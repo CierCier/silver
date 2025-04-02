@@ -131,6 +131,11 @@ class Lexer:
             self.c_line = len(self.code)
             return
 
+        if self.peek() == "/" and self.peek(1) == "/":
+            self.skip_comment()
+        elif self.peek() == "/" and self.peek(1) == "*":
+            self.skip_multiline_comment()
+
     def skip_comment(self):
         if self.peek() == "/" and self.peek(1) == "/":
             while (

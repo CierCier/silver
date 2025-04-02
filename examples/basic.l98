@@ -1,29 +1,24 @@
 
-declare printf(format: string, args: ...) : i32 ;
 
+declare printf(fmt: string, args: ...): i32;
 
 fn factorial(n: i32) : i32 {
-    let ret : i32 = 1;
-    if ( n >= 1 ){
-        ret = n * factorial(n - 1);
+
+    if (n == 0){
+        return 1;
+    }else{
+        return n * factorial(n - 1);
     }
-    return ret;
+
+    // This line is unreachable
+    // but needs to be here to make the function complete
+    return 0;
 }
 
-fn main(): i32{
+fn main(): i32 {
+    let n:i32 = 5;
 
-    //  single line comment
-    
-    /*  multi
-        line
-        comment
-    */
+    printf("Factorial of %d is %d\n", n,  factorial(n) );
 
-    let x: i32 = 5;
-    let y: i32 = factorial(x);
-
-    let s1: string = "Hello, World!";
-
-    printf("%s, %d! = %d\n", s1, x, y);
     return 0;
 }

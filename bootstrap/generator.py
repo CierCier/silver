@@ -385,7 +385,7 @@ class Generator:
         gv.unnamed_addr = True
         gv.global_constant = True
         gv.initializer = str_const
-        gv.section = ".rodata"
+        gv.section = ".rodata.str1"
 
         gv.align = 1
 
@@ -514,6 +514,14 @@ class Generator:
             ">": lambda l, r, name: self.builder.icmp_signed(">", l, r, name),
             ">=": lambda l, r, name: self.builder.icmp_signed(">=", l, r, name),
             "!=": lambda l, r, name: self.builder.icmp_signed("!=", l, r, name),
+            "&&": lambda l, r, name: self.builder.and_(l, r, name),
+            "||": lambda l, r, name: self.builder.or_(l, r, name),
+            "%": lambda l, r, name: self.builder.srem(l, r, name),
+            "&": lambda l, r, name: self.builder.and_(l, r, name),
+            "|": lambda l, r, name: self.builder.or_(l, r, name),
+            "^": lambda l, r, name: self.builder.xor(l, r, name),
+            "<<": lambda l, r, name: self.builder.shl(l, r, name),
+            ">>": lambda l, r, name: self.builder.lshr(l, r, name),
         }
 
         if binop_node.operator not in op_map:
@@ -534,37 +542,22 @@ class Generator:
         # Call function
         return self.builder.call(func, args, name="calltmp")
 
-    def generate_if_statement(self, if_node):
+    def generate_if_statement(self, if_node: IfNode):
         """Generate LLVM IR for if statements"""
         # Generate condition
         cond = self.generate_expression(if_node.condition)
 
-        # Create basic blocks
-        func = self.builder.block.function
-        then_block = func.append_basic_block("then")
-        else_block = func.append_basic_block("else")
-        merge_block = func.append_basic_block("ifcont")
-
-        # Create conditional branch
-        self.builder.cbranch(cond, then_block, else_block)
-
-        # Generate then block
-        self.builder.position_at_end(then_block)
-        self.generate_block(if_node.then_block)
-        self.builder.branch(merge_block)
-
-        # Generate else block (if exists)
-        self.builder.position_at_end(else_block)
-        if if_node.else_block:
-            self.generate_block(if_node.else_block)
-        self.builder.branch(merge_block)
-
-        # Continue from merge point
-        self.builder.position_at_end(merge_block)
+        with self.builder.if_else(cond) as (t_branch, f_branch):
+            with t_branch:
+                self.generate_block(if_node.then_block)
+            with f_branch:
+                if if_node.else_block:
+                    self.generate_block(if_node.else_block)
 
     def generate_while_loop(self, while_node):
         """Generate code for while loops"""
         # Create basic blocks
+
         test_block = self.builder.append_basic_block("while_test")
         body_block = self.builder.append_basic_block("while_body")
         end_block = self.builder.append_basic_block("while_end")

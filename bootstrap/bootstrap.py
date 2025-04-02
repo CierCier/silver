@@ -1,3 +1,5 @@
+#! /usr/bin/env python3
+
 from typing import List
 from generator import Generator
 from lexer import Lexer
@@ -58,27 +60,73 @@ class Bootstrap:
         generator = Generator(ast)
 
         llvm_ir = generator.generate_start()
-        ir_file = Path(self.output).with_suffix(".ll")
 
-        ir_file.write_bytes(llvm_ir.encode("utf-8"))
+        if self.emit_llvm:
+            self.__emit_llvm(llvm_ir, self.output)
+        if self.emit_asm:
+            self.__emit_asm(llvm_ir, self.output)
+        if self.emit_obj:
+            self.__emit_obj(llvm_ir, self.output)
 
-        asm_file = Path(self.output).with_suffix(".s")
+        self.__compile(llvm_ir, self.output)
 
-        subprocess.run(
-            ["llc", str(ir_file), "-o", str(asm_file)],
-            check=True,
+    def __emit_llvm(self, llvm_ir: str, output: Path):
+        ir_file = Path(output).with_suffix(".ll")
+        ir_file.write_text(llvm_ir)
+
+    def __emit_asm(self, llvm_ir: str, output: Path):
+        from subprocess import PIPE
+
+        asm_file = Path(output).with_suffix(".s")
+
+        # pipe the llvm ir to llc
+
+        process = subprocess.Popen(
+            ["llc"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
-        output_file = Path(self.output)
-        subprocess.run(
-            ["clang", str(asm_file), "-o", str(output_file), "-static"],
-            check=True,
+        stdout, stderr = process.communicate(input=llvm_ir.encode())
+        if process.returncode != 0:
+            print("Error: ", stderr.decode())
+            sys.exit(1)
+        asm_file.write_text(stdout.decode())
+
+    def __emit_obj(self, llvm_ir: str, output: Path):
+        from subprocess import PIPE
+
+        obj_file = Path(output).with_suffix(".o")
+
+        # pipe the llvm ir to llc
+        process = subprocess.Popen(
+            ["llc", "-filetype=obj"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
-        if not self.emit_llvm:
-            ir_file.unlink()
-        if not self.emit_asm:
-            asm_file.unlink()
+        stdout, stderr = process.communicate(input=llvm_ir.encode())
+        if process.returncode != 0:
+            print("Error: ", stderr.decode())
+            sys.exit(1)
+        obj_file.write_bytes(stdout)
+
+    def __compile(self, llvm_ir: str, output: Path):
+        output = Path(output)
+        self.__emit_llvm(llvm_ir, output)
+        command = [
+            "clang",
+            "-fPIE",
+            "-pie",
+            "-o",
+            output,  # output file
+            Path(output).with_suffix(".ll"),  # input file
+            "-lm",
+        ]
+
+        subprocess.run(command, check=True)
 
 
 def parse_args(args: List[str]):
