@@ -1,0 +1,29 @@
+
+declare printf(format: string, args: ...) : i32 ;
+
+
+fn factorial(n: i32) : i32 {
+    let ret : i32 = 1;
+    if ( n >= 1 ){
+        ret = n * factorial(n - 1);
+    }
+    return ret;
+}
+
+fn main(): i32{
+
+    //  single line comment
+    
+    /*  multi
+        line
+        comment
+    */
+
+    let x: i32 = 5;
+    let y: i32 = factorial(x);
+
+    let s1: string = "Hello, World!";
+
+    printf("%s, %d! = %d\n", s1, x, y);
+    return 0;
+}
