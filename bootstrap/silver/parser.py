@@ -2,8 +2,8 @@ from pathlib import Path
 import sys
 from tokenizer import Token, TokenType, Tokenizer
 
-import lang_types
-from lang_types import Type
+import bootstrap.silver.silver_types as silver_types
+from bootstrap.silver.silver_types import Type
 
 import llvmlite
 
@@ -169,7 +169,7 @@ class FunctionPrototypeAST(ExprAST):
     def set_variadic(self):
         """Set the function as variadic"""
         self.is_variadic = True
-        self.args.append(("...", lang_types.C_Variatic))
+        self.args.append(("...", silver_types.C_Variatic))
 
     def prefix(self):
         return f"{self.name}.{self.ret_type}"
@@ -626,11 +626,11 @@ def print_ast(ast: ExprAST, indent: int = 0):
 
 if __name__ == "__main__":
     from preprocess import Preprocessor
-    
+
     files = [Path(x) for x in sys.argv[1:]]
     preprocessor = Preprocessor(*files)
     f_data = preprocessor.preprocess()
-    
+
     tokenizer = Tokenizer(f_data)
     tokens = tokenizer.get_all()
 

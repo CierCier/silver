@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 
-
 class Position:
     def __init__(self, line: int, column: int):
         self.line = line
@@ -103,8 +102,7 @@ class Tokenizer:
         # tokenizer specific to send figure out the source file
         # //FILE <file>
         # //FILE END
-        TokenType.FILECHANGE : re.compile(r"//FILE (.*)"),
-        
+        TokenType.FILECHANGE: re.compile(r"//FILE (.*)"),
         # Whitespace (we'll skip this)
         TokenType.WHITESPACE: re.compile(r"[ \t\r]+"),
         TokenType.NEWLINE: re.compile(r"[\n\r]"),
@@ -182,7 +180,7 @@ class Tokenizer:
         "return": TokenType.KEYWORD,
         "true": TokenType.KEYWORD,
         "false": TokenType.KEYWORD,
-        #"defer": TokenType.KEYWORD,
+        # "defer": TokenType.KEYWORD,
         "import": TokenType.KEYWORD,
     }
 
@@ -192,8 +190,8 @@ class Tokenizer:
         self.tokens = []
 
         self.file_stack = []
-        
-        self.current_file: Path = None 
+
+        self.current_file: Path = None
         self.data = data
         self.cursor = 0
 
@@ -204,7 +202,12 @@ class Tokenizer:
         """Get the next token from the input stream"""
 
         if self.cursor >= len(self.data):
-            return Token( TokenType.EOF, "", Position(self.current_line, self.current_column), self.current_file)
+            return Token(
+                TokenType.EOF,
+                "",
+                Position(self.current_line, self.current_column),
+                self.current_file,
+            )
 
         # Skip whitespace first
         self.skip_whitespace()
@@ -244,17 +247,29 @@ class Tokenizer:
                 if token_type == TokenType.FILECHANGE:
                     v = match.group(1)
                     if v == "END":
-                        self.current_file = self.file_stack[-1] if self.file_stack else None
+                        self.current_file = (
+                            self.file_stack[-1] if self.file_stack else None
+                        )
                         if self.current_file is not None:
-                            self.current_file, self.current_line, self.current_column = self.current_file
+                            (
+                                self.current_file,
+                                self.current_line,
+                                self.current_column,
+                            ) = self.current_file
                             self.file_stack.pop()
+                            self.current_line -= (
+                                1  # Adjust to fix the removal of the import statement
+                            )
                     else:
-                        self.current_file = (self.current_file, self.current_line, self.current_column)
-                        self.file_stack.append( self.current_file )
+                        self.current_file = (
+                            self.current_file,
+                            self.current_line,
+                            self.current_column,
+                        )
+                        self.file_stack.append(self.current_file)
                         self.current_file = Path(v)
                         self.current_line = 1
                         self.current_column = 1
-
 
                 token = Token(
                     token_type,
@@ -287,7 +302,6 @@ class Tokenizer:
         )
         self.seek(1)
         return token
-
 
     def skip_to(self, tok: str):
         """Skip to the next token of type tok, returns everything consumed in the path"""
@@ -342,7 +356,11 @@ class Tokenizer:
             current_token = self.get_next_token()
 
         ## Remove EOF's in the middle of the token stream, only keep the last one
-        tokens = [tok for tok in tokens if tok.type != TokenType.EOF and tok.type != TokenType.FILECHANGE]
+        tokens = [
+            tok
+            for tok in tokens
+            if tok.type != TokenType.EOF and tok.type != TokenType.FILECHANGE
+        ]
         tokens.append(
             Token(
                 TokenType.EOF,
@@ -370,7 +388,7 @@ def test():
     samples = [Path(x) for x in sys.argv[1::]]
     preprocessor = Preprocessor(*samples)
     data = preprocessor.preprocess()
-    
+
     tokenizer = Tokenizer(data)
 
     tokens = tokenizer.get_all()
@@ -381,4 +399,5 @@ def test():
 
 if __name__ == "__main__":
     from preprocess import Preprocessor
+
     test()

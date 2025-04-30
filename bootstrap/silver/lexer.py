@@ -12,8 +12,7 @@ class Lexer:
         Args:
             tokens (list[Token]): List of tokens to be lexed
         """
-        self.tokens = tokens 
-        
+        self.tokens = tokens
 
     def is_valid(self) -> bool:
         """

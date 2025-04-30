@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 from __init__ import add_module
 
+
 class Preprocessor:
     def __init__(self, *sourceFiles):
         self.sourceFiles = sourceFiles
@@ -14,12 +15,12 @@ class Preprocessor:
                 self.data.append(f"//FILE {f.name}\n")
                 self.data.extend(f.readlines())
 
-    def preprocess(self)-> str:
+    def preprocess(self) -> str:
         """Perform preprocessing on the source files"""
         self.expand_imports()
 
         return "".join(self.data)
-     
+
     import_regex = re.compile(r"^\s*import\s+([a-zA-Z0-9_.]+);")
 
     def expand_imports(self):
@@ -28,16 +29,15 @@ class Preprocessor:
                 module = line.replace("import ", "").replace(";", "").strip()
                 module_data = add_module(module)
                 module_data = module_data.splitlines(keepends=True)
-                
+
                 i = self.data.index(line)
-                self.data = self.data[:i] + module_data + self.data[i+1:]
- 
-        
+                self.data = self.data[:i] + module_data + self.data[i + 1 :]
 
 
 if __name__ == "__main__":
     import sys
-    files = [ Path(x) for x in sys.argv[1:]]
+
+    files = [Path(x) for x in sys.argv[1:]]
 
     preprocessor = Preprocessor(*files)
     data = preprocessor.preprocess()
