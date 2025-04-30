@@ -1,24 +1,27 @@
+import std.io;
+
+//This is a Single Line Comment
+
+/*	This is a multi line 
+	Comment.
+*/
 
 
-declare printf(fmt: string, args: ...): i32;
+func main(string arg) i32  {
+	let i32 x = 129;
+	// or use hexadecimal
+	let i32 y = 0x81;
+	// or use scientific notation
+	let i32 z = 1.29e2;
 
-fn factorial(n: i32) : i32 {
+	let string s = "Hello World!";
 
-    if (n == 0){
-        return 1;
-    }else{
-        return n * factorial(n - 1);
-    }
+	printf("%s", s);
 
-    // This line is unreachable
-    // but needs to be here to make the function complete
-    return 0;
-}
+	if (x == y) {
+		printf("%d is equal to %d", x, y);
+	}
+	
 
-fn main(): i32 {
-    let n:i32 = 5;
-
-    printf("Factorial of %d is %d\n", n,  factorial(n) );
-
-    return 0;
+	return 0;
 }
