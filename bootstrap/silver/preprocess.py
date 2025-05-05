@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-from __init__ import add_module
+from silver import add_module
 
 
 class Preprocessor:

@@ -3,9 +3,10 @@
         Lang98 std.io module
 */
 
-let i32 stdout = 0;
-let i32 stdin = 1;
-let i32 stderr = 2;
-
 // external declaration to libc function
 func printf(string buf, ...) i32;
+
+
+func println(string buf) i32 {
+        return printf("%s\n", buf);
+}

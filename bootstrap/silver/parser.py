@@ -1,642 +1,660 @@
+from silver.preprocess import Preprocessor
+from silver.tokenizer import Token, TokenType, Tokenizer
+from silver.silver_types import SilverEnum, SilverStruct, SilverType, SilverUnion
+
+from typing import List, Optional
 from pathlib import Path
-import sys
-from tokenizer import Token, TokenType, Tokenizer
-
-import bootstrap.silver.silver_types as silver_types
-from bootstrap.silver.silver_types import Type
-
-import llvmlite
-
-from __init__ import MODULE_PATH
-
-SYMBOLS = dict()
 
 
-def add_symbol(symbol: str, type: Type):
-    """Add a symbol to the symbol table"""
-    if symbol in SYMBOLS:
-        raise Exception(f"Symbol {symbol} already defined")
-    SYMBOLS[symbol] = type
-
-
-def get_symbol(symbol: str):
-    if symbol not in SYMBOLS:
-        return None
-    else:
-        return SYMBOLS[symbol]
-
-
-MODULES = set()
-
-
-def add_module(module: str):
-    """Simply keeping track of imported modules"""
-    ## I should probably change this to use realpath of files
-    if module not in MODULES:
-        MODULES.add(module)
-
-
-class ExprAST:
+class SymbolTable:
     def __init__(self):
-        pass
+        self.symbols = {}
 
-    def prefix(self):
-        """Get the prefix of the expression.
-        Used to store vars in SYMBOLS.
-        like \".<scope>.var.<id>.<type>\" etc,
-        or \"<id>.<type>\" for global vars
-        """
-        return ""
+    def add_symbol(self, name: str, symbol_type: str, value: any = None):
+        self.symbols[name] = {"type": symbol_type, "value": value}
 
+    def get_symbol(self, name: str) -> dict:
+        return self.symbols.get(name, None)
 
-class ProgramAST(ExprAST):
-    def __init__(self, statements=list[ExprAST]):
-        super().__init__()
-        self.statements = statements
-
-    def codegen(self):
-        """Main Entry point for code generation"""
-        for statement in self.statements:
-            if statement.codegen:
-                statement.codegen()
+    def generate_debug_markers(self) -> str:
+        markers = []
+        for name, info in self.symbols.items():
+            markers.append(
+                f"Symbol: {name}, Type: {info['type']}, Value: {info['value']}"
+            )
+        return "\n".join(markers)
 
 
-class ImportAST(ExprAST):
-    def __init__(self, module: str):
-        super().__init__()
-        self.module = module
-        """ Ah so import modules, a bit tricky,
-            Something like importing C headers, except its our own lang files
-            So I'm thinking something like: import <module>.<submodule>.<subsubmodule> ....
-            So we need to keep track of the current module, and the imported modules
+class GlobalTable:
+    def __init__(self):
+        self.globals = {}
+        self.string_literals = []
 
-            anyways heres the process for this ig
-                1. Check if module is already imported
-                2. if not try to find it in the module path
-                3. if not found, raise an error, else goto (4)
-                4. add module to the list of imported modules
-                5. spawn a new tokenizer instance with the module file
-                6. spawn a new parser instance with the new tokens
-                7. parse the modules and add statements from the returned ProgramAST to the main ProgramAST
-        """
+    def add_global(self, name: str, value: any):
+        self.globals[name] = value
 
-    def __repr__(self):
-        return f"ImportAST(module={self.module})"
+    def get_global(self, name: str) -> any:
+        return self.globals.get(name, None)
 
+    def add_string_literal(self, value: str):
+        self.string_literals.append(value)
 
-class NumberExprAST(ExprAST):
-    def __init__(self, value: float):
-        super().__init__()
-        self.value = value
+    def get_string_literals(self) -> List[str]:
+        return self.string_literals
 
-    def __repr__(self):
-        return f"NumberExprAST(value={self.value})"
+    def generate_debug_markers(self) -> str:
+        markers = []
+        for name, value in self.globals.items():
+            markers.append(f"Global: {name}, Value: {value}")
+        for i, literal in enumerate(self.string_literals):
+            markers.append(f"String Literal {i}: {literal}")
+        return "\n".join(markers)
 
 
-class StringExprAST(ExprAST):
-    def __init__(self, value: str):
-        super().__init__()
-        self.value = value
+class GlobalTypesTable:
+    def __init__(self):
 
-    def __repr__(self):
-        return f"StringExprAST(value={self.value})"
+        ## prepopulate with primitive types
+        self.types = {
+            "i8": SilverType("i8", 1),
+            "i16": SilverType("i16", 2),
+            "i32": SilverType("i32", 4),
+            "i64": SilverType("i64", 8),
+            "u8": SilverType("u8", 1),
+            "u16": SilverType("u16", 2),
+            "u32": SilverType("u32", 4),
+            "u64": SilverType("u64", 8),
+            "f32": SilverType("f32", 4),
+            "f64": SilverType("f64", 8),
+            "bool": SilverType("bool", 1),
+            "char": SilverType("char", 1),
+            "string": SilverType("string", 0),
+            "void": SilverType("void", 0),
+        }
 
-    def prefix(self):
-        return f"{self.value}"  # TODO: Add string type
+    def add_type(self, name: str, type_def: any):
+        self.types[name] = type_def
+
+    def get_type(self, name: str) -> any:
+        return self.types.get(name, None)
+
+    def generate_debug_markers(self) -> str:
+        markers = []
+        for name, type_def in self.types.items():
+            markers.append(f"Type: {name}, Definition: {type_def}")
+        return "\n".join(markers)
 
 
-class VariableDeclAST(ExprAST):
-    def __init__(self, var_type: Type, var_name: str, init_value: ExprAST):
-        super().__init__()
-        self.var_type = var_type
-        self.var_name = var_name
-        self.init_value = init_value
+class Program:
+    def __init__(
+        self,
+        functions: List["Function"] = [],
+        globals: List["VariableDecl"] = [],
+        structs: List["SilverStruct"] = [],
+        enums: List["SilverEnum"] = [],
+        unions: List["SilverUnion"] = [],
+    ):
+        self.functions = functions
+        self.globals = globals
+        self.structs = structs
+        self.enums = enums
+        self.unions = unions
 
-    def __repr__(self):
-        return f"VariableDeclAST(var_type={self.var_type}, var_name={self.var_name}, init_value={self.init_value})"
+    def add_function(self, function: "Function"):
+        self.functions.append(function)
+
+    def get_function(self, name: str) -> "Function":
+        for function in self.functions:
+            if function.name == name:
+                return function
+        return None
+
+    def add_global(self, global_var: "VariableDecl"):
+        self.globals.append(global_var)
+
+    def get_globals(self) -> List["VariableDecl"]:
+        return self.globals
+
+    def add_struct(self, struct: "SilverStruct"):
+        self.structs.append(struct)
+
+    def get_struct(self, name: str) -> "SilverStruct":
+        for struct in self.structs:
+            if struct.name == name:
+                return struct
+        return None
+
+    def add_enum(self, enum: "SilverEnum"):
+        self.enums.append(enum)
+
+    def get_enum(self, name: str) -> "SilverEnum":
+        for enum in self.enums:
+            if enum.name == name:
+                return enum
+        return None
+
+    def add_union(self, union: "SilverUnion"):
+        self.unions.append(union)
+
+    def get_union(self, name: str) -> "SilverUnion":
+        for union in self.unions:
+            if union.name == name:
+                return union
+        return None
 
 
-class VariableExprAST(ExprAST):
+class Function:
+
+    def __init__(
+        self,
+        name: str,
+        parameters: List["Parameter"],
+        return_type: "Type",
+        body: Optional["Block"] = None,
+    ):
+        self.name = name
+        self.parameters = parameters
+        self.return_type = return_type
+        self.body = body
+        self.is_variadic = any(param.name == "..." for param in parameters)
+
+
+class Parameter:
+    def __init__(self, param_type: "Type", name: str):
+        self.param_type = param_type
+        self.name = name
+
+
+class Type:
     def __init__(self, name: str):
-        super().__init__()
         self.name = name
 
-    def __repr__(self):
-        return f"VariableExprAST(name={self.name})"
-
-    def prefix(self):
-        return f"{self.name}"
+    def __str__(self):
+        return f"Type({self.name})"
 
 
-class BinaryExprAST(ExprAST):
-    def __init__(self, op: str, lhs: ExprAST, rhs: ExprAST):
-        super().__init__()
-        self.op = op
-        self.lhs = lhs
-        self.rhs = rhs
-
-
-class UnaryExprAST(ExprAST):
-    def __init__(self, op: str, rhs: ExprAST):
-        super().__init__()
-        self.op = op
-        self.rhs = rhs
-
-
-class CallExprAST(ExprAST):
-    def __init__(self, callee: str, args: list[ExprAST]):
-        super().__init__()
-        self.callee = callee
-        self.args = args
-
-    def __repr__(self):
-        return f"CallExprAST(callee={self.callee}, args={self.args})"
-
-
-class FunctionPrototypeAST(ExprAST):
-    """Represents the prototype of a function. ie The Declaration of a function"""
-
-    def __init__(self, name: str, args: list[(str, Type)], ret_type: Type):
-        super().__init__()
-        self.name = name
-        self.args = args
-        self.ret_type = ret_type
-        self.is_variadic = False
-
-    def __repr__(self):
-        return f"FunctionPrototypeAST(name={self.name}, args={self.args}, ret_type={self.ret_type})"
-
-    def set_variadic(self):
-        """Set the function as variadic"""
-        self.is_variadic = True
-        self.args.append(("...", silver_types.C_Variatic))
-
-    def prefix(self):
-        return f"{self.name}.{self.ret_type}"
-
-
-class FunctionDefinitionAST(ExprAST):
-    """Represents the definition of a function. ie The Implementation of a function"""
-
-    def __init__(
-        self, proto: FunctionPrototypeAST, body: ExprAST, defer_body: ExprAST = None
-    ):
-        super().__init__()
-        self.proto = proto
-        self.body = body
-        self.defer_body = defer_body
-        ## Self note for defer statements
-        # upon parsing a defer statement, we should add the defer body to the function body
-        # the defer_body will be converted into its own Label. which will run before the function return
-        ## How though?
-        # upon encountering a return statement, we move the value to a return variable(Which always exists), and then
-        # jump to the defer Label, run the defer block, then jump to return
-        # if defer is empty, we jump to return, (this should be known at compile time)
-
-    def __repr__(self):
-        return f"FunctionDefinitionAST(proto={self.proto}, body={self.body})"
-
-
-class BlockAST(ExprAST):
-    """Represents a block of code. ie A function body or a block of statements"""
-
-    def __init__(self, statements: list[ExprAST]):
-        super().__init__()
+class Block:
+    def __init__(self, statements: List["Statement"]):
         self.statements = statements
+        self.symbol_table = SymbolTable()
 
-    def __repr__(self):
-        return f"BlockAST(statements={self.statements})"
+    def add_symbol(self, name: str, symbol_type: str, value: any = None):
+        self.symbol_table.add_symbol(name, symbol_type, value)
 
+    def get_symbol(self, name: str) -> dict:
+        return self.symbol_table.get_symbol(name)
 
-class IfAST(ExprAST):
-    def __init__(self, cond: ExprAST, then: ExprAST, else_: ExprAST = None):
-        super().__init__()
-        self.cond = cond
-        self.then = then
-        self.else_ = else_
-
-    def __repr__(self):
-        return f"IfAST(cond={self.cond}, then={self.then}, else_={self.else_})"
-
-
-class WhileAST(ExprAST):
-    def __init__(self, cond: ExprAST, body: ExprAST):
-        super().__init__()
-        self.cond = cond
-        self.body = body
-
-    def __repr__(self):
-        return f"WhileAST(cond={self.cond}, body={self.body})"
+    def __str__(self):
+        result = "{\n"
+        for stmt in self.statements:
+            result += f"  {stmt}\n"
+        result += "}"
+        return result
 
 
-class ForAST(ExprAST):
-    def __init__(
-        self, var: VariableExprAST, start: ExprAST, end: ExprAST, body: ExprAST
-    ):
-        super().__init__()
-        self.var = var
-        self.start = start
-        self.end = end
-        self.body = body
-
-    def __repr__(self):
-        return f"ForAST(var={self.var}, start={self.start}, end={self.end}, body={self.body})"
+class Statement:
+    pass
 
 
-class ReturnAST(ExprAST):
-    def __init__(self, value: ExprAST):
-        super().__init__()
+class VariableDecl(Statement):
+    def __init__(self, var_type: "Type", name: str, value: "Expr"):
+        self.var_type = var_type
+        self.name = name
         self.value = value
 
-    def __repr__(self):
-        return f"ReturnAST(value={self.value})"
+    def __str__(self):
+        return f"{self.var_type} {self.name} = {self.value}"
+
+
+class IfStmt(Statement):
+    def __init__(self, condition: "Expr", body: "Block"):
+        self.condition = condition
+        self.body = body
+
+    def __str__(self):
+        return f"if ({self.condition}) {self.body}"
+
+
+class ReturnStmt(Statement):
+    def __init__(self, value: Optional["Expr"]):
+        self.value = value
+
+    def __str__(self):
+        return f"return {self.value}"
+
+
+class ExprStmt(Statement):
+    def __init__(self, expr: "Expr"):
+        self.expr = expr
+
+    def __str__(self):
+        return f"{self.expr}"
+
+
+class Expr:
+    pass
+
+
+class BinOp(Expr):
+    def __init__(self, left: "Expr", op: str, right: "Expr"):
+        self.left = left
+        self.op = op
+        self.right = right
+
+    def __str__(self):
+        return f"({self.left} {self.op} {self.right})"
+
+
+class Identifier(Expr):
+    def __init__(self, name: str):
+        self.name = name
+
+    def __str__(self):
+        return self.name
+
+
+class Number(Expr):
+    def __init__(self, value: str):
+        self.value = value
+
+    def __str__(self):
+        return self.value
+
+
+class String(Expr):
+    def __init__(self, value: str):
+        self.value = value
+
+    def __str__(self):
+        return self.value
+
+
+class ParenExpr(Expr):
+    def __init__(self, expr: "Expr"):
+        self.expr = expr
+
+    def __str__(self):
+        return f"({self.expr})"
+
+
+class FunctionCall(Expr):
+    def __init__(self, name: str, args: List["Expr"]):
+        self.name = name
+        self.args = args
+
+    def __str__(self):
+        return f"{self.name}({', '.join(str(arg) for arg in self.args)})"
 
 
 class Parser:
-
-    OPERATORS = {
-        TokenType.SHIFT_LEFT_ASSIGN,
-        TokenType.SHIFT_RIGHT_ASSIGN,
-        TokenType.SHIFT_LEFT,
-        TokenType.SHIFT_RIGHT,
-        TokenType.EQUAL,
-        TokenType.NOT_EQUAL,
-        TokenType.LESS_EQUAL,
-        TokenType.GREATER_EQUAL,
-        TokenType.AND,
-        TokenType.OR,
-        TokenType.INCREMENT,
-        TokenType.DECREMENT,
-        TokenType.INCREMENT_ASSIGN,
-        TokenType.DECREMENT_ASSIGN,
-        TokenType.MULTIPLY_ASSIGN,
-        TokenType.DIVIDE_ASSIGN,
-        TokenType.PLUS,
-        TokenType.MINUS,
-        TokenType.MULTIPLY,
-        TokenType.DIVIDE,
-        TokenType.MODULO,
-        TokenType.ASSIGN,
-        TokenType.LESS,
-        TokenType.GREATER,
-        TokenType.NOT,
-    }
-
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
-        self.token_idx = -1
-        self.cur_token = None
-        self.next_token()  # Initialize the first token
+        self.position = 0
+        self.symbol_table = SymbolTable()
+        self.global_table = GlobalTable()
+        self.types_table = GlobalTypesTable()
+        self.current_block = None
 
-    def next_token(self):
-        """Get the next token from the list of tokens"""
-        if self.token_idx >= len(self.tokens):
-            self.cur_token = Token(TokenType.EOF, "")
-            return
-        self.token_idx += 1
-        self.cur_token = self.tokens[self.token_idx]
-
-    def parse_program(self) -> ProgramAST:
-        statements = []
-        while self.cur_token.type != TokenType.EOF:
-            stmt = self.parse_statement()
-            if stmt:
-                statements.append(stmt)
-        return ProgramAST(statements)
-
-    def parse_statement(self):
-        if self.cur_token.type == TokenType.KEYWORD:
-            if self.cur_token.value == "import":
-                return self.parse_import()
-            elif self.cur_token.value == "func":
-                return self.parse_function()
-            elif self.cur_token.value == "let":
-                return self.parse_variable_declaration()
-            elif self.cur_token.value == "return":
-                return self.parse_return()
-            elif self.cur_token.value == "for":
-                return self.parse_for()
-            elif self.cur_token.value == "while":
-                return self.parse_while()
-            elif self.cur_token.value == "if":
-                return self.parse_if()
-            elif self.cur_token.value == "defer":
-                return self.parse_defer()
+    def parse(self) -> Program:
+        program = Program()
+        while (
+            self.position < len(self.tokens)
+            and self.current_token().type != TokenType.EOF
+        ):
+            if self.match(TokenType.KEYWORD, "func"):
+                function = self.parse_function()
+                program.add_function(function)
+            elif self.match(TokenType.KEYWORD, "let"):
+                global_var = self.parse_variable_decl()
+                program.add_global(global_var)
+            elif self.match(TokenType.KEYWORD, "struct"):
+                struct = self.parse_struct()
+                program.add_struct(struct)
+            elif self.match(TokenType.KEYWORD, "enum"):
+                enum = self.parse_enum()
+                program.add_enum(enum)
+            elif self.match(TokenType.KEYWORD, "union"):
+                union = self.parse_union()
+                program.add_union(union)
             else:
-                raise Exception(f"Unknown keyword {self.cur_token.value}")
+                self.error(
+                    "Expected 'func', 'let', 'struct', 'enum', or 'union' keyword in global scope"
+                )
+        return program
+
+    def parse_function(self) -> Function:
+        """Parse a function declaration or definition."""
+        # Parse 'func' keyword
+        self.consume(TokenType.KEYWORD, "func")
+
+        # Parse function name
+        name = self.consume(TokenType.IDENTIFIER).value
+
+        # Parse parameters
+        self.consume(TokenType.LPAREN)
+        parameters = self.parse_parameters()
+        self.consume(TokenType.RPAREN)
+
+        # Parse return type
+        return_type = self.parse_type()
+
+        # Check if this is a declaration or definition
+        if self.match(TokenType.SEMICOLON):
+            self.consume(TokenType.SEMICOLON)
+            return Function(name, parameters, return_type)  # Declaration
         else:
-            return self.parse_expression()
-
-    def parse_import(self) -> ImportAST:
-        self.next_token()  # eat 'import'
-        module_name = ""
-
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            raise Exception("Expected module name after 'import'")
-        module_name += self.cur_token.value
-        self.next_token()  # eat module name
-
-        while self.cur_token.type == TokenType.DOT:
-            self.next_token()
-            if self.cur_token.type != TokenType.IDENTIFIER:
-                raise Exception("Expected submodule name after '.'")
-            module_name += "." + self.cur_token.value
-            self.next_token()
-
-        self.next_token()  # eat ';'
-        return ImportAST(module_name)
-
-    def parse_function(self) -> FunctionDefinitionAST | FunctionPrototypeAST:
-        self.next_token()  # eat 'func'
-
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            raise Exception("Expected function name after 'func'")
-        func_name = self.cur_token.value
-        self.next_token()
-
-        if self.cur_token.type != TokenType.LPAREN:
-            raise Exception("Expected '(' after function name")
-        self.next_token()
-        args = []
-        is_variadic = False
-
-        while self.cur_token.type != TokenType.RPAREN:
-            if self.cur_token.type == TokenType.VARIANT:
-                is_variadic = True
-                self.next_token()
-                break
-            if self.cur_token.type != TokenType.IDENTIFIER:
-                raise Exception("Expected Type after '(")
-            arg_type = self.cur_token.value
-            self.next_token()
-            if self.cur_token.type != TokenType.IDENTIFIER:
-                raise Exception("Expected argument name after type")
-            arg_name = self.cur_token.value
-            self.next_token()
-            args.append((arg_name, arg_type))
-            if self.cur_token.type == TokenType.COMMA:
-                self.next_token()
-        self.next_token()  # eat ')'
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            return_type = "void"
-        else:
-            return_type = self.cur_token.value
-            self.next_token()
-
-        proto = FunctionPrototypeAST(func_name, args, return_type)
-        if is_variadic:
-            proto.set_variadic()
-        add_symbol(func_name, proto)
-
-        if self.cur_token.type == TokenType.LBRACE:
-            # Function definition
+            # Parse function body
             body = self.parse_block()
-            return FunctionDefinitionAST(proto, body)
-        else:
-            # Function prototype
-            if self.cur_token.type != TokenType.SEMICOLON:
-                raise Exception("Expected ';' after function prototype")
-            self.next_token()
-            return proto
+            return Function(name, parameters, return_type, body)  # Definition
 
-    def parse_block(self) -> BlockAST:
-        if self.cur_token.type != TokenType.LBRACE:
-            raise Exception("Expected '{' to start a block")
-        self.next_token()
+    def parse_parameters(self) -> List[Parameter]:
+        parameters = []
+        if not self.match(TokenType.RPAREN):
+            while True:
+                if self.match(TokenType.VARIANT):
+                    self.consume(TokenType.VARIANT)
+                    parameters.append(Parameter(Type("variadic"), "..."))
+                    break
+                param_type = self.parse_type()
+                name = self.consume(TokenType.IDENTIFIER).value
+                parameters.append(Parameter(param_type, name))
+                if not self.match(TokenType.COMMA):
+                    break
+                self.consume(TokenType.COMMA)
+        return parameters
 
+    def parse_type(self) -> Type:
+        if self.match(TokenType.IDENTIFIER):
+            return Type(self.consume(TokenType.IDENTIFIER).value)
+        self.error("Expected type identifier")
+
+    def parse_block(self) -> Block:
+        self.consume(TokenType.LBRACE)
         statements = []
-        while self.cur_token.type != TokenType.RBRACE:
-            stmt = self.parse_statement()
-            if stmt:
-                statements.append(stmt)
+        block = Block(statements)
+        previous_block = self.current_block
+        self.current_block = block
 
-        self.next_token()  # eat '}'
-        return BlockAST(statements)
+        while not self.match(TokenType.RBRACE):
+            statements.append(self.parse_statement())
 
-    def parse_if(self) -> IfAST:
-        self.next_token()  # eat 'if'
-        cond = self.parse_expression()
-        then = self.parse_block()
-        else_ = None
-        if self.cur_token.type == TokenType.KEYWORD and self.cur_token.value == "else":
-            self.next_token()
-            else_ = self.parse_block()
-        return IfAST(cond, then, else_)
+        self.consume(TokenType.RBRACE)
+        self.current_block = previous_block
+        return block
 
-    def parse_while(self) -> WhileAST:
-        self.next_token()  # eat 'while'
-        cond = self.parse_expression()
+    def parse_statement(self) -> Statement:
+        if self.match(TokenType.KEYWORD, "let"):
+            return self.parse_variable_decl()
+        elif self.match(TokenType.KEYWORD, "if"):
+            return self.parse_if_stmt()
+        elif self.match(TokenType.KEYWORD, "return"):
+            return self.parse_return_stmt()
+        else:
+            return self.parse_expr_stmt()
+
+    def parse_variable_decl(self) -> VariableDecl:
+        self.consume(TokenType.KEYWORD, "let")
+        var_type = self.parse_type()
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.ASSIGN)
+        value = self.parse_expr()
+        self.consume(TokenType.SEMICOLON)
+
+        # Add the variable to the current block's symbol table
+        if isinstance(self.current_block, Block):
+            self.current_block.add_symbol(name, var_type.name, value)
+
+        return VariableDecl(var_type, name, value)
+
+    def parse_if_stmt(self) -> IfStmt:
+        self.consume(TokenType.KEYWORD, "if")
+        self.consume(TokenType.LPAREN)
+        condition = self.parse_expr()
+        self.consume(TokenType.RPAREN)
         body = self.parse_block()
-        return WhileAST(cond, body)
+        return IfStmt(condition, body)
 
-    def parse_for(self) -> ForAST:
-        self.next_token()  # eat 'for'
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            raise Exception("Expected variable name after 'for'")
-        var_name = self.cur_token.value
-        var = VariableExprAST(var_name)
-        self.next_token()
+    def parse_return_stmt(self) -> ReturnStmt:
+        self.consume(TokenType.KEYWORD, "return")
+        value = None
+        if not self.match(TokenType.SEMICOLON):
+            value = self.parse_expr()
+        self.consume(TokenType.SEMICOLON)
+        return ReturnStmt(value)
 
-        if self.cur_token.type != TokenType.COLON:
-            raise Exception("Expected ':' after variable in 'for'")
-        self.next_token()
+    def parse_expr_stmt(self) -> ExprStmt:
+        expr = self.parse_expr()
+        self.consume(TokenType.SEMICOLON)
+        return ExprStmt(expr)
 
-        start = self.parse_expression()
-        if self.cur_token.type != TokenType.DOTDOT:
-            raise Exception("Expected '..' in for range")
-        self.next_token()
+    def parse_expr(self) -> Expr:
+        return self.parse_comparison()
 
-        end = self.parse_expression()
-        body = self.parse_block()
-        return ForAST(var, start, end, body)
+    def parse_comparison(self) -> Expr:
+        left = self.parse_additive()
+        while (
+            self.match(TokenType.EQUAL)
+            or self.match(TokenType.NOT_EQUAL)
+            or self.match(TokenType.LESS)
+            or self.match(TokenType.LESS_EQUAL)
+            or self.match(TokenType.GREATER)
+            or self.match(TokenType.GREATER_EQUAL)
+        ):
+            op = self.consume(self.current_token().type).value
+            right = self.parse_additive()
+            left = BinOp(left, op, right)
+        return left
 
-    def parse_return(self) -> ReturnAST:
-        self.next_token()  # eat 'return'
-        value = self.parse_expression()
-        return ReturnAST(value)
+    def parse_additive(self) -> Expr:
+        left = self.parse_multiplicative()
+        while self.match(TokenType.PLUS) or self.match(TokenType.MINUS):
+            op = self.consume(self.current_token().type).value
+            right = self.parse_multiplicative()
+            left = BinOp(left, op, right)
+        return left
 
-    def parse_expression(self) -> ExprAST:
-        lhs = self.parse_primary()
-        bop = self.parse_binary_op_rhs(0, lhs)
-        if self.cur_token.type == TokenType.SEMICOLON:
-            self.next_token()
-        return bop
+    def parse_multiplicative(self) -> Expr:
+        left = self.parse_primary()
+        while self.match(TokenType.MULTIPLY) or self.match(TokenType.DIVIDE):
+            op = self.consume(self.current_token().type).value
+            right = self.parse_primary()
+            left = BinOp(left, op, right)
+        return left
 
-    def parse_primary(self) -> ExprAST:
-        if self.cur_token.type == TokenType.NUMBER:
-            value = float(self.cur_token.value)
-            self.next_token()
-            return NumberExprAST(value)
-        elif self.cur_token.type == TokenType.STRING:
-            value = self.cur_token.value
-            self.next_token()
-            return StringExprAST(value)
-
-        elif self.cur_token.type == TokenType.IDENTIFIER:
-            id_name = self.cur_token.value
-            self.next_token()
-            if self.cur_token.type == TokenType.LPAREN:
-                # Call expression
-                self.next_token()
+    def parse_primary(self) -> Expr:
+        if self.match(TokenType.IDENTIFIER):
+            name = self.consume(TokenType.IDENTIFIER).value
+            if self.match(TokenType.LPAREN):
+                self.consume(TokenType.LPAREN)
                 args = []
-                while self.cur_token.type != TokenType.RPAREN:
-                    arg = self.parse_expression()
-                    args.append(arg)
-                    if self.cur_token.type == TokenType.COMMA:
-                        self.next_token()
-                self.next_token()  # eat ')'
-                return CallExprAST(id_name, args)
-            else:
-                return VariableExprAST(id_name)
-        elif self.cur_token.type == TokenType.LPAREN:
-            self.next_token()
-            expr = self.parse_expression()
-            if self.cur_token.type != TokenType.RPAREN:
-                raise Exception("Expected ')'")
-            self.next_token()
-            return expr
+                if not self.match(TokenType.RPAREN):
+                    while True:
+                        args.append(self.parse_expr())
+                        if not self.match(TokenType.COMMA):
+                            break
+                        self.consume(TokenType.COMMA)
+                self.consume(TokenType.RPAREN)
+                return FunctionCall(name, args)
+            return Identifier(name)
+        elif self.match(TokenType.NUMBER):
+            return Number(self.consume(TokenType.NUMBER).value)
+        elif self.match(TokenType.STRING):
+            return String(self.consume(TokenType.STRING).value)
+        elif self.match(TokenType.LPAREN):
+            self.consume(TokenType.LPAREN)
+            expr = self.parse_expr()
+            self.consume(TokenType.RPAREN)
+            return ParenExpr(expr)
+        self.error("Expected primary expression")
+
+    def parse_struct(self) -> "SilverStruct":
+        self.consume(TokenType.KEYWORD, "struct")
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.LBRACE)
+
+        struct = SilverStruct(name)
+
+        while not self.match(TokenType.RBRACE):
+            f_type = self.parse_type()
+            f_type = self.types_table.get_type(f_type.name)
+            f_name = self.consume(TokenType.IDENTIFIER).value
+            struct.add_field(f_name, f_type)
+            self.consume(TokenType.SEMICOLON)
+
+        self.consume(TokenType.RBRACE)
+        return struct
+
+    def parse_enum(self) -> "SilverEnum":
+        self.consume(TokenType.KEYWORD, "enum")
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.LBRACE)
+
+        variants = []
+
+        while not self.match(TokenType.RBRACE):
+            variant_name = self.consume(TokenType.IDENTIFIER).value
+            variants.append(variant_name)
+            if not self.match(TokenType.COMMA):
+                break
+            self.consume(TokenType.COMMA)
+        self.consume(TokenType.RBRACE)
+        return SilverEnum(name, variants)
+
+    def parse_union(self) -> "SilverUnion":
+        self.consume(TokenType.KEYWORD, "union")
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.LBRACE)
+        fields = []
+        while not self.match(TokenType.RBRACE):
+            field_type = self.parse_type()
+            field_name = self.consume(TokenType.IDENTIFIER).value
+            self.consume(TokenType.SEMICOLON)
+            fields.append((field_type, field_name))
+        self.consume(TokenType.RBRACE)
+        return SilverUnion(name, fields)
+
+    def match(self, token_type: TokenType, value: str = None) -> bool:
+        if self.position >= len(self.tokens):
+            return False
+        token = self.tokens[self.position]
+        if token.type != token_type:
+            return False
+        if value is not None and token.value != value:
+            return False
+        return True
+
+    def consume(self, token_type: TokenType, value: str = None) -> Token:
+        if self.match(token_type, value):
+            token = self.tokens[self.position]
+            self.position += 1
+            return token
+        self.error(f"Expected {token_type}")
+
+    def current_token(self) -> Token:
+        if self.position >= len(self.tokens):
+            return Token(TokenType.EOF, "", None)
+        return self.tokens[self.position]
+
+    def error(self, message: str):
+        token = self.current_token()
+        if token.position:
+            error_msg = f"Parser error at {token.position}: {message}\n"
+            error_msg += f"Token: {token.type}, Value: {token.value}\n"
+            if token.position.file:
+                try:
+                    with open(token.position.file, "r") as f:
+                        lines = f.readlines()
+                        if 0 <= token.position.line - 1 < len(lines):
+                            line_counter = f"Line {token.position.line}: "
+                            error_msg += f"{line_counter}"
+                            error_msg += f"{lines[token.position.line - 1].strip()}\n"
+                            error_msg += (
+                                " " * (len(line_counter) + token.position.column - 1)
+                                + "^"
+                            )
+                except Exception as e:
+                    error_msg += f"Could not read file: {e}"
+            raise Exception(error_msg)
         else:
-            raise Exception(
-                f"Unknown token when expecting an expression: {self.cur_token}"
-            )
-
-    def parse_binary_op_rhs(self, expr_prec: int, lhs: ExprAST) -> ExprAST:
-        while True:
-            tok_prec = self.get_token_precedence()
-
-            if tok_prec < expr_prec:
-                return lhs
-
-            bin_op = self.cur_token.value
-            self.next_token()
-
-            rhs = self.parse_primary()
-            next_prec = self.get_token_precedence()
-            if tok_prec < next_prec:
-                rhs = self.parse_binary_op_rhs(tok_prec + 1, rhs)
-
-            lhs = BinaryExprAST(bin_op, lhs, rhs)
-
-    def get_token_precedence(self) -> int:
-        if self.cur_token.type not in self.OPERATORS:
-            return -1
-
-        prec = {
-            "=": 2,
-            "<": 10,
-            ">": 10,
-            "+": 20,
-            "-": 20,
-            "*": 40,
-            "/": 40,
-        }
-
-        return prec.get(self.cur_token.value, -1)
-
-    def parse_variable_declaration(self) -> VariableDeclAST:
-        self.next_token()  # eat 'let'
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            raise Exception("Expected Type after 'let'")
-        var_type = self.cur_token.value
-        self.next_token()
-        if self.cur_token.type != TokenType.IDENTIFIER:
-            raise Exception("Expected variable name after type")
-
-        var_name = self.cur_token.value
-        self.next_token()
-
-        if self.cur_token.type == TokenType.ASSIGN:
-            self.next_token()
-            init_value = self.parse_expression()
-        else:
-            init_value = None
-
-        # self.next_token()
-        var_decl = VariableDeclAST(var_type, var_name, init_value)
-        add_symbol(var_name, var_type)
-        return var_decl
-
-    def parse_defer(self) -> ExprAST:
-        self.next_token()  # eat 'defer'
-        if self.cur_token.type == TokenType.LBRACE:
-            # Defer block
-            self.next_token()
-            statements = []
-            while self.cur_token.type != TokenType.RBRACE:
-                stmt = self.parse_statement()
-                if stmt:
-                    statements.append(stmt)
-            self.next_token()
-            return BlockAST(statements)
-        else:
-            # Defer expression
-            expr = self.parse_expression()
-            if self.cur_token.type != TokenType.SEMICOLON:
-                raise Exception("Expected ';' after defer expression")
-            self.next_token()
-            return expr
+            raise Exception(f"Parser error: {message}")
 
 
-def print_ast(ast: ExprAST, indent: int = 0):
-    """Print the AST in a readable format"""
-
-    if isinstance(ast, ProgramAST):
-        print(" " * indent + "Program:")
-        for stmt in ast.statements:
-            print_ast(stmt, indent + 2)
-    elif isinstance(ast, ImportAST):
-        print(" " * indent + f"Import: {ast.module}")
-    elif isinstance(ast, FunctionPrototypeAST):
-        print(
-            " " * indent
-            + f"FunctionPrototype: {ast.name}({', '.join([f'{arg[0]}: {arg[1]}' for arg in ast.args])}) -> {ast.ret_type}"
-        )
-    elif isinstance(ast, FunctionDefinitionAST):
-        print(" " * indent + f"FunctionDefinition: {ast.proto.name}")
-        print_ast(ast.body, indent + 2)
-    elif isinstance(ast, VariableDeclAST):
-        print(
-            " " * indent
-            + f"VariableDecl: {ast.var_name} ({ast.var_type}) = {ast.init_value}"
-        )
-    elif isinstance(ast, VariableExprAST):
-        print(" " * indent + f"VariableExpr: {ast.name}")
-    elif isinstance(ast, NumberExprAST):
-        print(" " * indent + f"NumberExpr: {ast.value}")
-    elif isinstance(ast, StringExprAST):
-        print(" " * indent + f"StringExpr: {ast.value}")
-    elif isinstance(ast, BinaryExprAST):
-        print(" " * indent + f"BinaryExpr: {ast.op}")
-        print_ast(ast.lhs, indent + 2)
-        print_ast(ast.rhs, indent + 2)
-    elif isinstance(ast, CallExprAST):
-        print(
-            " " * indent
-            + f"CallExpr: {ast.callee}({', '.join([str(arg) for arg in ast.args])})"
-        )
-    elif isinstance(ast, BlockAST):
-        print(" " * indent + "Block:")
-        for stmt in ast.statements:
-            print_ast(stmt, indent + 2)
-    elif isinstance(ast, ReturnAST):
-        print(" " * indent + f"Return: {ast.value}")
-    else:
-        raise Exception(f"Unknown AST node type: {type(ast)}")
+def print_Expr(expr: Expr) -> str:
+    if isinstance(expr, BinOp):
+        return f"({print_Expr(expr.left)} {expr.op} {print_Expr(expr.right)})"
+    elif isinstance(expr, Identifier):
+        return expr.name
+    elif isinstance(expr, Number):
+        return expr.value
+    elif isinstance(expr, String):
+        return expr.value
+    elif isinstance(expr, ParenExpr):
+        return f"({print_Expr(expr.expr)})"
+    elif isinstance(expr, FunctionCall):
+        args = ", ".join(print_Expr(arg) for arg in expr.args)
+        return f"{expr.name}({args})"
+    return str(expr)
 
 
-if __name__ == "__main__":
-    from preprocess import Preprocessor
+def pretty_print(program: Program):
+    print("Program {")
+
+    # Print structs
+    for struct in program.structs:
+        print(f"struct {struct.name} {{")
+        for field_name, field_info in struct.fields.items():
+            print(f"  {field_info['type']} {field_name};")
+        print("}")
+
+    # Print enums
+    for enum in program.enums:
+        print(f"enum {enum.name} {{")
+        for variant in enum.variants:
+            print(f"  {variant},")
+        print("}")
+
+    # Print unions
+    for union in program.unions:
+        print(f"union {union.name} {{")
+        for field_type, field_name in union.fields:
+            print(f"  {field_type} {field_name};")
+        print("}")
+
+    # Print globals
+    for global_var in program.globals:
+        print(f"  {global_var}")
+
+    # Print functions
+    for function in program.functions:
+        print(f"{function.name}(")
+        for param in function.parameters:
+            print(f"  {param.param_type} {param.name}")
+        print(f") -> {function.return_type} {{")
+        if function.body:
+            for stmt in function.body.statements:
+                print(f"  {stmt}")
+        print("}")
+
+    print("}")
+
+
+def test():
+    import sys
 
     files = [Path(x) for x in sys.argv[1:]]
     preprocessor = Preprocessor(*files)
-    f_data = preprocessor.preprocess()
 
-    tokenizer = Tokenizer(f_data)
+    data = preprocessor.preprocess()
+
+    tokenizer = Tokenizer(data)
+
     tokens = tokenizer.get_all()
 
-    # for token in tokens:
-    #     print(token)
-
     parser = Parser(tokens)
+    program = parser.parse()
 
-    print_ast(parser.parse_program())
+    pretty_print(program)
+
+
+if __name__ == "__main__":
+    test()

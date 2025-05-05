@@ -1,0 +1,21 @@
+
+
+
+struct Point {
+    f32 x;
+    f32 y;
+}
+
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+
+union Message {
+    i32 integer;
+    f32 float;
+    string string;
+}
+

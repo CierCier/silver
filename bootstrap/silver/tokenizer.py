@@ -7,12 +7,30 @@ from pathlib import Path
 
 
 class Position:
-    def __init__(self, line: int, column: int):
+
+    def __init__(self, line: int, column: int, file: Path = None):
         self.line = line
         self.column = column
+        self.file = file
 
     def __str__(self):
-        return f"{self.line}:{self.column}"
+        return f"{self.file}:{self.line}:{self.column}"
+
+
+STRING_ESCAPES = {
+    "\\n": "\n",
+    "\\r": "\r",
+    "\\t": "\t",
+    "\\v": "\v",
+    "\\f": "\f",
+    "\\b": "\b",
+    "\\a": "\a",
+    "\\'": "'",
+    '\\"': '"',
+    "\\\\": "\\",
+    "\\?": "?",
+    "\\0": "\0",
+}
 
 
 class TokenType(Enum):
@@ -84,16 +102,14 @@ class TokenType(Enum):
 
 
 class Token:
-    def __init__(
-        self, type: TokenType, value: str, position: Position, source: Path = None
-    ):
+
+    def __init__(self, type: TokenType, value: str, position: Position):
         self.type = type
         self.value = value
         self.position = position
-        self.source = source
 
     def __str__(self):
-        return f'{self.type.name} "{self.value}" at {self.source}:{self.position}'
+        return f'{self.type.name} "{self.value}" at {self.position}'
 
 
 class Tokenizer:
@@ -180,8 +196,10 @@ class Tokenizer:
         "return": TokenType.KEYWORD,
         "true": TokenType.KEYWORD,
         "false": TokenType.KEYWORD,
-        # "defer": TokenType.KEYWORD,
         "import": TokenType.KEYWORD,
+        "struct": TokenType.KEYWORD,
+        "enum": TokenType.KEYWORD,
+        "union": TokenType.KEYWORD,
     }
 
     whitespace = set(" \t\r\n")
@@ -205,8 +223,7 @@ class Tokenizer:
             return Token(
                 TokenType.EOF,
                 "",
-                Position(self.current_line, self.current_column),
-                self.current_file,
+                Position(self.current_line, self.current_column, self.current_file),
             )
 
         # Skip whitespace first
@@ -216,8 +233,7 @@ class Tokenizer:
             return Token(
                 TokenType.EOF,
                 "",
-                Position(self.current_line, self.current_column),
-                self.current_file,
+                Position(self.current_line, self.current_column, self.current_file),
             )
 
         remaining_text = self.data[self.cursor :]
@@ -233,8 +249,9 @@ class Tokenizer:
                     token = Token(
                         tok_type,
                         keyword,
-                        Position(self.current_line, self.current_column),
-                        self.current_file,
+                        Position(
+                            self.current_line, self.current_column, self.current_file
+                        ),
                     )
                     self.seek(len(keyword))
                     return token
@@ -274,8 +291,7 @@ class Tokenizer:
                 token = Token(
                     token_type,
                     value,
-                    Position(self.current_line, self.current_column),
-                    self.current_file,
+                    Position(self.current_line, self.current_column, self.current_file),
                 )
                 self.seek(len(value))
 
@@ -290,6 +306,11 @@ class Tokenizer:
                 ):
                     return self.get_next_token()  # Skip comments and get next token
 
+                if token_type == TokenType.STRING:
+                    token.value = token.value[1:-1]  # Remove the quotes
+                    for k, v in STRING_ESCAPES.items():
+                        token.value = token.value.replace(k, v)
+
                 return token
 
         # If no pattern matched, it's an invalid token
@@ -297,8 +318,7 @@ class Tokenizer:
         token = Token(
             TokenType.INVALID,
             invalid_char,
-            Position(self.current_line, self.current_column),
-            self.current_file,
+            Position(self.current_line, self.current_column, self.current_file),
         )
         self.seek(1)
         return token
@@ -365,8 +385,7 @@ class Tokenizer:
             Token(
                 TokenType.EOF,
                 "",
-                Position(self.current_line, self.current_column),
-                self.current_file,
+                Position(self.current_line, self.current_column, self.current_file),
             )
         )
 
