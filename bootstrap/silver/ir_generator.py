@@ -48,27 +48,12 @@ class IRGenerator:
         self.builder: Optional[IRBuilder] = None
         self.named_values: Dict[str, ir.Value] = {}
         self.functions: Dict[str, Function] = {}
-        self.string_counter = 0  # Counter for unique string names
+        self.string_counter = (
+            0  # Counter for unique string names `.str.0`, `.str.1`, etc.
+        )
 
         self.module.triple = triple
         self.module.data_layout = get_data_layout(triple)
-
-        # Add standard library declarations
-        # self.add_standard_library_declarations()
-
-    def add_standard_library_declarations(self):
-        # Declare standard library functions
-        self.declare_external_function(
-            "printf",
-            ir.IntType(32),  # Return type
-            [ir.PointerType(ir.IntType(8))],  # Format string
-            var_arg=True,
-        )
-
-        # Declare standard I/O streams
-        self.declare_external_global("stdout", ir.IntType(32))
-        self.declare_external_global("stdin", ir.IntType(32))
-        self.declare_external_global("stderr", ir.IntType(32))
 
     def declare_external_global(self, name: str, type: ir.Type):
         """Declare an external global variable."""
@@ -101,7 +86,7 @@ class IRGenerator:
         func = Function(self.module, func_type, name)
         func.linkage = "external"
 
-        # Add descriptive parameter names
+        # This just names the variables in the IR for debugging purposes
         for i, param in enumerate(func.args):
             param.name = f"arg{i}"
 
@@ -109,18 +94,16 @@ class IRGenerator:
         return func
 
     def generate(self, program) -> str:
-        # Generate code for each function
+
         for function in program.functions:
             self.generate_function(function)
 
-        # Generate code for global variables
         for global_var in program.globals:
             self.generate_global(global_var)
 
         return str(self.module)
 
     def generate_function(self, function):
-        # Create function type
         param_types = []
         is_variadic = False
         for param in function.parameters:
@@ -133,24 +116,23 @@ class IRGenerator:
         return_type = self.get_llvm_type(function.return_type)
         func_type = FunctionType(return_type, param_types)
 
-        # Create function
+        # This is what actually creates the function declaration in the IR
         func = Function(self.module, func_type, function.name)
 
         if is_variadic:
-            # Add the byval attribute to the function if it's variadic (varargs)
             func_type.var_arg = True
 
         self.functions[function.name] = func
 
-        # If it's just a declaration, return
+        # return if we're in a declaration and not a definition
         if function.body is None:
             return
 
-        # Create entry block
+        ## Start the function body
         entry_block = func.append_basic_block("entry")
         self.builder = IRBuilder(entry_block)
 
-        # Add parameters to named values
+        # Allocate space for the parameters
         for param, arg in zip(function.parameters, func.args):
             param_name = param.name
             param_type = self.get_llvm_type(param.param_type)
@@ -158,11 +140,11 @@ class IRGenerator:
             self.builder.store(arg, alloca)
             self.named_values[param_name] = alloca
 
-        # Generate code for function body
+        ## Generate code for the function body
         for stmt in function.body.statements:
             self.generate_statement(stmt)
 
-        # Add return if needed
+        ## Add a return if needed
         if not self.builder.block.is_terminated:
             if return_type == ir.VoidType():
                 self.builder.ret_void()
@@ -226,11 +208,13 @@ class IRGenerator:
         self.builder.position_at_end(then_block)
         for stmt in stmt.body.statements:
             self.generate_statement(stmt)
-        self.builder.branch(merge_block)
+        if not self.builder.block.is_terminated:
+            self.builder.branch(merge_block)
 
         # Generate else block
         self.builder.position_at_end(else_block)
-        self.builder.branch(merge_block)
+        if not self.builder.block.is_terminated:
+            self.builder.branch(merge_block)
 
         # Continue at merge block
         self.builder.position_at_end(merge_block)
@@ -591,7 +575,7 @@ class IRGenerator:
         elif isinstance(expr, FunctionCall):
             # Look up the function's return type
             if expr.name in self.functions:
-                return self.functions[expr.name].type.return_type
+                return self.functions[expr.name].return_value.type
             # Default to i32 if not found
             return ir.IntType(32)
 

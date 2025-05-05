@@ -7,6 +7,15 @@ import std.io;
 */
 
 
+func factorial(i32 n) i32 {
+	if (n == 0) {
+		return 1;
+	}
+	
+	return n * factorial(n - 1);
+}
+
+
 func main() i32  {
 	let i32 x = 129;
 	// or use hexadecimal
@@ -15,11 +24,10 @@ func main() i32  {
 	let i32 z = 1.29e2;
 
 	println("Hello World!");
-
 	
+	let i32 f = factorial(10);
 
+	printf("Factorial of %d is %d\n", 10, f);
 	
-
 	return 0;
 }
-
