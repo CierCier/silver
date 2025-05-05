@@ -3,6 +3,7 @@
 import argparse
 import pathlib
 import os
+import subprocess
 import sys
 
 from silver import add_module_path
@@ -47,7 +48,7 @@ class Config:
         self.input_files = kwargs.get("input_files", [])
 
         if not self.output:
-            self.output = self.input_files[0].with_suffix(".ll")
+            self.output = pathlib.Path("a")
 
         if (
             not self.emit_llvm
@@ -140,6 +141,19 @@ def main():
 
     with open(output_file.with_suffix(".ll"), "w") as f:
         f.write(ir_code)
+
+    # compile the IR to a binary
+    subprocess.run(
+        [
+            "clang",
+            "-o",
+            output_file.with_suffix(".out"),
+            output_file.with_suffix(".ll"),
+        ]
+    )
+
+    if not config.emit_llvm_ir:
+        os.remove(output_file.with_suffix(".ll"))
 
 
 if __name__ == "__main__":
