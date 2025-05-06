@@ -1,0 +1,11 @@
+import std.io;
+
+
+
+func main() i32 {
+
+    let *i8 fd = fopen("test.txt", "w");
+    fwrite("Hello, World!", 13, 1, fd);
+    fclose(fd);
+    
+}

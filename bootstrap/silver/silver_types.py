@@ -26,6 +26,46 @@ class SilverType:
         return self.__size
 
 
+class IntType(SilverType):
+    def __init__(self, size: int):
+        super().__init__(f"i{size}", size)
+
+
+class UIntType(SilverType):
+    def __init__(self, size: int):
+        super().__init__(f"u{size}", size)
+
+
+class FloatType(SilverType):
+    def __init__(self, size: int):
+        super().__init__(f"f{size}", size)
+
+
+class DoubleType(SilverType):
+    def __init__(self):
+        super().__init__("f64", 64)
+
+
+class VoidType(SilverType):
+    def __init__(self):
+        super().__init__("void", 0)
+
+
+class StringType(SilverType):
+    def __init__(self):
+        super().__init__("string", 0)
+
+
+class CharType(SilverType):
+    def __init__(self):
+        super().__init__("char", 8)
+
+
+class BoolType(SilverType):
+    def __init__(self):
+        super().__init__("bool", 1)
+
+
 class SilverStruct(SilverType):
     """
     Class for struct types.
@@ -34,6 +74,7 @@ class SilverStruct(SilverType):
     def __init__(self, name: str, size: int = 0):
         super().__init__(name, size)
         self.fields = {}
+        self.__offset = 0
 
     def add_field(self, name: str, type: SilverType):
         """
@@ -41,9 +82,10 @@ class SilverStruct(SilverType):
         """
         self.fields[name] = {
             "type": type,
-            "offset": super().size(),
+            "offset": self.__offset,
         }
-        super().size(super().size() + type.size())
+        self.__offset += 1  # LLVM Struct Offsets
+        super().size(self.__offset)
 
     def get_offset(self, name: str):
         """
@@ -93,7 +135,8 @@ class SilverEnum(SilverType):
 
 
 class SilverUnion(SilverType):
-    def __init__(self, name: str, fields: List[tuple] = []):
+
+    def __init__(self, name: str, fields: List[tuple[str, SilverType]] = []):
         super().__init__(name)
         self.fields = fields
 

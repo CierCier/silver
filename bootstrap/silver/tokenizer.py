@@ -297,7 +297,7 @@ class Tokenizer:
 
                 if token_type == TokenType.NUMBER:
                     # Process number literals
-                    token.value = str(self.process_number(token))
+                    token.value = self.process_number(token)
 
                 # Special handling for comments to skip them
                 if token_type in (
@@ -392,15 +392,17 @@ class Tokenizer:
         return tokens
 
     def process_number(self, token):
+        """Process a number token to determine if it's a float or integer."""
         value = token.value
-        value = value.strip()  # remove any surrounding whitespace
-
-        if value.startswith("0x"):
-            return int(value[2:], 16)  # Convert hex to integer
-        elif "." in value or "e" in value.lower():
-            return float(value)  # Convert to float
+        if "e" in value.lower() or "." in value:
+            # It's a float, keep it as is
+            return value
+        elif value.startswith("0x") or value.startswith("0X") or value.startswith("x"):
+            # It's a hex number, convert to decimal
+            return str(int(value, 16))
         else:
-            return int(value)  # Convert to integer
+            # It's a decimal integer
+            return value
 
 
 def test():

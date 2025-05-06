@@ -1,10 +1,20 @@
 
 /*
-        Lang98 std.io module
+Lang98 std.io module
 */
 
-// external declaration to libc function
+
+
+// fd functions
+func fopen(string path, string mode) *i8;
+func fclose(*i8 fd) i32;
+
+func fwrite(string buff, i32 size, i32 n, *i8 fd) i32;
+func fread(string buff, i32 size, i32 n, *i8 fd) i32;
+
+
 func printf(string buf, ...) i32;
+func scanf(string fmt, ...) i32;
 
 
 func println(string buf) i32 {

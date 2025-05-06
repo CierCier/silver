@@ -20,9 +20,11 @@ func main() i32  {
 	let i32 x = 129;
 	// or use hexadecimal
 	let i32 y = 0x81;
+	
 	// or use scientific notation
-	let i32 z = 1.29e2;
+	let f32 z = 1.29e2;
 
+	// minimal wrapper for printf
 	println("Hello World!");
 	
 	let i32 f = factorial(10);

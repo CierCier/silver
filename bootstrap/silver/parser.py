@@ -2,7 +2,7 @@ from silver.preprocess import Preprocessor
 from silver.tokenizer import Token, TokenType, Tokenizer
 from silver.silver_types import SilverEnum, SilverStruct, SilverType, SilverUnion
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
 
 
@@ -72,7 +72,9 @@ class GlobalTypesTable:
             "void": SilverType("void", 0),
         }
 
-    def add_type(self, name: str, type_def: any):
+    def add_type(self, name: str, type_def: SilverType):
+        if name in self.types:
+            raise (f"Type '{name}' already exists")
         self.types[name] = type_def
 
     def get_type(self, name: str) -> any:
@@ -256,9 +258,11 @@ class Identifier(Expr):
 class Number(Expr):
     def __init__(self, value: str):
         self.value = value
+        # Keep the original string representation for floats
+        self.is_float = "e" in value.lower() or "." in value
 
     def __str__(self):
-        return self.value
+        return f"Number({self.value})"
 
 
 class String(Expr):
@@ -284,6 +288,51 @@ class FunctionCall(Expr):
 
     def __str__(self):
         return f"{self.name}({', '.join(str(arg) for arg in self.args)})"
+
+
+class MemberAccess(Expr):
+    def __init__(self, struct: Expr, field: str):
+        self.struct = struct
+        self.field = field
+
+    def __str__(self):
+        return f"{self.struct}.{self.field}"
+
+
+class StructInit(Expr):
+    def __init__(self, fields: Dict[str, Expr]):
+        self.fields = fields
+
+    def __str__(self):
+        fields_str = ", ".join(
+            f"{name}: {value}" for name, value in self.fields.items()
+        )
+        return f"{{{fields_str}}}"
+
+
+class AssignStmt(Statement):
+    def __init__(self, target: Expr, value: Expr):
+        self.target = target
+        self.value = value
+
+    def __str__(self):
+        return f"{self.target} = {self.value}"
+
+
+class DerefExpr(Expr):
+    def __init__(self, expr: Expr):
+        self.expr = expr
+
+    def __str__(self):
+        return f"*{self.expr}"
+
+
+class AddrOfExpr(Expr):
+    def __init__(self, expr: Expr):
+        self.expr = expr
+
+    def __str__(self):
+        return f"&{self.expr}"
 
 
 class Parser:
@@ -364,8 +413,16 @@ class Parser:
         return parameters
 
     def parse_type(self) -> Type:
+        # Handle pointer types first
+        if self.match(TokenType.MULTIPLY):
+            self.consume(TokenType.MULTIPLY)
+            base_type = self.parse_type()
+            return Type(f"*{base_type.name}")
+
+        # Handle regular types
         if self.match(TokenType.IDENTIFIER):
             return Type(self.consume(TokenType.IDENTIFIER).value)
+
         self.error("Expected type identifier")
 
     def parse_block(self) -> Block:
@@ -390,7 +447,16 @@ class Parser:
         elif self.match(TokenType.KEYWORD, "return"):
             return self.parse_return_stmt()
         else:
-            return self.parse_expr_stmt()
+            # Try to parse an assignment or expression statement
+            expr = self.parse_expr()
+            if self.match(TokenType.ASSIGN):
+                self.consume(TokenType.ASSIGN)
+                value = self.parse_expr()
+                self.consume(TokenType.SEMICOLON)
+                return AssignStmt(expr, value)
+            else:
+                self.consume(TokenType.SEMICOLON)
+                return ExprStmt(expr)
 
     def parse_variable_decl(self) -> VariableDecl:
         self.consume(TokenType.KEYWORD, "let")
@@ -421,11 +487,6 @@ class Parser:
             value = self.parse_expr()
         self.consume(TokenType.SEMICOLON)
         return ReturnStmt(value)
-
-    def parse_expr_stmt(self) -> ExprStmt:
-        expr = self.parse_expr()
-        self.consume(TokenType.SEMICOLON)
-        return ExprStmt(expr)
 
     def parse_expr(self) -> Expr:
         return self.parse_comparison()
@@ -462,6 +523,46 @@ class Parser:
         return left
 
     def parse_primary(self) -> Expr:
+        if self.match(TokenType.LBRACE):
+            # Handle struct initialization
+            self.consume(TokenType.LBRACE)
+            fields = {}
+
+            if not self.match(TokenType.RBRACE):
+                while True:
+                    field_name = self.consume(TokenType.IDENTIFIER).value
+                    self.consume(TokenType.COLON)
+                    field_value = self.parse_expr()
+                    fields[field_name] = field_value
+
+                    if not self.match(TokenType.COMMA):
+                        break
+                    self.consume(TokenType.COMMA)
+
+            self.consume(TokenType.RBRACE)
+            return StructInit(fields)
+
+        # Handle pointer operations
+        if self.match(TokenType.MULTIPLY):
+            self.consume(TokenType.MULTIPLY)
+            expr = self.parse_primary()
+            return DerefExpr(expr)
+        elif self.match(TokenType.AND):
+            self.consume(TokenType.AND)
+            expr = self.parse_primary()
+            return AddrOfExpr(expr)
+
+        expr = self.parse_identifier_or_call()
+
+        # Handle member access
+        while self.match(TokenType.DOT):
+            self.consume(TokenType.DOT)
+            field = self.consume(TokenType.IDENTIFIER).value
+            expr = MemberAccess(expr, field)
+
+        return expr
+
+    def parse_identifier_or_call(self) -> Expr:
         if self.match(TokenType.IDENTIFIER):
             name = self.consume(TokenType.IDENTIFIER).value
             if self.match(TokenType.LPAREN):
@@ -500,6 +601,8 @@ class Parser:
             f_name = self.consume(TokenType.IDENTIFIER).value
             struct.add_field(f_name, f_type)
             self.consume(TokenType.SEMICOLON)
+
+        self.types_table.add_type(name, struct)
 
         self.consume(TokenType.RBRACE)
         return struct
@@ -593,6 +696,13 @@ def print_Expr(expr: Expr) -> str:
     elif isinstance(expr, FunctionCall):
         args = ", ".join(print_Expr(arg) for arg in expr.args)
         return f"{expr.name}({args})"
+    elif isinstance(expr, MemberAccess):
+        return f"{print_Expr(expr.struct)}.{expr.field}"
+    elif isinstance(expr, StructInit):
+        fields = ", ".join(
+            f"{name}: {print_Expr(value)}" for name, value in expr.fields.items()
+        )
+        return f"{{{fields}}}"
     return str(expr)
 
 

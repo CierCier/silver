@@ -1,21 +1,27 @@
-
-
+import std.io;
+import std.math;
 
 struct Point {
     f32 x;
     f32 y;
 }
 
-enum Color {
-    RED,
-    GREEN,
-    BLUE
+struct Line {
+    Point p1;
+    Point p2;
 }
 
 
-union Message {
-    i32 integer;
-    f32 float;
-    string string;
-}
+func main(i32 argc, string argv) i32 {
 
+    let Point pnt = { x: 100, y: 100 };
+    let Line line = {
+        p1: { x: 100, y: 100 },
+        p2: { x: 200, y: 200 }
+    };
+    
+    printf("Point: %.2f, %.2f\n", pnt.x, pnt.y);
+    printf("Line: %.2f, %.2f, %.2f, %.2f\n", line.p1.x, line.p1.y, line.p2.x, line.p2.y);
+
+	return 0;
+}
