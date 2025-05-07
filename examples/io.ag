@@ -1,11 +1,16 @@
 import std.io;
 
+import examples.module;
 
 
 func main() i32 {
-
     let *i8 fd = fopen("test.txt", "w");
-    fwrite("Hello, World!", 13, 1, fd);
+
+    for (let i32 i = 0; i < 10; i++) {
+        fprintf(fd, "Hello, World %d\n", i);
+    }
+
+
     fclose(fd);
-    
+    return 0;
 }

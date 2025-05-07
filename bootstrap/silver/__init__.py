@@ -4,6 +4,14 @@ from pathlib import Path
 
 cwd = Path(os.path.curdir).parent.resolve()
 
+
+VERSION_MAJOR = 0
+VERSION_MINOR = 0
+VERSION_PATCH = 1
+
+VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
+
+
 MODULE_PATH = [
     f"{cwd}",  ## Higher precedence to cwd
     "/usr/include/silver/",

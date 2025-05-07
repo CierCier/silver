@@ -1,3 +1,4 @@
+import subprocess
 import llvmlite
 
 from llvmlite import ir
@@ -16,6 +17,7 @@ from llvmlite.ir import (
 )
 
 from silver.parser import (
+    Null,
     Program,
     Block,
     Statement,
@@ -33,9 +35,15 @@ from silver.parser import (
     MemberAccess,
     StructInit,
     AssignStmt,
+    Type as SilverTypeNode,
+    WhileStmt,
+    ForStmt,
+    ExternalDecl,
+    StaticDecl,
 )
 
-from silver.silver_types import SilverStruct, SilverUnion
+from silver.silver_types import SilverPointer, SilverStruct, SilverUnion
+from silver import VERSION_STRING
 
 from typing import Dict, List, Optional, Any
 
@@ -215,10 +223,15 @@ class IRGenerator:
             self.generate_struct(struct)
 
         for global_var in program.globals:
-            self.generate_global(global_var)
+            if isinstance(global_var, ExternalDecl):
+                self.generate_external_decl(global_var)
+            else:
+                self.generate_global(global_var)
 
         for function in program.functions:
             self.generate_function(function)
+
+        self.generate_metadata(program)
 
         return str(self.module)
 
@@ -234,6 +247,16 @@ class IRGenerator:
         name = f"Struct.{struct.name}"
         structure = ctx.get_identified_type(name)
 
+        # initialize the struct in the structs map first
+        # this is just to help us make possible recursive structs
+
+        self.structs[struct.name] = (structure, struct)
+        struct_ptr_i = f"*{struct.name}"
+        self.type_map[struct_ptr_i] = (
+            ir.PointerType(structure),
+            SilverPointer(struct_ptr_i, struct),
+        )
+
         elements = []
         for field_name, field_info in struct.fields.items():
             # Get the field type, handling nested structs
@@ -241,7 +264,6 @@ class IRGenerator:
             elements.append(field_type)
 
         structure.set_body(*elements)
-        self.structs[struct.name] = (structure, struct)
 
     def get_struct_field_index(self, struct_name: str, field_name: str) -> int:
         """Get the index of a field in a struct."""
@@ -377,7 +399,10 @@ class IRGenerator:
 
         ## Generate code for the function body
         for stmt in function.body.statements:
-            self.generate_statement(stmt)
+            if isinstance(stmt, Expr):
+                self.generate_expression(stmt)
+            elif isinstance(stmt, Statement):
+                self.generate_statement(stmt)
 
         ## Add a return if needed
         if not self.builder.block.is_terminated:
@@ -386,19 +411,46 @@ class IRGenerator:
             else:
                 self.builder.ret(Constant(return_type, 0))
 
-    def generate_global(self, global_var):
+    def generate_global(self, global_var, linkage: str = "private"):
         var_type = self.get_llvm_type(global_var.var_type)
         initializer = self.generate_expression(global_var.value)
-        global_var = ir.GlobalVariable(self.module, var_type, global_var.name)
-        global_var.initializer = initializer
 
-    def generate_statement(self, stmt):
+        # Create the global variable
+        global_var_ir = ir.GlobalVariable(self.module, var_type, global_var.name)
+        global_var_ir.linkage = linkage
+
+        self.named_values[global_var.name] = global_var_ir
+        if initializer is None:
+            return
+
+        if isinstance(initializer, ir.Constant):
+            global_var_ir.initializer = initializer
+        else:
+            global_var_ir.initializer = ir.Constant(var_type, None)
+
+        if isinstance(var_type, ir.PointerType):
+            ## we create a value global to store the value
+            __temp_global = ir.GlobalVariable(
+                self.module, initializer.type, f"{global_var.name}.value"
+            )
+            __temp_global.initializer = initializer
+            global_var_ir.initializer = __temp_global.bitcast(var_type)
+
+    def generate_statement(self, stmt: Statement) -> None:
         if isinstance(stmt, VariableDecl):
             self.generate_variable_decl(stmt)
+        elif isinstance(stmt, ExternalDecl):
+            self.generate_external_decl(stmt)
+        elif isinstance(stmt, StaticDecl):
+            self.generate_static_decl(stmt)
         elif isinstance(stmt, IfStmt):
             self.generate_if_stmt(stmt)
         elif isinstance(stmt, ReturnStmt):
             self.generate_return_stmt(stmt)
+        elif isinstance(stmt, WhileStmt):
+            self.generate_while_stmt(stmt)
+        elif isinstance(stmt, ForStmt):
+            self.generate_for_stmt(stmt)
         elif isinstance(stmt, ExprStmt):
             self.generate_expression(stmt.expr)
         elif isinstance(stmt, AssignStmt):
@@ -409,6 +461,8 @@ class IRGenerator:
                 target = self.named_values[stmt.target.name]
                 value = self.generate_expression(stmt.value)
                 self.builder.store(value, target)
+        else:
+            raise Exception(f"Unsupported statement type: {type(stmt)}")
 
     def generate_variable_decl(self, decl: VariableDecl):
         """Generate LLVM IR for a variable declaration.
@@ -422,63 +476,13 @@ class IRGenerator:
         Args:
             decl: The variable declaration AST node
         """
-        # Allocate space for the variable
         var_type = self.get_llvm_type(decl.var_type)
+        value = self.generate_expression(decl.value) if decl.value else None
+
         alloca = self.builder.alloca(var_type, name=decl.name)
-
-        # Generate code for the initial value
-        if isinstance(decl.value, StructInit):
-            # Handle struct initialization
-            struct_type = var_type
-            if not isinstance(struct_type, ir.IdentifiedStructType):
-                raise Exception(
-                    f"Expected struct type for struct initialization, got {struct_type}"
-                )
-
-            # Get the struct definition
-            struct_name = struct_type.name.replace("Struct.", "")
-            if struct_name not in self.structs:
-                raise Exception(f"Unknown struct type: {struct_name}")
-
-            struct_type, silver_struct = self.structs[struct_name]
-
-            # Initialize each field
-            for field_name, field_value in decl.value.fields.items():
-                # Get the field index and type
-                field_index = list(silver_struct.fields.keys()).index(field_name)
-                field_info = silver_struct.fields[field_name]
-                field_type = self.get_llvm_type(field_info["type"])
-
-                # Generate the field value
-                if isinstance(field_value, StructInit):
-                    # Handle nested struct initialization
-                    field_value_ir = self.generate_nested_struct_init(
-                        field_value, field_type
-                    )
-                else:
-                    field_value_ir = self.generate_expression(field_value)
-                    if self.needs_cast(field_value_ir.type, field_type):
-                        field_value_ir = self.cast_value(field_value_ir, field_type)
-
-                # Create GEP to access the field
-                indices = [
-                    Constant(ir.IntType(32), 0),
-                    Constant(ir.IntType(32), field_index),
-                ]
-                field_ptr = self.builder.gep(alloca, indices, inbounds=True)
-
-                # Store the field value
-                self.builder.store(field_value_ir, field_ptr)
-        else:
-            # Handle normal initialization
-            value = self.generate_expression(decl.value)
-            # Use the declared variable type instead of guessing
-            if self.needs_cast(value.type, var_type):
-                value = self.cast_value(value, var_type)
-
+        if value:
             self.builder.store(value, alloca)
 
-        # Add to named values
         self.named_values[decl.name] = alloca
 
     def generate_if_stmt(self, stmt):
@@ -602,7 +606,12 @@ class IRGenerator:
 
         elif isinstance(expr, Identifier):
             # Load the value from the alloca'd variable
-            alloca = self.named_values[expr.name]
+            alloca = None
+            if expr.name in self.named_values:
+                alloca = self.named_values[expr.name]
+            else:
+                raise Exception(f"Unknown identifier: {expr.name}")
+
             return self.builder.load(alloca)
 
         elif isinstance(expr, Number):
@@ -635,10 +644,44 @@ class IRGenerator:
             return str_ptr
 
         elif isinstance(expr, BinOp):
-            # Handle binary operations (arithmetic and comparison)
             left = self.generate_expression(expr.left)
             right = self.generate_expression(expr.right)
 
+            if expr.op == "+":
+                return self.builder.add(left, right)
+            elif expr.op == "-":
+                return self.builder.sub(left, right)
+            elif expr.op == "*":
+                return self.builder.mul(left, right)
+            elif expr.op == "/":
+                return self.builder.sdiv(left, right)
+            elif expr.op == "==":
+                return self.builder.icmp_signed("==", left, right)
+            elif expr.op == "!=":
+                return self.builder.icmp_signed("!=", left, right)
+            elif expr.op == "<":
+                return self.builder.icmp_signed("<", left, right)
+            elif expr.op == "<=":
+                return self.builder.icmp_signed("<=", left, right)
+            elif expr.op == ">":
+                return self.builder.icmp_signed(">", left, right)
+            elif expr.op == ">=":
+                return self.builder.icmp_signed(">=", left, right)
+            elif expr.op == "++":
+                # Handle increment
+                one = ir.Constant(left.type, 1)
+                result = self.builder.add(left, one)
+                # Store the result back to the variable
+                if isinstance(expr.left, Identifier):
+                    self.builder.store(result, self.named_values[expr.left.name])
+                return result
+            elif expr.op == "--":
+                # Handle decrement
+                one = ir.Constant(left.type, 1)
+                result = self.builder.sub(left, one)
+                # Store the result back to the variable
+                if isinstance(expr.left, Identifier):
+                    self.builder.store(result, self.named_values[expr.left.name])
             # Handle type promotion for binary operations
             if self.needs_cast(left.type, right.type):
                 if isinstance(left.type, ir.FloatType) or isinstance(
@@ -735,35 +778,44 @@ class IRGenerator:
         elif isinstance(expr, FunctionCall):
             # Handle function calls
             func = self.functions[expr.name]
+            if len(expr.args) < len(func.args):
+                raise Exception(
+                    f"Function {expr.name} expects {len(func.args)} arguments, but got {len(expr.args)}"
+                )
 
-            # Generate arguments for the function call
             args = []
-            if func.function_type.var_arg:
-                # For variadic functions (like printf), handle each argument specially
-                for i, arg in enumerate(expr.args):
-                    arg_value = self.generate_expression(arg)
-                    if i == 0:
-                        # First argument is passed as is (format string for printf)
-                        args.append(arg_value)
+
+            if len(expr.args) > len(func.args) and not func.function_type.var_arg:
+                raise Exception(
+                    f"Function {expr.name} expects {len(func.args)} arguments, but got {len(expr.args)}"
+                )
+
+            # extend func args to length of expr args, fill it with None
+            func_args = list(func.args)
+            func_args.extend([None] * (len(expr.args) - len(func.args)))
+
+            for arg, param_type in zip(expr.args, func_args):
+
+                arg_value = self.generate_expression(arg)
+
+                if param_type is None:
+                    ## this means a var_arg
+                    ## cast it to *i32
+                    if isinstance(arg_value, ir.PointerType):
+                        arg_value = self.builder.bitcast(
+                            arg_value, ir.PointerType(ir.IntType(32))
+                        )
                     else:
-                        # For subsequent arguments:
-                        # - Promote integers to at least 32 bits
-                        # - Convert floats to double
-                        if (
-                            isinstance(arg_value.type, ir.IntType)
-                            and arg_value.type.width < 32
-                        ):
-                            arg_value = self.builder.zext(arg_value, ir.IntType(32))
-                        elif isinstance(arg_value.type, ir.FloatType):
-                            arg_value = self.builder.fpext(arg_value, ir.DoubleType())
-                        args.append(arg_value)
-            else:
-                # For normal functions, cast arguments to match parameter types
-                for arg, param_type in zip(expr.args, func.args):
-                    arg_value = self.generate_expression(arg)
-                    if self.needs_cast(arg_value.type, param_type.type):
-                        arg_value = self.cast_value(arg_value, param_type.type)
+                        arg_value = self.builder.inttoptr(
+                            arg_value, ir.PointerType(ir.IntType(32))
+                        )
+
                     args.append(arg_value)
+                    continue
+
+                if self.needs_cast(arg_value.type, param_type.type):
+                    arg_value = self.cast_value(arg_value, param_type.type)
+                args.append(arg_value)
 
             return self.builder.call(func, args)
 
@@ -771,23 +823,45 @@ class IRGenerator:
             # Handle parenthesized expressions by just generating the inner expression
             return self.generate_expression(expr.expr)
 
+        elif isinstance(expr, Null):
+            null_ptr = self.builder.alloca(ir.PointerType(ir.IntType(8)))
+            null_val = self.builder.load(null_ptr)
+            self.builder.store(null_val, null_ptr)
+            return null_val
+
         raise Exception(f"Unsupported expression type: {type(expr)}")
 
-    def get_llvm_type(self, type_node):
-        """Get the LLVM type for a Silver type node."""
-        type_name = type_node.name
-        if type_name in self.type_map:
-            return self.type_map[type_name][0]
-
-        if type_name in self.structs:
-            return self.structs[type_name][0]
+    def get_llvm_type(self, silver_type: Type) -> ir.Type:
+        """Convert a Silver type to an LLVM type."""
+        # Check if we have a direct mapping
+        if silver_type.name in self.type_map:
+            return self.type_map[silver_type.name][0]
 
         # Handle pointer types
-        if type_name.startswith("*"):
-            pointee_type = self.get_llvm_type(Type(type_name[1:]))
+        if silver_type.name.startswith("*"):
+            base_type_name = silver_type.name[1:]  # Remove the *
+            base_type = SilverTypeNode(base_type_name)
+            pointee_type = self.get_llvm_type(base_type)
+
+            # Special case: void* is represented as i8* in LLVM
+            if isinstance(pointee_type, ir.VoidType):
+                return ir.PointerType(ir.IntType(8))
+
             return ir.PointerType(pointee_type)
 
-        raise Exception(f"Unknown type: {type_name}")
+        # Handle struct types
+        if silver_type.name in self.structs:
+            return self.structs[silver_type.name][0]
+
+        # Handle union types
+        if silver_type.name in self.structs:
+            return self.structs[silver_type.name][0]
+
+        # Handle enum types
+        if silver_type.name in self.structs:
+            return self.structs[silver_type.name][0]
+
+        raise Exception(f"Unknown type: {silver_type.name}")
 
     def get_silver_type(self, type_name: str) -> Any:
         """Get the Silver type representation for a type name."""
@@ -799,8 +873,6 @@ class IRGenerator:
 
     def needs_cast(self, from_type: ir.Type, to_type: ir.Type) -> bool:
         """Check if a cast is needed between two types."""
-        if from_type == to_type:
-            return False
 
         # Both types are integers
         if isinstance(from_type, ir.IntType) and isinstance(to_type, ir.IntType):
@@ -828,7 +900,7 @@ class IRGenerator:
         if isinstance(from_type, ir.PointerType) and isinstance(
             to_type, ir.PointerType
         ):
-            return True
+            return from_type.pointee != to_type.pointee
 
         # Pointer to integer
         if isinstance(from_type, ir.PointerType) and isinstance(to_type, ir.IntType):
@@ -913,7 +985,7 @@ class IRGenerator:
         if isinstance(from_type, ir.PointerType) and isinstance(
             to_type, ir.PointerType
         ):
-            return value
+            return self.builder.bitcast(value, to_type)
 
         # Integer to Pointer
         if isinstance(from_type, ir.IntType) and isinstance(to_type, ir.PointerType):
@@ -921,7 +993,9 @@ class IRGenerator:
 
         # Pointer to Integer
         if isinstance(from_type, ir.PointerType) and isinstance(to_type, ir.IntType):
-            return self.builder.ptrtoint(value, to_type)
+            tmp_ptr = self.builder.alloca(ir.PointerType(to_type))
+            self.builder.store(value, tmp_ptr)
+            return self.builder.bitcast(tmp_ptr, to_type)
 
         raise Exception(f"Cannot cast from {from_type} to {to_type}")
 
@@ -1046,6 +1120,123 @@ class IRGenerator:
 
         # Load the initialized struct
         return self.builder.load(temp_alloca)
+
+    def generate_while_stmt(self, stmt: WhileStmt) -> None:
+        # Create basic blocks for the loop
+        loop_header = self.builder.append_basic_block("while_header")
+        loop_body = self.builder.append_basic_block("while_body")
+        loop_exit = self.builder.append_basic_block("while_exit")
+
+        # Branch to loop header
+        self.builder.branch(loop_header)
+
+        # Generate loop header
+        self.builder.position_at_end(loop_header)
+        condition = self.generate_expression(stmt.condition)
+        self.builder.cbranch(condition, loop_body, loop_exit)
+
+        # Generate loop body
+        self.builder.position_at_end(loop_body)
+
+        for smt in stmt.body.statements:
+            if isinstance(smt, Expr):
+                self.generate_expression(smt)
+            elif isinstance(smt, Statement):
+                self.generate_statement(smt)
+
+        self.builder.branch(loop_header)
+
+        # Continue with loop exit
+        self.builder.position_at_end(loop_exit)
+
+    def generate_for_stmt(self, stmt: ForStmt) -> None:
+        init = stmt.init
+        condition = stmt.condition
+        increment = stmt.increment
+        body = stmt.body
+
+        init_block = self.builder.append_basic_block("for_init")
+        condition_block = self.builder.append_basic_block("for_condition")
+        body_block = self.builder.append_basic_block("for_body")
+        increment_block = self.builder.append_basic_block("for_increment")
+        exit_block = self.builder.append_basic_block("for_exit")
+
+        # Branch to init block
+        self.builder.branch(init_block)
+
+        if init:
+            self.builder.position_at_end(init_block)
+            if isinstance(init, Expr):
+                self.generate_expression(init)
+            elif isinstance(init, Statement):
+                self.generate_statement(init)
+            self.builder.branch(condition_block)
+
+        if condition:
+            self.builder.position_at_end(condition_block)
+            condition_ir = self.generate_expression(condition)
+            self.builder.cbranch(condition_ir, body_block, exit_block)
+
+        self.builder.position_at_end(body_block)
+        for smt in stmt.body.statements:
+            if isinstance(smt, Expr):
+                self.generate_expression(smt)
+            elif isinstance(smt, Statement):
+                self.generate_statement(smt)
+
+        self.builder.branch(increment_block)
+
+        if increment:
+            self.builder.position_at_end(increment_block)
+            if isinstance(increment, Expr):
+                self.generate_expression(increment)
+            elif isinstance(increment, Statement):
+                self.generate_statement(increment)
+            self.builder.branch(condition_block)
+
+        self.builder.position_at_end(exit_block)
+
+    def generate_external_decl(self, decl: ExternalDecl) -> None:
+        """Generate LLVM IR for an external variable declaration."""
+        var_type = self.get_llvm_type(decl.var_type)
+
+        # Create an external global variable
+        global_var = ir.GlobalVariable(self.module, var_type, decl.name, addrspace=0)
+        global_var.linkage = "external"
+        global_var.initializer = None  # External variables don't have initializers
+
+        # Add to named values for later reference
+        self.named_values[decl.name] = global_var
+
+    def generate_static_decl(self, decl: StaticDecl) -> None:
+        """Generate LLVM IR for a static variable declaration."""
+        var_type = self.get_llvm_type(decl.var_type)
+
+        # Create a static global variable
+        global_var = ir.GlobalVariable(self.module, var_type, decl.name, addrspace=0)
+        global_var.linkage = "internal"  # Static variables have internal linkage
+
+        # Generate the initializer
+        value = self.generate_expression(decl.value)
+        if isinstance(value, ir.Constant):
+            global_var.initializer = value
+        else:
+            global_var.initializer = ir.Constant(var_type, None)
+
+        # Add to named values for later reference
+        self.named_values[decl.name] = global_var
+
+    def generate_metadata(self, program: Program) -> None:
+        """Generate metadata for the program."""
+        llvm_version = subprocess.check_output(["llvm-config", "--version"])
+        llvm_version = llvm_version.decode("utf-8").strip()
+
+        metadata = self.module.add_metadata(
+            [
+                ("silver", VERSION_STRING),
+                ("llvm", llvm_version),
+            ]
+        )
 
 
 def test():

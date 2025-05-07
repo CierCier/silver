@@ -1,0 +1,22 @@
+
+
+extern *i8 stdout;
+
+func strlen(string str) i32;
+func strcpy(string dest, string src) *i8;
+func malloc(i32 size) *u8;
+func write(i32 fd, *i8 buf, i32 count) i32;
+
+func main() i32 {
+    let string s = "Hello, world!";
+    let i32 len = strlen(s);
+
+    let *u8 buf = malloc(len);
+
+    strcpy(buf, s);
+
+
+    write(1, buf, len);
+
+    return 0;
+}

@@ -1,0 +1,8 @@
+
+/*
+This is a module.
+It can be imported by other modules.
+*/
+
+
+let i32 MOD_ID = 1;

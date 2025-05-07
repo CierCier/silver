@@ -1,6 +1,18 @@
 from silver.preprocess import Preprocessor
 from silver.tokenizer import Token, TokenType, Tokenizer
-from silver.silver_types import SilverEnum, SilverStruct, SilverType, SilverUnion
+from silver.silver_types import (
+    BoolType,
+    FloatType,
+    IntType,
+    SilverEnum,
+    SilverPointer,
+    SilverStruct,
+    SilverType,
+    SilverUnion,
+    StringType,
+    UIntType,
+    VoidType,
+)
 
 from typing import List, Optional, Dict
 from pathlib import Path
@@ -70,6 +82,19 @@ class GlobalTypesTable:
             "char": SilverType("char", 1),
             "string": SilverType("string", 0),
             "void": SilverType("void", 0),
+            "*void": SilverPointer("*void", VoidType()),
+            "*i8": SilverPointer("*i8", IntType(8)),
+            "*i16": SilverPointer("*i16", IntType(16)),
+            "*i32": SilverPointer("*i32", IntType(32)),
+            "*i64": SilverPointer("*i64", IntType(64)),
+            "*u8": SilverPointer("*u8", UIntType(8)),
+            "*u16": SilverPointer("*u16", UIntType(16)),
+            "*u32": SilverPointer("*u32", UIntType(32)),
+            "*u64": SilverPointer("*u64", UIntType(64)),
+            "*f32": SilverPointer("*f32", FloatType(32)),
+            "*f64": SilverPointer("*f64", FloatType(64)),
+            "*bool": SilverPointer("*bool", BoolType()),
+            "*string": SilverPointer("*string", StringType()),
         }
 
     def add_type(self, name: str, type_def: SilverType):
@@ -194,6 +219,11 @@ class Block:
         return result
 
 
+class Null:
+    def __str__(self):
+        return "null"
+
+
 class Statement:
     pass
 
@@ -270,7 +300,15 @@ class String(Expr):
         self.value = value
 
     def __str__(self):
-        return self.value
+        _repr = self.value.replace("\n", "\\n")
+        _repr = _repr.replace("\t", "\\t")
+        _repr = _repr.replace("\r", "\\r")
+        _repr = _repr.replace("\f", "\\f")
+        _repr = _repr.replace("\b", "\\b")
+        _repr = _repr.replace("\a", "\\a")
+        _repr = _repr.replace("\v", "\\v")
+        _repr = _repr.replace("\0", "\\0")
+        return f'"{_repr}"'
 
 
 class ParenExpr(Expr):
@@ -335,6 +373,48 @@ class AddrOfExpr(Expr):
         return f"&{self.expr}"
 
 
+class WhileStmt(Statement):
+    def __init__(self, condition: Expr, body: Block):
+        self.condition = condition
+        self.body = body
+
+
+class ForStmt(Statement):
+    def __init__(
+        self,
+        init: Optional[Statement],
+        condition: ExprStmt,
+        increment: Optional[ExprStmt],
+        body: Block,
+    ):
+        self.init = init
+        self.condition = condition
+        self.increment = increment
+        self.body = body
+
+    def __str__(self):
+        return f"for ( {self.init};{self.condition}; {self.increment} ) {self.body}"
+
+
+class ExternalDecl(Statement):
+    def __init__(self, var_type: "Type", name: str):
+        self.var_type = var_type
+        self.name = name
+
+    def __str__(self):
+        return f"extern {self.var_type} {self.name}"
+
+
+class StaticDecl(Statement):
+    def __init__(self, var_type: "Type", name: str, value: "Expr"):
+        self.var_type = var_type
+        self.name = name
+        self.value = value
+
+    def __str__(self):
+        return f"static {self.var_type} {self.name} = {self.value}"
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
@@ -356,6 +436,9 @@ class Parser:
             elif self.match(TokenType.KEYWORD, "let"):
                 global_var = self.parse_variable_decl()
                 program.add_global(global_var)
+            elif self.match(TokenType.KEYWORD, "extern"):
+                extern_var = self.parse_external_decl()
+                program.add_global(extern_var)
             elif self.match(TokenType.KEYWORD, "struct"):
                 struct = self.parse_struct()
                 program.add_struct(struct)
@@ -367,34 +450,24 @@ class Parser:
                 program.add_union(union)
             else:
                 self.error(
-                    "Expected 'func', 'let', 'struct', 'enum', or 'union' keyword in global scope"
+                    "Expected 'func', 'let', 'extern', 'struct', 'enum', or 'union' keyword in global scope"
                 )
         return program
 
     def parse_function(self) -> Function:
-        """Parse a function declaration or definition."""
-        # Parse 'func' keyword
         self.consume(TokenType.KEYWORD, "func")
-
-        # Parse function name
         name = self.consume(TokenType.IDENTIFIER).value
-
-        # Parse parameters
         self.consume(TokenType.LPAREN)
         parameters = self.parse_parameters()
         self.consume(TokenType.RPAREN)
-
-        # Parse return type
         return_type = self.parse_type()
 
-        # Check if this is a declaration or definition
         if self.match(TokenType.SEMICOLON):
             self.consume(TokenType.SEMICOLON)
-            return Function(name, parameters, return_type)  # Declaration
+            return Function(name, parameters, return_type)
         else:
-            # Parse function body
             body = self.parse_block()
-            return Function(name, parameters, return_type, body)  # Definition
+            return Function(name, parameters, return_type, body)
 
     def parse_parameters(self) -> List[Parameter]:
         parameters = []
@@ -442,10 +515,16 @@ class Parser:
     def parse_statement(self) -> Statement:
         if self.match(TokenType.KEYWORD, "let"):
             return self.parse_variable_decl()
+        elif self.match(TokenType.KEYWORD, "static"):
+            return self.parse_static_decl()
         elif self.match(TokenType.KEYWORD, "if"):
             return self.parse_if_stmt()
         elif self.match(TokenType.KEYWORD, "return"):
             return self.parse_return_stmt()
+        elif self.match(TokenType.KEYWORD, "while"):
+            return self.parse_while_stmt()
+        elif self.match(TokenType.KEYWORD, "for"):
+            return self.parse_for_stmt()
         else:
             # Try to parse an assignment or expression statement
             expr = self.parse_expr()
@@ -454,23 +533,61 @@ class Parser:
                 value = self.parse_expr()
                 self.consume(TokenType.SEMICOLON)
                 return AssignStmt(expr, value)
+            elif self.match(TokenType.INCREMENT) or self.match(TokenType.DECREMENT):
+                op = self.consume(self.current_token().type).value
+                self.consume(TokenType.SEMICOLON)
+                return BinOp(expr, op, Number("1"))
+            elif self.match(TokenType.INCREMENT_ASSIGN):
+                self.consume(TokenType.INCREMENT_ASSIGN)
+                value = self.parse_expr()
+                self.consume(TokenType.SEMICOLON)
+                return BinOp(expr, "+=", value)
+            elif self.match(TokenType.DECREMENT_ASSIGN):
+                self.consume(TokenType.DECREMENT_ASSIGN)
+                value = self.parse_expr()
+                self.consume(TokenType.SEMICOLON)
+                return BinOp(expr, "-=", value)
             else:
                 self.consume(TokenType.SEMICOLON)
                 return ExprStmt(expr)
 
     def parse_variable_decl(self) -> VariableDecl:
+        # Check for static or external modifiers
+        is_static = False
+        is_external = False
+
+        if self.match(TokenType.KEYWORD, "static"):
+            self.consume(TokenType.KEYWORD, "static")
+            is_static = True
+        elif self.match(TokenType.KEYWORD, "extern"):
+            self.consume(TokenType.KEYWORD, "extern")
+            is_external = True
+
         self.consume(TokenType.KEYWORD, "let")
         var_type = self.parse_type()
         name = self.consume(TokenType.IDENTIFIER).value
-        self.consume(TokenType.ASSIGN)
-        value = self.parse_expr()
+
+        # For external declarations, the value is optional
+        if is_external:
+            if self.match(TokenType.ASSIGN):
+                self.consume(TokenType.ASSIGN)
+                value = self.parse_expr()
+            else:
+                value = None
+        else:
+            self.consume(TokenType.ASSIGN)
+            value = self.parse_expr()
+
         self.consume(TokenType.SEMICOLON)
 
         # Add the variable to the current block's symbol table
         if isinstance(self.current_block, Block):
             self.current_block.add_symbol(name, var_type.name, value)
 
-        return VariableDecl(var_type, name, value)
+        decl = VariableDecl(var_type, name, value)
+        decl.is_static = is_static
+        decl.is_external = is_external
+        return decl
 
     def parse_if_stmt(self) -> IfStmt:
         self.consume(TokenType.KEYWORD, "if")
@@ -487,6 +604,43 @@ class Parser:
             value = self.parse_expr()
         self.consume(TokenType.SEMICOLON)
         return ReturnStmt(value)
+
+    def parse_while_stmt(self) -> WhileStmt:
+        self.consume(TokenType.KEYWORD, "while")
+        self.consume(TokenType.LPAREN)
+        condition = self.parse_expr()
+        self.consume(TokenType.RPAREN)
+        body = self.parse_block()
+        return WhileStmt(condition, body)
+
+    def parse_for_stmt(self) -> ForStmt:
+        self.consume(TokenType.KEYWORD, "for")
+        self.consume(TokenType.LPAREN)
+
+        # Parse initialization
+        init = None
+        if not self.match(TokenType.SEMICOLON):
+            if self.match(TokenType.KEYWORD, "let"):
+                init = self.parse_variable_decl()
+            else:
+                init = self.parse_statement()
+        ## dont need to consume semicolon here, variable_decl already consumes it
+
+        # Parse condition
+        condition = None
+        if not self.match(TokenType.SEMICOLON):
+            condition = self.parse_expr()
+            self.consume(TokenType.SEMICOLON)
+
+        # Parse increment
+        increment = None
+        if not self.match(TokenType.RPAREN):
+            increment = self.parse_expr()
+        self.consume(TokenType.RPAREN)
+
+        body = self.parse_block()
+
+        return ForStmt(init, condition, increment, body)
 
     def parse_expr(self) -> Expr:
         return self.parse_comparison()
@@ -542,6 +696,12 @@ class Parser:
             self.consume(TokenType.RBRACE)
             return StructInit(fields)
 
+        # Handle increment/decrement operators
+        if self.match(TokenType.INCREMENT) or self.match(TokenType.DECREMENT):
+            op = self.consume(self.current_token().type).value
+            expr = self.parse_primary()
+            return BinOp(expr, op, Number("1"))
+
         # Handle pointer operations
         if self.match(TokenType.MULTIPLY):
             self.consume(TokenType.MULTIPLY)
@@ -553,6 +713,11 @@ class Parser:
             return AddrOfExpr(expr)
 
         expr = self.parse_identifier_or_call()
+
+        # Handle postfix increment/decrement
+        if self.match(TokenType.INCREMENT) or self.match(TokenType.DECREMENT):
+            op = self.consume(self.current_token().type).value
+            return BinOp(expr, op, Number("1"))
 
         # Handle member access
         while self.match(TokenType.DOT):
@@ -577,6 +742,20 @@ class Parser:
                 self.consume(TokenType.RPAREN)
                 return FunctionCall(name, args)
             return Identifier(name)
+        elif self.match(TokenType.KEYWORD, "true"):
+            self.consume(TokenType.KEYWORD, "true")
+            return Number("1")
+        elif self.match(TokenType.KEYWORD, "false"):
+            self.consume(TokenType.KEYWORD, "false")
+            return Number("0")
+        elif self.match(TokenType.KEYWORD, "null"):
+            self.consume(TokenType.KEYWORD, "null")
+            return Null()
+        elif self.match(TokenType.MINUS):
+            self.consume(TokenType.MINUS)
+            val = self.consume(TokenType.NUMBER).value
+            val = int(val) * -1
+            return Number(str(val))
         elif self.match(TokenType.NUMBER):
             return Number(self.consume(TokenType.NUMBER).value)
         elif self.match(TokenType.STRING):
@@ -592,17 +771,17 @@ class Parser:
         self.consume(TokenType.KEYWORD, "struct")
         name = self.consume(TokenType.IDENTIFIER).value
         self.consume(TokenType.LBRACE)
-
         struct = SilverStruct(name)
+
+        self.types_table.add_type(name, struct)
+        self.types_table.add_type(f"*{name}", SilverPointer(name, struct))
 
         while not self.match(TokenType.RBRACE):
             f_type = self.parse_type()
             f_type = self.types_table.get_type(f_type.name)
             f_name = self.consume(TokenType.IDENTIFIER).value
-            struct.add_field(f_name, f_type)
             self.consume(TokenType.SEMICOLON)
-
-        self.types_table.add_type(name, struct)
+            struct.add_field(f_name, f_type)
 
         self.consume(TokenType.RBRACE)
         return struct
@@ -611,7 +790,6 @@ class Parser:
         self.consume(TokenType.KEYWORD, "enum")
         name = self.consume(TokenType.IDENTIFIER).value
         self.consume(TokenType.LBRACE)
-
         variants = []
 
         while not self.match(TokenType.RBRACE):
@@ -635,6 +813,29 @@ class Parser:
             fields.append((field_type, field_name))
         self.consume(TokenType.RBRACE)
         return SilverUnion(name, fields)
+
+    def parse_external_decl(self) -> ExternalDecl:
+        self.consume(TokenType.KEYWORD, "extern")
+        var_type = self.parse_type()
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.SEMICOLON)
+        return ExternalDecl(var_type, name)
+
+    def parse_static_decl(self) -> StaticDecl:
+        if not isinstance(self.current_block, Block):
+            self.error("Static declarations are only allowed in function scope")
+
+        self.consume(TokenType.KEYWORD, "static")
+        var_type = self.parse_type()
+        name = self.consume(TokenType.IDENTIFIER).value
+        self.consume(TokenType.ASSIGN)
+        value = self.parse_expr()
+        self.consume(TokenType.SEMICOLON)
+
+        if isinstance(self.current_block, Block):
+            self.current_block.add_symbol(name, var_type.name, value)
+
+        return StaticDecl(var_type, name, value)
 
     def match(self, token_type: TokenType, value: str = None) -> bool:
         if self.position >= len(self.tokens):

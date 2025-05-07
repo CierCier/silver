@@ -1,22 +1,104 @@
 
 /*
-Lang98 std.io module
+Silver std.io module
+
+Translated from GLIBC stdio.h
 */
 
 
+let i32 EOF = -1;
 
-// fd functions
-func fopen(string path, string mode) *i8;
+let i32 SEEK_SET = 0;
+let i32 SEEK_CUR = 1;
+let i32 SEEK_END = 2;
+
+extern *i8 stdin;
+extern *i8 stdout;
+extern *i8 stderr;
+
+
+func clearerr(*i8 fd) void;
+func ctermid(*i8 buf) *i8;
+
+func dprintf(i32 fd, *i8 fmt, ...) i32;
+
 func fclose(*i8 fd) i32;
+func feof(*i8 fd) i32;
+func ferror(*i8 fd) i32;
+func fflush(*i8 fd) i32;
+func fgetc(*i8 fd) i32;
+func fgetpos(*i8 fd, *i32 pos) i32;
+func fgets(*i8 s, i32 size, *i8 fd) *i8;
+func fileno(*i8 fd) i32;
+func flockfile(*i8 fd) void;
+func fmemopen(*i8 buf, i32 size, *i8 mode) *i8;
+func fopen(string path, string mode) *i8;
+func fprintf(*i8 fd, *i8 fmt, ...) i32;
+func fputc(i32 c, *i8 fd) i32;
+func fputs(*i8 s, *i8 fd) i32;
+func fread(*i8 ptr, i32 size, i32 n, *i8 fd) i32;
+func freopen(*i8 filename, *i8 mode, *i8 stream) *i8;
+func fscanf(*i8 stream, *i8 format, ...) i32;
+func fseek(*i8 fd, i32 offset, i32 whence) i32;
+func fseeko(*i8 fd, i32 offset, i32 whence) i32;
+func fsetpos(*i8 fd, *i32 pos) i32;
+func ftell(*i8 fd) i32;
+func ftello(*i8 fd) i32;
+func ftrylockfile(*i8 fd) i32;
+func funlockfile(*i8 fd) void;
+func fwrite(*i8 ptr, i32 size, i32 n, *i8 fd) i32;
 
-func fwrite(string buff, i32 size, i32 n, *i8 fd) i32;
-func fread(string buff, i32 size, i32 n, *i8 fd) i32;
+func getc(*i8 fd) i32;
+func getchar() i32;
+func getc_unlocked(*i8 fd) i32;
+func getchar_unlocked() i32;
+func getdelim(*i8 lineptr, i32 n, i32 delim, *i8 fd) i32;
+func getline(*i8 lineptr, i32 size, *i8 fd) i32;
+func gets(*i8 s) *i8;
+
+func pclose(*i8 stream) i32;
+func perror(*i8 s) void;
+func popen(*i8 command, *i8 type) *i8;
+func printf(*i8 fmt, ...) i32;
+func putc(i32 c, *i8 fd) i32;
+func putchar(i32 c) i32;
+func putchar_unlocked(i32 c) i32;
+func puts(*i8 s) i32;
+func putw(i32 w, *i8 stream) i32;
+func putc_unlocked(i32 c, *i8 fd) i32;
+
+func remove(*i8 filename) i32;
+func rename(*i8 old, *i8 new) i32;
+func rewind(*i8 stream) void;
+
+func scanf(*i8 format, ...) i32;
+func setbuf(*i8 stream, *i8 buf) void;
+func setvbuf(*i8 stream, *i8 buf, i32 type, i32 size) i32;
+func snprintf(*i8 s, i32 size, *i8 format, ...) i32;
+func sprintf(*i8 s, *i8 format, ...) i32;
+func sscanf(*i8 s, *i8 format, ...) i32;
+
+func tmpfile() *i8;
+func tmpnam(*i8 s) *i8;
+func ungetc(i32 c, *i8 stream) i32;
 
 
-func printf(string buf, ...) i32;
-func scanf(string fmt, ...) i32;
+// currently disabled due to va_list not being implemented
+// func vdprintf(i32 fd, *i8 fmt, va_list ap) i32;
+// func vfprintf(*i8 stream, *i8 fmt, va_list ap) i32;
+// func vprintf(*i8 fmt, va_list ap) i32;
+// func vsprintf(*i8 s, *i8 fmt, va_list ap) i32;
+// func vsnprintf(*i8 s, i32 size, *i8 fmt, va_list ap) i32;
+// func vscanf(*i8 format, va_list ap) i32;
+// func vsprintf(*i8 s, *i8 fmt, va_list ap) i32;
+// func vsscanf(*i8 s, *i8 format, va_list ap) i32;
 
 
-func println(string buf) i32 {
-        return printf("%s\n", buf);
-}
+
+
+
+
+
+
+
+

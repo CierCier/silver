@@ -187,6 +187,8 @@ class Tokenizer:
     keywords = {
         "func": TokenType.KEYWORD,
         "let": TokenType.KEYWORD,
+        "extern": TokenType.KEYWORD,
+        "static": TokenType.KEYWORD,
         "if": TokenType.KEYWORD,
         "else": TokenType.KEYWORD,
         "for": TokenType.KEYWORD,
@@ -194,12 +196,13 @@ class Tokenizer:
         "continue": TokenType.KEYWORD,
         "break": TokenType.KEYWORD,
         "return": TokenType.KEYWORD,
-        "true": TokenType.KEYWORD,
-        "false": TokenType.KEYWORD,
         "import": TokenType.KEYWORD,
         "struct": TokenType.KEYWORD,
         "enum": TokenType.KEYWORD,
         "union": TokenType.KEYWORD,
+        "true": TokenType.KEYWORD,
+        "false": TokenType.KEYWORD,
+        "null": TokenType.KEYWORD,
     }
 
     whitespace = set(" \t\r\n")

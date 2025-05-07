@@ -32,6 +32,10 @@ class Preprocessor:
 
                 i = self.data.index(line)
                 self.data = self.data[:i] + module_data + self.data[i + 1 :]
+        # this needs to be recursive if any other import statement is found
+        for line in self.data:
+            if self.import_regex.match(line):
+                self.expand_imports()
 
 
 if __name__ == "__main__":

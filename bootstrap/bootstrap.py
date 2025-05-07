@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from silver import add_module_path
-from silver.parser import Parser, Program
+from silver.parser import Parser, Program, pretty_print
 from silver.tokenizer import Tokenizer
 from silver.preprocess import Preprocessor
 from silver.ir_generator import IRGenerator
@@ -36,29 +36,6 @@ def get_machine_triple():
         raise Exception(f"Unsupported system: {system}")
 
 
-class Config:
-    def __init__(self, **kwargs):
-        self.output = kwargs.get("output")
-        self.debug = kwargs.get("debug", False)
-        self.emit_llvm = kwargs.get("emit_llvm", False)
-        self.emit_llvm_bc = kwargs.get("emit_llvm_bc", False)
-        self.emit_llvm_ir = kwargs.get("emit_llvm_ir", False)
-        self.emit_llvm_asm = kwargs.get("emit_llvm_asm", False)
-        self.include_dirs = kwargs.get("include_dirs", [])
-        self.input_files = kwargs.get("input_files", [])
-
-        if not self.output:
-            self.output = pathlib.Path("a")
-
-        if (
-            not self.emit_llvm
-            and not self.emit_llvm_bc
-            and not self.emit_llvm_ir
-            and not self.emit_llvm_asm
-        ):
-            self.emit_llvm = True
-
-
 def main():
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument(
@@ -69,30 +46,25 @@ def main():
         "--emit-llvm", "-emit-llvm", action="store_true", help="Emit LLVM IR"
     )
     parser.add_argument(
-        "--emit-llvm-bc",
-        "-emit-llvm-bc",
-        action="store_true",
-        help="Emit LLVM IR in binary format",
-    )
-    parser.add_argument(
-        "--emit-llvm-ir",
-        "-emit-llvm-ir",
-        action="store_true",
-        help="Emit LLVM IR in text format",
-    )
-    parser.add_argument(
-        "--emit-llvm-asm",
-        "-emit-llvm-asm",
-        action="store_true",
-        help="Emit LLVM IR in assembly format",
-    )
-    parser.add_argument(
         "-I",
         "--include",
         action="append",
         type=pathlib.Path,
         help="Include directory",
     )
+
+    parser.add_argument(
+        "-c",
+        action="store_true",
+        help="Compile and assemble but do not link",
+    )
+
+    parser.add_argument(
+        "-S",
+        action="store_true",
+        help="Compile but do not assemble or link",
+    )
+
     parser.add_argument(
         "input_file",
         type=pathlib.Path,
@@ -107,26 +79,29 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    config = Config(
-        output=args.output,
-        debug=args.debug,
-        emit_llvm=args.emit_llvm,
-        emit_llvm_bc=args.emit_llvm_bc,
-        emit_llvm_ir=args.emit_llvm_ir,
-        emit_llvm_asm=args.emit_llvm_asm,
-        include_dirs=args.include or [],
-        input_files=args.input_file,
-    )
-
-    for include in config.include_dirs:
+    for include in args.include or []:
         add_module_path(include)  # Add the include directory to the module path
 
-    if config.output:
-        output_file = config.output
+    if args.output:
+        output_file = pathlib.Path(args.output)
     else:
-        output_file = "a"
+        output_file = pathlib.Path("a.out")
 
-    preprocessor = Preprocessor(*config.input_files)
+    if args.c:
+        output_file = output_file.with_suffix(".o")
+    elif args.S:
+        output_file = output_file.with_suffix(".S")
+
+    input_files = []
+    for file in args.input_file:
+        input_files.append(pathlib.Path(file))
+
+    if len(input_files) == 0:
+        print("Error: No input files provided")
+        parser.print_help()
+        sys.exit(1)
+
+    preprocessor = Preprocessor(*input_files)
     preprocessed_code = preprocessor.preprocess()
 
     tokenizer = Tokenizer(preprocessed_code)
@@ -139,20 +114,33 @@ def main():
 
     ir_code = ir_generator.generate(program)
 
-    with open(output_file.with_suffix(".ll"), "w") as f:
+    ir_file = output_file.with_suffix(".ll")
+
+    with open(ir_file, "w") as f:
         f.write(ir_code)
 
     # compile the IR to a binary
-    subprocess.run(
-        [
-            "clang",
-            "-o",
-            output_file.with_suffix(".out"),
-            output_file.with_suffix(".ll"),
-        ]
-    )
+    command = [
+        "clang",
+        "-o",
+        output_file,
+        ir_file,
+    ]
 
-    if not config.emit_llvm_ir:
+    if args.debug:
+        command.append("-g")
+
+    if args.emit_llvm:
+        command.append("-emit-llvm")
+
+    if args.c:
+        command.append("-c")
+    elif args.S:
+        command.append("-S")
+
+    subprocess.run(command)
+
+    if not args.emit_llvm:
         os.remove(output_file.with_suffix(".ll"))
 
 

@@ -16,7 +16,8 @@ func factorial(i32 n) i32 {
 }
 
 
-func main() i32  {
+func main(i32 argc, *i8 argv) i32  {
+
 	let i32 x = 129;
 	// or use hexadecimal
 	let i32 y = 0x81;
@@ -25,11 +26,22 @@ func main() i32  {
 	let f32 z = 1.29e2;
 
 	// minimal wrapper for printf
-	println("Hello World!");
+	printf("Hello World!\n");
 	
-	let i32 f = factorial(10);
+	// for loop
+	for (let i32 i = 0; i < 10; i++) {
+		printf("i = %d\n", i);
+	}
 
-	printf("Factorial of %d is %d\n", 10, f);
+	// while loop
+	let i32 i = 0;
+	while (i < 10) {
+		printf("i = %d\n", i);
+		i++;
+	}
+	
+
+	
 	
 	return 0;
 }
