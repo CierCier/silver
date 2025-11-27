@@ -1,0 +1,19 @@
+import std.io;
+
+
+i32 fib(i32 n){
+	i32 a = 0, b = 1;
+	while(n > 0 ){
+		i32 t = a+b;
+		a = b;
+		b = t;
+        n = n - 1;
+	}
+	return a;
+}
+
+i32 main(){
+    i32 x = comptime fib(6);
+    printf("f5: %d\n", x);
+    return 0;
+}

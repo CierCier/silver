@@ -1,0 +1,11 @@
+*.o
+*.so
+build/
+*.out
+*.log
+
+
+.cache
+
+.vscode
+.github

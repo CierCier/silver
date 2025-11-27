@@ -1,0 +1,3 @@
+
+extern fn println(str s);
+extern fn printf(str fmt, ...);

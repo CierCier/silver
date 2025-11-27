@@ -1,0 +1,54 @@
+// Test if/else, while, break, continue
+
+i32 factorial(i32 n) {
+    if (n <= 1) {
+        return 1;
+    } else {
+        return n * factorial(n - 1);
+    }
+}
+
+i32 count_to(i32 limit) {
+    i32 sum = 0;
+    i32 i = 0;
+    while (i < limit) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+i32 find_first_even(i32 start, i32 end) {
+    i32 i = start;
+    while (i < end) {
+        if (i % 2 == 0) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+i32 skip_threes(i32 limit) {
+    i32 sum = 0;
+    i32 i = 0;
+    while (i < limit) {
+        i = i + 1;
+        if (i % 3 == 0) {
+            continue;
+        }
+        sum = sum + i;
+        if (sum > 100) {
+            break;
+        }
+    }
+    return sum;
+}
+
+i32 main() {
+    i32 fact5 = factorial(5);
+    i32 sum10 = count_to(10);
+    i32 first_even = find_first_even(7, 20);
+    i32 partial = skip_threes(50);
+    return 0;
+}

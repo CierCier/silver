@@ -1,0 +1,73 @@
+import io.console; // include console output module (println)
+
+
+
+struct Point {
+    i32 x; // struct members definitions are seperated using a semi colon
+    // but you can also declaration multiple members like 
+    i32 y,z;
+}
+
+enum Space {
+    S_1D;
+    S_2D;
+    S_3D;
+    S_4D;
+}
+
+i32 do_thing(); // forward declaration for something
+
+
+// global Definition
+i32 GLOBAL_VAR = 3;
+
+
+// external declaration
+extern i32 *stdin;
+
+
+i32 fib(i32 n){
+	i32 a = 0, b = 1, c = 0;
+	while(n > 0 ){
+		i32 t = a+b;
+		a = b;
+		b = c;
+		c = t;
+	}
+	return c;
+}
+
+
+i32 main(i32 argc, str *argv ) {
+
+    i32 x, y =0, z;
+    // x and z use default value for their type while y is initialized to 0;
+
+
+    for (i32 i = 0; i < argc; i++){
+        println("%s%s", argv[i], (i < argc - 1)? "" : "\n"  );
+    }
+
+    // arrays are similar to C, just pointers
+
+    i32 arr[8] = { 0, 1, 2, 3, 4, 5, 6, 7, };
+    // or 
+    // i32 [8]arr
+    // i32 *arr
+
+    
+    println("Hello world");
+
+	// comp time constants
+	i32 f5 = comptime fib(5);
+
+    return 0; // this can be omitted for main
+}
+
+
+i32 do_thing(){
+    static i32 x = 0;
+    x += 1;
+
+    return x;
+}

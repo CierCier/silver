@@ -1,0 +1,12 @@
+import std.io;
+
+i32 main() {
+    i32 x = 10; // Should be const
+    i32 y = 20; // Should be mutable
+    y = 30;
+    
+    i32 z = 40; // Should be mutable (address taken)
+    i32* p = &z;
+    
+    return 0;
+}
