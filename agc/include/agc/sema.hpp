@@ -4,13 +4,18 @@
 #include <unordered_set>
 #include <vector>
 
+#include "agc/diagnostics.hpp"
+
 namespace agc {
 
 class SemanticAnalyzer {
 public:
+  explicit SemanticAnalyzer(DiagnosticEngine &diags) : diags_(diags) {}
   void analyze(Program &prog);
 
 private:
+  DiagnosticEngine &diags_;
+
   struct VarInfo {
     bool isMutated{false};
     // Pointer to the bool flag in the AST node that we will update
@@ -24,7 +29,8 @@ private:
   void pushScope();
   void popScope();
   void declareVar(const std::string &name, bool *isConstFlag);
-  void markMutated(const std::string &name);
+  void markMutated(const std::string &name, const DiagLoc &loc);
+  void checkVar(const std::string &name, const DiagLoc &loc);
 
   void visit(Stmt &stmt);
   void visit(Expr &expr);

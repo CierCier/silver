@@ -82,6 +82,7 @@ char Lexer::get() {
 void Lexer::newline() {
   loc_.line++;
   loc_.col = 1;
+  loc_.file = filename_;
 }
 
 bool Lexer::match(char c) {

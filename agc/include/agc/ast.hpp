@@ -71,6 +71,7 @@ struct Expr {
                ExprCond, ExprCall, ExprIndex, ExprMember, ExprComptime,
                ExprAddressOf, ExprDeref>
       v;
+  DiagLoc loc;
 };
 
 struct Stmt;
@@ -116,6 +117,7 @@ struct Stmt {
   std::variant<StmtExpr, StmtReturn, StmtDecl, StmtBlock, StmtFor, StmtIf,
                StmtWhile, StmtBreak, StmtContinue, StmtAsm>
       v;
+  DiagLoc loc;
 };
 
 struct Param {
@@ -165,6 +167,7 @@ struct DeclImport {
 
 struct Decl {
   std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport> v;
+  DiagLoc loc;
 };
 
 struct Program {

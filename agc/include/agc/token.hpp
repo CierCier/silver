@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include "agc/diagnostics.hpp"
 
 namespace agc {
 
@@ -91,10 +92,7 @@ enum class TokenKind : uint16_t {
   DotDotDot,
 };
 
-struct SourceLoc {
-  uint32_t line{1};
-  uint32_t col{1};
-};
+using SourceLoc = DiagLoc;
 
 struct Token {
   TokenKind kind{TokenKind::End};

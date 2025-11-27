@@ -35,6 +35,8 @@ public:
 private:
     bool verbose_{false};
     int errorCount_{0};
+
+    void printSnippet(std::ostream& out, const DiagLoc& loc);
 };
 
 } // namespace agc

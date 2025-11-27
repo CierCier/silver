@@ -1,4 +1,5 @@
 #include "agc/diagnostics.hpp"
+#include <fstream>
 
 namespace agc {
 
@@ -40,6 +41,37 @@ void DiagnosticEngine::report(DiagLevel level, const DiagLoc& loc, const std::st
     }
 
     out << BOLD << msg << RESET << "\n";
+
+    if (!loc.file.empty() && loc.line > 0) {
+        printSnippet(out, loc);
+    }
+}
+
+void DiagnosticEngine::printSnippet(std::ostream& out, const DiagLoc& loc) {
+    std::ifstream file(loc.file);
+    if (!file.is_open()) return;
+
+    std::string line;
+    int currentLine = 1;
+    while (std::getline(file, line)) {
+        if (currentLine == loc.line) {
+            // Print line number and content
+            out << "  " << loc.line << " | " << line << "\n";
+            
+            // Print caret
+            out << "  " << std::string(std::to_string(loc.line).length(), ' ') << " | ";
+            if (loc.col > 0) {
+                for (int i = 1; i < loc.col; ++i) {
+                    if (i < line.length() && line[i-1] == '\t') out << '\t';
+                    else out << ' ';
+                }
+                out << BOLD << RED << "^" << RESET;
+            }
+            out << "\n";
+            break;
+        }
+        currentLine++;
+    }
 }
 
 void DiagnosticEngine::report(DiagLevel level, const std::string& msg) {

@@ -9,7 +9,11 @@ namespace agc {
 class Lexer {
 public:
     explicit Lexer(std::string_view input, std::string filename = {})
-        : input_(input), filename_(std::move(filename)) {}
+        : input_(input), filename_(std::move(filename)) {
+            loc_.file = filename_;
+            loc_.line = 1;
+            loc_.col = 1;
+        }
 
     // Produce a full token stream (appends End token at end)
     std::vector<Token> lex();

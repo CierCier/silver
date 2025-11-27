@@ -257,6 +257,10 @@ int CompilerDriver::run(int argc, char** argv) {
       if (!opt.fsyntax_only && !opt.emit_backend && !opt.ast_dump) {
          std::cout << path << ": parsed OK\n";
       }
+    } catch (const agc::ParseError &e) {
+      diags_.report(agc::DiagLevel::Error, e.loc, e.what());
+      exitCode = 1;
+      parseError = true;
     } catch (const std::exception &e) {
       std::cerr << path << ": " << e.what() << "\n";
       exitCode = 1;
@@ -267,8 +271,9 @@ int CompilerDriver::run(int argc, char** argv) {
   if (parseError) return exitCode;
 
   // Run Semantic Analysis (Const Inference)
-  agc::SemanticAnalyzer sema;
+  agc::SemanticAnalyzer sema(diags_);
   sema.analyze(mainProg);
+  if (diags_.hasErrors()) return 1;
 
   // Run Comptime Evaluation
   agc::ComptimeEvaluator evaluator;

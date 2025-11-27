@@ -4,7 +4,16 @@
 #include <string_view>
 #include <vector>
 
+#include "agc/diagnostics.hpp"
+
 namespace agc {
+
+class ParseError : public std::runtime_error {
+public:
+    DiagLoc loc;
+    ParseError(const DiagLoc& l, const std::string& msg) 
+        : std::runtime_error(msg), loc(l) {}
+};
 
 class Parser {
 public:
@@ -32,7 +41,7 @@ private:
   DeclPtr parseImport();
   DeclPtr parseStruct();
   DeclPtr parseEnum();
-  DeclPtr parseDeclOrFunc(TypeName ty, bool isExtern, bool isStatic);
+  DeclPtr parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern, bool isStatic);
 
   // Types and declarators (simplified)
   TypeName parseType();
@@ -46,7 +55,7 @@ private:
   StmtPtr parseIf();
   StmtPtr parseWhile();
   StmtPtr parseAsm();
-  StmtPtr parseDeclStmt(TypeName t, bool isConst = false);
+  StmtPtr parseDeclStmt(TypeName t, DiagLoc loc, bool isConst = false);
 
   // Expressions (Pratt parser)
   ExprPtr parseExpr(int minPrec = 0);

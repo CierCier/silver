@@ -4,14 +4,25 @@
 
 namespace agc {
 
-static std::runtime_error parse_error(const Token &t, const char *msg) {
-  return std::runtime_error("parse error at line " +
-                            std::to_string(t.loc.line) + ": " + msg);
+static ParseError parse_error(const Token &t, const char *msg) {
+  return ParseError(t.loc, msg);
 }
 
 const Token &Parser::expect(TokenKind k, const char *msg) {
-  if (!is(k))
+  if (!is(k)) {
+    // Check if we should report at the end of the previous token
+    if (pos > 0 && k == TokenKind::Semicolon) {
+      const Token &prev = toks[pos - 1];
+      const Token &curr = peek();
+      if (curr.loc.line > prev.loc.line) {
+         // Construct a location at the end of prev
+         DiagLoc loc = prev.loc;
+         loc.col += prev.text.length(); 
+         throw ParseError(loc, msg);
+      }
+    }
     throw parse_error(peek(), msg);
+  }
   return toks[pos++];
 }
 
@@ -24,6 +35,7 @@ Program Parser::parseProgram() {
 }
 
 DeclPtr Parser::parseExternal() {
+  auto loc = peek().loc;
   bool isExtern = false, isStatic = false;
   if (match(TokenKind::Kw_import)) {
     pos--; // rewind to let parseImport consume the keyword and path
@@ -44,10 +56,11 @@ DeclPtr Parser::parseExternal() {
     isStatic = true;
 
   TypeName t = parseType();
-  return parseDeclOrFunc(std::move(t), isExtern, isStatic);
+  return parseDeclOrFunc(std::move(t), loc, isExtern, isStatic);
 }
 
 DeclPtr Parser::parseImport() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_import, "expected 'import'");
   std::vector<std::string> path;
   path.push_back(expect(TokenKind::Identifier, "module id").text);
@@ -57,6 +70,7 @@ DeclPtr Parser::parseImport() {
   expect(TokenKind::Semicolon, "; expected after import");
   auto d = std::make_unique<Decl>();
   d->v = DeclImport{std::move(path)};
+  d->loc = loc;
   return d;
 }
 
@@ -92,6 +106,7 @@ void Parser::parseDeclaratorTail(TypeName &t, std::string &name) {
 }
 
 DeclPtr Parser::parseStruct() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_struct, "expected 'struct'");
   std::string name = expect(TokenKind::Identifier, "struct name").text;
   expect(TokenKind::LBrace, "'{'");
@@ -129,10 +144,12 @@ DeclPtr Parser::parseStruct() {
 
   auto d = std::make_unique<Decl>();
   d->v = DeclStruct{std::move(name), std::move(fields)};
+  d->loc = loc;
   return d;
 }
 
 DeclPtr Parser::parseEnum() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_enum, "expected 'enum'");
   std::string name = expect(TokenKind::Identifier, "enum name").text;
   expect(TokenKind::LBrace, "'{'");
@@ -164,10 +181,11 @@ DeclPtr Parser::parseEnum() {
   }
   auto d = std::make_unique<Decl>();
   d->v = DeclEnum{std::move(name), std::move(items)};
+  d->loc = loc;
   return d;
 }
 
-DeclPtr Parser::parseDeclOrFunc(TypeName ty, bool isExtern, bool isStatic) {
+DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern, bool isStatic) {
   std::string name;
   parseDeclaratorTail(ty, name);
 
@@ -213,6 +231,7 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, bool isExtern, bool isStatic) {
     auto d = std::make_unique<Decl>();
     d->v = DeclFunc{std::move(ty), std::move(name), std::move(params),
                     std::move(body), isExtern, isVariadic};
+    d->loc = loc;
     return d;
   } else {
     // variable declaration (could be global)
@@ -246,11 +265,13 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, bool isExtern, bool isStatic) {
     expect(TokenKind::Semicolon, "; expected after declaration");
     auto d = std::make_unique<Decl>();
     d->v = DeclVar{std::move(ty), std::move(decls), isExtern, isStatic};
+    d->loc = loc;
     return d;
   }
 }
 
 StmtPtr Parser::parseBlock() {
+  auto loc = peek().loc;
   expect(TokenKind::LBrace, "'{'");
   auto blk = StmtBlock{};
   while (!match(TokenKind::RBrace)) {
@@ -261,6 +282,7 @@ StmtPtr Parser::parseBlock() {
         is_type_keyword(peek().kind) ||
         (is(TokenKind::Identifier) &&
          (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
+      auto loc = peek().loc;
       if (match(TokenKind::Kw_const)) {
         isConst = true;
       }
@@ -268,17 +290,18 @@ StmtPtr Parser::parseBlock() {
         // storage class ignored in AST for now
       }
       TypeName t = parseType();
-      blk.stmts.push_back(parseDeclStmt(std::move(t), isConst));
+      blk.stmts.push_back(parseDeclStmt(std::move(t), loc, isConst));
     } else {
       blk.stmts.push_back(parseStmt());
     }
   }
   auto s = std::make_unique<Stmt>();
   s->v = std::move(blk);
+  s->loc = loc;
   return s;
 }
 
-StmtPtr Parser::parseDeclStmt(TypeName t, bool isConst) {
+StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
   std::vector<std::pair<std::string, std::optional<ExprPtr>>> decls;
   std::string name;
   parseDeclaratorTail(t, name);
@@ -324,6 +347,7 @@ StmtPtr Parser::parseDeclStmt(TypeName t, bool isConst) {
   expect(TokenKind::Semicolon, "; expected after declaration");
   auto s = std::make_unique<Stmt>();
   s->v = StmtDecl{std::move(t), std::move(decls), isConst};
+  s->loc = loc;
   return s;
 }
 
@@ -349,15 +373,19 @@ StmtPtr Parser::parseStmt() {
     return parseWhile();
   }
   if (match(TokenKind::Kw_break)) {
+    auto loc = toks[pos-1].loc;
     expect(TokenKind::Semicolon, "; expected after break");
     auto s = std::make_unique<Stmt>();
     s->v = StmtBreak{};
+    s->loc = loc;
     return s;
   }
   if (match(TokenKind::Kw_continue)) {
+    auto loc = toks[pos-1].loc;
     expect(TokenKind::Semicolon, "; expected after continue");
     auto s = std::make_unique<Stmt>();
     s->v = StmtContinue{};
+    s->loc = loc;
     return s;
   }
   if (match(TokenKind::Kw_asm)) {
@@ -366,14 +394,17 @@ StmtPtr Parser::parseStmt() {
   }
 
   // expression statement
+  auto loc = peek().loc;
   auto e = parseExpr();
   expect(TokenKind::Semicolon, "; expected after expression");
   auto s = std::make_unique<Stmt>();
   s->v = StmtExpr{std::move(e)};
+  s->loc = loc;
   return s;
 }
 
 StmtPtr Parser::parseReturn() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_return, "return");
   StmtReturn r;
   if (!is(TokenKind::Semicolon))
@@ -381,10 +412,12 @@ StmtPtr Parser::parseReturn() {
   expect(TokenKind::Semicolon, "; expected after return");
   auto s = std::make_unique<Stmt>();
   s->v = std::move(r);
+  s->loc = loc;
   return s;
 }
 
 StmtPtr Parser::parseFor() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_for, "for");
   expect(TokenKind::LParen, "'('");
   StmtFor f;
@@ -395,6 +428,7 @@ StmtPtr Parser::parseFor() {
         is_type_keyword(peek().kind) ||
         (is(TokenKind::Identifier) &&
          (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
+      auto loc = peek().loc;
       if (match(TokenKind::Kw_const)) {
         isConst = true;
       }
@@ -402,7 +436,7 @@ StmtPtr Parser::parseFor() {
         // ignore 'static' at for-init
       }
       TypeName t = parseType();
-      f.init = parseDeclStmt(std::move(t), isConst);
+      f.init = parseDeclStmt(std::move(t), loc, isConst);
     } else {
       auto e = parseExpr();
       expect(TokenKind::Semicolon, "; after for init");
@@ -424,10 +458,12 @@ StmtPtr Parser::parseFor() {
   f.body = parseStmt();
   auto s = std::make_unique<Stmt>();
   s->v = std::move(f);
+  s->loc = loc;
   return s;
 }
 
 StmtPtr Parser::parseIf() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_if, "if");
   expect(TokenKind::LParen, "'(' after if");
   auto cond = parseExpr();
@@ -439,10 +475,12 @@ StmtPtr Parser::parseIf() {
   }
   auto s = std::make_unique<Stmt>();
   s->v = StmtIf{std::move(cond), std::move(thenBranch), std::move(elseBranch)};
+  s->loc = loc;
   return s;
 }
 
 StmtPtr Parser::parseWhile() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_while, "while");
   expect(TokenKind::LParen, "'(' after while");
   auto cond = parseExpr();
@@ -450,10 +488,12 @@ StmtPtr Parser::parseWhile() {
   auto body = parseStmt();
   auto s = std::make_unique<Stmt>();
   s->v = StmtWhile{std::move(cond), std::move(body)};
+  s->loc = loc;
   return s;
 }
 
 StmtPtr Parser::parseAsm() {
+  auto loc = peek().loc;
   expect(TokenKind::Kw_asm, "asm");
   expect(TokenKind::LParen, "(");
   std::string code = expect(TokenKind::String, "asm string").text;
@@ -461,6 +501,7 @@ StmtPtr Parser::parseAsm() {
   expect(TokenKind::Semicolon, ";");
   auto s = std::make_unique<Stmt>();
   s->v = StmtAsm{std::move(code), true};
+  s->loc = loc;
   return s;
 }
 
@@ -501,10 +542,12 @@ int Parser::precedence(TokenKind op) const {
 
 ExprPtr Parser::parsePrimary() {
   if (is(TokenKind::Identifier)) {
+    auto loc = peek().loc;
     std::string id = expect(TokenKind::Identifier, "id").text;
     // call or postfix parsing
     ExprPtr base = std::make_unique<Expr>();
     base->v = ExprIdent{std::move(id)};
+    base->loc = loc;
     while (true) {
       if (match(TokenKind::LParen)) {
         std::vector<ExprPtr> args;
@@ -525,25 +568,30 @@ ExprPtr Parser::parsePrimary() {
         else
           cname = "<expr>";
         call->v = ExprCall{std::move(cname), std::move(args)};
+        call->loc = base->loc; // Use base location for call
         base = std::move(call);
       } else if (match(TokenKind::LBracket)) {
         auto idx = parseExpr();
         expect(TokenKind::RBracket, "]");
         ExprPtr e = std::make_unique<Expr>();
         e->v = ExprIndex{std::move(base), std::move(idx)};
+        e->loc = base->loc;
         base = std::move(e);
       } else if (match(TokenKind::Dot)) {
         std::string mem = expect(TokenKind::Identifier, "member").text;
         ExprPtr e = std::make_unique<Expr>();
         e->v = ExprMember{std::move(base), std::move(mem), false};
+        e->loc = base->loc;
         base = std::move(e);
       } else if (match(TokenKind::PlusPlus)) {
         ExprPtr e = std::make_unique<Expr>();
         e->v = ExprUnary{TokenKind::PlusPlus, std::move(base)};
+        e->loc = base->loc;
         base = std::move(e);
       } else if (match(TokenKind::MinusMinus)) {
         ExprPtr e = std::make_unique<Expr>();
         e->v = ExprUnary{TokenKind::MinusMinus, std::move(base)};
+        e->loc = base->loc;
         base = std::move(e);
       } else {
         break;
@@ -552,15 +600,19 @@ ExprPtr Parser::parsePrimary() {
     return base;
   }
   if (is(TokenKind::Integer)) {
+    auto loc = peek().loc;
     uint64_t v = std::stoull(expect(TokenKind::Integer, "int").text);
     auto e = std::make_unique<Expr>();
     e->v = ExprInt{v};
+    e->loc = loc;
     return e;
   }
   if (is(TokenKind::String)) {
+    auto loc = peek().loc;
     std::string s = expect(TokenKind::String, "string").text;
     auto e = std::make_unique<Expr>();
     e->v = ExprStr{std::move(s)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::LParen)) {
@@ -569,60 +621,78 @@ ExprPtr Parser::parsePrimary() {
     return e;
   }
   if (match(TokenKind::Minus)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::Minus, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Bang)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::Bang, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Tilde)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::Tilde, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Plus)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::Plus, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::PlusPlus)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::PlusPlus, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::MinusMinus)) {
+    auto loc = toks[pos-1].loc;
     auto rhs = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprUnary{TokenKind::MinusMinus, std::move(rhs)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Kw_comptime)) {
+    auto loc = toks[pos-1].loc;
     // comptime expr => compile-time evaluation marker
     auto inner = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprComptime{std::move(inner)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Amp)) {
+    auto loc = toks[pos-1].loc;
     // Address-of operator
     auto operand = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprAddressOf{std::move(operand)};
+    e->loc = loc;
     return e;
   }
   if (match(TokenKind::Star)) {
+    auto loc = toks[pos-1].loc;
     // Dereference operator (unary *)
     auto operand = parsePrimary();
     auto e = std::make_unique<Expr>();
     e->v = ExprDeref{std::move(operand)};
+    e->loc = loc;
     return e;
   }
   throw parse_error(peek(), "unexpected token in expression");
@@ -634,11 +704,13 @@ ExprPtr Parser::parseExpr(int minPrec) {
   // ternary ?: (right-associative, low precedence)
   while (true) {
     if (match(TokenKind::Question)) {
+      auto loc = toks[pos-1].loc;
       auto thenE = parseExpr();
       expect(TokenKind::Colon, ":");
       auto elseE = parseExpr();
       auto e = std::make_unique<Expr>();
       e->v = ExprCond{std::move(lhs), std::move(thenE), std::move(elseE)};
+      e->loc = loc;
       lhs = std::move(e);
       continue;
     }
@@ -647,10 +719,12 @@ ExprPtr Parser::parseExpr(int minPrec) {
         is(TokenKind::MinusAssign) || is(TokenKind::StarAssign) ||
         is(TokenKind::SlashAssign) || is(TokenKind::PercentAssign)) {
       TokenKind aop = peek().kind;
+      auto loc = peek().loc;
       ++pos;
       auto rhs = parseExpr();
       auto e = std::make_unique<Expr>();
       e->v = ExprAssign{std::move(lhs), std::move(rhs), aop};
+      e->loc = loc;
       lhs = std::move(e);
       continue;
     }
@@ -659,10 +733,12 @@ ExprPtr Parser::parseExpr(int minPrec) {
     int prec = precedence(op);
     if (prec < minPrec)
       break;
+    auto loc = peek().loc;
     ++pos; // consume op
     auto rhs = parseExpr(prec + 1);
     auto e = std::make_unique<Expr>();
     e->v = ExprBinary{op, std::move(lhs), std::move(rhs)};
+    e->loc = loc;
     lhs = std::move(e);
   }
   return lhs;
