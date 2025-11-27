@@ -61,13 +61,9 @@ void SemanticAnalyzer::visit(Decl &decl) {
   if (auto *df = std::get_if<DeclFunc>(&decl.v)) {
     if (df->body) {
       pushScope();
-      // Register params (we don't mark params as const usually, but we could)
+      // Register params (we don't mark params as const usually)
       // For now, let's not touch params.
       for (auto &p : df->params) {
-          // declareVar(p.name, nullptr); // Don't track params for constness yet
-          // Actually, if we want to track shadowing, we should register them.
-          // But we don't have isConst flag for params in Param struct.
-          // So just register to prevent looking up globals.
           if (!scopes_.empty()) scopes_.back()[p.name] = VarInfo{true, nullptr}; // Assume mutated/non-const
       }
       

@@ -1,4 +1,5 @@
 #include "agc/codegen.hpp"
+#include "agc/diagnostics.hpp"
 #include <algorithm>
 #include <memory>
 #include <optional>
@@ -260,9 +261,11 @@ class FunctionEmitter {
     return nullptr;
   }
 
+  DiagnosticEngine* Diags{nullptr};
+
 public:
-  FunctionEmitter(llvm::Module &m, llvm::Function *f, std::string &err)
-      : M(m), F(f), B(m.getContext()), Err(err) {
+  FunctionEmitter(llvm::Module &m, llvm::Function *f, std::string &err, DiagnosticEngine* diags)
+      : M(m), F(f), B(m.getContext()), Err(err), Diags(diags) {
     RetTy = F->getReturnType();
     auto *entry = llvm::BasicBlock::Create(M.getContext(), "entry", F);
     B.SetInsertPoint(entry);
@@ -281,6 +284,59 @@ public:
   }
 
   llvm::Value *emitExpr(const Expr &e) {
+    if (auto *call = std::get_if<ExprCall>(&e.v)) {
+      if (Diags && Diags->isVerbose()) {
+          Diags->report(DiagLevel::Note, "Emitting call to " + call->callee + " with " + std::to_string(call->args.size()) + " args");
+      }
+
+      std::vector<llvm::Value *> args;
+      args.reserve(call->args.size());
+      
+      llvm::Function *calleeF = M.getFunction(call->callee);
+      if (!calleeF) {
+        Err = std::string("unknown function: ") + call->callee;
+        return nullptr;
+      }
+      auto *FTy = calleeF->getFunctionType();
+      
+      // Check arg count for non-variadic functions
+      if (!calleeF->isVarArg() && call->args.size() != FTy->getNumParams()) {
+        Err = "argument count mismatch for '" + call->callee + "'";
+        return nullptr;
+      }
+      // For variadic, we need at least fixed args
+      if (calleeF->isVarArg() && call->args.size() < FTy->getNumParams()) {
+         Err = "too few arguments for variadic function '" + call->callee + "'";
+         return nullptr;
+      }
+
+      for (size_t i = 0; i < call->args.size(); ++i) {
+        auto *v = emitExpr(*call->args[i]);
+        if (!v)
+          return nullptr;
+
+        if (Diags && Diags->isVerbose()) {
+             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+                 Diags->report(DiagLevel::Note, "  Arg " + std::to_string(i) + ": " + std::to_string(ci->getSExtValue()));
+             } else {
+                 Diags->report(DiagLevel::Note, "  Arg " + std::to_string(i) + ": non-constant");
+             }
+        }
+        
+        if (i < FTy->getNumParams()) {
+          v = castTo(v, FTy->getParamType((unsigned)i));
+        } else {
+             // Variadic argument promotion
+             if (v->getType()->isFloatTy()) {
+                 v = B.CreateFPExt(v, llvm::Type::getDoubleTy(M.getContext()));
+             } else if (v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(16)) {
+                 v = B.CreateSExt(v, llvm::Type::getInt32Ty(M.getContext()));
+             }
+        }
+        args.push_back(v);
+      }
+      return B.CreateCall(calleeF, args);
+    }
     if (auto *lit = std::get_if<ExprInt>(&e.v)) {
       return llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()),
                                     lit->value);
@@ -325,14 +381,38 @@ public:
         return B.CreateMul(L, R, "multmp");
       case TokenKind::Slash:
         return B.CreateSDiv(L, R, "divtmp");
+      case TokenKind::Percent:
+        return B.CreateSRem(L, R, "remtmp");
       case TokenKind::Eq:
         return B.CreateICmpEQ(L, R, "eqtmp");
       case TokenKind::Ne:
         return B.CreateICmpNE(L, R, "netmp");
       case TokenKind::Lt:
         return B.CreateICmpSLT(L, R, "lttmp");
+      case TokenKind::Le:
+        return B.CreateICmpSLE(L, R, "letmp");
       case TokenKind::Gt:
         return B.CreateICmpSGT(L, R, "gttmp");
+      case TokenKind::Ge:
+        return B.CreateICmpSGE(L, R, "getmp");
+      case TokenKind::Amp:
+        return B.CreateAnd(L, R, "andtmp");
+      case TokenKind::Pipe:
+        return B.CreateOr(L, R, "ortmp");
+      case TokenKind::Caret:
+        return B.CreateXor(L, R, "xortmp");
+      case TokenKind::Shl:
+        return B.CreateShl(L, R, "shltmp");
+      case TokenKind::Shr:
+        return B.CreateAShr(L, R, "ashrtmp"); // Arithmetic shift right for signed
+      case TokenKind::AndAnd:
+        // Logical AND (should be short-circuiting, but for now eager)
+        // TODO: Implement short-circuiting
+        return B.CreateAnd(L, R, "landtmp");
+      case TokenKind::OrOr:
+        // Logical OR
+        // TODO: Implement short-circuiting
+        return B.CreateOr(L, R, "lortmp");
       default:
         Err = "unsupported binary op";
         return nullptr;
@@ -485,6 +565,33 @@ public:
       Err = "member access not yet supported in LLVM backend";
       return nullptr;
     }
+    if (auto *un = std::get_if<ExprUnary>(&e.v)) {
+      auto *rhs = emitExpr(*un->rhs);
+      if (!rhs) return nullptr;
+      
+      switch (un->op) {
+      case TokenKind::Minus:
+        if (rhs->getType()->isIntegerTy())
+            return B.CreateNeg(rhs, "negtmp");
+        if (rhs->getType()->isFloatingPointTy())
+            return B.CreateFNeg(rhs, "fnegtmp");
+        Err = "invalid operand type for unary minus";
+        return nullptr;
+      case TokenKind::Bang:
+        // Logical NOT
+        rhs = castTo(rhs, llvm::Type::getInt1Ty(M.getContext()));
+        return B.CreateNot(rhs, "nottmp");
+      case TokenKind::Tilde:
+        // Bitwise NOT
+        if (rhs->getType()->isIntegerTy())
+            return B.CreateNot(rhs, "bitnottmp");
+        Err = "invalid operand type for bitwise not";
+        return nullptr;
+      default:
+        Err = "unsupported unary op";
+        return nullptr;
+      }
+    }
     Err = "unsupported expression";
     return nullptr;
   }
@@ -593,18 +700,33 @@ public:
       B.SetInsertPoint(AfterBB);
       return true;
     }
-    // ... other stmts
+    if (std::holds_alternative<StmtBreak>(s.v)) {
+      if (!BreakBB) {
+        Err = "break statement not in loop";
+        return false;
+      }
+      B.CreateBr(BreakBB);
+      return true;
+    }
+    if (std::holds_alternative<StmtContinue>(s.v)) {
+      if (!ContinueBB) {
+        Err = "continue statement not in loop";
+        return false;
+      }
+      B.CreateBr(ContinueBB);
+      return true;
+    }
     return true;
   }
 
-  bool emitBody(const StmtBlock &body) {
+  bool emitBody(const StmtBlock &body, bool isMainBody = false) {
     for (auto &sp : body.stmts) {
       if (!emitStmt(*sp)) return false;
       if (B.GetInsertBlock()->getTerminator())
         break; // function already returned
     }
-    // If no terminator, add default return
-    if (!B.GetInsertBlock()->getTerminator()) {
+    // If no terminator, add default return (ONLY for main function body)
+    if (isMainBody && !B.GetInsertBlock()->getTerminator()) {
       if (RetTy->isVoidTy())
         B.CreateRetVoid();
       else
@@ -644,7 +766,7 @@ static llvm::Function* declare_function_llvm(const DeclFunc &f, llvm::Module &M)
   return fn;
 }
 
-static bool emit_function_body_llvm(const DeclFunc &f, llvm::Module &M, std::string &err) {
+static bool emit_function_body_llvm(const DeclFunc &f, llvm::Module &M, std::string &err, DiagnosticEngine* diags) {
   if (!f.body) return true;
   
   auto *fn = M.getFunction(f.name);
@@ -654,9 +776,9 @@ static bool emit_function_body_llvm(const DeclFunc &f, llvm::Module &M, std::str
   }
 
   std::string localErr;
-  FunctionEmitter FE(M, fn, localErr);
+  FunctionEmitter FE(M, fn, localErr, diags);
   FE.initParams(f.params);
-  if (!FE.emitBody(*f.body)) {
+  if (!FE.emitBody(*f.body, true)) {
       err = localErr;
       return false;
   }
@@ -669,7 +791,11 @@ class LlvmBackend : public CodegenBackend {
 public:
   std::string_view name() const override { return "llvm"; }
   bool generate(const Program &prog, std::ostream &os, std::string &err,
-                const CodegenOptions &) override {
+                const CodegenOptions &opts) override {
+    DiagnosticEngine* diags = opts.diags;
+    if (diags && diags->isVerbose()) {
+        diags->report(DiagLevel::Note, "Generating LLVM IR...");
+    }
     llvm::LLVMContext ctx;
     llvm::Module module("silver_module", ctx);
 
@@ -715,7 +841,7 @@ public:
       const Decl &d = *dptr;
       if (auto *f = std::get_if<DeclFunc>(&d.v)) {
         if (f->body)
-          if (!emit_function_body_llvm(*f, module, err)) return false;
+          if (!emit_function_body_llvm(*f, module, err, diags)) return false;
       }
     }
 
@@ -734,7 +860,11 @@ public:
   }
 
   bool emit_object_file(const Program &prog, const std::string &filename,
-                        std::string &err) override {
+                        std::string &err, const CodegenOptions &opts) override {
+    DiagnosticEngine* diags = opts.diags;
+    if (diags && diags->isVerbose()) {
+        diags->report(DiagLevel::Note, "Emitting object file: " + filename);
+    }
     llvm::LLVMContext ctx;
     llvm::Module module("silver_module", ctx);
 
@@ -748,6 +878,7 @@ public:
           defined.push_back(f->name);
       }
     }
+
 
     // Globals first
     for (auto const &dptr : prog.decls) {
@@ -780,7 +911,7 @@ public:
       const Decl &d = *dptr;
       if (auto *f = std::get_if<DeclFunc>(&d.v)) {
         if (f->body)
-          if (!emit_function_body_llvm(*f, module, err)) return false;
+          if (!emit_function_body_llvm(*f, module, err, diags)) return false;
       }
     }
 

@@ -1,4 +1,5 @@
-// Test if/else, while, break, continue
+import std.io;
+
 
 i32 factorial(i32 n) {
     if (n <= 1) {
@@ -50,5 +51,10 @@ i32 main() {
     i32 sum10 = count_to(10);
     i32 first_even = find_first_even(7, 20);
     i32 partial = skip_threes(50);
+
+    printf("fact5: %d\n", fact5);
+    printf("sum10: %d\n", sum10);
+    printf("first_even: %d\n", first_even);
+    printf("partial: %d\n", partial);
     return 0;
 }

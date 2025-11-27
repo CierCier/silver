@@ -13,6 +13,8 @@ set(AGC_LIB_SOURCES
 	src/codegen_registry.cpp
 	src/comptime.cpp
     src/sema.cpp
+    src/driver.cpp
+    src/diagnostics.cpp
 )
 
 # LLVM backend (default)

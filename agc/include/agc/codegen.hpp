@@ -8,7 +8,10 @@
 
 namespace agc {
 
+class DiagnosticEngine;
+
 struct CodegenOptions {
+    DiagnosticEngine* diags{nullptr};
     // Placeholder for future toggles (opt level, debug, etc.)
 };
 
@@ -21,7 +24,7 @@ public:
     virtual bool generate(const Program& prog, std::ostream& os, std::string& error, const CodegenOptions& opt) = 0;
 
     virtual bool emit_object_file(const Program &prog, const std::string &filename,
-                                  std::string &err) {
+                                  std::string &err, const CodegenOptions &opts = {}) {
         err = "Backend does not support object file generation";
         return false;
     }

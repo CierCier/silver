@@ -1,4 +1,4 @@
-import io.console; // include console output module (println)
+import std.io;
 
 
 
@@ -33,6 +33,7 @@ i32 fib(i32 n){
 		a = b;
 		b = c;
 		c = t;
+        n = n - 1;
 	}
 	return c;
 }

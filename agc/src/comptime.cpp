@@ -88,7 +88,7 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
   return std::visit(
       [this](auto const &node) -> ComptimeResult {
         using T = std::decay_t<decltype(node)>;
-
+        // ... (existing evaluate logic) ...
         if constexpr (std::is_same_v<T, ExprInt>) {
           return ComptimeResult::success(
               ComptimeInt{static_cast<int64_t>(node.value)});
@@ -187,6 +187,111 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
         }
       },
       expr.v);
+}
+
+static void replace_comptime(ExprPtr &expr, ComptimeEvaluator &evaluator) {
+    if (!expr) return;
+
+    // Check if this node is ExprComptime
+    if (auto *ct = std::get_if<ExprComptime>(&expr->v)) {
+        auto res = evaluator.evaluate(*ct->expr);
+        if (res.ok()) {
+            // Replace expr with constant
+            if (auto *i = std::get_if<ComptimeInt>(&*res.value)) {
+                expr->v = ExprInt{static_cast<uint64_t>(i->value)};
+            } else if (auto *s = std::get_if<ComptimeStr>(&*res.value)) {
+                expr->v = ExprStr{s->value};
+            } else if (auto *b = std::get_if<ComptimeBool>(&*res.value)) {
+                expr->v = ExprInt{static_cast<uint64_t>(b->value ? 1 : 0)}; // Bool as int for now
+            } else {
+                // Warning or error?
+            }
+        } else {
+            // Error handling? For now just print to stderr as before, or throw?
+            // Since we moved this from main, we might want a better error reporting mechanism.
+            // For now, let's keep it simple and maybe print to stderr if we can't propagate.
+             fprintf(stderr, "error: comptime evaluation failed: %s\n", res.error.c_str());
+             exit(1);
+        }
+        return;
+    }
+
+    // Recurse
+    std::visit([&](auto &n) {
+        using T = std::decay_t<decltype(n)>;
+        if constexpr (std::is_same_v<T, ExprUnary>) {
+            replace_comptime(n.rhs, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprBinary>) {
+            replace_comptime(n.lhs, evaluator);
+            replace_comptime(n.rhs, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprAssign>) {
+            replace_comptime(n.lhs, evaluator);
+            replace_comptime(n.rhs, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprCond>) {
+            replace_comptime(n.cond, evaluator);
+            replace_comptime(n.thenE, evaluator);
+            replace_comptime(n.elseE, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprCall>) {
+            for (auto &arg : n.args) replace_comptime(arg, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprIndex>) {
+            replace_comptime(n.base, evaluator);
+            replace_comptime(n.index, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprMember>) {
+            replace_comptime(n.base, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
+            replace_comptime(n.operand, evaluator);
+        } else if constexpr (std::is_same_v<T, ExprDeref>) {
+            replace_comptime(n.operand, evaluator);
+        }
+    }, expr->v);
+}
+
+static void visit_stmt_comptime(StmtPtr &stmt, ComptimeEvaluator &evaluator) {
+    if (!stmt) return;
+    std::visit([&](auto &s) {
+        using T = std::decay_t<decltype(s)>;
+        if constexpr (std::is_same_v<T, StmtExpr>) {
+            replace_comptime(s.expr, evaluator);
+        } else if constexpr (std::is_same_v<T, StmtReturn>) {
+            if (s.expr) replace_comptime(*s.expr, evaluator);
+        } else if constexpr (std::is_same_v<T, StmtDecl>) {
+            for (auto &pair : s.declarators) {
+                if (pair.second && *pair.second) replace_comptime(*pair.second, evaluator);
+            }
+        } else if constexpr (std::is_same_v<T, StmtIf>) {
+            replace_comptime(s.cond, evaluator);
+            visit_stmt_comptime(s.thenBranch, evaluator);
+            if (s.elseBranch) visit_stmt_comptime(*s.elseBranch, evaluator);
+        } else if constexpr (std::is_same_v<T, StmtWhile>) {
+            replace_comptime(s.cond, evaluator);
+            visit_stmt_comptime(s.body, evaluator);
+        } else if constexpr (std::is_same_v<T, StmtBlock>) {
+            for (auto &st : s.stmts) visit_stmt_comptime(st, evaluator);
+        } else if constexpr (std::is_same_v<T, StmtFor>) {
+            if (s.init) visit_stmt_comptime(*s.init, evaluator);
+            if (s.cond) replace_comptime(*s.cond, evaluator);
+            if (s.iter) replace_comptime(*s.iter, evaluator);
+            visit_stmt_comptime(s.body, evaluator);
+        }
+    }, stmt->v);
+}
+
+void ComptimeEvaluator::evaluateProgram(Program &prog) {
+  for (auto &d : prog.decls) {
+      if (auto *f = std::get_if<DeclFunc>(&d->v)) {
+          if (f->body) {
+              for (auto &s : f->body->stmts) {
+                  visit_stmt_comptime(s, *this);
+              }
+          }
+      } else if (auto *v = std::get_if<DeclVar>(&d->v)) {
+          for (auto &pair : v->declarators) {
+              if (pair.second && *pair.second) {
+                  replace_comptime(*pair.second, *this);
+              }
+          }
+      }
+  }
 }
 
 ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {

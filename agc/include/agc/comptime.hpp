@@ -68,6 +68,9 @@ public:
   // Returns nullopt if the expression cannot be evaluated at compile time
   ComptimeResult evaluate(const Expr &expr);
 
+  // Traverse the program and evaluate all comptime expressions
+  void evaluateProgram(Program &prog);
+
   // Check if an expression is compile-time evaluable
   bool isComptime(const Expr &expr) const;
 
