@@ -88,7 +88,6 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
   return std::visit(
       [this](auto const &node) -> ComptimeResult {
         using T = std::decay_t<decltype(node)>;
-        // ... (existing evaluate logic) ...
         if constexpr (std::is_same_v<T, ExprInt>) {
           return ComptimeResult::success(
               ComptimeInt{static_cast<int64_t>(node.value)});
@@ -138,7 +137,7 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
               if (func->params.size() != node.args.size()) {
                   return ComptimeResult::fail("argument count mismatch");
               }
-              
+
               // Evaluate args in current scope
               std::vector<ComptimeValue> argVals;
               for(const auto& arg : node.args) {
@@ -153,12 +152,12 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
               for(size_t i=0; i<func->params.size(); ++i) {
                   setVar(func->params[i].name, std::move(argVals[i]));
               }
-              
+
               ComptimeResult res = ComptimeResult::success(ComptimeNull{});
               if (func->body) {
                   res = evalBlock(*func->body);
               }
-              
+
               popScope();
               return res;
           }
@@ -167,7 +166,7 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
             // Evaluate RHS
             auto rhs = evaluate(*node.rhs);
             if (!rhs.ok()) return rhs;
-            
+
             // LHS must be identifier for now
             if (auto* id = std::get_if<ExprIdent>(&node.lhs->v)) {
                 // Find variable location and update
@@ -323,7 +322,7 @@ ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {
             if (!cond.ok()) return cond;
             auto b = getBool(*cond.value);
             if (!b) return ComptimeResult::fail("if condition must be boolean");
-            
+
             if (*b) {
                 return evalStmt(*s.thenBranch);
             } else if (s.elseBranch) {
@@ -337,7 +336,7 @@ ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {
                 auto b = getBool(*cond.value);
                 if (!b) return ComptimeResult::fail("while condition must be boolean");
                 if (!*b) break;
-                
+
                 auto res = evalStmt(*s.body);
                 if (!res.ok()) return res;
                 if (res.flow == ComptimeFlow::Return) return res;
