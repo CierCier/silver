@@ -1,10 +1,13 @@
 #pragma once
+
 #include "agc/token.hpp"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <variant>
 #include <vector>
+
 
 namespace agc {
 
@@ -24,6 +27,9 @@ struct ExprIdent {
 };
 struct ExprInt {
   uint64_t value{};
+};
+struct ExprFloat {
+  double value{};
 };
 struct ExprStr {
   std::string value;
@@ -67,11 +73,13 @@ struct ExprDeref {
 };
 
 struct Expr {
-  std::variant<ExprIdent, ExprInt, ExprStr, ExprUnary, ExprBinary, ExprAssign,
-               ExprCond, ExprCall, ExprIndex, ExprMember, ExprComptime,
-               ExprAddressOf, ExprDeref>
+  std::variant<ExprIdent, ExprInt, ExprFloat, ExprStr, ExprUnary, ExprBinary,
+               ExprAssign, ExprCond, ExprCall, ExprIndex, ExprMember,
+               ExprComptime, ExprAddressOf, ExprDeref>
       v;
   DiagLoc loc;
+  // Type type; // populated by Sema (removed for now as it caused issues or not
+  // needed?) Actually let's keep it simple as before.
 };
 
 struct Stmt;
@@ -113,9 +121,20 @@ struct StmtAsm {
   bool isVolatile{true};
 };
 
+struct Case {
+  std::vector<ExprPtr> values;
+  StmtPtr body;
+};
+
+struct StmtSwitch {
+  ExprPtr cond;
+  std::vector<Case> cases;
+  std::optional<StmtPtr> defaultCase;
+};
+
 struct Stmt {
   std::variant<StmtExpr, StmtReturn, StmtDecl, StmtBlock, StmtFor, StmtIf,
-               StmtWhile, StmtBreak, StmtContinue, StmtAsm>
+               StmtWhile, StmtBreak, StmtContinue, StmtAsm, StmtSwitch>
       v;
   DiagLoc loc;
 };
@@ -161,12 +180,17 @@ struct DeclFunc {
   bool isExtern{false};
   bool isVariadic{false};
 };
+
 struct DeclImport {
   std::vector<std::string> path;
 };
 
+struct DeclLink {
+  std::string lib;
+};
+
 struct Decl {
-  std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport> v;
+  std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport, DeclLink> v;
   DiagLoc loc;
 };
 

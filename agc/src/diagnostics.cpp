@@ -38,6 +38,10 @@ void DiagnosticEngine::report(DiagLevel level, const DiagLoc& loc, const std::st
             out << RED << "fatal error: " << RESET;
             errorCount_++;
             break;
+        case DiagLevel::Debug:
+            if (!verbose_) return;
+            out << WHITE << "[DEBUG] " << RESET;
+            break;
     }
 
     out << BOLD << msg << RESET << "\n";

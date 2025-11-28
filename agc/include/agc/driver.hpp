@@ -21,6 +21,8 @@ struct CompilerOptions {
     std::optional<std::string> output;       // -o
     std::vector<std::string> include_paths;  // -I
     std::vector<std::string> defines;        // -D
+    std::vector<std::string> link_libs;      // -l
+    std::vector<std::string> link_paths;     // -L
     std::vector<std::string> inputs;         // files
 };
 

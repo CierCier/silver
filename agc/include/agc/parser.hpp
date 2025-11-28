@@ -1,7 +1,6 @@
 #pragma once
 #include "agc/ast.hpp"
 #include "agc/token.hpp"
-#include <string_view>
 #include <vector>
 
 #include "agc/diagnostics.hpp"
@@ -10,9 +9,9 @@ namespace agc {
 
 class ParseError : public std::runtime_error {
 public:
-    DiagLoc loc;
-    ParseError(const DiagLoc& l, const std::string& msg) 
-        : std::runtime_error(msg), loc(l) {}
+  DiagLoc loc;
+  ParseError(const DiagLoc &l, const std::string &msg)
+      : std::runtime_error(msg), loc(l) {}
 };
 
 class Parser {
@@ -39,26 +38,28 @@ private:
   // Declarations
   DeclPtr parseExternal();
   DeclPtr parseImport();
+  DeclPtr parseLink();
   DeclPtr parseStruct();
   DeclPtr parseEnum();
-  DeclPtr parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern, bool isStatic);
+  DeclPtr parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
+                          bool isStatic);
 
   // Types and declarators (simplified)
   TypeName parseType();
   void parseDeclaratorTail(TypeName &t, std::string &name);
-
-  // Statements
   StmtPtr parseStmt();
   StmtPtr parseBlock();
   StmtPtr parseReturn();
   StmtPtr parseFor();
   StmtPtr parseIf();
   StmtPtr parseWhile();
+  StmtPtr parseSwitch();
   StmtPtr parseAsm();
   StmtPtr parseDeclStmt(TypeName t, DiagLoc loc, bool isConst = false);
 
   // Expressions (Pratt parser)
-  ExprPtr parseExpr(int minPrec = 0);
+  ExprPtr parseExpr();
+  ExprPtr parseBinary(int minPrec);
   ExprPtr parsePrimary();
 
   int precedence(TokenKind op) const;

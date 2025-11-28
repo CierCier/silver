@@ -1,8 +1,7 @@
 #pragma once
+#include "diagnostics.hpp"
 #include <cstdint>
 #include <string>
-#include <string_view>
-#include "agc/diagnostics.hpp"
 
 namespace agc {
 
@@ -10,6 +9,7 @@ enum class TokenKind : uint16_t {
   End,
   Identifier,
   Integer,
+  Float,
   String,
 
   // Keywords
@@ -18,6 +18,11 @@ enum class TokenKind : uint16_t {
   Kw_enum,
   Kw_extern,
   Kw_static,
+  Kw_link,
+  Kw_switch,
+  Kw_case,
+  Kw_default,
+  Kw_impl,
   Kw_comptime,
   Kw_const,
   Kw_return,

@@ -1,0 +1,19 @@
+link "m";
+
+f64 M_E			=	2.71828182845904523536;
+f64 M_LOG2E		=	1.44269504088896340736;
+f64 M_LOG10E	=	0.434294481903251827651;
+f64 M_LN2		=	0.693147180559945309417;
+f64 M_LN10		=	2.30258509299404568402;
+f64 M_PI		=	3.14159265358979323846;
+
+
+
+
+extern f64 sin(f64 x);
+extern f64 cos(f64 x);
+extern f64 tan(f64 x);
+extern f64 asin(f64 x);
+extern f64 acos(f64 x);
+extern f64 atan(f64 x);
+extern f64 atan2(f64 y, f64 x);

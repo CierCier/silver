@@ -34,6 +34,16 @@ static TokenKind keywordKind(std::string_view id) {
     return TokenKind::Kw_continue;
   if (id == "asm")
     return TokenKind::Kw_asm;
+  if (id == "link")
+    return TokenKind::Kw_link;
+  if (id == "switch")
+    return TokenKind::Kw_switch;
+  if (id == "case")
+    return TokenKind::Kw_case;
+  if (id == "default")
+    return TokenKind::Kw_default;
+  if (id == "impl")
+    return TokenKind::Kw_impl;
 
   if (id == "void")
     return TokenKind::Kw_void;
@@ -148,11 +158,21 @@ Token Lexer::lexNumber() {
   SourceLoc start = loc_;
   std::string s;
   char c = peek();
+  bool isFloat = false;
   while (std::isdigit(static_cast<unsigned char>(c))) {
     s.push_back(get());
     c = peek();
   }
-  return Token{TokenKind::Integer, std::move(s), start};
+  if (c == '.') {
+    isFloat = true;
+    s.push_back(get());
+    c = peek();
+    while (std::isdigit(static_cast<unsigned char>(c))) {
+      s.push_back(get());
+      c = peek();
+    }
+  }
+  return Token{isFloat ? TokenKind::Float : TokenKind::Integer, std::move(s), start};
 }
 
 Token Lexer::lexString() {

@@ -1,5 +1,5 @@
+#include <cstdint>
 #include <cstdio>
+#include <stdint.h>
 
-extern "C" void println(const char* s) {
-    printf("%s\n", s);
-}
+extern "C" int32_t println(const char *s) { return printf("%s\n", s); }

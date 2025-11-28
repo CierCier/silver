@@ -1,17 +1,21 @@
 #include "agc/driver.hpp"
 #include "agc/ast_dump.hpp"
 #include "agc/codegen.hpp"
+#include "agc/comptime.hpp"
 #include "agc/lexer.hpp"
 #include "agc/parser.hpp"
-#include "libag/libag.hpp"
-#include "agc/comptime.hpp"
 #include "agc/sema.hpp"
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <filesystem>
-#include <unordered_set>
+#include "libag/libag.hpp"
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <unordered_set>
+
+namespace ag {
+const char *version() { return "0.1.0"; }
+} // namespace ag
 
 namespace agc {
 
@@ -34,28 +38,33 @@ void CompilerDriver::print_usage(const char *prog) {
       << "  -emit-<backend>       Shorthand for --emit=<backend>\n"
       << "  -I <dir>              Add directory to import/include search path\n"
       << "  -D <name>[=<val>]     Define a preprocessor symbol (reserved)\n"
+      << "  -l <lib>              Link against library <lib>\n"
+      << "  -L <dir>              Add directory to library search path\n"
       << "  --                    End of options\n";
 }
 
-std::optional<std::string> CompilerDriver::resolve_import(const std::vector<std::string>& parts, const std::vector<std::string>& include_paths) {
-    std::string relPath;
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (i > 0) relPath += "/";
-        relPath += parts[i];
-    }
-    relPath += ".ag";
+std::optional<std::string>
+CompilerDriver::resolve_import(const std::vector<std::string> &parts,
+                               const std::vector<std::string> &include_paths) {
+  std::string relPath;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0)
+      relPath += "/";
+    relPath += parts[i];
+  }
+  relPath += ".ag";
 
-    for (const auto& inc : include_paths) {
-        std::filesystem::path p = inc;
-        p /= relPath;
-        if (std::filesystem::exists(p)) {
-            return std::filesystem::absolute(p).string();
-        }
+  for (const auto &inc : include_paths) {
+    std::filesystem::path p = inc;
+    p /= relPath;
+    if (std::filesystem::exists(p)) {
+      return std::filesystem::absolute(p).string();
     }
-    return std::nullopt;
+  }
+  return std::nullopt;
 }
 
-int CompilerDriver::run(int argc, char** argv) {
+int CompilerDriver::run(int argc, char **argv) {
   CompilerOptions opt;
 
   bool end_of_opts = false;
@@ -143,6 +152,30 @@ int CompilerDriver::run(int argc, char** argv) {
         opt.defines.emplace_back(std::string(a.substr(2)));
         continue;
       }
+      if (a == "-l") {
+        if (i + 1 >= argc) {
+          std::cerr << "error: missing library after -l\n";
+          return 1;
+        }
+        opt.link_libs.emplace_back(argv[++i]);
+        continue;
+      }
+      if (a.rfind("-l", 0) == 0 && a.size() > 2) {
+        opt.link_libs.emplace_back(std::string(a.substr(2)));
+        continue;
+      }
+      if (a == "-L") {
+        if (i + 1 >= argc) {
+          std::cerr << "error: missing path after -L\n";
+          return 1;
+        }
+        opt.link_paths.emplace_back(argv[++i]);
+        continue;
+      }
+      if (a.rfind("-L", 0) == 0 && a.size() > 2) {
+        opt.link_paths.emplace_back(std::string(a.substr(2)));
+        continue;
+      }
       if (a.rfind("-emit-", 0) == 0 && a.size() > 6) {
         opt.emit_backend = std::string(a.substr(6));
         continue;
@@ -183,9 +216,10 @@ int CompilerDriver::run(int argc, char** argv) {
     std::cerr << "note: -c/-S/-E are not implemented; ignoring\n";
   }
 
-  // Default to LLVM backend if not specified and not just syntax checking/dumping
+  // Default to LLVM backend if not specified and not just syntax
+  // checking/dumping
   if (!opt.emit_backend && !opt.fsyntax_only && !opt.ast_dump) {
-      opt.emit_backend = "llvm";
+    opt.emit_backend = "llvm";
   }
 
   int exitCode = 0;
@@ -195,18 +229,18 @@ int CompilerDriver::run(int argc, char** argv) {
   std::deque<std::string> queue;
   std::unordered_set<std::string> visited;
 
-  for (const auto& in : opt.inputs) {
-      std::filesystem::path p(in);
-      if (std::filesystem::exists(p)) {
-          auto abs = std::filesystem::absolute(p).string();
-          if (visited.find(abs) == visited.end()) {
-              visited.insert(abs);
-              queue.push_back(abs);
-          }
-      } else {
-          // Let the loop handle the error
-          queue.push_back(in);
+  for (const auto &in : opt.inputs) {
+    std::filesystem::path p(in);
+    if (std::filesystem::exists(p)) {
+      auto abs = std::filesystem::absolute(p).string();
+      if (visited.find(abs) == visited.end()) {
+        visited.insert(abs);
+        queue.push_back(abs);
       }
+    } else {
+      // Let the loop handle the error
+      queue.push_back(in);
+    }
   }
 
   while (!queue.empty()) {
@@ -229,24 +263,30 @@ int CompilerDriver::run(int argc, char** argv) {
       auto toks = lx.lex();
       agc::Parser p(toks);
       auto prog = p.parseProgram();
-      
+
       // Scan for imports
-      for (const auto& d : prog.decls) {
-          if (auto* imp = std::get_if<agc::DeclImport>(&d->v)) {
-              auto resolved = resolve_import(imp->path, opt.include_paths);
-              if (resolved) {
-                  if (visited.find(*resolved) == visited.end()) {
-                      visited.insert(*resolved);
-                      queue.push_back(*resolved);
-                  }
-              } else {
-                  std::cerr << "error: cannot resolve import '";
-                  for(size_t i=0; i<imp->path.size(); ++i) std::cerr << (i?".":"") << imp->path[i];
-                  std::cerr << "'\n";
-                  exitCode = 1;
-                  parseError = true;
-              }
+      for (const auto &d : prog.decls) {
+        if (auto *imp = std::get_if<agc::DeclImport>(&d->v)) {
+          auto resolved = resolve_import(imp->path, opt.include_paths);
+          if (resolved) {
+            if (visited.find(*resolved) == visited.end()) {
+              visited.insert(*resolved);
+              queue.push_back(*resolved);
+            }
+          } else {
+            std::cerr << "error: cannot resolve import '";
+            for (size_t i = 0; i < imp->path.size(); ++i)
+              std::cerr << (i ? "." : "") << imp->path[i];
+            std::cerr << "'\n";
+            exitCode = 1;
+            parseError = true;
           }
+        }
+        if (auto *lnk = std::get_if<agc::DeclLink>(&d->v)) {
+          if (opt.verbose)
+            std::cout << "Found link: " << lnk->lib << "\n";
+          opt.link_libs.push_back(lnk->lib);
+        }
       }
 
       // Merge decls into mainProg
@@ -255,7 +295,7 @@ int CompilerDriver::run(int argc, char** argv) {
       }
 
       if (!opt.fsyntax_only && !opt.emit_backend && !opt.ast_dump) {
-         std::cout << path << ": parsed OK\n";
+        std::cout << path << ": parsed OK\n";
       }
     } catch (const agc::ParseError &e) {
       diags_.report(agc::DiagLevel::Error, e.loc, e.what());
@@ -268,20 +308,24 @@ int CompilerDriver::run(int argc, char** argv) {
     }
   }
 
-  if (parseError) return exitCode;
+  if (parseError)
+    return exitCode;
 
+  std::cerr << "Starting Sema..." << std::endl;
   // Run Semantic Analysis (Const Inference)
   agc::SemanticAnalyzer sema(diags_);
   sema.analyze(mainProg);
-  if (diags_.hasErrors()) return 1;
+  if (diags_.hasErrors())
+    return 1;
 
+  std::cerr << "Starting Comptime..." << std::endl;
   // Run Comptime Evaluation
   agc::ComptimeEvaluator evaluator;
   // Register user functions
   for (const auto &d : mainProg.decls) {
-      if (auto *f = std::get_if<agc::DeclFunc>(&d->v)) {
-          evaluator.registerUserFunc(f->name, f);
-      }
+    if (auto *f = std::get_if<agc::DeclFunc>(&d->v)) {
+      evaluator.registerUserFunc(f->name, f);
+    }
   }
   // Traverse and evaluate comptime exprs
   evaluator.evaluateProgram(mainProg);
@@ -300,50 +344,59 @@ int CompilerDriver::run(int argc, char** argv) {
 
     // Handle object file generation if backend is LLVM (or supports it)
     bool is_llvm = (*opt.emit_backend == "llvm");
-    
+
     if (is_llvm && !opt.output) {
-         opt.output = "a.out";
+      opt.output = "a.out";
     }
 
     agc::CodegenOptions cgopt;
     cgopt.diags = &diags_;
 
     if (is_llvm && opt.output) {
-         std::string objFile = *opt.output + ".o";
-         std::string err;
-         if (!be->emit_object_file(mainProg, objFile, err, cgopt)) {
-             std::cerr << "error: " << err << "\n";
-             exitCode = 1;
-         }
-         
-         // Link
-         // We will use 'cc' to link, which includes crt1.o and libc.
-         // Assume build/libag contains the library
-         std::string cmd = "cc -o " + *opt.output + " " + objFile + " -Lbuild/libag -lag_static";
-         int ret = system(cmd.c_str());
-         if (ret != 0) {
-             std::cerr << "Linker failed: " << cmd << "\n";
-             return 1;
-         }
-         // Cleanup
-         std::filesystem::remove(objFile);
-    } else {
-         std::ostream *out = &std::cout;
-         std::ofstream fout;
-         if (opt.output) {
-           fout.open(*opt.output);
-           if (!fout) {
-             std::cerr << "error: cannot open output '" << *opt.output << "'\n";
-             return 1;
-           }
-           out = &fout;
-         }
+      std::string objFile = *opt.output + ".o";
+      std::string err;
+      if (!be->emit_object_file(mainProg, objFile, err, cgopt)) {
+        std::cerr << "error: " << err << "\n";
+        exitCode = 1;
+      }
+      // Link
+      // We will use 'cc' to link, which includes crt1.o and libc.
+      // Assume build/libag contains the library
+      std::string cmd = "cc -o " + *opt.output + " " + objFile;
+      for (const auto &path : opt.link_paths) {
+        cmd += " -L" + path;
+      }
+      // Default libag path
+      cmd += " -Lbuild/libag";
 
-         std::string err;
-         if (!be->generate(mainProg, *out, err, cgopt)) {
-           std::cerr << "error: " << err << "\n";
-           exitCode = 1;
-         }
+      for (const auto &lib : opt.link_libs) {
+        cmd += " -l" + lib;
+      }
+      cmd += " -lag_static";
+      int ret = system(cmd.c_str());
+      if (ret != 0) {
+        std::cerr << "Linker failed: " << cmd << "\n";
+        return 1;
+      }
+      // Cleanup
+      std::filesystem::remove(objFile);
+    } else {
+      std::ostream *out = &std::cout;
+      std::ofstream fout;
+      if (opt.output) {
+        fout.open(*opt.output);
+        if (!fout) {
+          std::cerr << "error: cannot open output '" << *opt.output << "'\n";
+          return 1;
+        }
+        out = &fout;
+      }
+
+      std::string err;
+      if (!be->generate(mainProg, *out, err, cgopt)) {
+        std::cerr << "error: " << err << "\n";
+        exitCode = 1;
+      }
     }
   }
   return exitCode;

@@ -8,7 +8,11 @@ option(SILVER_ENABLE_CSHARP "Enable C# backend" OFF)
 # Create a library for the compiler core so tests can link to it
 set(AGC_LIB_SOURCES
 	src/lexer.cpp
-	src/parser.cpp
+	src/lexer.cpp
+	src/parser/parser.cpp
+	src/parser/parser_decl.cpp
+	src/parser/parser_stmt.cpp
+	src/parser/parser_expr.cpp
 	src/ast_dump.cpp
 	src/codegen_registry.cpp
 	src/comptime.cpp
@@ -22,7 +26,11 @@ if(SILVER_ENABLE_LLVM)
 	find_package(LLVM REQUIRED CONFIG)
 	message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 	message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-	list(APPEND AGC_LIB_SOURCES src/backends/codegen_llvm.cpp)
+	list(APPEND AGC_LIB_SOURCES 
+		src/backends/llvm/codegen_llvm.cpp
+		src/backends/llvm/llvm_expr.cpp
+		src/backends/llvm/llvm_stmt.cpp
+	)
 endif()
 
 # Optional JS backend
@@ -50,7 +58,10 @@ if(SILVER_ENABLE_LLVM)
 	if(TARGET LLVM)
 		target_link_libraries(agc_lib PUBLIC LLVM)
 	else()
-		llvm_map_components_to_libnames(llvm_libs support core irreader)
+		llvm_map_components_to_libnames(llvm_libs 
+            support core irreader codegen target mc native 
+            analysis transformutils ipo linker bitreader bitwriter
+        )
 		target_link_libraries(agc_lib PUBLIC ${llvm_libs})
 	endif()
 endif()

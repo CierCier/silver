@@ -124,7 +124,7 @@ struct Point {
 }
 
 - Function:
-
+```
 i32 main(i32 argc, str *argv) {
 	for (i32 i = 0; i < argc; i++) {
         println("%s%s", argv[i], (i < argc - 1) ? "" : "\n");
@@ -132,17 +132,19 @@ i32 main(i32 argc, str *argv) {
 	println("Hello world");
 	return 0;
 }
+```
 
 - Arrays:
-
+```
 	i32 arr[8];         // C-like suffix form
 	i32 [8]arr;         // prefix form supported by grammar
 	i32 *p[4];          // array of 4 pointers to i32
 	i32 (*pa)[4];       // pointer to array of 4 i32 (future if you add parentheses binding)
-
+```
 - Pointers:
-
+```
 	i32 *p;             // pointer to i32
 	i32 **grid;         // pointer to pointer to i32
 	i32 *matrix[16];    // array of 16 pointers to i32
 	i32 (*row)[16];     // pointer to array of 16 i32
+```

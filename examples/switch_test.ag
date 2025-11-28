@@ -1,0 +1,17 @@
+extern i32 printf(str fmt, ...);
+
+i32 main() {
+    i32 x = 2;
+    switch (x) {
+        case 1: printf("One\n");
+        case 2: printf("Two\n");
+        default: printf("Other\n");
+    }
+    
+    switch (x) {
+        case 1: printf("Should not happen\n");
+        case 3: printf("Should not happen\n");
+    }
+
+    return 0;
+}

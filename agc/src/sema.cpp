@@ -191,7 +191,7 @@ void SemanticAnalyzer::visit(Expr &expr) {
         } else if constexpr (std::is_same_v<T, ExprIdent>) {
              checkVar(n.name, expr.loc);
         }
-        // Int, Str: nothing to do
+        // Int, Float, Str: nothing to do
     }, expr.v);
 }
 
