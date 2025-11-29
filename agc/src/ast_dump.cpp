@@ -133,6 +133,17 @@ static void dumpExpr(const Expr &e, std::ostream &os, int ind) {
           indent(os, ind);
           os << "Deref(*)\n";
           dumpExpr(*node.operand, os, ind + 2);
+        } else if constexpr (std::is_same_v<T, ExprCast>) {
+          indent(os, ind);
+          os << "Cast(";
+          dumpType(node.target, os);
+          os << ")\n";
+          dumpExpr(*node.expr, os, ind + 2);
+        } else if constexpr (std::is_same_v<T, ExprInitList>) {
+          indent(os, ind);
+          os << "InitList\n";
+          for (auto &v : node.values)
+            dumpExpr(*v, os, ind + 2);
         }
       },
       e.v);

@@ -295,6 +295,20 @@ static void emitExpr(const Expr &e, std::ostream &os, int prec) {
           // C# unsafe code: *operand
           os << "*";
           emitExpr(*node.operand, os);
+        } else if constexpr (std::is_same_v<T, ExprCast>) {
+          // C# cast: (type)expr
+          os << "((" << emitType(node.target) << ")";
+          emitExpr(*node.expr, os);
+          os << ")";
+        } else if constexpr (std::is_same_v<T, ExprInitList>) {
+          // C# initializer list
+          os << "{ ";
+          for (size_t i = 0; i < node.values.size(); ++i) {
+            if (i)
+              os << ", ";
+            emitExpr(*node.values[i], os);
+          }
+          os << " }";
         }
       },
       e.v);
@@ -323,10 +337,10 @@ static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
           for (size_t i = 0; i < node.declarators.size(); ++i) {
             if (i)
               os << ", ";
-            os << node.declarators[i].first;
-            if (node.declarators[i].second && *node.declarators[i].second) {
+            os << node.declarators[i].name;
+            if (node.declarators[i].init && *node.declarators[i].init) {
               os << " = ";
-              emitExpr(**node.declarators[i].second, os);
+              emitExpr(**node.declarators[i].init, os);
             }
           }
           os << ";\n";
@@ -341,10 +355,10 @@ static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
               for (size_t i = 0; i < ds->declarators.size(); ++i) {
                 if (i)
                   os << ", ";
-                os << ds->declarators[i].first;
-                if (ds->declarators[i].second && *ds->declarators[i].second) {
+                os << ds->declarators[i].name;
+                if (ds->declarators[i].init && *ds->declarators[i].init) {
                   os << " = ";
-                  emitExpr(**ds->declarators[i].second, os);
+                  emitExpr(**ds->declarators[i].init, os);
                 }
               }
               os << "; ";
@@ -449,10 +463,10 @@ public:
               for (size_t i = 0; i < node.declarators.size(); ++i) {
                 if (i)
                   os << ", ";
-                os << node.declarators[i].first;
-                if (node.declarators[i].second && *node.declarators[i].second) {
+                os << node.declarators[i].name;
+                if (node.declarators[i].init && *node.declarators[i].init) {
                   os << " = ";
-                  emitExpr(**node.declarators[i].second, os);
+                  emitExpr(**node.declarators[i].init, os);
                 }
               }
               os << ";\n";

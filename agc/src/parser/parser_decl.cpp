@@ -233,4 +233,68 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
   }
 }
 
+DeclPtr Parser::parseCast(bool isImplicit) {
+  auto loc = peek().loc;
+  expect(TokenKind::Kw_cast, "expected 'cast'");
+  TypeName target = parseType();
+  expect(TokenKind::LParen, "expected '('");
+  std::vector<Param> params;
+  if (!match(TokenKind::RParen)) {
+    while (true) {
+      TypeName pt = parseType();
+      std::string pn;
+      if (peek().kind == TokenKind::Identifier) {
+        pn = expect(TokenKind::Identifier, "parameter name").text;
+      }
+      params.push_back(Param{std::move(pt), std::move(pn)});
+      if (match(TokenKind::RParen))
+        break;
+      expect(TokenKind::Comma, ", or ) expected");
+    }
+  }
+  auto blk = parseBlock();
+  std::optional<StmtBlock> body;
+  if (auto *sb = std::get_if<StmtBlock>(&blk->v)) {
+    body = std::move(*sb);
+  } else {
+    throw parse_error(peek(), "expected block");
+  }
+
+  auto d = std::make_unique<Decl>();
+  d->v = DeclCast{std::move(target), std::move(params), std::move(body),
+                  isImplicit};
+  d->loc = loc;
+  return d;
+}
+
+DeclPtr Parser::parseImpl() {
+  auto loc = peek().loc;
+  expect(TokenKind::Kw_impl, "expected 'impl'");
+  TypeName ty = parseType();
+  expect(TokenKind::LBrace, "expected '{'");
+
+  std::vector<DeclPtr> methods;
+  while (!match(TokenKind::RBrace)) {
+    if (match(TokenKind::Kw_implicit)) {
+      methods.push_back(parseCast(true));
+    } else if (is(TokenKind::Kw_cast)) {
+      methods.push_back(parseCast(false));
+    } else {
+      // Parse method (function)
+      // Methods look like functions but inside impl
+      // We can reuse parseDeclOrFunc but need to handle it carefully
+      // Actually, methods usually start with 'fn' or return type?
+      // In Silver, functions start with return type.
+      // So we parse type, then name...
+      TypeName rt = parseType();
+      methods.push_back(parseDeclOrFunc(rt, peek().loc, false, false));
+    }
+  }
+
+  auto d = std::make_unique<Decl>();
+  d->v = DeclImpl{std::move(ty), std::move(methods)};
+  d->loc = loc;
+  return d;
+}
+
 } // namespace agc

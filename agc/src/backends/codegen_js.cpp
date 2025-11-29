@@ -214,6 +214,18 @@ static void emitExpr(const Expr &e, std::ostream &os, int prec) {
           os << "/* *";
           emitExpr(*node.operand, os);
           os << " */";
+        } else if constexpr (std::is_same_v<T, ExprCast>) {
+          // JS doesn't have type casts - just emit the expression
+          emitExpr(*node.expr, os);
+        } else if constexpr (std::is_same_v<T, ExprInitList>) {
+          // Emit as object/array literal
+          os << '{';
+          for (size_t i = 0; i < node.values.size(); ++i) {
+            if (i)
+              os << ", ";
+            emitExpr(*node.values[i], os);
+          }
+          os << '}';
         }
       },
       e.v);
@@ -241,7 +253,7 @@ static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
           for (size_t i = 0; i < node.declarators.size(); ++i) {
             if (i)
               os << ", ";
-            os << node.declarators[i].first;
+            os << node.declarators[i].name;
           }
           os << ";\n"; // initializers omitted for brevity
         } else if constexpr (std::is_same_v<T, StmtBlock>) {
@@ -256,7 +268,7 @@ static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
               for (size_t i = 0; i < ds->declarators.size(); ++i) {
                 if (i)
                   os << ", ";
-                os << ds->declarators[i].first;
+                os << ds->declarators[i].name;
               }
               os << "; ";
             } else if (auto *es = std::get_if<StmtExpr>(&node.init->get()->v)) {
@@ -342,7 +354,7 @@ public:
               for (size_t i = 0; i < node.declarators.size(); ++i) {
                 if (i)
                   os << ", ";
-                os << node.declarators[i].first;
+                os << node.declarators[i].name;
               }
               os << ";\n";
             } else if constexpr (std::is_same_v<T, DeclFunc>) {

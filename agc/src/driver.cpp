@@ -40,6 +40,7 @@ void CompilerDriver::print_usage(const char *prog) {
       << "  -D <name>[=<val>]     Define a preprocessor symbol (reserved)\n"
       << "  -l <lib>              Link against library <lib>\n"
       << "  -L <dir>              Add directory to library search path\n"
+      << "  -static               Link against static runtime library\n"
       << "  --                    End of options\n";
 }
 
@@ -181,6 +182,11 @@ int CompilerDriver::run(int argc, char **argv) {
         continue;
       }
 
+      if (a.rfind("--static", 0) == 0) {
+        opt.static_link = true;
+        continue;
+      }
+
       std::cerr << "error: unknown option '" << a << "'\n";
       print_usage(argv[0]);
       return 1;
@@ -312,7 +318,7 @@ int CompilerDriver::run(int argc, char **argv) {
     return exitCode;
 
   // Run Semantic Analysis (Const Inference)
-  agc::SemanticAnalyzer sema(diags_);
+  agc::SemanticAnalyzer sema(diags_, typeCtx_);
   sema.analyze(mainProg);
   if (diags_.hasErrors())
     return 1;
@@ -358,18 +364,59 @@ int CompilerDriver::run(int argc, char **argv) {
       }
       // Link
       // We will use 'cc' to link, which includes crt1.o and libc.
-      // Assume build/libag contains the library
       std::string cmd = "cc -o " + *opt.output + " " + objFile;
+
+      // Collect library paths (both for linking and runtime)
+      std::vector<std::string> libPaths;
       for (const auto &path : opt.link_paths) {
+        libPaths.push_back(path);
+      }
+      // Default libag path - use absolute path
+      std::filesystem::path defaultLibPath =
+          std::filesystem::current_path() / "build" / "libag";
+      if (std::filesystem::exists(defaultLibPath)) {
+        libPaths.push_back(defaultLibPath.string());
+      }
+      // Also check relative to executable location (common install pattern)
+      // /usr/lib/silver is a common install location
+      if (std::filesystem::exists("/usr/lib/silver")) {
+        libPaths.push_back("/usr/lib/silver");
+      }
+      if (std::filesystem::exists("/lib/silver")) {
+        libPaths.push_back("/lib/silver");
+      }
+
+      // Add -L flags for link-time lookup
+      for (const auto &path : libPaths) {
         cmd += " -L" + path;
       }
-      // Default libag path
-      cmd += " -Lbuild/libag";
 
       for (const auto &lib : opt.link_libs) {
         cmd += " -l" + lib;
       }
-      cmd += " -lag_static";
+
+      if (opt.static_link) {
+        cmd += " -lag_static -static";
+      } else {
+        cmd += " -lag";
+        // Add rpath for runtime library lookup (dynamic linking)
+        // Use $ORIGIN for relative paths and absolute paths for system
+        // locations
+        std::string rpath;
+        for (const auto &path : libPaths) {
+          if (!rpath.empty())
+            rpath += ":";
+          rpath += path;
+        }
+        if (!rpath.empty()) {
+          cmd += " -Wl,-rpath," + rpath;
+        }
+      }
+
+      if (opt.verbose) {
+        std::cout << "Linking: " << cmd << "\n";
+      }
+
       int ret = system(cmd.c_str());
       if (ret != 0) {
         std::cerr << "Linker failed: " << cmd << "\n";

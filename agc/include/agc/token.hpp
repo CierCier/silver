@@ -33,6 +33,9 @@ enum class TokenKind : uint16_t {
   Kw_break,
   Kw_continue,
   Kw_asm,
+  Kw_as,
+  Kw_cast,
+  Kw_implicit,
 
   // Primitive type keywords (treated as identifiers in AST typing)
   Kw_void,

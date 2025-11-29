@@ -2,6 +2,7 @@
 
 #include "agc/ast.hpp"
 #include "agc/diagnostics.hpp"
+#include "agc/type.hpp"
 #include <optional>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ struct CompilerOptions {
   std::vector<std::string> link_libs;      // -l
   std::vector<std::string> link_paths;     // -L
   std::vector<std::string> inputs;         // files
+  bool static_link{false};                 // --static
 };
 
 class CompilerDriver {
@@ -46,6 +48,7 @@ private:
                  const std::vector<std::string> &include_paths);
 
   DiagnosticEngine diags_;
+  TypeContext typeCtx_;
 };
 
 } // namespace agc

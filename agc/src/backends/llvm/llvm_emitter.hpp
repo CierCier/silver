@@ -43,7 +43,7 @@ public:
   void initParams(const std::vector<Param> &params);
   llvm::Value *emitExpr(const Expr &e);
   bool emitStmt(const Stmt &s);
-  bool emitBody(const StmtBlock &body, bool isMainBody = false);
+  bool emitBody(const StmtBlock &body);
 };
 
 // Helper functions exposed for codegen_llvm.cpp

@@ -31,33 +31,37 @@ namespace agc {
 
 llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, const TypeName &t) {
   std::string base = t.name;
-  std::transform(base.begin(), base.end(), base.begin(),
+  std::string lower = base;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) { return (char)std::tolower(c); });
+
   llvm::Type *ty = nullptr;
-  if (base == "void")
+  if (lower == "void")
     ty = llvm::Type::getVoidTy(ctx);
-  else if (base == "bool" || base == "i1")
+  else if (lower == "bool" || lower == "i1")
     ty = llvm::Type::getInt1Ty(ctx);
-  else if (base == "i8" || base == "u8" || base == "char")
+  else if (lower == "i8" || lower == "u8" || lower == "char")
     ty = llvm::Type::getInt8Ty(ctx);
-  else if (base == "i16" || base == "u16")
+  else if (lower == "i16" || lower == "u16")
     ty = llvm::Type::getInt16Ty(ctx);
-  else if (base == "i32" || base == "u32" || base == "int")
+  else if (lower == "i32" || lower == "u32" || lower == "int")
     ty = llvm::Type::getInt32Ty(ctx);
-  else if (base == "i64" || base == "u64" || base == "long")
+  else if (lower == "i64" || lower == "u64" || lower == "long")
     ty = llvm::Type::getInt64Ty(ctx);
-  else if (base == "f32" || base == "float")
+  else if (lower == "f32" || lower == "float")
     ty = llvm::Type::getFloatTy(ctx);
-  else if (base == "f64" || base == "double")
+  else if (lower == "f64" || lower == "double")
     ty = llvm::Type::getDoubleTy(ctx);
-  else if (base == "str" || base == "string")
+  else if (lower == "str" || lower == "string")
     ty = llvm::PointerType::getUnqual(ctx);
   else {
+    // Try original name for structs
     ty = llvm::StructType::getTypeByName(ctx, "struct." + base);
     if (!ty)
       ty = llvm::StructType::getTypeByName(ctx, base);
-    if (!ty)
+    if (!ty) {
       ty = llvm::Type::getInt32Ty(ctx);
+    }
   }
 
   // arrays decay to pointer for now (opaque pointers)
@@ -111,8 +115,9 @@ static void emit_global_llvm(const DeclVar &v, llvm::Module &M) {
   }
 }
 
-static llvm::Function *declare_function_llvm(const DeclFunc &f,
-                                             llvm::Module &M) {
+static llvm::Function *declare_function_llvm_with_name(const DeclFunc &f,
+                                                       const std::string &name,
+                                                       llvm::Module &M) {
   auto &ctx = M.getContext();
   std::vector<llvm::Type *> paramTys;
   paramTys.reserve(f.params.size());
@@ -120,17 +125,17 @@ static llvm::Function *declare_function_llvm(const DeclFunc &f,
     paramTys.push_back(to_llvm_type(ctx, p.type));
   llvm::Type *retTy = to_llvm_type(ctx, f.ret);
   auto *fnTy = llvm::FunctionType::get(retTy, paramTys, f.isVariadic);
-  auto *fn = M.getFunction(f.name);
+  auto *fn = M.getFunction(name);
   if (!fn)
-    fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
-                                f.name, M);
+    fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, name,
+                                M);
   else {
     // Update type if needed (simple case)
     if (fn->getFunctionType() != fnTy) {
       fn->deleteBody();
       fn->eraseFromParent();
       fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
-                                  f.name, M);
+                                  name, M);
     }
   }
 
@@ -142,15 +147,61 @@ static llvm::Function *declare_function_llvm(const DeclFunc &f,
   return fn;
 }
 
-static bool emit_function_body_llvm(
-    const DeclFunc &f, llvm::Module &M, std::string &err,
-    DiagnosticEngine *diags,
+static llvm::Function *declare_function_llvm(const DeclFunc &f,
+                                             llvm::Module &M) {
+  return declare_function_llvm_with_name(f, f.name, M);
+}
+
+// Declare a cast function with mangled name: TypeName_cast_TargetType
+static llvm::Function *
+declare_cast_function_llvm(const std::string &mangledName, const DeclCast &dc,
+                           llvm::Module &M) {
+  auto &ctx = M.getContext();
+  std::vector<llvm::Type *> paramTys;
+  for (auto const &p : dc.params)
+    paramTys.push_back(to_llvm_type(ctx, p.type));
+  llvm::Type *retTy = to_llvm_type(ctx, dc.target);
+  auto *fnTy = llvm::FunctionType::get(retTy, paramTys, false);
+  auto *fn = M.getFunction(mangledName);
+  if (!fn)
+    fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                mangledName, M);
+
+  // Name parameters
+  unsigned idx = 0;
+  for (auto &arg : fn->args())
+    arg.setName(dc.params[idx++].name);
+
+  return fn;
+}
+
+static bool emit_cast_body_llvm(
+    const std::string &mangledName, const DeclCast &dc, llvm::Module &M,
+    std::string &err, DiagnosticEngine *diags,
+    const std::unordered_map<std::string, DeclStruct> &structs) {
+  llvm::Function *fn = M.getFunction(mangledName);
+  if (!fn) {
+    err = "cast function not found: " + mangledName;
+    return false;
+  }
+
+  FunctionEmitter emitter(M, fn, err, diags, &structs);
+  emitter.initParams(dc.params);
+  if (dc.body) {
+    return emitter.emitBody(*dc.body);
+  }
+  return true;
+}
+
+static bool emit_function_body_llvm_with_name(
+    const DeclFunc &f, const std::string &name, llvm::Module &M,
+    std::string &err, DiagnosticEngine *diags,
     const std::unordered_map<std::string, DeclStruct> &structs) {
   if (diags)
-    diags->report(DiagLevel::Debug, "emit_function_body_llvm: " + f.name);
-  llvm::Function *fn = M.getFunction(f.name);
+    diags->report(DiagLevel::Debug, "emit_function_body_llvm: " + name);
+  llvm::Function *fn = M.getFunction(name);
   if (!fn) {
-    err = "function not found: " + f.name;
+    err = "function not found: " + name;
     return false;
   }
 
@@ -160,11 +211,18 @@ static bool emit_function_body_llvm(
     bool res = emitter.emitBody(*f.body);
     if (diags)
       diags->report(DiagLevel::Debug,
-                    "emit_function_body_llvm: " + f.name +
+                    "emit_function_body_llvm: " + name +
                         " done, res=" + (res ? "true" : "false"));
     return res;
   }
   return true;
+}
+
+static bool emit_function_body_llvm(
+    const DeclFunc &f, llvm::Module &M, std::string &err,
+    DiagnosticEngine *diags,
+    const std::unordered_map<std::string, DeclStruct> &structs) {
+  return emit_function_body_llvm_with_name(f, f.name, M, err, diags, structs);
 }
 
 bool emit_object_file(const Program &prog, const std::string &filename,
@@ -242,12 +300,37 @@ bool emit_object_file(const Program &prog, const std::string &filename,
   // Function definitions - Pass 1: Declare
   for (auto const &dptr : prog.decls) {
     const Decl &d = *dptr;
+    if (diags)
+      diags->report(DiagLevel::Debug, "Pass 1 Decl variant index: " +
+                                          std::to_string(d.v.index()));
     if (auto *f = std::get_if<DeclFunc>(&d.v)) {
       if (f->body)
         declare_function_llvm(*f, module);
-    } else {
+    } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
       if (diags)
-        diags->report(DiagLevel::Error, "Unexpected declaration type");
+        diags->report(DiagLevel::Debug,
+                      "Processing impl block for: " + impl->type.name);
+      // Declare cast and method functions from impl blocks
+      for (auto const &m : impl->methods) {
+        if (diags)
+          diags->report(DiagLevel::Debug, "  impl method variant index: " +
+                                              std::to_string(m->v.index()));
+        if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+          if (dc->body) {
+            std::string mangledName =
+                impl->type.name + "_cast_" + dc->target.name;
+            if (diags)
+              diags->report(DiagLevel::Debug,
+                            "Declaring cast function: " + mangledName);
+            declare_cast_function_llvm(mangledName, *dc, module);
+          }
+        } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+          if (df->body) {
+            std::string mangledName = impl->type.name + "_" + df->name;
+            declare_function_llvm_with_name(*df, mangledName, module);
+          }
+        }
+      }
     }
   }
 
@@ -265,21 +348,39 @@ bool emit_object_file(const Program &prog, const std::string &filename,
       if (f->body)
         if (!emit_function_body_llvm(*f, module, err, diags, structs))
           return false;
+    } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
+      // Emit bodies for cast and method functions from impl blocks
+      for (auto const &m : impl->methods) {
+        if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+          if (dc->body) {
+            std::string mangledName =
+                impl->type.name + "_cast_" + dc->target.name;
+            if (!emit_cast_body_llvm(mangledName, *dc, module, err, diags,
+                                     structs))
+              return false;
+          }
+        } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+          if (df->body) {
+            std::string mangledName = impl->type.name + "_" + df->name;
+            if (!emit_function_body_llvm_with_name(*df, mangledName, module,
+                                                   err, diags, structs))
+              return false;
+          }
+        }
+      }
     }
   }
   if (diags)
     diags->report(DiagLevel::Debug, "Finished emitting bodies");
 
-  // Initialize targets
+  // Initialize native target only
   if (diags)
-    diags->report(DiagLevel::Debug, "Initializing LLVM targets...");
-  llvm::InitializeAllTargetInfos();
-  llvm::InitializeAllTargets();
-  llvm::InitializeAllTargetMCs();
-  llvm::InitializeAllAsmParsers();
-  llvm::InitializeAllAsmPrinters();
+    diags->report(DiagLevel::Debug, "Initializing LLVM native target...");
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmParser();
+  llvm::InitializeNativeTargetAsmPrinter();
   if (diags)
-    diags->report(DiagLevel::Debug, "LLVM targets initialized.");
+    diags->report(DiagLevel::Debug, "LLVM native target initialized.");
 
   auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
   if (diags)
@@ -295,12 +396,13 @@ bool emit_object_file(const Program &prog, const std::string &filename,
     return false;
   }
 
-  auto cpu = "generic";
+  auto cpu = llvm::sys::getHostCPUName();
   auto features = "";
 
   llvm::TargetOptions opt;
   auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
 
+  // Migrate to LLVM::Triple
   auto targetMachine =
       target->createTargetMachine(targetTripleStr, cpu, features, opt, rm);
 
@@ -433,7 +535,6 @@ public:
       err = "LLVM verification reported issues";
       if (diags)
         diags->report(DiagLevel::Debug, "LLVM verification failed");
-      module.print(llvm::errs(), nullptr);
     } else {
       if (diags)
         diags->report(DiagLevel::Debug, "LLVM verification passed");
@@ -525,6 +626,22 @@ public:
       if (auto *f = std::get_if<DeclFunc>(&d.v)) {
         if (f->body)
           declare_function_llvm(*f, module);
+      } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
+        // Declare cast and method functions from impl blocks
+        for (auto const &m : impl->methods) {
+          if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+            if (dc->body) {
+              std::string mangledName =
+                  impl->type.name + "_cast_" + dc->target.name;
+              declare_cast_function_llvm(mangledName, *dc, module);
+            }
+          } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+            if (df->body) {
+              std::string mangledName = impl->type.name + "_" + df->name;
+              declare_function_llvm_with_name(*df, mangledName, module);
+            }
+          }
+        }
       }
     }
 
@@ -542,21 +659,39 @@ public:
         if (f->body)
           if (!emit_function_body_llvm(*f, module, err, diags, structs))
             return false;
+      } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
+        // Emit cast and method function bodies from impl blocks
+        for (auto const &m : impl->methods) {
+          if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+            if (dc->body) {
+              std::string mangledName =
+                  impl->type.name + "_cast_" + dc->target.name;
+              if (!emit_cast_body_llvm(mangledName, *dc, module, err, diags,
+                                       structs))
+                return false;
+            }
+          } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+            if (df->body) {
+              std::string mangledName = impl->type.name + "_" + df->name;
+              if (!emit_function_body_llvm_with_name(*df, mangledName, module,
+                                                     err, diags, structs))
+                return false;
+            }
+          }
+        }
       }
     }
     if (diags)
       diags->report(DiagLevel::Debug, "Finished emitting bodies");
 
-    // Initialize targets
+    // Initialize native target only
     if (diags)
-      diags->report(DiagLevel::Debug, "Initializing LLVM targets...");
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
+      diags->report(DiagLevel::Debug, "Initializing LLVM native target...");
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmParser();
+    llvm::InitializeNativeTargetAsmPrinter();
     if (diags)
-      diags->report(DiagLevel::Debug, "LLVM targets initialized.");
+      diags->report(DiagLevel::Debug, "LLVM native target initialized.");
 
     auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
     if (diags)
@@ -572,7 +707,7 @@ public:
       return false;
     }
 
-    auto cpu = "generic";
+    auto cpu = llvm::sys::getHostCPUName();
     auto features = "";
 
     llvm::TargetOptions opt;

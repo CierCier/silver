@@ -17,6 +17,7 @@ set(AGC_LIB_SOURCES
 	src/codegen_registry.cpp
 	src/comptime.cpp
     src/sema.cpp
+    src/type.cpp
     src/driver.cpp
     src/diagnostics.cpp
 )

@@ -1,6 +1,4 @@
 #include "agc/parser.hpp"
-#include <iostream>
-#include <stdexcept>
 
 namespace agc {
 
@@ -56,19 +54,7 @@ StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
   parseDeclaratorTail(t, name);
   std::optional<ExprPtr> init;
   if (match(TokenKind::Assign)) {
-    if (match(TokenKind::LBrace)) {
-      int depth = 1;
-      while (depth > 0) {
-        if (match(TokenKind::LBrace))
-          depth++;
-        else if (match(TokenKind::RBrace))
-          depth--;
-        else
-          ++pos;
-      }
-    } else {
-      init = parseExpr();
-    }
+    init = parseExpr();
   }
   decls.push_back({std::move(name), varLoc, std::move(init)});
   while (match(TokenKind::Comma)) {
@@ -78,19 +64,7 @@ StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
     parseDeclaratorTail(t2, n2);
     std::optional<ExprPtr> init2;
     if (match(TokenKind::Assign)) {
-      if (match(TokenKind::LBrace)) {
-        int depth = 1;
-        while (depth > 0) {
-          if (match(TokenKind::LBrace))
-            depth++;
-          else if (match(TokenKind::RBrace))
-            depth--;
-          else
-            ++pos;
-        }
-      } else {
-        init2 = parseExpr();
-      }
+      init2 = parseExpr();
     }
     decls.push_back({std::move(n2), varLoc2, std::move(init2)});
   }

@@ -10,6 +10,8 @@ llvm::Value *FunctionEmitter::castTo(llvm::Value *V, llvm::Type *To) {
   auto *From = V->getType();
   if (From == To)
     return V;
+
+  // Int <-> Int
   if (To->isIntegerTy() && From->isIntegerTy()) {
     unsigned fw = From->getIntegerBitWidth();
     unsigned tw = To->getIntegerBitWidth();
@@ -19,6 +21,26 @@ llvm::Value *FunctionEmitter::castTo(llvm::Value *V, llvm::Type *To) {
       return B.CreateTrunc(V, To);
     return V;
   }
+
+  // Float <-> Float
+  if (To->isFloatingPointTy() && From->isFloatingPointTy()) {
+    if (From->getTypeID() < To->getTypeID()) // e.g. float -> double
+      return B.CreateFPExt(V, To);
+    if (From->getTypeID() > To->getTypeID()) // e.g. double -> float
+      return B.CreateFPTrunc(V, To);
+    return V;
+  }
+
+  // Int -> Float
+  if (To->isFloatingPointTy() && From->isIntegerTy()) {
+    return B.CreateSIToFP(V, To);
+  }
+
+  // Float -> Int
+  if (To->isIntegerTy() && From->isFloatingPointTy()) {
+    return B.CreateFPToSI(V, To);
+  }
+
   if (To->isPointerTy() && From->isPointerTy()) {
     return B.CreateBitCast(V, To);
   }
@@ -307,34 +329,54 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
 
     // Auto-cast to larger type (simple)
     if (L->getType() != R->getType()) {
-      // Assume int for now
-      L = castTo(L, llvm::Type::getInt32Ty(M.getContext()));
-      R = castTo(R, llvm::Type::getInt32Ty(M.getContext()));
+      // Promote to float if one is float
+      if (L->getType()->isFloatingPointTy()) {
+        R = castTo(R, L->getType());
+      } else if (R->getType()->isFloatingPointTy()) {
+        L = castTo(L, R->getType());
+      } else {
+        // Assume int for now
+        L = castTo(L, llvm::Type::getInt32Ty(M.getContext()));
+        R = castTo(R, llvm::Type::getInt32Ty(M.getContext()));
+      }
     }
+
+    bool isFloat = L->getType()->isFloatingPointTy();
 
     switch (bin->op) {
     case TokenKind::Plus:
-      return B.CreateAdd(L, R, "addtmp");
+      return isFloat ? B.CreateFAdd(L, R, "addtmp")
+                     : B.CreateAdd(L, R, "addtmp");
     case TokenKind::Minus:
-      return B.CreateSub(L, R, "subtmp");
+      return isFloat ? B.CreateFSub(L, R, "subtmp")
+                     : B.CreateSub(L, R, "subtmp");
     case TokenKind::Star:
-      return B.CreateMul(L, R, "multmp");
+      return isFloat ? B.CreateFMul(L, R, "multmp")
+                     : B.CreateMul(L, R, "multmp");
     case TokenKind::Slash:
-      return B.CreateSDiv(L, R, "divtmp");
+      return isFloat ? B.CreateFDiv(L, R, "divtmp")
+                     : B.CreateSDiv(L, R, "divtmp");
     case TokenKind::Percent:
-      return B.CreateSRem(L, R, "remtmp");
+      return isFloat ? B.CreateFRem(L, R, "remtmp")
+                     : B.CreateSRem(L, R, "remtmp");
     case TokenKind::Eq:
-      return B.CreateICmpEQ(L, R, "eqtmp");
+      return isFloat ? B.CreateFCmpOEQ(L, R, "eqtmp")
+                     : B.CreateICmpEQ(L, R, "eqtmp");
     case TokenKind::Ne:
-      return B.CreateICmpNE(L, R, "netmp");
+      return isFloat ? B.CreateFCmpONE(L, R, "netmp")
+                     : B.CreateICmpNE(L, R, "netmp");
     case TokenKind::Lt:
-      return B.CreateICmpSLT(L, R, "lttmp");
+      return isFloat ? B.CreateFCmpOLT(L, R, "lttmp")
+                     : B.CreateICmpSLT(L, R, "lttmp");
     case TokenKind::Le:
-      return B.CreateICmpSLE(L, R, "letmp");
+      return isFloat ? B.CreateFCmpOLE(L, R, "letmp")
+                     : B.CreateICmpSLE(L, R, "letmp");
     case TokenKind::Gt:
-      return B.CreateICmpSGT(L, R, "gttmp");
+      return isFloat ? B.CreateFCmpOGT(L, R, "gttmp")
+                     : B.CreateICmpSGT(L, R, "gttmp");
     case TokenKind::Ge:
-      return B.CreateICmpSGE(L, R, "getmp");
+      return isFloat ? B.CreateFCmpOGE(L, R, "getmp")
+                     : B.CreateICmpSGE(L, R, "getmp");
     case TokenKind::Amp:
       return B.CreateAnd(L, R, "andtmp");
     case TokenKind::Pipe:
@@ -538,6 +580,45 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
       Err = "unsupported unary op";
       return nullptr;
     }
+  }
+  if (auto *cast = std::get_if<ExprCast>(&e.v)) {
+    // Check if there's a custom cast function to call
+    if (cast->customCastFunc) {
+      // Call the custom cast function
+      llvm::Function *castFunc = M.getFunction(*cast->customCastFunc);
+      if (!castFunc) {
+        Err = "custom cast function not found: " + *cast->customCastFunc;
+        return nullptr;
+      }
+
+      // Emit the source expression as the argument
+      auto *srcVal = emitExpr(*cast->expr);
+      if (!srcVal)
+        return nullptr;
+
+      // If the source is a struct, we need to pass it by value
+      // The cast function takes a struct value, not a pointer
+      std::vector<llvm::Value *> args;
+      args.push_back(srcVal);
+
+      return B.CreateCall(castFunc, args, "cast.result");
+    }
+
+    // Primitive cast
+    auto *val = emitExpr(*cast->expr);
+    if (!val)
+      return nullptr;
+    llvm::Type *targetTy = to_llvm_type(M.getContext(), cast->target);
+    return castTo(val, targetTy);
+  }
+  if (auto *initList = std::get_if<ExprInitList>(&e.v)) {
+    // InitList requires a target type to be known (from context)
+    // For now, we only support single-element init lists as a simple value
+    if (initList->values.size() == 1) {
+      return emitExpr(*initList->values[0]);
+    }
+    Err = "initializer list with multiple values requires struct context";
+    return nullptr;
   }
   Err = "unsupported expression";
   return nullptr;

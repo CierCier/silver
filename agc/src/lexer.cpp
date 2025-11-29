@@ -44,6 +44,12 @@ static TokenKind keywordKind(std::string_view id) {
     return TokenKind::Kw_default;
   if (id == "impl")
     return TokenKind::Kw_impl;
+  if (id == "as")
+    return TokenKind::Kw_as;
+  if (id == "cast")
+    return TokenKind::Kw_cast;
+  if (id == "implicit")
+    return TokenKind::Kw_implicit;
 
   if (id == "void")
     return TokenKind::Kw_void;

@@ -46,6 +46,8 @@ private:
   DeclPtr parseEnum();
   DeclPtr parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
                           bool isStatic);
+  DeclPtr parseImpl();
+  DeclPtr parseCast(bool isImplicit);
 
   // Types and declarators (simplified)
   TypeName parseType();

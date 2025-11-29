@@ -128,6 +128,19 @@ ExprPtr Parser::parsePrimary() {
     return e;
   }
   if (match(TokenKind::LParen)) {
+    // Check for C-style cast: (type) expr
+    // We only support primitive types or types starting with keywords for now
+    // to avoid ambiguity
+    if (is_type_keyword(peek().kind)) {
+      TypeName t = parseType();
+      expect(TokenKind::RParen, ")");
+      auto rhs = parsePrimary(); // Cast binds as unary
+      auto e = std::make_unique<Expr>();
+      e->v = ExprCast{std::move(rhs), std::move(t)};
+      e->loc = e->loc; // fix loc
+      return e;
+    }
+
     auto e = parseExpr();
     expect(TokenKind::RParen, ")");
     return e;
@@ -201,6 +214,23 @@ ExprPtr Parser::parsePrimary() {
     auto expr = parseExpr();
     auto e = std::make_unique<Expr>();
     e->v = ExprComptime{std::move(expr)};
+    e->loc = loc;
+    return e;
+  }
+  if (match(TokenKind::LBrace)) {
+    auto loc = toks[pos - 1].loc;
+    std::vector<ExprPtr> values;
+    if (!is(TokenKind::RBrace)) {
+      while (true) {
+        values.push_back(parseExpr());
+        if (match(TokenKind::Comma))
+          continue;
+        break;
+      }
+    }
+    expect(TokenKind::RBrace, "}");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprInitList{std::move(values)};
     e->loc = loc;
     return e;
   }

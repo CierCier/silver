@@ -60,12 +60,43 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
       auto *alloc = createAlloca(ty, name);
       Locals[name] = {alloc, vd->type, false};
       if (init && *init) {
-        auto *v = emitExpr(**init);
-        if (v) {
-          v = castTo(v, ty);
-          B.CreateStore(v, alloc);
+        // Check if this is an init list for a struct
+        if (auto *initList = std::get_if<ExprInitList>(&(*init)->v)) {
+          // Handle struct initialization
+          if (auto *structTy = llvm::dyn_cast<llvm::StructType>(ty)) {
+            unsigned numElements = structTy->getNumElements();
+            for (unsigned i = 0; i < initList->values.size() && i < numElements;
+                 ++i) {
+              auto *v = emitExpr(*initList->values[i]);
+              if (!v)
+                return false;
+              auto *elemTy = structTy->getElementType(i);
+              v = castTo(v, elemTy);
+              auto *elemPtr = B.CreateStructGEP(structTy, alloc, i,
+                                                "gep." + std::to_string(i));
+              B.CreateStore(v, elemPtr);
+            }
+          } else if (initList->values.size() == 1) {
+            // Single-value init list for non-struct type
+            auto *v = emitExpr(*initList->values[0]);
+            if (v) {
+              v = castTo(v, ty);
+              B.CreateStore(v, alloc);
+            } else {
+              return false;
+            }
+          } else {
+            Err = "initializer list with multiple values for non-struct type";
+            return false;
+          }
         } else {
-          return false;
+          auto *v = emitExpr(**init);
+          if (v) {
+            v = castTo(v, ty);
+            B.CreateStore(v, alloc);
+          } else {
+            return false;
+          }
         }
       }
     }
@@ -236,15 +267,15 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
   return true;
 }
 
-bool FunctionEmitter::emitBody(const StmtBlock &body, bool isMainBody) {
+bool FunctionEmitter::emitBody(const StmtBlock &body) {
   for (auto &sp : body.stmts) {
     if (!emitStmt(*sp))
       return false;
     if (B.GetInsertBlock()->getTerminator())
       break; // function already returned
   }
-  // If no terminator, add default return (ONLY for main function body)
-  if (isMainBody && !B.GetInsertBlock()->getTerminator()) {
+  // If no terminator, add default return
+  if (!B.GetInsertBlock()->getTerminator()) {
     if (RetTy->isVoidTy())
       B.CreateRetVoid();
     else

@@ -77,6 +77,10 @@ DeclPtr Parser::parseExternal() {
     pos--;
     return parseEnum();
   }
+  if (match(TokenKind::Kw_impl)) {
+    pos--;
+    return parseImpl();
+  }
 
   if (match(TokenKind::Kw_extern))
     isExtern = true;

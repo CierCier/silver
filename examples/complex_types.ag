@@ -1,0 +1,23 @@
+import std.io;
+
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+void main() {
+    Point p;
+    p.x = 10;
+    p.y = 20;
+
+	printf("%d %d ", p.x, p.y);
+	
+	return 0;
+}

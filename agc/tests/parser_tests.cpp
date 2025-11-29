@@ -1,3 +1,4 @@
+#include "agc/diagnostics.hpp"
 #include "agc/lexer.hpp"
 #include "agc/parser.hpp"
 #include <gtest/gtest.h>
@@ -8,15 +9,15 @@ using namespace agc;
 static ExprPtr parseExpr(const std::string &code) {
   Lexer lexer(code);
   auto tokens = lexer.lex();
-  DiagnosticEngine diags;
-  Parser parser(tokens, diags);
+  DiagnosticEngine diag = DiagnosticEngine();
+
+  Parser parser(tokens, diag);
 
   std::string src = "i32 x = " + code + ";";
   Lexer l(src);
   auto toks = l.lex();
-  Parser p(toks, diags);
+  Parser p(toks, diag);
   auto prog = p.parseProgram();
-
   if (prog.decls.empty())
     return nullptr;
   auto *d = std::get_if<DeclVar>(&prog.decls[0]->v);
@@ -67,8 +68,8 @@ TEST(ParserTest, ComptimeModifier) {
 static Program parseProgram(const std::string &code) {
   Lexer l(code);
   auto toks = l.lex();
-  DiagnosticEngine diags;
-  Parser p(toks, diags);
+  auto diag = DiagnosticEngine();
+  Parser p(toks, diag);
   return p.parseProgram();
 }
 

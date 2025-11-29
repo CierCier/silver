@@ -83,6 +83,12 @@ bool ComptimeEvaluator::isComptime(const Expr &expr) const {
           return true;
         } else if constexpr (std::is_same_v<T, ExprComptime>) {
           return isComptime(*node.expr);
+        } else if constexpr (std::is_same_v<T, ExprInitList>) {
+          for (auto &v : node.values) {
+            if (!isComptime(*v))
+              return false;
+          }
+          return true;
         }
         return false;
       },
@@ -192,6 +198,11 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
           }
           return ComptimeResult::fail(
               "assignment to non-identifier not supported in comptime");
+        } else if constexpr (std::is_same_v<T, ExprInitList>) {
+          // InitList cannot be directly evaluated to a single value
+          // It's used for struct initialization and requires type context
+          return ComptimeResult::fail("initializer list cannot be evaluated at "
+                                      "compile time without type context");
         } else {
           return ComptimeResult::fail(
               "expression cannot be evaluated at compile time");

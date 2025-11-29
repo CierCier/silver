@@ -10,6 +10,8 @@
 
 namespace agc {
 
+class Type; // Forward declaration
+
 struct TypeName {
   // simple representation: keyword or identifier plus pointer depth and
   // optional array dims (prefix and suffix merged)
@@ -70,15 +72,24 @@ struct ExprAddressOf {
 struct ExprDeref {
   ExprPtr operand; // *operand
 };
+struct ExprCast {
+  ExprPtr expr;
+  TypeName target;
+  // Filled in by semantic analysis if a custom cast function exists
+  std::optional<std::string> customCastFunc;
+};
+
+struct ExprInitList {
+  std::vector<ExprPtr> values;
+};
 
 struct Expr {
   std::variant<ExprIdent, ExprInt, ExprFloat, ExprStr, ExprUnary, ExprBinary,
                ExprAssign, ExprCond, ExprCall, ExprIndex, ExprMember,
-               ExprComptime, ExprAddressOf, ExprDeref>
+               ExprComptime, ExprAddressOf, ExprDeref, ExprCast, ExprInitList>
       v;
   DiagLoc loc;
-  // Type type; // populated by Sema (removed for now as it caused issues or not
-  // needed?) Actually let's keep it simple as before.
+  Type *type{nullptr}; // Resolved type
 };
 
 struct Stmt;
@@ -186,6 +197,18 @@ struct DeclFunc {
   bool isVariadic{false};
 };
 
+struct DeclCast {
+  TypeName target;
+  std::vector<Param> params;
+  std::optional<StmtBlock> body;
+  bool isImplicit{false};
+};
+
+struct DeclImpl {
+  TypeName type;
+  std::vector<DeclPtr> methods; // Funcs or Casts
+};
+
 struct DeclImport {
   std::vector<std::string> path;
 };
@@ -195,7 +218,9 @@ struct DeclLink {
 };
 
 struct Decl {
-  std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport, DeclLink> v;
+  std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport, DeclLink,
+               DeclImpl, DeclCast>
+      v;
   DiagLoc loc;
 };
 
