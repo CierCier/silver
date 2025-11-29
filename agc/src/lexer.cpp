@@ -172,7 +172,8 @@ Token Lexer::lexNumber() {
       c = peek();
     }
   }
-  return Token{isFloat ? TokenKind::Float : TokenKind::Integer, std::move(s), start};
+  return Token{isFloat ? TokenKind::Float : TokenKind::Integer, std::move(s),
+               start};
 }
 
 Token Lexer::lexString() {

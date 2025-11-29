@@ -26,12 +26,7 @@ struct ComptimeNull {};
 using ComptimeValue = std::variant<ComptimeInt, ComptimeFloat, ComptimeStr,
                                    ComptimeBool, ComptimeNull>;
 
-enum class ComptimeFlow {
-  Normal,
-  Return,
-  Break,
-  Continue
-};
+enum class ComptimeFlow { Normal, Return, Break, Continue };
 
 // Result of compile-time evaluation
 struct ComptimeResult {
@@ -41,7 +36,8 @@ struct ComptimeResult {
 
   bool ok() const { return value.has_value(); }
 
-  static ComptimeResult success(ComptimeValue v, ComptimeFlow f = ComptimeFlow::Normal) {
+  static ComptimeResult success(ComptimeValue v,
+                                ComptimeFlow f = ComptimeFlow::Normal) {
     return ComptimeResult{std::move(v), "", f};
   }
   static ComptimeResult fail(const std::string &msg) {
@@ -79,8 +75,9 @@ public:
 
 private:
   std::unordered_map<std::string, ComptimeValue> constants_; // Global constants
-  std::unordered_map<std::string, ComptimeFunc> functions_; // Builtins
-  std::unordered_map<std::string, const DeclFunc *> userFunctions_; // User defined
+  std::unordered_map<std::string, ComptimeFunc> functions_;  // Builtins
+  std::unordered_map<std::string, const DeclFunc *>
+      userFunctions_; // User defined
 
   // Stack frames for local variables
   std::vector<std::unordered_map<std::string, ComptimeValue>> scopes_;

@@ -194,7 +194,7 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
     return d;
   } else {
     // variable declaration (could be global)
-    std::vector<std::pair<std::string, std::optional<ExprPtr>>> decls;
+    std::vector<Declarator> decls;
     std::optional<ExprPtr> init;
     if (match(TokenKind::Assign)) {
       if (match(TokenKind::LBrace)) {
@@ -211,15 +211,19 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
         init = parseExpr();
       }
     }
-    decls.emplace_back(std::move(name), std::move(init));
+
+    decls.push_back({std::move(name), loc, std::move(init)});
+
     while (match(TokenKind::Comma)) {
       std::string n2;
       TypeName ty2 = ty; // same base type
+
+      DiagLoc varLoc = peek().loc;
       parseDeclaratorTail(ty2, n2);
       std::optional<ExprPtr> init2;
       if (match(TokenKind::Assign))
         init2 = parseExpr();
-      decls.emplace_back(std::move(n2), std::move(init2));
+      decls.push_back({std::move(n2), varLoc, std::move(init2)});
     }
     expect(TokenKind::Semicolon, "; expected after declaration");
     auto d = std::make_unique<Decl>();

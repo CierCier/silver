@@ -16,9 +16,12 @@ public:
 
 class Parser {
 public:
-  explicit Parser(const std::vector<Token> &tokens) : toks(tokens) {}
+  explicit Parser(const std::vector<Token> &tokens, DiagnosticEngine &diags)
+      : toks(tokens), diags(diags) {}
 
   Program parseProgram();
+
+  void synchronize();
 
 private:
   const Token &peek(size_t off = 0) const {
@@ -65,6 +68,7 @@ private:
   int precedence(TokenKind op) const;
 
   const std::vector<Token> &toks;
+  DiagnosticEngine &diags;
   size_t pos{0};
 };
 

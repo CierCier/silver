@@ -13,24 +13,33 @@ StmtPtr Parser::parseBlock() {
   expect(TokenKind::LBrace, "'{'");
   auto blk = StmtBlock{};
   while (!match(TokenKind::RBrace)) {
-    // try declaration: optional 'const', optional 'static', then type keyword
-    // or identifier
-    bool isConst = false;
-    if (is(TokenKind::Kw_const) || is(TokenKind::Kw_static) ||
-        is_type_keyword(peek().kind) ||
-        (is(TokenKind::Identifier) &&
-         (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
-      auto loc = peek().loc;
-      if (match(TokenKind::Kw_const)) {
-        isConst = true;
+    if (is(TokenKind::End)) {
+      diags.report(DiagLevel::Error, peek().loc, "expected '}'");
+      break;
+    }
+    try {
+      // try declaration: optional 'const', optional 'static', then type keyword
+      // or identifier
+      bool isConst = false;
+      if (is(TokenKind::Kw_const) || is(TokenKind::Kw_static) ||
+          is_type_keyword(peek().kind) ||
+          (is(TokenKind::Identifier) &&
+           (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
+        auto loc = peek().loc;
+        if (match(TokenKind::Kw_const)) {
+          isConst = true;
+        }
+        if (match(TokenKind::Kw_static)) {
+          // storage class ignored in AST for now
+        }
+        TypeName t = parseType();
+        blk.stmts.push_back(parseDeclStmt(std::move(t), loc, isConst));
+      } else {
+        blk.stmts.push_back(parseStmt());
       }
-      if (match(TokenKind::Kw_static)) {
-        // storage class ignored in AST for now
-      }
-      TypeName t = parseType();
-      blk.stmts.push_back(parseDeclStmt(std::move(t), loc, isConst));
-    } else {
-      blk.stmts.push_back(parseStmt());
+    } catch (const ParseError &e) {
+      diags.report(DiagLevel::Error, e.loc, e.what());
+      synchronize();
     }
   }
   auto s = std::make_unique<Stmt>();
@@ -40,8 +49,10 @@ StmtPtr Parser::parseBlock() {
 }
 
 StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
-  std::vector<std::pair<std::string, std::optional<ExprPtr>>> decls;
+  std::vector<Declarator> decls;
   std::string name;
+
+  DiagLoc varLoc = peek().loc;
   parseDeclaratorTail(t, name);
   std::optional<ExprPtr> init;
   if (match(TokenKind::Assign)) {
@@ -59,10 +70,11 @@ StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
       init = parseExpr();
     }
   }
-  decls.emplace_back(std::move(name), std::move(init));
+  decls.push_back({std::move(name), varLoc, std::move(init)});
   while (match(TokenKind::Comma)) {
     std::string n2;
     TypeName t2 = t;
+    DiagLoc varLoc2 = peek().loc;
     parseDeclaratorTail(t2, n2);
     std::optional<ExprPtr> init2;
     if (match(TokenKind::Assign)) {
@@ -80,7 +92,7 @@ StmtPtr Parser::parseDeclStmt(TypeName t, DiagLoc loc, bool isConst) {
         init2 = parseExpr();
       }
     }
-    decls.emplace_back(std::move(n2), std::move(init2));
+    decls.push_back({std::move(n2), varLoc2, std::move(init2)});
   }
   expect(TokenKind::Semicolon, "; expected after declaration");
   auto s = std::make_unique<Stmt>();
@@ -115,7 +127,7 @@ StmtPtr Parser::parseStmt() {
     return parseSwitch();
   }
   if (match(TokenKind::Kw_break)) {
-    auto loc = toks[pos-1].loc;
+    auto loc = toks[pos - 1].loc;
     expect(TokenKind::Semicolon, "; expected after break");
     auto s = std::make_unique<Stmt>();
     s->v = StmtBreak{};
@@ -123,7 +135,7 @@ StmtPtr Parser::parseStmt() {
     return s;
   }
   if (match(TokenKind::Kw_continue)) {
-    auto loc = toks[pos-1].loc;
+    auto loc = toks[pos - 1].loc;
     expect(TokenKind::Semicolon, "; expected after continue");
     auto s = std::make_unique<Stmt>();
     s->v = StmtContinue{};
@@ -241,7 +253,7 @@ StmtPtr Parser::parseSwitch() {
   auto cond = parseExpr();
   expect(TokenKind::RParen, "')' after switch condition");
   expect(TokenKind::LBrace, "'{'");
-  
+
   std::vector<Case> cases;
   std::optional<StmtPtr> defaultCase;
 
@@ -250,13 +262,15 @@ StmtPtr Parser::parseSwitch() {
       std::vector<ExprPtr> values;
       while (true) {
         values.push_back(parseExpr());
-        if (!match(TokenKind::Comma)) break;
+        if (!match(TokenKind::Comma))
+          break;
       }
       expect(TokenKind::Colon, ": after case value");
       // Parse statements until next case/default/end
       StmtBlock body;
-      while (!is(TokenKind::Kw_case) && !is(TokenKind::Kw_default) && !is(TokenKind::RBrace)) {
-         body.stmts.push_back(parseStmt());
+      while (!is(TokenKind::Kw_case) && !is(TokenKind::Kw_default) &&
+             !is(TokenKind::RBrace)) {
+        body.stmts.push_back(parseStmt());
       }
       auto s = std::make_unique<Stmt>();
       s->v = std::move(body);
@@ -264,8 +278,9 @@ StmtPtr Parser::parseSwitch() {
     } else if (match(TokenKind::Kw_default)) {
       expect(TokenKind::Colon, ": after default");
       StmtBlock body;
-      while (!is(TokenKind::Kw_case) && !is(TokenKind::Kw_default) && !is(TokenKind::RBrace)) {
-         body.stmts.push_back(parseStmt());
+      while (!is(TokenKind::Kw_case) && !is(TokenKind::Kw_default) &&
+             !is(TokenKind::RBrace)) {
+        body.stmts.push_back(parseStmt());
       }
       auto s = std::make_unique<Stmt>();
       s->v = std::move(body);

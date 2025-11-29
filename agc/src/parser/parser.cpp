@@ -27,9 +27,35 @@ const Token &Parser::expect(TokenKind k, const char *msg) {
 Program Parser::parseProgram() {
   Program p;
   while (!is(TokenKind::End)) {
-    p.decls.push_back(parseExternal());
+    try {
+      p.decls.push_back(parseExternal());
+    } catch (const ParseError &e) {
+      diags.report(DiagLevel::Error, e.loc, e.what());
+      synchronize();
+    }
   }
   return p;
+}
+
+void Parser::synchronize() {
+  pos++;
+  while (!is(TokenKind::End)) {
+    if (toks[pos - 1].kind == TokenKind::Semicolon)
+      return;
+
+    switch (peek().kind) {
+    case TokenKind::Kw_struct:
+    case TokenKind::Kw_if:
+    case TokenKind::Kw_while:
+    case TokenKind::Kw_return:
+    case TokenKind::Kw_import:
+    case TokenKind::Kw_extern:
+    case TokenKind::RBrace:
+      return;
+    default:
+      pos++;
+    }
+  }
 }
 
 DeclPtr Parser::parseExternal() {

@@ -2,8 +2,6 @@
 
 namespace ag {
 
-const char* version() {
-    return version_string.data();
-}
+const char *version() { return version_string.data(); }
 
 } // namespace ag

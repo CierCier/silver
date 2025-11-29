@@ -8,7 +8,6 @@
 #include <variant>
 #include <vector>
 
-
 namespace agc {
 
 struct TypeName {
@@ -91,9 +90,15 @@ struct StmtExpr {
 struct StmtReturn {
   std::optional<ExprPtr> expr;
 };
+struct Declarator {
+  std::string name;
+  DiagLoc loc;
+  std::optional<ExprPtr> init;
+};
+
 struct StmtDecl {
   TypeName type;
-  std::vector<std::pair<std::string, std::optional<ExprPtr>>> declarators;
+  std::vector<Declarator> declarators;
   bool isConst{false};
 };
 struct StmtBlock {
@@ -167,7 +172,7 @@ struct DeclEnum {
 
 struct DeclVar {
   TypeName type;
-  std::vector<std::pair<std::string, std::optional<ExprPtr>>> declarators;
+  std::vector<Declarator> declarators;
   bool isExtern{false};
   bool isStatic{false};
   bool isConst{false};

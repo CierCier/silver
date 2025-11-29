@@ -89,7 +89,7 @@ llvm::Constant *default_const_for(llvm::Type *ty) {
 static void emit_global_llvm(const DeclVar &v, llvm::Module &M) {
   auto &ctx = M.getContext();
   llvm::Type *ty = to_llvm_type(ctx, v.type);
-  for (auto const &[name, init] : v.declarators) {
+  for (auto const &[name, loc, init] : v.declarators) {
     llvm::Constant *initConst = nullptr;
     if (init && (*init)) {
       // Only handle simple integer initializers for now

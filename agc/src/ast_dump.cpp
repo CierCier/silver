@@ -154,12 +154,13 @@ static void dumpStmt(const Stmt &s, std::ostream &os, int ind) {
         } else if constexpr (std::is_same_v<T, StmtDecl>) {
           indent(os, ind);
           os << "DeclStmt ";
-          if (node.isConst) os << "(const) ";
+          if (node.isConst)
+            os << "(const) ";
           dumpType(node.type, os);
           os << "\n";
           for (auto &de : node.declarators) {
             indent(os, ind + 2);
-            os << de.first << "\n";
+            os << de.name << "\n";
           }
         } else if constexpr (std::is_same_v<T, StmtBlock>) {
           dumpStmtBlock(node, os, ind);
@@ -244,11 +245,12 @@ void dump(const Program &prog, std::ostream &os) {
             }
           } else if constexpr (std::is_same_v<T, DeclVar>) {
             os << "  Var ";
-            if (node.isConst) os << "(const) ";
+            if (node.isConst)
+              os << "(const) ";
             dumpType(node.type, os);
             os << ":";
             for (size_t i = 0; i < node.declarators.size(); ++i) {
-              os << (i ? "," : " ") << node.declarators[i].first;
+              os << (i ? "," : " ") << node.declarators[i].name;
             }
             os << "\n";
           } else if constexpr (std::is_same_v<T, DeclFunc>) {

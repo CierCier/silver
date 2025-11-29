@@ -10,14 +10,15 @@ static ExprPtr parseExpr(const std::string &code) {
   std::string src = "i32 x = " + code + ";";
   Lexer l(src);
   auto toks = l.lex();
-  Parser p(toks);
+  DiagnosticEngine diags;
+  Parser p(toks, diags);
   auto prog = p.parseProgram();
   if (prog.decls.empty())
     return nullptr;
   auto *d = std::get_if<DeclVar>(&prog.decls[0]->v);
-  if (!d || d->declarators.empty() || !d->declarators[0].second)
+  if (!d || d->declarators.empty() || !d->declarators[0].init)
     return nullptr;
-  return std::move(*d->declarators[0].second);
+  return std::move(*d->declarators[0].init);
 }
 
 TEST(ComptimeTest, IntegerLiteral) {

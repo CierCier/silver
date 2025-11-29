@@ -8,24 +8,21 @@ using namespace agc;
 static ExprPtr parseExpr(const std::string &code) {
   Lexer lexer(code);
   auto tokens = lexer.lex();
-  Parser parser(tokens);
-  // We need to expose parseExpr or wrap it.
-  // Since parseExpr is private, we can parse a statement or program and
-  // extract. Or we can just test full programs. Let's parse a statement:
-  // "expr;" But Parser::parseStmt is private too. Parser::parseProgram is
-  // public. Let's wrap the expr in a function or global var init. "i32 x =
-  // expr;"
+  DiagnosticEngine diags;
+  Parser parser(tokens, diags);
+
   std::string src = "i32 x = " + code + ";";
   Lexer l(src);
   auto toks = l.lex();
-  Parser p(toks);
+  Parser p(toks, diags);
   auto prog = p.parseProgram();
+
   if (prog.decls.empty())
     return nullptr;
   auto *d = std::get_if<DeclVar>(&prog.decls[0]->v);
-  if (!d || d->declarators.empty() || !d->declarators[0].second)
+  if (!d || d->declarators.empty() || !d->declarators[0].init)
     return nullptr;
-  return std::move(*d->declarators[0].second);
+  return std::move(*d->declarators[0].init);
 }
 
 TEST(ParserTest, PrefixOperators) {
@@ -70,7 +67,8 @@ TEST(ParserTest, ComptimeModifier) {
 static Program parseProgram(const std::string &code) {
   Lexer l(code);
   auto toks = l.lex();
-  Parser p(toks);
+  DiagnosticEngine diags;
+  Parser p(toks, diags);
   return p.parseProgram();
 }
 

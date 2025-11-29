@@ -56,7 +56,7 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
   if (auto *vd = std::get_if<StmtDecl>(&s.v)) {
     // Create alloca
     auto *ty = to_llvm_type(M.getContext(), vd->type);
-    for (auto const &[name, init] : vd->declarators) {
+    for (auto const &[name, loc, init] : vd->declarators) {
       auto *alloc = createAlloca(ty, name);
       Locals[name] = {alloc, vd->type, false};
       if (init && *init) {

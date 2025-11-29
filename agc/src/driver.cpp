@@ -261,7 +261,7 @@ int CompilerDriver::run(int argc, char **argv) {
     try {
       agc::Lexer lx(text, path);
       auto toks = lx.lex();
-      agc::Parser p(toks);
+      agc::Parser p(toks, diags_);
       auto prog = p.parseProgram();
 
       // Scan for imports
@@ -311,14 +311,11 @@ int CompilerDriver::run(int argc, char **argv) {
   if (parseError)
     return exitCode;
 
-  std::cerr << "Starting Sema..." << std::endl;
   // Run Semantic Analysis (Const Inference)
   agc::SemanticAnalyzer sema(diags_);
   sema.analyze(mainProg);
   if (diags_.hasErrors())
     return 1;
-
-  std::cerr << "Starting Comptime..." << std::endl;
   // Run Comptime Evaluation
   agc::ComptimeEvaluator evaluator;
   // Register user functions

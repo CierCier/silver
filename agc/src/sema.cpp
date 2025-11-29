@@ -9,8 +9,8 @@ void SemanticAnalyzer::analyze(Program &prog) {
   // First pass: register globals
   for (auto &d : prog.decls) {
     if (auto *dv = std::get_if<DeclVar>(&d->v)) {
-      for (auto &pair : dv->declarators) {
-        declareVar(pair.first, &dv->isConst);
+      for (auto &decl : dv->declarators) {
+        declareVar(decl.name, decl.loc, &dv->isConst);
       }
     }
   }
@@ -23,13 +23,12 @@ void SemanticAnalyzer::analyze(Program &prog) {
   popScope();
 }
 
-void SemanticAnalyzer::pushScope() {
-  scopes_.emplace_back();
-}
+void SemanticAnalyzer::pushScope() { scopes_.emplace_back(); }
 
 void SemanticAnalyzer::popScope() {
-  if (scopes_.empty()) return;
-  
+  if (scopes_.empty())
+    return;
+
   // Before popping, check for non-mutated variables and mark them const
   for (auto &pair : scopes_.back()) {
     if (!pair.second.isMutated && pair.second.isConstFlag) {
@@ -41,28 +40,30 @@ void SemanticAnalyzer::popScope() {
 
 void SemanticAnalyzer::checkVar(const std::string &name, const DiagLoc &loc) {
   for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-    if (it->find(name) != it->end()) return;
+    if (it->find(name) != it->end())
+      return;
   }
   diags_.report(DiagLevel::Error, loc, "undefined variable '" + name + "'");
 }
 
-void SemanticAnalyzer::declareVar(const std::string &name, bool *isConstFlag) {
-  if (scopes_.empty()) return;
+void SemanticAnalyzer::declareVar(const std::string &name, const DiagLoc &loc,
+                                  bool *isConstFlag) {
+  if (scopes_.empty())
+    return;
   if (scopes_.back().count(name)) {
-      // We don't have location for declaration easily available here without changing declareVar signature
-      // But we can report it generally.
-      // Ideally we should pass location to declareVar.
-      // For now, let's skip redefinition check or just report without location if possible?
-      // But we want location.
-      // Let's update declareVar signature in next step if needed.
-      // For now, let's just focus on usage errors as requested.
+    diags_.report(DiagLevel::Error, loc, "redefinition of '" + name + "'");
+    // Note: we could report previous definition location if we stored it in
+    // VarInfo
+    return;
   }
   scopes_.back()[name] = VarInfo{false, isConstFlag};
   // Initialize as false, will be set to true at end of scope if not mutated
-  if (isConstFlag) *isConstFlag = false; 
+  if (isConstFlag)
+    *isConstFlag = false;
 }
 
-void SemanticAnalyzer::markMutated(const std::string &name, const DiagLoc &loc) {
+void SemanticAnalyzer::markMutated(const std::string &name,
+                                   const DiagLoc &loc) {
   // Search from innermost scope
   for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
     auto vit = it->find(name);
@@ -81,9 +82,11 @@ void SemanticAnalyzer::visit(Decl &decl) {
       // Register params (we don't mark params as const usually)
       // For now, let's not touch params.
       for (auto &p : df->params) {
-          if (!scopes_.empty()) scopes_.back()[p.name] = VarInfo{true, nullptr}; // Assume mutated/non-const
+        if (!scopes_.empty())
+          scopes_.back()[p.name] =
+              VarInfo{true, nullptr}; // Assume mutated/non-const
       }
-      
+
       // Visit body
       for (auto &s : df->body->stmts) {
         visit(*s);
@@ -91,108 +94,121 @@ void SemanticAnalyzer::visit(Decl &decl) {
       popScope();
     }
   } else if (auto *dv = std::get_if<DeclVar>(&decl.v)) {
-      // Visit initializers
-      for (auto &pair : dv->declarators) {
-          if (pair.second && *pair.second) {
-              visit(**pair.second);
-          }
+    // Visit initializers
+    for (auto &decl : dv->declarators) {
+      if (decl.init && *decl.init) {
+        visit(**decl.init);
       }
+    }
   }
 }
 
 void SemanticAnalyzer::visit(Stmt &stmt) {
-    std::visit([this, &stmt](auto &s) {
+  std::visit(
+      [this, &stmt](auto &s) {
         using T = std::decay_t<decltype(s)>;
         if constexpr (std::is_same_v<T, StmtExpr>) {
-            visit(*s.expr);
+          visit(*s.expr);
         } else if constexpr (std::is_same_v<T, StmtReturn>) {
-            if (s.expr) visit(**s.expr);
+          if (s.expr)
+            visit(**s.expr);
         } else if constexpr (std::is_same_v<T, StmtDecl>) {
-            for (auto &pair : s.declarators) {
-                if (pair.second && *pair.second) {
-                    visit(**pair.second);
-                }
-                declareVar(pair.first, &s.isConst);
+          for (auto &decl : s.declarators) {
+            if (decl.init && *decl.init) {
+              visit(**decl.init);
             }
+            declareVar(decl.name, decl.loc, &s.isConst);
+          }
         } else if constexpr (std::is_same_v<T, StmtIf>) {
-            visit(*s.cond);
-            visit(*s.thenBranch);
-            if (s.elseBranch) visit(**s.elseBranch);
+          visit(*s.cond);
+          visit(*s.thenBranch);
+          if (s.elseBranch)
+            visit(**s.elseBranch);
         } else if constexpr (std::is_same_v<T, StmtWhile>) {
-            visit(*s.cond);
-            visit(*s.body);
+          visit(*s.cond);
+          visit(*s.body);
         } else if constexpr (std::is_same_v<T, StmtBlock>) {
-            pushScope();
-            for (auto &st : s.stmts) visit(*st);
-            popScope();
+          pushScope();
+          for (auto &st : s.stmts)
+            visit(*st);
+          popScope();
         } else if constexpr (std::is_same_v<T, StmtFor>) {
-             pushScope();
-             if (s.init) visit(**s.init);
-             if (s.cond) visit(**s.cond);
-             if (s.iter) visit(**s.iter);
-             visit(*s.body);
-             popScope();
+          pushScope();
+          if (s.init)
+            visit(**s.init);
+          if (s.cond)
+            visit(**s.cond);
+          if (s.iter)
+            visit(**s.iter);
+          visit(*s.body);
+          popScope();
         }
         // Others: Break, Continue, Asm - nothing to do
-    }, stmt.v);
+      },
+      stmt.v);
 }
 
 void SemanticAnalyzer::visit(Expr &expr) {
-    std::visit([this, &expr](auto &n) {
+  std::visit(
+      [this, &expr](auto &n) {
         using T = std::decay_t<decltype(n)>;
         if constexpr (std::is_same_v<T, ExprUnary>) {
-            visit(*n.rhs);
+          visit(*n.rhs);
         } else if constexpr (std::is_same_v<T, ExprBinary>) {
-            visit(*n.lhs);
-            visit(*n.rhs);
+          visit(*n.lhs);
+          visit(*n.rhs);
         } else if constexpr (std::is_same_v<T, ExprAssign>) {
-            visit(*n.rhs);
-            // Check LHS for mutation
-            if (auto *id = std::get_if<ExprIdent>(&n.lhs->v)) {
-                markMutated(id->name, n.lhs->loc);
-            } else if (auto *idx = std::get_if<ExprIndex>(&n.lhs->v)) {
-                // Array assignment: a[i] = x. Mutates a.
-                if (auto *baseId = std::get_if<ExprIdent>(&idx->base->v)) {
-                    markMutated(baseId->name, idx->base->loc);
-                }
-                visit(*idx->index); // index is read
-            } else if (auto *dr = std::get_if<ExprDeref>(&n.lhs->v)) {
-                visit(*dr->operand); // *ptr = x. ptr is read.
+          visit(*n.rhs);
+          // Check LHS for mutation
+          if (auto *id = std::get_if<ExprIdent>(&n.lhs->v)) {
+            markMutated(id->name, n.lhs->loc);
+          } else if (auto *idx = std::get_if<ExprIndex>(&n.lhs->v)) {
+            // Array assignment: a[i] = x. Mutates a.
+            if (auto *baseId = std::get_if<ExprIdent>(&idx->base->v)) {
+              markMutated(baseId->name, idx->base->loc);
             }
-            // If LHS is complex, we might miss some mutations, but this covers basics.
+            visit(*idx->index); // index is read
+          } else if (auto *dr = std::get_if<ExprDeref>(&n.lhs->v)) {
+            visit(*dr->operand); // *ptr = x. ptr is read.
+          }
+          // If LHS is complex, we might miss some mutations, but this covers
+          // basics.
         } else if constexpr (std::is_same_v<T, ExprCond>) {
-            visit(*n.cond);
-            visit(*n.thenE);
-            visit(*n.elseE);
+          visit(*n.cond);
+          visit(*n.thenE);
+          visit(*n.elseE);
         } else if constexpr (std::is_same_v<T, ExprCall>) {
-             // Check callee if it's a function? 
-             // For now, we only track variables.
-             // But if callee is a variable (function pointer), we should check it.
-             // ExprCall has `callee` as string.
-             // We should check if `callee` is defined?
-             // But `callee` could be a global function which we don't track in `scopes_` fully (we only track vars).
-             // Wait, `analyze` first pass registers globals.
-             // But `declareVar` is for `DeclVar`. `DeclFunc` are not registered in `scopes_`.
-             // So we can't check function existence yet with this `SemanticAnalyzer`.
-             // It seems `SemanticAnalyzer` is mainly for const correctness of variables.
-             for(auto &arg : n.args) visit(*arg);
+          // Check callee if it's a function?
+          // For now, we only track variables.
+          // But if callee is a variable (function pointer), we should check it.
+          // ExprCall has `callee` as string.
+          // We should check if `callee` is defined?
+          // But `callee` could be a global function which we don't track in
+          // `scopes_` fully (we only track vars). Wait, `analyze` first pass
+          // registers globals. But `declareVar` is for `DeclVar`. `DeclFunc`
+          // are not registered in `scopes_`. So we can't check function
+          // existence yet with this `SemanticAnalyzer`. It seems
+          // `SemanticAnalyzer` is mainly for const correctness of variables.
+          for (auto &arg : n.args)
+            visit(*arg);
         } else if constexpr (std::is_same_v<T, ExprIndex>) {
-             visit(*n.base);
-             visit(*n.index);
+          visit(*n.base);
+          visit(*n.index);
         } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
-             // &x -> x escapes, assume mutated
-             if (auto *id = std::get_if<ExprIdent>(&n.operand->v)) {
-                 markMutated(id->name, n.operand->loc);
-             }
+          // &x -> x escapes, assume mutated
+          if (auto *id = std::get_if<ExprIdent>(&n.operand->v)) {
+            markMutated(id->name, n.operand->loc);
+          }
         } else if constexpr (std::is_same_v<T, ExprDeref>) {
-             visit(*n.operand);
+          visit(*n.operand);
         } else if constexpr (std::is_same_v<T, ExprComptime>) {
-             visit(*n.expr);
+          visit(*n.expr);
         } else if constexpr (std::is_same_v<T, ExprIdent>) {
-             checkVar(n.name, expr.loc);
+          checkVar(n.name, expr.loc);
         }
         // Int, Float, Str: nothing to do
-    }, expr.v);
+      },
+      expr.v);
 }
 
 } // namespace agc
