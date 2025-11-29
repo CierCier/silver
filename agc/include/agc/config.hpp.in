@@ -1,0 +1,16 @@
+#pragma once
+
+// Default paths configured at build time via CMake
+// These can be overridden with -I and -L flags
+
+namespace agc {
+namespace config {
+
+// Default include search paths for Silver modules
+constexpr const char *DEFAULT_INCLUDE_PATH = "@SILVER_DEFAULT_INCLUDE_PATH@";
+
+// Default library search path for linking
+constexpr const char *DEFAULT_LIB_PATH = "@SILVER_DEFAULT_LIB_PATH@";
+
+} // namespace config
+} // namespace agc

@@ -2,6 +2,7 @@
 #include "agc/ast_dump.hpp"
 #include "agc/codegen.hpp"
 #include "agc/comptime.hpp"
+#include "agc/config.hpp"
 #include "agc/lexer.hpp"
 #include "agc/parser.hpp"
 #include "agc/sema.hpp"
@@ -13,9 +14,9 @@
 #include <sstream>
 #include <unordered_set>
 
-namespace ag {
-const char *version() { return "0.1.0"; }
-} // namespace ag
+#if defined(SILVER_HAS_LLVM) && SILVER_HAS_LLVM
+#include <llvm/Config/llvm-config.h>
+#endif
 
 namespace agc {
 
@@ -200,11 +201,17 @@ int CompilerDriver::run(int argc, char **argv) {
     return 0;
   }
   if (opt.version) {
-    std::cout << "agc " << ag::version() << "\n";
+    std::cout << "agc version " << ag::version_full() << "\n";
+#if defined(SILVER_HAS_LLVM) && SILVER_HAS_LLVM
+    std::cout << "Target: " << LLVM_DEFAULT_TARGET_TRIPLE << "\n";
+#endif
+    std::cout << "Default include path: " << config::DEFAULT_INCLUDE_PATH
+              << "\n";
+    std::cout << "Default library path: " << config::DEFAULT_LIB_PATH << "\n";
     return 0;
   }
   if (opt.verbose) {
-    std::cout << "agc version " << ag::version() << "\n";
+    std::cout << "agc version " << ag::version_full() << "\n";
     diags_.setVerbose(true);
   }
   if (opt.inputs.empty()) {
@@ -214,8 +221,10 @@ int CompilerDriver::run(int argc, char **argv) {
 
   // Add default include paths
   opt.include_paths.push_back(".");
-  opt.include_paths.push_back("/usr/lib/silver/include");
-  opt.include_paths.push_back("/lib/silver/include");
+  // Use configured default include path from CMake
+  if (config::DEFAULT_INCLUDE_PATH[0] != '\0') {
+    opt.include_paths.push_back(config::DEFAULT_INCLUDE_PATH);
+  }
 
   // Warn about stub phases not yet implemented
   if (opt.compile_only || opt.assemble || opt.preprocess) {
@@ -371,19 +380,16 @@ int CompilerDriver::run(int argc, char **argv) {
       for (const auto &path : opt.link_paths) {
         libPaths.push_back(path);
       }
-      // Default libag path - use absolute path
+      // Default libag path - use absolute path for local builds
       std::filesystem::path defaultLibPath =
           std::filesystem::current_path() / "build" / "libag";
       if (std::filesystem::exists(defaultLibPath)) {
         libPaths.push_back(defaultLibPath.string());
       }
-      // Also check relative to executable location (common install pattern)
-      // /usr/lib/silver is a common install location
-      if (std::filesystem::exists("/usr/lib/silver")) {
-        libPaths.push_back("/usr/lib/silver");
-      }
-      if (std::filesystem::exists("/lib/silver")) {
-        libPaths.push_back("/lib/silver");
+      // Use configured default library path from CMake
+      if (config::DEFAULT_LIB_PATH[0] != '\0' &&
+          std::filesystem::exists(config::DEFAULT_LIB_PATH)) {
+        libPaths.push_back(config::DEFAULT_LIB_PATH);
       }
 
       // Add -L flags for link-time lookup

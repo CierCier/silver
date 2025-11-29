@@ -1,0 +1,23 @@
+#pragma once
+// clang-format off
+
+namespace ag {
+namespace ver {
+
+// Version components as numbers
+constexpr int MAJOR = @SILVER_VERSION_MAJOR@;
+constexpr int MINOR = @SILVER_VERSION_MINOR@;
+constexpr int PATCH = @SILVER_VERSION_PATCH@;
+
+// Version strings
+constexpr const char* STRING = "@SILVER_VERSION@";
+constexpr const char* STRING_FULL = "@SILVER_VERSION_FULL@";
+constexpr const char* GIT_HASH = "@SILVER_GIT_HASH@";
+
+// Computed version number: MAJOR * 10000 + MINOR * 100 + PATCH
+constexpr int NUMBER = MAJOR * 10000 + MINOR * 100 + PATCH;
+
+} // namespace ver
+} // namespace ag
+
+// clang-format on

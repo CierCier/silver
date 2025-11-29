@@ -5,6 +5,17 @@ option(SILVER_ENABLE_LLVM "Enable LLVM backend (default)" ON)
 option(SILVER_ENABLE_JS "Enable JavaScript backend" OFF)
 option(SILVER_ENABLE_CSHARP "Enable C# backend" OFF)
 
+# Default paths for Silver include and library directories
+set(SILVER_DEFAULT_INCLUDE_PATH "/usr/include/silver" CACHE STRING "Default include search path for Silver modules")
+set(SILVER_DEFAULT_LIB_PATH "/usr/lib/silver" CACHE STRING "Default library search path for linking")
+
+# Generate config header with default paths
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/agc/config.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/include/agc/config.hpp
+    @ONLY
+)
+
 # Create a library for the compiler core so tests can link to it
 set(AGC_LIB_SOURCES
 	src/lexer.cpp
