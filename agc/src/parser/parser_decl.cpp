@@ -44,6 +44,17 @@ TypeName Parser::parseType() {
   // pointer depth
   while (match(TokenKind::Star))
     ty.pointerDepth++;
+
+  // Generic arguments: Type<A, B>
+  if (match(TokenKind::Lt)) {
+    while (true) {
+      ty.genericArgs.push_back(parseType());
+      if (match(TokenKind::Gt))
+        break;
+      expect(TokenKind::Comma, "expected ',' or '>' in generic arguments");
+    }
+  }
+
   return ty;
 }
 
@@ -67,6 +78,16 @@ DeclPtr Parser::parseStruct() {
   auto loc = peek().loc;
   expect(TokenKind::Kw_struct, "expected 'struct'");
   std::string name = expect(TokenKind::Identifier, "struct name").text;
+  std::vector<std::string> genericParams;
+  if (match(TokenKind::Lt)) {
+    while (true) {
+      genericParams.push_back(
+          expect(TokenKind::Identifier, "generic parameter name").text);
+      if (match(TokenKind::Gt))
+        break;
+      expect(TokenKind::Comma, "expected ',' or '>' in generic parameters");
+    }
+  }
   expect(TokenKind::LBrace, "'{'");
 
   std::vector<StructField> fields;
@@ -101,7 +122,8 @@ DeclPtr Parser::parseStruct() {
   }
 
   auto d = std::make_unique<Decl>();
-  d->v = DeclStruct{std::move(name), std::move(fields)};
+  d->v =
+      DeclStruct{std::move(name), std::move(fields), std::move(genericParams)};
   d->loc = loc;
   return d;
 }
@@ -148,6 +170,17 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
   std::string name;
   parseDeclaratorTail(ty, name);
 
+  std::vector<std::string> genericParams;
+  if (match(TokenKind::Lt)) {
+    while (true) {
+      genericParams.push_back(
+          expect(TokenKind::Identifier, "generic parameter name").text);
+      if (match(TokenKind::Gt))
+        break;
+      expect(TokenKind::Comma, "expected ',' or '>' in generic parameters");
+    }
+  }
+
   if (match(TokenKind::LParen)) {
     // function
     std::vector<Param> params;
@@ -188,8 +221,9 @@ DeclPtr Parser::parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
     }
 
     auto d = std::make_unique<Decl>();
-    d->v = DeclFunc{std::move(ty),   std::move(name), std::move(params),
-                    std::move(body), isExtern,        isVariadic};
+    d->v = DeclFunc{std::move(ty),     std::move(name),         "",
+                    std::move(params), std::move(body),         isExtern,
+                    isVariadic,        std::move(genericParams)};
     d->loc = loc;
     return d;
   } else {
@@ -261,7 +295,7 @@ DeclPtr Parser::parseCast(bool isImplicit) {
   }
 
   auto d = std::make_unique<Decl>();
-  d->v = DeclCast{std::move(target), std::move(params), std::move(body),
+  d->v = DeclCast{std::move(target), "", std::move(params), std::move(body),
                   isImplicit};
   d->loc = loc;
   return d;

@@ -6,6 +6,33 @@ static ParseError parse_error(const Token &t, const char *msg) {
   return ParseError(t.loc, msg);
 }
 
+bool Parser::isGenericInstantiation() {
+  int depth = 0;
+  size_t i = 1; // start at < (offset 1 from current Identifier)
+  if (!is(TokenKind::Lt, 1))
+    return false;
+
+  while (true) {
+    const Token &t = peek(i);
+    if (t.kind == TokenKind::End)
+      return false;
+    if (t.kind == TokenKind::Lt)
+      depth++;
+    else if (t.kind == TokenKind::Gt) {
+      depth--;
+      if (depth == 0) {
+        const Token &next = peek(i + 1);
+        return next.kind == TokenKind::Identifier ||
+               next.kind == TokenKind::Star;
+      }
+    } else if (t.kind == TokenKind::Semicolon || t.kind == TokenKind::LBrace ||
+               t.kind == TokenKind::RBrace || t.kind == TokenKind::Eq) {
+      return false;
+    }
+    i++;
+  }
+}
+
 StmtPtr Parser::parseBlock() {
   auto loc = peek().loc;
   expect(TokenKind::LBrace, "'{'");
@@ -22,7 +49,8 @@ StmtPtr Parser::parseBlock() {
       if (is(TokenKind::Kw_const) || is(TokenKind::Kw_static) ||
           is_type_keyword(peek().kind) ||
           (is(TokenKind::Identifier) &&
-           (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
+           (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1) ||
+            isGenericInstantiation()))) {
         auto loc = peek().loc;
         if (match(TokenKind::Kw_const)) {
           isConst = true;
@@ -155,7 +183,8 @@ StmtPtr Parser::parseFor() {
     if (is(TokenKind::Kw_const) || is(TokenKind::Kw_static) ||
         is_type_keyword(peek().kind) ||
         (is(TokenKind::Identifier) &&
-         (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1)))) {
+         (is(TokenKind::Identifier, 1) || is(TokenKind::Star, 1) ||
+          isGenericInstantiation()))) {
       auto loc = peek().loc;
       if (match(TokenKind::Kw_const)) {
         isConst = true;

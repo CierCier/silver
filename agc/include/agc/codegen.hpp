@@ -12,6 +12,7 @@ class DiagnosticEngine;
 
 struct CodegenOptions {
   DiagnosticEngine *diags{nullptr};
+  class SemanticAnalyzer *sema{nullptr};
   // Placeholder for future toggles (opt level, debug, etc.)
 };
 

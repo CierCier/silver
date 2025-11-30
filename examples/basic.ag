@@ -51,7 +51,7 @@ i32 main(i32 argc, str *argv ) {
 
     // arrays are similar to C, just pointers
 
-    i32 arr[8] = { 0, 1, 2, 3, 4, 5, 6, 7, };
+    i32 arr[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
     // or 
     // i32 [8]arr
     // i32 *arr
@@ -67,8 +67,7 @@ i32 main(i32 argc, str *argv ) {
 
 
 i32 do_thing(){
-    static i32 x = 0;
-    x += 1;
-
+    i32 x = 0;
+    
     return x;
 }

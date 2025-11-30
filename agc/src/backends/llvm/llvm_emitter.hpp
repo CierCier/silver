@@ -18,11 +18,11 @@ class FunctionEmitter {
   llvm::Type *RetTy;
   std::string &Err;
   DiagnosticEngine *Diags{nullptr};
-  const std::unordered_map<std::string, DeclStruct> *Structs{nullptr};
+  const std::unordered_map<std::string, Type *> *StructTypes{nullptr};
 
   struct VarInfo {
     llvm::AllocaInst *alloc;
-    TypeName type;
+    Type *type;
     bool isConst{false};
   };
   std::unordered_map<std::string, VarInfo> Locals;
@@ -39,7 +39,7 @@ class FunctionEmitter {
 public:
   FunctionEmitter(llvm::Module &m, llvm::Function *f, std::string &err,
                   DiagnosticEngine *diags,
-                  const std::unordered_map<std::string, DeclStruct> *structs);
+                  const std::unordered_map<std::string, Type *> *structTypes);
   void initParams(const std::vector<Param> &params);
   llvm::Value *emitExpr(const Expr &e);
   bool emitStmt(const Stmt &s);
@@ -48,6 +48,7 @@ public:
 
 // Helper functions exposed for codegen_llvm.cpp
 llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, const TypeName &t);
+llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, Type *t);
 llvm::Constant *default_const_for(llvm::Type *ty);
 
 } // namespace agc

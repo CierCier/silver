@@ -38,6 +38,11 @@ private:
   }
   const Token &expect(TokenKind k, const char *msg);
 
+  // Helper to disambiguate Generic<T> var; from a < b > c;
+  // Helper to disambiguate Generic<T> var; from a < b > c;
+  bool isGenericInstantiation();
+  bool isGenericCall(); // Checks for < ... > (
+
   // Declarations
   DeclPtr parseExternal();
   DeclPtr parseImport();

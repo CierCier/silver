@@ -25,9 +25,16 @@ set(AGC_LIB_SOURCES
 	src/parser/parser_stmt.cpp
 	src/parser/parser_expr.cpp
 	src/ast_dump.cpp
+	src/ast_clone.cpp
 	src/codegen_registry.cpp
 	src/comptime.cpp
-    src/sema.cpp
+    src/sema/sema.cpp
+    src/sema/sema_decl.cpp
+    src/sema/sema_stmt.cpp
+    src/sema/sema_expr.cpp
+    src/sema/sema_type.cpp
+    src/sema/sema_instantiate.cpp
+    src/sema/mangle.cpp
     src/type.cpp
     src/driver.cpp
     src/diagnostics.cpp

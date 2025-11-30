@@ -85,7 +85,9 @@ bool ComptimeEvaluator::isComptime(const Expr &expr) const {
           return isComptime(*node.expr);
         } else if constexpr (std::is_same_v<T, ExprInitList>) {
           for (auto &v : node.values) {
-            if (!isComptime(*v))
+            if (v.designator && !isComptime(**v.designator))
+              return false;
+            if (!isComptime(*v.value))
               return false;
           }
           return true;

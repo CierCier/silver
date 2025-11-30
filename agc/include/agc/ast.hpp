@@ -18,6 +18,7 @@ struct TypeName {
   std::string name; // e.g., "i32", "str", or user-defined
   unsigned pointerDepth{0};
   std::vector<std::optional<uint64_t>> arrayDims; // each [] optional size
+  std::vector<TypeName> genericArgs;              // e.g. Box<i32> -> {i32}
 };
 
 struct Expr;
@@ -52,7 +53,9 @@ struct ExprCond {
 };
 struct ExprCall {
   std::string callee;
+  std::string mangledCallee; // Set by Sema
   std::vector<ExprPtr> args;
+  std::vector<TypeName> genericArgs;
 };
 struct ExprIndex {
   ExprPtr base;
@@ -79,8 +82,13 @@ struct ExprCast {
   std::optional<std::string> customCastFunc;
 };
 
+struct InitItem {
+  std::optional<ExprPtr> designator; // [index] or .field (future)
+  ExprPtr value;
+};
+
 struct ExprInitList {
-  std::vector<ExprPtr> values;
+  std::vector<InitItem> values;
 };
 
 struct Expr {
@@ -90,6 +98,8 @@ struct Expr {
       v;
   DiagLoc loc;
   Type *type{nullptr}; // Resolved type
+
+  std::unique_ptr<Expr> clone() const;
 };
 
 struct Stmt;
@@ -111,9 +121,11 @@ struct StmtDecl {
   TypeName type;
   std::vector<Declarator> declarators;
   bool isConst{false};
+  Type *resolvedType{nullptr}; // Set by Sema
 };
 struct StmtBlock {
   std::vector<StmtPtr> stmts;
+  StmtBlock clone() const; // Helper for deep copy
 };
 struct StmtFor {
   std::optional<StmtPtr> init; // either decl or expr stmt
@@ -153,11 +165,14 @@ struct Stmt {
                StmtWhile, StmtBreak, StmtContinue, StmtAsm, StmtSwitch>
       v;
   DiagLoc loc;
+
+  std::unique_ptr<Stmt> clone() const;
 };
 
 struct Param {
   TypeName type;
   std::string name;
+  Type *resolvedType{nullptr}; // Set by Sema
 };
 
 struct Decl;
@@ -170,6 +185,7 @@ struct StructField {
 struct DeclStruct {
   std::string name;
   std::vector<StructField> fields;
+  std::vector<std::string> genericParams; // e.g. struct Box<T> -> {"T"}
 };
 
 struct EnumItem {
@@ -191,14 +207,17 @@ struct DeclVar {
 struct DeclFunc {
   TypeName ret;
   std::string name;
+  std::string mangledName; // Set by Sema
   std::vector<Param> params;
   std::optional<StmtBlock> body;
   bool isExtern{false};
   bool isVariadic{false};
+  std::vector<std::string> genericParams; // e.g. T foo<T>(...) -> {"T"}
 };
 
 struct DeclCast {
   TypeName target;
+  std::string mangledName; // Set by Sema
   std::vector<Param> params;
   std::optional<StmtBlock> body;
   bool isImplicit{false};

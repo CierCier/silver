@@ -16,6 +16,12 @@ public:
   void analyze(Program &prog);
 
   TypeContext &getTypeContext() { return typeCtx_; }
+  const std::unordered_map<std::string, Type *> &getStructTypes() const {
+    return structTypes_;
+  }
+  const std::vector<DeclPtr> &getInstantiatedDecls() const {
+    return instantiatedDecls_;
+  }
 
 private:
   DiagnosticEngine &diags_;
@@ -29,7 +35,9 @@ private:
   };
 
   struct FuncInfo {
-    Type *type{nullptr};
+    Type *returnType{nullptr};
+    std::vector<Type *> paramTypes;
+    std::string mangledName;
   };
 
   // Map from variable name to info.
@@ -37,6 +45,19 @@ private:
   std::vector<std::unordered_map<std::string, VarInfo>> scopes_;
   std::unordered_map<std::string, Type *> structTypes_;
   std::unordered_map<std::string, Type *> enumTypes_;
+  std::unordered_map<std::string, FuncInfo> functions_;
+
+  // Generic templates
+  std::unordered_map<std::string, DeclStruct *> genericStructs_;
+  std::unordered_map<std::string, DeclFunc *> genericFunctions_;
+  std::vector<DeclPtr> instantiatedDecls_; // Owns instantiated generic
+                                           // functions/structs if needed
+  // Type parameter scopes (for T -> i32 substitution)
+  std::vector<std::unordered_map<std::string, Type *>> typeScopes_;
+
+  void pushTypeScope();
+  void popTypeScope();
+  void declareTypeAlias(const std::string &name, Type *type);
 
   void pushScope();
   void popScope();
@@ -46,6 +67,9 @@ private:
   Type *checkVar(const std::string &name, const DiagLoc &loc);
 
   Type *resolveType(const TypeName &typeName);
+  void instantiateStruct(DeclStruct *ds, const std::vector<Type *> &args);
+  void instantiateFunction(DeclFunc *df, const std::vector<Type *> &args,
+                           const DiagLoc &loc);
   bool checkType(Type *expected, Type *actual, const DiagLoc &loc);
 
   void visit(Stmt &stmt);

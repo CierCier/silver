@@ -47,3 +47,9 @@ add_subdirectory(libag)
 
 # the silver compiler (agc)
 add_subdirectory(agc)
+
+# Add cmake directory to module path
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Build examples
+add_subdirectory(examples)

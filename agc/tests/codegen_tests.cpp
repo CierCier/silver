@@ -14,6 +14,10 @@ static std::string generateCSharp(const std::string &code) {
   auto prog = parser.parseProgram();
 
   auto backend = create_backend("csharp");
+  if (!backend) {
+    // Backend not enabled
+    return "";
+  }
   std::stringstream ss;
   std::string err;
   CodegenOptions opts;

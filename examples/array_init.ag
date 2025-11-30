@@ -1,0 +1,36 @@
+import std.io;
+
+i32 main() {
+    // 1. Basic array initialization
+    i32 arr1[5] = { 1, 2, 3, 4, 5 };
+    printf("arr1[0]: %d\n", arr1[0]); // 1
+    printf("arr1[4]: %d\n", arr1[4]); // 5
+
+    // 2. Designated initialization (sparse)
+    i32 arr2[10] = { [2] = 10, [8] = 20 };
+    printf("arr2[2]: %d\n", arr2[2]); // 10
+    printf("arr2[8]: %d\n", arr2[8]); // 20
+    printf("arr2[0]: %d\n", arr2[0]); // 0 (implicit zero)
+    printf("arr2[5]: %d\n", arr2[5]); // 0 (implicit zero)
+
+    // 3. Mixed initialization
+    // [0]=1, [1]=2, [5]=3, [6]=4
+    i32 arr3[10] = { 1, 2, [5] = 3, 4 };
+    printf("arr3[0]: %d\n", arr3[0]); // 1
+    printf("arr3[1]: %d\n", arr3[1]); // 2
+    printf("arr3[5]: %d\n", arr3[5]); // 3
+    printf("arr3[6]: %d\n", arr3[6]); // 4
+    printf("arr3[4]: %d\n", arr3[4]); // 0
+
+    // 4. Out of order
+    i32 arr4[5] = { [3] = 30, [1] = 10 };
+    printf("arr4[1]: %d\n", arr4[1]); // 10
+    printf("arr4[3]: %d\n", arr4[3]); // 30
+
+    // 5. Overwriting (last one wins?)
+    i32 arr5[5] = { [2] = 100, [2] = 200 };
+    printf("arr5[2]: %d\n", arr5[2]); // 200
+
+    println("Array init tests passed!");
+    return 0;
+}

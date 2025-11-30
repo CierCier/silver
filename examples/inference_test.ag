@@ -1,0 +1,22 @@
+import std.io;
+
+i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+f64 get_pi() {
+    return 3.14159;
+}
+
+i32 main() {
+    i32 x = add(10, 20);
+    f64 pi = get_pi();
+
+    i32 y = -( 3 * ( 5 + 2) / (5 - 2) );
+    
+    printf("x: %d\n", x);
+    printf("pi: %f\n", pi);
+    printf("y: %d\n", y);
+    
+    return 0;
+}

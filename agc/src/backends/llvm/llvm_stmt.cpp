@@ -5,8 +5,9 @@ namespace agc {
 FunctionEmitter::FunctionEmitter(
     llvm::Module &m, llvm::Function *f, std::string &err,
     DiagnosticEngine *diags,
-    const std::unordered_map<std::string, DeclStruct> *structs)
-    : M(m), F(f), Err(err), Diags(diags), Structs(structs), B(m.getContext()) {
+    const std::unordered_map<std::string, Type *> *structTypes)
+    : M(m), F(f), Err(err), Diags(diags), StructTypes(structTypes),
+      B(m.getContext()) {
   RetTy = F->getReturnType();
   auto *entry = llvm::BasicBlock::Create(M.getContext(), "entry", F);
   B.SetInsertPoint(entry);
@@ -23,7 +24,7 @@ void FunctionEmitter::initParams(const std::vector<Param> &params) {
   unsigned idx = 0;
   for (auto &arg : F->args()) {
     std::string name = params[idx].name;
-    TypeName ty = params[idx].type;
+    Type *ty = params[idx].resolvedType;
     auto *alloc = createAlloca(arg.getType(), name + ".addr");
     B.CreateStore(&arg, alloc);
     Locals[name] = {alloc, ty, false};
@@ -55,30 +56,73 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
   }
   if (auto *vd = std::get_if<StmtDecl>(&s.v)) {
     // Create alloca
-    auto *ty = to_llvm_type(M.getContext(), vd->type);
-    for (auto const &[name, loc, init] : vd->declarators) {
-      auto *alloc = createAlloca(ty, name);
-      Locals[name] = {alloc, vd->type, false};
+    auto *ty = to_llvm_type(M.getContext(), vd->resolvedType);
+    for (auto const &decl : vd->declarators) {
+      auto *alloc = createAlloca(ty, decl.name);
+      Locals[decl.name] = {alloc, vd->resolvedType, false};
+      auto &init = decl.init;
       if (init && *init) {
-        // Check if this is an init list for a struct
+        // Check if this is an init list - assign type from context
         if (auto *initList = std::get_if<ExprInitList>(&(*init)->v)) {
+          // Zero-initialize first
+          // TODO: Use memset for large arrays
+          B.CreateStore(llvm::Constant::getNullValue(ty), alloc);
+
           // Handle struct initialization
           if (auto *structTy = llvm::dyn_cast<llvm::StructType>(ty)) {
-            unsigned numElements = structTy->getNumElements();
-            for (unsigned i = 0; i < initList->values.size() && i < numElements;
-                 ++i) {
-              auto *v = emitExpr(*initList->values[i]);
+            unsigned currentIndex = 0;
+            for (auto &item : initList->values) {
+              // Structs don't support designated init yet (Sema checks this)
+              if (currentIndex >= structTy->getNumElements())
+                break;
+
+              auto *v = emitExpr(*item.value);
               if (!v)
                 return false;
-              auto *elemTy = structTy->getElementType(i);
+
+              auto *elemTy = structTy->getElementType(currentIndex);
               v = castTo(v, elemTy);
-              auto *elemPtr = B.CreateStructGEP(structTy, alloc, i,
-                                                "gep." + std::to_string(i));
+              auto *elemPtr =
+                  B.CreateStructGEP(structTy, alloc, currentIndex,
+                                    "gep." + std::to_string(currentIndex));
               B.CreateStore(v, elemPtr);
+              currentIndex++;
+            }
+          } else if (ty->isArrayTy()) {
+            // Array initialization
+            auto *arrayTy = llvm::cast<llvm::ArrayType>(ty);
+            uint64_t currentIndex = 0;
+            for (auto &item : initList->values) {
+              if (item.designator) {
+                if (auto *idx = std::get_if<ExprInt>(&(*item.designator)->v)) {
+                  currentIndex = idx->value;
+                }
+              }
+
+              if (currentIndex >= arrayTy->getNumElements())
+                continue; // Should be caught by Sema
+
+              auto *v = emitExpr(*item.value);
+              if (!v)
+                return false;
+
+              auto *elemTy = arrayTy->getElementType();
+              v = castTo(v, elemTy);
+
+              std::vector<llvm::Value *> indices;
+              indices.push_back(llvm::ConstantInt::get(
+                  llvm::Type::getInt32Ty(M.getContext()), 0));
+              indices.push_back(llvm::ConstantInt::get(
+                  llvm::Type::getInt32Ty(M.getContext()), currentIndex));
+
+              auto *elemPtr = B.CreateGEP(
+                  ty, alloc, indices, "gep." + std::to_string(currentIndex));
+              B.CreateStore(v, elemPtr);
+              currentIndex++;
             }
           } else if (initList->values.size() == 1) {
-            // Single-value init list for non-struct type
-            auto *v = emitExpr(*initList->values[0]);
+            // Single-value init list for non-struct/non-array type
+            auto *v = emitExpr(*initList->values[0].value);
             if (v) {
               v = castTo(v, ty);
               B.CreateStore(v, alloc);
@@ -86,7 +130,10 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
               return false;
             }
           } else {
-            Err = "initializer list with multiple values for non-struct type";
+            llvm::errs() << "LLVM StmtDecl type: ";
+            ty->print(llvm::errs());
+            llvm::errs() << " isArray: " << ty->isArrayTy() << "\n";
+            Err = "LLVM: initializer list with multiple values for scalar type";
             return false;
           }
         } else {

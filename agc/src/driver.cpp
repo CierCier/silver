@@ -363,6 +363,7 @@ int CompilerDriver::run(int argc, char **argv) {
 
     agc::CodegenOptions cgopt;
     cgopt.diags = &diags_;
+    cgopt.sema = &sema;
 
     if (is_llvm && opt.output) {
       std::string objFile = *opt.output + ".o";

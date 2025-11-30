@@ -1,3 +1,4 @@
+#include "agc/type.hpp"
 #include "llvm_emitter.hpp"
 #include <variant>
 #include <vector>
@@ -10,6 +11,18 @@ llvm::Value *FunctionEmitter::castTo(llvm::Value *V, llvm::Type *To) {
   auto *From = V->getType();
   if (From == To)
     return V;
+
+  // Boolean -> Int
+  // Must check this before generic Int<->Int to use ZExt instead of SExt
+  if (To->isIntegerTy() && From->isIntegerTy(1)) {
+    return B.CreateZExt(V, To);
+  }
+
+  // Int -> Boolean
+  // Must check this before generic Int<->Int to use != 0 instead of Trunc
+  if (To->isIntegerTy(1) && From->isIntegerTy()) {
+    return B.CreateICmpNE(V, llvm::ConstantInt::get(From, 0));
+  }
 
   // Int <-> Int
   if (To->isIntegerTy() && From->isIntegerTy()) {
@@ -41,20 +54,24 @@ llvm::Value *FunctionEmitter::castTo(llvm::Value *V, llvm::Type *To) {
     return B.CreateFPToSI(V, To);
   }
 
+  // Pointer <-> Pointer
   if (To->isPointerTy() && From->isPointerTy()) {
     return B.CreateBitCast(V, To);
   }
-  if (To->isIntegerTy(1) && From->isIntegerTy()) {
-    return B.CreateICmpNE(V, llvm::ConstantInt::get(From, 0));
-  }
+
   // Fallback: bitcast int<->ptr if sizes match
   if (To->isPointerTy() && From->isIntegerTy()) {
     return B.CreateIntToPtr(V, To);
   }
+
+  // Pointer -> Int
   if (To->isIntegerTy() && From->isPointerTy()) {
     return B.CreatePtrToInt(V, To);
   }
-  return V; // best effort
+
+  // if we cant cast to the requested type
+  // shoot self in foot
+  return V;
 }
 
 llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
@@ -71,7 +88,7 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
         *outElemTy = G->getValueType();
       return G;
     }
-    // Could be a function name used in call; not an lvalue then
+
     Err = std::string("unknown identifier: ") + id->name;
     return nullptr;
   }
@@ -83,17 +100,36 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
     if (auto *baseId = std::get_if<ExprIdent>(&idx->base->v)) {
       auto it = Locals.find(baseId->name);
       if (it != Locals.end()) {
-        // Load pointer value from local alloca
+        Type *t = it->second.type;
+        if (t->isArray()) {
+          // Array: use alloca directly, GEP 0, index
+          basePtr = it->second.alloc;
+          baseElemTy = to_llvm_type(M.getContext(), t); // [N x T]
+
+          auto *idxVal = emitExpr(*idx->index);
+          if (!idxVal)
+            return nullptr;
+
+          std::vector<llvm::Value *> indices;
+          indices.push_back(llvm::ConstantInt::get(
+              llvm::Type::getInt32Ty(M.getContext()), 0));
+          indices.push_back(idxVal);
+
+          if (outElemTy) {
+            *outElemTy = to_llvm_type(M.getContext(),
+                                      static_cast<ArrayType *>(t)->element());
+          }
+          return B.CreateGEP(baseElemTy, basePtr, indices, "gep");
+        }
+
+        // Pointer: load it
         auto *loaded = B.CreateLoad(it->second.alloc->getAllocatedType(),
                                     it->second.alloc, baseId->name + ".val");
-        // Determine element type from declared TypeName (one level deref)
-        TypeName tn = it->second.type;
-        if (tn.pointerDepth > 0)
-          tn.pointerDepth--;
-        else if (!tn.arrayDims.empty())
-          tn.arrayDims.pop_back();
-
-        baseElemTy = to_llvm_type(M.getContext(), tn);
+        Type *elemT = t;
+        if (t->isPointer()) {
+          elemT = static_cast<PointerType *>(t)->pointee();
+        }
+        baseElemTy = to_llvm_type(M.getContext(), elemT);
         basePtr = loaded;
       } else if (auto *G = M.getGlobalVariable(baseId->name)) {
         // Global array/pointer
@@ -160,8 +196,11 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
         return nullptr;
       if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
         auto it = Locals.find(id->name);
-        if (it != Locals.end())
-          structName = it->second.type.name;
+        if (it != Locals.end()) {
+          if (it->second.type->isStruct()) {
+            structName = static_cast<StructType *>(it->second.type)->name();
+          }
+        }
       }
     } else {
       basePtr = emitLValue(*mem->base, &baseElemTy);
@@ -169,34 +208,39 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
         return nullptr;
       if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
         auto it = Locals.find(id->name);
-        if (it != Locals.end())
-          structName = it->second.type.name;
+        if (it != Locals.end()) {
+          if (it->second.type->isStruct()) {
+            structName = static_cast<StructType *>(it->second.type)->name();
+          }
+        }
       }
     }
 
-    if (structName.empty() || !Structs) {
+    if (structName.empty() || !StructTypes) {
       Err = "cannot determine struct type for member access";
       return nullptr;
     }
 
-    auto it = Structs->find(structName);
-    if (it == Structs->end()) {
+    auto it = StructTypes->find(structName);
+    if (it == StructTypes->end()) {
       Err = "unknown struct: " + structName;
       return nullptr;
     }
 
+    if (!it->second->isStruct()) {
+      Err = "type is not a struct: " + structName;
+      return nullptr;
+    }
+    auto *st = static_cast<StructType *>(it->second);
+
     unsigned llvmIdx = 0;
     bool found = false;
-    for (const auto &f : it->second.fields) {
-      for (const auto &name : f.names) {
-        if (name == mem->member) {
-          found = true;
-          break;
-        }
-        llvmIdx++;
-      }
-      if (found)
+    for (const auto &f : st->fields()) {
+      if (f.name == mem->member) {
+        found = true;
         break;
+      }
+      llvmIdx++;
     }
 
     if (!found) {
@@ -246,9 +290,11 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     std::vector<llvm::Value *> args;
     args.reserve(call->args.size());
 
-    llvm::Function *calleeF = M.getFunction(call->callee);
+    std::string calleeName =
+        call->mangledCallee.empty() ? call->callee : call->mangledCallee;
+    llvm::Function *calleeF = M.getFunction(calleeName);
     if (!calleeF) {
-      Err = std::string("unknown function: ") + call->callee;
+      Err = std::string("unknown function: ") + calleeName;
       return nullptr;
     }
     auto *FTy = calleeF->getFunctionType();
@@ -311,6 +357,17 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
   if (auto *id = std::get_if<ExprIdent>(&e.v)) {
     auto it = Locals.find(id->name);
     if (it != Locals.end()) {
+      if (it->second.type->isArray()) {
+        // Decay array to pointer: GEP 0, 0
+        llvm::Value *alloc = it->second.alloc;
+        llvm::Type *arrayTy = to_llvm_type(M.getContext(), it->second.type);
+        std::vector<llvm::Value *> indices;
+        indices.push_back(
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()), 0));
+        indices.push_back(
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()), 0));
+        return B.CreateGEP(arrayTy, alloc, indices, "array.decay");
+      }
       return B.CreateLoad(it->second.alloc->getAllocatedType(),
                           it->second.alloc, id->name);
     }
@@ -479,9 +536,11 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     std::vector<llvm::Value *> args;
     args.reserve(call->args.size());
 
-    llvm::Function *calleeF = M.getFunction(call->callee);
+    std::string calleeName =
+        call->mangledCallee.empty() ? call->callee : call->mangledCallee;
+    llvm::Function *calleeF = M.getFunction(calleeName);
     if (!calleeF) {
-      Err = std::string("unknown function: ") + call->callee;
+      Err = std::string("unknown function: ") + calleeName;
       return nullptr;
     }
     auto *FTy = calleeF->getFunctionType();
@@ -615,7 +674,7 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     // InitList requires a target type to be known (from context)
     // For now, we only support single-element init lists as a simple value
     if (initList->values.size() == 1) {
-      return emitExpr(*initList->values[0]);
+      return emitExpr(*initList->values[0].value);
     }
     Err = "initializer list with multiple values requires struct context";
     return nullptr;

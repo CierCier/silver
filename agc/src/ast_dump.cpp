@@ -142,8 +142,14 @@ static void dumpExpr(const Expr &e, std::ostream &os, int ind) {
         } else if constexpr (std::is_same_v<T, ExprInitList>) {
           indent(os, ind);
           os << "InitList\n";
-          for (auto &v : node.values)
-            dumpExpr(*v, os, ind + 2);
+          for (auto &v : node.values) {
+            if (v.designator) {
+              indent(os, ind + 2);
+              os << "Designator:\n";
+              dumpExpr(**v.designator, os, ind + 4);
+            }
+            dumpExpr(*v.value, os, ind + 2);
+          }
         }
       },
       e.v);

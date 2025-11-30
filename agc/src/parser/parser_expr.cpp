@@ -41,6 +41,30 @@ int Parser::precedence(TokenKind op) const {
   }
 }
 
+bool Parser::isGenericCall() {
+  int depth = 0;
+  size_t i = 0; // Start at current token (which should be <)
+  if (!is(TokenKind::Lt))
+    return false;
+
+  while (true) {
+    const Token &t = peek(i);
+    if (t.kind == TokenKind::End)
+      return false;
+    if (t.kind == TokenKind::Lt)
+      depth++;
+    else if (t.kind == TokenKind::Gt) {
+      depth--;
+      if (depth == 0) {
+        return peek(i + 1).kind == TokenKind::LParen;
+      }
+    } else if (t.kind == TokenKind::Semicolon || t.kind == TokenKind::LBrace ||
+               t.kind == TokenKind::RBrace || t.kind == TokenKind::Eq) {
+      return false;
+    }
+    i++;
+  }
+}
 ExprPtr Parser::parsePrimary() {
   if (is(TokenKind::Identifier)) {
     auto loc = peek().loc;
@@ -65,10 +89,42 @@ ExprPtr Parser::parsePrimary() {
         if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
           auto call = std::make_unique<Expr>();
           call->loc = base->loc;
-          call->v = ExprCall{std::move(idp->name), std::move(args)};
+          call->v = ExprCall{std::move(idp->name), "", std::move(args)};
           base = std::move(call);
         } else {
           throw parse_error(peek(), "expected function name for call");
+        }
+      } else if (is(TokenKind::Lt) && isGenericCall()) {
+        match(TokenKind::Lt);
+        std::vector<TypeName> genericArgs;
+        while (true) {
+          genericArgs.push_back(parseType());
+          if (match(TokenKind::Comma))
+            continue;
+          break;
+        }
+        expect(TokenKind::Gt, ">");
+
+        expect(TokenKind::LParen, "(");
+        std::vector<ExprPtr> args;
+        if (!is(TokenKind::RParen)) {
+          while (true) {
+            args.push_back(parseExpr());
+            if (match(TokenKind::Comma))
+              continue;
+            break;
+          }
+        }
+        expect(TokenKind::RParen, ")");
+
+        if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
+          auto call = std::make_unique<Expr>();
+          call->loc = base->loc;
+          call->v = ExprCall{std::move(idp->name), "", std::move(args),
+                             std::move(genericArgs)};
+          base = std::move(call);
+        } else {
+          throw parse_error(peek(), "expected function name for generic call");
         }
       } else if (match(TokenKind::LBracket)) {
         auto idx = parseExpr();
@@ -219,10 +275,16 @@ ExprPtr Parser::parsePrimary() {
   }
   if (match(TokenKind::LBrace)) {
     auto loc = toks[pos - 1].loc;
-    std::vector<ExprPtr> values;
+    std::vector<InitItem> values;
     if (!is(TokenKind::RBrace)) {
       while (true) {
-        values.push_back(parseExpr());
+        std::optional<ExprPtr> designator;
+        if (match(TokenKind::LBracket)) {
+          designator = parseExpr();
+          expect(TokenKind::RBracket, "]");
+          expect(TokenKind::Assign, "=");
+        }
+        values.push_back({std::move(designator), parseExpr()});
         if (match(TokenKind::Comma))
           continue;
         break;

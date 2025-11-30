@@ -1,0 +1,14 @@
+import std.io;
+
+T identity<T>(T x) {
+    return x;
+}
+
+void main() {
+    i32 a = identity<i32>(42);
+    
+    printf("Identity i32: %d\n", a);
+
+    f64 b = identity<f64>(3.14);
+    printf("Identity f64: %f\n", b);
+}
