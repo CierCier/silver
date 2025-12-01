@@ -69,6 +69,15 @@ const MethodInfo *StructType::findMethod(const std::string &name) const {
   return nullptr;
 }
 
+bool StructType::hasTrait(const std::string &trait) const {
+  for (const auto &t : traits_) {
+    if (t == trait) {
+      return true;
+    }
+  }
+  return false;
+}
+
 TypeContext::TypeContext() {
   voidType_ = new PrimitiveType(TypeKind::Void);
   boolType_ = new PrimitiveType(TypeKind::Bool);

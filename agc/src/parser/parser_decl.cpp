@@ -59,8 +59,25 @@ TypeName Parser::parseType() {
 }
 
 void Parser::parseDeclaratorTail(TypeName &t, std::string &name) {
-  // identifier
-  name = expect(TokenKind::Identifier, "declarator name").text;
+  // identifier - also accept 'drop', 'new', 'alloc', 'free' keywords as names
+  // for methods
+  if (is(TokenKind::Identifier)) {
+    name = expect(TokenKind::Identifier, "declarator name").text;
+  } else if (is(TokenKind::Kw_drop)) {
+    name = peek().text;
+    ++pos;
+  } else if (is(TokenKind::Kw_new)) {
+    name = peek().text;
+    ++pos;
+  } else if (is(TokenKind::Kw_alloc)) {
+    name = peek().text;
+    ++pos;
+  } else if (is(TokenKind::Kw_free)) {
+    name = peek().text;
+    ++pos;
+  } else {
+    throw parse_error(peek(), "expected declarator name");
+  }
   // arrays (suffix form)
   while (match(TokenKind::LBracket)) {
     if (is(TokenKind::RBracket)) {
@@ -74,7 +91,54 @@ void Parser::parseDeclaratorTail(TypeName &t, std::string &name) {
   }
 }
 
-DeclPtr Parser::parseStruct() {
+// Parse a single attribute: @name or @name(arg1, arg2, ...)
+Attribute Parser::parseAttribute() {
+  expect(TokenKind::At, "expected '@'");
+
+  // Accept either identifier or 'trait' keyword as attribute name
+  std::string name;
+  if (is(TokenKind::Kw_trait)) {
+    name = peek().text;
+    ++pos;
+  } else {
+    name = expect(TokenKind::Identifier, "attribute name").text;
+  }
+
+  std::vector<std::string> args;
+
+  if (match(TokenKind::LParen)) {
+    if (!is(TokenKind::RParen)) {
+      do {
+        // Accept identifiers or keywords as trait arguments
+        // (copy, clone, drop, default, debug, new, alloc, free, etc.)
+        const Token &t = peek();
+        if (t.kind == TokenKind::Identifier ||
+            t.kind == TokenKind::Kw_default || t.kind == TokenKind::Kw_drop ||
+            t.kind == TokenKind::Kw_new || t.kind == TokenKind::Kw_alloc ||
+            t.kind == TokenKind::Kw_free) {
+          args.push_back(t.text);
+          ++pos;
+        } else {
+          throw parse_error(t, "expected trait name");
+        }
+      } while (match(TokenKind::Comma));
+    }
+    expect(TokenKind::RParen, "expected ')' after attribute arguments");
+  }
+
+  return Attribute{std::move(name), std::move(args)};
+}
+
+// Parse multiple attributes: @attr1 @attr2(a, b) ...
+std::vector<Attribute> Parser::parseAttributes() {
+  std::vector<Attribute> attrs;
+  while (is(TokenKind::At)) {
+    attrs.push_back(parseAttribute());
+  }
+  return attrs;
+}
+
+DeclPtr Parser::parseStruct(std::vector<Attribute> attrs) {
   auto loc = peek().loc;
   expect(TokenKind::Kw_struct, "expected 'struct'");
   std::string name = expect(TokenKind::Identifier, "struct name").text;
@@ -122,8 +186,8 @@ DeclPtr Parser::parseStruct() {
   }
 
   auto d = std::make_unique<Decl>();
-  d->v =
-      DeclStruct{std::move(name), std::move(fields), std::move(genericParams)};
+  d->v = DeclStruct{std::move(name), std::move(fields),
+                    std::move(genericParams), std::move(attrs)};
   d->loc = loc;
   return d;
 }
@@ -161,6 +225,75 @@ DeclPtr Parser::parseEnum() {
   }
   auto d = std::make_unique<Decl>();
   d->v = DeclEnum{std::move(name), std::move(items)};
+  d->loc = loc;
+  return d;
+}
+
+DeclPtr Parser::parseTrait() {
+  auto loc = peek().loc;
+  expect(TokenKind::Kw_trait, "expected 'trait'");
+  std::string name = expect(TokenKind::Identifier, "trait name").text;
+
+  // Optional generic parameters: trait Clone<T> { ... }
+  std::vector<std::string> genericParams;
+  if (match(TokenKind::Lt)) {
+    while (true) {
+      genericParams.push_back(
+          expect(TokenKind::Identifier, "generic parameter name").text);
+      if (match(TokenKind::Gt))
+        break;
+      expect(TokenKind::Comma, "expected ',' or '>' in generic parameters");
+    }
+  }
+
+  expect(TokenKind::LBrace, "expected '{'");
+
+  std::vector<TraitMethod> methods;
+  while (!match(TokenKind::RBrace)) {
+    // Parse method signature: ReturnType name(params);
+    TypeName retType = parseType();
+    // Accept identifier or 'drop'/'new'/'alloc'/'free' keywords as method names
+    std::string methodName;
+    if (is(TokenKind::Identifier)) {
+      methodName = expect(TokenKind::Identifier, "method name").text;
+    } else if (is(TokenKind::Kw_drop)) {
+      methodName = peek().text;
+      ++pos;
+    } else if (is(TokenKind::Kw_new)) {
+      methodName = peek().text;
+      ++pos;
+    } else if (is(TokenKind::Kw_alloc)) {
+      methodName = peek().text;
+      ++pos;
+    } else if (is(TokenKind::Kw_free)) {
+      methodName = peek().text;
+      ++pos;
+    } else {
+      throw parse_error(peek(), "expected method name");
+    }
+
+    expect(TokenKind::LParen, "expected '('");
+    std::vector<Param> params;
+    if (!is(TokenKind::RParen)) {
+      do {
+        TypeName pt = parseType();
+        std::string pn;
+        if (is(TokenKind::Identifier)) {
+          pn = expect(TokenKind::Identifier, "parameter name").text;
+        }
+        params.push_back(Param{std::move(pt), std::move(pn)});
+      } while (match(TokenKind::Comma));
+    }
+    expect(TokenKind::RParen, "expected ')'");
+    expect(TokenKind::Semicolon, "expected ';' after method signature");
+
+    methods.push_back(TraitMethod{std::move(retType), std::move(methodName),
+                                  std::move(params)});
+  }
+
+  auto d = std::make_unique<Decl>();
+  d->v =
+      DeclTrait{std::move(name), std::move(genericParams), std::move(methods)};
   d->loc = loc;
   return d;
 }

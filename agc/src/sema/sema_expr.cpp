@@ -1,5 +1,5 @@
-#include "agc/sema.hpp"
 #include "agc/overloaded.hpp"
+#include "agc/sema.hpp"
 
 namespace agc {
 
@@ -92,8 +92,8 @@ void SemanticAnalyzer::visit(Expr &expr) {
               expr.type = info.returnType;
               n.mangledCallee = info.mangledName;
               // Check arg types
-              for (size_t i = 0; i < n.args.size() && i < info.paramTypes.size();
-                   ++i) {
+              for (size_t i = 0;
+                   i < n.args.size() && i < info.paramTypes.size(); ++i) {
                 checkType(info.paramTypes[i], n.args[i]->type, n.args[i]->loc);
               }
             } else {
@@ -176,6 +176,49 @@ void SemanticAnalyzer::visit(Expr &expr) {
               expr.type = typeCtx_.getVoid();
             }
           },
+          [this, &expr](ExprMethodCall &n) {
+            visit(*n.base);
+            for (auto &arg : n.args)
+              visit(*arg);
+
+            Type *baseType = n.base->type;
+            if (n.ptr) {
+              if (baseType && baseType->isPointer()) {
+                baseType = static_cast<PointerType *>(baseType)->pointee();
+              } else {
+                diags_.report(DiagLevel::Error, expr.loc,
+                              "arrow operator on non-pointer");
+                expr.type = typeCtx_.getVoid();
+                return;
+              }
+            }
+
+            if (baseType && baseType->isStruct()) {
+              auto *st = static_cast<StructType *>(baseType);
+              const MethodInfo *method = st->findMethod(n.method);
+              if (method) {
+                n.mangledMethod = method->mangledName;
+                expr.type = method->returnType;
+
+                // Check arg types (skip first param which is self)
+                for (size_t i = 0;
+                     i < n.args.size() && i + 1 < method->paramTypes.size();
+                     ++i) {
+                  checkType(method->paramTypes[i + 1], n.args[i]->type,
+                            n.args[i]->loc);
+                }
+              } else {
+                diags_.report(DiagLevel::Error, expr.loc,
+                              "struct '" + st->name() + "' has no method '" +
+                                  n.method + "'");
+                expr.type = typeCtx_.getVoid();
+              }
+            } else {
+              diags_.report(DiagLevel::Error, expr.loc,
+                            "method call on non-struct type");
+              expr.type = typeCtx_.getVoid();
+            }
+          },
           [this, &expr](ExprAddressOf &n) {
             visit(*n.operand);
             expr.type = typeCtx_.getPointer(n.operand->type);
@@ -183,7 +226,8 @@ void SemanticAnalyzer::visit(Expr &expr) {
           [this, &expr](ExprDeref &n) {
             visit(*n.operand);
             if (n.operand->type && n.operand->type->isPointer()) {
-              expr.type = static_cast<PointerType *>(n.operand->type)->pointee();
+              expr.type =
+                  static_cast<PointerType *>(n.operand->type)->pointee();
             } else {
               diags_.report(DiagLevel::Error, expr.loc,
                             "dereference of non-pointer");
@@ -223,6 +267,73 @@ void SemanticAnalyzer::visit(Expr &expr) {
               visit(*v.value);
             }
             expr.type = typeCtx_.getVoid();
+          },
+          [this, &expr](ExprNew &n) {
+            // new<T>() - returns a zero-initialized value of type T
+            Type *targetType = resolveType(n.targetType);
+            expr.type = targetType;
+
+            // Check if target type has a drop trait - store for codegen
+            if (targetType && targetType->isStruct()) {
+              auto *st = static_cast<StructType *>(targetType);
+              if (st->hasTrait("drop")) {
+                // Find the drop method
+                const MethodInfo *dropMethod = st->findMethod("drop");
+                if (dropMethod) {
+                  n.dropMethod = dropMethod->mangledName;
+                }
+              }
+            }
+          },
+          [this, &expr](ExprDrop &n) {
+            // drop(val) - calls drop method if type has @trait(drop)
+            visit(*n.operand);
+            Type *operandType = n.operand->type;
+            expr.type = typeCtx_.getVoid();
+
+            // Check if operand type has a drop trait
+            if (operandType && operandType->isStruct()) {
+              auto *st = static_cast<StructType *>(operandType);
+              if (st->hasTrait("drop")) {
+                const MethodInfo *dropMethod = st->findMethod("drop");
+                if (dropMethod) {
+                  n.dropMethod = dropMethod->mangledName;
+                } else {
+                  diags_.report(DiagLevel::Warning, expr.loc,
+                                "type '" + st->name() +
+                                    "' has @trait(drop) but no drop() method");
+                }
+              }
+            }
+          },
+          [this, &expr](ExprAlloc &n) {
+            // alloc<T>() - heap allocates, returns T*
+            // alloc<T>(count) - allocates array of count elements, returns T*
+            Type *targetType = resolveType(n.targetType);
+            expr.type = typeCtx_.getPointer(targetType);
+
+            // Analyze count expression if present
+            if (n.count) {
+              visit(**n.count);
+              Type *countType = (*n.count)->type;
+              // Count should be an integer type
+              if (countType && !countType->isInt()) {
+                diags_.report(DiagLevel::Error, expr.loc,
+                              "alloc count must be an integer type");
+              }
+            }
+          },
+          [this, &expr](ExprFree &n) {
+            // free(ptr) - deallocates heap memory
+            visit(*n.operand);
+            Type *operandType = n.operand->type;
+            expr.type = typeCtx_.getVoid();
+
+            // Operand should be a pointer type
+            if (operandType && !operandType->isPointer()) {
+              diags_.report(DiagLevel::Error, expr.loc,
+                            "free requires a pointer type");
+            }
           },
       },
       expr.v);

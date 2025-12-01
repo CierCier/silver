@@ -56,6 +56,10 @@ std::unique_ptr<Expr> Expr::clone() const {
           res->v = ExprIndex{arg.base->clone(), arg.index->clone()};
         } else if constexpr (std::is_same_v<T, ExprMember>) {
           res->v = ExprMember{arg.base->clone(), arg.member, arg.ptr};
+        } else if constexpr (std::is_same_v<T, ExprMethodCall>) {
+          res->v =
+              ExprMethodCall{arg.base->clone(), arg.method, arg.mangledMethod,
+                             cloneVec(arg.args), arg.ptr};
         } else if constexpr (std::is_same_v<T, ExprComptime>) {
           res->v = ExprComptime{arg.expr->clone()};
         } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
@@ -72,6 +76,18 @@ std::unique_ptr<Expr> Expr::clone() const {
                 {cloneOpt(item.designator), item.value->clone()});
           }
           res->v = ExprInitList{std::move(clonedValues)};
+        } else if constexpr (std::is_same_v<T, ExprNew>) {
+          res->v = ExprNew{arg.targetType, arg.dropMethod};
+        } else if constexpr (std::is_same_v<T, ExprDrop>) {
+          res->v = ExprDrop{arg.operand->clone(), arg.dropMethod};
+        } else if constexpr (std::is_same_v<T, ExprAlloc>) {
+          std::optional<ExprPtr> clonedCount;
+          if (arg.count) {
+            clonedCount = (*arg.count)->clone();
+          }
+          res->v = ExprAlloc{arg.targetType, std::move(clonedCount)};
+        } else if constexpr (std::is_same_v<T, ExprFree>) {
+          res->v = ExprFree{arg.operand->clone()};
         }
       },
       v);

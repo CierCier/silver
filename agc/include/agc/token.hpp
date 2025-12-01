@@ -36,6 +36,11 @@ enum class TokenKind : uint16_t {
   Kw_as,
   Kw_cast,
   Kw_implicit,
+  Kw_trait,
+  Kw_new,
+  Kw_drop,
+  Kw_alloc,
+  Kw_free,
 
   // Primitive type keywords (treated as identifiers in AST typing)
   Kw_void,
@@ -98,6 +103,7 @@ enum class TokenKind : uint16_t {
 
   Arrow,
   DotDotDot,
+  At,
 };
 
 using SourceLoc = DiagLoc;

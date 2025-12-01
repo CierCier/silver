@@ -36,7 +36,7 @@ void SemanticAnalyzer::analyze(Program &prog) {
     }
   }
 
-  // Pass 0.5: Resolve Struct fields
+  // Pass 0.5: Resolve Struct fields and traits
   for (auto &d : prog.decls) {
     if (auto *ds = std::get_if<DeclStruct>(&d->v)) {
       if (!ds->genericParams.empty())
@@ -51,6 +51,25 @@ void SemanticAnalyzer::analyze(Program &prog) {
           }
         }
         st->setFields(std::move(fields));
+
+        // Process @trait attributes
+        for (const auto &attr : ds->attributes) {
+          if (attr.name == "trait") {
+            for (const auto &traitName : attr.args) {
+              // Validate known traits
+              if (traitName != "copy" && traitName != "clone" &&
+                  traitName != "drop" && traitName != "default" &&
+                  traitName != "debug") {
+                diags_.report(DiagLevel::Warning, d->loc,
+                              "unknown trait '" + traitName + "'");
+              }
+              st->addTrait(traitName);
+            }
+          } else {
+            diags_.report(DiagLevel::Warning, d->loc,
+                          "unknown attribute '@" + attr.name + "'");
+          }
+        }
       }
     }
   }
@@ -83,9 +102,25 @@ void SemanticAnalyzer::analyze(Program &prog) {
       functions_[df->name] =
           FuncInfo{retType, std::move(paramTypes), df->mangledName};
     } else if (auto *di = std::get_if<DeclImpl>(&d->v)) {
-      // Register impl methods/casts
-      // For now, just visit them to check bodies
-      // We need to associate them with the type.
+      // Register impl methods as callable functions
+      for (auto &m : di->methods) {
+        if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+          Type *retType = resolveType(df->ret);
+          std::vector<Type *> paramTypes;
+          for (auto &p : df->params) {
+            Type *pt = resolveType(p.type);
+            p.resolvedType = pt;
+            paramTypes.push_back(pt);
+          }
+          std::string mangledName = mangle_method(di->type.name, *df);
+          df->mangledName = mangledName;
+
+          // Register with TypeName_methodName as the callable name
+          std::string callableName = di->type.name + "_" + df->name;
+          functions_[callableName] =
+              FuncInfo{retType, std::move(paramTypes), mangledName};
+        }
+      }
     }
   }
 

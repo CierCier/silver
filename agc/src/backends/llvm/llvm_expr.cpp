@@ -191,14 +191,30 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
     std::string structName;
 
     if (mem->ptr) {
+      // Arrow operator: base is a pointer, emit it as value
       basePtr = emitExpr(*mem->base);
       if (!basePtr)
         return nullptr;
-      if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
-        auto it = Locals.find(id->name);
-        if (it != Locals.end()) {
-          if (it->second.type->isStruct()) {
-            structName = static_cast<StructType *>(it->second.type)->name();
+      // Get struct name from the base expression's type (which should be
+      // pointer to struct)
+      if (mem->base->type && mem->base->type->isPointer()) {
+        auto *ptrType = static_cast<PointerType *>(mem->base->type);
+        if (ptrType->pointee() && ptrType->pointee()->isStruct()) {
+          structName = static_cast<StructType *>(ptrType->pointee())->name();
+        }
+      }
+      // Fallback: try getting from local variable if identifier
+      if (structName.empty()) {
+        if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
+          auto it = Locals.find(id->name);
+          if (it != Locals.end()) {
+            if (it->second.type->isPointer()) {
+              auto *ptrType = static_cast<PointerType *>(it->second.type);
+              if (ptrType->pointee() && ptrType->pointee()->isStruct()) {
+                structName =
+                    static_cast<StructType *>(ptrType->pointee())->name();
+              }
+            }
           }
         }
       }
@@ -206,11 +222,18 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
       basePtr = emitLValue(*mem->base, &baseElemTy);
       if (!basePtr)
         return nullptr;
-      if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
-        auto it = Locals.find(id->name);
-        if (it != Locals.end()) {
-          if (it->second.type->isStruct()) {
-            structName = static_cast<StructType *>(it->second.type)->name();
+      // Get struct name from base expression's type
+      if (mem->base->type && mem->base->type->isStruct()) {
+        structName = static_cast<StructType *>(mem->base->type)->name();
+      }
+      // Fallback: try getting from local variable if identifier
+      if (structName.empty()) {
+        if (auto *id = std::get_if<ExprIdent>(&mem->base->v)) {
+          auto it = Locals.find(id->name);
+          if (it != Locals.end()) {
+            if (it->second.type->isStruct()) {
+              structName = static_cast<StructType *>(it->second.type)->name();
+            }
           }
         }
       }
@@ -612,6 +635,60 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
       return nullptr;
     return B.CreateLoad(elemTy, addr, "memval");
   }
+  if (auto *mc = std::get_if<ExprMethodCall>(&e.v)) {
+    // Method call: base.method(args) -> method(base, args)
+    if (Diags)
+      Diags->report(DiagLevel::Debug,
+                    "emitExpr for ExprMethodCall: " + mc->method);
+
+    std::string calleeName = mc->mangledMethod;
+    llvm::Function *calleeF = M.getFunction(calleeName);
+    if (!calleeF) {
+      Err = std::string("unknown method: ") + calleeName;
+      return nullptr;
+    }
+    auto *FTy = calleeF->getFunctionType();
+
+    std::vector<llvm::Value *> args;
+    args.reserve(mc->args.size() + 1);
+
+    // First arg is 'self' (the base)
+    // Get the base value - for struct, we need to pass by value
+    llvm::Type *baseElemTy = nullptr;
+    llvm::Value *baseVal = nullptr;
+
+    // Try to get base as lvalue first to load struct value
+    llvm::Value *baseAddr = emitLValue(*mc->base, &baseElemTy);
+    if (baseAddr && baseElemTy) {
+      baseVal = B.CreateLoad(baseElemTy, baseAddr, "self");
+    } else {
+      // Fallback to emitExpr
+      baseVal = emitExpr(*mc->base);
+    }
+
+    if (!baseVal) {
+      Err = "failed to emit method receiver";
+      return nullptr;
+    }
+
+    if (FTy->getNumParams() > 0) {
+      baseVal = castTo(baseVal, FTy->getParamType(0));
+    }
+    args.push_back(baseVal);
+
+    // Rest of the arguments
+    for (size_t i = 0; i < mc->args.size(); ++i) {
+      auto *v = emitExpr(*mc->args[i]);
+      if (!v)
+        return nullptr;
+      if (i + 1 < FTy->getNumParams()) {
+        v = castTo(v, FTy->getParamType((unsigned)(i + 1)));
+      }
+      args.push_back(v);
+    }
+
+    return B.CreateCall(calleeF, args);
+  }
   if (auto *un = std::get_if<ExprUnary>(&e.v)) {
     // Handle increment/decrement separately since they need lvalue access
     if (un->op == TokenKind::PlusPlus || un->op == TokenKind::MinusMinus) {
@@ -641,9 +718,11 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
           newVal = B.CreateFSub(oldVal, one, "fdectmp");
       } else if (elemTy->isPointerTy()) {
         // Pointer arithmetic: increment by 1 element
-        auto *one = llvm::ConstantInt::get(llvm::Type::getInt64Ty(M.getContext()), 
-                                           un->op == TokenKind::PlusPlus ? 1 : -1);
-        newVal = B.CreateGEP(llvm::Type::getInt8Ty(M.getContext()), oldVal, one, "ptrinc");
+        auto *one =
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(M.getContext()),
+                                   un->op == TokenKind::PlusPlus ? 1 : -1);
+        newVal = B.CreateGEP(llvm::Type::getInt8Ty(M.getContext()), oldVal, one,
+                             "ptrinc");
       } else {
         Err = "invalid operand type for increment/decrement";
         return nullptr;
@@ -721,6 +800,106 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     }
     Err = "initializer list with multiple values requires struct context";
     return nullptr;
+  }
+  if (auto *newExpr = std::get_if<ExprNew>(&e.v)) {
+    // new<T>() - returns a zero-initialized value of type T
+    llvm::Type *targetTy = to_llvm_type(M.getContext(), newExpr->targetType);
+    if (!targetTy) {
+      Err = "unknown type for new<T>()";
+      return nullptr;
+    }
+
+    // For structs, we need to create an alloca, zero-initialize, and load
+    if (targetTy->isStructTy()) {
+      auto *alloc = createAlloca(targetTy, "new.tmp");
+      // Zero-initialize the struct
+      auto *zero = llvm::Constant::getNullValue(targetTy);
+      B.CreateStore(zero, alloc);
+      // Load and return the value
+      return B.CreateLoad(targetTy, alloc, "new.val");
+    }
+
+    // For primitives, just return the zero value
+    return llvm::Constant::getNullValue(targetTy);
+  }
+  if (auto *dropExpr = std::get_if<ExprDrop>(&e.v)) {
+    // drop(val) - calls drop method if type has @trait(drop), otherwise no-op
+    auto *operandVal = emitExpr(*dropExpr->operand);
+    if (!operandVal)
+      return nullptr;
+
+    if (dropExpr->dropMethod) {
+      // Call the drop method
+      llvm::Function *dropFunc = M.getFunction(*dropExpr->dropMethod);
+      if (!dropFunc) {
+        Err = "drop method not found: " + *dropExpr->dropMethod;
+        return nullptr;
+      }
+
+      std::vector<llvm::Value *> args;
+      args.push_back(operandVal);
+      B.CreateCall(dropFunc, args);
+    }
+    // drop() returns void, but we need to return something
+    // Return undef of void type isn't allowed, so return i32 0
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()), 0);
+  }
+  if (auto *allocExpr = std::get_if<ExprAlloc>(&e.v)) {
+    // alloc<T>() or alloc<T>(count) - heap allocate using malloc
+    llvm::Type *targetTy = to_llvm_type(M.getContext(), allocExpr->targetType);
+    if (!targetTy) {
+      Err = "unknown type for alloc<T>()";
+      return nullptr;
+    }
+
+    // Get or declare malloc function: void* malloc(size_t)
+    llvm::FunctionCallee mallocFunc = M.getOrInsertFunction(
+        "malloc", llvm::FunctionType::get(
+                      llvm::PointerType::get(M.getContext(), 0),
+                      {llvm::Type::getInt64Ty(M.getContext())}, false));
+
+    // Calculate allocation size
+    const llvm::DataLayout &DL = M.getDataLayout();
+    uint64_t elemSize = DL.getTypeAllocSize(targetTy);
+    llvm::Value *size = llvm::ConstantInt::get(
+        llvm::Type::getInt64Ty(M.getContext()), elemSize);
+
+    // If count is provided, multiply size by count
+    if (allocExpr->count) {
+      llvm::Value *countVal = emitExpr(**allocExpr->count);
+      if (!countVal)
+        return nullptr;
+      // Extend count to i64 if needed
+      if (countVal->getType()->getIntegerBitWidth() < 64) {
+        countVal = B.CreateZExt(
+            countVal, llvm::Type::getInt64Ty(M.getContext()), "count.ext");
+      }
+      size = B.CreateMul(size, countVal, "alloc.size");
+    }
+
+    // Call malloc
+    llvm::Value *rawPtr = B.CreateCall(mallocFunc, {size}, "alloc.raw");
+
+    // The result is already the right pointer type (opaque ptr in LLVM 15+)
+    return rawPtr;
+  }
+  if (auto *freeExpr = std::get_if<ExprFree>(&e.v)) {
+    // free(ptr) - deallocate using free()
+    llvm::Value *ptrVal = emitExpr(*freeExpr->operand);
+    if (!ptrVal)
+      return nullptr;
+
+    // Get or declare free function: void free(void*)
+    llvm::FunctionCallee freeFunc = M.getOrInsertFunction(
+        "free", llvm::FunctionType::get(
+                    llvm::Type::getVoidTy(M.getContext()),
+                    {llvm::PointerType::get(M.getContext(), 0)}, false));
+
+    // Call free
+    B.CreateCall(freeFunc, {ptrVal});
+
+    // free() returns void, return i32 0 as placeholder
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()), 0);
   }
   Err = "unsupported expression";
   return nullptr;

@@ -66,6 +66,13 @@ struct ExprMember {
   std::string member;
   bool ptr{false};
 };
+struct ExprMethodCall {
+  ExprPtr base;
+  std::string method;
+  std::string mangledMethod; // Set by Sema
+  std::vector<ExprPtr> args;
+  bool ptr{false}; // true for -> operator
+};
 struct ExprComptime {
   ExprPtr expr; // expression to evaluate at compile time
 };
@@ -82,6 +89,33 @@ struct ExprCast {
   std::optional<std::string> customCastFunc;
 };
 
+// Built-in new<T>() - zero-initializes and returns a value of type T
+struct ExprNew {
+  TypeName targetType;
+  // Resolved by sema - the drop method name if type has @trait(drop)
+  std::optional<std::string> dropMethod;
+};
+
+// Built-in drop(val) - calls drop method if type has @trait(drop), otherwise
+// no-op
+struct ExprDrop {
+  ExprPtr operand;
+  // Resolved by sema - the drop method name if type has @trait(drop)
+  std::optional<std::string> dropMethod;
+};
+
+// Built-in alloc<T>() - heap allocates, returns T*
+// alloc<T>(count) - allocates array of count elements, returns T*
+struct ExprAlloc {
+  TypeName targetType;
+  std::optional<ExprPtr> count; // nullptr for single allocation
+};
+
+// Built-in free(ptr) - deallocates heap memory
+struct ExprFree {
+  ExprPtr operand;
+};
+
 struct InitItem {
   std::optional<ExprPtr> designator; // [index] or .field (future)
   ExprPtr value;
@@ -94,7 +128,8 @@ struct ExprInitList {
 struct Expr {
   std::variant<ExprIdent, ExprInt, ExprFloat, ExprStr, ExprUnary, ExprBinary,
                ExprAssign, ExprCond, ExprCall, ExprIndex, ExprMember,
-               ExprComptime, ExprAddressOf, ExprDeref, ExprCast, ExprInitList>
+               ExprMethodCall, ExprComptime, ExprAddressOf, ExprDeref, ExprCast,
+               ExprInitList, ExprNew, ExprDrop, ExprAlloc, ExprFree>
       v;
   DiagLoc loc;
   Type *type{nullptr}; // Resolved type
@@ -182,10 +217,18 @@ struct StructField {
   TypeName type;
   std::vector<std::string> names;
 };
+
+// Attribute for decorator syntax: @trait(copy, clone, drop)
+struct Attribute {
+  std::string name;              // e.g. "trait"
+  std::vector<std::string> args; // e.g. ["copy", "clone", "drop"]
+};
+
 struct DeclStruct {
   std::string name;
   std::vector<StructField> fields;
   std::vector<std::string> genericParams; // e.g. struct Box<T> -> {"T"}
+  std::vector<Attribute> attributes;      // e.g. @trait(copy, drop)
 };
 
 struct EnumItem {
@@ -236,9 +279,23 @@ struct DeclLink {
   std::string lib;
 };
 
+// Trait method signature (no body)
+struct TraitMethod {
+  TypeName returnType;
+  std::string name;
+  std::vector<Param> params;
+};
+
+// Trait definition: trait Clone<T> { T clone(); }
+struct DeclTrait {
+  std::string name;
+  std::vector<std::string> genericParams; // e.g. trait Foo<T> -> {"T"}
+  std::vector<TraitMethod> methods;       // Method signatures
+};
+
 struct Decl {
   std::variant<DeclStruct, DeclEnum, DeclVar, DeclFunc, DeclImport, DeclLink,
-               DeclImpl, DeclCast>
+               DeclImpl, DeclCast, DeclTrait>
       v;
   DiagLoc loc;
 };

@@ -1,0 +1,54 @@
+import std.io;
+
+// Define traits
+trait Drop {
+    void drop();
+}
+
+trait Clone {
+    Self clone();
+}
+
+trait Debug {
+    void debug();
+}
+
+// Generic trait
+trait Into<T> {
+    T into();
+}
+
+// Point is copyable - no destructor needed
+@trait(copy)
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+// Box manages memory - needs drop
+@trait(drop, clone)
+struct Box {
+    i32* data;
+}
+
+// Can have multiple attributes
+@trait(copy, debug)
+@trait(default)
+struct Config {
+    i32 width;
+    i32 height;
+}
+
+i32 main() {
+    Point p;
+    p.x = 10;
+    p.y = 20;
+    
+    // Point is copy - both valid after assignment
+    Point p2 = p;
+    
+    printf("p: (%d, %d)\n", p.x, p.y);
+    printf("p2: (%d, %d)\n", p2.x, p2.y);
+    
+    return 0;
+}

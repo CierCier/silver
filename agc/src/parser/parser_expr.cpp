@@ -135,12 +135,101 @@ ExprPtr Parser::parsePrimary() {
         e->loc = loc;
         base = std::move(e);
       } else if (match(TokenKind::Dot)) {
-        std::string mem = expect(TokenKind::Identifier, "member").text;
+        // Member/method name - accept identifier or 'drop'/'new'/'alloc'/'free'
+        // keywords
+        std::string mem;
+        if (is(TokenKind::Identifier)) {
+          mem = expect(TokenKind::Identifier, "member").text;
+        } else if (is(TokenKind::Kw_drop)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_new)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_alloc)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_free)) {
+          mem = peek().text;
+          ++pos;
+        } else {
+          throw parse_error(peek(), "expected member name");
+        }
         auto loc = base->loc;
-        ExprPtr e = std::make_unique<Expr>();
-        e->v = ExprMember{std::move(base), std::move(mem), false};
-        e->loc = loc;
-        base = std::move(e);
+
+        // Check if this is a method call: base.method(args)
+        if (match(TokenKind::LParen)) {
+          std::vector<ExprPtr> args;
+          if (!is(TokenKind::RParen)) {
+            while (true) {
+              args.push_back(parseExpr());
+              if (match(TokenKind::Comma))
+                continue;
+              break;
+            }
+          }
+          expect(TokenKind::RParen, ")");
+
+          ExprPtr e = std::make_unique<Expr>();
+          e->v = ExprMethodCall{std::move(base), std::move(mem), "",
+                                std::move(args), false};
+          e->loc = loc;
+          base = std::move(e);
+        } else {
+          // Regular member access
+          ExprPtr e = std::make_unique<Expr>();
+          e->v = ExprMember{std::move(base), std::move(mem), false};
+          e->loc = loc;
+          base = std::move(e);
+        }
+      } else if (match(TokenKind::Arrow)) {
+        // Pointer member/method access with ->
+        std::string mem;
+        if (is(TokenKind::Identifier)) {
+          mem = expect(TokenKind::Identifier, "member").text;
+        } else if (is(TokenKind::Kw_drop)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_new)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_alloc)) {
+          mem = peek().text;
+          ++pos;
+        } else if (is(TokenKind::Kw_free)) {
+          mem = peek().text;
+          ++pos;
+        } else {
+          throw parse_error(peek(), "expected member name after ->");
+        }
+        auto loc = base->loc;
+
+        // Check if this is a method call: base->method(args)
+        if (match(TokenKind::LParen)) {
+          std::vector<ExprPtr> args;
+          if (!is(TokenKind::RParen)) {
+            while (true) {
+              args.push_back(parseExpr());
+              if (match(TokenKind::Comma))
+                continue;
+              break;
+            }
+          }
+          expect(TokenKind::RParen, ")");
+
+          ExprPtr e = std::make_unique<Expr>();
+          e->v = ExprMethodCall{std::move(base), std::move(mem), "",
+                                std::move(args), true}; // ptr=true for ->
+          e->loc = loc;
+          base = std::move(e);
+        } else {
+          // Pointer member access
+          ExprPtr e = std::make_unique<Expr>();
+          e->v = ExprMember{std::move(base), std::move(mem),
+                            true}; // ptr=true for ->
+          e->loc = loc;
+          base = std::move(e);
+        }
       } else if (match(TokenKind::PlusPlus)) {
         auto loc = base->loc;
         ExprPtr e = std::make_unique<Expr>();
@@ -270,6 +359,59 @@ ExprPtr Parser::parsePrimary() {
     auto expr = parseExpr();
     auto e = std::make_unique<Expr>();
     e->v = ExprComptime{std::move(expr)};
+    e->loc = loc;
+    return e;
+  }
+  // new<T>() - zero-initialize and return a value of type T
+  if (match(TokenKind::Kw_new)) {
+    auto loc = toks[pos - 1].loc;
+    expect(TokenKind::Lt, "<");
+    TypeName targetType = parseType();
+    expect(TokenKind::Gt, ">");
+    expect(TokenKind::LParen, "(");
+    expect(TokenKind::RParen, ")");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprNew{std::move(targetType), std::nullopt};
+    e->loc = loc;
+    return e;
+  }
+  // drop(expr) - call drop method if type has @trait(drop)
+  if (match(TokenKind::Kw_drop)) {
+    auto loc = toks[pos - 1].loc;
+    expect(TokenKind::LParen, "(");
+    auto operand = parseExpr();
+    expect(TokenKind::RParen, ")");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprDrop{std::move(operand), std::nullopt};
+    e->loc = loc;
+    return e;
+  }
+  // alloc<T>() - heap allocate single element, returns T*
+  // alloc<T>(count) - heap allocate array, returns T*
+  if (match(TokenKind::Kw_alloc)) {
+    auto loc = toks[pos - 1].loc;
+    expect(TokenKind::Lt, "<");
+    TypeName targetType = parseType();
+    expect(TokenKind::Gt, ">");
+    expect(TokenKind::LParen, "(");
+    std::optional<ExprPtr> count;
+    if (!is(TokenKind::RParen)) {
+      count = parseExpr();
+    }
+    expect(TokenKind::RParen, ")");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprAlloc{std::move(targetType), std::move(count)};
+    e->loc = loc;
+    return e;
+  }
+  // free(ptr) - deallocate heap memory
+  if (match(TokenKind::Kw_free)) {
+    auto loc = toks[pos - 1].loc;
+    expect(TokenKind::LParen, "(");
+    auto operand = parseExpr();
+    expect(TokenKind::RParen, ")");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprFree{std::move(operand)};
     e->loc = loc;
     return e;
   }

@@ -76,194 +76,230 @@ static void dumpStmt(const Stmt &s, std::ostream &os, int ind);
 static void dumpStmtBlock(const StmtBlock &b, std::ostream &os, int ind);
 
 static void dumpExpr(const Expr &e, std::ostream &os, int ind) {
-  std::visit(
-      overloaded{
-          [&](const ExprIdent &node) {
-            indent(os, ind);
-            os << "Ident(" << node.name << ")\n";
-          },
-          [&](const ExprInt &node) {
-            indent(os, ind);
-            os << "Int(" << node.value << ")\n";
-          },
-          [&](const ExprFloat &node) {
-            indent(os, ind);
-            os << "Float(" << node.value << ")\n";
-          },
-          [&](const ExprStr &node) {
-            indent(os, ind);
-            os << "Str(\"" << node.value << "\")\n";
-          },
-          [&](const ExprUnary &node) {
-            indent(os, ind);
-            os << "Unary(" << opName(node.op) << ")\n";
-            dumpExpr(*node.rhs, os, ind + 2);
-          },
-          [&](const ExprBinary &node) {
-            indent(os, ind);
-            os << "Binary(" << opName(node.op) << ")\n";
-            dumpExpr(*node.lhs, os, ind + 2);
-            dumpExpr(*node.rhs, os, ind + 2);
-          },
-          [&](const ExprAssign &node) {
-            indent(os, ind);
-            os << "Assign(" << opName(node.op) << ")\n";
-            dumpExpr(*node.lhs, os, ind + 2);
-            dumpExpr(*node.rhs, os, ind + 2);
-          },
-          [&](const ExprCond &node) {
-            indent(os, ind);
-            os << "Cond\n";
-            dumpExpr(*node.cond, os, ind + 2);
-            dumpExpr(*node.thenE, os, ind + 2);
-            dumpExpr(*node.elseE, os, ind + 2);
-          },
-          [&](const ExprCall &node) {
-            indent(os, ind);
-            os << "Call(" << node.callee << ")\n";
-            for (auto &a : node.args)
-              dumpExpr(*a, os, ind + 2);
-          },
-          [&](const ExprIndex &node) {
-            indent(os, ind);
-            os << "Index\n";
-            dumpExpr(*node.base, os, ind + 2);
-            dumpExpr(*node.index, os, ind + 2);
-          },
-          [&](const ExprMember &node) {
-            indent(os, ind);
-            os << (node.ptr ? "MemberPtr(" : "Member(") << node.member << ")\n";
-            dumpExpr(*node.base, os, ind + 2);
-          },
-          [&](const ExprComptime &node) {
-            indent(os, ind);
-            os << "Comptime\n";
-            dumpExpr(*node.expr, os, ind + 2);
-          },
-          [&](const ExprAddressOf &node) {
-            indent(os, ind);
-            os << "AddressOf(&)\n";
-            dumpExpr(*node.operand, os, ind + 2);
-          },
-          [&](const ExprDeref &node) {
-            indent(os, ind);
-            os << "Deref(*)\n";
-            dumpExpr(*node.operand, os, ind + 2);
-          },
-          [&](const ExprCast &node) {
-            indent(os, ind);
-            os << "Cast(";
-            dumpType(node.target, os);
-            os << ")\n";
-            dumpExpr(*node.expr, os, ind + 2);
-          },
-          [&](const ExprInitList &node) {
-            indent(os, ind);
-            os << "InitList\n";
-            for (auto &v : node.values) {
-              if (v.designator) {
-                indent(os, ind + 2);
-                os << "Designator:\n";
-                dumpExpr(**v.designator, os, ind + 4);
-              }
-              dumpExpr(*v.value, os, ind + 2);
-            }
-          },
-      },
-      e.v);
+  std::visit(overloaded{
+                 [&](const ExprIdent &node) {
+                   indent(os, ind);
+                   os << "Ident(" << node.name << ")\n";
+                 },
+                 [&](const ExprInt &node) {
+                   indent(os, ind);
+                   os << "Int(" << node.value << ")\n";
+                 },
+                 [&](const ExprFloat &node) {
+                   indent(os, ind);
+                   os << "Float(" << node.value << ")\n";
+                 },
+                 [&](const ExprStr &node) {
+                   indent(os, ind);
+                   os << "Str(\"" << node.value << "\")\n";
+                 },
+                 [&](const ExprUnary &node) {
+                   indent(os, ind);
+                   os << "Unary(" << opName(node.op) << ")\n";
+                   dumpExpr(*node.rhs, os, ind + 2);
+                 },
+                 [&](const ExprBinary &node) {
+                   indent(os, ind);
+                   os << "Binary(" << opName(node.op) << ")\n";
+                   dumpExpr(*node.lhs, os, ind + 2);
+                   dumpExpr(*node.rhs, os, ind + 2);
+                 },
+                 [&](const ExprAssign &node) {
+                   indent(os, ind);
+                   os << "Assign(" << opName(node.op) << ")\n";
+                   dumpExpr(*node.lhs, os, ind + 2);
+                   dumpExpr(*node.rhs, os, ind + 2);
+                 },
+                 [&](const ExprCond &node) {
+                   indent(os, ind);
+                   os << "Cond\n";
+                   dumpExpr(*node.cond, os, ind + 2);
+                   dumpExpr(*node.thenE, os, ind + 2);
+                   dumpExpr(*node.elseE, os, ind + 2);
+                 },
+                 [&](const ExprCall &node) {
+                   indent(os, ind);
+                   os << "Call(" << node.callee << ")\n";
+                   for (auto &a : node.args)
+                     dumpExpr(*a, os, ind + 2);
+                 },
+                 [&](const ExprIndex &node) {
+                   indent(os, ind);
+                   os << "Index\n";
+                   dumpExpr(*node.base, os, ind + 2);
+                   dumpExpr(*node.index, os, ind + 2);
+                 },
+                 [&](const ExprMember &node) {
+                   indent(os, ind);
+                   os << (node.ptr ? "MemberPtr(" : "Member(") << node.member
+                      << ")\n";
+                   dumpExpr(*node.base, os, ind + 2);
+                 },
+                 [&](const ExprMethodCall &node) {
+                   indent(os, ind);
+                   os << (node.ptr ? "MethodCallPtr(" : "MethodCall(")
+                      << node.method << ")\n";
+                   dumpExpr(*node.base, os, ind + 2);
+                   for (auto &arg : node.args) {
+                     dumpExpr(*arg, os, ind + 2);
+                   }
+                 },
+                 [&](const ExprComptime &node) {
+                   indent(os, ind);
+                   os << "Comptime\n";
+                   dumpExpr(*node.expr, os, ind + 2);
+                 },
+                 [&](const ExprAddressOf &node) {
+                   indent(os, ind);
+                   os << "AddressOf(&)\n";
+                   dumpExpr(*node.operand, os, ind + 2);
+                 },
+                 [&](const ExprDeref &node) {
+                   indent(os, ind);
+                   os << "Deref(*)\n";
+                   dumpExpr(*node.operand, os, ind + 2);
+                 },
+                 [&](const ExprCast &node) {
+                   indent(os, ind);
+                   os << "Cast(";
+                   dumpType(node.target, os);
+                   os << ")\n";
+                   dumpExpr(*node.expr, os, ind + 2);
+                 },
+                 [&](const ExprInitList &node) {
+                   indent(os, ind);
+                   os << "InitList\n";
+                   for (auto &v : node.values) {
+                     if (v.designator) {
+                       indent(os, ind + 2);
+                       os << "Designator:\n";
+                       dumpExpr(**v.designator, os, ind + 4);
+                     }
+                     dumpExpr(*v.value, os, ind + 2);
+                   }
+                 },
+                 [&](const ExprNew &node) {
+                   indent(os, ind);
+                   os << "New<";
+                   dumpType(node.targetType, os);
+                   os << ">()\n";
+                 },
+                 [&](const ExprDrop &node) {
+                   indent(os, ind);
+                   os << "Drop\n";
+                   dumpExpr(*node.operand, os, ind + 2);
+                 },
+                 [&](const ExprAlloc &node) {
+                   indent(os, ind);
+                   os << "Alloc<";
+                   dumpType(node.targetType, os);
+                   os << ">(";
+                   if (node.count) {
+                     os << "\n";
+                     dumpExpr(**node.count, os, ind + 2);
+                     indent(os, ind);
+                   }
+                   os << ")\n";
+                 },
+                 [&](const ExprFree &node) {
+                   indent(os, ind);
+                   os << "Free\n";
+                   dumpExpr(*node.operand, os, ind + 2);
+                 },
+             },
+             e.v);
 }
 
 static void dumpStmt(const Stmt &s, std::ostream &os, int ind) {
-  std::visit(
-      overloaded{
-          [&](const StmtExpr &node) {
-            indent(os, ind);
-            os << "ExprStmt\n";
-            dumpExpr(*node.expr, os, ind + 2);
-          },
-          [&](const StmtReturn &node) {
-            indent(os, ind);
-            os << "Return\n";
-            if (node.expr)
-              dumpExpr(**node.expr, os, ind + 2);
-          },
-          [&](const StmtDecl &node) {
-            indent(os, ind);
-            os << "DeclStmt ";
-            if (node.isConst)
-              os << "(const) ";
-            dumpType(node.type, os);
-            os << "\n";
-            for (auto &de : node.declarators) {
-              indent(os, ind + 2);
-              os << de.name << "\n";
-            }
-          },
-          [&](const StmtBlock &node) { dumpStmtBlock(node, os, ind); },
-          [&](const StmtFor &node) {
-            indent(os, ind);
-            os << "For\n";
-            if (node.init)
-              dumpStmt(*node.init->get(), os, ind + 2);
-            if (node.cond)
-              dumpExpr(**node.cond, os, ind + 2);
-            if (node.iter)
-              dumpExpr(**node.iter, os, ind + 2);
-            dumpStmt(*node.body, os, ind + 2);
-          },
-          [&](const StmtIf &node) {
-            indent(os, ind);
-            os << "If\n";
-            dumpExpr(*node.cond, os, ind + 2);
-            indent(os, ind + 2);
-            os << "Then:\n";
-            dumpStmt(*node.thenBranch, os, ind + 4);
-            if (node.elseBranch) {
-              indent(os, ind + 2);
-              os << "Else:\n";
-              dumpStmt(**node.elseBranch, os, ind + 4);
-            }
-          },
-          [&](const StmtWhile &node) {
-            indent(os, ind);
-            os << "While\n";
-            dumpExpr(*node.cond, os, ind + 2);
-            dumpStmt(*node.body, os, ind + 2);
-          },
-          [&](const StmtBreak &) {
-            indent(os, ind);
-            os << "Break\n";
-          },
-          [&](const StmtContinue &) {
-            indent(os, ind);
-            os << "Continue\n";
-          },
-          [&](const StmtAsm &node) {
-            indent(os, ind);
-            os << "Asm";
-            if (node.isVolatile)
-              os << " (volatile)";
-            os << "\n";
-          },
-          [&](const StmtSwitch &node) {
-            indent(os, ind);
-            os << "Switch\n";
-            dumpExpr(*node.cond, os, ind + 2);
-            for (auto &c : node.cases) {
-              indent(os, ind + 2);
-              os << "Case:\n";
-              for (auto &v : c.values)
-                dumpExpr(*v, os, ind + 4);
-              dumpStmt(*c.body, os, ind + 4);
-            }
-            if (node.defaultCase) {
-              indent(os, ind + 2);
-              os << "Default:\n";
-              dumpStmt(**node.defaultCase, os, ind + 4);
-            }
-          },
-      },
-      s.v);
+  std::visit(overloaded{
+                 [&](const StmtExpr &node) {
+                   indent(os, ind);
+                   os << "ExprStmt\n";
+                   dumpExpr(*node.expr, os, ind + 2);
+                 },
+                 [&](const StmtReturn &node) {
+                   indent(os, ind);
+                   os << "Return\n";
+                   if (node.expr)
+                     dumpExpr(**node.expr, os, ind + 2);
+                 },
+                 [&](const StmtDecl &node) {
+                   indent(os, ind);
+                   os << "DeclStmt ";
+                   if (node.isConst)
+                     os << "(const) ";
+                   dumpType(node.type, os);
+                   os << "\n";
+                   for (auto &de : node.declarators) {
+                     indent(os, ind + 2);
+                     os << de.name << "\n";
+                   }
+                 },
+                 [&](const StmtBlock &node) { dumpStmtBlock(node, os, ind); },
+                 [&](const StmtFor &node) {
+                   indent(os, ind);
+                   os << "For\n";
+                   if (node.init)
+                     dumpStmt(*node.init->get(), os, ind + 2);
+                   if (node.cond)
+                     dumpExpr(**node.cond, os, ind + 2);
+                   if (node.iter)
+                     dumpExpr(**node.iter, os, ind + 2);
+                   dumpStmt(*node.body, os, ind + 2);
+                 },
+                 [&](const StmtIf &node) {
+                   indent(os, ind);
+                   os << "If\n";
+                   dumpExpr(*node.cond, os, ind + 2);
+                   indent(os, ind + 2);
+                   os << "Then:\n";
+                   dumpStmt(*node.thenBranch, os, ind + 4);
+                   if (node.elseBranch) {
+                     indent(os, ind + 2);
+                     os << "Else:\n";
+                     dumpStmt(**node.elseBranch, os, ind + 4);
+                   }
+                 },
+                 [&](const StmtWhile &node) {
+                   indent(os, ind);
+                   os << "While\n";
+                   dumpExpr(*node.cond, os, ind + 2);
+                   dumpStmt(*node.body, os, ind + 2);
+                 },
+                 [&](const StmtBreak &) {
+                   indent(os, ind);
+                   os << "Break\n";
+                 },
+                 [&](const StmtContinue &) {
+                   indent(os, ind);
+                   os << "Continue\n";
+                 },
+                 [&](const StmtAsm &node) {
+                   indent(os, ind);
+                   os << "Asm";
+                   if (node.isVolatile)
+                     os << " (volatile)";
+                   os << "\n";
+                 },
+                 [&](const StmtSwitch &node) {
+                   indent(os, ind);
+                   os << "Switch\n";
+                   dumpExpr(*node.cond, os, ind + 2);
+                   for (auto &c : node.cases) {
+                     indent(os, ind + 2);
+                     os << "Case:\n";
+                     for (auto &v : c.values)
+                       dumpExpr(*v, os, ind + 4);
+                     dumpStmt(*c.body, os, ind + 4);
+                   }
+                   if (node.defaultCase) {
+                     indent(os, ind + 2);
+                     os << "Default:\n";
+                     dumpStmt(**node.defaultCase, os, ind + 4);
+                   }
+                 },
+             },
+             s.v);
 }
 
 static void dumpStmtBlock(const StmtBlock &b, std::ostream &os, int ind) {
@@ -288,10 +324,22 @@ void dump(const Program &prog, std::ostream &os) {
               }
               os << "\n";
             },
-            [&](const DeclLink &node) {
-              os << "  Link " << node.lib << "\n";
-            },
+            [&](const DeclLink &node) { os << "  Link " << node.lib << "\n"; },
             [&](const DeclStruct &node) {
+              // Dump attributes
+              for (const auto &attr : node.attributes) {
+                os << "  @" << attr.name;
+                if (!attr.args.empty()) {
+                  os << "(";
+                  for (size_t i = 0; i < attr.args.size(); ++i) {
+                    if (i)
+                      os << ", ";
+                    os << attr.args[i];
+                  }
+                  os << ")";
+                }
+                os << "\n";
+              }
               os << "  Struct " << node.name;
               if (!node.genericParams.empty()) {
                 os << "<";
@@ -399,6 +447,32 @@ void dump(const Program &prog, std::ostream &os) {
               if (node.isImplicit)
                 os << " (implicit)";
               os << "\n";
+            },
+            [&](const DeclTrait &node) {
+              os << "  Trait " << node.name;
+              if (!node.genericParams.empty()) {
+                os << "<";
+                for (size_t i = 0; i < node.genericParams.size(); ++i) {
+                  if (i)
+                    os << ", ";
+                  os << node.genericParams[i];
+                }
+                os << ">";
+              }
+              os << "\n";
+              for (const auto &m : node.methods) {
+                os << "    ";
+                dumpType(m.returnType, os);
+                os << " " << m.name << "(";
+                for (size_t i = 0; i < m.params.size(); ++i) {
+                  if (i)
+                    os << ", ";
+                  dumpType(m.params[i].type, os);
+                  if (!m.params[i].name.empty())
+                    os << " " << m.params[i].name;
+                }
+                os << ");\n";
+              }
             },
         },
         d.v);

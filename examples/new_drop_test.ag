@@ -1,0 +1,84 @@
+import std.io;
+
+// Define the Drop trait
+trait Drop {
+    void drop();
+}
+
+// A struct with drop trait - represents a resource that needs cleanup
+@trait(drop)
+struct Resource {
+    i32 id;
+    str name;
+}
+
+impl Resource {
+    void drop(Resource self) {
+        printf("Dropping Resource { id: %d, name: %s }\n", self.id, self.name);
+    }
+    
+    void print(Resource self) {
+        printf("Resource { id: %d, name: %s }\n", self.id, self.name);
+    }
+}
+
+// A simple struct without drop - should be zero-initialized
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+impl Point {
+    void print(Point self) {
+        printf("Point(%d, %d)\n", self.x, self.y);
+    }
+}
+
+i32 main() {
+    printf("=== Testing new<T>() ===\n");
+    
+    // Test new<Point>() - should create zero-initialized Point
+    Point p = new<Point>();
+    printf("new<Point>() created: ");
+    p.print();
+    
+    // Modify and print
+    p.x = 10;
+    p.y = 20;
+    printf("After modification: ");
+    p.print();
+    
+    printf("\n=== Testing new<T>() with drop trait ===\n");
+    
+    // Test new<Resource>() - should create zero-initialized Resource
+    Resource r = new<Resource>();
+    r.id = 42;
+    r.name = "TestResource";
+    printf("Created: ");
+    r.print();
+    
+    printf("\n=== Testing drop() ===\n");
+    
+    // Explicit drop - should call Resource.drop()
+    drop(r);
+    
+    // Create another resource
+    Resource r2 = new<Resource>();
+    r2.id = 100;
+    r2.name = "AnotherResource";
+    r2.print();
+    drop(r2);
+    
+    printf("\n=== Testing drop() on non-drop type ===\n");
+    
+    // drop() on Point should be a no-op (no drop trait)
+    Point p2 = new<Point>();
+    p2.x = 5;
+    p2.y = 15;
+    p2.print();
+    drop(p2);  // Should do nothing since Point has no @trait(drop)
+    printf("Point dropped (no-op)\n");
+    
+    printf("\nDone!\n");
+    return 0;
+}

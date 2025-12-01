@@ -47,12 +47,17 @@ private:
   DeclPtr parseExternal();
   DeclPtr parseImport();
   DeclPtr parseLink();
-  DeclPtr parseStruct();
+  DeclPtr parseStruct(std::vector<Attribute> attrs = {});
   DeclPtr parseEnum();
+  DeclPtr parseTrait();
   DeclPtr parseDeclOrFunc(TypeName ty, DiagLoc loc, bool isExtern,
                           bool isStatic);
   DeclPtr parseImpl();
   DeclPtr parseCast(bool isImplicit);
+
+  // Attributes (@trait, etc.)
+  Attribute parseAttribute();
+  std::vector<Attribute> parseAttributes();
 
   // Types and declarators (simplified)
   TypeName parseType();

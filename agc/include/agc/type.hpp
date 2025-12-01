@@ -112,6 +112,11 @@ public:
   const std::vector<CastInfo> &casts() const { return casts_; }
   const std::vector<MethodInfo> &methods() const { return methods_; }
 
+  // Trait support
+  void addTrait(const std::string &trait) { traits_.push_back(trait); }
+  bool hasTrait(const std::string &trait) const;
+  const std::vector<std::string> &traits() const { return traits_; }
+
   TypeKind kind() const override { return TypeKind::Struct; }
   std::string toString() const override { return name_; }
   const std::string &name() const { return name_; }
@@ -122,6 +127,7 @@ private:
   std::vector<Field> fields_;
   std::vector<CastInfo> casts_;
   std::vector<MethodInfo> methods_;
+  std::vector<std::string> traits_;
 };
 
 struct TypeEnumItem {

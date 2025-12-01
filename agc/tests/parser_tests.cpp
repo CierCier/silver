@@ -193,3 +193,71 @@ TEST(ParserTest, ConstVariable) {
   ASSERT_NE(varDecl, nullptr);
   EXPECT_FALSE(varDecl->isConst);
 }
+
+TEST(ParserTest, NewExpression) {
+  auto e = parseExpr("new<Point>()");
+  ASSERT_NE(e, nullptr);
+  auto *newExpr = std::get_if<ExprNew>(&e->v);
+  ASSERT_NE(newExpr, nullptr);
+  EXPECT_EQ(newExpr->targetType.name, "Point");
+}
+
+TEST(ParserTest, DropExpression) {
+  auto e = parseExpr("drop(x)");
+  ASSERT_NE(e, nullptr);
+  auto *dropExpr = std::get_if<ExprDrop>(&e->v);
+  ASSERT_NE(dropExpr, nullptr);
+  auto *id = std::get_if<ExprIdent>(&dropExpr->operand->v);
+  ASSERT_NE(id, nullptr);
+  EXPECT_EQ(id->name, "x");
+}
+
+TEST(ParserTest, DropMethodCall) {
+  // Test that .drop() method calls work
+  auto prog = parseProgram(R"(
+        void foo() {
+            r.drop();
+        }
+    )");
+  ASSERT_EQ(prog.decls.size(), 1);
+  auto *f = std::get_if<DeclFunc>(&prog.decls[0]->v);
+  ASSERT_NE(f, nullptr);
+  ASSERT_TRUE(f->body.has_value());
+  ASSERT_EQ(f->body->stmts.size(), 1);
+  auto *exprStmt = std::get_if<StmtExpr>(&f->body->stmts[0]->v);
+  ASSERT_NE(exprStmt, nullptr);
+  auto *mc = std::get_if<ExprMethodCall>(&exprStmt->expr->v);
+  ASSERT_NE(mc, nullptr);
+  EXPECT_EQ(mc->method, "drop");
+}
+
+TEST(ParserTest, AllocSingleExpression) {
+  auto e = parseExpr("alloc<i32>()");
+  ASSERT_NE(e, nullptr);
+  auto *allocExpr = std::get_if<ExprAlloc>(&e->v);
+  ASSERT_NE(allocExpr, nullptr);
+  EXPECT_EQ(allocExpr->targetType.name, "i32");
+  EXPECT_FALSE(allocExpr->count.has_value());
+}
+
+TEST(ParserTest, AllocArrayExpression) {
+  auto e = parseExpr("alloc<Point>(10)");
+  ASSERT_NE(e, nullptr);
+  auto *allocExpr = std::get_if<ExprAlloc>(&e->v);
+  ASSERT_NE(allocExpr, nullptr);
+  EXPECT_EQ(allocExpr->targetType.name, "Point");
+  ASSERT_TRUE(allocExpr->count.has_value());
+  auto *countExpr = std::get_if<ExprInt>(&(*allocExpr->count)->v);
+  ASSERT_NE(countExpr, nullptr);
+  EXPECT_EQ(countExpr->value, 10);
+}
+
+TEST(ParserTest, FreeExpression) {
+  auto e = parseExpr("free(ptr)");
+  ASSERT_NE(e, nullptr);
+  auto *freeExpr = std::get_if<ExprFree>(&e->v);
+  ASSERT_NE(freeExpr, nullptr);
+  auto *id = std::get_if<ExprIdent>(&freeExpr->operand->v);
+  ASSERT_NE(id, nullptr);
+  EXPECT_EQ(id->name, "ptr");
+}

@@ -103,6 +103,10 @@ void SemanticAnalyzer::visit(Decl &decl) {
       }
       popScope();
     }
+  } else if (auto *dt = std::get_if<DeclTrait>(&decl.v)) {
+    // Trait definitions are processed during trait registration
+    // Nothing to do here for now - validation happens elsewhere
+    (void)dt;
   }
 }
 

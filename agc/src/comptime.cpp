@@ -142,7 +142,8 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
           },
           [this](const ExprCall &node) -> ComptimeResult {
             // Check builtins
-            if (auto it = functions_.find(node.callee); it != functions_.end()) {
+            if (auto it = functions_.find(node.callee);
+                it != functions_.end()) {
               std::vector<ComptimeValue> args;
               for (const auto &arg : node.args) {
                 auto r = evaluate(*arg);
@@ -209,8 +210,9 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
                 "assignment to non-identifier not supported in comptime");
           },
           [](const ExprInitList &) -> ComptimeResult {
-            return ComptimeResult::fail("initializer list cannot be evaluated at "
-                                        "compile time without type context");
+            return ComptimeResult::fail(
+                "initializer list cannot be evaluated at "
+                "compile time without type context");
           },
           [](const auto &) -> ComptimeResult {
             return ComptimeResult::fail(
@@ -278,6 +280,12 @@ static void replace_comptime(ExprPtr &expr, ComptimeEvaluator &evaluator) {
             replace_comptime(n.index, evaluator);
           },
           [&](ExprMember &n) { replace_comptime(n.base, evaluator); },
+          [&](ExprMethodCall &n) {
+            replace_comptime(n.base, evaluator);
+            for (auto &arg : n.args) {
+              replace_comptime(arg, evaluator);
+            }
+          },
           [&](ExprAddressOf &n) { replace_comptime(n.operand, evaluator); },
           [&](ExprDeref &n) { replace_comptime(n.operand, evaluator); },
           [&](ExprCast &n) { replace_comptime(n.expr, evaluator); },
@@ -349,36 +357,35 @@ static void visit_stmt_comptime(StmtPtr &stmt, ComptimeEvaluator &evaluator) {
 
 void ComptimeEvaluator::evaluateProgram(Program &prog) {
   for (auto &d : prog.decls) {
-    std::visit(
-        overloaded{
-            [this](DeclFunc &f) {
-              if (f.body) {
-                for (auto &s : f.body->stmts) {
-                  visit_stmt_comptime(s, *this);
-                }
-              }
-            },
-            [this](DeclVar &v) {
-              for (auto &decl : v.declarators) {
-                if (decl.init && *decl.init) {
-                  replace_comptime(*decl.init, *this);
-                }
-              }
-            },
-            [this](DeclImpl &impl) {
-              for (auto &m : impl.methods) {
-                if (auto *f = std::get_if<DeclFunc>(&m->v)) {
-                  if (f->body) {
-                    for (auto &s : f->body->stmts) {
-                      visit_stmt_comptime(s, *this);
-                    }
-                  }
-                }
-              }
-            },
-            [](auto &) { /* other declaration types */ },
-        },
-        d->v);
+    std::visit(overloaded{
+                   [this](DeclFunc &f) {
+                     if (f.body) {
+                       for (auto &s : f.body->stmts) {
+                         visit_stmt_comptime(s, *this);
+                       }
+                     }
+                   },
+                   [this](DeclVar &v) {
+                     for (auto &decl : v.declarators) {
+                       if (decl.init && *decl.init) {
+                         replace_comptime(*decl.init, *this);
+                       }
+                     }
+                   },
+                   [this](DeclImpl &impl) {
+                     for (auto &m : impl.methods) {
+                       if (auto *f = std::get_if<DeclFunc>(&m->v)) {
+                         if (f->body) {
+                           for (auto &s : f->body->stmts) {
+                             visit_stmt_comptime(s, *this);
+                           }
+                         }
+                       }
+                     }
+                   },
+                   [](auto &) { /* other declaration types */ },
+               },
+               d->v);
   }
 }
 
@@ -395,7 +402,8 @@ ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {
                 return res;
               return ComptimeResult::success(*res.value, ComptimeFlow::Return);
             }
-            return ComptimeResult::success(ComptimeNull{}, ComptimeFlow::Return);
+            return ComptimeResult::success(ComptimeNull{},
+                                           ComptimeFlow::Return);
           },
           [this](const StmtDecl &s) -> ComptimeResult {
             for (const auto &decl : s.declarators) {
@@ -449,9 +457,7 @@ ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {
             }
             return ComptimeResult::success(ComptimeNull{});
           },
-          [this](const StmtBlock &s) -> ComptimeResult {
-            return evalBlock(s);
-          },
+          [this](const StmtBlock &s) -> ComptimeResult { return evalBlock(s); },
           [](const StmtBreak &) -> ComptimeResult {
             return ComptimeResult::success(ComptimeNull{}, ComptimeFlow::Break);
           },

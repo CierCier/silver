@@ -7,11 +7,21 @@ Notation: [] optional, {} zero or more, | alternation, () grouping.
 ```ebnf
 program              = { external_declaration } ;
 
-external_declaration = function_definition | declaration |struct_declaration ;
+external_declaration = function_definition | declaration | struct_declaration | trait_declaration ;
+
+(* Attributes - Python-style decorators *)
+attribute            = "@" identifier [ "(" identifier_list? ")" ] ;
+identifier_list      = identifier { "," identifier } ;
+
+(* Trait definitions *)
+trait_declaration    = "trait" identifier [ generic_params ] "{" { trait_method } "}" ;
+trait_method         = type identifier "(" [ param_list ] ")" ";" ;
 
 (* Structs: comma-separated members, optional trailing comma, no semicolon after the closing brace *)
+(* Structs can have attributes like @trait(copy, drop) *)
 
-struct_declaration   = "struct" identifier "{" struct_member_list? "}" ;
+struct_declaration   = { attribute } "struct" identifier [ generic_params ] "{" struct_member_list? "}" ;
+generic_params       = "<" identifier { "," identifier } ">" ;
 struct_member_list   = struct_member { "," struct_member } [ "," ] ;
 struct_member        = type declarator ;              (* e.g., i32 x  |  i32 y  *)
 
@@ -148,3 +158,51 @@ i32 main(i32 argc, str *argv) {
 	i32 *matrix[16];    // array of 16 pointers to i32
 	i32 (*row)[16];     // pointer to array of 16 i32
 ```
+
+- Traits (memory management markers):
+```silver
+// Define a trait with method signatures
+trait Drop {
+    void drop();
+}
+
+trait Clone {
+    Self clone();
+}
+
+// Generic trait
+trait Into<T> {
+    T into();
+}
+
+// Mark a struct as copyable (bitwise copy, no destructor)
+@trait(copy)
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+// Mark a struct as needing cleanup (drop) and cloneable
+@trait(drop, clone)
+struct Box<T> {
+    T* ptr;
+}
+
+// Multiple trait attributes
+@trait(copy, debug)
+@trait(default)
+struct Config {
+    i32 width;
+    i32 height;
+}
+```
+
+Built-in traits:
+- `copy` - Type is bitwise copyable, no destructor called
+- `clone` - Type supports explicit deep copy via `.clone()`
+- `drop` - Type has a destructor that will be called when it goes out of scope
+- `default` - Type supports default construction
+- `debug` - Type supports debug printing
+- `drop` - Type has a destructor that will be called when it goes out of scope
+- `default` - Type supports default construction
+- `debug` - Type supports debug printing

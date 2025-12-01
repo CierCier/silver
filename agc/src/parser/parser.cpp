@@ -69,6 +69,17 @@ DeclPtr Parser::parseExternal() {
     pos--;
     return parseLink();
   }
+  // Check for attributes before struct
+  if (is(TokenKind::At)) {
+    auto attrs = parseAttributes();
+    if (is(TokenKind::Kw_struct)) {
+      return parseStruct(std::move(attrs));
+    } else {
+      // For now, only structs support attributes
+      throw ParseError(peek().loc,
+                       "attributes are only supported on struct declarations");
+    }
+  }
   if (match(TokenKind::Kw_struct)) {
     pos--;
     return parseStruct();
@@ -76,6 +87,10 @@ DeclPtr Parser::parseExternal() {
   if (match(TokenKind::Kw_enum)) {
     pos--;
     return parseEnum();
+  }
+  if (match(TokenKind::Kw_trait)) {
+    pos--;
+    return parseTrait();
   }
   if (match(TokenKind::Kw_impl)) {
     pos--;

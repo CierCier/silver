@@ -50,6 +50,16 @@ static TokenKind keywordKind(std::string_view id) {
     return TokenKind::Kw_cast;
   if (id == "implicit")
     return TokenKind::Kw_implicit;
+  if (id == "trait")
+    return TokenKind::Kw_trait;
+  if (id == "new")
+    return TokenKind::Kw_new;
+  if (id == "drop")
+    return TokenKind::Kw_drop;
+  if (id == "alloc")
+    return TokenKind::Kw_alloc;
+  if (id == "free")
+    return TokenKind::Kw_free;
 
   if (id == "void")
     return TokenKind::Kw_void;
@@ -390,6 +400,9 @@ std::vector<Token> Lexer::lex() {
         out.push_back(Token{TokenKind::Ge, ">=", start});
       else
         out.push_back(Token{TokenKind::Gt, ">", start});
+      break;
+    case '@':
+      emit(TokenKind::At, c);
       break;
     default:
       // unknown char, skip
