@@ -43,6 +43,7 @@ public:
   void initParams(const std::vector<Param> &params);
   llvm::Value *emitExpr(const Expr &e);
   bool emitStmt(const Stmt &s);
+  bool emitBlock(const StmtBlock &body);
   bool emitBody(const StmtBlock &body);
 };
 

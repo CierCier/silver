@@ -1,4 +1,5 @@
 #include "agc/backends/codegen_js.hpp"
+#include "agc/overloaded.hpp"
 #include <sstream>
 
 namespace agc {
@@ -52,6 +53,58 @@ static int binPrec(TokenKind k) {
   }
 }
 
+static const char *binOpStr(TokenKind op) {
+  switch (op) {
+  case TokenKind::Plus:
+    return " + ";
+  case TokenKind::Minus:
+    return " - ";
+  case TokenKind::Star:
+    return " * ";
+  case TokenKind::Slash:
+    return " / ";
+  case TokenKind::Percent:
+    return " % ";
+  case TokenKind::AndAnd:
+    return " && ";
+  case TokenKind::OrOr:
+    return " || ";
+  case TokenKind::Eq:
+    return " === ";
+  case TokenKind::Ne:
+    return " !== ";
+  case TokenKind::Lt:
+    return " < ";
+  case TokenKind::Le:
+    return " <= ";
+  case TokenKind::Gt:
+    return " > ";
+  case TokenKind::Ge:
+    return " >= ";
+  default:
+    return " /*op*/ ";
+  }
+}
+
+static const char *assignOpStr(TokenKind op) {
+  switch (op) {
+  case TokenKind::Assign:
+    return "=";
+  case TokenKind::PlusAssign:
+    return "+=";
+  case TokenKind::MinusAssign:
+    return "-=";
+  case TokenKind::StarAssign:
+    return "*=";
+  case TokenKind::SlashAssign:
+    return "/=";
+  case TokenKind::PercentAssign:
+    return "%=";
+  default:
+    return "/*=*/";
+  }
+}
+
 static void emitCallArgs(const std::vector<ExprPtr> &args, std::ostream &os) {
   for (size_t i = 0; i < args.size(); ++i) {
     if (i)
@@ -62,255 +115,251 @@ static void emitCallArgs(const std::vector<ExprPtr> &args, std::ostream &os) {
 
 static void emitExpr(const Expr &e, std::ostream &os, int prec) {
   std::visit(
-      [&](auto const &node) {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, ExprIdent>) {
-          os << node.name;
-        } else if constexpr (std::is_same_v<T, ExprInt>) {
-          os << node.value;
-        } else if constexpr (std::is_same_v<T, ExprStr>) {
-          os << '"';
-          for (char c : node.value) {
-            if (c == '\\' || c == '"')
-              os << '\\' << c;
-            else if (c == '\n')
-              os << "\\n";
-            else
-              os << c;
-          }
-          os << '"';
-        } else if constexpr (std::is_same_v<T, ExprUnary>) {
-          if (node.op == TokenKind::Minus) {
-            os << '-';
-            emitExpr(*node.rhs, os, 7);
-          } else if (node.op == TokenKind::Bang) {
-            os << '!';
-            emitExpr(*node.rhs, os, 7);
-          } else if (node.op == TokenKind::PlusPlus) {
-            os << "(++";
+      overloaded{
+          [&](const ExprIdent &node) { os << node.name; },
+          [&](const ExprInt &node) { os << node.value; },
+          [&](const ExprFloat &node) { os << node.value; },
+          [&](const ExprStr &node) {
+            os << '"';
+            for (char c : node.value) {
+              if (c == '\\' || c == '"')
+                os << '\\' << c;
+              else if (c == '\n')
+                os << "\\n";
+              else
+                os << c;
+            }
+            os << '"';
+          },
+          [&](const ExprUnary &node) {
+            switch (node.op) {
+            case TokenKind::Minus:
+              os << '-';
+              emitExpr(*node.rhs, os, 7);
+              break;
+            case TokenKind::Bang:
+              os << '!';
+              emitExpr(*node.rhs, os, 7);
+              break;
+            case TokenKind::PlusPlus:
+              os << "(++";
+              emitExpr(*node.rhs, os);
+              os << ')';
+              break;
+            case TokenKind::MinusMinus:
+              os << "(--";
+              emitExpr(*node.rhs, os);
+              os << ')';
+              break;
+            default:
+              os << "/*unop*/";
+              break;
+            }
+          },
+          [&](const ExprBinary &node) {
+            int p = binPrec(node.op);
+            if (p < prec)
+              os << '(';
+            emitExpr(*node.lhs, os, p);
+            os << binOpStr(node.op);
+            emitExpr(*node.rhs, os, p + 1);
+            if (p < prec)
+              os << ')';
+          },
+          [&](const ExprAssign &node) {
+            emitExpr(*node.lhs, os);
+            os << ' ' << assignOpStr(node.op) << ' ';
             emitExpr(*node.rhs, os);
-            os << ')';
-          } else if (node.op == TokenKind::MinusMinus) {
-            os << "(--";
-            emitExpr(*node.rhs, os);
-            os << ')';
-          } else {
-            os << "/*unop*/";
-          }
-        } else if constexpr (std::is_same_v<T, ExprBinary>) {
-          int p = binPrec(node.op);
-          if (p < prec)
-            os << '(';
-          emitExpr(*node.lhs, os, p);
-          switch (node.op) {
-          case TokenKind::Plus:
-            os << " + ";
-            break;
-          case TokenKind::Minus:
-            os << " - ";
-            break;
-          case TokenKind::Star:
-            os << " * ";
-            break;
-          case TokenKind::Slash:
-            os << " / ";
-            break;
-          case TokenKind::Percent:
-            os << " % ";
-            break;
-          case TokenKind::AndAnd:
-            os << " && ";
-            break;
-          case TokenKind::OrOr:
-            os << " || ";
-            break;
-          case TokenKind::Eq:
-            os << " == ";
-            break;
-          case TokenKind::Ne:
-            os << " != ";
-            break;
-          case TokenKind::Lt:
-            os << " < ";
-            break;
-          case TokenKind::Le:
-            os << " <= ";
-            break;
-          case TokenKind::Gt:
-            os << " > ";
-            break;
-          case TokenKind::Ge:
-            os << " >= ";
-            break;
-          default:
-            os << " /*op*/ ";
-            break;
-          }
-          emitExpr(*node.rhs, os, p + 1);
-          if (p < prec)
-            os << ')';
-        } else if constexpr (std::is_same_v<T, ExprAssign>) {
-          emitExpr(*node.lhs, os);
-          os << ' ';
-          switch (node.op) {
-          case TokenKind::Assign:
-            os << '=';
-            break;
-          case TokenKind::PlusAssign:
-            os << "+=";
-            break;
-          case TokenKind::MinusAssign:
-            os << "-=";
-            break;
-          case TokenKind::StarAssign:
-            os << "*=";
-            break;
-          case TokenKind::SlashAssign:
-            os << "/=";
-            break;
-          case TokenKind::PercentAssign:
-            os << "%=";
-            break;
-          default:
-            os << "/*=*/";
-            break;
-          }
-          os << ' ';
-          emitExpr(*node.rhs, os);
-        } else if constexpr (std::is_same_v<T, ExprCond>) {
-          emitExpr(*node.cond, os);
-          os << " ? ";
-          emitExpr(*node.thenE, os);
-          os << " : ";
-          emitExpr(*node.elseE, os);
-        } else if constexpr (std::is_same_v<T, ExprCall>) {
-          if (node.callee == "println") {
-            os << "console.log(";
-            emitCallArgs(node.args, os);
-            os << ")";
-          } else {
-            os << node.callee << '(';
-            emitCallArgs(node.args, os);
-            os << ')';
-          }
-        } else if constexpr (std::is_same_v<T, ExprIndex>) {
-          emitExpr(*node.base, os);
-          os << '[';
-          emitExpr(*node.index, os);
-          os << ']';
-        } else if constexpr (std::is_same_v<T, ExprMember>) {
-          emitExpr(*node.base, os);
-          os << '.' << node.member;
-        } else if constexpr (std::is_same_v<T, ExprComptime>) {
-          // JS doesn't have comptime - just emit the inner expression
-          emitExpr(*node.expr, os);
-        } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
-          // JS doesn't support address-of - emit as comment
-          os << "/* &";
-          emitExpr(*node.operand, os);
-          os << " */";
-        } else if constexpr (std::is_same_v<T, ExprDeref>) {
-          // JS doesn't support dereference - emit as comment
-          os << "/* *";
-          emitExpr(*node.operand, os);
-          os << " */";
-        } else if constexpr (std::is_same_v<T, ExprCast>) {
-          // JS doesn't have type casts - just emit the expression
-          emitExpr(*node.expr, os);
-        } else if constexpr (std::is_same_v<T, ExprInitList>) {
-          // Emit as object/array literal
-          os << '{';
-          for (size_t i = 0; i < node.values.size(); ++i) {
-            if (i)
-              os << ", ";
-            emitExpr(*node.values[i], os);
-          }
-          os << '}';
-        }
+          },
+          [&](const ExprCond &node) {
+            emitExpr(*node.cond, os);
+            os << " ? ";
+            emitExpr(*node.thenE, os);
+            os << " : ";
+            emitExpr(*node.elseE, os);
+          },
+          [&](const ExprCall &node) {
+            if (node.callee == "println") {
+              os << "console.log(";
+              emitCallArgs(node.args, os);
+              os << ")";
+            } else {
+              os << node.callee << '(';
+              emitCallArgs(node.args, os);
+              os << ')';
+            }
+          },
+          [&](const ExprIndex &node) {
+            emitExpr(*node.base, os);
+            os << '[';
+            emitExpr(*node.index, os);
+            os << ']';
+          },
+          [&](const ExprMember &node) {
+            emitExpr(*node.base, os);
+            os << '.' << node.member;
+          },
+          [&](const ExprComptime &node) {
+            // JS doesn't have comptime - just emit the inner expression
+            emitExpr(*node.expr, os);
+          },
+          [&](const ExprAddressOf &node) {
+            // JS doesn't support address-of - emit as comment
+            os << "/* &";
+            emitExpr(*node.operand, os);
+            os << " */";
+          },
+          [&](const ExprDeref &node) {
+            // JS doesn't support dereference - emit as comment
+            os << "/* *";
+            emitExpr(*node.operand, os);
+            os << " */";
+          },
+          [&](const ExprCast &node) {
+            // JS doesn't have type casts - just emit the expression
+            emitExpr(*node.expr, os);
+          },
+          [&](const ExprInitList &node) {
+            // Emit as object/array literal
+            os << '{';
+            for (size_t i = 0; i < node.values.size(); ++i) {
+              if (i)
+                os << ", ";
+              emitExpr(*node.values[i].value, os);
+            }
+            os << '}';
+          },
       },
       e.v);
 }
 
+static void emitStmt(const Stmt &s, std::ostream &os, int ind);
+
+static void emitForInit(const Stmt &s, std::ostream &os) {
+  std::visit(
+      overloaded{
+          [&](const StmtDecl &ds) {
+            os << "let /*" << emitType(ds.type) << "*/ ";
+            for (size_t i = 0; i < ds.declarators.size(); ++i) {
+              if (i)
+                os << ", ";
+              os << ds.declarators[i].name;
+              if (ds.declarators[i].init && *ds.declarators[i].init) {
+                os << " = ";
+                emitExpr(**ds.declarators[i].init, os);
+              }
+            }
+          },
+          [&](const StmtExpr &es) { emitExpr(*es.expr, os); },
+          [&](const auto &) { /* other statement types not expected */ },
+      },
+      s.v);
+}
+
 static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
   std::visit(
-      [&](auto const &node) {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, StmtExpr>) {
-          indent(os, ind);
-          emitExpr(*node.expr, os);
-          os << ";\n";
-        } else if constexpr (std::is_same_v<T, StmtReturn>) {
-          indent(os, ind);
-          os << "return";
-          if (node.expr) {
-            os << ' ';
-            emitExpr(**node.expr, os);
-          }
-          os << ";\n";
-        } else if constexpr (std::is_same_v<T, StmtDecl>) {
-          indent(os, ind);
-          os << "let /*" << emitType(node.type) << "*/ ";
-          for (size_t i = 0; i < node.declarators.size(); ++i) {
-            if (i)
-              os << ", ";
-            os << node.declarators[i].name;
-          }
-          os << ";\n"; // initializers omitted for brevity
-        } else if constexpr (std::is_same_v<T, StmtBlock>) {
-          emitBlock(node, os, ind);
-        } else if constexpr (std::is_same_v<T, StmtFor>) {
-          indent(os, ind);
-          os << "for (";
-          if (node.init) {
-            // Only handle decl stmt init or expr stmt minimally
-            if (auto *ds = std::get_if<StmtDecl>(&node.init->get()->v)) {
-              os << "let /*" << emitType(ds->type) << "*/ ";
-              for (size_t i = 0; i < ds->declarators.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << ds->declarators[i].name;
-              }
-              os << "; ";
-            } else if (auto *es = std::get_if<StmtExpr>(&node.init->get()->v)) {
-              emitExpr(*es->expr, os);
-              os << "; ";
-            } else {
-              os << "; ";
-            }
-          } else {
-            os << "; ";
-          }
-          if (node.cond)
-            emitExpr(**node.cond, os);
-          os << "; ";
-          if (node.iter)
-            emitExpr(**node.iter, os);
-          os << ") ";
-          emitStmt(*node.body, os, 0);
-        } else if constexpr (std::is_same_v<T, StmtIf>) {
-          indent(os, ind);
-          os << "if (";
-          emitExpr(*node.cond, os);
-          os << ") ";
-          emitStmt(*node.thenBranch, os, 0);
-          if (node.elseBranch) {
+      overloaded{
+          [&](const StmtExpr &node) {
             indent(os, ind);
-            os << "else ";
-            emitStmt(**node.elseBranch, os, 0);
-          }
-        } else if constexpr (std::is_same_v<T, StmtWhile>) {
-          indent(os, ind);
-          os << "while (";
-          emitExpr(*node.cond, os);
-          os << ") ";
-          emitStmt(*node.body, os, 0);
-        } else if constexpr (std::is_same_v<T, StmtBreak>) {
-          indent(os, ind);
-          os << "break;\n";
-        } else if constexpr (std::is_same_v<T, StmtContinue>) {
-          indent(os, ind);
-          os << "continue;\n";
-        }
+            emitExpr(*node.expr, os);
+            os << ";\n";
+          },
+          [&](const StmtReturn &node) {
+            indent(os, ind);
+            os << "return";
+            if (node.expr) {
+              os << ' ';
+              emitExpr(**node.expr, os);
+            }
+            os << ";\n";
+          },
+          [&](const StmtDecl &node) {
+            indent(os, ind);
+            os << "let /*" << emitType(node.type) << "*/ ";
+            for (size_t i = 0; i < node.declarators.size(); ++i) {
+              if (i)
+                os << ", ";
+              os << node.declarators[i].name;
+              if (node.declarators[i].init && *node.declarators[i].init) {
+                os << " = ";
+                emitExpr(**node.declarators[i].init, os);
+              }
+            }
+            os << ";\n";
+          },
+          [&](const StmtBlock &node) { emitBlock(node, os, ind); },
+          [&](const StmtFor &node) {
+            indent(os, ind);
+            os << "for (";
+            if (node.init) {
+              emitForInit(**node.init, os);
+            }
+            os << "; ";
+            if (node.cond)
+              emitExpr(**node.cond, os);
+            os << "; ";
+            if (node.iter)
+              emitExpr(**node.iter, os);
+            os << ") ";
+            emitStmt(*node.body, os, 0);
+          },
+          [&](const StmtIf &node) {
+            indent(os, ind);
+            os << "if (";
+            emitExpr(*node.cond, os);
+            os << ") ";
+            emitStmt(*node.thenBranch, os, 0);
+            if (node.elseBranch) {
+              indent(os, ind);
+              os << "else ";
+              emitStmt(**node.elseBranch, os, 0);
+            }
+          },
+          [&](const StmtWhile &node) {
+            indent(os, ind);
+            os << "while (";
+            emitExpr(*node.cond, os);
+            os << ") ";
+            emitStmt(*node.body, os, 0);
+          },
+          [&](const StmtBreak &) {
+            indent(os, ind);
+            os << "break;\n";
+          },
+          [&](const StmtContinue &) {
+            indent(os, ind);
+            os << "continue;\n";
+          },
+          [&](const StmtAsm &) {
+            indent(os, ind);
+            os << "// inline assembly not supported in JS\n";
+          },
+          [&](const StmtSwitch &node) {
+            indent(os, ind);
+            os << "switch (";
+            emitExpr(*node.cond, os);
+            os << ") {\n";
+            for (auto &c : node.cases) {
+              for (auto &v : c.values) {
+                indent(os, ind);
+                os << "case ";
+                emitExpr(*v, os);
+                os << ":\n";
+              }
+              emitStmt(*c.body, os, ind + 2);
+              indent(os, ind + 2);
+              os << "break;\n";
+            }
+            if (node.defaultCase) {
+              indent(os, ind);
+              os << "default:\n";
+              emitStmt(**node.defaultCase, os, ind + 2);
+              indent(os, ind + 2);
+              os << "break;\n";
+            }
+            indent(os, ind);
+            os << "}\n";
+          },
       },
       s.v);
 }
@@ -329,49 +378,70 @@ public:
   std::string_view name() const override { return "js"; }
   bool generate(const Program &prog, std::ostream &os, std::string &err,
                 const CodegenOptions &) override {
+    (void)err;
     os << "// Transpiled by AGc (this is not reliable)\n\n";
-    // Emit functions and top-level vars; ignore struct/enum for now (emit as
-    // comments)
+
     for (auto const &dptr : prog.decls) {
       const Decl &d = *dptr;
       std::visit(
-          [&](auto const &node) {
-            using T = std::decay_t<decltype(node)>;
-            if constexpr (std::is_same_v<T, DeclImport>) {
-              os << "// import ";
-              for (size_t i = 0; i < node.path.size(); ++i) {
-                if (i)
-                  os << '.';
-                os << node.path[i];
-              }
-              os << "\n";
-            } else if constexpr (std::is_same_v<T, DeclStruct>) {
-              os << "// struct " << node.name << "\n";
-            } else if constexpr (std::is_same_v<T, DeclEnum>) {
-              os << "// enum " << node.name << "\n";
-            } else if constexpr (std::is_same_v<T, DeclVar>) {
-              os << "let /*" << emitType(node.type) << "*/ ";
-              for (size_t i = 0; i < node.declarators.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << node.declarators[i].name;
-              }
-              os << ";\n";
-            } else if constexpr (std::is_same_v<T, DeclFunc>) {
-              os << "function " << node.name << "(";
-              for (size_t i = 0; i < node.params.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << node.params[i].name;
-              }
-              os << ") ";
-              if (node.body) {
-                emitBlock(*node.body, os, 0);
-              } else {
-                os << "{}\n";
-              }
-              os << "\n";
-            }
+          overloaded{
+              [&](const DeclImport &node) {
+                os << "// import ";
+                for (size_t i = 0; i < node.path.size(); ++i) {
+                  if (i)
+                    os << '.';
+                  os << node.path[i];
+                }
+                os << "\n";
+              },
+              [&](const DeclLink &node) { os << "// link " << node.lib << "\n"; },
+              [&](const DeclStruct &node) {
+                os << "// struct " << node.name << "\n";
+              },
+              [&](const DeclEnum &node) {
+                os << "const " << node.name << " = Object.freeze({\n";
+                int64_t nextVal = 0;
+                for (auto &item : node.items) {
+                  int64_t val = item.value ? static_cast<int64_t>(*item.value) : nextVal;
+                  os << "  " << item.name << ": " << val << ",\n";
+                  nextVal = val + 1;
+                }
+                os << "});\n\n";
+              },
+              [&](const DeclVar &node) {
+                os << "let /*" << emitType(node.type) << "*/ ";
+                for (size_t i = 0; i < node.declarators.size(); ++i) {
+                  if (i)
+                    os << ", ";
+                  os << node.declarators[i].name;
+                  if (node.declarators[i].init && *node.declarators[i].init) {
+                    os << " = ";
+                    emitExpr(**node.declarators[i].init, os);
+                  }
+                }
+                os << ";\n";
+              },
+              [&](const DeclFunc &node) {
+                os << "function " << node.name << "(";
+                for (size_t i = 0; i < node.params.size(); ++i) {
+                  if (i)
+                    os << ", ";
+                  os << node.params[i].name;
+                }
+                os << ") ";
+                if (node.body) {
+                  emitBlock(*node.body, os, 0);
+                } else {
+                  os << "{}\n";
+                }
+                os << "\n";
+              },
+              [&](const DeclImpl &) {
+                // impl blocks handled inline in JS
+              },
+              [&](const DeclCast &) {
+                // cast operators not applicable in JS
+              },
           },
           d.v);
     }

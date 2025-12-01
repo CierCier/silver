@@ -1,4 +1,5 @@
 #include "llvm_emitter.hpp"
+#include <llvm/IR/InlineAsm.h>
 
 namespace agc {
 
@@ -32,9 +33,19 @@ void FunctionEmitter::initParams(const std::vector<Param> &params) {
   }
 }
 
+bool FunctionEmitter::emitBlock(const StmtBlock &body) {
+  for (auto &sp : body.stmts) {
+    if (!emitStmt(*sp))
+      return false;
+    if (B.GetInsertBlock()->getTerminator())
+      break; // block already has terminator (return/break/continue)
+  }
+  return true;
+}
+
 bool FunctionEmitter::emitStmt(const Stmt &s) {
   if (auto *sb = std::get_if<StmtBlock>(&s.v)) {
-    return emitBody(*sb);
+    return emitBlock(*sb);
   }
   if (auto *se = std::get_if<StmtExpr>(&s.v)) {
     if (!emitExpr(*se->expr))
@@ -238,6 +249,79 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
       return false;
     }
     B.CreateBr(ContinueBB);
+    return true;
+  }
+  if (auto *fr = std::get_if<StmtFor>(&s.v)) {
+    llvm::Function *TheFunction = B.GetInsertBlock()->getParent();
+    llvm::BasicBlock *CondBB =
+        llvm::BasicBlock::Create(M.getContext(), "for.cond", TheFunction);
+    llvm::BasicBlock *LoopBB =
+        llvm::BasicBlock::Create(M.getContext(), "for.body");
+    llvm::BasicBlock *IncBB =
+        llvm::BasicBlock::Create(M.getContext(), "for.inc");
+    llvm::BasicBlock *AfterBB =
+        llvm::BasicBlock::Create(M.getContext(), "for.end");
+
+    // Emit init
+    if (fr->init) {
+      if (!emitStmt(**fr->init))
+        return false;
+    }
+
+    B.CreateBr(CondBB);
+    B.SetInsertPoint(CondBB);
+
+    // Emit condition
+    if (fr->cond) {
+      auto *cond = emitExpr(**fr->cond);
+      if (!cond)
+        return false;
+      cond = castTo(cond, llvm::Type::getInt1Ty(M.getContext()));
+      B.CreateCondBr(cond, LoopBB, AfterBB);
+    } else {
+      // No condition = always true
+      B.CreateBr(LoopBB);
+    }
+
+    TheFunction->insert(TheFunction->end(), LoopBB);
+    B.SetInsertPoint(LoopBB);
+
+    auto *OldBreak = BreakBB;
+    auto *OldContinue = ContinueBB;
+    BreakBB = AfterBB;
+    ContinueBB = IncBB;
+
+    // Emit body
+    if (!emitStmt(*fr->body))
+      return false;
+    if (!B.GetInsertBlock()->getTerminator())
+      B.CreateBr(IncBB);
+
+    BreakBB = OldBreak;
+    ContinueBB = OldContinue;
+
+    // Emit increment
+    TheFunction->insert(TheFunction->end(), IncBB);
+    B.SetInsertPoint(IncBB);
+    if (fr->iter) {
+      if (!emitExpr(**fr->iter))
+        return false;
+    }
+    B.CreateBr(CondBB);
+
+    TheFunction->insert(TheFunction->end(), AfterBB);
+    B.SetInsertPoint(AfterBB);
+    return true;
+  }
+  if (auto *asmStmt = std::get_if<StmtAsm>(&s.v)) {
+    // Emit inline assembly
+    // LLVM inline assembly format: asm [volatile] ("assembly code" : outputs : inputs : clobbers)
+    // For simplicity, we emit with no outputs/inputs/clobbers
+    llvm::FunctionType *asmTy =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(M.getContext()), false);
+    llvm::InlineAsm *ia = llvm::InlineAsm::get(
+        asmTy, asmStmt->code, "", /*hasSideEffects=*/asmStmt->isVolatile);
+    B.CreateCall(asmTy, ia);
     return true;
   }
   if (auto *sw = std::get_if<StmtSwitch>(&s.v)) {

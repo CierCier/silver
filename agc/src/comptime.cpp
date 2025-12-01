@@ -1,4 +1,5 @@
 #include "agc/comptime.hpp"
+#include "agc/overloaded.hpp"
 #include <cmath>
 
 namespace agc {
@@ -49,166 +50,172 @@ ComptimeEvaluator::getVar(const std::string &name) {
 
 bool ComptimeEvaluator::isComptime(const Expr &expr) const {
   return std::visit(
-      [this](auto const &node) -> bool {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, ExprInt> ||
-                      std::is_same_v<T, ExprStr>) {
-          return true;
-        } else if constexpr (std::is_same_v<T, ExprIdent>) {
-          // Const cast to call non-const getVar, or duplicate getVar logic
-          // Since getVar is private and non-const (though it could be const),
-          // let's duplicate the lookup logic for const correctness
-          for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-            if (it->count(node.name))
-              return true;
-          }
-          if (constants_.count(node.name))
+      overloaded{
+          [](const ExprInt &) { return true; },
+          [](const ExprFloat &) { return true; },
+          [](const ExprStr &) { return true; },
+          [this](const ExprIdent &node) {
+            for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+              if (it->count(node.name))
+                return true;
+            }
+            return constants_.count(node.name) > 0;
+          },
+          [this](const ExprUnary &node) { return isComptime(*node.rhs); },
+          [this](const ExprBinary &node) {
+            return isComptime(*node.lhs) && isComptime(*node.rhs);
+          },
+          [this](const ExprCond &node) {
+            return isComptime(*node.cond) && isComptime(*node.thenE) &&
+                   isComptime(*node.elseE);
+          },
+          [this](const ExprCall &node) {
+            if (!functions_.count(node.callee) &&
+                !userFunctions_.count(node.callee))
+              return false;
+            for (auto &arg : node.args) {
+              if (!isComptime(*arg))
+                return false;
+            }
             return true;
-          return false;
-        } else if constexpr (std::is_same_v<T, ExprUnary>) {
-          return isComptime(*node.rhs);
-        } else if constexpr (std::is_same_v<T, ExprBinary>) {
-          return isComptime(*node.lhs) && isComptime(*node.rhs);
-        } else if constexpr (std::is_same_v<T, ExprCond>) {
-          return isComptime(*node.cond) && isComptime(*node.thenE) &&
-                 isComptime(*node.elseE);
-        } else if constexpr (std::is_same_v<T, ExprCall>) {
-          if (!functions_.count(node.callee) &&
-              !userFunctions_.count(node.callee))
-            return false;
-          for (auto &arg : node.args) {
-            if (!isComptime(*arg))
-              return false;
-          }
-          return true;
-        } else if constexpr (std::is_same_v<T, ExprComptime>) {
-          return isComptime(*node.expr);
-        } else if constexpr (std::is_same_v<T, ExprInitList>) {
-          for (auto &v : node.values) {
-            if (v.designator && !isComptime(**v.designator))
-              return false;
-            if (!isComptime(*v.value))
-              return false;
-          }
-          return true;
-        }
-        return false;
+          },
+          [this](const ExprComptime &node) { return isComptime(*node.expr); },
+          [this](const ExprInitList &node) {
+            for (auto &v : node.values) {
+              if (v.designator && !isComptime(**v.designator))
+                return false;
+              if (!isComptime(*v.value))
+                return false;
+            }
+            return true;
+          },
+          [](const auto &) { return false; },
       },
       expr.v);
 }
 
 ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
   return std::visit(
-      [this](auto const &node) -> ComptimeResult {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, ExprInt>) {
-          return ComptimeResult::success(
-              ComptimeInt{static_cast<int64_t>(node.value)});
-        } else if constexpr (std::is_same_v<T, ExprStr>) {
-          return ComptimeResult::success(ComptimeStr{node.value});
-        } else if constexpr (std::is_same_v<T, ExprIdent>) {
-          auto val = getVar(node.name);
-          if (val)
-            return ComptimeResult::success(*val);
-          return ComptimeResult::fail("unknown identifier: " + node.name);
-        } else if constexpr (std::is_same_v<T, ExprUnary>) {
-          auto operandResult = evaluate(*node.rhs);
-          if (!operandResult.ok())
-            return operandResult;
-          return evalUnary(node.op, *operandResult.value);
-        } else if constexpr (std::is_same_v<T, ExprBinary>) {
-          auto lhsResult = evaluate(*node.lhs);
-          if (!lhsResult.ok())
-            return lhsResult;
-          auto rhsResult = evaluate(*node.rhs);
-          if (!rhsResult.ok())
-            return rhsResult;
-          return evalBinary(node.op, *lhsResult.value, *rhsResult.value);
-        } else if constexpr (std::is_same_v<T, ExprCond>) {
-          auto condResult = evaluate(*node.cond);
-          if (!condResult.ok())
-            return condResult;
-          auto condBool = getBool(*condResult.value);
-          if (!condBool)
-            return ComptimeResult::fail("condition must be boolean");
-          return *condBool ? evaluate(*node.thenE) : evaluate(*node.elseE);
-        } else if constexpr (std::is_same_v<T, ExprComptime>) {
-          return evaluate(*node.expr);
-        } else if constexpr (std::is_same_v<T, ExprCall>) {
-          // Check builtins
-          if (auto it = functions_.find(node.callee); it != functions_.end()) {
-            std::vector<ComptimeValue> args;
-            for (const auto &arg : node.args) {
-              auto r = evaluate(*arg);
-              if (!r.ok())
-                return r;
-              args.push_back(std::move(*r.value));
-            }
-            return it->second(args);
-          }
-          // Check user functions
-          if (auto it = userFunctions_.find(node.callee);
-              it != userFunctions_.end()) {
-            const DeclFunc *func = it->second;
-            if (func->params.size() != node.args.size()) {
-              return ComptimeResult::fail("argument count mismatch");
-            }
-
-            // Evaluate args in current scope
-            std::vector<ComptimeValue> argVals;
-            for (const auto &arg : node.args) {
-              auto r = evaluate(*arg);
-              if (!r.ok())
-                return r;
-              argVals.push_back(std::move(*r.value));
-            }
-
-            // New scope for function call
-            pushScope();
-            // Bind params
-            for (size_t i = 0; i < func->params.size(); ++i) {
-              setVar(func->params[i].name, std::move(argVals[i]));
-            }
-
-            ComptimeResult res = ComptimeResult::success(ComptimeNull{});
-            if (func->body) {
-              res = evalBlock(*func->body);
-            }
-
-            popScope();
-            return res;
-          }
-          return ComptimeResult::fail("unknown function: " + node.callee);
-        } else if constexpr (std::is_same_v<T, ExprAssign>) {
-          // Evaluate RHS
-          auto rhs = evaluate(*node.rhs);
-          if (!rhs.ok())
-            return rhs;
-
-          // LHS must be identifier for now
-          if (auto *id = std::get_if<ExprIdent>(&node.lhs->v)) {
-            // Find variable location and update
-            // Simple update: check scopes
-            for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-              if (it->count(id->name)) {
-                (*it)[id->name] = *rhs.value;
-                return rhs;
+      overloaded{
+          [](const ExprInt &node) -> ComptimeResult {
+            return ComptimeResult::success(
+                ComptimeInt{static_cast<int64_t>(node.value)});
+          },
+          [](const ExprFloat &node) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeFloat{node.value});
+          },
+          [](const ExprStr &node) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeStr{node.value});
+          },
+          [this](const ExprIdent &node) -> ComptimeResult {
+            auto val = getVar(node.name);
+            if (val)
+              return ComptimeResult::success(*val);
+            return ComptimeResult::fail("unknown identifier: " + node.name);
+          },
+          [this](const ExprUnary &node) -> ComptimeResult {
+            auto operandResult = evaluate(*node.rhs);
+            if (!operandResult.ok())
+              return operandResult;
+            return evalUnary(node.op, *operandResult.value);
+          },
+          [this](const ExprBinary &node) -> ComptimeResult {
+            auto lhsResult = evaluate(*node.lhs);
+            if (!lhsResult.ok())
+              return lhsResult;
+            auto rhsResult = evaluate(*node.rhs);
+            if (!rhsResult.ok())
+              return rhsResult;
+            return evalBinary(node.op, *lhsResult.value, *rhsResult.value);
+          },
+          [this](const ExprCond &node) -> ComptimeResult {
+            auto condResult = evaluate(*node.cond);
+            if (!condResult.ok())
+              return condResult;
+            auto condBool = getBool(*condResult.value);
+            if (!condBool)
+              return ComptimeResult::fail("condition must be boolean");
+            return *condBool ? evaluate(*node.thenE) : evaluate(*node.elseE);
+          },
+          [this](const ExprComptime &node) -> ComptimeResult {
+            return evaluate(*node.expr);
+          },
+          [this](const ExprCall &node) -> ComptimeResult {
+            // Check builtins
+            if (auto it = functions_.find(node.callee); it != functions_.end()) {
+              std::vector<ComptimeValue> args;
+              for (const auto &arg : node.args) {
+                auto r = evaluate(*arg);
+                if (!r.ok())
+                  return r;
+                args.push_back(std::move(*r.value));
               }
+              return it->second(args);
             }
-            return ComptimeResult::fail("assignment to unknown variable: " +
-                                        id->name);
-          }
-          return ComptimeResult::fail(
-              "assignment to non-identifier not supported in comptime");
-        } else if constexpr (std::is_same_v<T, ExprInitList>) {
-          // InitList cannot be directly evaluated to a single value
-          // It's used for struct initialization and requires type context
-          return ComptimeResult::fail("initializer list cannot be evaluated at "
-                                      "compile time without type context");
-        } else {
-          return ComptimeResult::fail(
-              "expression cannot be evaluated at compile time");
-        }
+            // Check user functions
+            if (auto it = userFunctions_.find(node.callee);
+                it != userFunctions_.end()) {
+              const DeclFunc *func = it->second;
+              if (func->params.size() != 0 &&
+                  func->params.size() != node.args.size()) {
+                return ComptimeResult::fail("argument count mismatch");
+              }
+
+              // Evaluate args in current scope
+              std::vector<ComptimeValue> argVals;
+              for (const auto &arg : node.args) {
+                auto r = evaluate(*arg);
+                if (!r.ok())
+                  return r;
+                argVals.push_back(std::move(*r.value));
+              }
+
+              // New scope for function call
+              pushScope();
+              // Bind params
+              for (size_t i = 0; i < func->params.size(); ++i) {
+                setVar(func->params[i].name, std::move(argVals[i]));
+              }
+
+              ComptimeResult res = ComptimeResult::success(ComptimeNull{});
+              if (func->body) {
+                res = evalBlock(*func->body);
+              }
+
+              popScope();
+              return res;
+            }
+            return ComptimeResult::fail("unknown function: " + node.callee);
+          },
+          [this](const ExprAssign &node) -> ComptimeResult {
+            // Evaluate RHS
+            auto rhs = evaluate(*node.rhs);
+            if (!rhs.ok())
+              return rhs;
+
+            // LHS must be identifier for now
+            if (auto *id = std::get_if<ExprIdent>(&node.lhs->v)) {
+              // Find variable location and update
+              for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+                if (it->count(id->name)) {
+                  (*it)[id->name] = *rhs.value;
+                  return rhs;
+                }
+              }
+              return ComptimeResult::fail("assignment to unknown variable: " +
+                                          id->name);
+            }
+            return ComptimeResult::fail(
+                "assignment to non-identifier not supported in comptime");
+          },
+          [](const ExprInitList &) -> ComptimeResult {
+            return ComptimeResult::fail("initializer list cannot be evaluated at "
+                                        "compile time without type context");
+          },
+          [](const auto &) -> ComptimeResult {
+            return ComptimeResult::fail(
+                "expression cannot be evaluated at compile time");
+          },
       },
       expr.v);
 }
@@ -222,21 +229,22 @@ static void replace_comptime(ExprPtr &expr, ComptimeEvaluator &evaluator) {
     auto res = evaluator.evaluate(*ct->expr);
     if (res.ok()) {
       // Replace expr with constant
-      if (auto *i = std::get_if<ComptimeInt>(&*res.value)) {
-        expr->v = ExprInt{static_cast<uint64_t>(i->value)};
-      } else if (auto *s = std::get_if<ComptimeStr>(&*res.value)) {
-        expr->v = ExprStr{s->value};
-      } else if (auto *b = std::get_if<ComptimeBool>(&*res.value)) {
-        expr->v = ExprInt{
-            static_cast<uint64_t>(b->value ? 1 : 0)}; // Bool as int for now
-      } else {
-        // Warning or error?
-      }
+      std::visit(
+          overloaded{
+              [&](const ComptimeInt &i) {
+                expr->v = ExprInt{static_cast<uint64_t>(i.value)};
+              },
+              [&](const ComptimeFloat &f) { expr->v = ExprFloat{f.value}; },
+              [&](const ComptimeStr &s) { expr->v = ExprStr{s.value}; },
+              [&](const ComptimeBool &b) {
+                expr->v = ExprInt{static_cast<uint64_t>(b.value ? 1 : 0)};
+              },
+              [](const auto &) {
+                // Warning or error for unhandled types
+              },
+          },
+          *res.value);
     } else {
-      // Error handling? For now just print to stderr as before, or throw?
-      // Since we moved this from main, we might want a better error reporting
-      // mechanism. For now, let's keep it simple and maybe print to stderr if
-      // we can't propagate.
       fprintf(stderr, "error: comptime evaluation failed: %s\n",
               res.error.c_str());
       exit(1);
@@ -244,35 +252,43 @@ static void replace_comptime(ExprPtr &expr, ComptimeEvaluator &evaluator) {
     return;
   }
 
-  // Recurse
+  // Recurse into child expressions
   std::visit(
-      [&](auto &n) {
-        using T = std::decay_t<decltype(n)>;
-        if constexpr (std::is_same_v<T, ExprUnary>) {
-          replace_comptime(n.rhs, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprBinary>) {
-          replace_comptime(n.lhs, evaluator);
-          replace_comptime(n.rhs, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprAssign>) {
-          replace_comptime(n.lhs, evaluator);
-          replace_comptime(n.rhs, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprCond>) {
-          replace_comptime(n.cond, evaluator);
-          replace_comptime(n.thenE, evaluator);
-          replace_comptime(n.elseE, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprCall>) {
-          for (auto &arg : n.args)
-            replace_comptime(arg, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprIndex>) {
-          replace_comptime(n.base, evaluator);
-          replace_comptime(n.index, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprMember>) {
-          replace_comptime(n.base, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
-          replace_comptime(n.operand, evaluator);
-        } else if constexpr (std::is_same_v<T, ExprDeref>) {
-          replace_comptime(n.operand, evaluator);
-        }
+      overloaded{
+          [&](ExprUnary &n) { replace_comptime(n.rhs, evaluator); },
+          [&](ExprBinary &n) {
+            replace_comptime(n.lhs, evaluator);
+            replace_comptime(n.rhs, evaluator);
+          },
+          [&](ExprAssign &n) {
+            replace_comptime(n.lhs, evaluator);
+            replace_comptime(n.rhs, evaluator);
+          },
+          [&](ExprCond &n) {
+            replace_comptime(n.cond, evaluator);
+            replace_comptime(n.thenE, evaluator);
+            replace_comptime(n.elseE, evaluator);
+          },
+          [&](ExprCall &n) {
+            for (auto &arg : n.args)
+              replace_comptime(arg, evaluator);
+          },
+          [&](ExprIndex &n) {
+            replace_comptime(n.base, evaluator);
+            replace_comptime(n.index, evaluator);
+          },
+          [&](ExprMember &n) { replace_comptime(n.base, evaluator); },
+          [&](ExprAddressOf &n) { replace_comptime(n.operand, evaluator); },
+          [&](ExprDeref &n) { replace_comptime(n.operand, evaluator); },
+          [&](ExprCast &n) { replace_comptime(n.expr, evaluator); },
+          [&](ExprInitList &n) {
+            for (auto &item : n.values) {
+              if (item.designator)
+                replace_comptime(*item.designator, evaluator);
+              replace_comptime(item.value, evaluator);
+            }
+          },
+          [](auto &) { /* leaf nodes - nothing to recurse into */ },
       },
       expr->v);
 }
@@ -281,127 +297,171 @@ static void visit_stmt_comptime(StmtPtr &stmt, ComptimeEvaluator &evaluator) {
   if (!stmt)
     return;
   std::visit(
-      [&](auto &s) {
-        using T = std::decay_t<decltype(s)>;
-        if constexpr (std::is_same_v<T, StmtExpr>) {
-          replace_comptime(s.expr, evaluator);
-        } else if constexpr (std::is_same_v<T, StmtReturn>) {
-          if (s.expr)
-            replace_comptime(*s.expr, evaluator);
-        } else if constexpr (std::is_same_v<T, StmtDecl>) {
-          for (auto &decl : s.declarators) {
-            if (decl.init && *decl.init)
-              replace_comptime(*decl.init, evaluator);
-          }
-        } else if constexpr (std::is_same_v<T, StmtIf>) {
-          replace_comptime(s.cond, evaluator);
-          visit_stmt_comptime(s.thenBranch, evaluator);
-          if (s.elseBranch)
-            visit_stmt_comptime(*s.elseBranch, evaluator);
-        } else if constexpr (std::is_same_v<T, StmtWhile>) {
-          replace_comptime(s.cond, evaluator);
-          visit_stmt_comptime(s.body, evaluator);
-        } else if constexpr (std::is_same_v<T, StmtBlock>) {
-          for (auto &st : s.stmts)
-            visit_stmt_comptime(st, evaluator);
-        } else if constexpr (std::is_same_v<T, StmtFor>) {
-          if (s.init)
-            visit_stmt_comptime(*s.init, evaluator);
-          if (s.cond)
-            replace_comptime(*s.cond, evaluator);
-          if (s.iter)
-            replace_comptime(*s.iter, evaluator);
-          visit_stmt_comptime(s.body, evaluator);
-        }
+      overloaded{
+          [&](StmtExpr &s) { replace_comptime(s.expr, evaluator); },
+          [&](StmtReturn &s) {
+            if (s.expr)
+              replace_comptime(*s.expr, evaluator);
+          },
+          [&](StmtDecl &s) {
+            for (auto &decl : s.declarators) {
+              if (decl.init && *decl.init)
+                replace_comptime(*decl.init, evaluator);
+            }
+          },
+          [&](StmtIf &s) {
+            replace_comptime(s.cond, evaluator);
+            visit_stmt_comptime(s.thenBranch, evaluator);
+            if (s.elseBranch)
+              visit_stmt_comptime(*s.elseBranch, evaluator);
+          },
+          [&](StmtWhile &s) {
+            replace_comptime(s.cond, evaluator);
+            visit_stmt_comptime(s.body, evaluator);
+          },
+          [&](StmtBlock &s) {
+            for (auto &st : s.stmts)
+              visit_stmt_comptime(st, evaluator);
+          },
+          [&](StmtFor &s) {
+            if (s.init)
+              visit_stmt_comptime(*s.init, evaluator);
+            if (s.cond)
+              replace_comptime(*s.cond, evaluator);
+            if (s.iter)
+              replace_comptime(*s.iter, evaluator);
+            visit_stmt_comptime(s.body, evaluator);
+          },
+          [&](StmtSwitch &s) {
+            replace_comptime(s.cond, evaluator);
+            for (auto &c : s.cases) {
+              for (auto &v : c.values)
+                replace_comptime(v, evaluator);
+              visit_stmt_comptime(c.body, evaluator);
+            }
+            if (s.defaultCase)
+              visit_stmt_comptime(*s.defaultCase, evaluator);
+          },
+          [](auto &) { /* StmtBreak, StmtContinue, StmtAsm - nothing to do */ },
       },
       stmt->v);
 }
 
 void ComptimeEvaluator::evaluateProgram(Program &prog) {
   for (auto &d : prog.decls) {
-    if (auto *f = std::get_if<DeclFunc>(&d->v)) {
-      if (f->body) {
-        for (auto &s : f->body->stmts) {
-          visit_stmt_comptime(s, *this);
-        }
-      }
-    } else if (auto *v = std::get_if<DeclVar>(&d->v)) {
-      for (auto &decl : v->declarators) {
-        if (decl.init && *decl.init) {
-          replace_comptime(*decl.init, *this);
-        }
-      }
-    }
+    std::visit(
+        overloaded{
+            [this](DeclFunc &f) {
+              if (f.body) {
+                for (auto &s : f.body->stmts) {
+                  visit_stmt_comptime(s, *this);
+                }
+              }
+            },
+            [this](DeclVar &v) {
+              for (auto &decl : v.declarators) {
+                if (decl.init && *decl.init) {
+                  replace_comptime(*decl.init, *this);
+                }
+              }
+            },
+            [this](DeclImpl &impl) {
+              for (auto &m : impl.methods) {
+                if (auto *f = std::get_if<DeclFunc>(&m->v)) {
+                  if (f->body) {
+                    for (auto &s : f->body->stmts) {
+                      visit_stmt_comptime(s, *this);
+                    }
+                  }
+                }
+              }
+            },
+            [](auto &) { /* other declaration types */ },
+        },
+        d->v);
   }
 }
 
 ComptimeResult ComptimeEvaluator::evalStmt(const Stmt &stmt) {
   return std::visit(
-      [this](auto const &s) -> ComptimeResult {
-        using T = std::decay_t<decltype(s)>;
-        if constexpr (std::is_same_v<T, StmtExpr>) {
-          return evaluate(*s.expr);
-        } else if constexpr (std::is_same_v<T, StmtReturn>) {
-          if (s.expr) {
-            auto res = evaluate(**s.expr);
-            if (!res.ok())
-              return res;
-            return ComptimeResult::success(*res.value, ComptimeFlow::Return);
-          }
-          return ComptimeResult::success(ComptimeNull{}, ComptimeFlow::Return);
-        } else if constexpr (std::is_same_v<T, StmtDecl>) {
-          for (const auto &decl : s.declarators) {
-            if (decl.init && *decl.init) {
-              auto val = evaluate(**decl.init);
-              if (!val.ok())
-                return val;
-              setVar(decl.name, *val.value);
-            } else {
-              // Default init to 0/null
-              setVar(decl.name, ComptimeInt{0});
+      overloaded{
+          [this](const StmtExpr &s) -> ComptimeResult {
+            return evaluate(*s.expr);
+          },
+          [this](const StmtReturn &s) -> ComptimeResult {
+            if (s.expr) {
+              auto res = evaluate(**s.expr);
+              if (!res.ok())
+                return res;
+              return ComptimeResult::success(*res.value, ComptimeFlow::Return);
             }
-          }
-          return ComptimeResult::success(ComptimeNull{});
-        } else if constexpr (std::is_same_v<T, StmtIf>) {
-          auto cond = evaluate(*s.cond);
-          if (!cond.ok())
-            return cond;
-          auto b = getBool(*cond.value);
-          if (!b)
-            return ComptimeResult::fail("if condition must be boolean");
-
-          if (*b) {
-            return evalStmt(*s.thenBranch);
-          } else if (s.elseBranch) {
-            return evalStmt(**s.elseBranch);
-          }
-          return ComptimeResult::success(ComptimeNull{});
-        } else if constexpr (std::is_same_v<T, StmtWhile>) {
-          while (true) {
+            return ComptimeResult::success(ComptimeNull{}, ComptimeFlow::Return);
+          },
+          [this](const StmtDecl &s) -> ComptimeResult {
+            for (const auto &decl : s.declarators) {
+              if (decl.init && *decl.init) {
+                auto val = evaluate(**decl.init);
+                if (!val.ok())
+                  return val;
+                setVar(decl.name, *val.value);
+              } else {
+                // Default init to 0/null
+                setVar(decl.name, ComptimeInt{0});
+              }
+            }
+            return ComptimeResult::success(ComptimeNull{});
+          },
+          [this](const StmtIf &s) -> ComptimeResult {
             auto cond = evaluate(*s.cond);
             if (!cond.ok())
               return cond;
             auto b = getBool(*cond.value);
             if (!b)
-              return ComptimeResult::fail("while condition must be boolean");
-            if (!*b)
-              break;
+              return ComptimeResult::fail("if condition must be boolean");
 
-            auto res = evalStmt(*s.body);
-            if (!res.ok())
-              return res;
-            if (res.flow == ComptimeFlow::Return)
-              return res;
-            if (res.flow == ComptimeFlow::Break)
-              break;
-            if (res.flow == ComptimeFlow::Continue)
-              continue;
-          }
-          return ComptimeResult::success(ComptimeNull{});
-        } else if constexpr (std::is_same_v<T, StmtBlock>) {
-          return evalBlock(s);
-        }
-        return ComptimeResult::success(ComptimeNull{});
+            if (*b) {
+              return evalStmt(*s.thenBranch);
+            } else if (s.elseBranch) {
+              return evalStmt(**s.elseBranch);
+            }
+            return ComptimeResult::success(ComptimeNull{});
+          },
+          [this](const StmtWhile &s) -> ComptimeResult {
+            while (true) {
+              auto cond = evaluate(*s.cond);
+              if (!cond.ok())
+                return cond;
+              auto b = getBool(*cond.value);
+              if (!b)
+                return ComptimeResult::fail("while condition must be boolean");
+              if (!*b)
+                break;
+
+              auto res = evalStmt(*s.body);
+              if (!res.ok())
+                return res;
+              if (res.flow == ComptimeFlow::Return)
+                return res;
+              if (res.flow == ComptimeFlow::Break)
+                break;
+              if (res.flow == ComptimeFlow::Continue)
+                continue;
+            }
+            return ComptimeResult::success(ComptimeNull{});
+          },
+          [this](const StmtBlock &s) -> ComptimeResult {
+            return evalBlock(s);
+          },
+          [](const StmtBreak &) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeNull{}, ComptimeFlow::Break);
+          },
+          [](const StmtContinue &) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeNull{},
+                                           ComptimeFlow::Continue);
+          },
+          [](const auto &) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeNull{});
+          },
       },
       stmt.v);
 }

@@ -326,6 +326,30 @@ ExprPtr Parser::parseExpr() {
     e->loc = e->loc;
     return e;
   }
+  // Compound assignment operators
+  TokenKind compoundOp = TokenKind::End; // sentinel for "no match"
+  if (match(TokenKind::PlusAssign))
+    compoundOp = TokenKind::PlusAssign;
+  else if (match(TokenKind::MinusAssign))
+    compoundOp = TokenKind::MinusAssign;
+  else if (match(TokenKind::StarAssign))
+    compoundOp = TokenKind::StarAssign;
+  else if (match(TokenKind::SlashAssign))
+    compoundOp = TokenKind::SlashAssign;
+  else if (match(TokenKind::PercentAssign))
+    compoundOp = TokenKind::PercentAssign;
+  else if (match(TokenKind::ShlAssign))
+    compoundOp = TokenKind::ShlAssign;
+  else if (match(TokenKind::ShrAssign))
+    compoundOp = TokenKind::ShrAssign;
+
+  if (compoundOp != TokenKind::End) {
+    auto rhs = parseExpr();
+    auto e = std::make_unique<Expr>();
+    e->v = ExprAssign{std::move(lhs), std::move(rhs), compoundOp};
+    e->loc = e->loc;
+    return e;
+  }
   if (match(TokenKind::Question)) {
     auto thenE = parseExpr();
     expect(TokenKind::Colon, ": expected in ternary");

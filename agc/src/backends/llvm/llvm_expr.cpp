@@ -613,6 +613,49 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     return B.CreateLoad(elemTy, addr, "memval");
   }
   if (auto *un = std::get_if<ExprUnary>(&e.v)) {
+    // Handle increment/decrement separately since they need lvalue access
+    if (un->op == TokenKind::PlusPlus || un->op == TokenKind::MinusMinus) {
+      llvm::Type *elemTy = nullptr;
+      auto *addr = emitLValue(*un->rhs, &elemTy);
+      if (!addr || !elemTy) {
+        Err = "increment/decrement requires an lvalue";
+        return nullptr;
+      }
+
+      // Load current value
+      auto *oldVal = B.CreateLoad(elemTy, addr, "incval");
+
+      // Create the increment/decrement value
+      llvm::Value *newVal = nullptr;
+      if (elemTy->isIntegerTy()) {
+        auto *one = llvm::ConstantInt::get(elemTy, 1);
+        if (un->op == TokenKind::PlusPlus)
+          newVal = B.CreateAdd(oldVal, one, "inctmp");
+        else
+          newVal = B.CreateSub(oldVal, one, "dectmp");
+      } else if (elemTy->isFloatingPointTy()) {
+        auto *one = llvm::ConstantFP::get(elemTy, 1.0);
+        if (un->op == TokenKind::PlusPlus)
+          newVal = B.CreateFAdd(oldVal, one, "finctmp");
+        else
+          newVal = B.CreateFSub(oldVal, one, "fdectmp");
+      } else if (elemTy->isPointerTy()) {
+        // Pointer arithmetic: increment by 1 element
+        auto *one = llvm::ConstantInt::get(llvm::Type::getInt64Ty(M.getContext()), 
+                                           un->op == TokenKind::PlusPlus ? 1 : -1);
+        newVal = B.CreateGEP(llvm::Type::getInt8Ty(M.getContext()), oldVal, one, "ptrinc");
+      } else {
+        Err = "invalid operand type for increment/decrement";
+        return nullptr;
+      }
+
+      // Store the new value back
+      B.CreateStore(newVal, addr);
+
+      // Return the new value (pre-increment semantics)
+      return newVal;
+    }
+
     auto *rhs = emitExpr(*un->rhs);
     if (!rhs)
       return nullptr;

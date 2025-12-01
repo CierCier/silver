@@ -1,4 +1,5 @@
 #include "agc/codegen.hpp"
+#include "agc/overloaded.hpp"
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -36,19 +37,11 @@ static std::string emitType(const TypeName &t) {
   else if (base == "f64")
     base = "double";
   else if (base == "str")
-    base = "string"; // simplistic mapping
+    base = "string";
   else if (base == "bool")
     base = "bool";
   else if (base == "void")
     base = "void";
-
-  // Pointers in C# are unsafe, but for simplicity let's map to arrays or just
-  // keep as is if unsafe For this simple implementation, let's assume we use
-  // unsafe blocks or map pointers to something else. But the user wants
-  // interop, so maybe unsafe is better. However, for "basic" examples like
-  // arrays, C# uses arrays. Let's try to map pointer to array if it looks like
-  // an array, or just use unsafe pointer. Given the example: i32 *argv ->
-  // string[] args (convention) i32 arr[8] -> int[] arr = new int[8]
 
   std::ostringstream os;
   os << base;
@@ -57,7 +50,7 @@ static std::string emitType(const TypeName &t) {
   for (auto &d : t.arrayDims) {
     os << "[";
     if (d)
-      os << *d; // C# arrays are [,] for multidim, but here it's likely []
+      os << *d;
     os << "]";
   }
   return os.str();
@@ -109,299 +102,316 @@ static void emitCallArgs(const std::vector<ExprPtr> &args, std::ostream &os) {
   }
 }
 
+static const char *binOpStr(TokenKind op) {
+  switch (op) {
+  case TokenKind::Plus:
+    return " + ";
+  case TokenKind::Minus:
+    return " - ";
+  case TokenKind::Star:
+    return " * ";
+  case TokenKind::Slash:
+    return " / ";
+  case TokenKind::Percent:
+    return " % ";
+  case TokenKind::AndAnd:
+    return " && ";
+  case TokenKind::OrOr:
+    return " || ";
+  case TokenKind::Eq:
+    return " == ";
+  case TokenKind::Ne:
+    return " != ";
+  case TokenKind::Lt:
+    return " < ";
+  case TokenKind::Le:
+    return " <= ";
+  case TokenKind::Gt:
+    return " > ";
+  case TokenKind::Ge:
+    return " >= ";
+  case TokenKind::Amp:
+    return " & ";
+  case TokenKind::Pipe:
+    return " | ";
+  case TokenKind::Caret:
+    return " ^ ";
+  case TokenKind::Shl:
+    return " << ";
+  case TokenKind::Shr:
+    return " >> ";
+  default:
+    return " /*op*/ ";
+  }
+}
+
+static const char *assignOpStr(TokenKind op) {
+  switch (op) {
+  case TokenKind::Assign:
+    return "=";
+  case TokenKind::PlusAssign:
+    return "+=";
+  case TokenKind::MinusAssign:
+    return "-=";
+  case TokenKind::StarAssign:
+    return "*=";
+  case TokenKind::SlashAssign:
+    return "/=";
+  case TokenKind::PercentAssign:
+    return "%=";
+  case TokenKind::ShlAssign:
+    return "<<=";
+  case TokenKind::ShrAssign:
+    return ">>=";
+  default:
+    return "/*=*/";
+  }
+}
+
 static void emitExpr(const Expr &e, std::ostream &os, int prec) {
   std::visit(
-      [&](auto const &node) {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, ExprIdent>) {
-          os << node.name;
-        } else if constexpr (std::is_same_v<T, ExprInt>) {
-          os << node.value;
-        } else if constexpr (std::is_same_v<T, ExprStr>) {
-          os << '"';
-          for (char c : node.value) {
-            if (c == '\\' || c == '"')
-              os << '\\' << c;
-            else if (c == '\n')
-              os << "\\n";
-            else
-              os << c;
-          }
-          os << '"';
-        } else if constexpr (std::is_same_v<T, ExprUnary>) {
-          if (node.op == TokenKind::Minus) {
-            os << '-';
+      overloaded{
+          [&](const ExprIdent &node) { os << node.name; },
+          [&](const ExprInt &node) { os << node.value; },
+          [&](const ExprFloat &node) { os << node.value; },
+          [&](const ExprStr &node) {
+            os << '"';
+            for (char c : node.value) {
+              if (c == '\\' || c == '"')
+                os << '\\' << c;
+              else if (c == '\n')
+                os << "\\n";
+              else
+                os << c;
+            }
+            os << '"';
+          },
+          [&](const ExprUnary &node) {
+            switch (node.op) {
+            case TokenKind::Minus:
+              os << '-';
+              break;
+            case TokenKind::Bang:
+              os << '!';
+              break;
+            case TokenKind::Tilde:
+              os << '~';
+              break;
+            case TokenKind::Plus:
+              os << '+';
+              break;
+            case TokenKind::PlusPlus:
+              os << "++";
+              break;
+            case TokenKind::MinusMinus:
+              os << "--";
+              break;
+            default:
+              os << "/*unop*/";
+              break;
+            }
             emitExpr(*node.rhs, os, 12);
-          } else if (node.op == TokenKind::Bang) {
-            os << '!';
-            emitExpr(*node.rhs, os, 12);
-          } else if (node.op == TokenKind::Tilde) {
-            os << '~';
-            emitExpr(*node.rhs, os, 12);
-          } else if (node.op == TokenKind::Plus) {
-            os << '+';
-            emitExpr(*node.rhs, os, 12);
-          } else if (node.op == TokenKind::PlusPlus) {
-            os << "++";
-            emitExpr(*node.rhs, os, 12);
-          } else if (node.op == TokenKind::MinusMinus) {
-            os << "--";
-            emitExpr(*node.rhs, os, 12);
-          } else {
-            os << "/*unop*/";
-          }
-        } else if constexpr (std::is_same_v<T, ExprBinary>) {
-          int p = binPrec(node.op);
-          if (p < prec)
-            os << '(';
-          emitExpr(*node.lhs, os, p);
-          switch (node.op) {
-          case TokenKind::Plus:
-            os << " + ";
-            break;
-          case TokenKind::Minus:
-            os << " - ";
-            break;
-          case TokenKind::Star:
-            os << " * ";
-            break;
-          case TokenKind::Slash:
-            os << " / ";
-            break;
-          case TokenKind::Percent:
-            os << " % ";
-            break;
-          case TokenKind::AndAnd:
-            os << " && ";
-            break;
-          case TokenKind::OrOr:
-            os << " || ";
-            break;
-          case TokenKind::Eq:
-            os << " == ";
-            break;
-          case TokenKind::Ne:
-            os << " != ";
-            break;
-          case TokenKind::Lt:
-            os << " < ";
-            break;
-          case TokenKind::Le:
-            os << " <= ";
-            break;
-          case TokenKind::Gt:
-            os << " > ";
-            break;
-          case TokenKind::Ge:
-            os << " >= ";
-            break;
-          case TokenKind::Amp:
-            os << " & ";
-            break;
-          case TokenKind::Pipe:
-            os << " | ";
-            break;
-          case TokenKind::Caret:
-            os << " ^ ";
-            break;
-          case TokenKind::Shl:
-            os << " << ";
-            break;
-          case TokenKind::Shr:
-            os << " >> ";
-            break;
-          default:
-            os << " /*op*/ ";
-            break;
-          }
-          emitExpr(*node.rhs, os, p + 1);
-          if (p < prec)
-            os << ')';
-        } else if constexpr (std::is_same_v<T, ExprAssign>) {
-          emitExpr(*node.lhs, os);
-          os << ' ';
-          switch (node.op) {
-          case TokenKind::Assign:
-            os << '=';
-            break;
-          case TokenKind::PlusAssign:
-            os << "+=";
-            break;
-          case TokenKind::MinusAssign:
-            os << "-=";
-            break;
-          case TokenKind::StarAssign:
-            os << "*=";
-            break;
-          case TokenKind::SlashAssign:
-            os << "/=";
-            break;
-          case TokenKind::PercentAssign:
-            os << "%=";
-            break;
-          case TokenKind::ShlAssign:
-            os << "<<=";
-            break;
-          case TokenKind::ShrAssign:
-            os << ">>=";
-            break;
-          default:
-            os << "/*=*/";
-            break;
-          }
-          os << ' ';
-          emitExpr(*node.rhs, os);
-        } else if constexpr (std::is_same_v<T, ExprCond>) {
-          emitExpr(*node.cond, os);
-          os << " ? ";
-          emitExpr(*node.thenE, os);
-          os << " : ";
-          emitExpr(*node.elseE, os);
-        } else if constexpr (std::is_same_v<T, ExprCall>) {
-          if (node.callee == "println") {
-            os << "Console.WriteLine(";
-            // C# Console.WriteLine supports format strings similar to printf
-            // but with {0} etc. For simplicity, let's assume the user uses C#
-            // style or we just pass it through. But wait, the example uses
-            // printf style "%s%s". We might need a helper or just map to
-            // Console.Write(string.Format(...)) Or just emit it and let the
-            // user deal with it (stub). Better: map to a helper `Printf` if we
-            // can, or just `Console.WriteLine`. Let's just emit
-            // `Console.WriteLine` and hope for the best or comment.
-            emitCallArgs(node.args, os);
+          },
+          [&](const ExprBinary &node) {
+            int p = binPrec(node.op);
+            if (p < prec)
+              os << '(';
+            emitExpr(*node.lhs, os, p);
+            os << binOpStr(node.op);
+            emitExpr(*node.rhs, os, p + 1);
+            if (p < prec)
+              os << ')';
+          },
+          [&](const ExprAssign &node) {
+            emitExpr(*node.lhs, os);
+            os << ' ' << assignOpStr(node.op) << ' ';
+            emitExpr(*node.rhs, os);
+          },
+          [&](const ExprCond &node) {
+            emitExpr(*node.cond, os);
+            os << " ? ";
+            emitExpr(*node.thenE, os);
+            os << " : ";
+            emitExpr(*node.elseE, os);
+          },
+          [&](const ExprCall &node) {
+            if (node.callee == "println") {
+              os << "Console.WriteLine(";
+              emitCallArgs(node.args, os);
+              os << ")";
+            } else {
+              os << node.callee << '(';
+              emitCallArgs(node.args, os);
+              os << ')';
+            }
+          },
+          [&](const ExprIndex &node) {
+            emitExpr(*node.base, os);
+            os << '[';
+            emitExpr(*node.index, os);
+            os << ']';
+          },
+          [&](const ExprMember &node) {
+            emitExpr(*node.base, os);
+            os << '.' << node.member;
+          },
+          [&](const ExprComptime &node) {
+            // C# doesn't have comptime - just emit the inner expression
+            emitExpr(*node.expr, os);
+          },
+          [&](const ExprAddressOf &node) {
+            os << "&";
+            emitExpr(*node.operand, os);
+          },
+          [&](const ExprDeref &node) {
+            os << "*";
+            emitExpr(*node.operand, os);
+          },
+          [&](const ExprCast &node) {
+            os << "((" << emitType(node.target) << ")";
+            emitExpr(*node.expr, os);
             os << ")";
-          } else {
-            os << node.callee << '(';
-            emitCallArgs(node.args, os);
-            os << ')';
-          }
-        } else if constexpr (std::is_same_v<T, ExprIndex>) {
-          emitExpr(*node.base, os);
-          os << '[';
-          emitExpr(*node.index, os);
-          os << ']';
-        } else if constexpr (std::is_same_v<T, ExprMember>) {
-          emitExpr(*node.base, os);
-          os << '.' << node.member;
-        } else if constexpr (std::is_same_v<T, ExprComptime>) {
-          // C# doesn't have comptime - just emit the inner expression
-          // The evaluator would have folded constants already
-          emitExpr(*node.expr, os);
-        } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
-          // C# unsafe code: &operand
-          os << "&";
-          emitExpr(*node.operand, os);
-        } else if constexpr (std::is_same_v<T, ExprDeref>) {
-          // C# unsafe code: *operand
-          os << "*";
-          emitExpr(*node.operand, os);
-        } else if constexpr (std::is_same_v<T, ExprCast>) {
-          // C# cast: (type)expr
-          os << "((" << emitType(node.target) << ")";
-          emitExpr(*node.expr, os);
-          os << ")";
-        } else if constexpr (std::is_same_v<T, ExprInitList>) {
-          // C# initializer list
-          os << "{ ";
-          for (size_t i = 0; i < node.values.size(); ++i) {
-            if (i)
-              os << ", ";
-            emitExpr(*node.values[i], os);
-          }
-          os << " }";
-        }
+          },
+          [&](const ExprInitList &node) {
+            os << "{ ";
+            for (size_t i = 0; i < node.values.size(); ++i) {
+              if (i)
+                os << ", ";
+              emitExpr(*node.values[i].value, os);
+            }
+            os << " }";
+          },
       },
       e.v);
 }
 
+static void emitStmt(const Stmt &s, std::ostream &os, int ind);
+
+static void emitForInit(const Stmt &s, std::ostream &os) {
+  std::visit(
+      overloaded{
+          [&](const StmtDecl &ds) {
+            os << emitType(ds.type) << " ";
+            for (size_t i = 0; i < ds.declarators.size(); ++i) {
+              if (i)
+                os << ", ";
+              os << ds.declarators[i].name;
+              if (ds.declarators[i].init && *ds.declarators[i].init) {
+                os << " = ";
+                emitExpr(**ds.declarators[i].init, os);
+              }
+            }
+          },
+          [&](const StmtExpr &es) { emitExpr(*es.expr, os); },
+          [&](const auto &) { /* other statement types not expected */ },
+      },
+      s.v);
+}
+
 static void emitStmt(const Stmt &s, std::ostream &os, int ind) {
   std::visit(
-      [&](auto const &node) {
-        using T = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<T, StmtExpr>) {
-          indent(os, ind);
-          emitExpr(*node.expr, os);
-          os << ";\n";
-        } else if constexpr (std::is_same_v<T, StmtReturn>) {
-          indent(os, ind);
-          os << "return";
-          if (node.expr) {
-            os << ' ';
-            emitExpr(**node.expr, os);
-          }
-          os << ";\n";
-        } else if constexpr (std::is_same_v<T, StmtDecl>) {
-          indent(os, ind);
-          // C# var decl
-          os << emitType(node.type) << " ";
-          for (size_t i = 0; i < node.declarators.size(); ++i) {
-            if (i)
-              os << ", ";
-            os << node.declarators[i].name;
-            if (node.declarators[i].init && *node.declarators[i].init) {
-              os << " = ";
-              emitExpr(**node.declarators[i].init, os);
-            }
-          }
-          os << ";\n";
-        } else if constexpr (std::is_same_v<T, StmtBlock>) {
-          emitBlock(node, os, ind);
-        } else if constexpr (std::is_same_v<T, StmtFor>) {
-          indent(os, ind);
-          os << "for (";
-          if (node.init) {
-            if (auto *ds = std::get_if<StmtDecl>(&node.init->get()->v)) {
-              os << emitType(ds->type) << " ";
-              for (size_t i = 0; i < ds->declarators.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << ds->declarators[i].name;
-                if (ds->declarators[i].init && *ds->declarators[i].init) {
-                  os << " = ";
-                  emitExpr(**ds->declarators[i].init, os);
-                }
-              }
-              os << "; ";
-            } else if (auto *es = std::get_if<StmtExpr>(&node.init->get()->v)) {
-              emitExpr(*es->expr, os);
-              os << "; ";
-            } else {
-              os << "; ";
-            }
-          } else {
-            os << "; ";
-          }
-          if (node.cond)
-            emitExpr(**node.cond, os);
-          os << "; ";
-          if (node.iter)
-            emitExpr(**node.iter, os);
-          os << ") ";
-          emitStmt(*node.body, os, 0);
-        } else if constexpr (std::is_same_v<T, StmtIf>) {
-          indent(os, ind);
-          os << "if (";
-          emitExpr(*node.cond, os);
-          os << ") ";
-          emitStmt(*node.thenBranch, os, 0);
-          if (node.elseBranch) {
+      overloaded{
+          [&](const StmtExpr &node) {
             indent(os, ind);
-            os << "else ";
-            emitStmt(**node.elseBranch, os, 0);
-          }
-        } else if constexpr (std::is_same_v<T, StmtWhile>) {
-          indent(os, ind);
-          os << "while (";
-          emitExpr(*node.cond, os);
-          os << ") ";
-          emitStmt(*node.body, os, 0);
-        } else if constexpr (std::is_same_v<T, StmtBreak>) {
-          indent(os, ind);
-          os << "break;\n";
-        } else if constexpr (std::is_same_v<T, StmtContinue>) {
-          indent(os, ind);
-          os << "continue;\n";
-        }
+            emitExpr(*node.expr, os);
+            os << ";\n";
+          },
+          [&](const StmtReturn &node) {
+            indent(os, ind);
+            os << "return";
+            if (node.expr) {
+              os << ' ';
+              emitExpr(**node.expr, os);
+            }
+            os << ";\n";
+          },
+          [&](const StmtDecl &node) {
+            indent(os, ind);
+            os << emitType(node.type) << " ";
+            for (size_t i = 0; i < node.declarators.size(); ++i) {
+              if (i)
+                os << ", ";
+              os << node.declarators[i].name;
+              if (node.declarators[i].init && *node.declarators[i].init) {
+                os << " = ";
+                emitExpr(**node.declarators[i].init, os);
+              }
+            }
+            os << ";\n";
+          },
+          [&](const StmtBlock &node) { emitBlock(node, os, ind); },
+          [&](const StmtFor &node) {
+            indent(os, ind);
+            os << "for (";
+            if (node.init) {
+              emitForInit(**node.init, os);
+            }
+            os << "; ";
+            if (node.cond)
+              emitExpr(**node.cond, os);
+            os << "; ";
+            if (node.iter)
+              emitExpr(**node.iter, os);
+            os << ") ";
+            emitStmt(*node.body, os, 0);
+          },
+          [&](const StmtIf &node) {
+            indent(os, ind);
+            os << "if (";
+            emitExpr(*node.cond, os);
+            os << ") ";
+            emitStmt(*node.thenBranch, os, 0);
+            if (node.elseBranch) {
+              indent(os, ind);
+              os << "else ";
+              emitStmt(**node.elseBranch, os, 0);
+            }
+          },
+          [&](const StmtWhile &node) {
+            indent(os, ind);
+            os << "while (";
+            emitExpr(*node.cond, os);
+            os << ") ";
+            emitStmt(*node.body, os, 0);
+          },
+          [&](const StmtBreak &) {
+            indent(os, ind);
+            os << "break;\n";
+          },
+          [&](const StmtContinue &) {
+            indent(os, ind);
+            os << "continue;\n";
+          },
+          [&](const StmtAsm &) {
+            indent(os, ind);
+            os << "// inline assembly not supported in C#\n";
+          },
+          [&](const StmtSwitch &node) {
+            indent(os, ind);
+            os << "switch (";
+            emitExpr(*node.cond, os);
+            os << ") {\n";
+            for (auto &c : node.cases) {
+              for (auto &v : c.values) {
+                indent(os, ind);
+                os << "case ";
+                emitExpr(*v, os);
+                os << ":\n";
+              }
+              emitStmt(*c.body, os, ind + 4);
+              indent(os, ind + 4);
+              os << "break;\n";
+            }
+            if (node.defaultCase) {
+              indent(os, ind);
+              os << "default:\n";
+              emitStmt(**node.defaultCase, os, ind + 4);
+              indent(os, ind + 4);
+              os << "break;\n";
+            }
+            indent(os, ind);
+            os << "}\n";
+          },
       },
       s.v);
 }
@@ -427,75 +437,87 @@ public:
     for (auto const &dptr : prog.decls) {
       const Decl &d = *dptr;
       std::visit(
-          [&](auto const &node) {
-            using T = std::decay_t<decltype(node)>;
-            if constexpr (std::is_same_v<T, DeclImport>) {
-              os << "    // import ";
-              for (size_t i = 0; i < node.path.size(); ++i) {
-                if (i)
-                  os << '.';
-                os << node.path[i];
-              }
-              os << "\n";
-            } else if constexpr (std::is_same_v<T, DeclStruct>) {
-              os << "    public struct " << node.name << " {\n";
-              for (auto &f : node.fields) {
-                os << "        public " << emitType(f.type) << " ";
-                for (size_t i = 0; i < f.names.size(); ++i) {
+          overloaded{
+              [&](const DeclImport &node) {
+                os << "    // import ";
+                for (size_t i = 0; i < node.path.size(); ++i) {
+                  if (i)
+                    os << '.';
+                  os << node.path[i];
+                }
+                os << "\n";
+              },
+              [&](const DeclLink &node) {
+                os << "    // link " << node.lib << "\n";
+              },
+              [&](const DeclStruct &node) {
+                os << "    public struct " << node.name << " {\n";
+                for (auto &f : node.fields) {
+                  os << "        public " << emitType(f.type) << " ";
+                  for (size_t i = 0; i < f.names.size(); ++i) {
+                    if (i)
+                      os << ", ";
+                    os << f.names[i];
+                  }
+                  os << ";\n";
+                }
+                os << "    }\n";
+              },
+              [&](const DeclEnum &node) {
+                os << "    public enum " << node.name << " {\n";
+                for (auto &item : node.items) {
+                  os << "        " << item.name;
+                  if (item.value)
+                    os << " = " << *item.value;
+                  os << ",\n";
+                }
+                os << "    }\n";
+              },
+              [&](const DeclVar &node) {
+                os << "    public static " << emitType(node.type) << " ";
+                for (size_t i = 0; i < node.declarators.size(); ++i) {
                   if (i)
                     os << ", ";
-                  os << f.names[i];
+                  os << node.declarators[i].name;
+                  if (node.declarators[i].init && *node.declarators[i].init) {
+                    os << " = ";
+                    emitExpr(**node.declarators[i].init, os);
+                  }
                 }
                 os << ";\n";
-              }
-              os << "    }\n";
-            } else if constexpr (std::is_same_v<T, DeclEnum>) {
-              os << "    public enum " << node.name << " {\n";
-              for (auto &item : node.items) {
-                os << "        " << item.name;
-                if (item.value)
-                  os << " = " << *item.value;
-                os << ",\n";
-              }
-              os << "    }\n";
-            } else if constexpr (std::is_same_v<T, DeclVar>) {
-              os << "    public static " << emitType(node.type) << " ";
-              for (size_t i = 0; i < node.declarators.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << node.declarators[i].name;
-                if (node.declarators[i].init && *node.declarators[i].init) {
-                  os << " = ";
-                  emitExpr(**node.declarators[i].init, os);
+              },
+              [&](const DeclFunc &node) {
+                if (node.isExtern) {
+                  os << "    "
+                        "[System.Runtime.InteropServices.DllImport(\"__"
+                        "Internal\")]\n";
+                  os << "    public static extern " << emitType(node.ret) << " "
+                     << node.name << "(";
+                } else {
+                  os << "    public static " << emitType(node.ret) << " "
+                     << node.name << "(";
                 }
-              }
-              os << ";\n";
-            } else if constexpr (std::is_same_v<T, DeclFunc>) {
-              if (node.isExtern) {
-                os << "    "
-                      "[System.Runtime.InteropServices.DllImport(\"__"
-                      "Internal\")]\n";
-                os << "    public static extern " << emitType(node.ret) << " "
-                   << node.name << "(";
-              } else {
-                os << "    public static " << emitType(node.ret) << " "
-                   << node.name << "(";
-              }
-              for (size_t i = 0; i < node.params.size(); ++i) {
-                if (i)
-                  os << ", ";
-                os << emitType(node.params[i].type) << " "
-                   << node.params[i].name;
-              }
-              os << ")";
-              if (node.body) {
+                for (size_t i = 0; i < node.params.size(); ++i) {
+                  if (i)
+                    os << ", ";
+                  os << emitType(node.params[i].type) << " "
+                     << node.params[i].name;
+                }
+                os << ")";
+                if (node.body) {
+                  os << "\n";
+                  emitBlock(*node.body, os, 4);
+                } else {
+                  os << ";\n";
+                }
                 os << "\n";
-                emitBlock(*node.body, os, 4);
-              } else {
-                os << ";\n";
-              }
-              os << "\n";
-            }
+              },
+              [&](const DeclImpl &) {
+                // impl blocks handled differently in C#
+              },
+              [&](const DeclCast &) {
+                // cast operators handled differently in C#
+              },
           },
           d.v);
     }
