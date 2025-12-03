@@ -1,7 +1,5 @@
 #pragma once
 #include "libag/version.hpp"
-#include <string_view>
-
 
 // Export/import macro for shared builds
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -25,17 +23,17 @@
 namespace ag {
 
 // Returns the library version as a C string (stable for program lifetime).
-AG_API const char *version();
+inline const char *version() { return ver::STRING; }
 
 // Returns the full version string (includes git hash for dev builds).
-AG_API const char *version_full();
+inline const char *version_full() { return ver::STRING_FULL; }
 
 // Returns the git commit hash.
-AG_API const char *git_hash();
+inline const char *git_hash() { return ver::GIT_HASH; }
 
 // Returns version components.
-AG_API int version_major();
-AG_API int version_minor();
-AG_API int version_patch();
+inline int version_major() { return ver::MAJOR; }
+inline int version_minor() { return ver::MINOR; }
+inline int version_patch() { return ver::PATCH; }
 
 } // namespace ag

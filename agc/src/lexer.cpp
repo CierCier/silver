@@ -61,6 +61,11 @@ static TokenKind keywordKind(std::string_view id) {
   if (id == "free")
     return TokenKind::Kw_free;
 
+  if (id == "true")
+    return TokenKind::Kw_true;
+  if (id == "false")
+    return TokenKind::Kw_false;
+
   if (id == "void")
     return TokenKind::Kw_void;
   if (id == "bool")

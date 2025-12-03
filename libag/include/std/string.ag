@@ -1,0 +1,239 @@
+// Silver Standard Library - String Type
+// A dynamic string object with automatic memory management
+
+import std.io;
+import std.mem;
+
+// Drop trait for automatic cleanup
+trait Drop {
+    void drop();
+}
+
+// Clone trait for creating copies
+trait Clone {
+    Self clone();
+}
+
+// String object - a dynamically sized, mutable string
+@trait(drop, clone)
+struct String {
+    i8* data;       // Underlying C string pointer
+    i64 len;        // Current length (excluding null terminator)
+    i64 capacity;   // Allocated capacity
+}
+
+// C library functions we need
+extern i64 strlen(str s);
+extern str strcpy(str dest, str src);
+extern str strcat(str dest, str src);
+extern str strncpy(str dest, str src, i64 n);
+extern i32 strcmp(str a, str b);
+extern i32 strncmp(str a, str b, i64 n);
+extern str strchr(str s, i32 c);
+extern str strstr(str haystack, str needle);
+
+impl String {
+    // Create a new empty String with default capacity
+    String new() {
+        String s;
+        s.capacity = 16;
+        s.len = 0;
+        s.data = alloc<i8>(16);
+        s.data[0] = 0;
+        return s;
+    }
+    
+    // Create a String with specified capacity
+    String with_capacity(i64 cap) {
+        String s;
+        if (cap < 1) {
+            cap = 1;
+        }
+        s.capacity = cap;
+        s.len = 0;
+        s.data = alloc<i8>(cap);
+        s.data[0] = 0;
+        return s;
+    }
+    
+    // Create a String from a C string literal
+    String from(str cstr) {
+        String s;
+        s.len = strlen(cstr);
+        s.capacity = s.len + 1;
+        s.data = alloc<i8>(s.capacity);
+        strcpy((str)s.data, cstr);
+        return s;
+    }
+    
+    // Drop implementation - frees the underlying memory
+    void drop(String self) {
+        if (self.data != 0) {
+            free(self.data);
+        }
+    }
+    
+    // Clone implementation - creates a deep copy
+    String clone(String self) {
+        String copy;
+        copy.len = self.len;
+        copy.capacity = self.capacity;
+        copy.data = alloc<i8>(self.capacity);
+        strcpy((str)copy.data, (str)self.data);
+        return copy;
+    }
+    
+    // Get the length of the string
+    i64 length(String self) {
+        return self.len;
+    }
+    
+    // Check if string is empty
+    bool is_empty(String self) {
+        return self.len == 0;
+    }
+    
+    // Get the underlying C string (for interop)
+    str as_cstr(String self) {
+        return (str)self.data;
+    }
+    
+    // Get character at index (no bounds checking)
+    i8 at(String self, i64 index) {
+        return self.data[index];
+    }
+    
+    // Reserve capacity for at least `new_cap` bytes
+    void reserve(String* self, i64 new_cap) {
+        if (new_cap <= self->capacity) {
+            return;
+        }
+        i8* new_data = alloc<i8>(new_cap);
+        strcpy((str)new_data, (str)self->data);
+        free(self->data);
+        self->data = new_data;
+        self->capacity = new_cap;
+    }
+    
+    // Clear the string (keeps capacity)
+    void clear(String* self) {
+        self->len = 0;
+        self->data[0] = 0;
+    }
+    
+    // Push a single character
+    void push_char(String* self, i8 c) {
+        if (self->len + 1 >= self->capacity) {
+            self->reserve(self->capacity * 2);
+        }
+        self->data[self->len] = c;
+        self->len = self->len + 1;
+        self->data[self->len] = 0;
+    }
+    
+    // Append another string
+    void append(String* self, str other) {
+        i64 other_len = strlen(other);
+        i64 new_len = self->len + other_len;
+        if (new_len + 1 > self->capacity) {
+            i64 new_cap = self->capacity * 2;
+            if (new_cap < new_len + 1) {
+                new_cap = new_len + 1;
+            }
+            self->reserve(new_cap);
+        }
+        strcat((str)self->data, other);
+        self->len = new_len;
+    }
+    
+    // Append a String object
+    void append_string(String* self, String other) {
+        self->append((str)other.data);
+    }
+    
+    // Compare with another string (returns 0 if equal)
+    i32 compare(String self, str other) {
+        return strcmp((str)self.data, other);
+    }
+    
+    // Check equality
+    bool equals(String self, str other) {
+        return strcmp((str)self.data, other) == 0;
+    }
+    
+    // Check equality with another String
+    bool equals_string(String self, String other) {
+        return strcmp((str)self.data, (str)other.data) == 0;
+    }
+    
+    // Check if string starts with prefix
+    bool starts_with(String self, str prefix) {
+        i64 prefix_len = strlen(prefix);
+        if (prefix_len > self.len) {
+            return false;
+        }
+        return strncmp((str)self.data, prefix, prefix_len) == 0;
+    }
+    
+    // Check if string ends with suffix
+    bool ends_with(String self, str suffix) {
+        i64 suffix_len = strlen(suffix);
+        if (suffix_len > self.len) {
+            return false;
+        }
+        i64 offset = self.len - suffix_len;
+        i8* suffix_start = self.data + offset;
+        return strcmp((str)suffix_start, suffix) == 0;
+    }
+    
+    // Find first occurrence of character, returns -1 if not found
+    i64 find_char(String self, i8 c) {
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (self.data[i] == c) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    
+    // Find first occurrence of substring, returns -1 if not found
+    i64 find(String self, str needle) {
+        str result = strstr((str)self.data, needle);
+        if (result == 0) {
+            return -1;
+        }
+        return (i64)(result) - (i64)(self.data);
+    }
+    
+    // Get substring (creates a new String)
+    String substring(String self, i64 start, i64 len) {
+        String result = String.with_capacity(len + 1);
+        if (start >= self.len) {
+            return result;
+        }
+        if (start + len > self.len) {
+            len = self.len - start;
+        }
+        i8* src = self.data + start;
+        strncpy((str)result.data, (str)src, len);
+        result.data[len] = 0;
+        result.len = len;
+        return result;
+    }
+    
+    // Print the string
+    void print(String self) {
+        printf("%s", (str)self.data);
+    }
+    
+    // Print the string with newline
+    void println(String self) {
+        printf("%s\n", (str)self.data);
+    }
+    
+    // Debug print with length info
+    void debug(String self) {
+        printf("String { len: %ld, capacity: %ld, data: \"%s\" }\n", 
+               self.len, self.capacity, (str)self.data);
+    }
+}

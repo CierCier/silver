@@ -43,11 +43,19 @@ llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, Type *t) {
   case TypeKind::Void:
     return llvm::Type::getVoidTy(ctx);
   case TypeKind::Bool:
-    return llvm::Type::getInt1Ty(ctx);
-  case TypeKind::Int:
+    return llvm::Type::getInt8Ty(ctx); // Match C's _Bool (1 byte)
+  case TypeKind::Int8:
+    return llvm::Type::getInt8Ty(ctx);
+  case TypeKind::Int16:
+    return llvm::Type::getInt16Ty(ctx);
+  case TypeKind::Int32:
     return llvm::Type::getInt32Ty(ctx);
-  case TypeKind::Float:
-    return llvm::Type::getDoubleTy(ctx); // f64 default
+  case TypeKind::Int64:
+    return llvm::Type::getInt64Ty(ctx);
+  case TypeKind::Float32:
+    return llvm::Type::getFloatTy(ctx);
+  case TypeKind::Float64:
+    return llvm::Type::getDoubleTy(ctx);
   case TypeKind::String:
     return llvm::PointerType::getUnqual(ctx);
   case TypeKind::Pointer:
@@ -86,7 +94,7 @@ llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, const TypeName &t) {
   if (lower == "void")
     ty = llvm::Type::getVoidTy(ctx);
   else if (lower == "bool" || lower == "i1")
-    ty = llvm::Type::getInt1Ty(ctx);
+    ty = llvm::Type::getInt8Ty(ctx); // Match C's _Bool (1 byte)
   else if (lower == "i8" || lower == "u8" || lower == "char")
     ty = llvm::Type::getInt8Ty(ctx);
   else if (lower == "i16" || lower == "u16")
@@ -151,16 +159,28 @@ llvm::Constant *default_const_for(llvm::Type *ty) {
 static void emit_global_llvm(const DeclVar &v, llvm::Module &M) {
   auto &ctx = M.getContext();
   llvm::Type *ty = to_llvm_type(ctx, v.type);
+  llvm::IRBuilder<> B(ctx);
   for (auto const &[name, loc, init] : v.declarators) {
     llvm::Constant *initConst = nullptr;
     if (init && (*init)) {
-      // Only handle simple integer initializers for now
+      // Handle different initializer types
       if (auto *ei = std::get_if<ExprInt>(&((*init)->v))) {
         if (ty->isIntegerTy())
           initConst = llvm::ConstantInt::get(ty, ei->value);
       } else if (auto *ef = std::get_if<ExprFloat>(&((*init)->v))) {
         if (ty->isFloatingPointTy())
           initConst = llvm::ConstantFP::get(ty, ef->value);
+      } else if (auto *eb = std::get_if<ExprBool>(&((*init)->v))) {
+        if (ty->isIntegerTy())
+          initConst = llvm::ConstantInt::get(ty, eb->value ? 1 : 0);
+      } else if (auto *es = std::get_if<ExprStr>(&((*init)->v))) {
+        // Create a global string constant and get a pointer to it
+        auto *strConst =
+            llvm::ConstantDataArray::getString(ctx, es->value, true);
+        auto *strGlobal = new llvm::GlobalVariable(
+            M, strConst->getType(), true, llvm::GlobalValue::PrivateLinkage,
+            strConst, name + ".str");
+        initConst = llvm::ConstantExpr::getBitCast(strGlobal, ty);
       }
     }
     new llvm::GlobalVariable(
@@ -408,24 +428,18 @@ public:
             return false;
       } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
         // Emit cast and method function bodies from impl blocks
+        // Skip generic impls (their methods have empty mangledName)
         for (auto const &m : impl->methods) {
           if (auto *dc = std::get_if<DeclCast>(&m->v)) {
-            if (dc->body) {
-              std::string mangledName =
-                  dc->mangledName.empty()
-                      ? (impl->type.name + "_cast_" + dc->target.name)
-                      : dc->mangledName;
-              if (!emit_cast_body_llvm(mangledName, *dc, module, err, diags,
+            if (dc->body && !dc->mangledName.empty()) {
+              if (!emit_cast_body_llvm(dc->mangledName, *dc, module, err, diags,
                                        structTypes))
                 return false;
             }
           } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
-            if (df->body) {
-              std::string mangledName = df->mangledName.empty()
-                                            ? (impl->type.name + "_" + df->name)
-                                            : df->mangledName;
-              if (!emit_function_body_llvm_with_name(*df, mangledName, module,
-                                                     err, diags, structTypes))
+            if (df->body && !df->mangledName.empty()) {
+              if (!emit_function_body_llvm_with_name(
+                      *df, df->mangledName, module, err, diags, structTypes))
                 return false;
             }
           }
@@ -442,6 +456,12 @@ public:
             if (!emit_function_body_llvm(*f, module, err, diags, structTypes))
               return false;
           }
+        } else if (auto *dc = std::get_if<DeclCast>(&d.v)) {
+          if (dc->body && !dc->mangledName.empty()) {
+            if (!emit_cast_body_llvm(dc->mangledName, *dc, module, err, diags,
+                                     structTypes))
+              return false;
+          }
         }
       }
     }
@@ -451,8 +471,7 @@ public:
     // Verify module (non-fatal for now)
     if (diags)
       diags->report(DiagLevel::Debug, "Starting verification");
-    llvm::raw_null_ostream nulls;
-    if (llvm::verifyModule(module, &nulls)) {
+    if (llvm::verifyModule(module, &llvm::errs())) {
       err = "LLVM verification reported issues";
       if (diags)
         diags->report(DiagLevel::Debug, "LLVM verification failed");
@@ -570,21 +589,15 @@ public:
           declare_function_llvm(*f, module);
       } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
         // Declare cast and method functions from impl blocks
+        // Skip generic impls (their methods have empty mangledName)
         for (auto const &m : impl->methods) {
           if (auto *dc = std::get_if<DeclCast>(&m->v)) {
-            if (dc->body) {
-              std::string mangledName =
-                  dc->mangledName.empty()
-                      ? (impl->type.name + "_cast_" + dc->target.name)
-                      : dc->mangledName;
-              declare_cast_function_llvm(mangledName, *dc, module);
+            if (dc->body && !dc->mangledName.empty()) {
+              declare_cast_function_llvm(dc->mangledName, *dc, module);
             }
           } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
-            if (df->body) {
-              std::string mangledName = df->mangledName.empty()
-                                            ? (impl->type.name + "_" + df->name)
-                                            : df->mangledName;
-              declare_function_llvm_with_name(*df, mangledName, module);
+            if (df->body && !df->mangledName.empty()) {
+              declare_function_llvm_with_name(*df, df->mangledName, module);
             }
           }
         }
@@ -600,6 +613,10 @@ public:
             continue;
           if (f->body)
             declare_function_llvm(*f, module);
+        } else if (auto *dc = std::get_if<DeclCast>(&d.v)) {
+          if (dc->body && !dc->mangledName.empty()) {
+            declare_cast_function_llvm(dc->mangledName, *dc, module);
+          }
         }
       }
     }
@@ -622,24 +639,18 @@ public:
             return false;
       } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
         // Emit cast and method function bodies from impl blocks
+        // Skip generic impls (their methods have empty mangledName)
         for (auto const &m : impl->methods) {
           if (auto *dc = std::get_if<DeclCast>(&m->v)) {
-            if (dc->body) {
-              std::string mangledName =
-                  dc->mangledName.empty()
-                      ? (impl->type.name + "_cast_" + dc->target.name)
-                      : dc->mangledName;
-              if (!emit_cast_body_llvm(mangledName, *dc, module, err, diags,
+            if (dc->body && !dc->mangledName.empty()) {
+              if (!emit_cast_body_llvm(dc->mangledName, *dc, module, err, diags,
                                        structTypes))
                 return false;
             }
           } else if (auto *df = std::get_if<DeclFunc>(&m->v)) {
-            if (df->body) {
-              std::string mangledName = df->mangledName.empty()
-                                            ? (impl->type.name + "_" + df->name)
-                                            : df->mangledName;
-              if (!emit_function_body_llvm_with_name(*df, mangledName, module,
-                                                     err, diags, structTypes))
+            if (df->body && !df->mangledName.empty()) {
+              if (!emit_function_body_llvm_with_name(
+                      *df, df->mangledName, module, err, diags, structTypes))
                 return false;
             }
           }
@@ -654,6 +665,12 @@ public:
         if (auto *f = std::get_if<DeclFunc>(&d.v)) {
           if (f->body) {
             if (!emit_function_body_llvm(*f, module, err, diags, structTypes))
+              return false;
+          }
+        } else if (auto *dc = std::get_if<DeclCast>(&d.v)) {
+          if (dc->body && !dc->mangledName.empty()) {
+            if (!emit_cast_body_llvm(dc->mangledName, *dc, module, err, diags,
+                                     structTypes))
               return false;
           }
         }

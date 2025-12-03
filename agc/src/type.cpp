@@ -22,9 +22,17 @@ std::string PrimitiveType::toString() const {
     return "void";
   case TypeKind::Bool:
     return "bool";
-  case TypeKind::Int:
+  case TypeKind::Int8:
+    return "i8";
+  case TypeKind::Int16:
+    return "i16";
+  case TypeKind::Int32:
     return "i32";
-  case TypeKind::Float:
+  case TypeKind::Int64:
+    return "i64";
+  case TypeKind::Float32:
+    return "f32";
+  case TypeKind::Float64:
     return "f64";
   case TypeKind::String:
     return "str";
@@ -81,14 +89,22 @@ bool StructType::hasTrait(const std::string &trait) const {
 TypeContext::TypeContext() {
   voidType_ = new PrimitiveType(TypeKind::Void);
   boolType_ = new PrimitiveType(TypeKind::Bool);
-  intType_ = new PrimitiveType(TypeKind::Int);
-  floatType_ = new PrimitiveType(TypeKind::Float);
+  int8Type_ = new PrimitiveType(TypeKind::Int8);
+  int16Type_ = new PrimitiveType(TypeKind::Int16);
+  int32Type_ = new PrimitiveType(TypeKind::Int32);
+  int64Type_ = new PrimitiveType(TypeKind::Int64);
+  float32Type_ = new PrimitiveType(TypeKind::Float32);
+  float64Type_ = new PrimitiveType(TypeKind::Float64);
   stringType_ = new PrimitiveType(TypeKind::String);
 
   types_.emplace_back(voidType_);
   types_.emplace_back(boolType_);
-  types_.emplace_back(intType_);
-  types_.emplace_back(floatType_);
+  types_.emplace_back(int8Type_);
+  types_.emplace_back(int16Type_);
+  types_.emplace_back(int32Type_);
+  ;
+  types_.emplace_back(float32Type_);
+  types_.emplace_back(float64Type_);
   types_.emplace_back(stringType_);
 }
 
@@ -98,8 +114,14 @@ TypeContext::~TypeContext() {
 
 Type *TypeContext::getVoid() { return voidType_; }
 Type *TypeContext::getBool() { return boolType_; }
-Type *TypeContext::getInt() { return intType_; }
-Type *TypeContext::getFloat() { return floatType_; }
+Type *TypeContext::getInt8() { return int8Type_; }
+Type *TypeContext::getInt16() { return int16Type_; }
+Type *TypeContext::getInt32() { return int32Type_; }
+Type *TypeContext::getInt() { return int32Type_; } // Alias for i32
+Type *TypeContext::getInt64() { return int64Type_; }
+Type *TypeContext::getFloat32() { return float32Type_; }
+Type *TypeContext::getFloat64() { return float64Type_; }
+Type *TypeContext::getFloat() { return float64Type_; } // Alias for f64
 Type *TypeContext::getString() { return stringType_; }
 
 Type *TypeContext::getPointer(Type *pointee) {

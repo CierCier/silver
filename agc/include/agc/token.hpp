@@ -41,6 +41,8 @@ enum class TokenKind : uint16_t {
   Kw_drop,
   Kw_alloc,
   Kw_free,
+  Kw_true,
+  Kw_false,
 
   // Primitive type keywords (treated as identifiers in AST typing)
   Kw_void,

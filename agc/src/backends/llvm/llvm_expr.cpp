@@ -148,11 +148,62 @@ llvm::Value *FunctionEmitter::emitLValue(const Expr &e,
     }
 
     if (!basePtr) {
-      // Fallback: emit base expr
-      basePtr = emitExpr(*idx->base);
-      // We don't know type easily here without semantic analysis
-      // Assume i32* for now
-      baseElemTy = llvm::Type::getInt32Ty(M.getContext());
+      // Fallback: try to get base as lvalue first (for struct member arrays)
+      llvm::Type *baseLValueTy = nullptr;
+      basePtr = emitLValue(*idx->base, &baseLValueTy);
+
+      if (basePtr && baseLValueTy) {
+        // Check if base is an array type (e.g., struct member array)
+        if (baseLValueTy->isArrayTy()) {
+          auto *idxVal = emitExpr(*idx->index);
+          if (!idxVal)
+            return nullptr;
+
+          std::vector<llvm::Value *> indices;
+          indices.push_back(llvm::ConstantInt::get(
+              llvm::Type::getInt32Ty(M.getContext()), 0));
+          indices.push_back(idxVal);
+
+          if (outElemTy) {
+            *outElemTy =
+                llvm::cast<llvm::ArrayType>(baseLValueTy)->getElementType();
+          }
+          return B.CreateGEP(baseLValueTy, basePtr, indices, "gep");
+        }
+        // If it's a pointer type stored at the address, load it
+        if (baseLValueTy->isPointerTy()) {
+          basePtr = B.CreateLoad(baseLValueTy, basePtr, "ptr.val");
+          // Get pointee element type from semantic info if available
+          if (idx->base->type && idx->base->type->isPointer()) {
+            Type *elemT =
+                static_cast<PointerType *>(idx->base->type)->pointee();
+            baseElemTy = to_llvm_type(M.getContext(), elemT);
+          } else {
+            baseElemTy = llvm::Type::getInt32Ty(M.getContext());
+          }
+        } else {
+          // Unexpected type, use as-is
+          baseElemTy = baseLValueTy;
+        }
+      } else {
+        // Last resort: emit base expr (for pointer expressions)
+        basePtr = emitExpr(*idx->base);
+        // Get element type from semantic info
+        if (idx->base->type) {
+          if (idx->base->type->isPointer()) {
+            Type *elemT =
+                static_cast<PointerType *>(idx->base->type)->pointee();
+            baseElemTy = to_llvm_type(M.getContext(), elemT);
+          } else if (idx->base->type->isArray()) {
+            Type *elemT = static_cast<ArrayType *>(idx->base->type)->element();
+            baseElemTy = to_llvm_type(M.getContext(), elemT);
+          } else {
+            baseElemTy = llvm::Type::getInt32Ty(M.getContext());
+          }
+        } else {
+          baseElemTy = llvm::Type::getInt32Ty(M.getContext());
+        }
+      }
     }
 
     if (!basePtr)
@@ -365,12 +416,28 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     return B.CreateCall(calleeF, args);
   }
   if (auto *lit = std::get_if<ExprInt>(&e.v)) {
-    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(M.getContext()),
-                                  lit->value);
+    // Use the resolved type from sema if available, otherwise infer from value
+    llvm::Type *intTy = nullptr;
+    if (e.type) {
+      intTy = to_llvm_type(M.getContext(), e.type);
+    }
+    // Fallback: choose type based on value size
+    if (!intTy || !intTy->isIntegerTy()) {
+      if (lit->value > INT32_MAX) {
+        intTy = llvm::Type::getInt64Ty(M.getContext());
+      } else {
+        intTy = llvm::Type::getInt32Ty(M.getContext());
+      }
+    }
+    return llvm::ConstantInt::get(intTy, lit->value);
   }
   if (auto *flit = std::get_if<ExprFloat>(&e.v)) {
     return llvm::ConstantFP::get(llvm::Type::getDoubleTy(M.getContext()),
                                  flit->value);
+  }
+  if (auto *blit = std::get_if<ExprBool>(&e.v)) {
+    return llvm::ConstantInt::get(llvm::Type::getInt8Ty(M.getContext()),
+                                  blit->value ? 1 : 0);
   }
   if (auto *s = std::get_if<ExprStr>(&e.v)) {
     // Create global string
@@ -407,21 +474,38 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     if (!L || !R)
       return nullptr;
 
+    // Check for pointer comparison/arithmetic
+    bool isPointerOp =
+        L->getType()->isPointerTy() || R->getType()->isPointerTy();
+
     // Auto-cast to larger type (simple)
     if (L->getType() != R->getType()) {
-      // Promote to float if one is float
-      if (L->getType()->isFloatingPointTy()) {
+      if (isPointerOp) {
+        // For pointer operations, convert integer to pointer or vice versa
+        if (L->getType()->isPointerTy() && R->getType()->isIntegerTy()) {
+          R = castTo(R, L->getType());
+        } else if (R->getType()->isPointerTy() && L->getType()->isIntegerTy()) {
+          L = castTo(L, R->getType());
+        }
+      } else if (L->getType()->isFloatingPointTy()) {
+        // Promote to float if one is float
         R = castTo(R, L->getType());
       } else if (R->getType()->isFloatingPointTy()) {
         L = castTo(L, R->getType());
-      } else {
-        // Assume int for now
-        L = castTo(L, llvm::Type::getInt32Ty(M.getContext()));
-        R = castTo(R, llvm::Type::getInt32Ty(M.getContext()));
+      } else if (L->getType()->isIntegerTy() && R->getType()->isIntegerTy()) {
+        // Integer promotion: cast to the larger type
+        unsigned lWidth = L->getType()->getIntegerBitWidth();
+        unsigned rWidth = R->getType()->getIntegerBitWidth();
+        if (lWidth > rWidth) {
+          R = castTo(R, L->getType());
+        } else {
+          L = castTo(L, R->getType());
+        }
       }
     }
 
     bool isFloat = L->getType()->isFloatingPointTy();
+    bool isPtr = L->getType()->isPointerTy();
 
     switch (bin->op) {
     case TokenKind::Plus:
@@ -652,37 +736,54 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     std::vector<llvm::Value *> args;
     args.reserve(mc->args.size() + 1);
 
-    // First arg is 'self' (the base)
-    // Get the base value - for struct, we need to pass by value
-    llvm::Type *baseElemTy = nullptr;
-    llvm::Value *baseVal = nullptr;
+    // Check if this is a static method call (base is a type, not an instance)
+    // Static calls happen when base->type is a MetaType
+    bool isStaticCall = mc->base->type && mc->base->type->isMeta();
 
-    // Try to get base as lvalue first to load struct value
-    llvm::Value *baseAddr = emitLValue(*mc->base, &baseElemTy);
-    if (baseAddr && baseElemTy) {
-      baseVal = B.CreateLoad(baseElemTy, baseAddr, "self");
-    } else {
-      // Fallback to emitExpr
-      baseVal = emitExpr(*mc->base);
-    }
+    if (!isStaticCall) {
+      // Instance method: First arg is 'self' (the base)
+      llvm::Type *baseElemTy = nullptr;
+      llvm::Value *baseVal = nullptr;
 
-    if (!baseVal) {
-      Err = "failed to emit method receiver";
-      return nullptr;
-    }
+      // Get base as lvalue (address)
+      llvm::Value *baseAddr = emitLValue(*mc->base, &baseElemTy);
 
-    if (FTy->getNumParams() > 0) {
-      baseVal = castTo(baseVal, FTy->getParamType(0));
+      // Check if the first parameter expects a pointer type
+      bool needsPointer =
+          FTy->getNumParams() > 0 && FTy->getParamType(0)->isPointerTy();
+
+      if (baseAddr && baseElemTy) {
+        if (needsPointer) {
+          // Method takes pointer self (e.g., File* self) - pass address
+          baseVal = baseAddr;
+        } else {
+          // Method takes value self (e.g., File self) - load and pass by value
+          baseVal = B.CreateLoad(baseElemTy, baseAddr, "self");
+        }
+      } else {
+        // Fallback to emitExpr
+        baseVal = emitExpr(*mc->base);
+      }
+
+      if (!baseVal) {
+        Err = "failed to emit method receiver";
+        return nullptr;
+      }
+
+      if (FTy->getNumParams() > 0) {
+        baseVal = castTo(baseVal, FTy->getParamType(0));
+      }
+      args.push_back(baseVal);
     }
-    args.push_back(baseVal);
 
     // Rest of the arguments
     for (size_t i = 0; i < mc->args.size(); ++i) {
       auto *v = emitExpr(*mc->args[i]);
       if (!v)
         return nullptr;
-      if (i + 1 < FTy->getNumParams()) {
-        v = castTo(v, FTy->getParamType((unsigned)(i + 1)));
+      size_t paramIdx = isStaticCall ? i : i + 1;
+      if (paramIdx < FTy->getNumParams()) {
+        v = castTo(v, FTy->getParamType((unsigned)paramIdx));
       }
       args.push_back(v);
     }

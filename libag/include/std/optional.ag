@@ -1,0 +1,109 @@
+// Silver Standard Library - Optional Type
+// A generic type-safe wrapper for nullable values
+
+import std.io;
+
+// ============================================================================
+// Optional<T> - Generic Optional type
+// ============================================================================
+struct Optional<T> {
+    T value;
+    bool has_value;
+}
+
+impl Optional<T> {
+    // Create an empty Optional
+    Optional<T> none() {
+        Optional<T> opt;
+        opt.has_value = false;
+        return opt;
+    }
+    
+    // Create an Optional with a value
+    Optional<T> some(T val) {
+        Optional<T> opt;
+        opt.has_value = true;
+        opt.value = val;
+        return opt;
+    }
+    
+    // Check if has a value
+    bool is_some(Optional<T> self) {
+        return self.has_value;
+    }
+    
+    // Check if empty
+    bool is_none(Optional<T> self) {
+        return !self.has_value;
+    }
+    
+    // Get the value (undefined behavior if empty!)
+    T unwrap(Optional<T> self) {
+        return self.value;
+    }
+    
+    // Get value or default if empty
+    T unwrap_or(Optional<T> self, T default_val) {
+        if (self.has_value) {
+            return self.value;
+        }
+        return default_val;
+    }
+}
+
+
+// ============================================================================
+// Result<T, E> - Generic Result type for operations that can fail
+// Contains either a success value or an error value
+// ============================================================================
+struct Result<T, E> {
+    T value;
+    E error;
+    bool is_ok;
+}
+
+impl Result<T, E> {
+    // Create a success result
+    Result<T, E> ok(T val) {
+        Result<T, E> r;
+        r.is_ok = true;
+        r.value = val;
+        return r;
+    }
+    
+    // Create an error result
+    Result<T, E> err(E err_val) {
+        Result<T, E> r;
+        r.is_ok = false;
+        r.error = err_val;
+        return r;
+    }
+    
+    // Check if success
+    bool success(Result<T, E> self) {
+        return self.is_ok;
+    }
+    
+    // Check if error
+    bool failed(Result<T, E> self) {
+        return !self.is_ok;
+    }
+    
+    // Get value (undefined if error!)
+    T unwrap(Result<T, E> self) {
+        return self.value;
+    }
+    
+    // Get value or default if error
+    T unwrap_or(Result<T, E> self, T default_val) {
+        if (self.is_ok) {
+            return self.value;
+        }
+        return default_val;
+    }
+    
+    // Get error value
+    E get_error(Result<T, E> self) {
+        return self.error;
+    }
+}

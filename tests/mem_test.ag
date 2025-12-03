@@ -1,0 +1,252 @@
+// Test suite for std.mem - Memory operations
+import std.io;
+import std.mem;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+i32 main() {
+    printf("=== Memory Tests ===\n\n");
+    
+    // Test: alloc and free for primitives
+    printf("--- Primitive Allocation ---\n");
+    
+    i32* single_int = alloc<i32>();
+    assert_true(single_int != 0, "alloc<i32>() returns non-null");
+    
+    *single_int = 42;
+    assert_eq_i32(*single_int, 42, "allocated memory is writable/readable");
+    
+    free(single_int);
+    printf("  [PASS] free() completes without crash\n");
+    tests_passed = tests_passed + 1;
+    
+    // Test: Array allocation
+    printf("\n--- Array Allocation ---\n");
+    
+    i32* int_array = alloc<i32>(10);
+    assert_true(int_array != 0, "alloc<i32>(10) returns non-null");
+    
+    // Fill array
+    for (i32 i = 0; i < 10; i = i + 1) {
+        int_array[i] = i * 10;
+    }
+    
+    // Verify array
+    bool array_correct = true;
+    for (i32 i = 0; i < 10; i = i + 1) {
+        if (int_array[i] != i * 10) {
+            array_correct = false;
+        }
+    }
+    assert_true(array_correct, "array allocation allows indexed access");
+    
+    free(int_array);
+    
+    // Test: Struct allocation
+    printf("\n--- Struct Allocation ---\n");
+    
+    Point* single_point = alloc<Point>();
+    assert_true(single_point != 0, "alloc<Point>() returns non-null");
+    
+    single_point->x = 100;
+    single_point->y = 200;
+    assert_eq_i32(single_point->x, 100, "struct field x writable");
+    assert_eq_i32(single_point->y, 200, "struct field y writable");
+    
+    free(single_point);
+    
+    // Test: Struct array allocation
+    printf("\n--- Struct Array Allocation ---\n");
+    
+    Point* points = alloc<Point>(5);
+    assert_true(points != 0, "alloc<Point>(5) returns non-null");
+    
+    for (i32 i = 0; i < 5; i = i + 1) {
+        points[i].x = i;
+        points[i].y = i * 2;
+    }
+    
+    bool points_correct = true;
+    for (i32 i = 0; i < 5; i = i + 1) {
+        if (points[i].x != i || points[i].y != i * 2) {
+            points_correct = false;
+        }
+    }
+    assert_true(points_correct, "struct array allocation works correctly");
+    
+    free(points);
+    
+    // Test: memset
+    printf("\n--- memset ---\n");
+    
+    i8* buffer = alloc<i8>(100);
+    memset(buffer, 0, 100);
+    
+    bool all_zero = true;
+    for (i32 i = 0; i < 100; i = i + 1) {
+        if (buffer[i] != 0) {
+            all_zero = false;
+        }
+    }
+    assert_true(all_zero, "memset sets all bytes to 0");
+    
+    memset(buffer, 65, 10);  // 'A' = 65
+    assert_true(buffer[0] == 65, "memset sets first byte");
+    assert_true(buffer[9] == 65, "memset sets last byte in range");
+    assert_true(buffer[10] == 0, "memset doesn't affect bytes outside range");
+    
+    free(buffer);
+    
+    // Test: memcpy
+    printf("\n--- memcpy ---\n");
+    
+    i8* src = alloc<i8>(20);
+    i8* dst = alloc<i8>(20);
+    
+    // Fill source with pattern
+    for (i32 i = 0; i < 20; i = i + 1) {
+        src[i] = (i8)(i + 65);  // 'A', 'B', 'C', ...
+    }
+    
+    memcpy(dst, src, 20);
+    
+    bool copy_correct = true;
+    for (i32 i = 0; i < 20; i = i + 1) {
+        if (dst[i] != src[i]) {
+            copy_correct = false;
+        }
+    }
+    assert_true(copy_correct, "memcpy copies all bytes correctly");
+    
+    free(src);
+    free(dst);
+    
+    // Test: memmove (with overlapping regions)
+    printf("\n--- memmove ---\n");
+    
+    i8* overlap_buf = alloc<i8>(20);
+    for (i32 i = 0; i < 10; i = i + 1) {
+        overlap_buf[i] = (i8)(i + 48);  // '0', '1', '2', ...
+    }
+    
+    // Move bytes 0-9 to positions 5-14 (overlapping)
+    memmove(&overlap_buf[5], overlap_buf, 10);
+    
+    // Original 0-4 should be unchanged
+    assert_true(overlap_buf[0] == 48, "memmove preserves start of source");
+    assert_true(overlap_buf[4] == 52, "memmove preserves end of unchanged region");
+    
+    // Bytes 5-14 should have the moved data
+    assert_true(overlap_buf[5] == 48, "memmove copies to new position");
+    assert_true(overlap_buf[14] == 57, "memmove copies last byte correctly");
+    
+    free(overlap_buf);
+    
+    // Test: realloc
+    printf("\n--- realloc ---\n");
+    
+    i32* grow_buf = alloc<i32>(5);
+    for (i32 i = 0; i < 5; i = i + 1) {
+        grow_buf[i] = i * 100;
+    }
+    
+    // Grow the buffer
+    grow_buf = (i32*)(realloc(grow_buf, 10 * 4));  // 10 i32s
+    assert_true(grow_buf != 0, "realloc returns non-null");
+    
+    // Check original data preserved
+    bool realloc_preserved = true;
+    for (i32 i = 0; i < 5; i = i + 1) {
+        if (grow_buf[i] != i * 100) {
+            realloc_preserved = false;
+        }
+    }
+    assert_true(realloc_preserved, "realloc preserves original data");
+    
+    // Can use the new space
+    grow_buf[9] = 999;
+    assert_eq_i32(grow_buf[9], 999, "realloc allows access to new space");
+    
+    free(grow_buf);
+    
+    // Test: Large allocation
+    printf("\n--- Large Allocation ---\n");
+    
+    i64 large_size = 1000000;  // 1 million bytes
+    i8* large_buf = alloc<i8>(large_size);
+    assert_true(large_buf != 0, "large allocation succeeds");
+    
+    // Write to first and last bytes
+    large_buf[0] = 1;
+    large_buf[large_size - 1] = 2;
+    assert_true(large_buf[0] == 1, "first byte of large alloc writable");
+    assert_true(large_buf[large_size - 1] == 2, "last byte of large alloc writable");
+    
+    free(large_buf);
+    
+    // Test: Multiple allocations
+    printf("\n--- Multiple Allocations ---\n");
+    
+    i32* ptrs[10];
+    for (i32 i = 0; i < 10; i = i + 1) {
+        ptrs[i] = alloc<i32>(100);
+        ptrs[i][0] = i;
+    }
+    
+    bool multi_correct = true;
+    for (i32 i = 0; i < 10; i = i + 1) {
+        if (ptrs[i][0] != i) {
+            multi_correct = false;
+        }
+    }
+    assert_true(multi_correct, "multiple allocations don't interfere");
+    
+    for (i32 i = 0; i < 10; i = i + 1) {
+        free(ptrs[i]);
+    }
+    printf("  [PASS] multiple frees complete without crash\n");
+    tests_passed = tests_passed + 1;
+    
+    // Summary
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    
+    return tests_failed > 0 ? 1 : 0;
+}

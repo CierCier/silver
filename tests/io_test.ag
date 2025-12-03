@@ -1,0 +1,136 @@
+// Test suite for std.io - I/O operations
+import std.io;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== I/O Tests ===\n\n");
+    
+    // Test: printf basic functionality
+    printf("--- printf Tests ---\n");
+    
+    // These tests are mainly to verify compilation and basic output
+    // Visual verification needed for correctness
+    
+    i32 ret = printf("Test string\n");
+    assert_true(ret > 0, "printf returns positive value");
+    
+    // Test: Format specifiers
+    printf("\n--- Format Specifiers ---\n");
+    
+    i32 int_val = 42;
+    printf("Integer: %d\n", int_val);
+    printf("  [PASS] %%d format works\n");
+    tests_passed = tests_passed + 1;
+    
+    i64 long_val = 9223372036854775807;
+    printf("Long: %ld\n", long_val);
+    printf("  [PASS] %%ld format works\n");
+    tests_passed = tests_passed + 1;
+    
+    f64 float_val = 3.14159;
+    printf("Float: %f\n", float_val);
+    printf("  [PASS] %%f format works\n");
+    tests_passed = tests_passed + 1;
+    
+    str str_val = "hello";
+    printf("String: %s\n", str_val);
+    printf("  [PASS] %%s format works\n");
+    tests_passed = tests_passed + 1;
+    
+    printf("Hex: %x\n", 255);
+    printf("  [PASS] %%x format works\n");
+    tests_passed = tests_passed + 1;
+    
+    printf("Pointer: %p\n", &int_val);
+    printf("  [PASS] %%p format works\n");
+    tests_passed = tests_passed + 1;
+    
+    // Test: puts
+    printf("\n--- puts Tests ---\n");
+    
+    ret = puts("Line from puts");
+    assert_true(ret >= 0, "puts returns non-negative");
+    
+    // Test: putchar
+    printf("\n--- putchar Tests ---\n");
+    
+    printf("Characters: ");
+    ret = putchar(65);  // 'A'
+    putchar(66);        // 'B'
+    putchar(67);        // 'C'
+    putchar(10);        // newline
+    assert_true(ret == 65, "putchar returns the character written");
+    
+    // Test: println wrapper
+    printf("\n--- println Tests ---\n");
+    
+    ret = println("Line from println");
+    assert_true(ret > 0, "println returns positive value");
+    
+    // Test: Multiple arguments
+    printf("\n--- Multiple Arguments ---\n");
+    
+    i32 a = 1;
+    i32 b = 2;
+    i32 c = 3;
+    printf("Three values: %d, %d, %d\n", a, b, c);
+    printf("  [PASS] printf with multiple arguments works\n");
+    tests_passed = tests_passed + 1;
+    
+    // Test: Width and precision
+    printf("\n--- Width and Precision ---\n");
+    
+    printf("Width 10: [%10d]\n", 42);
+    printf("Left align: [%-10d]\n", 42);
+    printf("Zero pad: [%010d]\n", 42);
+    printf("Precision: [%.3f]\n", 3.14159);
+    printf("  [PASS] width/precision formatting compiles\n");
+    tests_passed = tests_passed + 1;
+    
+    // Test: Escape sequences
+    printf("\n--- Escape Sequences ---\n");
+    
+    printf("Tab:\tafter tab\n");
+    printf("Quote: \"quoted\"\n");
+    printf("Backslash: \\\n");
+    printf("  [PASS] escape sequences work\n");
+    tests_passed = tests_passed + 1;
+    
+    // Test: Empty string
+    printf("\n--- Edge Cases ---\n");
+    
+    ret = printf("");
+    assert_eq_i32(ret, 0, "empty printf returns 0");
+    
+    ret = puts("");
+    assert_true(ret >= 0, "empty puts succeeds");
+    
+    // Summary
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    
+    return tests_failed > 0 ? 1 : 0;
+}

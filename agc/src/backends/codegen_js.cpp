@@ -114,122 +114,124 @@ static void emitCallArgs(const std::vector<ExprPtr> &args, std::ostream &os) {
 }
 
 static void emitExpr(const Expr &e, std::ostream &os, int prec) {
-  std::visit(overloaded{
-                 [&](const ExprIdent &node) { os << node.name; },
-                 [&](const ExprInt &node) { os << node.value; },
-                 [&](const ExprFloat &node) { os << node.value; },
-                 [&](const ExprStr &node) {
-                   os << '"';
-                   for (char c : node.value) {
-                     if (c == '\\' || c == '"')
-                       os << '\\' << c;
-                     else if (c == '\n')
-                       os << "\\n";
-                     else
-                       os << c;
-                   }
-                   os << '"';
-                 },
-                 [&](const ExprUnary &node) {
-                   switch (node.op) {
-                   case TokenKind::Minus:
-                     os << '-';
-                     emitExpr(*node.rhs, os, 7);
-                     break;
-                   case TokenKind::Bang:
-                     os << '!';
-                     emitExpr(*node.rhs, os, 7);
-                     break;
-                   case TokenKind::PlusPlus:
-                     os << "(++";
-                     emitExpr(*node.rhs, os);
-                     os << ')';
-                     break;
-                   case TokenKind::MinusMinus:
-                     os << "(--";
-                     emitExpr(*node.rhs, os);
-                     os << ')';
-                     break;
-                   default:
-                     os << "/*unop*/";
-                     break;
-                   }
-                 },
-                 [&](const ExprBinary &node) {
-                   int p = binPrec(node.op);
-                   if (p < prec)
-                     os << '(';
-                   emitExpr(*node.lhs, os, p);
-                   os << binOpStr(node.op);
-                   emitExpr(*node.rhs, os, p + 1);
-                   if (p < prec)
-                     os << ')';
-                 },
-                 [&](const ExprAssign &node) {
-                   emitExpr(*node.lhs, os);
-                   os << ' ' << assignOpStr(node.op) << ' ';
-                   emitExpr(*node.rhs, os);
-                 },
-                 [&](const ExprCond &node) {
-                   emitExpr(*node.cond, os);
-                   os << " ? ";
-                   emitExpr(*node.thenE, os);
-                   os << " : ";
-                   emitExpr(*node.elseE, os);
-                 },
-                 [&](const ExprCall &node) {
-                   if (node.callee == "println") {
-                     os << "console.log(";
-                     emitCallArgs(node.args, os);
-                     os << ")";
-                   } else {
-                     os << node.callee << '(';
-                     emitCallArgs(node.args, os);
-                     os << ')';
-                   }
-                 },
-                 [&](const ExprIndex &node) {
-                   emitExpr(*node.base, os);
-                   os << '[';
-                   emitExpr(*node.index, os);
-                   os << ']';
-                 },
-                 [&](const ExprMember &node) {
-                   emitExpr(*node.base, os);
-                   os << '.' << node.member;
-                 },
-                 [&](const ExprComptime &node) {
-                   // JS doesn't have comptime - just emit the inner expression
-                   emitExpr(*node.expr, os);
-                 },
-                 [&](const ExprAddressOf &node) {
-                   // JS doesn't support address-of - emit as comment
-                   os << "/* &";
-                   emitExpr(*node.operand, os);
-                   os << " */";
-                 },
-                 [&](const ExprDeref &node) {
-                   // JS doesn't support dereference - emit as comment
-                   os << "/* *";
-                   emitExpr(*node.operand, os);
-                   os << " */";
-                 },
-                 [&](const ExprCast &node) {
-                   // JS doesn't have type casts - just emit the expression
-                   emitExpr(*node.expr, os);
-                 },
-                 [&](const ExprInitList &node) {
-                   // Emit as object/array literal
-                   os << '{';
-                   for (size_t i = 0; i < node.values.size(); ++i) {
-                     if (i)
-                       os << ", ";
-                     emitExpr(*node.values[i].value, os);
-                   }
-                   os << '}';
-                 },
-             },
-             e.v);
+  std::visit(
+      overloaded{
+          [&](const ExprIdent &node) { os << node.name; },
+          [&](const ExprInt &node) { os << node.value; },
+          [&](const ExprFloat &node) { os << node.value; },
+          [&](const ExprBool &node) { os << (node.value ? "true" : "false"); },
+          [&](const ExprStr &node) {
+            os << '"';
+            for (char c : node.value) {
+              if (c == '\\' || c == '"')
+                os << '\\' << c;
+              else if (c == '\n')
+                os << "\\n";
+              else
+                os << c;
+            }
+            os << '"';
+          },
+          [&](const ExprUnary &node) {
+            switch (node.op) {
+            case TokenKind::Minus:
+              os << '-';
+              emitExpr(*node.rhs, os, 7);
+              break;
+            case TokenKind::Bang:
+              os << '!';
+              emitExpr(*node.rhs, os, 7);
+              break;
+            case TokenKind::PlusPlus:
+              os << "(++";
+              emitExpr(*node.rhs, os);
+              os << ')';
+              break;
+            case TokenKind::MinusMinus:
+              os << "(--";
+              emitExpr(*node.rhs, os);
+              os << ')';
+              break;
+            default:
+              os << "/*unop*/";
+              break;
+            }
+          },
+          [&](const ExprBinary &node) {
+            int p = binPrec(node.op);
+            if (p < prec)
+              os << '(';
+            emitExpr(*node.lhs, os, p);
+            os << binOpStr(node.op);
+            emitExpr(*node.rhs, os, p + 1);
+            if (p < prec)
+              os << ')';
+          },
+          [&](const ExprAssign &node) {
+            emitExpr(*node.lhs, os);
+            os << ' ' << assignOpStr(node.op) << ' ';
+            emitExpr(*node.rhs, os);
+          },
+          [&](const ExprCond &node) {
+            emitExpr(*node.cond, os);
+            os << " ? ";
+            emitExpr(*node.thenE, os);
+            os << " : ";
+            emitExpr(*node.elseE, os);
+          },
+          [&](const ExprCall &node) {
+            if (node.callee == "println") {
+              os << "console.log(";
+              emitCallArgs(node.args, os);
+              os << ")";
+            } else {
+              os << node.callee << '(';
+              emitCallArgs(node.args, os);
+              os << ')';
+            }
+          },
+          [&](const ExprIndex &node) {
+            emitExpr(*node.base, os);
+            os << '[';
+            emitExpr(*node.index, os);
+            os << ']';
+          },
+          [&](const ExprMember &node) {
+            emitExpr(*node.base, os);
+            os << '.' << node.member;
+          },
+          [&](const ExprComptime &node) {
+            // JS doesn't have comptime - just emit the inner expression
+            emitExpr(*node.expr, os);
+          },
+          [&](const ExprAddressOf &node) {
+            // JS doesn't support address-of - emit as comment
+            os << "/* &";
+            emitExpr(*node.operand, os);
+            os << " */";
+          },
+          [&](const ExprDeref &node) {
+            // JS doesn't support dereference - emit as comment
+            os << "/* *";
+            emitExpr(*node.operand, os);
+            os << " */";
+          },
+          [&](const ExprCast &node) {
+            // JS doesn't have type casts - just emit the expression
+            emitExpr(*node.expr, os);
+          },
+          [&](const ExprInitList &node) {
+            // Emit as object/array literal
+            os << '{';
+            for (size_t i = 0; i < node.values.size(); ++i) {
+              if (i)
+                os << ", ";
+              emitExpr(*node.values[i].value, os);
+            }
+            os << '}';
+          },
+      },
+      e.v);
 }
 
 static void emitStmt(const Stmt &s, std::ostream &os, int ind);

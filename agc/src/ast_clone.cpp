@@ -11,8 +11,6 @@ cloneVec(const std::vector<std::unique_ptr<T>> &v) {
   for (const auto &e : v) {
     if (e)
       res.push_back(e->clone());
-    else
-      res.push_back(nullptr);
   }
   return res;
 }
@@ -38,6 +36,7 @@ std::unique_ptr<Expr> Expr::clone() const {
         if constexpr (std::is_same_v<T, ExprIdent> ||
                       std::is_same_v<T, ExprInt> ||
                       std::is_same_v<T, ExprFloat> ||
+                      std::is_same_v<T, ExprBool> ||
                       std::is_same_v<T, ExprStr>) {
           res->v = arg;
         } else if constexpr (std::is_same_v<T, ExprUnary>) {
@@ -128,9 +127,8 @@ std::unique_ptr<Stmt> Stmt::clone() const {
                            cloneOpt(arg.cond), cloneOpt(arg.iter),
                            arg.body->clone()};
         } else if constexpr (std::is_same_v<T, StmtIf>) {
-          res->v =
-              StmtIf{arg.cond->clone(), arg.thenBranch->clone(),
-                     arg.elseBranch ? (*arg.elseBranch)->clone() : nullptr};
+          res->v = StmtIf{arg.cond->clone(), arg.thenBranch->clone(),
+                          cloneOpt(arg.elseBranch)};
         } else if constexpr (std::is_same_v<T, StmtWhile>) {
           res->v = StmtWhile{arg.cond->clone(), arg.body->clone()};
         } else if constexpr (std::is_same_v<T, StmtBreak> ||
