@@ -76,12 +76,13 @@ TypeName fromType(Type *t) {
   if (t->isStruct()) {
     tn.name = static_cast<StructType *>(t)->name();
     // Generic args are already baked into the mangled name for StructType
-  } else if (t->isInt()) {
-    tn.name = "i32";
+  } else if (t->isInt64()) {
+    // Check specific integer types BEFORE the generic isInt() check
+    tn.name = "i64";
   } else if (t->isInt8()) {
     tn.name = "i8";
-  } else if (t->isInt64()) {
-    tn.name = "i64";
+  } else if (t->isInt32()) {
+    tn.name = "i32";
   } else if (t->isFloat()) {
     tn.name = "f64";
   } else if (t->isFloat32()) {
@@ -364,6 +365,7 @@ void SemanticAnalyzer::instantiateImpl(DeclImpl *impl, DeclStruct *ds,
 
       // Resolve types and register method on struct
       Type *retType = resolveType(newFunc.ret);
+
       std::vector<Type *> paramTypes;
       for (auto &p : newFunc.params) {
         Type *pt = resolveType(p.type);
@@ -380,7 +382,11 @@ void SemanticAnalyzer::instantiateImpl(DeclImpl *impl, DeclStruct *ds,
           FuncInfo{retType, paramTypes, newFunc.mangledName};
 
       clonedDecl->v = std::move(newFunc);
+      Decl *rawDecl = clonedDecl.get();
       instantiatedDecls_.push_back(std::move(clonedDecl));
+
+      // Run sema on the cloned decl to resolve types in the body
+      visit(*rawDecl);
     } else if (auto *dc = std::get_if<DeclCast>(&m->v)) {
       // Clone the cast
       auto clonedDecl = std::make_unique<Decl>();
@@ -416,7 +422,11 @@ void SemanticAnalyzer::instantiateImpl(DeclImpl *impl, DeclStruct *ds,
           CastInfo{targetType, newCast.mangledName, newCast.isImplicit});
 
       clonedDecl->v = std::move(newCast);
+      Decl *rawDecl = clonedDecl.get();
       instantiatedDecls_.push_back(std::move(clonedDecl));
+
+      // Run sema on the cloned decl to resolve types in the body
+      visit(*rawDecl);
     }
   }
 

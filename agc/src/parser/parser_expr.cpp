@@ -169,30 +169,18 @@ ExprPtr Parser::parsePrimary() {
 
           // Create a type expression for the generic type
           if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
-            // Create ExprIdent for the generic type (will become MetaType)
-            TypeName typeName;
-            typeName.name = idp->name;
-            typeName.genericArgs = std::move(genericArgs);
-
-            auto typeExpr = std::make_unique<Expr>();
-            typeExpr->loc = base->loc;
-            typeExpr->v = ExprIdent{idp->name};
-            // Store generic args in the type for resolution
-            // We'll use a special ExprCall for static method on generic type
-
-            ExprPtr e = std::make_unique<Expr>();
-            e->v = ExprMethodCall{std::move(typeExpr), std::move(mem), "",
-                                  std::move(methodArgs), false};
-            e->loc = loc;
-            // Store the generic args somewhere - let's add them to the base
-            // Actually, we need to emit this differently
-            // For now, emit as ExprCall with mangled name
+            // Build the mangled type name for the generic instantiation
+            // Must match the convention used in sema_instantiate.cpp
+            // which uses Type::toString() - for pointers that's "*typename"
             std::string mangledTypeName = idp->name;
             for (auto &ga : genericArgs) {
-              mangledTypeName += "_" + ga.name;
+              std::string typeStr;
+              // Prepend asterisks for pointer depth (matching Type::toString())
               for (unsigned i = 0; i < ga.pointerDepth; ++i) {
-                mangledTypeName += "*";
+                typeStr += "*";
               }
+              typeStr += ga.name;
+              mangledTypeName += "_" + typeStr;
             }
 
             // Create the base as an identifier with the mangled type name
@@ -200,6 +188,8 @@ ExprPtr Parser::parsePrimary() {
             mangledBase->loc = base->loc;
             mangledBase->v = ExprIdent{mangledTypeName};
 
+            ExprPtr e = std::make_unique<Expr>();
+            e->loc = loc;
             e->v = ExprMethodCall{std::move(mangledBase), std::move(mem), "",
                                   std::move(methodArgs), false};
             base = std::move(e);

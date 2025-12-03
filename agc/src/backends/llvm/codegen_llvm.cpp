@@ -110,10 +110,28 @@ llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, const TypeName &t) {
   else if (lower == "str" || lower == "string")
     ty = llvm::PointerType::getUnqual(ctx);
   else {
+    // Handle generic types by mangling: Optional<i32> -> Optional_i32
+    std::string mangledName = base;
+    if (!t.genericArgs.empty()) {
+      for (const auto &arg : t.genericArgs) {
+        mangledName += "_";
+        // Handle pointer types in generic args
+        for (unsigned i = 0; i < arg.pointerDepth; ++i) {
+          mangledName += "*";
+        }
+        mangledName += arg.name;
+      }
+    }
     // Try original name for structs
-    ty = llvm::StructType::getTypeByName(ctx, "struct." + base);
+    ty = llvm::StructType::getTypeByName(ctx, "struct." + mangledName);
     if (!ty)
-      ty = llvm::StructType::getTypeByName(ctx, base);
+      ty = llvm::StructType::getTypeByName(ctx, mangledName);
+    if (!ty) {
+      // Fallback to base name (for non-generic structs)
+      ty = llvm::StructType::getTypeByName(ctx, "struct." + base);
+      if (!ty)
+        ty = llvm::StructType::getTypeByName(ctx, base);
+    }
     if (!ty) {
       ty = llvm::Type::getInt32Ty(ctx);
     }
@@ -507,6 +525,7 @@ public:
     }
     if (diags)
       diags->report(DiagLevel::Debug, "Starting emit_object_file...");
+
     llvm::LLVMContext ctx;
     llvm::Module module("silver_module", ctx);
 
