@@ -1,0 +1,44 @@
+// Test: Generic impl blocks
+import std.io;
+
+struct Box<T> {
+    T value;
+}
+
+impl Box<T> {
+    Box<T> new(T val) {
+        Box<T> b;
+        b.value = val;
+        return b;
+    }
+
+    T get(Box<T> self) {
+        return self.value;
+    }
+
+    void set(Box<T>* self, T val) {
+        self->value = val;
+    }
+
+    void debug(Box<T> self) {
+        printf("Box { value: ... }\n");
+    }
+}
+
+i32 main() {
+    printf("=== Generic Impl Test ===\n");
+
+    // Test Box<i32>
+    Box<i32> b1 = Box<i32>.new(42);
+    printf("Box<i32> value: %d\n", b1.get());
+    
+    b1.set(100);
+    printf("After set: %d\n", b1.get());
+
+    // Test Box<f64>
+    Box<f64> b2 = Box<f64>.new(3.14);
+    printf("Box<f64> value: %f\n", b2.get());
+
+    printf("Done!\n");
+    return 0;
+}

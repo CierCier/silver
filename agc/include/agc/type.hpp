@@ -10,8 +10,12 @@ namespace agc {
 enum class TypeKind {
   Void,
   Bool,
-  Int,
-  Float,
+  Int8,    // i8
+  Int16,   // i16
+  Int32,   // i32
+  Int64,   // i64
+  Float32, // f32
+  Float64, // f64
   String,
   Pointer,
   Array,
@@ -30,8 +34,14 @@ public:
 
   bool isVoid() const { return kind() == TypeKind::Void; }
   bool isBool() const { return kind() == TypeKind::Bool; }
-  bool isInt() const { return kind() == TypeKind::Int; }
-  bool isFloat() const { return kind() == TypeKind::Float; }
+  bool isInt8() const { return kind() == TypeKind::Int8; }
+  bool isInt16() const { return kind() == TypeKind::Int16; }
+  bool isInt32() const { return kind() == TypeKind::Int32; }
+  bool isInt64() const { return kind() == TypeKind::Int64; }
+  bool isInt() const { return isInt8() || isInt16() || isInt32() || isInt64(); }
+  bool isFloat32() const { return kind() == TypeKind::Float32; }
+  bool isFloat64() const { return kind() == TypeKind::Float64; }
+  bool isFloat() const { return isFloat32() || isFloat64(); }
   bool isString() const { return kind() == TypeKind::String; }
   bool isPointer() const { return kind() == TypeKind::Pointer; }
   bool isArray() const { return kind() == TypeKind::Array; }
@@ -39,6 +49,9 @@ public:
   bool isEnum() const { return kind() == TypeKind::Enum; }
   bool isFunction() const { return kind() == TypeKind::Function; }
   bool isMeta() const { return kind() == TypeKind::Meta; }
+  bool isIntegral() const { return isInt() || isBool(); }
+  bool isFloating() const { return isFloat(); }
+  bool isNumeric() const { return isIntegral() || isFloating(); }
 };
 
 class PrimitiveType : public Type {
@@ -184,8 +197,14 @@ public:
 
   Type *getVoid();
   Type *getBool();
-  Type *getInt();   // i32 for now
-  Type *getFloat(); // f64
+  Type *getInt8();    // i8
+  Type *getInt16();   // i16
+  Type *getInt32();   // i32
+  Type *getInt();     // alias for i32
+  Type *getInt64();   // i64
+  Type *getFloat32(); // f32
+  Type *getFloat64(); // f64
+  Type *getFloat();   // alias for f64
   Type *getString();
 
   Type *getPointer(Type *pointee);
@@ -202,8 +221,12 @@ private:
   // Cache for primitives
   Type *voidType_;
   Type *boolType_;
-  Type *intType_;
-  Type *floatType_;
+  Type *int8Type_;
+  Type *int16Type_;
+  Type *int32Type_;
+  Type *int64Type_;
+  Type *float32Type_;
+  Type *float64Type_;
   Type *stringType_;
 
   // Simple caching for pointers/arrays could be added, but for now just create

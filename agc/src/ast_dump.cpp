@@ -89,6 +89,10 @@ static void dumpExpr(const Expr &e, std::ostream &os, int ind) {
                    indent(os, ind);
                    os << "Float(" << node.value << ")\n";
                  },
+                 [&](const ExprBool &node) {
+                   indent(os, ind);
+                   os << "Bool(" << (node.value ? "true" : "false") << ")\n";
+                 },
                  [&](const ExprStr &node) {
                    indent(os, ind);
                    os << "Str(\"" << node.value << "\")\n";

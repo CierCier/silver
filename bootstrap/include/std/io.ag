@@ -1,0 +1,3 @@
+
+extern i32 println(str s);
+extern i32 printf(str fmt, ...);

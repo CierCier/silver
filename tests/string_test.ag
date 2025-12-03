@@ -1,0 +1,172 @@
+// Test suite for std.string - String type
+import std.io;
+import std.string;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== String Tests ===\n\n");
+    
+    // Test: String creation
+    printf("--- String Creation ---\n");
+    
+    String s1 = String.new();
+    assert_eq_i64(s1.length(), 0, "new() creates empty string");
+    assert_true(s1.is_empty(), "new() string is_empty() returns true");
+    
+    String s2 = String.from("Hello");
+    assert_eq_i64(s2.length(), 5, "from() sets correct length");
+    assert_true(!s2.is_empty(), "from() string is not empty");
+    assert_true(s2.equals("Hello"), "from() stores correct content");
+    
+    String s3 = String.with_capacity(100);
+    assert_eq_i64(s3.length(), 0, "with_capacity() creates empty string");
+    assert_true(s3.capacity >= 100, "with_capacity() reserves capacity");
+    
+    drop(s1);
+    drop(s2);
+    drop(s3);
+    
+    // Test: Append operations
+    printf("\n--- Append Operations ---\n");
+    
+    String s4 = String.new();
+    s4.append("Hello");
+    assert_true(s4.equals("Hello"), "append() works on empty string");
+    
+    s4.append(" World");
+    assert_true(s4.equals("Hello World"), "append() concatenates");
+    assert_eq_i64(s4.length(), 11, "append() updates length");
+    
+    s4.push_char(33); // '!'
+    assert_true(s4.equals("Hello World!"), "push_char() appends character");
+    assert_eq_i64(s4.length(), 12, "push_char() updates length");
+    
+    drop(s4);
+    
+    // Test: String comparison
+    printf("\n--- String Comparison ---\n");
+    
+    String s5 = String.from("test");
+    assert_true(s5.equals("test"), "equals() returns true for match");
+    assert_true(!s5.equals("Test"), "equals() is case sensitive");
+    assert_true(!s5.equals("testing"), "equals() returns false for different strings");
+    
+    String s6 = String.from("test");
+    assert_true(s5.equals_string(s6), "equals_string() compares String objects");
+    
+    drop(s5);
+    drop(s6);
+    
+    // Test: starts_with / ends_with
+    printf("\n--- Prefix/Suffix Tests ---\n");
+    
+    String s7 = String.from("Hello World");
+    assert_true(s7.starts_with("Hello"), "starts_with() matches prefix");
+    assert_true(!s7.starts_with("World"), "starts_with() rejects non-prefix");
+    assert_true(s7.starts_with(""), "starts_with() matches empty string");
+    
+    assert_true(s7.ends_with("World"), "ends_with() matches suffix");
+    assert_true(!s7.ends_with("Hello"), "ends_with() rejects non-suffix");
+    assert_true(s7.ends_with(""), "ends_with() matches empty string");
+    
+    drop(s7);
+    
+    // Test: Character access
+    printf("\n--- Character Access ---\n");
+    
+    String s8 = String.from("ABCDE");
+    assert_eq_i64((i64)(s8.at(0)), 65, "at(0) returns 'A'");
+    assert_eq_i64((i64)(s8.at(4)), 69, "at(4) returns 'E'");
+    
+    drop(s8);
+    
+    // Test: Search operations
+    printf("\n--- Search Operations ---\n");
+    
+    String s9 = String.from("Hello World");
+    assert_eq_i64(s9.find_char(72), 0, "find_char('H') returns 0");
+    assert_eq_i64(s9.find_char(111), 4, "find_char('o') returns first occurrence");
+    assert_eq_i64(s9.find_char(120), -1, "find_char('x') returns -1 for not found");
+    
+    assert_eq_i64(s9.find("World"), 6, "find() locates substring");
+    assert_eq_i64(s9.find("xyz"), -1, "find() returns -1 for not found");
+    assert_eq_i64(s9.find("Hello"), 0, "find() finds at beginning");
+    
+    drop(s9);
+    
+    // Test: Substring
+    printf("\n--- Substring ---\n");
+    
+    String s10 = String.from("Hello World");
+    String sub1 = s10.substring(0, 5);
+    assert_true(sub1.equals("Hello"), "substring(0, 5) extracts 'Hello'");
+    
+    String sub2 = s10.substring(6, 5);
+    assert_true(sub2.equals("World"), "substring(6, 5) extracts 'World'");
+    
+    String sub3 = s10.substring(6, 100);
+    assert_true(sub3.equals("World"), "substring() clamps length");
+    
+    drop(s10);
+    drop(sub1);
+    drop(sub2);
+    drop(sub3);
+    
+    // Test: Clone
+    printf("\n--- Clone ---\n");
+    
+    String s11 = String.from("Original");
+    String s12 = s11.clone();
+    assert_true(s12.equals("Original"), "clone() copies content");
+    
+    s12.append(" Modified");
+    assert_true(s11.equals("Original"), "clone() is independent copy");
+    assert_true(s12.equals("Original Modified"), "modified clone has new content");
+    
+    drop(s11);
+    drop(s12);
+    
+    // Test: Clear and reserve
+    printf("\n--- Clear and Reserve ---\n");
+    
+    String s13 = String.from("Some content");
+    i64 old_cap = s13.capacity;
+    s13.clear();
+    assert_eq_i64(s13.length(), 0, "clear() sets length to 0");
+    assert_true(s13.is_empty(), "clear() makes string empty");
+    assert_true(s13.capacity == old_cap, "clear() preserves capacity");
+    
+    s13.reserve(1000);
+    assert_true(s13.capacity >= 1000, "reserve() increases capacity");
+    
+    drop(s13);
+    
+    // Summary
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    
+    return tests_failed > 0 ? 1 : 0;
+}

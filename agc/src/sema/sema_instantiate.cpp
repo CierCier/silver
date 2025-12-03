@@ -1,3 +1,4 @@
+#include "agc/mangle.hpp"
 #include "agc/sema.hpp"
 
 namespace agc {
@@ -41,6 +42,12 @@ void SemanticAnalyzer::instantiateStruct(DeclStruct *ds,
   st->setFields(std::move(fields));
 
   popTypeScope();
+
+  // Instantiate generic impls for this struct
+  auto range = genericImpls_.equal_range(ds->name);
+  for (auto it = range.first; it != range.second; ++it) {
+    instantiateImpl(it->second, ds, args, st);
+  }
 }
 
 // Helper to convert Type* back to TypeName for substitution
@@ -71,8 +78,14 @@ TypeName fromType(Type *t) {
     // Generic args are already baked into the mangled name for StructType
   } else if (t->isInt()) {
     tn.name = "i32";
+  } else if (t->isInt8()) {
+    tn.name = "i8";
+  } else if (t->isInt64()) {
+    tn.name = "i64";
   } else if (t->isFloat()) {
     tn.name = "f64";
+  } else if (t->isFloat32()) {
+    tn.name = "f32";
   } else if (t->isBool()) {
     tn.name = "bool";
   } else if (t->isString()) {
@@ -129,11 +142,17 @@ void substitute(Expr &e, const std::unordered_map<std::string, TypeName> &map) {
         } else if constexpr (std::is_same_v<T, ExprCall>) {
           for (auto &a : arg.args)
             substitute(*a, map);
+          for (auto &ga : arg.genericArgs)
+            substitute(ga, map);
         } else if constexpr (std::is_same_v<T, ExprIndex>) {
           substitute(*arg.base, map);
           substitute(*arg.index, map);
         } else if constexpr (std::is_same_v<T, ExprMember>) {
           substitute(*arg.base, map);
+        } else if constexpr (std::is_same_v<T, ExprMethodCall>) {
+          substitute(*arg.base, map);
+          for (auto &a : arg.args)
+            substitute(*a, map);
         } else if constexpr (std::is_same_v<T, ExprComptime>) {
           substitute(*arg.expr, map);
         } else if constexpr (std::is_same_v<T, ExprAddressOf>) {
@@ -149,6 +168,16 @@ void substitute(Expr &e, const std::unordered_map<std::string, TypeName> &map) {
               substitute(**v.designator, map);
             substitute(*v.value, map);
           }
+        } else if constexpr (std::is_same_v<T, ExprNew>) {
+          substitute(arg.targetType, map);
+        } else if constexpr (std::is_same_v<T, ExprDrop>) {
+          substitute(*arg.operand, map);
+        } else if constexpr (std::is_same_v<T, ExprAlloc>) {
+          substitute(arg.targetType, map);
+          if (arg.count)
+            substitute(**arg.count, map);
+        } else if constexpr (std::is_same_v<T, ExprFree>) {
+          substitute(*arg.operand, map);
         }
       },
       e.v);
@@ -170,8 +199,10 @@ void substitute(Stmt &s, const std::unordered_map<std::string, TypeName> &map) {
               substitute(**d.init, map);
           }
         } else if constexpr (std::is_same_v<T, StmtBlock>) {
-          for (auto &stmt : arg.stmts)
-            substitute(*stmt, map);
+          for (auto &stmt : arg.stmts) {
+            if (stmt)
+              substitute(*stmt, map);
+          }
         } else if constexpr (std::is_same_v<T, StmtFor>) {
           if (arg.init)
             substitute(**arg.init, map);
@@ -183,8 +214,9 @@ void substitute(Stmt &s, const std::unordered_map<std::string, TypeName> &map) {
         } else if constexpr (std::is_same_v<T, StmtIf>) {
           substitute(*arg.cond, map);
           substitute(*arg.thenBranch, map);
-          if (arg.elseBranch)
-            substitute(**arg.elseBranch, map);
+          if (arg.elseBranch.has_value()) {
+            substitute(*arg.elseBranch.value(), map);
+          }
         } else if constexpr (std::is_same_v<T, StmtWhile>) {
           substitute(*arg.cond, map);
           substitute(*arg.body, map);
@@ -256,7 +288,8 @@ void SemanticAnalyzer::instantiateFunction(DeclFunc *df,
     newFunc.body = df->body->clone();
     // Apply substitution
     for (auto &stmt : newFunc.body->stmts) {
-      substitute(*stmt, subMap);
+      if (stmt)
+        substitute(*stmt, subMap);
     }
   }
 
@@ -277,6 +310,117 @@ void SemanticAnalyzer::instantiateFunction(DeclFunc *df,
 
   // Register in functions_ map so it can be found by subsequent calls
   visit(*rawDecl);
+}
+
+void SemanticAnalyzer::instantiateImpl(DeclImpl *impl, DeclStruct *ds,
+                                       const std::vector<Type *> &args,
+                                       StructType *targetStruct) {
+  // Build substitution map: T -> i32, etc.
+  std::unordered_map<std::string, TypeName> subMap;
+  for (size_t i = 0; i < ds->genericParams.size(); ++i) {
+    subMap[ds->genericParams[i]] = fromType(args[i]);
+  }
+
+  // Set up type scope for type resolution
+  pushTypeScope();
+  for (size_t i = 0; i < ds->genericParams.size(); ++i) {
+    declareTypeAlias(ds->genericParams[i], args[i]);
+  }
+
+  // Process each method in the impl
+  for (auto &m : impl->methods) {
+    if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+      // Clone the method
+      auto clonedDecl = std::make_unique<Decl>();
+      clonedDecl->loc = m->loc;
+
+      DeclFunc newFunc;
+      newFunc.name = df->name;
+      newFunc.isExtern = df->isExtern;
+      newFunc.isVariadic = df->isVariadic;
+
+      // Substitute return type
+      newFunc.ret = df->ret;
+      substitute(newFunc.ret, subMap);
+
+      // Substitute parameter types
+      for (auto &p : df->params) {
+        Param newP = p;
+        substitute(newP.type, subMap);
+        newFunc.params.push_back(newP);
+      }
+
+      // Clone and substitute body
+      if (df->body) {
+        newFunc.body = df->body->clone();
+        for (auto &stmt : newFunc.body->stmts) {
+          if (stmt)
+            substitute(*stmt, subMap);
+        }
+      }
+
+      // Mangle name using the concrete struct name
+      newFunc.mangledName = mangle_method(targetStruct->name(), newFunc);
+
+      // Resolve types and register method on struct
+      Type *retType = resolveType(newFunc.ret);
+      std::vector<Type *> paramTypes;
+      for (auto &p : newFunc.params) {
+        Type *pt = resolveType(p.type);
+        p.resolvedType = pt;
+        paramTypes.push_back(pt);
+      }
+
+      targetStruct->addMethod(
+          MethodInfo{newFunc.name, newFunc.mangledName, retType, paramTypes});
+
+      // Register as callable function
+      std::string callableName = targetStruct->name() + "_" + newFunc.name;
+      functions_[callableName] =
+          FuncInfo{retType, paramTypes, newFunc.mangledName};
+
+      clonedDecl->v = std::move(newFunc);
+      instantiatedDecls_.push_back(std::move(clonedDecl));
+    } else if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+      // Clone the cast
+      auto clonedDecl = std::make_unique<Decl>();
+      clonedDecl->loc = m->loc;
+
+      DeclCast newCast;
+      newCast.isImplicit = dc->isImplicit;
+
+      // Substitute target type
+      newCast.target = dc->target;
+      substitute(newCast.target, subMap);
+
+      // Substitute parameter types
+      for (auto &p : dc->params) {
+        Param newP = p;
+        substitute(newP.type, subMap);
+        newCast.params.push_back(newP);
+      }
+
+      // Clone and substitute body
+      if (dc->body) {
+        newCast.body = dc->body->clone();
+        for (auto &stmt : newCast.body->stmts) {
+          if (stmt)
+            substitute(*stmt, subMap);
+        }
+      }
+
+      // Mangle name and resolve types
+      newCast.mangledName = mangle_cast(targetStruct->name(), newCast);
+      Type *targetType = resolveType(newCast.target);
+      targetStruct->addCast(
+          CastInfo{targetType, newCast.mangledName, newCast.isImplicit});
+
+      clonedDecl->v = std::move(newCast);
+      instantiatedDecls_.push_back(std::move(clonedDecl));
+    }
+  }
+
+  popTypeScope();
 }
 
 } // namespace agc

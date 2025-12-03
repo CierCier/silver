@@ -10,12 +10,20 @@ void SemanticAnalyzer::visit(Decl &decl) {
     // Function already registered? No, we didn't register functions in pass 1
     // fully. Let's register params and body.
     Type *retType = resolveType(df->ret);
+
+    // If mangledName is already set, it means this is a method called from
+    // DeclImpl or a generic instantiation. In that case, don't register it as a
+    // global function.
+    bool isMethodOrInstantiated = !df->mangledName.empty();
+
     if (df->mangledName.empty()) {
       df->mangledName = mangle_function(*df);
     }
 
     // Ensure function is registered (needed for instantiated functions)
-    if (functions_.find(df->name) == functions_.end()) {
+    // Only register if it's NOT a method (methods are registered by DeclImpl)
+    if (!isMethodOrInstantiated &&
+        functions_.find(df->name) == functions_.end()) {
       std::vector<Type *> paramTypes;
       for (auto &p : df->params) {
         Type *pt = resolveType(p.type);
@@ -56,6 +64,17 @@ void SemanticAnalyzer::visit(Decl &decl) {
     // So this visit(Decl) is only for top-level.
     // Pass 1 handled DeclVar.
   } else if (auto *di = std::get_if<DeclImpl>(&decl.v)) {
+    // Skip generic impls - they are instantiated with the struct
+    if (genericImpls_.count(di->type.name)) {
+      // Check if this is the same generic impl we stored
+      auto range = genericImpls_.equal_range(di->type.name);
+      for (auto it = range.first; it != range.second; ++it) {
+        if (it->second == di) {
+          return; // Skip - will be instantiated later
+        }
+      }
+    }
+
     Type *type = resolveType(di->type);
     StructType *structType = nullptr;
     if (type && type->isStruct()) {

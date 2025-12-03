@@ -13,7 +13,49 @@ void SemanticAnalyzer::visit(Expr &expr) {
           [this, &expr](ExprBinary &n) {
             visit(*n.lhs);
             visit(*n.rhs);
-            if (checkType(n.lhs->type, n.rhs->type, expr.loc)) {
+
+            // Helper to check if type is pointer-like (pointer or str)
+            auto isPointerLike = [](Type *t) {
+              return t && (t->isPointer() || t->isString());
+            };
+
+            // Check for pointer arithmetic (pointer + integer or integer +
+            // pointer)
+            bool isPointerArith = false;
+            Type *ptrType = nullptr;
+            if (n.op == TokenKind::Plus || n.op == TokenKind::Minus) {
+              if (isPointerLike(n.lhs->type) && n.rhs->type &&
+                  n.rhs->type->isIntegral()) {
+                isPointerArith = true;
+                ptrType = n.lhs->type;
+              } else if (n.op == TokenKind::Plus && n.lhs->type &&
+                         n.lhs->type->isIntegral() &&
+                         isPointerLike(n.rhs->type)) {
+                isPointerArith = true;
+                ptrType = n.rhs->type;
+              }
+            }
+
+            // Check for pointer comparison with null (integer 0)
+            bool isPointerNullCompare = false;
+            if (n.op == TokenKind::Eq || n.op == TokenKind::Ne) {
+              // pointer/str == 0 or pointer/str != 0
+              if (isPointerLike(n.lhs->type) && n.rhs->type &&
+                  n.rhs->type->isIntegral()) {
+                isPointerNullCompare = true;
+              }
+              // 0 == pointer/str or 0 != pointer/str
+              else if (n.lhs->type && n.lhs->type->isIntegral() &&
+                       isPointerLike(n.rhs->type)) {
+                isPointerNullCompare = true;
+              }
+            }
+
+            if (isPointerArith) {
+              expr.type = ptrType;
+            } else if (isPointerNullCompare) {
+              expr.type = typeCtx_.getBool();
+            } else if (checkType(n.lhs->type, n.rhs->type, expr.loc)) {
               // Result type depends on op
               // Comparison -> bool
               // Arithmetic -> same as operand
@@ -105,7 +147,11 @@ void SemanticAnalyzer::visit(Expr &expr) {
           [this, &expr](ExprIndex &n) {
             visit(*n.base);
             visit(*n.index);
-            checkType(typeCtx_.getInt(), n.index->type, n.index->loc);
+            // Accept any integer type for array index (i8, i32, i64)
+            if (!n.index->type || !n.index->type->isIntegral()) {
+              diags_.report(DiagLevel::Error, n.index->loc,
+                            "array index must be an integer type");
+            }
             if (n.base->type && n.base->type->isArray()) {
               expr.type = static_cast<ArrayType *>(n.base->type)->element();
             } else if (n.base->type && n.base->type->isPointer()) {
@@ -193,6 +239,14 @@ void SemanticAnalyzer::visit(Expr &expr) {
               }
             }
 
+            // Handle static method calls (Type.method())
+            // When baseType is MetaType, we're calling a static method
+            bool isStaticCall = false;
+            if (baseType && baseType->isMeta()) {
+              baseType = static_cast<MetaType *>(baseType)->representedType();
+              isStaticCall = true;
+            }
+
             if (baseType && baseType->isStruct()) {
               auto *st = static_cast<StructType *>(baseType);
               const MethodInfo *method = st->findMethod(n.method);
@@ -200,12 +254,14 @@ void SemanticAnalyzer::visit(Expr &expr) {
                 n.mangledMethod = method->mangledName;
                 expr.type = method->returnType;
 
-                // Check arg types (skip first param which is self)
-                for (size_t i = 0;
-                     i < n.args.size() && i + 1 < method->paramTypes.size();
+                // For static calls, all args match params directly
+                // For instance calls, skip first param which is self
+                size_t paramOffset = isStaticCall ? 0 : 1;
+                for (size_t i = 0; i < n.args.size() &&
+                                   i + paramOffset < method->paramTypes.size();
                      ++i) {
-                  checkType(method->paramTypes[i + 1], n.args[i]->type,
-                            n.args[i]->loc);
+                  checkType(method->paramTypes[i + paramOffset],
+                            n.args[i]->type, n.args[i]->loc);
                 }
               } else {
                 diags_.report(DiagLevel::Error, expr.loc,
@@ -241,8 +297,16 @@ void SemanticAnalyzer::visit(Expr &expr) {
           [this, &expr](ExprIdent &n) {
             expr.type = checkVar(n.name, expr.loc);
           },
-          [this, &expr](ExprInt &) { expr.type = typeCtx_.getInt(); },
+          [this, &expr](ExprInt &n) {
+            // Choose i64 if value doesn't fit in i32
+            if (n.value > INT32_MAX) {
+              expr.type = typeCtx_.getInt64();
+            } else {
+              expr.type = typeCtx_.getInt();
+            }
+          },
           [this, &expr](ExprFloat &) { expr.type = typeCtx_.getFloat(); },
+          [this, &expr](ExprBool &) { expr.type = typeCtx_.getBool(); },
           [this, &expr](ExprCast &n) {
             visit(*n.expr);
             Type *target = resolveType(n.target);
@@ -316,8 +380,8 @@ void SemanticAnalyzer::visit(Expr &expr) {
             if (n.count) {
               visit(**n.count);
               Type *countType = (*n.count)->type;
-              // Count should be an integer type
-              if (countType && !countType->isInt()) {
+              // Count should be an integer type (i8, i32, i64, etc.)
+              if (countType && !countType->isIntegral()) {
                 diags_.report(DiagLevel::Error, expr.loc,
                               "alloc count must be an integer type");
               }

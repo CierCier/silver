@@ -68,6 +68,7 @@ target_include_directories(agc_lib PUBLIC
 	${CMAKE_CURRENT_SOURCE_DIR}/include
 	${CMAKE_CURRENT_SOURCE_DIR}/../libag/include
 	${CMAKE_CURRENT_BINARY_DIR}/include
+	${CMAKE_BINARY_DIR}/libag/include
 )
 
 if(SILVER_ENABLE_LLVM)

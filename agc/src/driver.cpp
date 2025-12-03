@@ -402,23 +402,7 @@ int CompilerDriver::run(int argc, char **argv) {
         cmd += " -l" + lib;
       }
 
-      if (opt.static_link) {
-        cmd += " -lag_static -static";
-      } else {
-        cmd += " -lag";
-        // Add rpath for runtime library lookup (dynamic linking)
-        // Use $ORIGIN for relative paths and absolute paths for system
-        // locations
-        std::string rpath;
-        for (const auto &path : libPaths) {
-          if (!rpath.empty())
-            rpath += ":";
-          rpath += path;
-        }
-        if (!rpath.empty()) {
-          cmd += " -Wl,-rpath," + rpath;
-        }
-      }
+      // static link only now
 
       if (opt.verbose) {
         std::cout << "Linking: " << cmd << "\n";

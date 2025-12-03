@@ -1,0 +1,332 @@
+// Silver Standard Library - File I/O
+// File handles and operations for reading/writing files
+
+import std.io;
+import std.mem;
+import std.string;
+
+// Drop trait for automatic cleanup
+trait Drop {
+    void drop();
+}
+
+// File open modes
+// Use these constants when opening files
+// FILE_READ    = "r"   - read only
+// FILE_WRITE   = "w"   - write only (truncate)
+// FILE_APPEND  = "a"   - append only
+// FILE_READ_WRITE = "r+" - read and write
+
+// Opaque FILE pointer from C
+extern void* fopen(str filename, str mode);
+extern i32 fclose(void* stream);
+extern i64 fread(void* ptr, i64 size, i64 count, void* stream);
+extern i64 fwrite(void* ptr, i64 size, i64 count, void* stream);
+extern i32 fseek(void* stream, i64 offset, i32 whence);
+extern i64 ftell(void* stream);
+extern i32 fflush(void* stream);
+extern i32 feof(void* stream);
+extern i32 ferror(void* stream);
+extern void clearerr(void* stream);
+extern i32 fgetc(void* stream);
+extern i32 fputc(i32 c, void* stream);
+extern str fgets(str s, i32 n, void* stream);
+extern i32 fputs(str s, void* stream);
+extern i32 fprintf(void* stream, str fmt, ...);
+extern i32 remove(str filename);
+extern i32 rename(str oldname, str newname);
+
+// Seek origins
+// SEEK_SET = 0  - from beginning
+// SEEK_CUR = 1  - from current position
+// SEEK_END = 2  - from end
+
+// ============================================================================
+// File - A file handle with automatic resource management
+// ============================================================================
+@trait(drop)
+struct File {
+    void* handle;   // C FILE* pointer
+    str path;       // File path (for debugging)
+    bool is_open;   // Track if file is open
+}
+
+impl File {
+    // Open a file with the given mode
+    // Returns a File with is_open=false if opening failed
+    File open(str filename, str mode) {
+        File f;
+        f.path = filename;
+        f.handle = fopen(filename, mode);
+        f.is_open = f.handle != 0;
+        return f;
+    }
+    
+    // Open file for reading
+    File open_read(str filename) {
+        return File.open(filename, "r");
+    }
+    
+    // Open file for writing (truncates existing file)
+    File open_write(str filename) {
+        return File.open(filename, "w");
+    }
+    
+    // Open file for appending
+    File open_append(str filename) {
+        return File.open(filename, "a");
+    }
+    
+    // Open file for reading and writing
+    File open_rw(str filename) {
+        return File.open(filename, "r+");
+    }
+    
+    // Drop implementation - closes the file
+    void drop(File self) {
+        if (self.is_open && self.handle != 0) {
+            fclose(self.handle);
+        }
+    }
+    
+    // Check if file is open
+    bool valid(File self) {
+        return self.is_open && self.handle != 0;
+    }
+    
+    // Close the file manually
+    void close(File* self) {
+        if (self->is_open && self->handle != 0) {
+            fclose(self->handle);
+            self->is_open = false;
+            self->handle = 0;
+        }
+    }
+    
+    // Read up to `count` bytes into buffer, returns number of bytes read
+    i64 read(File* self, void* buffer, i64 count) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return fread(buffer, 1, count, self->handle);
+    }
+    
+    // Write `count` bytes from buffer, returns number of bytes written
+    i64 write(File* self, void* buffer, i64 count) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return fwrite(buffer, 1, count, self->handle);
+    }
+    
+    // Write a C string
+    i32 write_str(File* self, str s) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return fputs(s, self->handle);
+    }
+    
+    // Write a C string with newline
+    i32 write_line(File* self, str s) {
+        if (!self->is_open) {
+            return -1;
+        }
+        i32 result = fputs(s, self->handle);
+        if (result >= 0) {
+            fputc(10, self->handle);  // newline
+        }
+        return result;
+    }
+    
+    // Write formatted string
+    i32 writef(File* self, str fmt, ...) {
+        if (!self->is_open) {
+            return -1;
+        }
+        // Note: This requires varargs support
+        return fprintf(self->handle, fmt);
+    }
+    
+    // Read a single character, returns -1 on EOF
+    i32 read_char(File* self) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return fgetc(self->handle);
+    }
+    
+    // Write a single character
+    i32 write_char(File* self, i8 c) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return fputc((i32)(c), self->handle);
+    }
+    
+    // Read a line into buffer (up to max_len chars), returns pointer to buffer or null
+    str read_line(File* self, str buffer, i32 max_len) {
+        if (!self->is_open) {
+            return 0;
+        }
+        return fgets(buffer, max_len, self->handle);
+    }
+    
+    // Seek to position from beginning of file
+    bool seek(File* self, i64 offset) {
+        if (!self->is_open) {
+            return false;
+        }
+        return fseek(self->handle, offset, 0) == 0;  // SEEK_SET = 0
+    }
+    
+    // Seek relative to current position
+    bool seek_relative(File* self, i64 offset) {
+        if (!self->is_open) {
+            return false;
+        }
+        return fseek(self->handle, offset, 1) == 0;  // SEEK_CUR = 1
+    }
+    
+    // Seek relative to end of file
+    bool seek_end(File* self, i64 offset) {
+        if (!self->is_open) {
+            return false;
+        }
+        return fseek(self->handle, offset, 2) == 0;  // SEEK_END = 2
+    }
+    
+    // Get current position in file
+    i64 tell(File* self) {
+        if (!self->is_open) {
+            return -1;
+        }
+        return ftell(self->handle);
+    }
+    
+    // Rewind to beginning of file
+    void rewind(File* self) {
+        if (self->is_open) {
+            fseek(self->handle, 0, 0);  // SEEK_SET = 0
+        }
+    }
+    
+    // Flush buffered data to disk
+    bool flush(File* self) {
+        if (!self->is_open) {
+            return false;
+        }
+        return fflush(self->handle) == 0;
+    }
+    
+    // Check if at end of file
+    bool eof(File* self) {
+        if (!self->is_open) {
+            return true;
+        }
+        return feof(self->handle) != 0;
+    }
+    
+    // Check if there was an error
+    bool error(File* self) {
+        if (!self->is_open) {
+            return true;
+        }
+        return ferror(self->handle) != 0;
+    }
+    
+    // Clear error and EOF flags
+    void clear_error(File* self) {
+        if (self->is_open) {
+            clearerr(self->handle);
+        }
+    }
+    
+    // Get the file size in bytes
+    i64 size(File* self) {
+        if (!self->is_open) {
+            return -1;
+        }
+        i64 current = ftell(self->handle);
+        fseek(self->handle, 0, 2);  // SEEK_END
+        i64 size = ftell(self->handle);
+        fseek(self->handle, current, 0);  // Restore position
+        return size;
+    }
+    
+    // Debug print
+    void debug(File self) {
+        printf("File { path: \"%s\", is_open: %s }\n", 
+               self.path, 
+               self.is_open ? "true" : "false");
+    }
+}
+
+
+// ============================================================================
+// Standalone file utility functions
+// ============================================================================
+
+// Delete a file, returns true on success
+bool file_delete(str filename) {
+    return remove(filename) == 0;
+}
+
+// Rename/move a file, returns true on success
+bool file_rename(str oldname, str newname) {
+    return rename(oldname, newname) == 0;
+}
+
+// Check if file exists (tries to open for reading)
+bool file_exists(str filename) {
+    void* f = fopen(filename, "r");
+    if (f != 0) {
+        fclose(f);
+        return true;
+    }
+    return false;
+}
+
+// Read entire file into a newly allocated buffer
+// Caller must free the returned buffer
+// Returns null on error, sets *out_size to file size
+str file_read_all(str filename, i64* out_size) {
+    File f = File.open_read(filename);
+    if (!f.valid()) {
+        *out_size = 0;
+        return 0;
+    }
+    
+    i64 size = f.size();
+    if (size < 0) {
+        f.close();
+        *out_size = 0;
+        return 0;
+    }
+    
+    str buffer = alloc<i8>(size + 1);
+    i64 read = f.read(buffer, size);
+    f.close();
+    
+    if (read != size) {
+        free(buffer);
+        *out_size = 0;
+        return 0;
+    }
+    
+    buffer[size] = 0;  // Null terminate
+    *out_size = size;
+    return buffer;
+}
+
+// Write string to file (creates/truncates file)
+bool file_write_all(str filename, str content, i64 len) {
+    File f = File.open_write(filename);
+    if (!f.valid()) {
+        return false;
+    }
+    
+    i64 written = f.write(content, len);
+    f.close();
+    return written == len;
+}

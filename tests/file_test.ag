@@ -1,0 +1,255 @@
+// Test suite for std.file - File I/O
+import std.io;
+import std.file;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+str test_file = "/tmp/silver_file_test.txt";
+str test_file2 = "/tmp/silver_file_test2.txt";
+
+i32 main() {
+    printf("=== File I/O Tests ===\n\n");
+    
+    // Cleanup any previous test files
+    file_delete(test_file);
+    file_delete(test_file2);
+    
+    // Test: File creation and writing
+    printf("--- File Creation and Writing ---\n");
+    
+    File f1 = File.open_write(test_file);
+    assert_true(f1.valid(), "open_write() creates file successfully");
+    assert_true(f1.is_open, "file reports as open");
+    
+    i32 result = f1.write_str("Hello World");
+    assert_true(result >= 0, "write_str() succeeds");
+    
+    f1.close();
+    assert_true(!f1.is_open, "close() updates is_open flag");
+    
+    // Test: File existence
+    printf("\n--- File Existence ---\n");
+    
+    assert_true(file_exists(test_file), "file_exists() returns true for existing file");
+    assert_true(!file_exists("/tmp/nonexistent_silver_test_12345.txt"), 
+                "file_exists() returns false for nonexistent file");
+    
+    // Test: File reading - basic open and size check
+    printf("\n--- File Reading ---\n");
+    
+    File f2 = File.open_read(test_file);
+    assert_true(f2.valid(), "open_read() opens existing file");
+    
+    i64 size = f2.size();
+    assert_eq_i64(size, 11, "size() returns correct file size");
+    
+    // Read character by character to verify content
+    i32 ch = f2.read_char();
+    assert_eq_i32(ch, 72, "first char is 'H' (72)");
+    ch = f2.read_char();
+    assert_eq_i32(ch, 101, "second char is 'e' (101)");
+    
+    f2.close();
+    
+    // Test: Write with lines
+    printf("\n--- Line Writing ---\n");
+    
+    File f3 = File.open_write(test_file);
+    f3.write_line("Line 1");
+    f3.write_line("Line 2");
+    f3.write_line("Line 3");
+    f3.close();
+    
+    File f4 = File.open_read(test_file);
+    // "Line 1\n" = 7 chars, "Line 2\n" = 7 chars, "Line 3\n" = 7 chars = 21 total
+    i64 line_size = f4.size();
+    assert_eq_i64(line_size, 21, "three lines have correct total size");
+    
+    // Check first character is 'L'
+    i32 first_ch = f4.read_char();
+    assert_eq_i32(first_ch, 76, "first line starts with 'L' (76)");
+    
+    f4.close();
+    
+    // Test: Seeking
+    printf("\n--- Seeking ---\n");
+    
+    // Write known content
+    File f5 = File.open_write(test_file);
+    f5.write_str("ABCDEFGHIJ");
+    f5.close();
+    
+    File f6 = File.open_read(test_file);
+    
+    // Seek to position 5
+    bool seek_ok = f6.seek(5);
+    assert_true(seek_ok, "seek() succeeds");
+    
+    i64 pos = f6.tell();
+    assert_eq_i64(pos, 5, "tell() returns correct position after seek");
+    
+    i32 seek_ch = f6.read_char();
+    assert_eq_i32(seek_ch, 70, "read after seek returns 'F' (70)");
+    
+    // Rewind
+    f6.rewind();
+    pos = f6.tell();
+    assert_eq_i64(pos, 0, "rewind() returns to beginning");
+    
+    f6.close();
+    
+    // Test: Append mode
+    printf("\n--- Append Mode ---\n");
+    
+    // Start fresh
+    File f7 = File.open_write(test_file);
+    f7.write_str("Start");
+    f7.close();
+    
+    File f8 = File.open_append(test_file);
+    assert_true(f8.valid(), "open_append() opens file");
+    f8.write_str("End");
+    f8.close();
+    
+    // Verify by checking size (Start=5 + End=3 = 8)
+    File f8v = File.open_read(test_file);
+    i64 append_size = f8v.size();
+    assert_eq_i64(append_size, 8, "appended file has correct size");
+    f8v.close();
+    
+    // Test: Character I/O
+    printf("\n--- Character I/O ---\n");
+    
+    File f9 = File.open_write(test_file);
+    f9.write_char(65);  // 'A'
+    f9.write_char(66);  // 'B'
+    f9.write_char(67);  // 'C'
+    f9.close();
+    
+    File f10 = File.open_read(test_file);
+    i32 ch1 = f10.read_char();
+    i32 ch2 = f10.read_char();
+    i32 ch3 = f10.read_char();
+    i32 ch4 = f10.read_char();  // Should be EOF (-1)
+    
+    assert_eq_i32(ch1, 65, "read_char() reads 'A' (65)");
+    assert_eq_i32(ch2, 66, "read_char() reads 'B' (66)");
+    assert_eq_i32(ch3, 67, "read_char() reads 'C' (67)");
+    assert_eq_i32(ch4, -1, "read_char() returns -1 at EOF");
+    
+    f10.close();
+    
+    // Test: EOF detection
+    printf("\n--- EOF Detection ---\n");
+    
+    File f11 = File.open_read(test_file);
+    // Read all chars (ABC)
+    f11.read_char();
+    f11.read_char();
+    f11.read_char();
+    f11.read_char();  // This triggers EOF
+    
+    assert_true(f11.eof(), "eof() returns true at end of file");
+    
+    f11.rewind();
+    // After rewind, EOF flag may still be set until we read
+    f11.read_char();  // Read something to clear EOF
+    f11.rewind();
+    assert_true(!f11.eof(), "eof() returns false after rewind and read");
+    
+    f11.close();
+    
+    // Test: Rename
+    printf("\n--- File Rename ---\n");
+    
+    // Create a file to rename
+    File fr = File.open_write(test_file);
+    fr.write_str("rename test");
+    fr.close();
+    
+    bool rename_ok = file_rename(test_file, test_file2);
+    assert_true(rename_ok, "file_rename() succeeds");
+    assert_true(!file_exists(test_file), "old file doesn't exist after rename");
+    assert_true(file_exists(test_file2), "new file exists after rename");
+    
+    // Test: Delete
+    printf("\n--- File Delete ---\n");
+    
+    bool delete_ok = file_delete(test_file2);
+    assert_true(delete_ok, "file_delete() succeeds");
+    assert_true(!file_exists(test_file2), "file doesn't exist after delete");
+    
+    // Test: Error handling - opening nonexistent file
+    printf("\n--- Error Handling ---\n");
+    
+    File bad = File.open_read("/tmp/this_file_does_not_exist_silver_test.txt");
+    assert_true(!bad.valid(), "opening nonexistent file returns invalid File");
+    assert_true(!bad.is_open, "nonexistent file is_open is false");
+    
+    // Operations on invalid file should handle gracefully
+    i32 bad_char = bad.read_char();
+    assert_eq_i32(bad_char, -1, "read_char() on invalid file returns -1");
+    
+    i64 bad_tell = bad.tell();
+    assert_eq_i64(bad_tell, -1, "tell() on invalid file returns -1");
+    
+    bool bad_seek = bad.seek(10);
+    assert_true(!bad_seek, "seek() on invalid file returns false");
+    
+    // Test: Flush
+    printf("\n--- Flush ---\n");
+    
+    File ff = File.open_write(test_file);
+    ff.write_str("flush test");
+    bool flush_ok = ff.flush();
+    assert_true(flush_ok, "flush() on valid file succeeds");
+    ff.close();
+    
+    bool bad_flush = bad.flush();
+    assert_true(!bad_flush, "flush() on invalid file returns false");
+    
+    // Summary
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    
+    // Final cleanup
+    file_delete(test_file);
+    file_delete(test_file2);
+    
+    if (tests_failed > 0) {
+        return 1;
+    }
+    return 0;
+}

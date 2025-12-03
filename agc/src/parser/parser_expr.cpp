@@ -56,7 +56,8 @@ bool Parser::isGenericCall() {
     else if (t.kind == TokenKind::Gt) {
       depth--;
       if (depth == 0) {
-        return peek(i + 1).kind == TokenKind::LParen;
+        return peek(i + 1).kind == TokenKind::LParen ||
+               peek(i + 1).kind == TokenKind::Dot;
       }
     } else if (t.kind == TokenKind::Semicolon || t.kind == TokenKind::LBrace ||
                t.kind == TokenKind::RBrace || t.kind == TokenKind::Eq) {
@@ -95,7 +96,7 @@ ExprPtr Parser::parsePrimary() {
           throw parse_error(peek(), "expected function name for call");
         }
       } else if (is(TokenKind::Lt) && isGenericCall()) {
-        match(TokenKind::Lt);
+        expect(TokenKind::Lt, "<");
         std::vector<TypeName> genericArgs;
         while (true) {
           genericArgs.push_back(parseType());
@@ -105,26 +106,120 @@ ExprPtr Parser::parsePrimary() {
         }
         expect(TokenKind::Gt, ">");
 
-        expect(TokenKind::LParen, "(");
         std::vector<ExprPtr> args;
-        if (!is(TokenKind::RParen)) {
-          while (true) {
-            args.push_back(parseExpr());
-            if (match(TokenKind::Comma))
-              continue;
-            break;
+        // If followed by (, it's a call. If followed by ., it's a type
+        // instantiation followed by static method call
+        if (match(TokenKind::LParen)) {
+          if (!is(TokenKind::RParen)) {
+            while (true) {
+              args.push_back(parseExpr());
+              if (match(TokenKind::Comma))
+                continue;
+              break;
+            }
           }
-        }
-        expect(TokenKind::RParen, ")");
+          expect(TokenKind::RParen, ")");
 
-        if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
-          auto call = std::make_unique<Expr>();
-          call->loc = base->loc;
-          call->v = ExprCall{std::move(idp->name), "", std::move(args),
-                             std::move(genericArgs)};
-          base = std::move(call);
+          if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
+            auto call = std::make_unique<Expr>();
+            call->loc = base->loc;
+            call->v = ExprCall{std::move(idp->name), "", std::move(args),
+                               std::move(genericArgs)};
+            base = std::move(call);
+          } else {
+            throw parse_error(peek(),
+                              "expected function name for generic call");
+          }
+        } else if (match(TokenKind::Dot)) {
+          // Type<T>.method() - static method call on generic type
+          // Member/method name - accept identifier or
+          // 'drop'/'new'/'alloc'/'free'
+          std::string mem;
+          if (is(TokenKind::Identifier)) {
+            mem = expect(TokenKind::Identifier, "member").text;
+          } else if (is(TokenKind::Kw_drop)) {
+            mem = peek().text;
+            ++pos;
+          } else if (is(TokenKind::Kw_new)) {
+            mem = peek().text;
+            ++pos;
+          } else if (is(TokenKind::Kw_alloc)) {
+            mem = peek().text;
+            ++pos;
+          } else if (is(TokenKind::Kw_free)) {
+            mem = peek().text;
+            ++pos;
+          } else {
+            throw parse_error(peek(), "expected method name after type");
+          }
+          auto loc = base->loc;
+
+          // This must be a method call
+          expect(TokenKind::LParen, "(");
+          std::vector<ExprPtr> methodArgs;
+          if (!is(TokenKind::RParen)) {
+            while (true) {
+              methodArgs.push_back(parseExpr());
+              if (match(TokenKind::Comma))
+                continue;
+              break;
+            }
+          }
+          expect(TokenKind::RParen, ")");
+
+          // Create a type expression for the generic type
+          if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
+            // Create ExprIdent for the generic type (will become MetaType)
+            TypeName typeName;
+            typeName.name = idp->name;
+            typeName.genericArgs = std::move(genericArgs);
+
+            auto typeExpr = std::make_unique<Expr>();
+            typeExpr->loc = base->loc;
+            typeExpr->v = ExprIdent{idp->name};
+            // Store generic args in the type for resolution
+            // We'll use a special ExprCall for static method on generic type
+
+            ExprPtr e = std::make_unique<Expr>();
+            e->v = ExprMethodCall{std::move(typeExpr), std::move(mem), "",
+                                  std::move(methodArgs), false};
+            e->loc = loc;
+            // Store the generic args somewhere - let's add them to the base
+            // Actually, we need to emit this differently
+            // For now, emit as ExprCall with mangled name
+            std::string mangledTypeName = idp->name;
+            for (auto &ga : genericArgs) {
+              mangledTypeName += "_" + ga.name;
+              for (unsigned i = 0; i < ga.pointerDepth; ++i) {
+                mangledTypeName += "*";
+              }
+            }
+
+            // Create the base as an identifier with the mangled type name
+            auto mangledBase = std::make_unique<Expr>();
+            mangledBase->loc = base->loc;
+            mangledBase->v = ExprIdent{mangledTypeName};
+
+            e->v = ExprMethodCall{std::move(mangledBase), std::move(mem), "",
+                                  std::move(methodArgs), false};
+            base = std::move(e);
+          } else {
+            throw parse_error(peek(),
+                              "expected type name for static method call");
+          }
         } else {
-          throw parse_error(peek(), "expected function name for generic call");
+          // Not followed by ( or . - just create call with no args (for type
+          // instantiation)
+          if (auto *idp = std::get_if<ExprIdent>(&base->v)) {
+            auto call = std::make_unique<Expr>();
+            call->loc = base->loc;
+            call->v = ExprCall{std::move(idp->name), "", std::move(args),
+                               std::move(genericArgs)};
+            base = std::move(call);
+          } else {
+            throw parse_error(peek(),
+                              "expected function name for generic call");
+          }
         }
       } else if (match(TokenKind::LBracket)) {
         auto idx = parseExpr();
@@ -253,6 +348,22 @@ ExprPtr Parser::parsePrimary() {
     uint64_t v = std::stoull(expect(TokenKind::Integer, "int").text);
     auto e = std::make_unique<Expr>();
     e->v = ExprInt{v};
+    e->loc = loc;
+    return e;
+  }
+  if (is(TokenKind::Kw_true)) {
+    auto loc = peek().loc;
+    expect(TokenKind::Kw_true, "true");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprBool{true};
+    e->loc = loc;
+    return e;
+  }
+  if (is(TokenKind::Kw_false)) {
+    auto loc = peek().loc;
+    expect(TokenKind::Kw_false, "false");
+    auto e = std::make_unique<Expr>();
+    e->v = ExprBool{false};
     e->loc = loc;
     return e;
   }

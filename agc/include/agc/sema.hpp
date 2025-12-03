@@ -1,5 +1,6 @@
 #pragma once
 #include "agc/ast.hpp"
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -50,6 +51,7 @@ private:
   // Generic templates
   std::unordered_map<std::string, DeclStruct *> genericStructs_;
   std::unordered_map<std::string, DeclFunc *> genericFunctions_;
+  std::multimap<std::string, DeclImpl *> genericImpls_; // struct name -> impl
   std::vector<DeclPtr> instantiatedDecls_; // Owns instantiated generic
                                            // functions/structs if needed
   // Type parameter scopes (for T -> i32 substitution)
@@ -68,6 +70,9 @@ private:
 
   Type *resolveType(const TypeName &typeName);
   void instantiateStruct(DeclStruct *ds, const std::vector<Type *> &args);
+  void instantiateImpl(DeclImpl *impl, DeclStruct *ds,
+                       const std::vector<Type *> &args,
+                       StructType *targetStruct);
   void instantiateFunction(DeclFunc *df, const std::vector<Type *> &args,
                            const DiagLoc &loc);
   bool checkType(Type *expected, Type *actual, const DiagLoc &loc);

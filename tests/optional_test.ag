@@ -1,0 +1,206 @@
+// Test suite for std.optional - Optional and Result types
+import std.io;
+import std.optional;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== Optional_i32 Tests ===\n\n");
+    
+    // Test: None creation
+    printf("--- None Creation ---\n");
+    
+    Optional_i32 none = Optional_i32.none();
+    assert_true(none.is_none(), "none() creates empty optional");
+    assert_true(!none.is_some(), "none is_some() returns false");
+    
+    // Test: Some creation
+    printf("\n--- Some Creation ---\n");
+    
+    Optional_i32 some = Optional_i32.some(42);
+    assert_true(some.is_some(), "some() creates valued optional");
+    assert_true(!some.is_none(), "some is_none() returns false");
+    assert_eq_i32(some.unwrap(), 42, "unwrap() returns correct value");
+    
+    // Test: unwrap_or
+    printf("\n--- unwrap_or ---\n");
+    
+    assert_eq_i32(some.unwrap_or(99), 42, "unwrap_or() returns value when Some");
+    assert_eq_i32(none.unwrap_or(99), 99, "unwrap_or() returns default when None");
+    
+    // Test: Various values
+    printf("\n--- Various Values ---\n");
+    
+    Optional_i32 zero = Optional_i32.some(0);
+    assert_true(zero.is_some(), "some(0) is still Some");
+    assert_eq_i32(zero.unwrap(), 0, "some(0) unwraps to 0");
+    
+    Optional_i32 negative = Optional_i32.some(-100);
+    assert_eq_i32(negative.unwrap(), -100, "negative values work");
+    
+    // Test: Optional_i64
+    printf("\n=== Optional_i64 Tests ===\n\n");
+    
+    Optional_i64 none64 = Optional_i64.none();
+    assert_true(none64.is_none(), "Optional_i64.none() works");
+    
+    Optional_i64 some64 = Optional_i64.some(9223372036854775807);  // Max i64
+    assert_true(some64.is_some(), "Optional_i64.some() works with large value");
+    assert_eq_i64(some64.unwrap(), 9223372036854775807, "large i64 value preserved");
+    
+    // Test: Optional_f64
+    printf("\n=== Optional_f64 Tests ===\n\n");
+    
+    Optional_f64 none_f = Optional_f64.none();
+    assert_true(none_f.is_none(), "Optional_f64.none() works");
+    
+    Optional_f64 some_f = Optional_f64.some(3.14159);
+    assert_true(some_f.is_some(), "Optional_f64.some() works");
+    
+    f64 val = some_f.unwrap();
+    assert_true(val > 3.14 && val < 3.15, "f64 value preserved");
+    
+    f64 default_f = none_f.unwrap_or(2.71828);
+    assert_true(default_f > 2.71 && default_f < 2.72, "unwrap_or() works for f64");
+    
+    // Test: Optional_ptr
+    printf("\n=== Optional_ptr Tests ===\n\n");
+    
+    Optional_ptr none_p = Optional_ptr.none();
+    assert_true(none_p.is_none(), "Optional_ptr.none() works");
+    
+    i32 x = 42;
+    Optional_ptr some_p = Optional_ptr.some(&x);
+    assert_true(some_p.is_some(), "Optional_ptr.some() works");
+    
+    i32* ptr = (i32*)(some_p.unwrap());
+    assert_eq_i32(*ptr, 42, "pointer value accessible through optional");
+    
+    void* default_ptr = none_p.unwrap_or(&x);
+    assert_true(default_ptr == &x, "unwrap_or() returns default pointer");
+    
+    // Test: Result_i32
+    printf("\n=== Result_i32 Tests ===\n\n");
+    
+    // Test: Ok creation
+    printf("--- Ok Creation ---\n");
+    
+    Result_i32 ok_result = Result_i32.ok(100);
+    assert_true(ok_result.success(), "ok() creates successful result");
+    assert_true(!ok_result.failed(), "ok() result is not failed");
+    assert_eq_i32(ok_result.unwrap(), 100, "ok() unwrap returns value");
+    assert_eq_i32(ok_result.get_error(), 0, "ok() has no error");
+    
+    // Test: Err creation
+    printf("\n--- Err Creation ---\n");
+    
+    Result_i32 err_result = Result_i32.err(404);
+    assert_true(err_result.failed(), "err() creates failed result");
+    assert_true(!err_result.success(), "err() result is not success");
+    assert_eq_i32(err_result.get_error(), 404, "err() returns error code");
+    
+    // Test: unwrap_or on Result
+    printf("\n--- Result unwrap_or ---\n");
+    
+    assert_eq_i32(ok_result.unwrap_or(-1), 100, "ok unwrap_or returns value");
+    assert_eq_i32(err_result.unwrap_or(-1), -1, "err unwrap_or returns default");
+    
+    // Test: Simulated use case
+    printf("\n=== Simulated Use Cases ===\n\n");
+    
+    // Simulate a function that might fail
+    printf("Simulating division:\n");
+    
+    // divide(10, 2) -> Ok(5)
+    i32 a = 10;
+    i32 b = 2;
+    Result_i32 div1;
+    if (b != 0) {
+        div1 = Result_i32.ok(a / b);
+    } else {
+        div1 = Result_i32.err(1);  // Division by zero error
+    }
+    assert_true(div1.success(), "10/2 succeeds");
+    assert_eq_i32(div1.unwrap(), 5, "10/2 = 5");
+    
+    // divide(10, 0) -> Err(1)
+    b = 0;
+    Result_i32 div2;
+    if (b != 0) {
+        div2 = Result_i32.ok(a / b);
+    } else {
+        div2 = Result_i32.err(1);
+    }
+    assert_true(div2.failed(), "10/0 fails");
+    assert_eq_i32(div2.get_error(), 1, "10/0 returns error code 1");
+    
+    // Simulate looking up a value
+    printf("\nSimulating lookup:\n");
+    
+    i32[5] array;
+    array[0] = 10;
+    array[1] = 20;
+    array[2] = 30;
+    array[3] = 40;
+    array[4] = 50;
+    
+    // lookup(array, 2) -> Some(30)
+    i32 idx = 2;
+    Optional_i32 lookup1;
+    if (idx >= 0 && idx < 5) {
+        lookup1 = Optional_i32.some(array[idx]);
+    } else {
+        lookup1 = Optional_i32.none();
+    }
+    assert_true(lookup1.is_some(), "valid index returns Some");
+    assert_eq_i32(lookup1.unwrap(), 30, "correct value returned");
+    
+    // lookup(array, 10) -> None
+    idx = 10;
+    Optional_i32 lookup2;
+    if (idx >= 0 && idx < 5) {
+        lookup2 = Optional_i32.some(array[idx]);
+    } else {
+        lookup2 = Optional_i32.none();
+    }
+    assert_true(lookup2.is_none(), "invalid index returns None");
+    assert_eq_i32(lookup2.unwrap_or(-1), -1, "default value used for invalid index");
+    
+    // Summary
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    
+    return tests_failed > 0 ? 1 : 0;
+}

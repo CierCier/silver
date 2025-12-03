@@ -1,0 +1,54 @@
+link "m";
+
+f64 M_E			=	2.71828182845904523536;
+f64 M_LOG2E		=	1.44269504088896340736;
+f64 M_LOG10E	=	0.434294481903251827651;
+f64 M_LN2		=	0.693147180559945309417;
+f64 M_LN10		=	2.30258509299404568402;
+f64 M_PI		=	3.14159265358979323846;
+f64 M_PI_2		=	1.57079632679489661923;
+f64 M_PI_4		=	0.785398163397448309616;
+
+
+
+extern f64 sin(f64 x);
+extern f64 cos(f64 x);
+extern f64 tan(f64 x);
+
+extern f64 asin(f64 x);
+extern f64 acos(f64 x);
+extern f64 atan(f64 x);
+extern f64 atan2(f64 y, f64 x);
+
+extern f64 sinh(f64 x);
+extern f64 cosh(f64 x);
+extern f64 tanh(f64 x);
+
+extern f64 asinh(f64 x);
+extern f64 acosh(f64 x);
+extern f64 atanh(f64 x);
+
+extern f64 exp(f64 x);
+extern f64 frexp(f64 x, i32* exp);
+extern f64 ldexp(f64 x, i32 exp);
+
+extern f64 log(f64 x);
+extern f64 log10(f64 x);
+
+extern f64 modf(f64 x, f64* intpart);
+
+extern f64 pow(f64 x, f64 y);
+extern f64 sqrt(f64 x);
+
+extern f64 ceil(f64 x);
+extern f64 floor(f64 x);
+extern f64 fabs(f64 x);
+extern f64 fmod(f64 x, f64 y);
+
+extern f64 hypot(f64 x, f64 y);
+extern f64 cbrt(f64 x);
+extern f64 erf(f64 x);
+extern f64 erfc(f64 x);
+
+extern f64 tgamma(f64 x);
+extern f64 lgamma(f64 x);

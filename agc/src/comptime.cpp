@@ -104,6 +104,9 @@ ComptimeResult ComptimeEvaluator::evaluate(const Expr &expr) {
           [](const ExprFloat &node) -> ComptimeResult {
             return ComptimeResult::success(ComptimeFloat{node.value});
           },
+          [](const ExprBool &node) -> ComptimeResult {
+            return ComptimeResult::success(ComptimeInt{node.value ? 1 : 0});
+          },
           [](const ExprStr &node) -> ComptimeResult {
             return ComptimeResult::success(ComptimeStr{node.value});
           },

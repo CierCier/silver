@@ -1,0 +1,14 @@
+// Memory allocation functions (for manual use when needed)
+// Note: alloc<T>() and free() are built-in keywords that directly use malloc/free
+
+// Reallocate memory block to new size
+extern void* realloc(void* ptr, i64 size);
+
+// Set memory to a value
+extern void* memset(void* ptr, i32 value, i64 size);
+
+// Copy memory
+extern void* memcpy(void* dest, void* src, i64 size);
+
+// Move memory (handles overlapping regions)
+extern void* memmove(void* dest, void* src, i64 size);

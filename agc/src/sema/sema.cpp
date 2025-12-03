@@ -102,23 +102,112 @@ void SemanticAnalyzer::analyze(Program &prog) {
       functions_[df->name] =
           FuncInfo{retType, std::move(paramTypes), df->mangledName};
     } else if (auto *di = std::get_if<DeclImpl>(&d->v)) {
-      // Register impl methods as callable functions
-      for (auto &m : di->methods) {
-        if (auto *df = std::get_if<DeclFunc>(&m->v)) {
-          Type *retType = resolveType(df->ret);
-          std::vector<Type *> paramTypes;
-          for (auto &p : df->params) {
-            Type *pt = resolveType(p.type);
-            p.resolvedType = pt;
-            paramTypes.push_back(pt);
+      // Check if this is a generic impl (impl Vec<T> where Vec is generic)
+      bool isGenericImpl = false;
+      if (genericStructs_.count(di->type.name) &&
+          !di->type.genericArgs.empty()) {
+        // Check if the generic args are type parameters (not concrete types)
+        // e.g., impl Vec<T> where T matches struct Vec<T>
+        DeclStruct *gs = genericStructs_[di->type.name];
+        if (di->type.genericArgs.size() == gs->genericParams.size()) {
+          // Check if generic args are just identifiers matching struct's params
+          bool allMatch = true;
+          for (size_t i = 0; i < di->type.genericArgs.size(); ++i) {
+            const TypeName &arg = di->type.genericArgs[i];
+            // A type parameter reference has no pointers, arrays, or nested
+            // generics
+            if (arg.pointerDepth != 0 || !arg.arrayDims.empty() ||
+                !arg.genericArgs.empty()) {
+              allMatch = false;
+              break;
+            }
+            // Check if the name matches the struct's generic param
+            if (arg.name != gs->genericParams[i]) {
+              allMatch = false;
+              break;
+            }
           }
-          std::string mangledName = mangle_method(di->type.name, *df);
-          df->mangledName = mangledName;
+          isGenericImpl = allMatch;
+        }
+      }
 
-          // Register with TypeName_methodName as the callable name
-          std::string callableName = di->type.name + "_" + df->name;
-          functions_[callableName] =
-              FuncInfo{retType, std::move(paramTypes), mangledName};
+      if (isGenericImpl) {
+        // Store for later instantiation
+        genericImpls_.emplace(di->type.name, di);
+      } else {
+        // Concrete impl - register methods as callable functions
+        for (auto &m : di->methods) {
+          if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+            Type *retType = resolveType(df->ret);
+            std::vector<Type *> paramTypes;
+            for (auto &p : df->params) {
+              Type *pt = resolveType(p.type);
+              p.resolvedType = pt;
+              paramTypes.push_back(pt);
+            }
+            std::string mangledName = mangle_method(di->type.name, *df);
+            df->mangledName = mangledName;
+
+            // Register with TypeName_methodName as the callable name
+            std::string callableName = di->type.name + "_" + df->name;
+            functions_[callableName] =
+                FuncInfo{retType, std::move(paramTypes), mangledName};
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 1.5: Register impl methods on struct types BEFORE checking function
+  // bodies This ensures methods are available when checking method calls
+  for (auto &d : prog.decls) {
+    if (auto *di = std::get_if<DeclImpl>(&d->v)) {
+      // Skip generic impls
+      bool isGenericImpl = false;
+      if (genericStructs_.count(di->type.name) &&
+          !di->type.genericArgs.empty()) {
+        DeclStruct *gs = genericStructs_[di->type.name];
+        if (di->type.genericArgs.size() == gs->genericParams.size()) {
+          bool allMatch = true;
+          for (size_t i = 0; i < di->type.genericArgs.size(); ++i) {
+            const TypeName &arg = di->type.genericArgs[i];
+            if (arg.pointerDepth != 0 || !arg.arrayDims.empty() ||
+                !arg.genericArgs.empty() || arg.name != gs->genericParams[i]) {
+              allMatch = false;
+              break;
+            }
+          }
+          isGenericImpl = allMatch;
+        }
+      }
+
+      if (!isGenericImpl) {
+        Type *type = resolveType(di->type);
+        if (type && type->isStruct()) {
+          auto *structType = static_cast<StructType *>(type);
+          for (auto &m : di->methods) {
+            if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+              Type *retType = resolveType(df->ret);
+              std::vector<Type *> paramTypes;
+              for (auto &p : df->params) {
+                Type *pt = resolveType(p.type);
+                p.resolvedType = pt;
+                paramTypes.push_back(pt);
+              }
+              std::string mangledName = mangle_method(di->type.name, *df);
+              df->mangledName = mangledName;
+              structType->addMethod(
+                  MethodInfo{df->name, mangledName, retType, paramTypes});
+            } else if (auto *dc = std::get_if<DeclCast>(&m->v)) {
+              if (!dc->params.empty()) {
+                Type *targetType = resolveType(dc->target);
+                std::string mangledName = mangle_cast(di->type.name, *dc);
+                dc->mangledName = mangledName;
+                structType->addCast(
+                    CastInfo{targetType, mangledName, dc->isImplicit});
+              }
+            }
+          }
         }
       }
     }

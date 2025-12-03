@@ -1,3 +1,10 @@
-
-extern i32 println(str s);
+// Standard I/O functions - link to libc
 extern i32 printf(str fmt, ...);
+extern i32 puts(str s);
+extern i32 putchar(i32 c);
+extern i32 getchar();
+
+// Silver wrapper for println
+i32 println(str s) {
+    return printf("%s\n", s);
+}

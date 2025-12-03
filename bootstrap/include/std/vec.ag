@@ -1,0 +1,433 @@
+// Silver Standard Library - Dynamic Array (Vector) Type
+// A generic-like dynamic array with automatic memory management
+
+import std.io;
+import std.mem;
+
+// Drop trait for automatic cleanup
+trait Drop {
+    void drop();
+}
+
+// ============================================================================
+// Vec_i32 - Dynamic array of i32 values
+// ============================================================================
+@trait(drop)
+struct Vec_i32 {
+    i32* data;      // Underlying array
+    i64 len;        // Current number of elements
+    i64 capacity;   // Allocated capacity
+}
+
+impl Vec_i32 {
+    // Create a new empty vector
+    Vec_i32 new() {
+        Vec_i32 v;
+        v.capacity = 8;
+        v.len = 0;
+        v.data = alloc<i32>(8);
+        return v;
+    }
+    
+    // Create a vector with specified capacity
+    Vec_i32 with_capacity(i64 cap) {
+        Vec_i32 v;
+        if (cap < 1) {
+            cap = 1;
+        }
+        v.capacity = cap;
+        v.len = 0;
+        v.data = alloc<i32>(cap);
+        return v;
+    }
+    
+    // Drop implementation
+    void drop(Vec_i32 self) {
+        if (self.data != 0) {
+            free(self.data);
+        }
+    }
+    
+    // Get length
+    i64 length(Vec_i32 self) {
+        return self.len;
+    }
+    
+    // Check if empty
+    bool is_empty(Vec_i32 self) {
+        return self.len == 0;
+    }
+    
+    // Get element at index (no bounds checking)
+    i32 get(Vec_i32 self, i64 index) {
+        return self.data[index];
+    }
+    
+    // Set element at index (no bounds checking)
+    void set(Vec_i32* self, i64 index, i32 value) {
+        self->data[index] = value;
+    }
+    
+    // Reserve capacity
+    void reserve(Vec_i32* self, i64 new_cap) {
+        if (new_cap <= self->capacity) {
+            return;
+        }
+        i32* new_data = alloc<i32>(new_cap);
+        for (i64 i = 0; i < self->len; i = i + 1) {
+            new_data[i] = self->data[i];
+        }
+        free(self->data);
+        self->data = new_data;
+        self->capacity = new_cap;
+    }
+    
+    // Push an element to the back
+    void push(Vec_i32* self, i32 value) {
+        if (self->len >= self->capacity) {
+            self->reserve(self->capacity * 2);
+        }
+        self->data[self->len] = value;
+        self->len = self->len + 1;
+    }
+    
+    // Pop an element from the back (returns 0 if empty)
+    i32 pop(Vec_i32* self) {
+        if (self->len == 0) {
+            return 0;
+        }
+        self->len = self->len - 1;
+        return self->data[self->len];
+    }
+    
+    // Clear all elements (keeps capacity)
+    void clear(Vec_i32* self) {
+        self->len = 0;
+    }
+    
+    // Get first element (undefined if empty)
+    i32 first(Vec_i32 self) {
+        return self.data[0];
+    }
+    
+    // Get last element (undefined if empty)
+    i32 last(Vec_i32 self) {
+        return self.data[self.len - 1];
+    }
+    
+    // Insert at index (shifts elements right)
+    void insert(Vec_i32* self, i64 index, i32 value) {
+        if (index > self->len) {
+            index = self->len;
+        }
+        if (self->len >= self->capacity) {
+            self->reserve(self->capacity * 2);
+        }
+        // Shift elements right
+        for (i64 i = self->len; i > index; i = i - 1) {
+            self->data[i] = self->data[i - 1];
+        }
+        self->data[index] = value;
+        self->len = self->len + 1;
+    }
+    
+    // Remove at index (shifts elements left)
+    i32 remove(Vec_i32* self, i64 index) {
+        if (index >= self->len) {
+            return 0;
+        }
+        i32 value = self->data[index];
+        // Shift elements left
+        for (i64 i = index; i < self->len - 1; i = i + 1) {
+            self->data[i] = self->data[i + 1];
+        }
+        self->len = self->len - 1;
+        return value;
+    }
+    
+    // Find first occurrence of value, returns -1 if not found
+    i64 find(Vec_i32 self, i32 value) {
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (self.data[i] == value) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    
+    // Check if contains value
+    bool contains(Vec_i32 self, i32 value) {
+        return self.find(value) >= 0;
+    }
+    
+    // Reverse the vector in place
+    void reverse(Vec_i32* self) {
+        i64 i = 0;
+        i64 j = self->len - 1;
+        while (i < j) {
+            i32 tmp = self->data[i];
+            self->data[i] = self->data[j];
+            self->data[j] = tmp;
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    
+    // Print debug info
+    void debug(Vec_i32 self) {
+        printf("Vec_i32 { len: %ld, capacity: %ld, data: [", self.len, self.capacity);
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (i > 0) {
+                printf(", ");
+            }
+            printf("%d", self.data[i]);
+        }
+        printf("] }\n");
+    }
+}
+
+
+// ============================================================================
+// Vec_i64 - Dynamic array of i64 values
+// ============================================================================
+@trait(drop)
+struct Vec_i64 {
+    i64* data;
+    i64 len;
+    i64 capacity;
+}
+
+impl Vec_i64 {
+    Vec_i64 new() {
+        Vec_i64 v;
+        v.capacity = 8;
+        v.len = 0;
+        v.data = alloc<i64>(8);
+        return v;
+    }
+    
+    Vec_i64 with_capacity(i64 cap) {
+        Vec_i64 v;
+        if (cap < 1) { cap = 1; }
+        v.capacity = cap;
+        v.len = 0;
+        v.data = alloc<i64>(cap);
+        return v;
+    }
+    
+    void drop(Vec_i64 self) {
+        if (self.data != 0) { free(self.data); }
+    }
+    
+    i64 length(Vec_i64 self) { return self.len; }
+    bool is_empty(Vec_i64 self) { return self.len == 0; }
+    i64 get(Vec_i64 self, i64 index) { return self.data[index]; }
+    void set(Vec_i64* self, i64 index, i64 value) { self->data[index] = value; }
+    
+    void reserve(Vec_i64* self, i64 new_cap) {
+        if (new_cap <= self->capacity) { return; }
+        i64* new_data = alloc<i64>(new_cap);
+        for (i64 i = 0; i < self->len; i = i + 1) {
+            new_data[i] = self->data[i];
+        }
+        free(self->data);
+        self->data = new_data;
+        self->capacity = new_cap;
+    }
+    
+    void push(Vec_i64* self, i64 value) {
+        if (self->len >= self->capacity) { self->reserve(self->capacity * 2); }
+        self->data[self->len] = value;
+        self->len = self->len + 1;
+    }
+    
+    i64 pop(Vec_i64* self) {
+        if (self->len == 0) { return 0; }
+        self->len = self->len - 1;
+        return self->data[self->len];
+    }
+    
+    void clear(Vec_i64* self) { self->len = 0; }
+    i64 first(Vec_i64 self) { return self.data[0]; }
+    i64 last(Vec_i64 self) { return self.data[self.len - 1]; }
+    
+    i64 find(Vec_i64 self, i64 value) {
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (self.data[i] == value) { return i; }
+        }
+        return -1;
+    }
+    
+    bool contains(Vec_i64 self, i64 value) { return self.find(value) >= 0; }
+    
+    void debug(Vec_i64 self) {
+        printf("Vec_i64 { len: %ld, capacity: %ld, data: [", self.len, self.capacity);
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (i > 0) { printf(", "); }
+            printf("%ld", self.data[i]);
+        }
+        printf("] }\n");
+    }
+}
+
+
+// ============================================================================
+// Vec_f64 - Dynamic array of f64 values  
+// ============================================================================
+@trait(drop)
+struct Vec_f64 {
+    f64* data;
+    i64 len;
+    i64 capacity;
+}
+
+impl Vec_f64 {
+    Vec_f64 new() {
+        Vec_f64 v;
+        v.capacity = 8;
+        v.len = 0;
+        v.data = alloc<f64>(8);
+        return v;
+    }
+    
+    Vec_f64 with_capacity(i64 cap) {
+        Vec_f64 v;
+        if (cap < 1) { cap = 1; }
+        v.capacity = cap;
+        v.len = 0;
+        v.data = alloc<f64>(cap);
+        return v;
+    }
+    
+    void drop(Vec_f64 self) {
+        if (self.data != 0) { free(self.data); }
+    }
+    
+    i64 length(Vec_f64 self) { return self.len; }
+    bool is_empty(Vec_f64 self) { return self.len == 0; }
+    f64 get(Vec_f64 self, i64 index) { return self.data[index]; }
+    void set(Vec_f64* self, i64 index, f64 value) { self->data[index] = value; }
+    
+    void reserve(Vec_f64* self, i64 new_cap) {
+        if (new_cap <= self->capacity) { return; }
+        f64* new_data = alloc<f64>(new_cap);
+        for (i64 i = 0; i < self->len; i = i + 1) {
+            new_data[i] = self->data[i];
+        }
+        free(self->data);
+        self->data = new_data;
+        self->capacity = new_cap;
+    }
+    
+    void push(Vec_f64* self, f64 value) {
+        if (self->len >= self->capacity) { self->reserve(self->capacity * 2); }
+        self->data[self->len] = value;
+        self->len = self->len + 1;
+    }
+    
+    f64 pop(Vec_f64* self) {
+        if (self->len == 0) { return 0.0; }
+        self->len = self->len - 1;
+        return self->data[self->len];
+    }
+    
+    void clear(Vec_f64* self) { self->len = 0; }
+    f64 first(Vec_f64 self) { return self.data[0]; }
+    f64 last(Vec_f64 self) { return self.data[self.len - 1]; }
+    
+    // Sum all elements
+    f64 sum(Vec_f64 self) {
+        f64 total = 0.0;
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            total = total + self.data[i];
+        }
+        return total;
+    }
+    
+    // Average of all elements
+    f64 avg(Vec_f64 self) {
+        if (self.len == 0) { return 0.0; }
+        return self.sum() / (f64)(self.len);
+    }
+    
+    void debug(Vec_f64 self) {
+        printf("Vec_f64 { len: %ld, capacity: %ld, data: [", self.len, self.capacity);
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (i > 0) { printf(", "); }
+            printf("%f", self.data[i]);
+        }
+        printf("] }\n");
+    }
+}
+
+
+// ============================================================================
+// Vec_ptr - Dynamic array of generic pointers (void*)
+// Can be used to store pointers to any type
+// ============================================================================
+@trait(drop)
+struct Vec_ptr {
+    void** data;
+    i64 len;
+    i64 capacity;
+}
+
+impl Vec_ptr {
+    Vec_ptr new() {
+        Vec_ptr v;
+        v.capacity = 8;
+        v.len = 0;
+        v.data = alloc<void*>(8);
+        return v;
+    }
+    
+    Vec_ptr with_capacity(i64 cap) {
+        Vec_ptr v;
+        if (cap < 1) { cap = 1; }
+        v.capacity = cap;
+        v.len = 0;
+        v.data = alloc<void*>(cap);
+        return v;
+    }
+    
+    void drop(Vec_ptr self) {
+        // Note: Does NOT free the pointed-to objects, only the array itself
+        if (self.data != 0) { free(self.data); }
+    }
+    
+    i64 length(Vec_ptr self) { return self.len; }
+    bool is_empty(Vec_ptr self) { return self.len == 0; }
+    void* get(Vec_ptr self, i64 index) { return self.data[index]; }
+    void set(Vec_ptr* self, i64 index, void* value) { self->data[index] = value; }
+    
+    void reserve(Vec_ptr* self, i64 new_cap) {
+        if (new_cap <= self->capacity) { return; }
+        void** new_data = alloc<void*>(new_cap);
+        for (i64 i = 0; i < self->len; i = i + 1) {
+            new_data[i] = self->data[i];
+        }
+        free(self->data);
+        self->data = new_data;
+        self->capacity = new_cap;
+    }
+    
+    void push(Vec_ptr* self, void* value) {
+        if (self->len >= self->capacity) { self->reserve(self->capacity * 2); }
+        self->data[self->len] = value;
+        self->len = self->len + 1;
+    }
+    
+    void* pop(Vec_ptr* self) {
+        if (self->len == 0) { return 0; }
+        self->len = self->len - 1;
+        return self->data[self->len];
+    }
+    
+    void clear(Vec_ptr* self) { self->len = 0; }
+    void* first(Vec_ptr self) { return self.data[0]; }
+    void* last(Vec_ptr self) { return self.data[self.len - 1]; }
+    
+    void debug(Vec_ptr self) {
+        printf("Vec_ptr { len: %ld, capacity: %ld }\n", self.len, self.capacity);
+    }
+}

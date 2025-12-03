@@ -33,6 +33,9 @@ struct ExprInt {
 struct ExprFloat {
   double value{};
 };
+struct ExprBool {
+  bool value{};
+};
 struct ExprStr {
   std::string value;
 };
@@ -126,10 +129,11 @@ struct ExprInitList {
 };
 
 struct Expr {
-  std::variant<ExprIdent, ExprInt, ExprFloat, ExprStr, ExprUnary, ExprBinary,
-               ExprAssign, ExprCond, ExprCall, ExprIndex, ExprMember,
-               ExprMethodCall, ExprComptime, ExprAddressOf, ExprDeref, ExprCast,
-               ExprInitList, ExprNew, ExprDrop, ExprAlloc, ExprFree>
+  std::variant<ExprIdent, ExprInt, ExprFloat, ExprBool, ExprStr, ExprUnary,
+               ExprBinary, ExprAssign, ExprCond, ExprCall, ExprIndex,
+               ExprMember, ExprMethodCall, ExprComptime, ExprAddressOf,
+               ExprDeref, ExprCast, ExprInitList, ExprNew, ExprDrop, ExprAlloc,
+               ExprFree>
       v;
   DiagLoc loc;
   Type *type{nullptr}; // Resolved type

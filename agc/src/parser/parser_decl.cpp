@@ -41,10 +41,6 @@ TypeName Parser::parseType() {
   } else {
     throw parse_error(t, "expected type name");
   }
-  // pointer depth
-  while (match(TokenKind::Star))
-    ty.pointerDepth++;
-
   // Generic arguments: Type<A, B>
   if (match(TokenKind::Lt)) {
     while (true) {
@@ -54,6 +50,10 @@ TypeName Parser::parseType() {
       expect(TokenKind::Comma, "expected ',' or '>' in generic arguments");
     }
   }
+
+  // pointer depth
+  while (match(TokenKind::Star))
+    ty.pointerDepth++;
 
   return ty;
 }
