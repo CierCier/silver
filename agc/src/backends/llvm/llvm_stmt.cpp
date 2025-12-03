@@ -315,8 +315,9 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
   }
   if (auto *asmStmt = std::get_if<StmtAsm>(&s.v)) {
     // Emit inline assembly
-    // LLVM inline assembly format: asm [volatile] ("assembly code" : outputs : inputs : clobbers)
-    // For simplicity, we emit with no outputs/inputs/clobbers
+    // LLVM inline assembly format: asm [volatile] ("assembly code" : outputs :
+    // inputs : clobbers) For simplicity, we emit with no
+    // outputs/inputs/clobbers
     llvm::FunctionType *asmTy =
         llvm::FunctionType::get(llvm::Type::getVoidTy(M.getContext()), false);
     llvm::InlineAsm *ia = llvm::InlineAsm::get(

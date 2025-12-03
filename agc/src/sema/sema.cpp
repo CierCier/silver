@@ -264,6 +264,55 @@ Type *SemanticAnalyzer::checkVar(const std::string &name, const DiagLoc &loc) {
     return typeCtx_.getMeta(enumTypes_[name]);
   }
 
+  // Check if this is a mangled generic struct name (e.g., "Optional_i32")
+  // Try to parse it as GenericName_TypeArg1_TypeArg2...
+  size_t underscorePos = name.find('_');
+  if (underscorePos != std::string::npos) {
+    std::string baseName = name.substr(0, underscorePos);
+    if (genericStructs_.count(baseName)) {
+      // Parse type arguments from the mangled name
+      std::vector<Type *> typeArgs;
+      std::string remaining = name.substr(underscorePos + 1);
+
+      // Split by underscore and resolve each type
+      size_t pos = 0;
+      while (pos < remaining.size()) {
+        size_t nextUnderscore = remaining.find('_', pos);
+        std::string argStr;
+        if (nextUnderscore == std::string::npos) {
+          argStr = remaining.substr(pos);
+          pos = remaining.size();
+        } else {
+          argStr = remaining.substr(pos, nextUnderscore - pos);
+          pos = nextUnderscore + 1;
+        }
+
+        // Handle pointer types (e.g., "*void" or "void*")
+        TypeName tn;
+        while (!argStr.empty() && argStr[0] == '*') {
+          tn.pointerDepth++;
+          argStr = argStr.substr(1);
+        }
+        while (!argStr.empty() && argStr.back() == '*') {
+          tn.pointerDepth++;
+          argStr.pop_back();
+        }
+        tn.name = argStr;
+
+        Type *argType = resolveType(tn);
+        typeArgs.push_back(argType);
+      }
+
+      // Instantiate the generic struct
+      instantiateStruct(genericStructs_[baseName], typeArgs);
+
+      // Now the mangled name should be in structTypes_
+      if (structTypes_.count(name)) {
+        return typeCtx_.getMeta(structTypes_[name]);
+      }
+    }
+  }
+
   diags_.report(DiagLevel::Error, loc,
                 "undefined variable or type '" + name + "'");
   return typeCtx_.getVoid(); // Error recovery

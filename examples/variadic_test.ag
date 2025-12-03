@@ -1,7 +1,0 @@
-import std.io;
-
-i32 main() {
-    println("Hello from std.io!");
-    printf("Variadic test: %d %s\n", 42, "works!");
-    return 0;
-}

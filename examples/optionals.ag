@@ -1,0 +1,39 @@
+import std.io;
+import std.optional;
+
+
+struct Dim<T> {
+    T x;
+    T y;
+    Optional<T> z; // Optional third dimension
+}
+
+impl Dim<T>{
+    Dim<T> new(T x, T y){
+        Dim<T> d;
+        d.x = x;
+        d.y = y;
+        return d;
+    }
+}
+
+i32 main(){
+    Dim<i32> d = Dim<i32>.new(10, 20);
+    
+    printf("Dim: x=%d, y=%d\n", d.x, d.y);
+    if (d.z.is_some()) {
+        printf("z is present: %d\n", d.z.unwrap());
+    } else {
+        printf("z is not present\n");
+    }
+
+    d.z = Optional<i32>.some(30);
+
+    if (d.z.is_some()) {
+        printf("z is now present: %d\n", d.z.unwrap());
+    } else {
+        printf("z is still not present\n");
+    }
+    
+    return 0;
+}
