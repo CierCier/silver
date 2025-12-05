@@ -15,7 +15,9 @@ class FunctionEmitter {
   llvm::Module &M;
   llvm::Function *F;
   llvm::IRBuilder<> B;
-  llvm::Type *RetTy;
+  llvm::Type *RetTy; // Original return type (struct type if sret)
+  llvm::Value *SretPtr{
+      nullptr}; // Hidden sret pointer if returning large struct
   std::string &Err;
   DiagnosticEngine *Diags{nullptr};
   const std::unordered_map<std::string, Type *> *StructTypes{nullptr};

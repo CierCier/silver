@@ -261,3 +261,62 @@ TEST(ParserTest, FreeExpression) {
   ASSERT_NE(id, nullptr);
   EXPECT_EQ(id->name, "ptr");
 }
+
+TEST(ParserTest, CharLiteralASCII) {
+  auto e = parseExpr("'A'");
+  ASSERT_NE(e, nullptr);
+  auto *charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 65); // ASCII 'A'
+}
+
+TEST(ParserTest, CharLiteralEscape) {
+  auto e = parseExpr("'\\n'");
+  ASSERT_NE(e, nullptr);
+  auto *charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 10); // newline
+
+  e = parseExpr("'\\t'");
+  ASSERT_NE(e, nullptr);
+  charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 9); // tab
+
+  e = parseExpr("'\\''");
+  ASSERT_NE(e, nullptr);
+  charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 39); // single quote
+}
+
+TEST(ParserTest, CharLiteralUnicode) {
+  auto e = parseExpr("'\\u0041'"); // Unicode for 'A'
+  ASSERT_NE(e, nullptr);
+  auto *charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 0x0041);
+
+  e = parseExpr("'\\u263A'"); // Smiley face ☺
+  ASSERT_NE(e, nullptr);
+  charExpr = std::get_if<ExprChar>(&e->v);
+  ASSERT_NE(charExpr, nullptr);
+  EXPECT_EQ(charExpr->codepoint, 0x263A);
+}
+
+TEST(ParserTest, CharTypeDeclaration) {
+  auto prog = parseProgram(R"(
+        i32 foo() {
+            char c = 'x';
+            return 0;
+        }
+    )");
+  ASSERT_EQ(prog.decls.size(), 1);
+  auto *f = std::get_if<DeclFunc>(&prog.decls[0]->v);
+  ASSERT_NE(f, nullptr);
+  ASSERT_TRUE(f->body.has_value());
+  ASSERT_GE(f->body->stmts.size(), 1);
+  auto *declStmt = std::get_if<StmtDecl>(&f->body->stmts[0]->v);
+  ASSERT_NE(declStmt, nullptr);
+  EXPECT_EQ(declStmt->type.name, "char");
+}

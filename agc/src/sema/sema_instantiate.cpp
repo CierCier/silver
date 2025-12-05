@@ -89,6 +89,8 @@ TypeName fromType(Type *t) {
     tn.name = "f32";
   } else if (t->isBool()) {
     tn.name = "bool";
+  } else if (t->isChar()) {
+    tn.name = "char";
   } else if (t->isString()) {
     tn.name = "str";
   } else if (t->isVoid()) {

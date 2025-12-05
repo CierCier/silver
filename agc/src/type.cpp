@@ -36,6 +36,8 @@ std::string PrimitiveType::toString() const {
     return "f64";
   case TypeKind::String:
     return "str";
+  case TypeKind::Char:
+    return "char";
   default:
     return "?";
   }
@@ -96,6 +98,7 @@ TypeContext::TypeContext() {
   float32Type_ = new PrimitiveType(TypeKind::Float32);
   float64Type_ = new PrimitiveType(TypeKind::Float64);
   stringType_ = new PrimitiveType(TypeKind::String);
+  charType_ = new PrimitiveType(TypeKind::Char);
 
   types_.emplace_back(voidType_);
   types_.emplace_back(boolType_);
@@ -106,6 +109,7 @@ TypeContext::TypeContext() {
   types_.emplace_back(float32Type_);
   types_.emplace_back(float64Type_);
   types_.emplace_back(stringType_);
+  types_.emplace_back(charType_);
 }
 
 TypeContext::~TypeContext() {
@@ -123,6 +127,7 @@ Type *TypeContext::getFloat32() { return float32Type_; }
 Type *TypeContext::getFloat64() { return float64Type_; }
 Type *TypeContext::getFloat() { return float64Type_; } // Alias for f64
 Type *TypeContext::getString() { return stringType_; }
+Type *TypeContext::getChar() { return charType_; }
 
 Type *TypeContext::getPointer(Type *pointee) {
   // Check if we already have this pointer type?

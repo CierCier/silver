@@ -58,6 +58,8 @@ llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, Type *t) {
     return llvm::Type::getDoubleTy(ctx);
   case TypeKind::String:
     return llvm::PointerType::getUnqual(ctx);
+  case TypeKind::Char:
+    return llvm::Type::getInt8Ty(ctx); // C-compatible char
   case TypeKind::Pointer:
     return llvm::PointerType::getUnqual(ctx);
   case TypeKind::Array: {
@@ -86,28 +88,27 @@ llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, Type *t) {
 
 llvm::Type *to_llvm_type(llvm::LLVMContext &ctx, const TypeName &t) {
   std::string base = t.name;
-  std::string lower = base;
-  std::transform(lower.begin(), lower.end(), lower.begin(),
-                 [](unsigned char c) { return (char)std::tolower(c); });
 
   llvm::Type *ty = nullptr;
-  if (lower == "void")
+  if (base == "void")
     ty = llvm::Type::getVoidTy(ctx);
-  else if (lower == "bool" || lower == "i1")
+  else if (base == "bool" || base == "i1")
     ty = llvm::Type::getInt8Ty(ctx); // Match C's _Bool (1 byte)
-  else if (lower == "i8" || lower == "u8" || lower == "char")
+  else if (base == "i8" || base == "u8")
     ty = llvm::Type::getInt8Ty(ctx);
-  else if (lower == "i16" || lower == "u16")
+  else if (base == "i16" || base == "u16")
     ty = llvm::Type::getInt16Ty(ctx);
-  else if (lower == "i32" || lower == "u32" || lower == "int")
+  else if (base == "i32" || base == "u32" || base == "int")
     ty = llvm::Type::getInt32Ty(ctx);
-  else if (lower == "i64" || lower == "u64" || lower == "long")
+  else if (base == "i64" || base == "u64" || base == "long")
     ty = llvm::Type::getInt64Ty(ctx);
-  else if (lower == "f32" || lower == "float")
+  else if (base == "char")
+    ty = llvm::Type::getInt32Ty(ctx); // UTF-8 codepoint
+  else if (base == "f32" || base == "float")
     ty = llvm::Type::getFloatTy(ctx);
-  else if (lower == "f64" || lower == "double")
+  else if (base == "f64" || base == "double")
     ty = llvm::Type::getDoubleTy(ctx);
-  else if (lower == "str" || lower == "string")
+  else if (base == "str" || base == "string")
     ty = llvm::PointerType::getUnqual(ctx);
   else {
     // Handle generic types by mangling: Optional<i32> -> Optional_i32
@@ -211,16 +212,37 @@ static void emit_global_llvm(const DeclVar &v, llvm::Module &M) {
   }
 }
 
+// Check if a struct type needs sret (hidden pointer) for return
+// On x86-64 System V ABI, structs > 16 bytes need sret
+static bool needsSret(llvm::Type *ty, const llvm::DataLayout &DL) {
+  if (!ty->isStructTy())
+    return false;
+  uint64_t size = DL.getTypeAllocSize(ty);
+  return size > 16;
+}
+
 static llvm::Function *declare_function_llvm_with_name(const DeclFunc &f,
                                                        const std::string &name,
                                                        llvm::Module &M) {
   auto &ctx = M.getContext();
+  const llvm::DataLayout &DL = M.getDataLayout();
   std::vector<llvm::Type *> paramTys;
-  paramTys.reserve(f.params.size());
+  paramTys.reserve(f.params.size() + 1); // +1 for possible sret
+
+  llvm::Type *retTy = to_llvm_type(ctx, f.ret);
+  bool useSret = needsSret(retTy, DL);
+
+  // If using sret, add hidden pointer parameter first
+  if (useSret) {
+    paramTys.push_back(llvm::PointerType::getUnqual(ctx));
+  }
+
   for (auto const &p : f.params)
     paramTys.push_back(to_llvm_type(ctx, p.type));
-  llvm::Type *retTy = to_llvm_type(ctx, f.ret);
-  auto *fnTy = llvm::FunctionType::get(retTy, paramTys, f.isVariadic);
+
+  // If using sret, function returns void
+  llvm::Type *actualRetTy = useSret ? llvm::Type::getVoidTy(ctx) : retTy;
+  auto *fnTy = llvm::FunctionType::get(actualRetTy, paramTys, f.isVariadic);
   auto *fn = M.getFunction(name);
   if (!fn)
     fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, name,
@@ -235,10 +257,23 @@ static llvm::Function *declare_function_llvm_with_name(const DeclFunc &f,
     }
   }
 
-  // Name parameters
+  // Add sret attribute to first parameter if needed
+  if (useSret) {
+    fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(ctx, retTy));
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+  }
+
+  // Name parameters (offset by 1 if using sret)
   unsigned idx = 0;
-  for (auto &arg : fn->args())
-    arg.setName(f.params[idx++].name);
+  unsigned argOffset = useSret ? 1 : 0;
+  for (auto &arg : fn->args()) {
+    if (useSret && idx == 0) {
+      arg.setName("sret.ptr");
+    } else {
+      arg.setName(f.params[idx - argOffset].name);
+    }
+    idx++;
+  }
 
   return fn;
 }
@@ -339,6 +374,18 @@ public:
     llvm::LLVMContext ctx;
     llvm::Module module("silver_module", ctx);
 
+    // Set up target and data layout early so struct sizes are computed
+    // correctly
+    auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    llvm::Triple targetTriple(targetTripleStr);
+    module.setTargetTriple(targetTriple);
+
+    // Set a default data layout for x86-64 Linux (will be overwritten in
+    // compile_to_obj) This is needed for needsSret() to compute correct struct
+    // sizes
+    module.setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:"
+                         "128-f80:128-n8:16:32:64-S128");
+
     // Collect structs for member access resolution
     std::unordered_map<std::string, Type *> emptyStructTypes;
     const auto &structTypes =
@@ -416,6 +463,15 @@ public:
           continue;
         if (f->body)
           declare_function_llvm(*f, module);
+      } else if (auto *impl = std::get_if<DeclImpl>(&d.v)) {
+        // Declare impl methods
+        for (auto const &m : impl->methods) {
+          if (auto *df = std::get_if<DeclFunc>(&m->v)) {
+            if (df->body && !df->mangledName.empty()) {
+              declare_function_llvm_with_name(*df, df->mangledName, module);
+            }
+          }
+        }
       }
     }
 
@@ -526,8 +582,38 @@ public:
     if (diags)
       diags->report(DiagLevel::Debug, "Starting emit_object_file...");
 
+    // Initialize native target
+    if (diags)
+      diags->report(DiagLevel::Debug, "Initializing LLVM native target...");
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmParser();
+    llvm::InitializeNativeTargetAsmPrinter();
+
+    auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    if (diags)
+      diags->report(DiagLevel::Debug, "Target triple: " + targetTripleStr);
+
+    std::string error;
+    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
+
+    if (!target) {
+      err = error;
+      return false;
+    }
+
+    auto cpu = llvm::sys::getHostCPUName();
+    auto features = "";
+
+    llvm::TargetOptions opt;
+    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+
+    auto targetMachine =
+        target->createTargetMachine(targetTripleStr, cpu, features, opt, rm);
+
     llvm::LLVMContext ctx;
     llvm::Module module("silver_module", ctx);
+    module.setTargetTriple(llvm::Triple(targetTripleStr));
+    module.setDataLayout(targetMachine->createDataLayout());
 
     // Collect structs for member access resolution
     std::unordered_map<std::string, Type *> emptyStructTypes;
@@ -573,6 +659,15 @@ public:
           elements.push_back(to_llvm_type(ctx, f.type));
         }
         stTy->setBody(elements);
+        if (diags && stTy->isSized()) {
+          const llvm::DataLayout &DL = module.getDataLayout();
+          uint64_t size = DL.getTypeAllocSize(stTy);
+          uint64_t align = DL.getABITypeAlign(stTy).value();
+          diags->report(DiagLevel::Debug,
+                        "Struct " + st->name() +
+                            ": size=" + std::to_string(size) +
+                            ", align=" + std::to_string(align));
+        }
       }
     }
 
@@ -698,40 +793,6 @@ public:
     if (diags)
       diags->report(DiagLevel::Debug, "Finished emitting bodies");
 
-    // Initialize native target only
-    if (diags)
-      diags->report(DiagLevel::Debug, "Initializing LLVM native target...");
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmParser();
-    llvm::InitializeNativeTargetAsmPrinter();
-    if (diags)
-      diags->report(DiagLevel::Debug, "LLVM native target initialized.");
-
-    auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
-    if (diags)
-      diags->report(DiagLevel::Debug, "Target triple: " + targetTripleStr);
-    llvm::Triple targetTriple(targetTripleStr);
-    module.setTargetTriple(targetTriple);
-
-    std::string error;
-    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
-
-    if (!target) {
-      err = error;
-      return false;
-    }
-
-    auto cpu = llvm::sys::getHostCPUName();
-    auto features = "";
-
-    llvm::TargetOptions opt;
-    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
-
-    auto targetMachine =
-        target->createTargetMachine(targetTripleStr, cpu, features, opt, rm);
-
-    module.setDataLayout(targetMachine->createDataLayout());
-
     std::error_code ec;
     llvm::raw_fd_ostream dest(filename, ec, llvm::sys::fs::OF_None);
 
@@ -750,6 +811,10 @@ public:
     pass.add(llvm::createReassociatePass());
     pass.add(llvm::createEarlyCSEPass());
     pass.add(llvm::createCFGSimplificationPass());
+    pass.add(llvm::createLoopSimplifyPass());
+    pass.add(llvm::createLoopUnrollPass());
+    pass.add(llvm::createUnifyLoopExitsPass());
+    pass.add(llvm::createPartiallyInlineLibCallsPass());
 
     auto fileType = llvm::CodeGenFileType::ObjectFile;
 

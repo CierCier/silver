@@ -23,8 +23,10 @@ static void mangle_type(std::stringstream &ss, const TypeName &t) {
     ss << "v";
   else if (t.name == "bool" || t.name == "i1")
     ss << "b";
-  else if (t.name == "i8" || t.name == "char")
+  else if (t.name == "i8")
     ss << "c";
+  else if (t.name == "char")
+    ss << "c"; // C-compatible char (same as i8)
   else if (t.name == "u8")
     ss << "h";
   else if (t.name == "i16")

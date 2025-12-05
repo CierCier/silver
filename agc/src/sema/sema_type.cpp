@@ -21,9 +21,12 @@ Type *SemanticAnalyzer::resolveType(const TypeName &typeName) {
     base = typeCtx_.getBool();
   else if (typeName.name == "i32" || typeName.name == "int")
     base = typeCtx_.getInt();
-  else if (typeName.name == "i8" || typeName.name == "u8" ||
-           typeName.name == "char")
+  else if (typeName.name == "i8" || typeName.name == "u8")
     base = typeCtx_.getInt8();
+  else if (typeName.name == "i16" || typeName.name == "u16")
+    base = typeCtx_.getInt16();
+  else if (typeName.name == "char")
+    base = typeCtx_.getChar();
   else if (typeName.name == "i64" || typeName.name == "u64" ||
            typeName.name == "long")
     base = typeCtx_.getInt64();
@@ -101,6 +104,7 @@ bool SemanticAnalyzer::checkType(Type *expected, Type *actual,
     case TypeKind::Bool:
       return 1;
     case TypeKind::Int8:
+    case TypeKind::Char: // char is i8 for C compatibility
       return 8;
     case TypeKind::Int16:
       return 16;
@@ -146,6 +150,12 @@ bool SemanticAnalyzer::checkType(Type *expected, Type *actual,
         actPtr->pointee()->kind() == TypeKind::Int8) {
       return true;
     }
+  }
+
+  // Allow str and pointer types to be used as bool (e.g., in conditions)
+  // A str/pointer is truthy if it's non-null
+  if (expected->isBool() && (actual->isString() || actual->isPointer())) {
+    return true;
   }
 
   diags_.report(DiagLevel::Error, loc,

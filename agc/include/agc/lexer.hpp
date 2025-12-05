@@ -29,6 +29,7 @@ private:
   Token lexIdentifierOrKeyword();
   Token lexNumber();
   Token lexString();
+  Token lexCharLiteral();
   Token make(TokenKind k, std::string s);
 
   bool match(char c);

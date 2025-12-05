@@ -307,6 +307,7 @@ void SemanticAnalyzer::visit(Expr &expr) {
           },
           [this, &expr](ExprFloat &) { expr.type = typeCtx_.getFloat(); },
           [this, &expr](ExprBool &) { expr.type = typeCtx_.getBool(); },
+          [this, &expr](ExprChar &) { expr.type = typeCtx_.getChar(); },
           [this, &expr](ExprCast &n) {
             visit(*n.expr);
             Type *target = resolveType(n.target);

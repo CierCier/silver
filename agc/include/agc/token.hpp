@@ -11,6 +11,7 @@ enum class TokenKind : uint16_t {
   Integer,
   Float,
   String,
+  CharLiteral, // Character literal 'c'
 
   // Keywords
   Kw_import,

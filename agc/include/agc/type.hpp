@@ -17,6 +17,7 @@ enum class TypeKind {
   Float32, // f32
   Float64, // f64
   String,
+  Char, // C-compatible char (stored as i8)
   Pointer,
   Array,
   Struct,
@@ -43,13 +44,14 @@ public:
   bool isFloat64() const { return kind() == TypeKind::Float64; }
   bool isFloat() const { return isFloat32() || isFloat64(); }
   bool isString() const { return kind() == TypeKind::String; }
+  bool isChar() const { return kind() == TypeKind::Char; }
   bool isPointer() const { return kind() == TypeKind::Pointer; }
   bool isArray() const { return kind() == TypeKind::Array; }
   bool isStruct() const { return kind() == TypeKind::Struct; }
   bool isEnum() const { return kind() == TypeKind::Enum; }
   bool isFunction() const { return kind() == TypeKind::Function; }
   bool isMeta() const { return kind() == TypeKind::Meta; }
-  bool isIntegral() const { return isInt() || isBool(); }
+  bool isIntegral() const { return isInt() || isBool() || isChar(); }
   bool isFloating() const { return isFloat(); }
   bool isNumeric() const { return isIntegral() || isFloating(); }
 };
@@ -206,6 +208,7 @@ public:
   Type *getFloat64(); // f64
   Type *getFloat();   // alias for f64
   Type *getString();
+  Type *getChar(); // UTF-8 codepoint
 
   Type *getPointer(Type *pointee);
   Type *getArray(Type *element, uint64_t size);
@@ -228,6 +231,7 @@ private:
   Type *float32Type_;
   Type *float64Type_;
   Type *stringType_;
+  Type *charType_;
 
   // Simple caching for pointers/arrays could be added, but for now just create
   // new ones or maybe intern them? Let's just store them all in types_ for
