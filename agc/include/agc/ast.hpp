@@ -39,6 +39,9 @@ struct ExprBool {
 struct ExprStr {
   std::string value;
 };
+struct ExprChar {
+  uint32_t codepoint; // UTF-8 codepoint value
+};
 struct ExprUnary {
   TokenKind op;
   ExprPtr rhs;
@@ -129,8 +132,8 @@ struct ExprInitList {
 };
 
 struct Expr {
-  std::variant<ExprIdent, ExprInt, ExprFloat, ExprBool, ExprStr, ExprUnary,
-               ExprBinary, ExprAssign, ExprCond, ExprCall, ExprIndex,
+  std::variant<ExprIdent, ExprInt, ExprFloat, ExprBool, ExprStr, ExprChar,
+               ExprUnary, ExprBinary, ExprAssign, ExprCond, ExprCall, ExprIndex,
                ExprMember, ExprMethodCall, ExprComptime, ExprAddressOf,
                ExprDeref, ExprCast, ExprInitList, ExprNew, ExprDrop, ExprAlloc,
                ExprFree>

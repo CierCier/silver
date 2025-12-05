@@ -24,6 +24,21 @@ llvm::Value *FunctionEmitter::castTo(llvm::Value *V, llvm::Type *To) {
     return B.CreateICmpNE(V, llvm::ConstantInt::get(From, 0));
   }
 
+  // Pointer -> Boolean (e.g., str -> bool)
+  // A pointer is truthy if it's non-null
+  // Only applies for small integer targets (i1, i8) typically used for bool
+  // For larger integers (i32, i64), fall through to PtrToInt
+  if (To->isIntegerTy() && From->isPointerTy() &&
+      To->getIntegerBitWidth() <= 8) {
+    llvm::Value *cmp =
+        B.CreateICmpNE(V, llvm::ConstantPointerNull::get(
+                              llvm::PointerType::get(M.getContext(), 0)));
+    // Zero-extend i1 result to the target integer type (e.g., i8 for bool)
+    if (To->isIntegerTy(1))
+      return cmp;
+    return B.CreateZExt(cmp, To);
+  }
+
   // Int <-> Int
   if (To->isIntegerTy() && From->isIntegerTy()) {
     unsigned fw = From->getIntegerBitWidth();
@@ -362,7 +377,7 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     }
 
     std::vector<llvm::Value *> args;
-    args.reserve(call->args.size());
+    args.reserve(call->args.size() + 1); // +1 for possible sret
 
     std::string calleeName =
         call->mangledCallee.empty() ? call->callee : call->mangledCallee;
@@ -373,13 +388,31 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     }
     auto *FTy = calleeF->getFunctionType();
 
+    // Check if callee uses sret
+    bool calleeSret = calleeF->arg_size() > 0 &&
+                      calleeF->hasParamAttribute(0, llvm::Attribute::StructRet);
+    llvm::AllocaInst *sretAlloca = nullptr;
+    llvm::Type *sretTy = nullptr;
+
+    if (calleeSret) {
+      // Allocate space for the return value and pass as first arg
+      sretTy = calleeF->getParamAttribute(0, llvm::Attribute::StructRet)
+                   .getValueAsType();
+      sretAlloca = createAlloca(sretTy, "sret.tmp");
+      args.push_back(sretAlloca);
+    }
+
+    // Adjust expected param count for sret
+    size_t expectedParams =
+        calleeSret ? FTy->getNumParams() - 1 : FTy->getNumParams();
+
     // Check arg count for non-variadic functions
-    if (!calleeF->isVarArg() && call->args.size() != FTy->getNumParams()) {
+    if (!calleeF->isVarArg() && call->args.size() != expectedParams) {
       Err = "argument count mismatch for '" + call->callee + "'";
       return nullptr;
     }
     // For variadic, we need at least fixed args
-    if (calleeF->isVarArg() && call->args.size() < FTy->getNumParams()) {
+    if (calleeF->isVarArg() && call->args.size() < expectedParams) {
       Err = "too few arguments for variadic function '" + call->callee + "'";
       return nullptr;
     }
@@ -400,8 +433,10 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
         }
       }
 
-      if (i < FTy->getNumParams()) {
-        v = castTo(v, FTy->getParamType((unsigned)i));
+      // Adjust param index for sret
+      size_t paramIdx = calleeSret ? i + 1 : i;
+      if (paramIdx < FTy->getNumParams()) {
+        v = castTo(v, FTy->getParamType((unsigned)paramIdx));
       } else {
         // Variadic argument promotion
         if (v->getType()->isFloatTy()) {
@@ -412,6 +447,12 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
         }
       }
       args.push_back(v);
+    }
+
+    // If sret, call returns void but we load result from sret pointer
+    if (calleeSret) {
+      B.CreateCall(calleeF, args);
+      return B.CreateLoad(sretTy, sretAlloca, "sret.load");
     }
     return B.CreateCall(calleeF, args);
   }
@@ -438,6 +479,11 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
   if (auto *blit = std::get_if<ExprBool>(&e.v)) {
     return llvm::ConstantInt::get(llvm::Type::getInt8Ty(M.getContext()),
                                   blit->value ? 1 : 0);
+  }
+  if (auto *clit = std::get_if<ExprChar>(&e.v)) {
+    // Char is stored as i8 (C-compatible)
+    return llvm::ConstantInt::get(llvm::Type::getInt8Ty(M.getContext()),
+                                  clit->codepoint);
   }
   if (auto *s = std::get_if<ExprStr>(&e.v)) {
     // Create global string
@@ -733,12 +779,29 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
     }
     auto *FTy = calleeF->getFunctionType();
 
+    // Check if callee uses sret
+    bool calleeSret = calleeF->arg_size() > 0 &&
+                      calleeF->hasParamAttribute(0, llvm::Attribute::StructRet);
+    llvm::AllocaInst *sretAlloca = nullptr;
+    llvm::Type *sretTy = nullptr;
+
     std::vector<llvm::Value *> args;
-    args.reserve(mc->args.size() + 1);
+    args.reserve(mc->args.size() + 2); // +1 for self, +1 for possible sret
+
+    if (calleeSret) {
+      // Allocate space for the return value and pass as first arg
+      sretTy = calleeF->getParamAttribute(0, llvm::Attribute::StructRet)
+                   .getValueAsType();
+      sretAlloca = createAlloca(sretTy, "sret.tmp");
+      args.push_back(sretAlloca);
+    }
 
     // Check if this is a static method call (base is a type, not an instance)
     // Static calls happen when base->type is a MetaType
     bool isStaticCall = mc->base->type && mc->base->type->isMeta();
+
+    // Calculate param offset for sret
+    unsigned sretOffset = calleeSret ? 1 : 0;
 
     if (!isStaticCall) {
       // Instance method: First arg is 'self' (the base)
@@ -749,8 +812,10 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
       llvm::Value *baseAddr = emitLValue(*mc->base, &baseElemTy);
 
       // Check if the first parameter expects a pointer type
-      bool needsPointer =
-          FTy->getNumParams() > 0 && FTy->getParamType(0)->isPointerTy();
+      // Account for sret offset
+      unsigned selfParamIdx = sretOffset;
+      bool needsPointer = FTy->getNumParams() > selfParamIdx &&
+                          FTy->getParamType(selfParamIdx)->isPointerTy();
 
       if (baseAddr && baseElemTy) {
         if (needsPointer) {
@@ -770,8 +835,8 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
         return nullptr;
       }
 
-      if (FTy->getNumParams() > 0) {
-        baseVal = castTo(baseVal, FTy->getParamType(0));
+      if (FTy->getNumParams() > selfParamIdx) {
+        baseVal = castTo(baseVal, FTy->getParamType(selfParamIdx));
       }
       args.push_back(baseVal);
     }
@@ -781,13 +846,18 @@ llvm::Value *FunctionEmitter::emitExpr(const Expr &e) {
       auto *v = emitExpr(*mc->args[i]);
       if (!v)
         return nullptr;
-      size_t paramIdx = isStaticCall ? i : i + 1;
+      size_t paramIdx = sretOffset + (isStaticCall ? i : i + 1);
       if (paramIdx < FTy->getNumParams()) {
         v = castTo(v, FTy->getParamType((unsigned)paramIdx));
       }
       args.push_back(v);
     }
 
+    // If sret, call returns void but we load result from sret pointer
+    if (calleeSret) {
+      B.CreateCall(calleeF, args);
+      return B.CreateLoad(sretTy, sretAlloca, "sret.load");
+    }
     return B.CreateCall(calleeF, args);
   }
   if (auto *un = std::get_if<ExprUnary>(&e.v)) {

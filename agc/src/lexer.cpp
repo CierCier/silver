@@ -239,6 +239,164 @@ Token Lexer::lexString() {
   return Token{TokenKind::String, std::move(s), start};
 }
 
+Token Lexer::lexCharLiteral() {
+  SourceLoc start = loc_;
+  std::string s;
+  get(); // opening single quote
+
+  char c = peek();
+  if (c == '\\') {
+    // Escape sequence
+    get(); // consume backslash
+    char e = get();
+    switch (e) {
+    case 'n':
+      s.push_back('\n');
+      break;
+    case 'r':
+      s.push_back('\r');
+      break;
+    case 't':
+      s.push_back('\t');
+      break;
+    case '0':
+      s.push_back('\0');
+      break;
+    case '\\':
+      s.push_back('\\');
+      break;
+    case '\'':
+      s.push_back('\'');
+      break;
+    case 'x': {
+      // Hex escape: \xNN
+      char h1 = get();
+      char h2 = get();
+      auto hexDigit = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9')
+          return ch - '0';
+        if (ch >= 'a' && ch <= 'f')
+          return 10 + (ch - 'a');
+        if (ch >= 'A' && ch <= 'F')
+          return 10 + (ch - 'A');
+        return -1;
+      };
+      int v1 = hexDigit(h1);
+      int v2 = hexDigit(h2);
+      if (v1 >= 0 && v2 >= 0) {
+        s.push_back(static_cast<char>((v1 << 4) | v2));
+      }
+      break;
+    }
+    case 'u': {
+      // Unicode escape: \uNNNN (4 hex digits)
+      uint32_t codepoint = 0;
+      auto hexDigit = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9')
+          return ch - '0';
+        if (ch >= 'a' && ch <= 'f')
+          return 10 + (ch - 'a');
+        if (ch >= 'A' && ch <= 'F')
+          return 10 + (ch - 'A');
+        return -1;
+      };
+      for (int i = 0; i < 4; ++i) {
+        char h = get();
+        int v = hexDigit(h);
+        if (v >= 0) {
+          codepoint = (codepoint << 4) | v;
+        }
+      }
+      // Encode as UTF-8
+      if (codepoint <= 0x7F) {
+        s.push_back(static_cast<char>(codepoint));
+      } else if (codepoint <= 0x7FF) {
+        s.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        s.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+      } else {
+        s.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        s.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+      }
+      break;
+    }
+    case 'U': {
+      // Extended Unicode escape: \UNNNNNNNN (8 hex digits)
+      uint32_t codepoint = 0;
+      auto hexDigit = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9')
+          return ch - '0';
+        if (ch >= 'a' && ch <= 'f')
+          return 10 + (ch - 'a');
+        if (ch >= 'A' && ch <= 'F')
+          return 10 + (ch - 'A');
+        return -1;
+      };
+      for (int i = 0; i < 8; ++i) {
+        char h = get();
+        int v = hexDigit(h);
+        if (v >= 0) {
+          codepoint = (codepoint << 4) | v;
+        }
+      }
+      // Encode as UTF-8
+      if (codepoint <= 0x7F) {
+        s.push_back(static_cast<char>(codepoint));
+      } else if (codepoint <= 0x7FF) {
+        s.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        s.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+      } else if (codepoint <= 0xFFFF) {
+        s.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        s.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+      } else if (codepoint <= 0x10FFFF) {
+        s.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+        s.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+      }
+      break;
+    }
+    default:
+      s.push_back(e);
+      break;
+    }
+  } else if (c != '\'' && c != '\0' && c != '\n') {
+    // Handle UTF-8 multi-byte characters directly
+    // UTF-8 byte patterns:
+    // 0xxxxxxx - 1 byte (ASCII)
+    // 110xxxxx 10xxxxxx - 2 bytes
+    // 1110xxxx 10xxxxxx 10xxxxxx - 3 bytes
+    // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx - 4 bytes
+    unsigned char first = static_cast<unsigned char>(get());
+    s.push_back(static_cast<char>(first));
+
+    int extraBytes = 0;
+    if ((first & 0xE0) == 0xC0)
+      extraBytes = 1; // 110xxxxx
+    else if ((first & 0xF0) == 0xE0)
+      extraBytes = 2; // 1110xxxx
+    else if ((first & 0xF8) == 0xF0)
+      extraBytes = 3; // 11110xxx
+
+    for (int i = 0; i < extraBytes; ++i) {
+      unsigned char cont = static_cast<unsigned char>(peek());
+      if ((cont & 0xC0) == 0x80) { // 10xxxxxx
+        s.push_back(static_cast<char>(get()));
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Consume closing quote
+  if (peek() == '\'') {
+    get();
+  }
+
+  return Token{TokenKind::CharLiteral, std::move(s), start};
+}
+
 std::vector<Token> Lexer::lex() {
   std::vector<Token> out;
   while (true) {
@@ -256,6 +414,10 @@ std::vector<Token> Lexer::lex() {
     }
     if (c == '"') {
       out.push_back(lexString());
+      continue;
+    }
+    if (c == '\'') {
+      out.push_back(lexCharLiteral());
       continue;
     }
 

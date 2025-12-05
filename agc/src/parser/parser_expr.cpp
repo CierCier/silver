@@ -373,6 +373,35 @@ ExprPtr Parser::parsePrimary() {
     e->loc = loc;
     return e;
   }
+  if (is(TokenKind::CharLiteral)) {
+    auto loc = peek().loc;
+    std::string s = expect(TokenKind::CharLiteral, "char").text;
+    // Convert UTF-8 bytes to codepoint
+    uint32_t codepoint = 0;
+    if (!s.empty()) {
+      const unsigned char *bytes =
+          reinterpret_cast<const unsigned char *>(s.data());
+      if ((bytes[0] & 0x80) == 0) {
+        // ASCII: 0xxxxxxx
+        codepoint = bytes[0];
+      } else if ((bytes[0] & 0xE0) == 0xC0 && s.size() >= 2) {
+        // 2-byte: 110xxxxx 10xxxxxx
+        codepoint = ((bytes[0] & 0x1F) << 6) | (bytes[1] & 0x3F);
+      } else if ((bytes[0] & 0xF0) == 0xE0 && s.size() >= 3) {
+        // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+        codepoint = ((bytes[0] & 0x0F) << 12) | ((bytes[1] & 0x3F) << 6) |
+                    (bytes[2] & 0x3F);
+      } else if ((bytes[0] & 0xF8) == 0xF0 && s.size() >= 4) {
+        // 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        codepoint = ((bytes[0] & 0x07) << 18) | ((bytes[1] & 0x3F) << 12) |
+                    ((bytes[2] & 0x3F) << 6) | (bytes[3] & 0x3F);
+      }
+    }
+    auto e = std::make_unique<Expr>();
+    e->v = ExprChar{codepoint};
+    e->loc = loc;
+    return e;
+  }
   if (match(TokenKind::LParen)) {
     // Check for C-style cast: (type) expr
     // We only support primitive types or types starting with keywords for now

@@ -97,6 +97,10 @@ static void dumpExpr(const Expr &e, std::ostream &os, int ind) {
                    indent(os, ind);
                    os << "Str(\"" << node.value << "\")\n";
                  },
+                 [&](const ExprChar &node) {
+                   indent(os, ind);
+                   os << "Char(" << node.codepoint << ")\n";
+                 },
                  [&](const ExprUnary &node) {
                    indent(os, ind);
                    os << "Unary(" << opName(node.op) << ")\n";

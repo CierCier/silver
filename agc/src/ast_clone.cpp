@@ -37,7 +37,8 @@ std::unique_ptr<Expr> Expr::clone() const {
                       std::is_same_v<T, ExprInt> ||
                       std::is_same_v<T, ExprFloat> ||
                       std::is_same_v<T, ExprBool> ||
-                      std::is_same_v<T, ExprStr>) {
+                      std::is_same_v<T, ExprStr> ||
+                      std::is_same_v<T, ExprChar>) {
           res->v = arg;
         } else if constexpr (std::is_same_v<T, ExprUnary>) {
           res->v = ExprUnary{arg.op, arg.rhs->clone()};

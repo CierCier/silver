@@ -9,10 +9,18 @@ FunctionEmitter::FunctionEmitter(
     const std::unordered_map<std::string, Type *> *structTypes)
     : M(m), F(f), Err(err), Diags(diags), StructTypes(structTypes),
       B(m.getContext()) {
-  RetTy = F->getReturnType();
+  // Check if function uses sret (first param has sret attribute)
+  if (F->arg_size() > 0 &&
+      F->hasParamAttribute(0, llvm::Attribute::StructRet)) {
+    // Get the struct type from the sret attribute
+    SretPtr = F->getArg(0);
+    RetTy =
+        F->getParamAttribute(0, llvm::Attribute::StructRet).getValueAsType();
+  } else {
+    RetTy = F->getReturnType();
+  }
   auto *entry = llvm::BasicBlock::Create(M.getContext(), "entry", F);
   B.SetInsertPoint(entry);
-  // B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
 }
 
 llvm::AllocaInst *FunctionEmitter::createAlloca(llvm::Type *ty,
@@ -23,9 +31,18 @@ llvm::AllocaInst *FunctionEmitter::createAlloca(llvm::Type *ty,
 
 void FunctionEmitter::initParams(const std::vector<Param> &params) {
   unsigned idx = 0;
+  unsigned argOffset = SretPtr ? 1 : 0; // Skip sret parameter
   for (auto &arg : F->args()) {
-    std::string name = params[idx].name;
-    Type *ty = params[idx].resolvedType;
+    if (SretPtr && idx == 0) {
+      // Skip the sret pointer parameter - it's not a user-visible param
+      idx++;
+      continue;
+    }
+    unsigned paramIdx = idx - argOffset;
+    if (paramIdx >= params.size())
+      break;
+    std::string name = params[paramIdx].name;
+    Type *ty = params[paramIdx].resolvedType;
     auto *alloc = createAlloca(arg.getType(), name + ".addr");
     B.CreateStore(&arg, alloc);
     Locals[name] = {alloc, ty, false};
@@ -60,9 +77,17 @@ bool FunctionEmitter::emitStmt(const Stmt &s) {
     auto *v = emitExpr(**sr->expr);
     if (!v)
       return false;
-    // cast return value
-    v = castTo(v, RetTy);
-    B.CreateRet(v);
+
+    // If using sret, store to the sret pointer and return void
+    if (SretPtr) {
+      v = castTo(v, RetTy);
+      B.CreateStore(v, SretPtr);
+      B.CreateRetVoid();
+    } else {
+      // cast return value
+      v = castTo(v, RetTy);
+      B.CreateRet(v);
+    }
     return true;
   }
   if (auto *vd = std::get_if<StmtDecl>(&s.v)) {
