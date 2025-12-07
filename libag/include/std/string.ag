@@ -3,6 +3,8 @@
 
 import std.io;
 import std.mem;
+import std.traits;
+
 
 // C library functions we need (C compliant signatures)
 extern i64 strlen(i8* s);
@@ -41,4 +43,27 @@ impl String{
         return s;
     }
 
+    String with_capacity(i64 cap){
+        String s;
+        if(cap < 1){
+            cap = 1;
+        }
+        s.len = 0;
+        s.capacity = cap;
+        s.data = alloc<i8>(s.capacity + 1); // +1 for null terminator
+        s.data[0] = 0;
+
+        return s;
+    }
+
+
+
+    void drop(String self){
+        if (self.data != 0){
+            free(self.data);
+            self.data = (i8 *) 0;
+            self.len = 0;
+            self.capacity = 0;
+        }
+    }
 }

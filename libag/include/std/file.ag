@@ -3,11 +3,8 @@
 
 import std.io;
 import std.mem;
+import std.traits;
 
-// Drop trait for automatic cleanup
-trait Drop {
-    void drop();
-}
 
 // Opaque FILE pointer from C
 extern void* fopen(str filename, str mode);

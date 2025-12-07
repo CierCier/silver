@@ -1,0 +1,12 @@
+
+
+
+// Drop trait for automatic cleanup
+trait Drop {
+    void drop();
+}
+
+trait Clone {
+    Self clone();
+}
+
