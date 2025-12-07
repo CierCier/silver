@@ -15,6 +15,16 @@ void assert_true(bool cond, str msg) {
     }
 }
 
+void assert_false(bool cond, str msg) {
+    if (!cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
 void assert_eq_i64(i64 a, i64 b, str msg) {
     if (a == b) {
         tests_passed = tests_passed + 1;
@@ -25,16 +35,32 @@ void assert_eq_i64(i64 a, i64 b, str msg) {
     }
 }
 
-i32 main() {
-    printf("=== String Tests ===\n\n");
-    
-    String s = String.new();
-
-    printf("String created: capacity=%ld\n", s.capacity);
-    printf("String data ptr: %p\n", s.data);
-    printf("String len: %ld\n", s.len);
-
-    assert_eq_i64(s.len, 0, "New string has length 0");
-    return tests_failed > 0 ? 1 : 0;
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
 }
 
+
+i32 main(){
+    String s = String.new();
+    assert_eq_i64(s.len, 0, "New string has length 0");
+    assert_eq_i64(s.capacity, 16, "New string has initial capacity 16");
+    assert_true(s.data != 0, "New string has non-null data pointer");
+    s.drop();
+
+
+    String s1 = String.with_capacity(32);
+    assert_eq_i64(s1.len, 0, "String with_capacity has length 0");
+    assert_eq_i64(s1.capacity, 32, "String with_capacity has specified capacity 32");
+    assert_true(s1.data != 0, "String with_capacity has non-null data pointer");
+    s1.drop();
+
+
+
+    return 0;
+}
