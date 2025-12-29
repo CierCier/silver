@@ -1,0 +1,10 @@
+[package]
+name = "agco"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chumsky = "0.12.0"
+clap = { version = "4.5.53", features = ["derive"] }
+inkwell = { version = "0.7.1", features = ["llvm-sys-211", "llvm21-1"] }
+logos = "0.16.0"
