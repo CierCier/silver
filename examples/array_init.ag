@@ -31,6 +31,5 @@ i32 main() {
     i32 arr5[5] = { [2] = 100, [2] = 200 };
     printf("arr5[2]: %d\n", arr5[2]); // 200
 
-    println("Array init tests passed!");
     return 0;
 }
