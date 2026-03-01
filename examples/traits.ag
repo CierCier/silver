@@ -1,0 +1,31 @@
+trait Add {
+    fn add(Point self, Point other) -> Point;
+}
+
+trait Display {
+    type Output = str;
+    fn display(Vec3 self) -> str { return "vec3"; }
+}
+
+struct Point {
+    f64 x;
+    f64 y;
+}
+
+struct Vec3 {
+    f64 x;
+    f64 y;
+    f64 z;
+}
+
+impl Add for Point {
+    Point add(Point self, Point other) { return self; }
+}
+
+trait Pair<A, B> {
+    fn pair(A self, B other) -> A;
+}
+
+impl Pair<Point, Vec3> for Point {
+    Point pair(Point self, Vec3 other) { return self; }
+}

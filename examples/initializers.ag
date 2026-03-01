@@ -1,0 +1,27 @@
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+struct Vec3 {
+    i32 x;
+    i32 y;
+    i32 z;
+}
+
+i32 main() {
+    Point p = { 1, 2 };
+    Point q = { .x = 1, .y = 2 };
+    Point r = { .x = 1 }; // y defaults to 0
+
+    i32 arr1[3] = { 1, 2, 3 };
+    i32 arr2[5] = { [2] = 10, [4] = 20 };
+    i32 arr3[6] = { 1, 2, [4] = 9, 10 };
+
+    i32 grid[2][2] = { { 1, 2 }, { 3, 4 } };
+    i32 grid2[2][3] = { { [1] = 10 }, { [2] = 20 } };
+    Point pts[2] = { { .x = 1, .y = 2 }, { .x = 3, .y = 4 } };
+
+    Vec3 v = { .x = 1, .y = 2, .z = 3 };
+    return 0;
+}

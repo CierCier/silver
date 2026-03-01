@@ -1,0 +1,37 @@
+
+
+extern "C" i32 printf(const char *fmt, ...);
+
+struct Point<T> {
+    T x;
+    T y;
+}
+
+impl Point<T> {
+    Point<T> mul(Point<T> *self, T rhs) {
+        Point<T> result = {
+			.x = self.x * rhs,
+			.y = self.y * rhs
+		};
+		
+        return result;
+    }
+}
+
+
+i32 main(i32 argc, char** argv) {
+    for (i32 i = 0; i < argc; i++) {
+        i32 v = i + i;
+    }
+
+    Point<i32> cd = { .x = 10, .y = 20 };
+	Point<i32> bd = cd.mul(5);
+
+	Point<f32> fd = {.x=1.0, .y=1.2};
+
+	printf("cd: (%d, %d)\n", cd.x, cd.y);
+	printf("bd: (%d, %d)\n", bd.x, bd.y);
+	printf("fd: (%f, %f)\n", fd.x, fd.y);
+
+    return 0;
+}

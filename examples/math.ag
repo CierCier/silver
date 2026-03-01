@@ -3,7 +3,9 @@ import std.math;
 
 
 i32 main(){
-	
+
 	f64 x = sin(M_PI);
-	printf("sin(PI) = %f", x);
+	printf("sin(PI) = %f\n", x);
+
+	return 0;
 }

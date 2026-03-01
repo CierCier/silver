@@ -1,8 +1,0 @@
-CompileFlags:
-  CompilationDatabase: build
-
-
-# Indexing settings
-Index:
-  Background: Build
-
