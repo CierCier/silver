@@ -6,7 +6,7 @@ i32 main() {
     y = 30;
     
     i32 z = 40; // Should be mutable (address taken)
-    i32* p = &z;
+    const i32* p = &z;
     
     return 0;
 }

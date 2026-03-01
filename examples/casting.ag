@@ -6,8 +6,8 @@ struct Point {
     f64 y;
 }
 
-impl Point{
-    cast f64(Point self){
+impl Point {
+    cast f64(Point self) {
         return sqrt(self.x * self.x + self.y * self.y);
     }
 }
@@ -21,7 +21,7 @@ i32 main() {
     i32 w = (i32) z;
     printf("z as i32: %d\n", w);
 
-    Point p = {2.0, 1.0};
+    Point p = { 2.0, 1.0 };
 
     f64 magnitude = (f64) p;
 
@@ -29,4 +29,6 @@ i32 main() {
     // this should return sqrt(1.0^2 + 2.0^2) = sqrt(5.0) = 2.236~
 
     printf("Magnitude of Point p: %f\n", magnitude);
+
+    return 0;
 }

@@ -1,0 +1,10 @@
+i32 main() {
+    i32 x = 0;
+    i32 y = 10;
+    return 0;
+}
+
+i32 another_error() {
+    i32 z = 20;
+    return z;
+}

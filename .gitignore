@@ -1,13 +1,5 @@
-*.o
-*.so
-build/
-*.out
-*.log
-
 target/
+*.out
+*.o
 
-
-.cache
-
-.vscode
-.github
+changes.md

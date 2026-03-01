@@ -27,9 +27,18 @@ i32 main() {
     printf("arr4[1]: %d\n", arr4[1]); // 10
     printf("arr4[3]: %d\n", arr4[3]); // 30
 
-    // 5. Overwriting (last one wins?)
+    // 5. Overwriting (last one wins)
     i32 arr5[5] = { [2] = 100, [2] = 200 };
     printf("arr5[2]: %d\n", arr5[2]); // 200
+
+    // 6. Multi-dimensional arrays
+    i32 grid[2][2] = { { 1, 2 }, { 3, 4 } };
+    printf("grid[0][1]: %d\n", grid[0][1]); // 2
+
+    // 7. Indexed initialization in multi-dimensional arrays
+    i32 grid2[2][3] = { { [1] = 10 }, { [2] = 20 } };
+    printf("grid2[0][1]: %d\n", grid2[0][1]); // 10
+    printf("grid2[1][2]: %d\n", grid2[1][2]); // 20
 
     return 0;
 }

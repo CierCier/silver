@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-
 members = [
-    "agco",
+    "agc",
+    "silver_runtime",
 ]
+
+
+[workspace.dependencies]
+runtime = { path = "silver_runtime" }

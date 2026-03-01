@@ -8,12 +8,22 @@ struct Dim<T> {
     Optional<T> z; // Optional third dimension
 }
 
-impl Dim<T>{
-    Dim<T> new(T x, T y){
-        Dim<T> d;
-        d.x = x;
-        d.y = y;
+impl Dim<T> {
+    Dim<T> new(T x, T y) {
+        Dim<T> d = { .x = x, .y = y, .z = Optional<T>.none() };
         return d;
+    }
+
+    i32 set_z(Dim<T>* self, T value) {
+        self.z = Optional<T>.some(value);
+        return 0;
+    }
+
+    i32 has_z(Dim<T> self) {
+        if (self.z.is_some()) {
+            return 1;
+        }
+        return 0;
     }
 }
 
@@ -21,15 +31,15 @@ i32 main(){
     Dim<i32> d = Dim<i32>.new(10, 20);
 
     printf("Dim: x=%d, y=%d\n", d.x, d.y);
-    if (d.z.is_some()) {
+    if (d.has_z()) {
         printf("z is present: %d\n", d.z.unwrap());
     } else {
         printf("z is not present\n");
     }
 
-    d.z = Optional<i32>.some(30);
+    d.set_z(30);
 
-    if (d.z.is_some()) {
+    if (d.has_z()) {
         printf("z is now present: %d\n", d.z.unwrap());
     } else {
         printf("z is still not present\n");

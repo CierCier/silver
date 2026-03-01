@@ -1,0 +1,17 @@
+#[packed]
+struct PackedPoint {
+    i8 x;
+    i32 y;
+}
+
+#[align(16)]
+struct AlignedVec {
+    f64 x;
+    f64 y;
+}
+
+#[repr(C)]
+struct CLike {
+    i32 id;
+    bool flag;
+}

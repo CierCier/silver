@@ -1,0 +1,19 @@
+// This file demonstrates error recovery and helpful error messages
+
+// Error 1: Missing semicolon
+i32 func1() {
+    i32 x = 42;
+    return x;
+}
+
+// Error 2: Unclosed brace
+i32 func2() {
+    i32 y = 10;
+    return y;
+}
+
+// This function should still be parsed despite previous errors
+i32 func3() {
+    i32 z = 100;
+    return z;
+}
