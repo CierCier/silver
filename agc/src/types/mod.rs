@@ -194,6 +194,10 @@ pub fn parse_struct_attributes(
                 }
                 out.align = Some(align);
             }
+<<<<<<< HEAD
+=======
+            "link" => {}
+>>>>>>> cc823df (shift to LL3)
             _ => {
                 return Err(StructAttrError {
                     message: format!("unknown struct attribute '{}'", attr.name.name),

@@ -74,7 +74,12 @@ fn rewrite_expression(expression: &mut ast::Expression) {
         | ast::ExpressionKind::Postfix { operand, .. }
         | ast::ExpressionKind::Move(operand)
         | ast::ExpressionKind::Reference {
+<<<<<<< HEAD
             expression: operand, ..
+=======
+            expression: operand,
+            ..
+>>>>>>> cc823df (shift to LL3)
         } => rewrite_expression(operand),
         ast::ExpressionKind::Call {
             function,
@@ -192,10 +197,14 @@ fn fold_comptime_cast(inner: &ast::Expression) -> Option<ast::Expression> {
     })
 }
 
+<<<<<<< HEAD
 fn cast_literal(
     source: &ast::Literal,
     target: &ast::PrimitiveType,
 ) -> Option<ast::Literal> {
+=======
+fn cast_literal(source: &ast::Literal, target: &ast::PrimitiveType) -> Option<ast::Literal> {
+>>>>>>> cc823df (shift to LL3)
     match target {
         ast::PrimitiveType::Bool => Some(ast::Literal::Bool(match source {
             ast::Literal::Bool(value) => *value,
@@ -236,7 +245,13 @@ fn cast_literal(
             let (is_signed, bits) = int_target_spec(target)?;
             let int_value = source_to_i128(source)?;
             if is_signed {
+<<<<<<< HEAD
                 Some(ast::Literal::Integer(cast_i128_to_signed_bits(int_value, bits)))
+=======
+                Some(ast::Literal::Integer(cast_i128_to_signed_bits(
+                    int_value, bits,
+                )))
+>>>>>>> cc823df (shift to LL3)
             } else {
                 let unsigned = cast_i128_to_unsigned_bits(int_value, bits);
                 if unsigned > i128::MAX as u128 {

@@ -1,6 +1,10 @@
 pub mod ast;
 pub mod error;
+<<<<<<< HEAD
 pub mod graph;
+=======
+pub mod prt_parser;
+>>>>>>> cc823df (shift to LL3)
 
 pub use ast::*;
 pub use error::{ParseError, ParseResult};
@@ -28,7 +32,11 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> (Program, Vec<ParseError>) {
+<<<<<<< HEAD
         let mut parser = graph::GraphParser::new(self.source_name.clone());
+=======
+        let mut parser = prt_parser::PRT_Parser::new(self.source_name.clone());
+>>>>>>> cc823df (shift to LL3)
         match parser.parse_program(&self.tokens) {
             Ok(program) => (program, Vec::new()),
             Err(error) => {

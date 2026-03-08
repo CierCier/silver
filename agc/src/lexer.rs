@@ -974,9 +974,14 @@ mod tests {
             "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "if", "else", "while",
             "for", "break", "continue", "return", "import", "comptime", "cast", "move", "ref",
             "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128", "u8",
+<<<<<<< HEAD
             "private",
             "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80", "bool", "str",
             "char", "Vec", "Optional",
+=======
+            "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
+            "bool", "str", "char", "Vec", "Optional",
+>>>>>>> cc823df (shift to LL3)
         ];
 
         if keywords.contains(&id_string.as_str()) {

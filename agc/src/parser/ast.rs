@@ -28,6 +28,10 @@ pub enum ItemKind {
     Trait(TraitItem),
     Import(ImportItem),
     ExternFunction(ExternFunctionItem),
+<<<<<<< HEAD
+=======
+    ExternVariable(ExternVariableItem),
+>>>>>>> cc823df (shift to LL3)
     ExternBlock(ExternBlockItem),
 }
 
@@ -91,6 +95,17 @@ pub struct ExternFunctionItem {
     pub linkage: ExternLinkage,
 }
 
+<<<<<<< HEAD
+=======
+/// External variable declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternVariableItem {
+    pub name: Identifier,
+    pub var_type: Type,
+    pub linkage: ExternLinkage,
+}
+
+>>>>>>> cc823df (shift to LL3)
 /// External block with multiple function declarations
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternBlockItem {

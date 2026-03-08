@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+<<<<<<< HEAD
+=======
+use crate::attributes::validate_global_attributes;
+>>>>>>> cc823df (shift to LL3)
 use crate::lexer::Span;
 use crate::module_artifact::ModuleArtifact;
 use crate::parser::ast;
@@ -8,8 +12,13 @@ use crate::semantic::monomorph::MonomorphRequest;
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::traits::validate_traits_with_imports;
 use crate::types::{
+<<<<<<< HEAD
     is_bool, is_integer, is_numeric, is_string, parse_struct_attributes, struct_layout,
     StructAttrError, Type, TypeContext,
+=======
+    StructAttrError, Type, TypeContext, is_bool, is_integer, is_numeric, is_string,
+    parse_struct_attributes, struct_layout,
+>>>>>>> cc823df (shift to LL3)
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +43,10 @@ pub struct TypeChecker {
     trait_impls: HashMap<String, HashSet<String>>,
     monomorph_requests: Vec<MonomorphRequest>,
     imported_functions: HashMap<String, Vec<FunctionSig>>,
+<<<<<<< HEAD
+=======
+    extern_variables: HashMap<String, Type>,
+>>>>>>> cc823df (shift to LL3)
     imported_types: HashSet<String>,
     imported_traits: HashSet<String>,
     imported_modules: Vec<ModuleArtifact>,
@@ -122,10 +135,18 @@ impl TypeChecker {
         self.register_imported_types();
         self.collect_trait_impls(program);
         self.collect_functions(program, table);
+<<<<<<< HEAD
+=======
+        self.collect_extern_variables(program, table);
+>>>>>>> cc823df (shift to LL3)
         self.collect_imported_functions(table);
         self.collect_impl_methods(program, table);
         self.collect_struct_layouts(program);
         for item in &program.items {
+<<<<<<< HEAD
+=======
+            self.check_global_attributes(&item.attributes);
+>>>>>>> cc823df (shift to LL3)
             if let ast::ItemKind::Struct(_) = &item.kind {
                 self.check_struct_attributes(&item.attributes);
             }
@@ -1092,6 +1113,30 @@ impl TypeChecker {
         }
     }
 
+<<<<<<< HEAD
+=======
+    fn collect_extern_variables(
+        &mut self,
+        program: &ast::Program,
+        table: &mut CompilerSymbolTable,
+    ) {
+        for item in &program.items {
+            let ast::ItemKind::ExternVariable(var) = &item.kind else {
+                continue;
+            };
+            let symbol_key = format!("extern_var::{}", var.name.name);
+            table.intern_symbol(
+                symbol_key,
+                SymbolKind::ExternVariable,
+                Some(var.name.span.clone()),
+                CompilerPhase::TypeCheck,
+            );
+            self.extern_variables
+                .insert(var.name.name.clone(), Type::from_ast(&var.var_type));
+        }
+    }
+
+>>>>>>> cc823df (shift to LL3)
     fn collect_function_item(
         &mut self,
         func: &ast::FunctionItem,
@@ -1905,6 +1950,12 @@ impl TypeChecker {
                 return Some(ty.clone());
             }
         }
+<<<<<<< HEAD
+=======
+        if let Some(ty) = self.extern_variables.get(name) {
+            return Some(ty.clone());
+        }
+>>>>>>> cc823df (shift to LL3)
         None
     }
 
@@ -1924,6 +1975,15 @@ impl TypeChecker {
             self.error(message, span);
         }
     }
+<<<<<<< HEAD
+=======
+
+    fn check_global_attributes(&mut self, attributes: &[ast::Attribute]) {
+        for error in validate_global_attributes(attributes) {
+            self.error(error.message, error.span);
+        }
+    }
+>>>>>>> cc823df (shift to LL3)
 }
 
 fn operator_method_name(operator: &ast::BinaryOperator) -> Option<&'static str> {
@@ -2248,4 +2308,26 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
     }
+<<<<<<< HEAD
+=======
+
+    #[test]
+    fn accepts_link_attribute_in_global_scope() {
+        let program = parse("#[link(m)] struct Good { i32 x; } i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected type errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_invalid_link_attribute() {
+        let program = parse("#[link(1)] i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("link expects a library name")),
+            "expected invalid link attribute error, got {errors:?}"
+        );
+    }
+>>>>>>> cc823df (shift to LL3)
 }

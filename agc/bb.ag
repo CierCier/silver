@@ -1,7 +1,17 @@
+<<<<<<< HEAD
 
 
 extern "C" i32 printf(const char *fmt, ...);
 
+=======
+#[link(m)]
+
+extern "C" i32 printf(const char *fmt, ...);
+extern "C" f32 sinf(f32 x);
+
+
+#[align(4)]
+>>>>>>> cc823df (shift to LL3)
 struct Point<T> {
     T x;
     T y;
@@ -33,5 +43,13 @@ i32 main(i32 argc, char** argv) {
 	printf("bd: (%d, %d)\n", bd.x, bd.y);
 	printf("fd: (%f, %f)\n", fd.x, fd.y);
 
+<<<<<<< HEAD
+=======
+	f32 x = 3.123;
+
+
+	printf("Sin 3.123 %f", sinf(x));
+
+>>>>>>> cc823df (shift to LL3)
     return 0;
 }

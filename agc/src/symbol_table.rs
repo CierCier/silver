@@ -9,6 +9,10 @@ pub type SymbolId = u64;
 pub enum SymbolKind {
     Function,
     ExternFunction,
+<<<<<<< HEAD
+=======
+    ExternVariable,
+>>>>>>> cc823df (shift to LL3)
     Struct,
     Enum,
     Trait,
@@ -85,12 +89,24 @@ impl CompilerSymbolTable {
         phase: CompilerPhase,
     ) {
         let key = key.into();
+<<<<<<< HEAD
         let entry = self.entries.entry(key.clone()).or_insert_with(|| SymbolEntry {
             kinds: HashSet::new(),
             first_span: span.clone(),
             touched_in: HashSet::new(),
             touches: 0,
         });
+=======
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| SymbolEntry {
+                kinds: HashSet::new(),
+                first_span: span.clone(),
+                touched_in: HashSet::new(),
+                touches: 0,
+            });
+>>>>>>> cc823df (shift to LL3)
 
         if entry.first_span.is_none() {
             entry.first_span = span;
@@ -134,7 +150,15 @@ impl CompilerSymbolTable {
     }
 
     pub fn summary_line(&self) -> String {
+<<<<<<< HEAD
         format!("symbols={} events={}", self.entries.len(), self.events.len())
+=======
+        format!(
+            "symbols={} events={}",
+            self.entries.len(),
+            self.events.len()
+        )
+>>>>>>> cc823df (shift to LL3)
     }
 
     pub fn absorb_from(&mut self, other: &CompilerSymbolTable) {
@@ -226,7 +250,16 @@ impl CompilerSymbolTable {
     fn record_item_symbols(&mut self, item: &ast::Item, phase: CompilerPhase) {
         match &item.kind {
             ast::ItemKind::Function(func) => {
+<<<<<<< HEAD
                 self.upsert(&func.name.name, SymbolKind::Function, Some(func.name.span.clone()), phase);
+=======
+                self.upsert(
+                    &func.name.name,
+                    SymbolKind::Function,
+                    Some(func.name.span.clone()),
+                    phase,
+                );
+>>>>>>> cc823df (shift to LL3)
                 for param in &func.parameters {
                     self.upsert(
                         format!("{}::{}", func.name.name, param.name.name),
@@ -285,7 +318,16 @@ impl CompilerSymbolTable {
                     .as_ref()
                     .named_type_name()
                     .unwrap_or_else(|| "<anon>".to_string());
+<<<<<<< HEAD
                 self.upsert(format!("impl:{owner}"), SymbolKind::Impl, Some(item.span.clone()), phase);
+=======
+                self.upsert(
+                    format!("impl:{owner}"),
+                    SymbolKind::Impl,
+                    Some(item.span.clone()),
+                    phase,
+                );
+>>>>>>> cc823df (shift to LL3)
                 for member in &impl_item.items {
                     if let ast::ImplItemKind::Function(func) = member {
                         self.upsert(
@@ -314,6 +356,17 @@ impl CompilerSymbolTable {
                     phase,
                 );
             }
+<<<<<<< HEAD
+=======
+            ast::ItemKind::ExternVariable(var) => {
+                self.upsert(
+                    &var.name.name,
+                    SymbolKind::ExternVariable,
+                    Some(var.name.span.clone()),
+                    phase,
+                );
+            }
+>>>>>>> cc823df (shift to LL3)
             ast::ItemKind::ExternBlock(block) => {
                 for func in &block.functions {
                     self.upsert(

@@ -56,11 +56,19 @@ impl ParseError {
                     match found {
                         Token::IntLiteral(_) => Some("Identifiers cannot start with a number. Try using a letter or underscore first.".to_string()),
                         // Check if it's a keyword token
+<<<<<<< HEAD
                         Token::Struct | Token::Enum | Token::Impl | Token::Trait | Token::Fn | 
                         Token::Let | Token::Mut | Token::Const | Token::If | Token::Else | 
                         Token::While | Token::For | Token::Break | Token::Continue | Token::Return |
                         Token::Import | Token::Comptime | Token::Cast | Token::Move | Token::Ref | 
                         Token::Extern | Token::Pub | Token::Private | Token::True | Token::False => 
+=======
+                        Token::Struct | Token::Enum | Token::Impl | Token::Trait | Token::Fn |
+                        Token::Let | Token::Mut | Token::Const | Token::If | Token::Else |
+                        Token::While | Token::For | Token::Break | Token::Continue | Token::Return |
+                        Token::Import | Token::Comptime | Token::Cast | Token::Move | Token::Ref |
+                        Token::Extern | Token::Pub | Token::Private | Token::True | Token::False =>
+>>>>>>> cc823df (shift to LL3)
                             Some("This is a reserved keyword and cannot be used as an identifier.".to_string()),
                         _ => Some("Expected an identifier (variable or function name).".to_string()),
                     }

@@ -1588,11 +1588,15 @@ fn sanitize(value: &str) -> String {
             last_underscore = true;
         }
     }
+<<<<<<< HEAD
     if out.is_empty() {
         "_".to_string()
     } else {
         out
     }
+=======
+    if out.is_empty() { "_".to_string() } else { out }
+>>>>>>> cc823df (shift to LL3)
 }
 
 fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<Type> {
