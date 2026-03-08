@@ -2,6 +2,7 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
+<<<<<<< HEAD
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
@@ -13,10 +14,26 @@ use inkwell::targets::{
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
+=======
+>>>>>>> cc823df (shift to LL3)
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
+<<<<<<< HEAD
+=======
+use inkwell::builder::Builder;
+use inkwell::context::Context;
+use inkwell::module::Linkage;
+use inkwell::module::Module;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
+>>>>>>> cc823df (shift to LL3)
 
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::lexer::Span;
@@ -67,6 +84,10 @@ pub struct LlvmIrGenerator<'ctx> {
     variables: Vec<HashMap<String, VarInfo<'ctx>>>,
     function_sigs: HashMap<SymbolId, FunctionSig>,
     function_name_to_symbol: HashMap<String, SymbolId>,
+<<<<<<< HEAD
+=======
+    extern_globals: HashMap<String, ast::Type>,
+>>>>>>> cc823df (shift to LL3)
     struct_types: HashMap<String, StructType<'ctx>>,
     struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     method_receivers: HashMap<(String, String), bool>,
@@ -125,6 +146,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
+<<<<<<< HEAD
+=======
+            extern_globals: HashMap::new(),
+>>>>>>> cc823df (shift to LL3)
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
             method_receivers: HashMap::new(),
@@ -213,6 +238,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
+<<<<<<< HEAD
+=======
+            extern_globals: HashMap::new(),
+>>>>>>> cc823df (shift to LL3)
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
             method_receivers: HashMap::new(),
@@ -252,6 +281,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+<<<<<<< HEAD
         machine.write_to_file(&generator.module, file_type, path).map_err(|e| {
             CodegenError::new(format!(
                 "failed to emit {} via LLVM target machine to {}: {e}",
@@ -262,6 +292,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 path.display()
             ))
         })
+=======
+        machine
+            .write_to_file(&generator.module, file_type, path)
+            .map_err(|e| {
+                CodegenError::new(format!(
+                    "failed to emit {} via LLVM target machine to {}: {e}",
+                    match file_type {
+                        FileType::Object => "object file",
+                        FileType::Assembly => "assembly file",
+                    },
+                    path.display()
+                ))
+            })
+>>>>>>> cc823df (shift to LL3)
     }
 
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
@@ -439,6 +483,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .find_map(|scope| scope.get(name).cloned())
     }
 
+<<<<<<< HEAD
+=======
+    fn lookup_extern_global(
+        &self,
+        name: &str,
+    ) -> Option<(inkwell::values::GlobalValue<'ctx>, ast::Type)> {
+        let ty = self.extern_globals.get(name)?.clone();
+        self.module.get_global(name).map(|global| (global, ty))
+    }
+
+>>>>>>> cc823df (shift to LL3)
     fn register_function_signature(
         &mut self,
         llvm_name: &str,
@@ -645,11 +700,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 last_underscore = true;
             }
         }
+<<<<<<< HEAD
         if out.is_empty() {
             "_".to_string()
         } else {
             out
         }
+=======
+        if out.is_empty() { "_".to_string() } else { out }
+>>>>>>> cc823df (shift to LL3)
     }
 
     fn monomorph_owner_name_from_named(named: &ast::NamedType) -> String {
@@ -1285,6 +1344,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .intern_string_literal(value)
                 .map(|ptr| ptr.as_basic_value_enum()),
             ast::ExpressionKind::Identifier(identifier) => {
+<<<<<<< HEAD
                 let info = self.lookup_variable(&identifier.name).ok_or_else(|| {
                     CodegenError::with_span(
                         format!("unknown variable `{}`", identifier.name),
@@ -1300,6 +1360,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             identifier.span.clone(),
                         )
                     })
+=======
+                if let Some(info) = self.lookup_variable(&identifier.name) {
+                    let llvm_ty = self.lower_basic_type(&info.ty)?;
+                    return self
+                        .builder
+                        .build_load(llvm_ty, info.ptr, &identifier.name)
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to load variable `{}`: {e}", identifier.name),
+                                identifier.span.clone(),
+                            )
+                        });
+                }
+                if let Some((global, ty)) = self.lookup_extern_global(&identifier.name) {
+                    let llvm_ty = self.lower_basic_type(&ty)?;
+                    return self
+                        .builder
+                        .build_load(llvm_ty, global.as_pointer_value(), &identifier.name)
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!(
+                                    "failed to load extern variable `{}`: {e}",
+                                    identifier.name
+                                ),
+                                identifier.span.clone(),
+                            )
+                        });
+                }
+                Err(CodegenError::with_span(
+                    format!("unknown variable `{}`", identifier.name),
+                    identifier.span.clone(),
+                ))
+>>>>>>> cc823df (shift to LL3)
             }
             ast::ExpressionKind::Binary {
                 left,
@@ -2215,6 +2308,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<(PointerValue<'ctx>, ast::Type)> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => {
+<<<<<<< HEAD
                 let info = self.lookup_variable(&identifier.name).ok_or_else(|| {
                     CodegenError::with_span(
                         format!("unknown variable `{}`", identifier.name),
@@ -2222,6 +2316,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
                 Ok((info.ptr, info.ty))
+=======
+                if let Some(info) = self.lookup_variable(&identifier.name) {
+                    return Ok((info.ptr, info.ty));
+                }
+                if let Some((global, ty)) = self.lookup_extern_global(&identifier.name) {
+                    return Ok((global.as_pointer_value(), ty));
+                }
+                Err(CodegenError::with_span(
+                    format!("unknown variable `{}`", identifier.name),
+                    identifier.span.clone(),
+                ))
+>>>>>>> cc823df (shift to LL3)
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
@@ -2846,11 +2952,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
         })?;
 
+<<<<<<< HEAD
         if return_old {
             Ok(current)
         } else {
             Ok(updated)
         }
+=======
+        if return_old { Ok(current) } else { Ok(updated) }
+>>>>>>> cc823df (shift to LL3)
     }
 
     fn emit_binary_expression(
@@ -3805,6 +3915,16 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &item.attributes,
                     )?;
                 }
+<<<<<<< HEAD
+=======
+                ast::ItemKind::ExternVariable(extern_variable_item) => {
+                    self.generate_extern_variable_item(
+                        extern_variable_item,
+                        &item.visibility,
+                        &item.attributes,
+                    )?;
+                }
+>>>>>>> cc823df (shift to LL3)
                 ast::ItemKind::ExternBlock(extern_block_item) => {
                     self.generate_extern_block_item(
                         extern_block_item,
@@ -3855,6 +3975,15 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     &item.visibility,
                     &item.attributes,
                 ),
+<<<<<<< HEAD
+=======
+            ast::ItemKind::ExternVariable(extern_variable_item) => self
+                .generate_extern_variable_item(
+                    extern_variable_item,
+                    &item.visibility,
+                    &item.attributes,
+                ),
+>>>>>>> cc823df (shift to LL3)
             ast::ItemKind::ExternBlock(extern_block_item) => self.generate_extern_block_item(
                 extern_block_item,
                 &item.visibility,
@@ -4108,6 +4237,32 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+<<<<<<< HEAD
+=======
+    fn generate_extern_variable_item(
+        &mut self,
+        item: &ast::ExternVariableItem,
+        _visibility: &ast::Visibility,
+        _attributes: &[ast::Attribute],
+    ) -> CodegenResult<()> {
+        let llvm_ty = self.lower_basic_type(&item.var_type)?;
+        let global = self
+            .module
+            .get_global(&item.name.name)
+            .unwrap_or_else(|| self.module.add_global(llvm_ty, None, &item.name.name));
+        global.set_linkage(Linkage::External);
+        self.extern_globals
+            .insert(item.name.name.clone(), item.var_type.clone());
+        self.symbol_table.intern_symbol(
+            format!("codegen::extern_var::{}", item.name.name),
+            SymbolKind::ExternVariable,
+            Some(item.name.span.clone()),
+            CompilerPhase::Codegen,
+        );
+        Ok(())
+    }
+
+>>>>>>> cc823df (shift to LL3)
     fn generate_extern_block_item(
         &mut self,
         item: &ast::ExternBlockItem,

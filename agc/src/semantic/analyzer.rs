@@ -23,6 +23,10 @@ enum SymbolKind {
     Enum,
     Trait,
     Function,
+<<<<<<< HEAD
+=======
+    ExternVariable,
+>>>>>>> cc823df (shift to LL3)
 }
 
 pub struct Analyzer {
@@ -175,6 +179,12 @@ impl Analyzer {
                 ast::ItemKind::ExternFunction(func) => {
                     self.insert_symbol(&func.name, SymbolKind::Function);
                 }
+<<<<<<< HEAD
+=======
+                ast::ItemKind::ExternVariable(var) => {
+                    self.insert_symbol(&var.name, SymbolKind::ExternVariable);
+                }
+>>>>>>> cc823df (shift to LL3)
                 ast::ItemKind::ExternBlock(block) => {
                     for func in &block.functions {
                         self.insert_symbol(&func.name, SymbolKind::Function);
@@ -195,6 +205,12 @@ impl Analyzer {
                 SymbolKind::Enum => format!("duplicate enum '{}'", ident.name),
                 SymbolKind::Trait => format!("duplicate trait '{}'", ident.name),
                 SymbolKind::Function => format!("duplicate function '{}'", ident.name),
+<<<<<<< HEAD
+=======
+                SymbolKind::ExternVariable => {
+                    format!("duplicate extern variable '{}'", ident.name)
+                }
+>>>>>>> cc823df (shift to LL3)
             };
             self.errors.push(SemanticError {
                 message,
@@ -344,6 +360,12 @@ impl Analyzer {
                 }
                 self.pop_type_params();
             }
+<<<<<<< HEAD
+=======
+            ast::ItemKind::ExternVariable(var) => {
+                self.check_type(&var.var_type);
+            }
+>>>>>>> cc823df (shift to LL3)
             _ => {}
         }
     }
@@ -797,7 +819,12 @@ impl Analyzer {
             Some(SymbolKind::Function)
             | Some(SymbolKind::Struct)
             | Some(SymbolKind::Enum)
+<<<<<<< HEAD
             | Some(SymbolKind::Trait) => return,
+=======
+            | Some(SymbolKind::Trait)
+            | Some(SymbolKind::ExternVariable) => return,
+>>>>>>> cc823df (shift to LL3)
             None => {}
         }
 
