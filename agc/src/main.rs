@@ -1,10 +1,4 @@
 use std::path::{Path, PathBuf};
-<<<<<<< HEAD
-use std::{env, ffi::OsString};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-=======
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString};
@@ -12,7 +6,6 @@ use std::{env, ffi::OsString};
 use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
 use crate::module_artifact::{ModuleArtifact, module_name_from_path};
 use crate::module_loader::{ModuleLoader, collect_imported_artifacts, module_loader_default_dirs};
->>>>>>> cc823df (shift to LL3)
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -20,20 +13,6 @@ use semantic::analyzer::{Analyzer, SemanticAnalyzerHook};
 use semantic::comptime_cast_hook::ComptimeCastHook;
 use semantic::typeck::TypeChecker;
 use symbol_table::{CompilerPhase, CompilerSymbolTable};
-<<<<<<< HEAD
-use crate::module_artifact::{ModuleArtifact, module_name_from_path};
-use crate::module_loader::{ModuleLoader, collect_imported_artifacts, module_loader_default_dirs};
-
-mod codegen;
-mod diagnostics;
-mod lexer;
-mod parser;
-mod symbol_table;
-mod ast_tree;
-mod module_artifact;
-mod module_loader;
-mod semantic;
-=======
 
 mod ast_tree;
 mod attributes;
@@ -45,7 +24,6 @@ mod module_loader;
 mod parser;
 mod semantic;
 mod symbol_table;
->>>>>>> cc823df (shift to LL3)
 mod traits;
 mod types;
 
@@ -63,11 +41,7 @@ enum EmitKind {
     Tokens,
     /// (Future) Dump parsed AST.
     Ast,
-<<<<<<< HEAD
-    /// Dump compiled parser grammar graph.
-=======
     /// Dump parser grammar.
->>>>>>> cc823df (shift to LL3)
     Grammar,
     /// Emit binary module artifact.
     Module,
@@ -78,6 +52,7 @@ struct CompilePlan {
     emit: EmitKind,
     inputs: Vec<PathBuf>,
     output: PathBuf,
+    package_root: PathBuf,
     include_dirs: Vec<PathBuf>,
     defines: Vec<String>,
     lib_dirs: Vec<PathBuf>,
@@ -96,6 +71,7 @@ impl CompilePlan {
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("emit={:?}", self.emit));
         parts.push(format!("output={}", self.output.display()));
+        parts.push(format!("root={}", self.package_root.display()));
 
         if let Some(t) = &self.target {
             parts.push(format!("target={t}"));
@@ -172,6 +148,10 @@ struct Cli {
     /// Add directory to include search path
     #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append)]
     include_dirs: Vec<PathBuf>,
+
+    /// Resolve `pkg.*` imports from this directory (defaults to current working directory)
+    #[arg(long = "root", value_name = "DIR")]
+    root: Option<PathBuf>,
 
     /// Define a preprocessor symbol (accepted for clang-compat; not yet used)
     #[arg(short = 'D', value_name = "NAME[=VALUE]", action = ArgAction::Append)]
@@ -289,11 +269,17 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     let output = cli
         .output
         .unwrap_or_else(|| default_output_for(emit, &cli.inputs));
+    let package_root = match cli.root {
+        Some(root) => root,
+        None => env::current_dir()
+            .map_err(|e| format!("failed to determine current working directory: {e}"))?,
+    };
 
     Ok(CompilePlan {
         emit,
         inputs: cli.inputs,
         output,
+        package_root,
         include_dirs: cli.include_dirs,
         defines: cli.defines,
         lib_dirs: cli.lib_dirs,
@@ -310,6 +296,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
 
 fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     let mut loader = ModuleLoader::new();
+    loader.set_package_root(&plan.package_root);
     for dir in module_loader_default_dirs(plan.sysroot.as_deref()) {
         loader.add_search_dir(dir);
     }
@@ -319,10 +306,6 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     loader
 }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> cc823df (shift to LL3)
 fn main() {
     let argv = normalize_argv_for_clap(env::args_os().collect());
     let cli = Cli::parse_from(argv);
@@ -333,6 +316,7 @@ fn main() {
                 for input in &plan.inputs {
                     eprintln!("  input: {}", input.display());
                 }
+                eprintln!("  --root {}", plan.package_root.display());
                 for inc in &plan.include_dirs {
                     eprintln!("  -I {}", inc.display());
                 }
@@ -418,28 +402,16 @@ fn main() {
             }
 
             if plan.emit == EmitKind::Grammar {
-<<<<<<< HEAD
-                let graph_parser = parser::graph::GraphParser::new(None);
-                let graph = graph_parser.render_grammar_pretty();
-=======
                 let prt_parser = parser::prt_parser::PRT_Parser::new(None);
                 let grammar = prt_parser.render_grammar_pretty();
->>>>>>> cc823df (shift to LL3)
 
                 if plan.inputs.len() > 1 {
                     for input in &plan.inputs {
                         println!("== {} ==", input.display());
-<<<<<<< HEAD
-                        println!("{graph}");
-                    }
-                } else {
-                    println!("{graph}");
-=======
                         println!("{grammar}");
                     }
                 } else {
                     println!("{grammar}");
->>>>>>> cc823df (shift to LL3)
                 }
                 return;
             }
@@ -574,10 +546,7 @@ fn main() {
             let loader = build_module_loader(&plan);
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
-<<<<<<< HEAD
-=======
             let mut native_libs = plan.libs.clone();
->>>>>>> cc823df (shift to LL3)
 
             for input in &plan.inputs {
                 let src = match std::fs::read_to_string(input) {
@@ -651,12 +620,8 @@ fn main() {
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
                 symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
 
-<<<<<<< HEAD
-                let semantic_errors = run_semantic_hooks(&mut ast, &mut symbol_table, &imported_modules);
-=======
                 let semantic_errors =
                     run_semantic_hooks(&mut ast, &mut symbol_table, &imported_modules);
->>>>>>> cc823df (shift to LL3)
                 if !semantic_errors.is_empty() {
                     eprintln!("agc: semantic errors:");
                     for error in &semantic_errors {
@@ -694,8 +659,6 @@ fn main() {
                     std::process::exit(2);
                 }
 
-<<<<<<< HEAD
-=======
                 let program_link_libs = match collect_program_link_libraries(&ast) {
                     Ok(libs) => libs,
                     Err(error) => {
@@ -717,7 +680,6 @@ fn main() {
                     extend_unique_libs(&mut native_libs, &module.native_libs);
                 }
 
->>>>>>> cc823df (shift to LL3)
                 semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
                 symbol_table.touch_phase(
                     CompilerPhase::Monomorphize,
@@ -738,11 +700,7 @@ fn main() {
                         &src,
                         &ast,
                         target_triple,
-<<<<<<< HEAD
-                        plan.libs.clone(),
-=======
                         native_libs.clone(),
->>>>>>> cc823df (shift to LL3)
                     );
                     let bytes = match artifact.to_bytes() {
                         Ok(bytes) => bytes,
@@ -772,12 +730,7 @@ fn main() {
                     symbol_table.touch_phase(CompilerPhase::Codegen, "LLVM codegen");
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
-<<<<<<< HEAD
-                        let result =
-                            codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_table(
-=======
                         let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_table(
->>>>>>> cc823df (shift to LL3)
                             &ast,
                             &plan.output,
                             plan.target.as_deref(),
@@ -804,21 +757,12 @@ fn main() {
                     } else if matches!(plan.emit, EmitKind::Asm) {
                         let result =
                             codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_table(
-<<<<<<< HEAD
-                            &ast,
-                            &plan.output,
-                            plan.target.as_deref(),
-                            plan.opt_level.as_deref(),
-                            &mut symbol_table,
-                        );
-=======
                                 &ast,
                                 &plan.output,
                                 plan.target.as_deref(),
                                 plan.opt_level.as_deref(),
                                 &mut symbol_table,
                             );
->>>>>>> cc823df (shift to LL3)
                         if let Err(error) = result {
                             if let Some(span) = error.span {
                                 eprintln!(
@@ -837,18 +781,10 @@ fn main() {
                             std::process::exit(2);
                         }
                     } else {
-<<<<<<< HEAD
-                        let output =
-                            codegen::llvm_ir::LlvmIrGenerator::generate_with_table(
-                                &ast,
-                                &mut symbol_table,
-                            );
-=======
                         let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_table(
                             &ast,
                             &mut symbol_table,
                         );
->>>>>>> cc823df (shift to LL3)
                         match output {
                             Ok(ir) => {
                                 llvm_units.push((
@@ -906,17 +842,6 @@ fn main() {
                 return;
             }
 
-<<<<<<< HEAD
-                if matches!(plan.emit, EmitKind::Exe) {
-                    if let Err(e) = build_with_llvm_tools(&plan, &llvm_units) {
-                        eprintln!("agc: {}: {e}", "error".red().bold());
-                        std::process::exit(2);
-                    }
-                    return;
-                }
-
-            eprintln!("agc: {}: unsupported emit mode {:?}", "error".red().bold(), plan.emit);
-=======
             if matches!(plan.emit, EmitKind::Exe) {
                 if let Err(e) = build_with_llvm_tools(&plan, &llvm_units, &native_libs) {
                     eprintln!("agc: {}: {e}", "error".red().bold());
@@ -930,7 +855,6 @@ fn main() {
                 "error".red().bold(),
                 plan.emit
             );
->>>>>>> cc823df (shift to LL3)
             std::process::exit(2);
         }
         Err(e) => {
@@ -1007,15 +931,11 @@ fn map_llc_opt_level(level: Option<&str>) -> &'static str {
     }
 }
 
-<<<<<<< HEAD
-fn build_with_llvm_tools(plan: &CompilePlan, units: &[(PathBuf, String)]) -> Result<(), String> {
-=======
 fn build_with_llvm_tools(
     plan: &CompilePlan,
     units: &[(PathBuf, String)],
     native_libs: &[String],
 ) -> Result<(), String> {
->>>>>>> cc823df (shift to LL3)
     if units.is_empty() {
         return Err("no LLVM units generated".to_string());
     }
@@ -1054,14 +974,10 @@ fn build_with_llvm_tools(
     let object_path = temp_dir.join("linked.o");
     let mut llc = Command::new("llc");
     llc.arg("-filetype=obj")
-<<<<<<< HEAD
-        .arg(format!("-O{}", map_llc_opt_level(plan.opt_level.as_deref())))
-=======
         .arg(format!(
             "-O{}",
             map_llc_opt_level(plan.opt_level.as_deref())
         ))
->>>>>>> cc823df (shift to LL3)
         .arg("-o")
         .arg(&object_path);
     if let Some(target) = &plan.target {
@@ -1070,18 +986,11 @@ fn build_with_llvm_tools(
     llc.arg(&linked_ll);
     run_tool(llc, "llc")?;
 
-<<<<<<< HEAD
-    let link_result = link_with_ld_lld(plan, &object_path).or_else(|ld_err| {
-        // Keep a compatibility fallback for systems without lld installed.
-        link_with_cc(plan, &object_path)
-            .map_err(|cc_err| format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}"))
-=======
     let link_result = link_with_ld_lld(plan, &object_path, native_libs).or_else(|ld_err| {
         // Keep a compatibility fallback for systems without lld installed.
         link_with_cc(plan, &object_path, native_libs).map_err(|cc_err| {
             format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
         })
->>>>>>> cc823df (shift to LL3)
     });
     link_result?;
 
@@ -1133,15 +1042,11 @@ fn default_dynamic_linker(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
-<<<<<<< HEAD
-fn link_with_ld_lld(plan: &CompilePlan, object_path: &Path) -> Result<(), String> {
-=======
 fn link_with_ld_lld(
     plan: &CompilePlan,
     object_path: &Path,
     native_libs: &[String],
 ) -> Result<(), String> {
->>>>>>> cc823df (shift to LL3)
     let lld_name = if command_exists("ld.lld") {
         "ld.lld"
     } else if command_exists("lld") {
@@ -1193,26 +1098,18 @@ fn link_with_ld_lld(
             }
         }
     }
-<<<<<<< HEAD
-    for lib in &plan.libs {
-=======
     for lib in native_libs {
->>>>>>> cc823df (shift to LL3)
         link.arg(format!("-l{lib}"));
     }
 
     run_tool(link, "ld.lld")
 }
 
-<<<<<<< HEAD
-fn link_with_cc(plan: &CompilePlan, object_path: &Path) -> Result<(), String> {
-=======
 fn link_with_cc(
     plan: &CompilePlan,
     object_path: &Path,
     native_libs: &[String],
 ) -> Result<(), String> {
->>>>>>> cc823df (shift to LL3)
     let mut link = Command::new("cc");
     link.arg("-o").arg(&plan.output).arg(object_path);
     if let Some(sysroot) = &plan.sysroot {
@@ -1227,11 +1124,7 @@ fn link_with_cc(
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
     }
-<<<<<<< HEAD
-    for lib in &plan.libs {
-=======
     for lib in native_libs {
->>>>>>> cc823df (shift to LL3)
         link.arg(format!("-l{lib}"));
     }
     run_tool(link, "cc linker")

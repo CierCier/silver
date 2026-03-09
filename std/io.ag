@@ -1,0 +1,331 @@
+// Zero-cost stdio.h wrapper for Silver.
+//
+// The raw C entry points remain available where variadic formatting is useful,
+// while the higher-level `File` wrapper keeps ordinary file I/O pointer-safe.
+
+struct FILE {
+    i32 _opaque;
+}
+
+i32 io_eof() {
+    return -1;
+}
+
+i32 io_seek_set() {
+    return 0;
+}
+
+i32 io_seek_cur() {
+    return 1;
+}
+
+i32 io_seek_end() {
+    return 2;
+}
+
+i32 io_full_buffering() {
+    return 0;
+}
+
+i32 io_line_buffering() {
+    return 1;
+}
+
+i32 io_no_buffering() {
+    return 2;
+}
+
+extern "C" FILE* stdin;
+extern "C" FILE* stdout;
+extern "C" FILE* stderr;
+
+extern "C" i32 remove(const char* path);
+extern "C" i32 rename(const char* from, const char* to);
+extern "C" FILE* tmpfile();
+extern "C" char* tmpnam(char* buffer);
+
+extern "C" i32 fclose(FILE* stream);
+extern "C" i32 fflush(FILE* stream);
+extern "C" FILE* fopen(const char* path, const char* mode);
+extern "C" FILE* freopen(const char* path, const char* mode, FILE* stream);
+extern "C" void setbuf(FILE* stream, char* buffer);
+extern "C" i32 setvbuf(FILE* stream, char* buffer, i32 mode, i64 size);
+
+extern "C" i32 fprintf(FILE* stream, const char* fmt, ...);
+extern "C" i32 fscanf(FILE* stream, const char* fmt, ...);
+extern "C" i32 printf(const char* fmt, ...);
+extern "C" i32 scanf(const char* fmt, ...);
+extern "C" i32 snprintf(char* buffer, i64 len, const char* fmt, ...);
+extern "C" i32 sprintf(char* buffer, const char* fmt, ...);
+extern "C" i32 sscanf(const char* buffer, const char* fmt, ...);
+
+extern "C" i32 fgetc(FILE* stream);
+extern "C" char* fgets(char* buffer, i32 len, FILE* stream);
+extern "C" i32 fputc(i32 ch, FILE* stream);
+extern "C" i32 fputs(const char* text, FILE* stream);
+extern "C" i32 getchar();
+extern "C" i32 putchar(i32 ch);
+extern "C" i32 puts(const char* text);
+extern "C" i32 ungetc(i32 ch, FILE* stream);
+
+extern "C" i64 fread(void* buffer, i64 elem_size, i64 elem_count, FILE* stream);
+extern "C" i64 fwrite(const void* buffer, i64 elem_size, i64 elem_count, FILE* stream);
+
+extern "C" i32 fseek(FILE* stream, i64 offset, i32 origin);
+extern "C" i64 ftell(FILE* stream);
+extern "C" void c_rewind(FILE* stream);
+extern "C" void clearerr(FILE* stream);
+extern "C" i32 feof(FILE* stream);
+extern "C" i32 ferror(FILE* stream);
+extern "C" void perror(const char* message);
+
+struct File {
+    FILE* raw;
+    bool is_open;
+}
+
+impl File {
+    File from_raw(FILE* raw) {
+        File file = { .raw = raw, .is_open = raw != 0 };
+        return file;
+    }
+
+    File open(str path, str mode) {
+        return File.from_raw(fopen(path, mode));
+    }
+
+    File open_read(str path) {
+        return File.open(path, "r");
+    }
+
+    File open_write(str path) {
+        return File.open(path, "w");
+    }
+
+    File open_append(str path) {
+        return File.open(path, "a");
+    }
+
+    File reopen(File self, str path, str mode) {
+        if (!self.valid()) {
+            return File.from_raw(0);
+        }
+        return File.from_raw(freopen(path, mode, self.raw));
+    }
+
+    bool valid(File self) {
+        return self.raw != 0;
+    }
+
+    i32 close(File* self) {
+        if (!self.valid()) {
+            self.is_open = false;
+            return 0;
+        }
+        i32 result = fclose(self.raw);
+        if (result == 0) {
+            self.raw = 0;
+            self.is_open = false;
+        }
+        return result;
+    }
+
+    i32 flush(File self) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return fflush(self.raw);
+    }
+
+    i32 read_char(File self) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return fgetc(self.raw);
+    }
+
+    i32 write_char(File self, i32 ch) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return fputc(ch, self.raw);
+    }
+
+    i32 write_str(File self, str text) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return fputs(text, self.raw);
+    }
+
+    i32 write_line(File self, str text) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        i32 result = fputs(text, self.raw);
+        if (result < 0) {
+            return result;
+        }
+        return fputc(10, self.raw);
+    }
+
+    i64 read(File self, void* buffer, i64 elem_size, i64 elem_count) {
+        if (!self.valid()) {
+            return 0;
+        }
+        return fread(buffer, elem_size, elem_count, self.raw);
+    }
+
+    i64 write(File self, const void* buffer, i64 elem_size, i64 elem_count) {
+        if (!self.valid()) {
+            return 0;
+        }
+        return fwrite(buffer, elem_size, elem_count, self.raw);
+    }
+
+    i32 push_back(File self, i32 ch) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return ungetc(ch, self.raw);
+    }
+
+    bool seek(File self, i64 offset) {
+        return self.seek_from(offset, io_seek_set());
+    }
+
+    bool seek_from(File self, i64 offset, i32 origin) {
+        if (!self.valid()) {
+            return false;
+        }
+        if (fseek(self.raw, offset, origin) == 0) {
+            return true;
+        }
+        return false;
+    }
+
+    i64 tell(File self) {
+        if (!self.valid()) {
+            return -1;
+        }
+        return ftell(self.raw);
+    }
+
+    void rewind(File self) {
+        if (self.valid()) {
+            c_rewind(self.raw);
+        }
+    }
+
+    bool eof(File self) {
+        if (!self.valid()) {
+            return true;
+        }
+        if (feof(self.raw) != 0) {
+            return true;
+        }
+        return false;
+    }
+
+    bool error(File self) {
+        if (!self.valid()) {
+            return true;
+        }
+        if (ferror(self.raw) != 0) {
+            return true;
+        }
+        return false;
+    }
+
+    void clear_error(File self) {
+        if (self.valid()) {
+            clearerr(self.raw);
+        }
+    }
+
+    i64 size(File self) {
+        if (!self.valid()) {
+            return -1;
+        }
+
+        i64 pos = ftell(self.raw);
+        if (pos < 0) {
+            return -1;
+        }
+        if (fseek(self.raw, 0, io_seek_end()) != 0) {
+            return -1;
+        }
+
+        i64 end = ftell(self.raw);
+        fseek(self.raw, pos, io_seek_set());
+        return end;
+    }
+
+    i32 set_buffer(File self, char* buffer, i32 mode, i64 size) {
+        if (!self.valid()) {
+            return io_eof();
+        }
+        return setvbuf(self.raw, buffer, mode, size);
+    }
+
+    void set_unbuffered(File self) {
+        if (self.valid()) {
+            setbuf(self.raw, 0);
+        }
+    }
+}
+
+File stdin_file() {
+    return File.from_raw(stdin);
+}
+
+File stdout_file() {
+    return File.from_raw(stdout);
+}
+
+File stderr_file() {
+    return File.from_raw(stderr);
+}
+
+File temp_file() {
+    return File.from_raw(tmpfile());
+}
+
+i32 println(str text) {
+    return puts(text);
+}
+
+i32 eprintln(str text) {
+    File err = stderr_file();
+    if (!err.valid()) {
+        return io_eof();
+    }
+    i32 result = err.write_str(text);
+    if (result < 0) {
+        return result;
+    }
+    return err.write_char(10);
+}
+
+bool file_exists(str path) {
+    File file = File.open_read(path);
+    if (!file.valid()) {
+        return false;
+    }
+    file.close();
+    return true;
+}
+
+bool file_delete(str path) {
+    if (remove(path) == 0) {
+        return true;
+    }
+    return false;
+}
+
+bool file_rename(str from, str to) {
+    if (rename(from, to) == 0) {
+        return true;
+    }
+    return false;
+}

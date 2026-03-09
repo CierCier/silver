@@ -2,26 +2,10 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
-<<<<<<< HEAD
-use inkwell::builder::Builder;
-use inkwell::context::Context;
-use inkwell::module::Linkage;
-use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
-use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
-};
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
-};
-=======
->>>>>>> cc823df (shift to LL3)
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
-<<<<<<< HEAD
-=======
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
@@ -31,9 +15,8 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
->>>>>>> cc823df (shift to LL3)
 
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::lexer::Span;
@@ -84,10 +67,8 @@ pub struct LlvmIrGenerator<'ctx> {
     variables: Vec<HashMap<String, VarInfo<'ctx>>>,
     function_sigs: HashMap<SymbolId, FunctionSig>,
     function_name_to_symbol: HashMap<String, SymbolId>,
-<<<<<<< HEAD
-=======
     extern_globals: HashMap<String, ast::Type>,
->>>>>>> cc823df (shift to LL3)
+    global_variables: HashMap<String, ast::Type>,
     struct_types: HashMap<String, StructType<'ctx>>,
     struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     method_receivers: HashMap<(String, String), bool>,
@@ -146,10 +127,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
-<<<<<<< HEAD
-=======
             extern_globals: HashMap::new(),
->>>>>>> cc823df (shift to LL3)
+            global_variables: HashMap::new(),
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
             method_receivers: HashMap::new(),
@@ -238,10 +217,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
-<<<<<<< HEAD
-=======
             extern_globals: HashMap::new(),
->>>>>>> cc823df (shift to LL3)
+            global_variables: HashMap::new(),
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
             method_receivers: HashMap::new(),
@@ -281,18 +258,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
-<<<<<<< HEAD
-        machine.write_to_file(&generator.module, file_type, path).map_err(|e| {
-            CodegenError::new(format!(
-                "failed to emit {} via LLVM target machine to {}: {e}",
-                match file_type {
-                    FileType::Object => "object file",
-                    FileType::Assembly => "assembly file",
-                },
-                path.display()
-            ))
-        })
-=======
         machine
             .write_to_file(&generator.module, file_type, path)
             .map_err(|e| {
@@ -305,7 +270,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     path.display()
                 ))
             })
->>>>>>> cc823df (shift to LL3)
     }
 
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
@@ -483,8 +447,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .find_map(|scope| scope.get(name).cloned())
     }
 
-<<<<<<< HEAD
-=======
     fn lookup_extern_global(
         &self,
         name: &str,
@@ -493,7 +455,51 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.module.get_global(name).map(|global| (global, ty))
     }
 
->>>>>>> cc823df (shift to LL3)
+    fn lookup_module_global(
+        &self,
+        name: &str,
+    ) -> Option<(inkwell::values::GlobalValue<'ctx>, ast::Type)> {
+        if let Some(ty) = self.global_variables.get(name).cloned() {
+            if let Some(global) = self.module.get_global(name) {
+                return Some((global, ty));
+            }
+        }
+        self.lookup_extern_global(name)
+    }
+
+    fn lookup_storage(&self, name: &str) -> Option<(PointerValue<'ctx>, ast::Type)> {
+        if let Some(info) = self.lookup_variable(name) {
+            return Some((info.ptr, info.ty));
+        }
+        self.lookup_module_global(name)
+            .map(|(global, ty)| (global.as_pointer_value(), ty))
+    }
+
+    fn lookup_value_type(&self, name: &str) -> Option<ast::Type> {
+        self.lookup_variable(name)
+            .map(|info| info.ty)
+            .or_else(|| self.global_variables.get(name).cloned())
+            .or_else(|| self.extern_globals.get(name).cloned())
+    }
+
+    fn intern_const_string_global(&mut self, value: &str) -> PointerValue<'ctx> {
+        if let Some(existing) = self.string_constants.get(value) {
+            return *existing;
+        }
+
+        let string_value = self.context.const_string(value.as_bytes(), true);
+        let global_name = format!(".str.{}", self.string_constants.len());
+        let global = self
+            .module
+            .add_global(string_value.get_type(), None, &global_name);
+        global.set_initializer(&string_value);
+        global.set_constant(true);
+        global.set_linkage(Linkage::Private);
+        let ptr = global.as_pointer_value();
+        self.string_constants.insert(value.to_string(), ptr);
+        ptr
+    }
+
     fn register_function_signature(
         &mut self,
         llvm_name: &str,
@@ -700,15 +706,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 last_underscore = true;
             }
         }
-<<<<<<< HEAD
-        if out.is_empty() {
-            "_".to_string()
-        } else {
-            out
-        }
-=======
         if out.is_empty() { "_".to_string() } else { out }
->>>>>>> cc823df (shift to LL3)
     }
 
     fn monomorph_owner_name_from_named(named: &ast::NamedType) -> String {
@@ -1046,8 +1044,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     fn receiver_owner_name(&mut self, expr: &ast::Expression) -> Option<String> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => self
-                .lookup_variable(&identifier.name)
-                .and_then(|info| Self::owner_name_from_type(&info.ty))
+                .lookup_value_type(&identifier.name)
+                .as_ref()
+                .and_then(Self::owner_name_from_type)
                 .or_else(|| Some(Self::sanitize_monomorph(&identifier.name))),
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_from_type(ty),
             ast::ExpressionKind::StructLiteral { path, .. } => Some(Self::path_name(path)),
@@ -1062,8 +1061,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     fn receiver_owner_candidates(&mut self, expr: &ast::Expression) -> Vec<String> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => self
-                .lookup_variable(&identifier.name)
-                .map(|info| Self::owner_name_candidates_from_type(&info.ty))
+                .lookup_value_type(&identifier.name)
+                .as_ref()
+                .map(Self::owner_name_candidates_from_type)
                 .unwrap_or_else(|| vec![Self::sanitize_monomorph(&identifier.name)]),
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_candidates_from_type(ty),
             ast::ExpressionKind::StructLiteral { path, .. } => vec![Self::path_name(path)],
@@ -1315,6 +1315,464 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(ptr)
     }
 
+    fn const_cast_value_to_basic_type(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if value.get_type() == target {
+            return Ok(value);
+        }
+
+        match (value, target) {
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::IntType(int_ty)) => Ok(int_ty
+                .const_int(
+                    int_val
+                        .get_sign_extended_constant()
+                        .or_else(|| int_val.get_zero_extended_constant().map(|v| v as i64))
+                        .ok_or_else(|| {
+                            CodegenError::with_span(
+                                "expected integer constant in global initializer",
+                                span.clone(),
+                            )
+                        })? as u64,
+                    true,
+                )
+                .as_basic_value_enum()),
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => Ok(float_ty
+                .const_float(
+                    int_val
+                        .get_sign_extended_constant()
+                        .or_else(|| int_val.get_zero_extended_constant().map(|v| v as i64))
+                        .ok_or_else(|| {
+                            CodegenError::with_span(
+                                "expected integer constant in global initializer",
+                                span.clone(),
+                            )
+                        })? as f64,
+                )
+                .as_basic_value_enum()),
+            (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::IntType(int_ty)) => Ok(int_ty
+                .const_int(
+                    float_val
+                        .get_constant()
+                        .map(|(value, _)| value as i64)
+                        .ok_or_else(|| {
+                            CodegenError::with_span(
+                                "expected float constant in global initializer",
+                                span.clone(),
+                            )
+                        })? as u64,
+                    true,
+                )
+                .as_basic_value_enum()),
+            (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::FloatType(float_ty)) => {
+                Ok(float_ty
+                    .const_float(
+                        float_val
+                            .get_constant()
+                            .map(|(value, _)| value)
+                            .ok_or_else(|| {
+                                CodegenError::with_span(
+                                    "expected float constant in global initializer",
+                                    span.clone(),
+                                )
+                            })?,
+                    )
+                    .as_basic_value_enum())
+            }
+            (source, _) => Err(CodegenError::with_span(
+                format!(
+                    "unsupported constant cast from `{}` to `{}`",
+                    source.get_type().print_to_string(),
+                    target.print_to_string()
+                ),
+                span.clone(),
+            )),
+        }
+    }
+
+    fn const_array_value_from_values(
+        &self,
+        element_ty: BasicTypeEnum<'ctx>,
+        values: &[BasicValueEnum<'ctx>],
+        span: &Span,
+    ) -> CodegenResult<ArrayValue<'ctx>> {
+        match element_ty {
+            BasicTypeEnum::ArrayType(array_ty) => {
+                let mut typed = Vec::with_capacity(values.len());
+                for value in values {
+                    let BasicValueEnum::ArrayValue(array_value) = *value else {
+                        return Err(CodegenError::with_span(
+                            "array initializer element type mismatch",
+                            span.clone(),
+                        ));
+                    };
+                    typed.push(array_value);
+                }
+                Ok(array_ty.const_array(&typed))
+            }
+            BasicTypeEnum::FloatType(float_ty) => {
+                let mut typed = Vec::with_capacity(values.len());
+                for value in values {
+                    let BasicValueEnum::FloatValue(float_value) = *value else {
+                        return Err(CodegenError::with_span(
+                            "array initializer element type mismatch",
+                            span.clone(),
+                        ));
+                    };
+                    typed.push(float_value);
+                }
+                Ok(float_ty.const_array(&typed))
+            }
+            BasicTypeEnum::IntType(int_ty) => {
+                let mut typed = Vec::with_capacity(values.len());
+                for value in values {
+                    let BasicValueEnum::IntValue(int_value) = *value else {
+                        return Err(CodegenError::with_span(
+                            "array initializer element type mismatch",
+                            span.clone(),
+                        ));
+                    };
+                    typed.push(int_value);
+                }
+                Ok(int_ty.const_array(&typed))
+            }
+            BasicTypeEnum::PointerType(ptr_ty) => {
+                let mut typed = Vec::with_capacity(values.len());
+                for value in values {
+                    let BasicValueEnum::PointerValue(ptr_value) = *value else {
+                        return Err(CodegenError::with_span(
+                            "array initializer element type mismatch",
+                            span.clone(),
+                        ));
+                    };
+                    typed.push(ptr_value);
+                }
+                Ok(ptr_ty.const_array(&typed))
+            }
+            BasicTypeEnum::StructType(struct_ty) => {
+                let mut typed = Vec::with_capacity(values.len());
+                for value in values {
+                    let BasicValueEnum::StructValue(struct_value) = *value else {
+                        return Err(CodegenError::with_span(
+                            "array initializer element type mismatch",
+                            span.clone(),
+                        ));
+                    };
+                    typed.push(struct_value);
+                }
+                Ok(struct_ty.const_array(&typed))
+            }
+            other => Err(CodegenError::with_span(
+                format!(
+                    "array global initializer is not supported for `{}`",
+                    other.print_to_string()
+                ),
+                span.clone(),
+            )),
+        }
+    }
+
+    fn emit_const_initializer_value(
+        &mut self,
+        items: &[ast::InitializerItem],
+        target_type: &ast::Type,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        match target_type.kind.as_ref() {
+            ast::TypeKind::Named(named) => {
+                let struct_name = Self::named_type_key(named);
+                let struct_ty = self.ensure_named_struct_type(named)?;
+                let declared_fields =
+                    self.struct_fields
+                        .get(&struct_name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            CodegenError::with_span(
+                                format!("missing field metadata for struct `{struct_name}`"),
+                                span.clone(),
+                            )
+                        })?;
+                let named_mode = items
+                    .iter()
+                    .any(|item| matches!(item, ast::InitializerItem::Field { .. }));
+                let mut values = Vec::with_capacity(declared_fields.len());
+
+                if named_mode {
+                    let mut by_name: HashMap<String, &ast::Expression> = HashMap::new();
+                    for item in items {
+                        match item {
+                            ast::InitializerItem::Field { name, value } => {
+                                if by_name.insert(name.name.clone(), value).is_some() {
+                                    return Err(CodegenError::with_span(
+                                        format!("duplicate field `{}` in initializer", name.name),
+                                        name.span.clone(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(CodegenError::with_span(
+                                    "cannot mix positional items with named struct initializer",
+                                    span.clone(),
+                                ));
+                            }
+                        }
+                    }
+
+                    for (field_name, field_ty) in declared_fields {
+                        let Some(value_expr) = by_name.get(&field_name) else {
+                            return Err(CodegenError::with_span(
+                                format!("missing field `{field_name}` in initializer"),
+                                span.clone(),
+                            ));
+                        };
+                        values.push(self.emit_const_value_for_type(value_expr, &field_ty)?);
+                    }
+                } else {
+                    if items.len() != declared_fields.len() {
+                        return Err(CodegenError::with_span(
+                            "positional struct initializer field count mismatch",
+                            span.clone(),
+                        ));
+                    }
+                    for (item, (_, field_ty)) in items.iter().zip(declared_fields.iter()) {
+                        let ast::InitializerItem::Positional(expr) = item else {
+                            return Err(CodegenError::with_span(
+                                "struct positional initializer only supports positional items",
+                                span.clone(),
+                            ));
+                        };
+                        values.push(self.emit_const_value_for_type(expr, field_ty)?);
+                    }
+                }
+
+                Ok(struct_ty.const_named_struct(&values).as_basic_value_enum())
+            }
+            ast::TypeKind::Tuple(types) => {
+                if items.len() != types.len() {
+                    return Err(CodegenError::with_span(
+                        "tuple initializer arity mismatch",
+                        span.clone(),
+                    ));
+                }
+                let mut values = Vec::with_capacity(types.len());
+                for (item, ty) in items.iter().zip(types.iter()) {
+                    let ast::InitializerItem::Positional(expr) = item else {
+                        return Err(CodegenError::with_span(
+                            "tuple initializer only supports positional items",
+                            span.clone(),
+                        ));
+                    };
+                    values.push(self.emit_const_value_for_type(expr, ty)?);
+                }
+                Ok(self
+                    .context
+                    .const_struct(&values, false)
+                    .as_basic_value_enum())
+            }
+            ast::TypeKind::Array(array) => {
+                let element_ty = self.lower_basic_type(&array.element_type)?;
+                let Some(size_expr) = &array.size else {
+                    return Err(CodegenError::with_span(
+                        "array initializer requires a known array size",
+                        span.clone(),
+                    ));
+                };
+                let ast::ExpressionKind::Literal(ast::Literal::Integer(size_value)) =
+                    size_expr.kind.as_ref()
+                else {
+                    return Err(CodegenError::with_span(
+                        "array size must be an integer literal",
+                        size_expr.span.clone(),
+                    ));
+                };
+                let size = usize::try_from(*size_value).map_err(|_| {
+                    CodegenError::with_span("array size is out of range", size_expr.span.clone())
+                })?;
+
+                let mut slots = vec![element_ty.const_zero(); size];
+                let mut next_positional = 0usize;
+                for item in items {
+                    match item {
+                        ast::InitializerItem::Positional(expr) => {
+                            if next_positional >= size {
+                                return Err(CodegenError::with_span(
+                                    "too many positional array initializer items",
+                                    expr.span.clone(),
+                                ));
+                            }
+                            slots[next_positional] =
+                                self.emit_const_value_for_type(expr, &array.element_type)?;
+                            next_positional += 1;
+                        }
+                        ast::InitializerItem::Index { index, value } => {
+                            let ast::ExpressionKind::Literal(ast::Literal::Integer(index_value)) =
+                                index.kind.as_ref()
+                            else {
+                                return Err(CodegenError::with_span(
+                                    "array designated index must be an integer literal",
+                                    index.span.clone(),
+                                ));
+                            };
+                            let idx = usize::try_from(*index_value).map_err(|_| {
+                                CodegenError::with_span(
+                                    "array designated index is out of range",
+                                    index.span.clone(),
+                                )
+                            })?;
+                            if idx >= size {
+                                return Err(CodegenError::with_span(
+                                    "array designated index exceeds array size",
+                                    index.span.clone(),
+                                ));
+                            }
+                            slots[idx] =
+                                self.emit_const_value_for_type(value, &array.element_type)?;
+                        }
+                        ast::InitializerItem::Field { name, .. } => {
+                            return Err(CodegenError::with_span(
+                                format!(
+                                    "field designator `{}` is invalid for array initializer",
+                                    name.name
+                                ),
+                                name.span.clone(),
+                            ));
+                        }
+                    }
+                }
+
+                Ok(self
+                    .const_array_value_from_values(element_ty, &slots, span)?
+                    .as_basic_value_enum())
+            }
+            _ => Err(CodegenError::with_span(
+                "initializer is not supported for this global type",
+                target_type.span.clone(),
+            )),
+        }
+    }
+
+    fn emit_const_value_for_type(
+        &mut self,
+        expr: &ast::Expression,
+        target_type: &ast::Type,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let target = self.lower_basic_type(target_type)?;
+        let value = match expr.kind.as_ref() {
+            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => self
+                .context
+                .i64_type()
+                .const_int(*value as u64, true)
+                .as_basic_value_enum(),
+            ast::ExpressionKind::Literal(ast::Literal::Float(value)) => self
+                .context
+                .f64_type()
+                .const_float(*value)
+                .as_basic_value_enum(),
+            ast::ExpressionKind::Literal(ast::Literal::Bool(value)) => self
+                .context
+                .bool_type()
+                .const_int(u64::from(*value), false)
+                .as_basic_value_enum(),
+            ast::ExpressionKind::Literal(ast::Literal::Char(value)) => self
+                .context
+                .i32_type()
+                .const_int((*value) as u64, false)
+                .as_basic_value_enum(),
+            ast::ExpressionKind::Literal(ast::Literal::String(value)) => {
+                self.intern_const_string_global(value).as_basic_value_enum()
+            }
+            ast::ExpressionKind::Unary { operator, operand } => {
+                let inner = self.emit_const_value_for_type(operand, target_type)?;
+                match (operator, inner) {
+                    (ast::UnaryOperator::Plus, value) => value,
+                    (ast::UnaryOperator::Minus, BasicValueEnum::IntValue(int_value)) => {
+                        int_value.const_neg().as_basic_value_enum()
+                    }
+                    (ast::UnaryOperator::Minus, BasicValueEnum::FloatValue(float_value)) => self
+                        .context
+                        .f64_type()
+                        .const_float(
+                            -float_value
+                                .get_constant()
+                                .map(|(value, _)| value)
+                                .ok_or_else(|| {
+                                    CodegenError::with_span(
+                                        "expected float constant in global initializer",
+                                        expr.span.clone(),
+                                    )
+                                })?,
+                        )
+                        .as_basic_value_enum(),
+                    (ast::UnaryOperator::Not, BasicValueEnum::IntValue(int_value))
+                    | (ast::UnaryOperator::BitwiseNot, BasicValueEnum::IntValue(int_value)) => {
+                        int_value.const_not().as_basic_value_enum()
+                    }
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "unsupported constant unary operator in global initializer",
+                            expr.span.clone(),
+                        ));
+                    }
+                }
+            }
+            ast::ExpressionKind::Cast {
+                expression,
+                target_type: cast_target,
+            } => {
+                let inner = self.emit_const_value_for_type(expression, cast_target)?;
+                let cast_target = self.lower_basic_type(cast_target)?;
+                self.const_cast_value_to_basic_type(inner, cast_target, &expr.span)?
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                return self.emit_const_initializer_value(items, target_type, &expr.span);
+            }
+            _ => {
+                return Err(CodegenError::with_span(
+                    "global initializer must be a compile-time constant expression",
+                    expr.span.clone(),
+                ));
+            }
+        };
+
+        self.const_cast_value_to_basic_type(value, target, &expr.span)
+    }
+
+    fn generate_global_variable_item(
+        &mut self,
+        item: &ast::GlobalVariableItem,
+        visibility: &ast::Visibility,
+    ) -> CodegenResult<()> {
+        let llvm_ty = self.lower_basic_type(&item.var_type)?;
+        let global = self
+            .module
+            .get_global(&item.name.name)
+            .unwrap_or_else(|| self.module.add_global(llvm_ty, None, &item.name.name));
+        global.set_linkage(if Self::is_private(visibility) {
+            Linkage::Internal
+        } else {
+            Linkage::External
+        });
+        global.set_constant(!item.is_mutable);
+        let initializer = if let Some(init) = &item.initializer {
+            self.emit_const_value_for_type(init, &item.var_type)?
+        } else {
+            llvm_ty.const_zero()
+        };
+        global.set_initializer(&initializer);
+        self.global_variables
+            .insert(item.name.name.clone(), item.var_type.clone());
+        self.symbol_table.intern_symbol(
+            format!("codegen::global::{}", item.name.name),
+            SymbolKind::GlobalVariable,
+            Some(item.name.span.clone()),
+            CompilerPhase::Codegen,
+        );
+        Ok(())
+    }
+
     fn emit_expression_value(
         &mut self,
         expr: &ast::Expression,
@@ -1344,46 +1802,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .intern_string_literal(value)
                 .map(|ptr| ptr.as_basic_value_enum()),
             ast::ExpressionKind::Identifier(identifier) => {
-<<<<<<< HEAD
-                let info = self.lookup_variable(&identifier.name).ok_or_else(|| {
-                    CodegenError::with_span(
-                        format!("unknown variable `{}`", identifier.name),
-                        identifier.span.clone(),
-                    )
-                })?;
-                let llvm_ty = self.lower_basic_type(&info.ty)?;
-                self.builder
-                    .build_load(llvm_ty, info.ptr, &identifier.name)
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to load variable `{}`: {e}", identifier.name),
-                            identifier.span.clone(),
-                        )
-                    })
-=======
-                if let Some(info) = self.lookup_variable(&identifier.name) {
-                    let llvm_ty = self.lower_basic_type(&info.ty)?;
-                    return self
-                        .builder
-                        .build_load(llvm_ty, info.ptr, &identifier.name)
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed to load variable `{}`: {e}", identifier.name),
-                                identifier.span.clone(),
-                            )
-                        });
-                }
-                if let Some((global, ty)) = self.lookup_extern_global(&identifier.name) {
+                if let Some((ptr, ty)) = self.lookup_storage(&identifier.name) {
                     let llvm_ty = self.lower_basic_type(&ty)?;
                     return self
                         .builder
-                        .build_load(llvm_ty, global.as_pointer_value(), &identifier.name)
+                        .build_load(llvm_ty, ptr, &identifier.name)
                         .map_err(|e| {
                             CodegenError::with_span(
-                                format!(
-                                    "failed to load extern variable `{}`: {e}",
-                                    identifier.name
-                                ),
+                                format!("failed to load variable `{}`: {e}", identifier.name),
                                 identifier.span.clone(),
                             )
                         });
@@ -1392,7 +1818,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     format!("unknown variable `{}`", identifier.name),
                     identifier.span.clone(),
                 ))
->>>>>>> cc823df (shift to LL3)
             }
             ast::ExpressionKind::Binary {
                 left,
@@ -2308,26 +2733,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<(PointerValue<'ctx>, ast::Type)> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => {
-<<<<<<< HEAD
-                let info = self.lookup_variable(&identifier.name).ok_or_else(|| {
-                    CodegenError::with_span(
-                        format!("unknown variable `{}`", identifier.name),
-                        identifier.span.clone(),
-                    )
-                })?;
-                Ok((info.ptr, info.ty))
-=======
-                if let Some(info) = self.lookup_variable(&identifier.name) {
-                    return Ok((info.ptr, info.ty));
-                }
-                if let Some((global, ty)) = self.lookup_extern_global(&identifier.name) {
-                    return Ok((global.as_pointer_value(), ty));
+                if let Some(storage) = self.lookup_storage(&identifier.name) {
+                    return Ok(storage);
                 }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
                     identifier.span.clone(),
                 ))
->>>>>>> cc823df (shift to LL3)
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
@@ -2613,7 +3025,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             let receiver_ty = match receiver.kind.as_ref() {
                 ast::ExpressionKind::Identifier(identifier) => {
-                    self.lookup_variable(&identifier.name).map(|info| info.ty)
+                    self.lookup_value_type(&identifier.name)
                 }
                 ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
                     self.resolve_lvalue_ptr(receiver).ok().map(|(_, ty)| ty)
@@ -2668,7 +3080,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if inject_receiver {
             let receiver_ty = match receiver.kind.as_ref() {
                 ast::ExpressionKind::Identifier(identifier) => {
-                    self.lookup_variable(&identifier.name).map(|info| info.ty)
+                    self.lookup_value_type(&identifier.name)
                 }
                 ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
                     self.resolve_lvalue_ptr(receiver).ok().map(|(_, ty)| ty)
@@ -2952,15 +3364,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
         })?;
 
-<<<<<<< HEAD
-        if return_old {
-            Ok(current)
-        } else {
-            Ok(updated)
-        }
-=======
         if return_old { Ok(current) } else { Ok(updated) }
->>>>>>> cc823df (shift to LL3)
     }
 
     fn emit_binary_expression(
@@ -3899,6 +4303,12 @@ fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
 
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()> {
+        for item in &program.items {
+            if let ast::ItemKind::Struct(struct_item) = &item.kind {
+                self.generate_struct_item(struct_item, &item.visibility, &item.attributes)?;
+            }
+        }
+
         // Pass 1: collect declarations/types so forward references can resolve.
         for item in &program.items {
             match &item.kind {
@@ -3915,8 +4325,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &item.attributes,
                     )?;
                 }
-<<<<<<< HEAD
-=======
                 ast::ItemKind::ExternVariable(extern_variable_item) => {
                     self.generate_extern_variable_item(
                         extern_variable_item,
@@ -3924,7 +4332,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &item.attributes,
                     )?;
                 }
->>>>>>> cc823df (shift to LL3)
+                ast::ItemKind::GlobalVariable(global_variable_item) => {
+                    self.generate_global_variable_item(global_variable_item, &item.visibility)?;
+                }
                 ast::ItemKind::ExternBlock(extern_block_item) => {
                     self.generate_extern_block_item(
                         extern_block_item,
@@ -3954,6 +4364,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ast::ItemKind::Function(function_item) => {
                 self.generate_function_item(function_item, &item.visibility, &item.attributes)
             }
+            ast::ItemKind::GlobalVariable(global_variable_item) => {
+                self.generate_global_variable_item(global_variable_item, &item.visibility)
+            }
             ast::ItemKind::Struct(struct_item) => {
                 self.generate_struct_item(struct_item, &item.visibility, &item.attributes)
             }
@@ -3975,15 +4388,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     &item.visibility,
                     &item.attributes,
                 ),
-<<<<<<< HEAD
-=======
             ast::ItemKind::ExternVariable(extern_variable_item) => self
                 .generate_extern_variable_item(
                     extern_variable_item,
                     &item.visibility,
                     &item.attributes,
                 ),
->>>>>>> cc823df (shift to LL3)
             ast::ItemKind::ExternBlock(extern_block_item) => self.generate_extern_block_item(
                 extern_block_item,
                 &item.visibility,
@@ -4237,8 +4647,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
-<<<<<<< HEAD
-=======
     fn generate_extern_variable_item(
         &mut self,
         item: &ast::ExternVariableItem,
@@ -4262,7 +4670,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
->>>>>>> cc823df (shift to LL3)
     fn generate_extern_block_item(
         &mut self,
         item: &ast::ExternBlockItem,
@@ -4549,6 +4956,32 @@ mod tests {
             ir.contains("%Rect = type { %Point, %Point }")
                 && ir.contains("getelementptr inbounds nuw %Rect"),
             "expected nested struct initializer lowering:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_global_variable_initializer_and_load() {
+        let ir = lower_to_llvm("i32 counter = -1; i32 main() { return counter; }");
+        assert!(
+            ir.contains("@counter = global i32 -1"),
+            "expected lowered global initializer:\n{ir}"
+        );
+        assert!(
+            ir.contains("load i32, ptr @counter"),
+            "expected global load in function body:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_global_variable_store() {
+        let ir = lower_to_llvm("i32 counter; i32 main() { counter = 3; return counter; }");
+        assert!(
+            ir.contains("@counter = global i32 0"),
+            "expected zero-initialized global:\n{ir}"
+        );
+        assert!(
+            ir.contains("store i32 3, ptr @counter"),
+            "expected global store in function body:\n{ir}"
         );
     }
 

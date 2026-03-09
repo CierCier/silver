@@ -23,10 +23,8 @@ enum SymbolKind {
     Enum,
     Trait,
     Function,
-<<<<<<< HEAD
-=======
+    GlobalVariable,
     ExternVariable,
->>>>>>> cc823df (shift to LL3)
 }
 
 pub struct Analyzer {
@@ -176,15 +174,15 @@ impl Analyzer {
                 ast::ItemKind::Function(func) => {
                     self.insert_symbol(&func.name, SymbolKind::Function);
                 }
+                ast::ItemKind::GlobalVariable(var) => {
+                    self.insert_symbol(&var.name, SymbolKind::GlobalVariable);
+                }
                 ast::ItemKind::ExternFunction(func) => {
                     self.insert_symbol(&func.name, SymbolKind::Function);
                 }
-<<<<<<< HEAD
-=======
                 ast::ItemKind::ExternVariable(var) => {
                     self.insert_symbol(&var.name, SymbolKind::ExternVariable);
                 }
->>>>>>> cc823df (shift to LL3)
                 ast::ItemKind::ExternBlock(block) => {
                     for func in &block.functions {
                         self.insert_symbol(&func.name, SymbolKind::Function);
@@ -205,12 +203,10 @@ impl Analyzer {
                 SymbolKind::Enum => format!("duplicate enum '{}'", ident.name),
                 SymbolKind::Trait => format!("duplicate trait '{}'", ident.name),
                 SymbolKind::Function => format!("duplicate function '{}'", ident.name),
-<<<<<<< HEAD
-=======
+                SymbolKind::GlobalVariable => format!("duplicate global variable '{}'", ident.name),
                 SymbolKind::ExternVariable => {
                     format!("duplicate extern variable '{}'", ident.name)
                 }
->>>>>>> cc823df (shift to LL3)
             };
             self.errors.push(SemanticError {
                 message,
@@ -299,6 +295,12 @@ impl Analyzer {
                 self.pop_var_scope();
                 self.pop_type_params();
             }
+            ast::ItemKind::GlobalVariable(var) => {
+                self.check_type(&var.var_type);
+                if let Some(initializer) = &var.initializer {
+                    self.check_expression(initializer);
+                }
+            }
             ast::ItemKind::Impl(impl_item) => {
                 let mut implicit = HashSet::new();
                 if impl_item.generics.is_none() {
@@ -360,12 +362,9 @@ impl Analyzer {
                 }
                 self.pop_type_params();
             }
-<<<<<<< HEAD
-=======
             ast::ItemKind::ExternVariable(var) => {
                 self.check_type(&var.var_type);
             }
->>>>>>> cc823df (shift to LL3)
             _ => {}
         }
     }
@@ -817,14 +816,11 @@ impl Analyzer {
 
         match self.has_symbol(&ident.name) {
             Some(SymbolKind::Function)
+            | Some(SymbolKind::GlobalVariable)
             | Some(SymbolKind::Struct)
             | Some(SymbolKind::Enum)
-<<<<<<< HEAD
-            | Some(SymbolKind::Trait) => return,
-=======
             | Some(SymbolKind::Trait)
             | Some(SymbolKind::ExternVariable) => return,
->>>>>>> cc823df (shift to LL3)
             None => {}
         }
 
@@ -837,6 +833,12 @@ impl Analyzer {
     fn mark_mutated(&mut self, expr: &ast::Expression) {
         if let Some(name) = self.lvalue_root(expr) {
             if self.table_backend.mark_var_mutated(&name) {
+                return;
+            }
+            if matches!(
+                self.has_symbol(&name),
+                Some(SymbolKind::GlobalVariable) | Some(SymbolKind::ExternVariable)
+            ) {
                 return;
             }
             self.errors.push(SemanticError {

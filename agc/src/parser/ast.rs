@@ -22,16 +22,14 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind {
     Function(FunctionItem),
+    GlobalVariable(GlobalVariableItem),
     Struct(StructItem),
     Enum(EnumItem),
     Impl(ImplItem),
     Trait(TraitItem),
     Import(ImportItem),
     ExternFunction(ExternFunctionItem),
-<<<<<<< HEAD
-=======
     ExternVariable(ExternVariableItem),
->>>>>>> cc823df (shift to LL3)
     ExternBlock(ExternBlockItem),
 }
 
@@ -43,6 +41,15 @@ pub struct FunctionItem {
     pub parameters: Vec<Parameter>,
     pub return_type: Option<Type>,
     pub body: Block,
+}
+
+/// Top-level global variable declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalVariableItem {
+    pub name: Identifier,
+    pub var_type: Type,
+    pub initializer: Option<Expression>,
+    pub is_mutable: bool,
 }
 
 /// Struct definition
@@ -95,8 +102,6 @@ pub struct ExternFunctionItem {
     pub linkage: ExternLinkage,
 }
 
-<<<<<<< HEAD
-=======
 /// External variable declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternVariableItem {
@@ -105,7 +110,6 @@ pub struct ExternVariableItem {
     pub linkage: ExternLinkage,
 }
 
->>>>>>> cc823df (shift to LL3)
 /// External block with multiple function declarations
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternBlockItem {
