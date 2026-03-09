@@ -19,16 +19,7 @@ pub fn render_program(program: &ast::Program) -> String {
     let root = program_node(program);
     let mut lines = vec![root.label];
     for (index, child) in root.children.iter().enumerate() {
-<<<<<<< HEAD
-        render_node(
-            child,
-            "",
-            index + 1 == root.children.len(),
-            &mut lines,
-        );
-=======
         render_node(child, "", index + 1 == root.children.len(), &mut lines);
->>>>>>> cc823df (shift to LL3)
     }
     lines.join("\n")
 }
@@ -63,24 +54,13 @@ fn program_node(program: &ast::Program) -> Node {
 fn item_node(item: &ast::Item) -> Node {
     let mut node = match &item.kind {
         ast::ItemKind::Function(function) => function_node(function),
+        ast::ItemKind::GlobalVariable(global) => global_variable_node(global),
         ast::ItemKind::Struct(strukt) => struct_node(strukt),
         ast::ItemKind::Enum(enm) => enum_node(enm),
         ast::ItemKind::Impl(impl_item) => impl_node(impl_item),
         ast::ItemKind::Trait(trait_item) => trait_node(trait_item),
         ast::ItemKind::Import(import) => import_node(import),
         ast::ItemKind::ExternFunction(extern_fn) => extern_fn_node(extern_fn),
-<<<<<<< HEAD
-        ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
-    };
-
-    node.label = format!(
-        "{} [{}..{}]",
-        node.label, item.span.start, item.span.end
-    );
-
-    let mut children = Vec::new();
-    children.push(Node::new(format!("visibility: {}", visibility_name(&item.visibility))));
-=======
         ast::ItemKind::ExternVariable(extern_var) => extern_var_node(extern_var),
         ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
     };
@@ -92,7 +72,6 @@ fn item_node(item: &ast::Item) -> Node {
         "visibility: {}",
         visibility_name(&item.visibility)
     )));
->>>>>>> cc823df (shift to LL3)
     if !item.attributes.is_empty() {
         let mut attrs = Node::new("attributes");
         attrs.children = item.attributes.iter().map(attribute_node).collect();
@@ -119,6 +98,23 @@ fn function_node(function: &ast::FunctionItem) -> Node {
         node.children.push(ret);
     }
     node.children.push(block_node(&function.body));
+    node
+}
+
+fn global_variable_node(global: &ast::GlobalVariableItem) -> Node {
+    let mut node = Node::new(format!("Global {}", global.name.name));
+    let mut ty = Node::new("type");
+    ty.children.push(type_node(&global.var_type));
+    node.children.push(ty);
+    if let Some(initializer) = &global.initializer {
+        let mut init = Node::new("initializer");
+        init.children.push(expression_node(initializer));
+        node.children.push(init);
+    }
+    node.children.push(Node::new(format!(
+        "mutable: {}",
+        if global.is_mutable { "yes" } else { "no" }
+    )));
     node
 }
 
@@ -155,15 +151,11 @@ fn trait_node(trait_item: &ast::TraitItem) -> Node {
     }
     if !trait_item.super_traits.is_empty() {
         let mut supers = Node::new("super_traits");
-<<<<<<< HEAD
-        supers.children = trait_item.super_traits.iter().map(trait_bound_node).collect();
-=======
         supers.children = trait_item
             .super_traits
             .iter()
             .map(trait_bound_node)
             .collect();
->>>>>>> cc823df (shift to LL3)
         node.children.push(supers);
     }
     if !trait_item.items.is_empty() {
@@ -194,19 +186,10 @@ fn impl_node(impl_item: &ast::ImplItem) -> Node {
 }
 
 fn import_node(import: &ast::ImportItem) -> Node {
-<<<<<<< HEAD
-    let mut node = Node::new(format!(
-        "Import {}",
-        path_name(&import.path)
-    ));
-    if let Some(alias) = &import.alias {
-        node.children.push(Node::new(format!("alias: {}", alias.name)));
-=======
     let mut node = Node::new(format!("Import {}", path_name(&import.path)));
     if let Some(alias) = &import.alias {
         node.children
             .push(Node::new(format!("alias: {}", alias.name)));
->>>>>>> cc823df (shift to LL3)
     }
     if let Some(items) = &import.items {
         let mut imported = Node::new("items");
@@ -232,9 +215,6 @@ fn extern_fn_node(extern_fn: &ast::ExternFunctionItem) -> Node {
         extern_fn.name.name,
         linkage_name(&extern_fn.linkage)
     ));
-<<<<<<< HEAD
-    node.children.push(function_signature_node(&extern_fn.signature));
-=======
     node.children
         .push(function_signature_node(&extern_fn.signature));
     node
@@ -249,7 +229,6 @@ fn extern_var_node(extern_var: &ast::ExternVariableItem) -> Node {
     let mut ty = Node::new("type");
     ty.children.push(type_node(&extern_var.var_type));
     node.children.push(ty);
->>>>>>> cc823df (shift to LL3)
     node
 }
 
@@ -471,13 +450,9 @@ fn let_node(let_stmt: &ast::LetStatement) -> Node {
 
 fn pattern_node(pattern: &ast::Pattern) -> Node {
     match &pattern.kind {
-<<<<<<< HEAD
-        ast::PatternKind::Identifier(ident) => Node::new(format!("Pattern::Identifier {}", ident.name)),
-=======
         ast::PatternKind::Identifier(ident) => {
             Node::new(format!("Pattern::Identifier {}", ident.name))
         }
->>>>>>> cc823df (shift to LL3)
         ast::PatternKind::Tuple(items) => {
             let mut node = Node::new("Pattern::Tuple");
             node.children = items.iter().map(pattern_node).collect();
@@ -503,13 +478,9 @@ fn pattern_node(pattern: &ast::Pattern) -> Node {
             }
             node
         }
-<<<<<<< HEAD
-        ast::PatternKind::Literal(literal) => Node::new(format!("Pattern::Literal {}", literal_name(literal))),
-=======
         ast::PatternKind::Literal(literal) => {
             Node::new(format!("Pattern::Literal {}", literal_name(literal)))
         }
->>>>>>> cc823df (shift to LL3)
         ast::PatternKind::Wildcard => Node::new("Pattern::Wildcard"),
     }
 }
@@ -527,13 +498,9 @@ fn expression_node(expression: &ast::Expression) -> Node {
         ast::ExpressionKind::Literal(literal) => {
             Node::new(format!("Expr::Literal {}", literal_name(literal)))
         }
-<<<<<<< HEAD
-        ast::ExpressionKind::Identifier(ident) => Node::new(format!("Expr::Identifier {}", ident.name)),
-=======
         ast::ExpressionKind::Identifier(ident) => {
             Node::new(format!("Expr::Identifier {}", ident.name))
         }
->>>>>>> cc823df (shift to LL3)
         ast::ExpressionKind::TypeName(ty) => {
             let mut n = Node::new("Expr::TypeName");
             n.children.push(type_node(ty));
@@ -783,29 +750,20 @@ fn macro_arg_node(arg: &ast::MacroArg) -> Node {
             node.children.push(item_node(item));
             node
         }
-<<<<<<< HEAD
-        ast::MacroArg::Literal(literal) => Node::new(format!("MacroArg::Literal {}", literal_name(literal))),
-        ast::MacroArg::Identifier(ident) => Node::new(format!("MacroArg::Identifier {}", ident.name)),
-=======
         ast::MacroArg::Literal(literal) => {
             Node::new(format!("MacroArg::Literal {}", literal_name(literal)))
         }
         ast::MacroArg::Identifier(ident) => {
             Node::new(format!("MacroArg::Identifier {}", ident.name))
         }
->>>>>>> cc823df (shift to LL3)
     }
 }
 
 fn type_node(ty: &ast::Type) -> Node {
     let mut node = match ty.kind.as_ref() {
-<<<<<<< HEAD
-        ast::TypeKind::Primitive(primitive) => Node::new(format!("Type::Primitive {:?}", primitive)),
-=======
         ast::TypeKind::Primitive(primitive) => {
             Node::new(format!("Type::Primitive {:?}", primitive))
         }
->>>>>>> cc823df (shift to LL3)
         ast::TypeKind::Named(named) => {
             let mut n = Node::new(format!("Type::Named {}", path_name(&named.path)));
             if let Some(generics) = &named.generics {
@@ -831,12 +789,8 @@ fn type_node(ty: &ast::Type) -> Node {
                 "Type::Reference"
             });
             if let Some(lifetime) = &reference.lifetime {
-<<<<<<< HEAD
-                n.children.push(Node::new(format!("lifetime '{}'", lifetime.name)));
-=======
                 n.children
                     .push(Node::new(format!("lifetime '{}'", lifetime.name)));
->>>>>>> cc823df (shift to LL3)
             }
             n.children.push(type_node(&reference.inner));
             n
@@ -986,13 +940,9 @@ fn attribute_node(attribute: &ast::Attribute) -> Node {
 fn attribute_arg_node(arg: &ast::AttributeArg) -> Node {
     match arg {
         ast::AttributeArg::Identifier(ident) => Node::new(format!("ident {}", ident.name)),
-<<<<<<< HEAD
-        ast::AttributeArg::Literal(literal) => Node::new(format!("literal {}", literal_name(literal))),
-=======
         ast::AttributeArg::Literal(literal) => {
             Node::new(format!("literal {}", literal_name(literal)))
         }
->>>>>>> cc823df (shift to LL3)
     }
 }
 

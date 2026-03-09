@@ -109,6 +109,7 @@ enum ItemProduction {
     Trait,
     Impl,
     Function,
+    GlobalVariable,
 }
 
 enum ParsedExternDeclaration {
@@ -224,9 +225,15 @@ impl PRT_Parser {
         // Program := Item*
         self.grammar.add_rule("Program", repeat(rule("Item")));
 
-        // Item := Import | Function
-        self.grammar
-            .add_rule("Item", choice(vec![rule("Import"), rule("Function")]));
+        // Item := Import | Function | GlobalVariable
+        self.grammar.add_rule(
+            "Item",
+            choice(vec![
+                rule("Import"),
+                rule("Function"),
+                rule("GlobalVariable"),
+            ]),
+        );
 
         // Import := import Identifier ('.' Identifier)* ';'
         self.grammar.add_rule(
@@ -252,6 +259,17 @@ impl PRT_Parser {
                 opt(rule("ParamList")),
                 tok(Token::RightParen),
                 rule("Block"),
+            ]),
+        );
+
+        // GlobalVariable := Type Identifier ('=' Expression)? ';'
+        self.grammar.add_rule(
+            "GlobalVariable",
+            seq(vec![
+                rule("Type"),
+                tok(Token::Identifier(String::new())),
+                opt(seq(vec![tok(Token::Assign), rule("Expression")])),
+                tok(Token::Semicolon),
             ]),
         );
 
@@ -628,8 +646,15 @@ impl PRT_Parser {
     }
 
     fn predict_item_production(&self, tokens: &[LexToken], start: usize) -> Option<ItemProduction> {
-        self.transition_table
-            .predict_item(&self.lookahead_classes(tokens, start))
+        let predicted = self
+            .transition_table
+            .predict_item(&self.lookahead_classes(tokens, start))?;
+        if predicted == ItemProduction::Function
+            && !self.looks_like_function_item_start(tokens, start)
+        {
+            return Some(ItemProduction::GlobalVariable);
+        }
+        Some(predicted)
     }
 
     fn find_item_end(
@@ -641,7 +666,9 @@ impl PRT_Parser {
         fallback_span: &Span,
     ) -> Result<Option<usize>, ParseError> {
         let item_end = match production {
-            ItemProduction::Import | ItemProduction::ExternDeclaration => self
+            ItemProduction::Import
+            | ItemProduction::ExternDeclaration
+            | ItemProduction::GlobalVariable => self
                 .find_statement_terminator(tokens, item_start, tokens.len())
                 .map(|idx| idx + 1),
             ItemProduction::Struct | ItemProduction::Trait | ItemProduction::Impl => {
@@ -2427,6 +2454,61 @@ impl PRT_Parser {
         })
     }
 
+    fn parse_global_variable_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::GlobalVariableItem, ParseError> {
+        let decl_end = end.saturating_sub(1);
+        let (var_type, after_type) =
+            self.parse_type_prefix(tokens, start, decl_end)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected global variable type".to_string(),
+                    span: tokens[start].span.clone(),
+                })?;
+        if !matches!(
+            tokens.get(after_type).map(|token| &token.kind),
+            Some(Token::Identifier(_))
+        ) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected global variable name".to_string(),
+                span: tokens
+                    .get(after_type)
+                    .map(|token| token.span.clone())
+                    .unwrap_or_else(|| tokens[start].span.clone()),
+            });
+        }
+
+        let name_token = &tokens[after_type];
+        let Token::Identifier(name) = &name_token.kind else {
+            unreachable!();
+        };
+
+        let mut initializer = None;
+        if after_type + 1 < decl_end {
+            if !matches!(tokens[after_type + 1].kind, Token::Assign) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unsupported global variable declaration syntax".to_string(),
+                    span: tokens[after_type + 1].span.clone(),
+                });
+            }
+            initializer =
+                Some(self.parse_expression_reduction(tokens, after_type + 2, decl_end)?);
+        }
+
+        self.known_ident_names.insert(name.clone());
+        Ok(ast::GlobalVariableItem {
+            name: ast::Identifier {
+                name: name.clone(),
+                span: name_token.span.clone(),
+            },
+            var_type,
+            initializer,
+            is_mutable: true,
+        })
+    }
+
     fn parse_trait_ref_range(
         &self,
         tokens: &[LexToken],
@@ -3990,6 +4072,9 @@ impl PRT_Parser {
                 ItemProduction::Function => ast::ItemKind::Function(
                     self.parse_function_reduction(tokens, item_start, item_end)?,
                 ),
+                ItemProduction::GlobalVariable => ast::ItemKind::GlobalVariable(
+                    self.parse_global_variable_reduction(tokens, item_start, item_end)?,
+                ),
             };
             self.record_known_item(&kind);
             items.push(ast::Item {
@@ -4063,6 +4148,9 @@ impl PRT_Parser {
             ast::ItemKind::Function(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
+            ast::ItemKind::GlobalVariable(item) => {
+                self.known_ident_names.insert(item.name.name.clone());
+            }
             ast::ItemKind::ExternFunction(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
@@ -4110,6 +4198,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_extern_variable_with_explicit_abi() {
+        let source = r#"extern "C" i32 errno;"#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::ExternVariable(var) = &program.items[0].kind else {
+            panic!("expected extern variable item");
+        };
+        assert_eq!(var.name.name, "errno");
+        assert_eq!(var.linkage, ast::ExternLinkage::C);
+    }
+
+    #[test]
     fn tracks_type_names_for_statement_disambiguation() {
         let source = r#"
             struct MyType {}
@@ -4134,5 +4236,19 @@ mod tests {
             main_fn.body.statements[1].kind,
             ast::StatementKind::Expression(_)
         ));
+    }
+
+    #[test]
+    fn parses_top_level_global_variable() {
+        let source = "i32 EOF = -1;";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::GlobalVariable(item) = &program.items[0].kind else {
+            panic!("expected global variable item");
+        };
+        assert_eq!(item.name.name, "EOF");
+        assert!(item.initializer.is_some(), "expected global initializer");
     }
 }

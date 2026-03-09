@@ -111,15 +111,12 @@ pub trait SilverGenerator {
         visibility: &ast::Visibility,
         attributes: &[ast::Attribute],
     ) -> CodegenResult<()>;
-<<<<<<< HEAD
-=======
     fn generate_extern_variable_item(
         &mut self,
         item: &ast::ExternVariableItem,
         visibility: &ast::Visibility,
         attributes: &[ast::Attribute],
     ) -> CodegenResult<()>;
->>>>>>> cc823df (shift to LL3)
     fn generate_extern_block_item(
         &mut self,
         item: &ast::ExternBlockItem,

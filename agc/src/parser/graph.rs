@@ -213,6 +213,11 @@ pub struct GraphParser {
     memo: HashMap<(String, usize), Option<usize>>,
 }
 
+enum ParsedExternDeclaration {
+    Function(ast::ExternFunctionItem),
+    Variable(ast::ExternVariableItem),
+}
+
 impl GraphParser {
     pub fn new(source_name: Option<String>) -> Self {
         let mut parser = Self {
@@ -319,8 +324,11 @@ impl GraphParser {
         // Program := Item*
         self.grammar.add_rule("Program", repeat(rule("Item")));
 
-        // Item := Import | Function
-        self.grammar.add_rule("Item", choice(vec![rule("Import"), rule("Function")]));
+        // Item := Import | Function | GlobalVariable
+        self.grammar.add_rule(
+            "Item",
+            choice(vec![rule("Import"), rule("Function"), rule("GlobalVariable")]),
+        );
 
         // Import := import Identifier ('.' Identifier)* ';'
         self.grammar.add_rule(
@@ -346,6 +354,17 @@ impl GraphParser {
                 opt(rule("ParamList")),
                 tok(Token::RightParen),
                 rule("Block"),
+            ]),
+        );
+
+        // GlobalVariable := Type Identifier ('=' Expression)? ';'
+        self.grammar.add_rule(
+            "GlobalVariable",
+            seq(vec![
+                rule("Type"),
+                tok(Token::Identifier(String::new())),
+                opt(seq(vec![tok(Token::Assign), rule("Expression")])),
+                tok(Token::Semicolon),
             ]),
         );
 
@@ -2268,6 +2287,59 @@ impl GraphParser {
         })
     }
 
+    fn parse_global_variable_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::GlobalVariableItem, ParseError> {
+        let decl_end = end.saturating_sub(1);
+        let (var_type, after_type) =
+            self.parse_type_prefix(tokens, start, decl_end)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected global variable type".to_string(),
+                    span: tokens[start].span.clone(),
+                })?;
+        if !matches!(
+            tokens.get(after_type).map(|token| &token.kind),
+            Some(Token::Identifier(_))
+        ) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected global variable name".to_string(),
+                span: tokens
+                    .get(after_type)
+                    .map(|token| token.span.clone())
+                    .unwrap_or_else(|| tokens[start].span.clone()),
+            });
+        }
+
+        let name_token = &tokens[after_type];
+        let Token::Identifier(name) = &name_token.kind else {
+            unreachable!();
+        };
+
+        let mut initializer = None;
+        if after_type + 1 < decl_end {
+            if !matches!(tokens[after_type + 1].kind, Token::Assign) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unsupported global variable declaration syntax".to_string(),
+                    span: tokens[after_type + 1].span.clone(),
+                });
+            }
+            initializer = Some(self.parse_expression_reduction(tokens, after_type + 2, decl_end)?);
+        }
+
+        Ok(ast::GlobalVariableItem {
+            name: ast::Identifier {
+                name: name.clone(),
+                span: name_token.span.clone(),
+            },
+            var_type,
+            initializer,
+            is_mutable: true,
+        })
+    }
+
     fn parse_trait_ref_range(
         &self,
         tokens: &[LexToken],
@@ -3542,12 +3614,12 @@ impl GraphParser {
         }
     }
 
-    fn parse_extern_function_reduction(
+    fn parse_extern_declaration_reduction(
         &mut self,
         tokens: &[LexToken],
         start: usize,
         end: usize,
-    ) -> Result<ast::ExternFunctionItem, ParseError> {
+    ) -> Result<ParsedExternDeclaration, ParseError> {
         let mut cursor = start;
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
             return Err(ParseError::InvalidSyntax {
@@ -3557,18 +3629,16 @@ impl GraphParser {
         }
         cursor += 1;
 
-        let abi_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-            message: "expected extern ABI string".to_string(),
-            span: tokens[start].span.clone(),
-        })?;
-        let Token::StringLiteral(abi_string) = &abi_token.kind else {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected extern ABI string".to_string(),
-                span: abi_token.span.clone(),
-            });
+        let linkage = if let Some(abi_token) = tokens.get(cursor) {
+            if let Token::StringLiteral(abi_string) = &abi_token.kind {
+                cursor += 1;
+                Self::parse_extern_linkage(abi_string)
+            } else {
+                ast::ExternLinkage::C
+            }
+        } else {
+            ast::ExternLinkage::C
         };
-        let linkage = Self::parse_extern_linkage(abi_string);
-        cursor += 1;
 
         let (return_type, after_return_type) = self
             .parse_type_prefix(tokens, cursor, end)
@@ -3590,9 +3660,20 @@ impl GraphParser {
         };
         cursor += 1;
 
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
+            return Ok(ParsedExternDeclaration::Variable(ast::ExternVariableItem {
+                name: ast::Identifier {
+                    name: function_name.clone(),
+                    span: name_token.span.clone(),
+                },
+                var_type: return_type,
+                linkage,
+            }));
+        }
+
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
-                message: "expected '(' after extern function name".to_string(),
+                message: "expected '(' or ';' after extern declaration name".to_string(),
                 span: name_token.span.clone(),
             });
         }
@@ -3674,7 +3755,7 @@ impl GraphParser {
             });
         }
 
-        Ok(ast::ExternFunctionItem {
+        Ok(ParsedExternDeclaration::Function(ast::ExternFunctionItem {
             name: ast::Identifier {
                 name: function_name.clone(),
                 span: name_token.span.clone(),
@@ -3685,7 +3766,7 @@ impl GraphParser {
                 is_variadic,
             },
             linkage,
-        })
+        }))
     }
 
     pub fn parse_program(&mut self, tokens: &[LexToken]) -> Result<ast::Program, ParseError> {
@@ -3759,32 +3840,57 @@ impl GraphParser {
                         span: tokens.get(after_type).map(|t| t.span.clone()).unwrap_or(span.clone()),
                     });
                 }
-                let mut lparen = after_type + 1;
-                if matches!(tokens.get(lparen).map(|t| &t.kind), Some(Token::Less)) {
-                    let Some(generics_close) =
-                        self.find_matching_token(tokens, lparen, tokens.len(), Token::Less, Token::Greater)
-                    else {
+                let after_name = after_type + 1;
+                if matches!(
+                    tokens.get(after_name).map(|t| &t.kind),
+                    Some(Token::Assign | Token::Semicolon)
+                ) {
+                    self.find_statement_terminator(tokens, item_start, tokens.len())
+                        .map(|idx| idx + 1)
+                } else {
+                    let mut lparen = after_name;
+                    if matches!(tokens.get(lparen).map(|t| &t.kind), Some(Token::Less)) {
+                        let Some(generics_close) = self.find_matching_token(
+                            tokens,
+                            lparen,
+                            tokens.len(),
+                            Token::Less,
+                            Token::Greater,
+                        ) else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "unterminated generic parameter list".to_string(),
+                                span: tokens.get(lparen).map(|t| t.span.clone()).unwrap_or(span.clone()),
+                            });
+                        };
+                        lparen = generics_close + 1;
+                    }
+                    let Some(rparen) = self.find_matching_token(
+                        tokens,
+                        lparen,
+                        tokens.len(),
+                        Token::LeftParen,
+                        Token::RightParen,
+                    ) else {
                         return Err(ParseError::InvalidSyntax {
-                            message: "unterminated generic parameter list".to_string(),
+                            message: "unterminated function parameter list".to_string(),
                             span: tokens.get(lparen).map(|t| t.span.clone()).unwrap_or(span.clone()),
                         });
                     };
-                    lparen = generics_close + 1;
+                    let lbrace = rparen + 1;
+                    let Some(rbrace) = self.find_matching_token(
+                        tokens,
+                        lbrace,
+                        tokens.len(),
+                        Token::LeftBrace,
+                        Token::RightBrace,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "unterminated function block".to_string(),
+                            span: tokens.get(lbrace).map(|t| t.span.clone()).unwrap_or(span.clone()),
+                        });
+                    };
+                    Some(rbrace + 1)
                 }
-                let Some(rparen) = self.find_matching_token(tokens, lparen, tokens.len(), Token::LeftParen, Token::RightParen) else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "unterminated function parameter list".to_string(),
-                        span: tokens.get(lparen).map(|t| t.span.clone()).unwrap_or(span.clone()),
-                    });
-                };
-                let lbrace = rparen + 1;
-                let Some(rbrace) = self.find_matching_token(tokens, lbrace, tokens.len(), Token::LeftBrace, Token::RightBrace) else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "unterminated function block".to_string(),
-                        span: tokens.get(lbrace).map(|t| t.span.clone()).unwrap_or(span.clone()),
-                    });
-                };
-                Some(rbrace + 1)
             };
 
             let Some(item_end) = item_end else {
@@ -3804,13 +3910,39 @@ impl GraphParser {
                 Token::Import => {
                     ast::ItemKind::Import(self.parse_import_reduction(tokens, item_start, item_end)?)
                 }
-                Token::Extern => ast::ItemKind::ExternFunction(
-                    self.parse_extern_function_reduction(tokens, item_start, item_end)?,
-                ),
+                Token::Extern => {
+                    match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
+                        ParsedExternDeclaration::Function(function_item) => {
+                            ast::ItemKind::ExternFunction(function_item)
+                        }
+                        ParsedExternDeclaration::Variable(variable_item) => {
+                            ast::ItemKind::ExternVariable(variable_item)
+                        }
+                    }
+                }
                 Token::Struct => ast::ItemKind::Struct(self.parse_struct_reduction(tokens, item_start, item_end)?),
                 Token::Trait => ast::ItemKind::Trait(self.parse_trait_reduction(tokens, item_start, item_end)?),
                 Token::Impl => ast::ItemKind::Impl(self.parse_impl_reduction(tokens, item_start, item_end)?),
-                _ => ast::ItemKind::Function(self.parse_function_reduction(tokens, item_start, item_end)?),
+                _ => {
+                    let (_, after_type) = self.parse_type_prefix(tokens, item_start, item_end).ok_or_else(|| {
+                        ParseError::InvalidSyntax {
+                            message: "expected item type".to_string(),
+                            span: tokens.get(item_start).map(|t| t.span.clone()).unwrap_or(span.clone()),
+                        }
+                    })?;
+                    if matches!(
+                        tokens.get(after_type + 1).map(|t| &t.kind),
+                        Some(Token::Assign | Token::Semicolon)
+                    ) {
+                        ast::ItemKind::GlobalVariable(
+                            self.parse_global_variable_reduction(tokens, item_start, item_end)?,
+                        )
+                    } else {
+                        ast::ItemKind::Function(
+                            self.parse_function_reduction(tokens, item_start, item_end)?,
+                        )
+                    }
+                }
             };
             items.push(ast::Item {
                 kind,
