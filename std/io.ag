@@ -7,33 +7,22 @@ struct FILE {
     i32 _opaque;
 }
 
-i32 io_eof() {
-    return -1;
-}
 
-i32 io_seek_set() {
-    return 0;
-}
+const i32 EOF = -1;
 
-i32 io_seek_cur() {
-    return 1;
-}
 
-i32 io_seek_end() {
-    return 2;
-}
+enum IO_SEEK {
+	SET = 0;
+	CURSOR = 1;
+	END = 2;
+};
 
-i32 io_full_buffering() {
-    return 0;
-}
+enum IO_BUFFERING {
+	FULL = 0;
+	LINE = 1;
+	NONE = 2;
+};
 
-i32 io_line_buffering() {
-    return 1;
-}
-
-i32 io_no_buffering() {
-    return 2;
-}
 
 extern "C" FILE* stdin;
 extern "C" FILE* stdout;
@@ -73,7 +62,7 @@ extern "C" i64 fwrite(const void* buffer, i64 elem_size, i64 elem_count, FILE* s
 
 extern "C" i32 fseek(FILE* stream, i64 offset, i32 origin);
 extern "C" i64 ftell(FILE* stream);
-extern "C" void c_rewind(FILE* stream);
+extern "C" void rewind(FILE* stream);
 extern "C" void clearerr(FILE* stream);
 extern "C" i32 feof(FILE* stream);
 extern "C" i32 ferror(FILE* stream);
@@ -132,35 +121,35 @@ impl File {
 
     i32 flush(File self) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return fflush(self.raw);
     }
 
     i32 read_char(File self) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return fgetc(self.raw);
     }
 
     i32 write_char(File self, i32 ch) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return fputc(ch, self.raw);
     }
 
     i32 write_str(File self, str text) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return fputs(text, self.raw);
     }
 
     i32 write_line(File self, str text) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         i32 result = fputs(text, self.raw);
         if (result < 0) {
@@ -185,7 +174,7 @@ impl File {
 
     i32 push_back(File self, i32 ch) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return ungetc(ch, self.raw);
     }
@@ -213,7 +202,7 @@ impl File {
 
     void rewind(File self) {
         if (self.valid()) {
-            c_rewind(self.raw);
+            rewind(self.raw);
         }
     }
 
@@ -263,7 +252,7 @@ impl File {
 
     i32 set_buffer(File self, char* buffer, i32 mode, i64 size) {
         if (!self.valid()) {
-            return io_eof();
+            return EOF;
         }
         return setvbuf(self.raw, buffer, mode, size);
     }
@@ -298,7 +287,7 @@ i32 println(str text) {
 i32 eprintln(str text) {
     File err = stderr_file();
     if (!err.valid()) {
-        return io_eof();
+        return EOF;
     }
     i32 result = err.write_str(text);
     if (result < 0) {

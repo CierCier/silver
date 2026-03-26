@@ -47,7 +47,14 @@ fn program_node(program: &ast::Program) -> Node {
         "Program [{}..{}]",
         program.span.start, program.span.end
     ));
-    node.children = program.items.iter().map(item_node).collect();
+    let mut children = Vec::new();
+    if !program.attributes.is_empty() {
+        let mut attrs = Node::new("attributes");
+        attrs.children = program.attributes.iter().map(attribute_node).collect();
+        children.push(attrs);
+    }
+    children.extend(program.items.iter().map(item_node));
+    node.children = children;
     node
 }
 
@@ -239,6 +246,11 @@ fn extern_block_node(block: &ast::ExternBlockItem) -> Node {
         functions.children = block.functions.iter().map(extern_fn_node).collect();
         node.children.push(functions);
     }
+    if !block.variables.is_empty() {
+        let mut variables = Node::new("variables");
+        variables.children = block.variables.iter().map(extern_var_node).collect();
+        node.children.push(variables);
+    }
     node
 }
 
@@ -350,6 +362,10 @@ fn impl_item_node(item: &ast::ImplItemKind) -> Node {
 
 fn enum_variant_node(variant: &ast::EnumVariant) -> Node {
     let mut node = Node::new(format!("Variant {}", variant.name.name));
+    if let Some(discriminant) = variant.discriminant {
+        node.children
+            .push(Node::new(format!("discriminant = {}", discriminant)));
+    }
     match &variant.data {
         ast::EnumVariantData::Unit => {}
         ast::EnumVariantData::Tuple(items) => {

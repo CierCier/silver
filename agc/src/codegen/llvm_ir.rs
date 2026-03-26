@@ -71,6 +71,8 @@ pub struct LlvmIrGenerator<'ctx> {
     global_variables: HashMap<String, ast::Type>,
     struct_types: HashMap<String, StructType<'ctx>>,
     struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
+    enum_backing_types: HashMap<String, ast::PrimitiveType>,
+    enum_variants: HashMap<String, HashMap<String, i128>>,
     method_receivers: HashMap<(String, String), bool>,
     string_constants: HashMap<String, PointerValue<'ctx>>,
     struct_generics: HashMap<String, Vec<String>>,
@@ -131,6 +133,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_variables: HashMap::new(),
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
+            enum_backing_types: HashMap::new(),
+            enum_variants: HashMap::new(),
             method_receivers: HashMap::new(),
             string_constants: HashMap::new(),
             struct_generics: HashMap::new(),
@@ -221,6 +225,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_variables: HashMap::new(),
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
+            enum_backing_types: HashMap::new(),
+            enum_variants: HashMap::new(),
             method_receivers: HashMap::new(),
             string_constants: HashMap::new(),
             struct_generics: HashMap::new(),
@@ -330,10 +336,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .context
                         .ptr_type(AddressSpace::default())
                         .as_basic_type_enum(),
+                    ast::PrimitiveType::Void => {
+                        return Err(CodegenError::with_span(
+                            "`void` is not a first-class value type",
+                            ty.span.clone(),
+                        ));
+                    }
                 };
                 Ok(basic)
             }
             ast::TypeKind::Named(named) => {
+                if let Some(enum_backing) = self.enum_backing_type_for_named(named) {
+                    return self.lower_basic_type(&ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(enum_backing)),
+                        span: ty.span.clone(),
+                    });
+                }
                 if named.path.len() == 1 && named.generics.is_none() {
                     let candidate = &named.path[0].name;
                     if self.is_generic_placeholder_name(candidate) {
@@ -344,14 +362,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(struct_ty.as_basic_type_enum())
             }
             ast::TypeKind::Reference(reference) => {
-                let _ = self.lower_basic_type(&reference.inner)?;
+                if !Self::is_void_primitive(&reference.inner) {
+                    let _ = self.lower_basic_type(&reference.inner)?;
+                }
                 Ok(self
                     .context
                     .ptr_type(AddressSpace::default())
                     .as_basic_type_enum())
             }
             ast::TypeKind::Pointer(pointer) => {
-                let _ = self.lower_basic_type(&pointer.inner)?;
+                if !Self::is_void_primitive(&pointer.inner) {
+                    let _ = self.lower_basic_type(&pointer.inner)?;
+                }
                 Ok(self
                     .context
                     .ptr_type(AddressSpace::default())
@@ -396,7 +418,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .as_basic_type_enum())
             }
             ast::TypeKind::Function(function) => {
-                let _ = self.lower_basic_type(&function.return_type)?;
+                if !Self::is_void_primitive(&function.return_type) {
+                    let _ = self.lower_basic_type(&function.return_type)?;
+                }
                 for parameter in &function.parameters {
                     let _ = self.lower_basic_type(parameter)?;
                 }
@@ -425,11 +449,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         if let Some(ret) = return_type {
+            if Self::is_void_primitive(ret) {
+                return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
+            }
             let llvm_ret = self.lower_basic_type(ret)?;
             Ok(llvm_ret.fn_type(&llvm_params, is_variadic))
         } else {
             Ok(self.context.void_type().fn_type(&llvm_params, is_variadic))
         }
+    }
+
+    fn is_void_primitive(ty: &ast::Type) -> bool {
+        matches!(
+            ty.kind.as_ref(),
+            ast::TypeKind::Primitive(ast::PrimitiveType::Void)
+        )
     }
 
     fn push_scope(&mut self) {
@@ -685,6 +719,52 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         struct_ty.set_body(&lowered, false);
         Ok(struct_ty)
+    }
+
+    fn enum_backing_type_for_named(
+        &self,
+        named: &ast::NamedType,
+    ) -> Option<ast::PrimitiveType> {
+        if named.path.len() != 1 {
+            return None;
+        }
+        self.enum_backing_types.get(&named.path[0].name).cloned()
+    }
+
+    fn enum_member_constant(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let backing = self.enum_backing_types.get(enum_name)?;
+        let value = self.enum_variants.get(enum_name)?.get(variant_name)?;
+        let int_ty = match backing {
+            ast::PrimitiveType::I8 | ast::PrimitiveType::U8 => self.context.i8_type(),
+            ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => self.context.i16_type(),
+            ast::PrimitiveType::I32 | ast::PrimitiveType::U32 => self.context.i32_type(),
+            ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => self.context.i64_type(),
+            ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => self.context.i128_type(),
+            _ => return None,
+        };
+        let width = match backing {
+            ast::PrimitiveType::I8 | ast::PrimitiveType::U8 => 8,
+            ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 16,
+            ast::PrimitiveType::I32 | ast::PrimitiveType::U32 => 32,
+            ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => 64,
+            ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 128,
+            _ => return None,
+        };
+        let raw = *value as u128;
+        let words = if width <= 64 {
+            vec![raw as u64]
+        } else {
+            vec![raw as u64, (raw >> 64) as u64]
+        };
+        Some(
+            int_ty
+                .const_int_arbitrary_precision(&words)
+                .as_basic_value_enum(),
+        )
     }
 
     fn path_name(path: &[ast::Identifier]) -> String {
@@ -1263,7 +1343,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .and_then(|block| block.get_terminator())
             .is_none();
         if needs_terminator {
-            if return_type.is_some() {
+            if return_type.is_some_and(|ret| !Self::is_void_primitive(ret)) {
                 return Err(CodegenError::with_span(
                     format!("function `{fn_name}` may exit without returning a value"),
                     fn_span.clone(),
@@ -1819,6 +1899,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     identifier.span.clone(),
                 ))
             }
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref() {
+                    if let Some(value) = self.enum_member_constant(&owner.name, &field.name) {
+                        return Ok(value);
+                    }
+                }
+                let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
+                let llvm_ty = self.lower_basic_type(&ty)?;
+                self.builder
+                    .build_load(llvm_ty, ptr, "lvalue.load")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to load lvalue: {e}"),
+                            expr.span.clone(),
+                        )
+                    })
+            }
             ast::ExpressionKind::Binary {
                 left,
                 operator,
@@ -1888,7 +1985,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "initializer expression requires a target type context",
                 expr.span.clone(),
             )),
-            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+            ast::ExpressionKind::Index { .. } => {
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
                 self.builder
@@ -3104,6 +3201,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map(|param| param.is_pointer_type())
                         .unwrap_or(false)
                 });
+            let expected_receiver_llvm_ty = if expects_ref {
+                None
+            } else if let Some(signature) = &signature {
+                if let Some(first_param) = signature.params.first() {
+                    Some(self.lower_basic_type(first_param)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let receiver_arg = if expects_ref {
                 if receiver_is_pointer {
@@ -3131,7 +3239,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             } else {
-                self.emit_expression_value(receiver)?
+                if receiver_is_pointer {
+                    let receiver_value = self.emit_expression_value(receiver)?;
+                    let BasicValueEnum::PointerValue(receiver_ptr) = receiver_value else {
+                        return Err(CodegenError::with_span(
+                            "pointer receiver did not lower to a pointer",
+                            receiver.span.clone(),
+                        ));
+                    };
+                    if let Some(expected_receiver_ty) = expected_receiver_llvm_ty {
+                        self.builder
+                            .build_load(expected_receiver_ty, receiver_ptr, "method.recv.load")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to load pointer receiver: {e}"),
+                                    receiver.span.clone(),
+                                )
+                            })?
+                    } else {
+                        receiver_value
+                    }
+                } else {
+                    self.emit_expression_value(receiver)?
+                }
             };
 
             let receiver_arg = if let Some(signature) = &signature {
@@ -3750,6 +3881,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("float compare failed: {e}")))?;
                 Ok(value.as_basic_value_enum())
             }
+            (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
+                let pred = match operator {
+                    ast::BinaryOperator::Equal => IntPredicate::EQ,
+                    ast::BinaryOperator::NotEqual => IntPredicate::NE,
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "pointer comparisons only support == and !=",
+                            whole_expr.span.clone(),
+                        ));
+                    }
+                };
+                let intptr = self.context.i64_type();
+                let lhs_int = self
+                    .builder
+                    .build_ptr_to_int(*lhs, intptr, "pcmp.lhs")
+                    .map_err(|e| CodegenError::new(format!("ptr-to-int cast failed: {e}")))?;
+                let rhs_int = self
+                    .builder
+                    .build_ptr_to_int(*rhs, intptr, "pcmp.rhs")
+                    .map_err(|e| CodegenError::new(format!("ptr-to-int cast failed: {e}")))?;
+                let value = self
+                    .builder
+                    .build_int_compare(pred, lhs_int, rhs_int, "pcmp")
+                    .map_err(|e| CodegenError::new(format!("pointer compare failed: {e}")))?;
+                Ok(value.as_basic_value_enum())
+            }
             _ => Err(CodegenError::with_span(
                 "comparison requires matching numeric types",
                 whole_expr.span.clone(),
@@ -4291,6 +4448,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 }
 
+fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveType {
+    if min_value < 0 {
+        if min_value >= i8::MIN as i128 && max_value <= i8::MAX as i128 {
+            ast::PrimitiveType::I8
+        } else if min_value >= i16::MIN as i128 && max_value <= i16::MAX as i128 {
+            ast::PrimitiveType::I16
+        } else if min_value >= i32::MIN as i128 && max_value <= i32::MAX as i128 {
+            ast::PrimitiveType::I32
+        } else if min_value >= i64::MIN as i128 && max_value <= i64::MAX as i128 {
+            ast::PrimitiveType::I64
+        } else {
+            ast::PrimitiveType::I128
+        }
+    } else if max_value <= u8::MAX as i128 {
+        ast::PrimitiveType::U8
+    } else if max_value <= u16::MAX as i128 {
+        ast::PrimitiveType::U16
+    } else if max_value <= u32::MAX as i128 {
+        ast::PrimitiveType::U32
+    } else if max_value <= u64::MAX as i128 {
+        ast::PrimitiveType::U64
+    } else {
+        ast::PrimitiveType::U128
+    }
+}
+
 fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
     match opt_level.unwrap_or("0") {
         "0" => OptimizationLevel::None,
@@ -4304,8 +4487,14 @@ fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()> {
         for item in &program.items {
-            if let ast::ItemKind::Struct(struct_item) = &item.kind {
-                self.generate_struct_item(struct_item, &item.visibility, &item.attributes)?;
+            match &item.kind {
+                ast::ItemKind::Struct(struct_item) => {
+                    self.generate_struct_item(struct_item, &item.visibility, &item.attributes)?;
+                }
+                ast::ItemKind::Enum(enum_item) => {
+                    self.generate_enum_item(enum_item, &item.visibility, &item.attributes)?;
+                }
+                _ => {}
             }
         }
 
@@ -4515,10 +4704,33 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_enum_item(
         &mut self,
         item: &ast::EnumItem,
-        visibility: &ast::Visibility,
-        attributes: &[ast::Attribute],
+        _visibility: &ast::Visibility,
+        _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        todo!()
+        let mut variants = HashMap::new();
+        let mut next_value = 0i128;
+        let mut min_value = 0i128;
+        let mut max_value = 0i128;
+        let mut saw_any = false;
+
+        for variant in &item.variants {
+            let value = variant.discriminant.unwrap_or(next_value);
+            variants.insert(variant.name.name.clone(), value);
+            next_value = value.checked_add(1).unwrap_or(value);
+            if !saw_any {
+                min_value = value;
+                max_value = value;
+                saw_any = true;
+            } else {
+                min_value = min_value.min(value);
+                max_value = max_value.max(value);
+            }
+        }
+
+        self.enum_backing_types
+            .insert(item.name.name.clone(), choose_enum_backing_type(min_value, max_value));
+        self.enum_variants.insert(item.name.name.clone(), variants);
+        Ok(())
     }
 
     fn generate_impl_item(
@@ -4601,11 +4813,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
 
     fn generate_import_item(
         &mut self,
-        item: &ast::ImportItem,
-        visibility: &ast::Visibility,
-        attributes: &[ast::Attribute],
+        _item: &ast::ImportItem,
+        _visibility: &ast::Visibility,
+        _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        todo!()
+        // Imports are lowered before codegen by parser hooks.
+        Ok(())
     }
 
     fn generate_extern_function_item(
@@ -4678,6 +4891,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<()> {
         for function in &item.functions {
             self.generate_extern_function_item(function, visibility, attributes)?;
+        }
+        for variable in &item.variables {
+            self.generate_extern_variable_item(variable, visibility, attributes)?;
         }
         Ok(())
     }
@@ -4944,6 +5160,24 @@ mod tests {
         assert!(
             ir.contains("zeroinitializer"),
             "expected zero initialization for uninitialized let binding:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_enum_member_access_to_resolved_integer_width() {
+        let ir = lower_to_llvm("enum Color { Red; Blue = 255; } Color id() { return Color.Blue; }");
+        assert!(
+            ir.contains("define i8 @id()"),
+            "expected enum backing type to lower to i8:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_large_enum_to_u16() {
+        let ir = lower_to_llvm("enum Big { Value = 256; } Big id() { return Big.Value; }");
+        assert!(
+            ir.contains("define i16 @id()"),
+            "expected enum backing type to lower to i16:\n{ir}"
         );
     }
 

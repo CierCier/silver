@@ -358,6 +358,14 @@ impl CompilerSymbolTable {
                         phase,
                     );
                 }
+                for var in &block.variables {
+                    self.upsert(
+                        &var.name.name,
+                        SymbolKind::ExternVariable,
+                        Some(var.name.span.clone()),
+                        phase,
+                    );
+                }
             }
         }
     }

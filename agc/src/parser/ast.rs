@@ -5,6 +5,7 @@ use crate::lexer::Span;
 /// Top-level AST node representing a complete Silver program
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub attributes: Vec<Attribute>,
     pub items: Vec<Item>,
     pub span: Span,
 }
@@ -115,6 +116,7 @@ pub struct ExternVariableItem {
 pub struct ExternBlockItem {
     pub linkage: ExternLinkage,
     pub functions: Vec<ExternFunctionItem>,
+    pub variables: Vec<ExternVariableItem>,
 }
 
 /// External linkage types
@@ -267,6 +269,7 @@ pub enum PrimitiveType {
     Bool,
     Str,
     Char,
+    Void,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -341,6 +344,7 @@ pub struct Field {
 pub struct EnumVariant {
     pub name: Identifier,
     pub data: EnumVariantData,
+    pub discriminant: Option<i128>,
     pub span: Span,
 }
 

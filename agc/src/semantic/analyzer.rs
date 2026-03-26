@@ -187,6 +187,9 @@ impl Analyzer {
                     for func in &block.functions {
                         self.insert_symbol(&func.name, SymbolKind::Function);
                     }
+                    for var in &block.variables {
+                        self.insert_symbol(&var.name, SymbolKind::ExternVariable);
+                    }
                 }
                 _ => {}
             }

@@ -5,7 +5,7 @@ use std::{env, ffi::OsString};
 
 use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
 use crate::module_artifact::{ModuleArtifact, module_name_from_path};
-use crate::module_loader::{ModuleLoader, collect_imported_artifacts, module_loader_default_dirs};
+use crate::module_loader::{ModuleLoader, module_loader_default_dirs};
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -43,7 +43,7 @@ enum EmitKind {
     Ast,
     /// Dump parser grammar.
     Grammar,
-    /// Emit binary module artifact.
+    /// Emit module interface artifact (.agm).
     Module,
 }
 
@@ -110,7 +110,7 @@ impl CompilePlan {
     name = "agc",
     version,
     about = "Silver compiler (clang-like driver)",
-    long_about = "A clang-like driver for the Silver compiler.\n\nMost flags are accepted for compatibility; the LLVM backend is still being implemented. Use -### to see the derived compilation plan."
+    long_about = "A clang-like driver for the Silver compiler"
 )]
 struct Cli {
     /// Input source files (.ag). Optional for --emit=grammar.
@@ -149,7 +149,7 @@ struct Cli {
     #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append)]
     include_dirs: Vec<PathBuf>,
 
-    /// Resolve `pkg.*` imports from this directory (defaults to current working directory)
+    /// Add a primary module include root (defaults to current working directory)
     #[arg(long = "root", value_name = "DIR")]
     root: Option<PathBuf>,
 
@@ -231,7 +231,7 @@ fn default_output_for(emit: EmitKind, inputs: &[PathBuf]) -> PathBuf {
         EmitKind::Tokens => with_ext_or_default(inputs, "tokens"),
         EmitKind::Ast => with_ext_or_default(inputs, "ast"),
         EmitKind::Grammar => with_ext_or_default(inputs, "grammar"),
-        EmitKind::Module => with_ext_or_default(inputs, "agbm"),
+        EmitKind::Module => with_ext_or_default(inputs, "agm"),
     }
 }
 
@@ -296,13 +296,17 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
 
 fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     let mut loader = ModuleLoader::new();
-    loader.set_package_root(&plan.package_root);
+    // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
+    loader.add_search_dir(&plan.package_root);
+
+    for dir in &plan.include_dirs {
+        loader.add_search_dir(dir);
+    }
+
     for dir in module_loader_default_dirs(plan.sysroot.as_deref()) {
         loader.add_search_dir(dir);
     }
-    for dir in &plan.lib_dirs {
-        loader.add_search_dir(dir);
-    }
+
     loader
 }
 
@@ -436,7 +440,7 @@ fn main() {
                                 tokens,
                                 input.display().to_string(),
                             );
-                            let (mut ast, errors) = parser.parse_program();
+                            let (ast, errors) = parser.parse_program();
 
                             if !errors.is_empty() {
                                 eprintln!("agc: parser errors:");
@@ -461,50 +465,6 @@ fn main() {
                             let mut symbol_table = CompilerSymbolTable::new();
                             symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
                             symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
-
-                            let semantic_errors =
-                                run_semantic_hooks(&mut ast, &mut symbol_table, &[]);
-                            if !semantic_errors.is_empty() {
-                                eprintln!("agc: semantic errors:");
-                                for error in &semantic_errors {
-                                    eprintln!(
-                                        "{}",
-                                        diagnostics::render(
-                                            &src,
-                                            &input.display().to_string(),
-                                            error.span.clone(),
-                                            &error.message,
-                                            diagnostics::Severity::Error,
-                                        )
-                                    );
-                                }
-                                std::process::exit(2);
-                            }
-
-                            let (type_errors, monomorphs) = TypeChecker::new()
-                                .check_program_with_table(&ast, &mut symbol_table);
-                            if !type_errors.is_empty() {
-                                eprintln!("agc: type errors:");
-                                for error in &type_errors {
-                                    eprintln!(
-                                        "{}",
-                                        diagnostics::render(
-                                            &src,
-                                            &input.display().to_string(),
-                                            error.span.clone(),
-                                            &error.message,
-                                            diagnostics::Severity::Error,
-                                        )
-                                    );
-                                }
-                                std::process::exit(2);
-                            }
-
-                            semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
-                            symbol_table.touch_phase(
-                                CompilerPhase::Monomorphize,
-                                format!("monomorph requests applied: {}", monomorphs.len()),
-                            );
 
                             if plan.inputs.len() > 1 {
                                 println!("== {} ==", input.display());
@@ -608,13 +568,34 @@ fn main() {
                     }
                 }
 
-                let imported_modules = match collect_imported_artifacts(&ast, &loader) {
-                    Ok(modules) => modules,
+                let pre_lowering_link_libs = match collect_program_link_libraries(&ast) {
+                    Ok(libs) => libs,
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                &src,
+                                &input.display().to_string(),
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                        std::process::exit(2);
+                    }
+                };
+
+                let base_dir = input.parent();
+                let import_lowering = match parser::FileImportResolverHook::new(&loader)
+                    .lower_program_imports(&mut ast, base_dir, Some(input))
+                {
+                    Ok(result) => result,
                     Err(error) => {
                         eprintln!("agc: {}: {error}", "error".red().bold());
                         std::process::exit(2);
                     }
                 };
+                let imported_modules = import_lowering.module_artifacts;
 
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
@@ -675,6 +656,7 @@ fn main() {
                         std::process::exit(2);
                     }
                 };
+                extend_unique_libs(&mut native_libs, &pre_lowering_link_libs);
                 extend_unique_libs(&mut native_libs, &program_link_libs);
                 for module in &imported_modules {
                     extend_unique_libs(&mut native_libs, &module.native_libs);
@@ -1042,6 +1024,13 @@ fn default_dynamic_linker(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn should_force_non_pie(target: Option<&str>) -> bool {
+    match target {
+        Some(triple) => triple.contains("linux"),
+        None => cfg!(target_os = "linux"),
+    }
+}
+
 fn link_with_ld_lld(
     plan: &CompilePlan,
     object_path: &Path,
@@ -1112,6 +1101,9 @@ fn link_with_cc(
 ) -> Result<(), String> {
     let mut link = Command::new("cc");
     link.arg("-o").arg(&plan.output).arg(object_path);
+    if should_force_non_pie(plan.target.as_deref()) {
+        link.arg("-no-pie");
+    }
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }

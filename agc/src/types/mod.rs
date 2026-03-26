@@ -658,6 +658,7 @@ fn parse_primitive_name(name: &str) -> Option<ast::PrimitiveType> {
         "bool" => Some(ast::PrimitiveType::Bool),
         "str" => Some(ast::PrimitiveType::Str),
         "char" => Some(ast::PrimitiveType::Char),
+        "void" => Some(ast::PrimitiveType::Void),
         _ => None,
     }
 }
@@ -712,6 +713,10 @@ pub fn is_string(ty: &Type) -> bool {
     matches!(ty, Type::Primitive(ast::PrimitiveType::Str))
 }
 
+pub fn is_void(ty: &Type) -> bool {
+    matches!(ty, Type::Primitive(ast::PrimitiveType::Void))
+}
+
 fn primitive_layout(primitive: &ast::PrimitiveType, pointer_size: usize) -> TypeLayout {
     match primitive {
         ast::PrimitiveType::I8 | ast::PrimitiveType::U8 => TypeLayout::known(1, 1),
@@ -728,6 +733,7 @@ fn primitive_layout(primitive: &ast::PrimitiveType, pointer_size: usize) -> Type
         ast::PrimitiveType::Bool => TypeLayout::known(1, 1),
         ast::PrimitiveType::Char => TypeLayout::known(4, 4),
         ast::PrimitiveType::Str => TypeLayout::known(pointer_size, pointer_size),
+        ast::PrimitiveType::Void => TypeLayout::known(0, 1),
     }
 }
 
@@ -864,6 +870,21 @@ mod tests {
         let layout = ctx.layout_of(&ty);
         assert_eq!(layout.align, Some(4));
         assert_eq!(layout.size, Some(16));
+    }
+
+    #[test]
+    fn canonical_parser_understands_void() {
+        let ty = Type::from_canonical_key("void").expect("expected void type");
+        assert_eq!(ty, Type::Primitive(ast::PrimitiveType::Void));
+    }
+
+    #[test]
+    fn void_layout_is_zero_sized() {
+        let ctx = TypeContext::default();
+        let ty = Type::Primitive(ast::PrimitiveType::Void);
+        let layout = ctx.layout_of(&ty);
+        assert_eq!(layout.size, Some(0));
+        assert_eq!(layout.align, Some(1));
     }
 
     #[test]

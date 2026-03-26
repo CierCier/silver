@@ -1,6 +1,7 @@
 #[link(m)]
 
-extern "C" i32 printf(const char *fmt, ...);
+import std.io;
+
 extern "C" f32 sinf(f32 x);
 
 

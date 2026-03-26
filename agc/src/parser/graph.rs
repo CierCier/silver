@@ -400,6 +400,7 @@ impl GraphParser {
                     tok(Token::Bool),
                     tok(Token::Str),
                     tok(Token::Char),
+                    tok(Token::Void),
                     tok(Token::Identifier(String::new())),
                 ]),
                 repeat(tok(Token::Star)),
@@ -653,6 +654,7 @@ impl GraphParser {
             Token::Bool => Some(ast::PrimitiveType::Bool),
             Token::Str => Some(ast::PrimitiveType::Str),
             Token::Char => Some(ast::PrimitiveType::Char),
+            Token::Void => Some(ast::PrimitiveType::Void),
             _ => None,
         };
 
@@ -1172,6 +1174,7 @@ impl GraphParser {
                 Token::Bool => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
                 Token::Str => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
                 Token::Char => ast::TypeKind::Primitive(ast::PrimitiveType::Char),
+                Token::Void => ast::TypeKind::Primitive(ast::PrimitiveType::Void),
                 Token::Identifier(ref name) => ast::TypeKind::Named(ast::NamedType {
                     path: vec![ast::Identifier {
                         name: name.clone(),
@@ -2919,6 +2922,115 @@ impl GraphParser {
         })
     }
 
+    fn parse_enum_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::EnumItem, ParseError> {
+        let mut cursor = start + 1;
+        let name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
+            message: "missing enum name".to_string(),
+            span: tokens[start].span.clone(),
+        })?;
+        let Token::Identifier(enum_name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected enum identifier".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+        cursor += 1;
+
+        let (mut generics, next) = self.parse_generics_prefix(tokens, cursor, end)?;
+        cursor = next;
+        let (where_clause, next_after_where) = self.parse_where_clause_prefix(tokens, cursor, end)?;
+        cursor = next_after_where;
+        generics = self.merge_generics_where(generics, where_clause);
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after enum name".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let mut variants = Vec::new();
+        while cursor < end - 1 {
+            let variant_name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
+                message: "expected enum variant".to_string(),
+                span: name_token.span.clone(),
+            })?;
+            let Token::Identifier(variant_name) = &variant_name_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected enum variant identifier".to_string(),
+                    span: variant_name_token.span.clone(),
+                });
+            };
+            cursor += 1;
+
+            let mut discriminant = None;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
+                cursor += 1;
+                let mut sign = 1i128;
+                if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Minus)) {
+                    sign = -1;
+                    cursor += 1;
+                }
+                let Some(value_token) = tokens.get(cursor) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected integer literal after '='".to_string(),
+                        span: variant_name_token.span.clone(),
+                    });
+                };
+                let Token::IntLiteral(value) = value_token.kind else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "enum discriminant must be an integer literal".to_string(),
+                        span: value_token.span.clone(),
+                    });
+                };
+                discriminant = Some(sign.saturating_mul(value));
+                cursor += 1;
+            }
+
+            let Some(semicolon_token) = tokens.get(cursor) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ';' after enum variant".to_string(),
+                    span: variant_name_token.span.clone(),
+                });
+            };
+            if !matches!(semicolon_token.kind, Token::Semicolon) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ';' after enum variant".to_string(),
+                    span: semicolon_token.span.clone(),
+                });
+            }
+            cursor += 1;
+
+            variants.push(ast::EnumVariant {
+                name: ast::Identifier {
+                    name: variant_name.clone(),
+                    span: variant_name_token.span.clone(),
+                },
+                data: ast::EnumVariantData::Unit,
+                discriminant,
+                span: Span {
+                    start: variant_name_token.span.start,
+                    end: semicolon_token.span.end,
+                },
+            });
+        }
+
+        Ok(ast::EnumItem {
+            name: ast::Identifier {
+                name: enum_name.clone(),
+                span: name_token.span.clone(),
+            },
+            generics,
+            variants,
+        })
+    }
+
     fn parse_trait_reduction(
         &mut self,
         tokens: &[LexToken],
@@ -3614,31 +3726,32 @@ impl GraphParser {
         }
     }
 
-    fn parse_extern_declaration_reduction(
+    fn extern_block_body_open(&self, tokens: &[LexToken], start: usize) -> Option<usize> {
+        if !matches!(tokens.get(start).map(|t| &t.kind), Some(Token::Extern)) {
+            return None;
+        }
+        let mut cursor = start + 1;
+        if matches!(
+            tokens.get(cursor).map(|t| &t.kind),
+            Some(Token::StringLiteral(_))
+        ) {
+            cursor += 1;
+        }
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            Some(cursor)
+        } else {
+            None
+        }
+    }
+
+    fn parse_extern_member_reduction(
         &mut self,
         tokens: &[LexToken],
         start: usize,
         end: usize,
+        linkage: ast::ExternLinkage,
     ) -> Result<ParsedExternDeclaration, ParseError> {
         let mut cursor = start;
-        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected 'extern'".to_string(),
-                span: tokens[start].span.clone(),
-            });
-        }
-        cursor += 1;
-
-        let linkage = if let Some(abi_token) = tokens.get(cursor) {
-            if let Token::StringLiteral(abi_string) = &abi_token.kind {
-                cursor += 1;
-                Self::parse_extern_linkage(abi_string)
-            } else {
-                ast::ExternLinkage::C
-            }
-        } else {
-            ast::ExternLinkage::C
-        };
 
         let (return_type, after_return_type) = self
             .parse_type_prefix(tokens, cursor, end)
@@ -3769,6 +3882,106 @@ impl GraphParser {
         }))
     }
 
+    fn parse_extern_declaration_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ParsedExternDeclaration, ParseError> {
+        let mut cursor = start;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected 'extern'".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let linkage = if let Some(abi_token) = tokens.get(cursor) {
+            if let Token::StringLiteral(abi_string) = &abi_token.kind {
+                cursor += 1;
+                Self::parse_extern_linkage(abi_string)
+            } else {
+                ast::ExternLinkage::C
+            }
+        } else {
+            ast::ExternLinkage::C
+        };
+
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "extern block is not a declaration".to_string(),
+                span: tokens[cursor].span.clone(),
+            });
+        }
+
+        self.parse_extern_member_reduction(tokens, cursor, end, linkage)
+    }
+
+    fn parse_extern_block_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::ExternBlockItem, ParseError> {
+        let mut cursor = start;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected 'extern'".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let linkage = if let Some(abi_token) = tokens.get(cursor) {
+            if let Token::StringLiteral(abi_string) = &abi_token.kind {
+                cursor += 1;
+                Self::parse_extern_linkage(abi_string)
+            } else {
+                ast::ExternLinkage::C
+            }
+        } else {
+            ast::ExternLinkage::C
+        };
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after extern ABI".to_string(),
+                span: tokens
+                    .get(cursor)
+                    .map(|t| t.span.clone())
+                    .unwrap_or_else(|| tokens[start].span.clone()),
+            });
+        }
+
+        let body_start = cursor + 1;
+        let body_end = end.saturating_sub(1);
+        let mut functions = Vec::new();
+        let mut variables = Vec::new();
+        cursor = body_start;
+        while cursor < body_end {
+            let Some(member_end) = self.find_statement_terminator(tokens, cursor, body_end).map(|idx| idx + 1) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unterminated extern block declaration".to_string(),
+                    span: tokens[cursor].span.clone(),
+                });
+            };
+
+            match self.parse_extern_member_reduction(tokens, cursor, member_end, linkage.clone())? {
+                ParsedExternDeclaration::Function(function) => functions.push(function),
+                ParsedExternDeclaration::Variable(variable) => variables.push(variable),
+            }
+
+            cursor = member_end;
+        }
+
+        Ok(ast::ExternBlockItem {
+            linkage,
+            functions,
+            variables,
+        })
+    }
+
     pub fn parse_program(&mut self, tokens: &[LexToken]) -> Result<ast::Program, ParseError> {
         self.memo.clear();
 
@@ -3791,6 +4004,7 @@ impl GraphParser {
         }
 
         let mut position = 0usize;
+        let mut program_attributes = Vec::new();
         let mut items = Vec::new();
 
         while !Self::at_eof(tokens, position) {
@@ -3801,10 +4015,27 @@ impl GraphParser {
                 break;
             }
 
-            let item_end = if matches!(tokens[item_start].kind, Token::Import | Token::Extern) {
+            let item_end = if matches!(tokens[item_start].kind, Token::Import) {
                 self.find_statement_terminator(tokens, item_start, tokens.len())
                     .map(|idx| idx + 1)
-            } else if matches!(tokens[item_start].kind, Token::Struct | Token::Trait | Token::Impl) {
+            } else if matches!(tokens[item_start].kind, Token::Extern) {
+                if let Some(body_open) = self.extern_block_body_open(tokens, item_start) {
+                    self.find_matching_token(
+                        tokens,
+                        body_open,
+                        tokens.len(),
+                        Token::LeftBrace,
+                        Token::RightBrace,
+                    )
+                    .map(|idx| idx + 1)
+                } else {
+                    self.find_statement_terminator(tokens, item_start, tokens.len())
+                        .map(|idx| idx + 1)
+                }
+            } else if matches!(
+                tokens[item_start].kind,
+                Token::Struct | Token::Enum | Token::Trait | Token::Impl
+            ) {
                 let Some(body_open) = tokens
                     .iter()
                     .enumerate()
@@ -3911,16 +4142,23 @@ impl GraphParser {
                     ast::ItemKind::Import(self.parse_import_reduction(tokens, item_start, item_end)?)
                 }
                 Token::Extern => {
-                    match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
-                        ParsedExternDeclaration::Function(function_item) => {
-                            ast::ItemKind::ExternFunction(function_item)
-                        }
-                        ParsedExternDeclaration::Variable(variable_item) => {
-                            ast::ItemKind::ExternVariable(variable_item)
+                    if self.extern_block_body_open(tokens, item_start).is_some() {
+                        ast::ItemKind::ExternBlock(
+                            self.parse_extern_block_reduction(tokens, item_start, item_end)?,
+                        )
+                    } else {
+                        match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
+                            ParsedExternDeclaration::Function(function_item) => {
+                                ast::ItemKind::ExternFunction(function_item)
+                            }
+                            ParsedExternDeclaration::Variable(variable_item) => {
+                                ast::ItemKind::ExternVariable(variable_item)
+                            }
                         }
                     }
                 }
                 Token::Struct => ast::ItemKind::Struct(self.parse_struct_reduction(tokens, item_start, item_end)?),
+                Token::Enum => ast::ItemKind::Enum(self.parse_enum_reduction(tokens, item_start, item_end)?),
                 Token::Trait => ast::ItemKind::Trait(self.parse_trait_reduction(tokens, item_start, item_end)?),
                 Token::Impl => ast::ItemKind::Impl(self.parse_impl_reduction(tokens, item_start, item_end)?),
                 _ => {
@@ -3944,11 +4182,21 @@ impl GraphParser {
                     }
                 }
             };
+
+            let mut retained = Vec::new();
+            for attr in attributes {
+                if attr.name.name == "link" {
+                    program_attributes.push(attr);
+                } else {
+                    retained.push(attr);
+                }
+            }
+
             items.push(ast::Item {
                 kind,
                 span: item_span,
                 visibility,
-                attributes,
+                attributes: retained,
             });
 
             position = item_end;
@@ -3964,6 +4212,7 @@ impl GraphParser {
         };
 
         Ok(ast::Program {
+            attributes: program_attributes,
             items,
             span: program_span,
         })

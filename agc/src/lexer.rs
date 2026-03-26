@@ -64,6 +64,7 @@ pub enum Token {
     Bool,
     Str,
     Char,
+    Void,
     Vec,
     Optional,
 
@@ -621,6 +622,7 @@ impl Lexer {
             "bool" => Token::Bool,
             "str" => Token::Str,
             "char" => Token::Char,
+            "void" => Token::Void,
             "Vec" => Token::Vec,
             "Optional" => Token::Optional,
 
@@ -975,7 +977,7 @@ mod tests {
             "for", "break", "continue", "return", "import", "comptime", "cast", "move", "ref",
             "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128", "u8",
             "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
-            "bool", "str", "char", "Vec", "Optional",
+            "bool", "str", "char", "void", "Vec", "Optional",
         ];
 
         if keywords.contains(&id_string.as_str()) {
@@ -1102,6 +1104,7 @@ mod tests {
             ("bool", Token::Bool),
             ("str", Token::Str),
             ("char", Token::Char),
+            ("void", Token::Void),
             ("Vec", Token::Vec),
             ("Optional", Token::Optional),
         ];
