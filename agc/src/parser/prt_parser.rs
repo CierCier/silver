@@ -96,6 +96,7 @@ enum TokenClass {
     Import,
     Extern,
     Struct,
+    Enum,
     Trait,
     Impl,
     TypeStart,
@@ -105,7 +106,9 @@ enum TokenClass {
 enum ItemProduction {
     Import,
     ExternDeclaration,
+    ExternBlock,
     Struct,
+    Enum,
     Trait,
     Impl,
     Function,
@@ -137,6 +140,10 @@ impl TransitionTable {
         rows.insert(
             (NonTerminal::Item, vec![TokenClass::Struct]),
             ItemProduction::Struct,
+        );
+        rows.insert(
+            (NonTerminal::Item, vec![TokenClass::Enum]),
+            ItemProduction::Enum,
         );
         rows.insert(
             (NonTerminal::Item, vec![TokenClass::Trait]),
@@ -305,6 +312,7 @@ impl PRT_Parser {
                     tok(Token::Bool),
                     tok(Token::Str),
                     tok(Token::Char),
+                    tok(Token::Void),
                     tok(Token::Identifier(String::new())),
                 ]),
                 repeat(tok(Token::Star)),
@@ -492,6 +500,7 @@ impl PRT_Parser {
             Token::Bool => Some(ast::PrimitiveType::Bool),
             Token::Str => Some(ast::PrimitiveType::Str),
             Token::Char => Some(ast::PrimitiveType::Char),
+            Token::Void => Some(ast::PrimitiveType::Void),
             _ => None,
         };
 
@@ -524,6 +533,7 @@ impl PRT_Parser {
             Token::Import => Some(TokenClass::Import),
             Token::Extern => Some(TokenClass::Extern),
             Token::Struct => Some(TokenClass::Struct),
+            Token::Enum => Some(TokenClass::Enum),
             Token::Trait => Some(TokenClass::Trait),
             Token::Impl => Some(TokenClass::Impl),
             Token::Identifier(_)
@@ -623,6 +633,7 @@ impl PRT_Parser {
                 | Token::Bool
                 | Token::Str
                 | Token::Char
+                | Token::Void
                 | Token::Identifier(_)
         )
     }
@@ -646,6 +657,13 @@ impl PRT_Parser {
     }
 
     fn predict_item_production(&self, tokens: &[LexToken], start: usize) -> Option<ItemProduction> {
+        if matches!(tokens.get(start).map(|t| &t.kind), Some(Token::Extern)) {
+            return Some(if self.extern_header_starts_block(tokens, start) {
+                ItemProduction::ExternBlock
+            } else {
+                ItemProduction::ExternDeclaration
+            });
+        }
         let predicted = self
             .transition_table
             .predict_item(&self.lookahead_classes(tokens, start))?;
@@ -671,7 +689,26 @@ impl PRT_Parser {
             | ItemProduction::GlobalVariable => self
                 .find_statement_terminator(tokens, item_start, tokens.len())
                 .map(|idx| idx + 1),
-            ItemProduction::Struct | ItemProduction::Trait | ItemProduction::Impl => {
+            ItemProduction::ExternBlock => {
+                let Some(body_open) = self.extern_block_body_open(tokens, item_start) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected extern block body".to_string(),
+                        span: tokens[item_start].span.clone(),
+                    });
+                };
+                self.find_matching_token(
+                    tokens,
+                    body_open,
+                    tokens.len(),
+                    Token::LeftBrace,
+                    Token::RightBrace,
+                )
+                .map(|idx| idx + 1)
+            }
+            ItemProduction::Struct
+            | ItemProduction::Enum
+            | ItemProduction::Trait
+            | ItemProduction::Impl => {
                 let Some(body_open) = tokens
                     .iter()
                     .enumerate()
@@ -1279,6 +1316,7 @@ impl PRT_Parser {
                 Token::Bool => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
                 Token::Str => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
                 Token::Char => ast::TypeKind::Primitive(ast::PrimitiveType::Char),
+                Token::Void => ast::TypeKind::Primitive(ast::PrimitiveType::Void),
                 Token::Identifier(ref name) => ast::TypeKind::Named(ast::NamedType {
                     path: vec![ast::Identifier {
                         name: name.clone(),
@@ -3101,6 +3139,120 @@ impl PRT_Parser {
         })
     }
 
+    fn parse_enum_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::EnumItem, ParseError> {
+        let mut cursor = start + 1;
+        let name_token = tokens
+            .get(cursor)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "missing enum name".to_string(),
+                span: tokens[start].span.clone(),
+            })?;
+        let Token::Identifier(enum_name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected enum identifier".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+        cursor += 1;
+
+        let (mut generics, next) = self.parse_generics_prefix(tokens, cursor, end)?;
+        cursor = next;
+        let (where_clause, next_after_where) =
+            self.parse_where_clause_prefix(tokens, cursor, end)?;
+        cursor = next_after_where;
+        generics = self.merge_generics_where(generics, where_clause);
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after enum name".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let mut variants = Vec::new();
+        while cursor < end - 1 {
+            let variant_name_token = tokens
+                .get(cursor)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected enum variant".to_string(),
+                    span: name_token.span.clone(),
+                })?;
+            let Token::Identifier(variant_name) = &variant_name_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected enum variant identifier".to_string(),
+                    span: variant_name_token.span.clone(),
+                });
+            };
+            cursor += 1;
+
+            let mut discriminant = None;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
+                cursor += 1;
+                let mut sign = 1i128;
+                if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Minus)) {
+                    sign = -1;
+                    cursor += 1;
+                }
+                let Some(value_token) = tokens.get(cursor) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected integer literal after '='".to_string(),
+                        span: variant_name_token.span.clone(),
+                    });
+                };
+                let Token::IntLiteral(value) = value_token.kind else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "enum discriminant must be an integer literal".to_string(),
+                        span: value_token.span.clone(),
+                    });
+                };
+                discriminant = Some(sign.saturating_mul(value));
+                cursor += 1;
+            }
+
+            let Some(semicolon_token) = tokens.get(cursor) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ';' after enum variant".to_string(),
+                    span: variant_name_token.span.clone(),
+                });
+            };
+            if !matches!(semicolon_token.kind, Token::Semicolon) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ';' after enum variant".to_string(),
+                    span: semicolon_token.span.clone(),
+                });
+            }
+            cursor += 1;
+
+            variants.push(ast::EnumVariant {
+                name: ast::Identifier {
+                    name: variant_name.clone(),
+                    span: variant_name_token.span.clone(),
+                },
+                data: ast::EnumVariantData::Unit,
+                discriminant,
+                span: Span {
+                    start: variant_name_token.span.start,
+                    end: semicolon_token.span.end,
+                },
+            });
+        }
+
+        Ok(ast::EnumItem {
+            name: ast::Identifier {
+                name: enum_name.clone(),
+                span: name_token.span.clone(),
+            },
+            generics,
+            variants,
+        })
+    }
+
     fn parse_trait_reduction(
         &mut self,
         tokens: &[LexToken],
@@ -3828,31 +3980,36 @@ impl PRT_Parser {
         }
     }
 
-    fn parse_extern_declaration_reduction(
+    fn extern_header_starts_block(&self, tokens: &[LexToken], start: usize) -> bool {
+        self.extern_block_body_open(tokens, start).is_some()
+    }
+
+    fn extern_block_body_open(&self, tokens: &[LexToken], start: usize) -> Option<usize> {
+        if !matches!(tokens.get(start).map(|t| &t.kind), Some(Token::Extern)) {
+            return None;
+        }
+        let mut cursor = start + 1;
+        if matches!(
+            tokens.get(cursor).map(|t| &t.kind),
+            Some(Token::StringLiteral(_))
+        ) {
+            cursor += 1;
+        }
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            Some(cursor)
+        } else {
+            None
+        }
+    }
+
+    fn parse_extern_member_reduction(
         &mut self,
         tokens: &[LexToken],
         start: usize,
         end: usize,
+        linkage: ast::ExternLinkage,
     ) -> Result<ParsedExternDeclaration, ParseError> {
         let mut cursor = start;
-        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected 'extern'".to_string(),
-                span: tokens[start].span.clone(),
-            });
-        }
-        cursor += 1;
-
-        let linkage = if let Some(abi_token) = tokens.get(cursor) {
-            if let Token::StringLiteral(abi_string) = &abi_token.kind {
-                cursor += 1;
-                Self::parse_extern_linkage(abi_string)
-            } else {
-                ast::ExternLinkage::C
-            }
-        } else {
-            ast::ExternLinkage::C
-        };
 
         let (decl_type, after_decl_type) =
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
@@ -3994,6 +4151,106 @@ impl PRT_Parser {
         }))
     }
 
+    fn parse_extern_declaration_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ParsedExternDeclaration, ParseError> {
+        let mut cursor = start;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected 'extern'".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let linkage = if let Some(abi_token) = tokens.get(cursor) {
+            if let Token::StringLiteral(abi_string) = &abi_token.kind {
+                cursor += 1;
+                Self::parse_extern_linkage(abi_string)
+            } else {
+                ast::ExternLinkage::C
+            }
+        } else {
+            ast::ExternLinkage::C
+        };
+
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "extern block is not a declaration".to_string(),
+                span: tokens[cursor].span.clone(),
+            });
+        }
+
+        self.parse_extern_member_reduction(tokens, cursor, end, linkage)
+    }
+
+    fn parse_extern_block_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::ExternBlockItem, ParseError> {
+        let mut cursor = start;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected 'extern'".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let linkage = if let Some(abi_token) = tokens.get(cursor) {
+            if let Token::StringLiteral(abi_string) = &abi_token.kind {
+                cursor += 1;
+                Self::parse_extern_linkage(abi_string)
+            } else {
+                ast::ExternLinkage::C
+            }
+        } else {
+            ast::ExternLinkage::C
+        };
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after extern ABI".to_string(),
+                span: tokens
+                    .get(cursor)
+                    .map(|t| t.span.clone())
+                    .unwrap_or_else(|| tokens[start].span.clone()),
+            });
+        }
+
+        let body_start = cursor + 1;
+        let body_end = end.saturating_sub(1);
+        let mut functions = Vec::new();
+        let mut variables = Vec::new();
+        cursor = body_start;
+        while cursor < body_end {
+            let Some(member_end) = self.find_statement_terminator(tokens, cursor, body_end).map(|idx| idx + 1) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unterminated extern block declaration".to_string(),
+                    span: tokens[cursor].span.clone(),
+                });
+            };
+
+            match self.parse_extern_member_reduction(tokens, cursor, member_end, linkage.clone())? {
+                ParsedExternDeclaration::Function(function) => functions.push(function),
+                ParsedExternDeclaration::Variable(variable) => variables.push(variable),
+            }
+
+            cursor = member_end;
+        }
+
+        Ok(ast::ExternBlockItem {
+            linkage,
+            functions,
+            variables,
+        })
+    }
+
     pub fn parse_program(&mut self, tokens: &[LexToken]) -> Result<ast::Program, ParseError> {
         self.seed_known_types_from_tokens(tokens);
         let span = tokens
@@ -4006,6 +4263,7 @@ impl PRT_Parser {
             .unwrap_or_else(|| "<unknown>".to_string());
 
         let mut position = 0usize;
+        let mut program_attributes = Vec::new();
         let mut items = Vec::new();
 
         while !Self::at_eof(tokens, position) {
@@ -4060,9 +4318,17 @@ impl PRT_Parser {
                         }
                     }
                 }
+                ItemProduction::ExternBlock => {
+                    ast::ItemKind::ExternBlock(self.parse_extern_block_reduction(
+                        tokens, item_start, item_end,
+                    )?)
+                }
                 ItemProduction::Struct => ast::ItemKind::Struct(
                     self.parse_struct_reduction(tokens, item_start, item_end)?,
                 ),
+                ItemProduction::Enum => {
+                    ast::ItemKind::Enum(self.parse_enum_reduction(tokens, item_start, item_end)?)
+                }
                 ItemProduction::Trait => {
                     ast::ItemKind::Trait(self.parse_trait_reduction(tokens, item_start, item_end)?)
                 }
@@ -4076,12 +4342,22 @@ impl PRT_Parser {
                     self.parse_global_variable_reduction(tokens, item_start, item_end)?,
                 ),
             };
+
+            let mut retained = Vec::new();
+            for attr in attributes {
+                if attr.name.name == "link" {
+                    program_attributes.push(attr);
+                } else {
+                    retained.push(attr);
+                }
+            }
+
             self.record_known_item(&kind);
             items.push(ast::Item {
                 kind,
                 span: item_span,
                 visibility,
-                attributes,
+                attributes: retained,
             });
 
             position = item_end;
@@ -4100,6 +4376,7 @@ impl PRT_Parser {
         };
 
         Ok(ast::Program {
+            attributes: program_attributes,
             items,
             span: program_span,
         })
@@ -4118,7 +4395,7 @@ impl PRT_Parser {
                 Token::RightBracket => bracket_depth = bracket_depth.saturating_sub(1),
                 Token::LeftBrace => brace_depth += 1,
                 Token::RightBrace => brace_depth = brace_depth.saturating_sub(1),
-                Token::Struct | Token::Trait
+                Token::Struct | Token::Enum | Token::Trait
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
                     if let Some(LexToken {
@@ -4141,6 +4418,10 @@ impl PRT_Parser {
                 self.known_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
             }
+            ast::ItemKind::Enum(item) => {
+                self.known_type_names.insert(item.name.name.clone());
+                self.known_ident_names.insert(item.name.name.clone());
+            }
             ast::ItemKind::Trait(item) => {
                 self.known_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
@@ -4157,8 +4438,7 @@ impl PRT_Parser {
             ast::ItemKind::ExternVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
-            ast::ItemKind::Enum(_)
-            | ast::ItemKind::Impl(_)
+            ast::ItemKind::Impl(_)
             | ast::ItemKind::Import(_)
             | ast::ItemKind::ExternBlock(_) => {}
         }
@@ -4212,6 +4492,84 @@ mod tests {
     }
 
     #[test]
+    fn parses_extern_block_with_explicit_abi() {
+        let source = r#"extern "C" { i32 puts(str); f32 sinf(f32 x); }"#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::ExternBlock(block) = &program.items[0].kind else {
+            panic!("expected extern block item");
+        };
+        assert_eq!(block.linkage, ast::ExternLinkage::C);
+        assert_eq!(block.functions.len(), 2);
+        assert!(block.variables.is_empty());
+        assert_eq!(block.functions[0].name.name, "puts");
+        assert_eq!(block.functions[1].name.name, "sinf");
+        assert_eq!(block.functions[1].signature.parameters.len(), 1);
+    }
+
+    #[test]
+    fn parses_empty_extern_block_without_explicit_abi() {
+        let source = "extern { }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::ExternBlock(block) = &program.items[0].kind else {
+            panic!("expected extern block item");
+        };
+        assert_eq!(block.linkage, ast::ExternLinkage::C);
+        assert!(block.functions.is_empty());
+        assert!(block.variables.is_empty());
+    }
+
+    #[test]
+    fn parses_extern_block_with_variables() {
+        let source = r#"extern "C" { i32 errno; }"#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        let ast::ItemKind::ExternBlock(block) = &program.items[0].kind else {
+            panic!("expected extern block item");
+        };
+        assert!(block.functions.is_empty());
+        assert_eq!(block.variables.len(), 1);
+        assert_eq!(block.variables[0].name.name, "errno");
+    }
+
+    #[test]
+    fn parses_enum_with_implicit_and_explicit_discriminants() {
+        let source = "enum Color { Red; Green = 7; Blue; }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        let ast::ItemKind::Enum(item) = &program.items[0].kind else {
+            panic!("expected enum item");
+        };
+        assert_eq!(item.name.name, "Color");
+        assert_eq!(item.variants.len(), 3);
+        assert_eq!(item.variants[0].name.name, "Red");
+        assert_eq!(item.variants[0].discriminant, None);
+        assert_eq!(item.variants[1].name.name, "Green");
+        assert_eq!(item.variants[1].discriminant, Some(7));
+        assert_eq!(item.variants[2].name.name, "Blue");
+        assert_eq!(item.variants[2].discriminant, None);
+    }
+
+    #[test]
+    fn parses_enum_with_negative_discriminant() {
+        let source = "enum Status { Ok; Err = -1; }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        let ast::ItemKind::Enum(item) = &program.items[0].kind else {
+            panic!("expected enum item");
+        };
+        assert_eq!(item.variants[1].discriminant, Some(-1));
+    }
+
+    #[test]
     fn tracks_type_names_for_statement_disambiguation() {
         let source = r#"
             struct MyType {}
@@ -4250,5 +4608,54 @@ mod tests {
         };
         assert_eq!(item.name.name, "EOF");
         assert!(item.initializer.is_some(), "expected global initializer");
+    }
+
+    #[test]
+    fn parses_void_and_void_pointer_types() {
+        let source = "void consume(void* p) { return; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(item) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        let Some(return_type) = &item.return_type else {
+            panic!("expected explicit return type");
+        };
+        assert!(matches!(
+            return_type.kind.as_ref(),
+            ast::TypeKind::Primitive(ast::PrimitiveType::Void)
+        ));
+        assert!(matches!(
+            item.parameters[0].param_type.kind.as_ref(),
+            ast::TypeKind::Pointer(_)
+        ));
+    }
+
+    #[test]
+    fn keeps_link_attribute_at_program_scope() {
+        let source = "#[link(m)] import std.io; extern \"C\" i32 puts(str);";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        assert_eq!(program.items.len(), 2, "expected import + extern");
+        assert_eq!(program.attributes.len(), 1, "expected one program attribute");
+        assert_eq!(program.attributes[0].name.name, "link");
+        let ast::ItemKind::Import(_) = &program.items[0].kind else {
+            panic!("expected import item first");
+        };
+        assert!(
+            program.items[0].attributes.is_empty(),
+            "import should not own #[link] attributes"
+        );
+        let ast::ItemKind::ExternFunction(_) = &program.items[1].kind else {
+            panic!("expected extern function item second");
+        };
+        assert!(
+            program.items[1].attributes.is_empty(),
+            "extern should not own #[link] attributes"
+        );
     }
 }

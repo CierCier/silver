@@ -1,9 +1,11 @@
 pub mod ast;
 pub mod error;
+pub mod import_hook;
 pub mod prt_parser;
 
 pub use ast::*;
 pub use error::{ParseError, ParseResult};
+pub use import_hook::FileImportResolverHook;
 
 use crate::lexer::{LexToken, Span};
 
@@ -39,6 +41,7 @@ impl Parser {
                     .unwrap_or(Span { start: 0, end: 0 });
                 (
                     Program {
+                        attributes: Vec::new(),
                         items: Vec::new(),
                         span: fallback_span,
                     },

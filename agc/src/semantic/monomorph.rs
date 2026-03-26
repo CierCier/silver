@@ -580,6 +580,7 @@ fn instantiate_enum(
                         .collect(),
                 ),
             },
+            discriminant: variant.discriminant,
             span: variant.span.clone(),
         })
         .collect::<Vec<_>>();

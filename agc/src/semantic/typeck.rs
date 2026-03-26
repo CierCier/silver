@@ -9,8 +9,8 @@ use crate::semantic::monomorph::MonomorphRequest;
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::traits::validate_traits_with_imports;
 use crate::types::{
-    StructAttrError, Type, TypeContext, is_bool, is_integer, is_numeric, is_string,
-    parse_struct_attributes, struct_layout,
+    StructAttrError, Type, TypeContext, TypeLayout, is_bool, is_integer, is_numeric, is_string,
+    is_void, parse_struct_attributes, struct_layout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,7 @@ pub struct TypeChecker {
     known_type_ids: HashSet<SymbolId>,
     known_types: HashMap<String, SymbolId>,
     struct_defs: HashMap<String, StructDef>,
+    enum_defs: HashMap<String, EnumDef>,
     trait_impls: HashMap<String, HashSet<String>>,
     monomorph_requests: Vec<MonomorphRequest>,
     imported_functions: HashMap<String, Vec<FunctionSig>>,
@@ -74,6 +75,12 @@ struct TypeBoundPredicate {
 struct StructDef {
     type_params: Vec<String>,
     fields: HashMap<String, Type>,
+}
+
+#[derive(Debug, Clone)]
+struct EnumDef {
+    backing_type: ast::PrimitiveType,
+    variants: HashMap<String, i128>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,6 +137,7 @@ impl TypeChecker {
         self.collect_imported_functions(table);
         self.collect_impl_methods(program, table);
         self.collect_struct_layouts(program);
+        self.check_global_attributes(&program.attributes);
         for item in &program.items {
             self.check_global_attributes(&item.attributes);
             if let ast::ItemKind::Struct(_) = &item.kind {
@@ -278,6 +286,10 @@ impl TypeChecker {
                     self.known_type_ids.insert(type_id);
                     self.known_types
                         .insert(enum_item.name.name.clone(), type_id);
+                    if let Some(enum_def) = self.build_enum_def(enum_item) {
+                        self.register_enum_layout(&enum_item.name.name, &enum_def.backing_type);
+                        self.enum_defs.insert(enum_item.name.name.clone(), enum_def);
+                    }
                 }
                 ast::ItemKind::Trait(trait_item) => {
                     let type_id = table.intern_symbol(
@@ -331,6 +343,7 @@ impl TypeChecker {
         self.push_scope();
         for param in &func.parameters {
             let param_type = Type::from_ast(&param.param_type);
+            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
             self.bind(&param.name.name, param_type, param.span.clone());
         }
         self.check_block(&func.body);
@@ -359,6 +372,7 @@ impl TypeChecker {
                 };
 
                 let declared = Type::from_ast(annotation);
+                self.reject_plain_void_value_type(&declared, annotation.span.clone());
 
                 if let Some(init) = &let_stmt.initializer {
                     let init_type = self.check_expr(init, Some(&declared));
@@ -395,7 +409,12 @@ impl TypeChecker {
                 match value {
                     Some(expr) => {
                         let found = self.check_expr(expr, Some(&expected));
-                        if !self.is_assignable(&expected, &found)
+                        if Self::is_void_like(&expected) {
+                            self.error(
+                                "void function cannot return a value",
+                                expr.span.clone(),
+                            );
+                        } else if !self.is_assignable(&expected, &found)
                             && !self.is_implicitly_castable(&found, &expected)
                         {
                             self.error(
@@ -408,7 +427,7 @@ impl TypeChecker {
                         }
                     }
                     None => {
-                        if expected != Type::Unit {
+                        if !Self::is_void_like(&expected) {
                             self.error(
                                 format!(
                                     "return type mismatch: expected {:?}, found unit",
@@ -450,11 +469,12 @@ impl TypeChecker {
             },
             ast::ExpressionKind::TypeName(ty) => Type::from_ast(ty),
             ast::ExpressionKind::Unary { operator, operand } => {
-                let operand_expected = expected.filter(|ty| is_numeric(ty) || is_bool(ty));
+                let operand_expected =
+                    expected.filter(|ty| self.is_numeric_type(ty) || is_bool(ty));
                 let operand_ty = self.check_expr(operand, operand_expected);
                 match operator {
                     ast::UnaryOperator::Plus | ast::UnaryOperator::Minus => {
-                        if !is_numeric(&operand_ty) {
+                        if !self.is_numeric_type(&operand_ty) {
                             self.error("unary +/- requires numeric operand", expr.span.clone());
                         }
                         operand_ty
@@ -466,7 +486,7 @@ impl TypeChecker {
                         Type::Primitive(ast::PrimitiveType::Bool)
                     }
                     ast::UnaryOperator::BitwiseNot => {
-                        if !is_integer(&operand_ty) {
+                        if !self.is_integer_type(&operand_ty) {
                             self.error("bitwise not requires integer", expr.span.clone());
                         }
                         operand_ty
@@ -510,10 +530,10 @@ impl TypeChecker {
                 | ast::BinaryOperator::Multiply
                 | ast::BinaryOperator::Divide
                 | ast::BinaryOperator::Modulo => {
-                    let numeric_expected = expected.filter(|ty| is_numeric(ty));
+                    let numeric_expected = expected.filter(|ty| self.is_numeric_type(ty));
                     let left_ty = self.check_expr(left, numeric_expected);
                     let right_ty = self.check_expr(right, numeric_expected);
-                    if is_numeric(&left_ty) && is_numeric(&right_ty) {
+                    if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
                         if let Some(common) = self.common_numeric_type(&left_ty, &right_ty) {
                             return common;
                         }
@@ -539,7 +559,7 @@ impl TypeChecker {
                 | ast::BinaryOperator::GreaterEqual => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
-                    if is_numeric(&left_ty) && is_numeric(&right_ty) {
+                    if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
                         if self.common_numeric_type(&left_ty, &right_ty).is_none() {
                             self.error("comparison operands must be compatible", expr.span.clone());
                         }
@@ -583,7 +603,7 @@ impl TypeChecker {
                     if left_ty != right_ty {
                         self.error("bitwise operands must match types", expr.span.clone());
                     }
-                    if !is_integer(&left_ty) || !is_integer(&right_ty) {
+                    if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
                         self.error(
                             "bitwise operator requires integer operands",
                             expr.span.clone(),
@@ -772,6 +792,21 @@ impl TypeChecker {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let object_ty = self.check_expr(object, None);
+                if let Type::Named { path, .. } = &object_ty {
+                    if path.len() == 1 && self.enum_defs.contains_key(&path[0]) {
+                        let is_type_scoped_access = matches!(
+                            object.kind.as_ref(),
+                            ast::ExpressionKind::Identifier(ident) if ident.name == path[0]
+                        );
+                        if !is_type_scoped_access {
+                            self.error(
+                                "enum members must be accessed through the enum type name",
+                                object.span.clone(),
+                            );
+                            return Type::Unknown;
+                        }
+                    }
+                }
                 if let Some(field_ty) = self.resolve_field_access_type(&object_ty, &field.name) {
                     field_ty
                 } else {
@@ -1107,18 +1142,33 @@ impl TypeChecker {
         table: &mut CompilerSymbolTable,
     ) {
         for item in &program.items {
-            let ast::ItemKind::ExternVariable(var) = &item.kind else {
-                continue;
-            };
-            let symbol_key = format!("extern_var::{}", var.name.name);
-            table.intern_symbol(
-                symbol_key,
-                SymbolKind::ExternVariable,
-                Some(var.name.span.clone()),
-                CompilerPhase::TypeCheck,
-            );
-            self.extern_variables
-                .insert(var.name.name.clone(), Type::from_ast(&var.var_type));
+            match &item.kind {
+                ast::ItemKind::ExternVariable(var) => {
+                    let symbol_key = format!("extern_var::{}", var.name.name);
+                    table.intern_symbol(
+                        symbol_key,
+                        SymbolKind::ExternVariable,
+                        Some(var.name.span.clone()),
+                        CompilerPhase::TypeCheck,
+                    );
+                    self.extern_variables
+                        .insert(var.name.name.clone(), Type::from_ast(&var.var_type));
+                }
+                ast::ItemKind::ExternBlock(block) => {
+                    for var in &block.variables {
+                        let symbol_key = format!("extern_var::{}", var.name.name);
+                        table.intern_symbol(
+                            symbol_key,
+                            SymbolKind::ExternVariable,
+                            Some(var.name.span.clone()),
+                            CompilerPhase::TypeCheck,
+                        );
+                        self.extern_variables
+                            .insert(var.name.name.clone(), Type::from_ast(&var.var_type));
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1145,6 +1195,7 @@ impl TypeChecker {
 
     fn check_global_variable(&mut self, var: &ast::GlobalVariableItem) {
         let declared = Type::from_ast(&var.var_type);
+        self.reject_plain_void_value_type(&declared, var.var_type.span.clone());
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
             if !self.is_assignable(&declared, &init_type)
@@ -1231,6 +1282,12 @@ impl TypeChecker {
     }
 
     fn literal_matches_expected(&self, literal: &ast::Literal, expected: &Type) -> bool {
+        if let Some(backing) = self.enum_backing_type(expected) {
+            if !matches!(expected, Type::Primitive(_)) {
+                return self.literal_matches_expected(literal, &Type::Primitive(backing));
+            }
+        }
+
         match literal {
             ast::Literal::Integer(_) => is_integer(expected),
             ast::Literal::Float(_) => matches!(
@@ -1413,7 +1470,14 @@ impl TypeChecker {
     }
 
     fn is_assignable(&self, expected: &Type, found: &Type) -> bool {
-        expected == found
+        if expected == found || Self::void_compatible(expected, found) {
+            return true;
+        }
+
+        match (self.enum_backing_type(expected), self.enum_backing_type(found)) {
+            (Some(expected_backing), Some(found_backing)) => expected_backing == found_backing,
+            _ => false,
+        }
     }
 
     fn infer_type_params(
@@ -1434,7 +1498,9 @@ impl TypeChecker {
         }
 
         match (expected, found) {
-            (Type::Primitive(_), _) | (Type::Unit, _) => expected == found,
+            (Type::Primitive(_), _) | (Type::Unit, _) => {
+                expected == found || Self::void_compatible(expected, found)
+            }
             (Type::Pointer { is_mutable, inner }, Type::Primitive(ast::PrimitiveType::Str)) => {
                 if *is_mutable {
                     return false;
@@ -1540,10 +1606,36 @@ impl TypeChecker {
         if matches!(from, Type::Unknown) || matches!(to, Type::Unknown) {
             return true;
         }
+        if Self::is_void_like(from) || Self::is_void_like(to) {
+            return Self::void_compatible(from, to);
+        }
+        if let (Some(from_backing), Some(to_backing)) =
+            (self.enum_backing_type(from), self.enum_backing_type(to))
+        {
+            if !matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)) {
+                return self.is_castable(
+                    &Type::Primitive(from_backing),
+                    &Type::Primitive(to_backing),
+                );
+            }
+        }
         self.is_primitive_type(from) && self.is_primitive_type(to)
     }
 
     fn is_implicitly_castable(&self, from: &Type, to: &Type) -> bool {
+        if Self::void_compatible(from, to) {
+            return true;
+        }
+        if let (Some(from_backing), Some(to_backing)) =
+            (self.enum_backing_type(from), self.enum_backing_type(to))
+        {
+            if !matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)) {
+                return self.is_implicitly_castable(
+                    &Type::Primitive(from_backing),
+                    &Type::Primitive(to_backing),
+                );
+            }
+        }
         if self.is_castable(from, to) {
             return true;
         }
@@ -1555,12 +1647,28 @@ impl TypeChecker {
                 }
                 matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::Char))
             }
+            (
+                Type::Pointer {
+                    is_mutable: from_mut,
+                    ..
+                },
+                Type::Pointer {
+                    is_mutable: to_mut,
+                    inner,
+                },
+            ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
             _ => false,
         }
     }
 
     fn is_numeric_type(&self, ty: &Type) -> bool {
-        is_numeric(ty)
+        self.numeric_type(ty).is_some()
+    }
+
+    fn is_integer_type(&self, ty: &Type) -> bool {
+        self.numeric_type(ty)
+            .map(|primitive| is_integer(&Type::Primitive(primitive)))
+            .unwrap_or(false)
     }
 
     fn receiver_compatible(&self, param: &Type, receiver: &Type, score: &mut usize) -> bool {
@@ -1656,18 +1764,37 @@ impl TypeChecker {
     }
 
     fn is_primitive_type(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Primitive(_))
+        self.enum_backing_type(ty).is_some()
+    }
+
+    fn is_void_like(ty: &Type) -> bool {
+        matches!(ty, Type::Unit) || is_void(ty)
+    }
+
+    fn void_compatible(expected: &Type, found: &Type) -> bool {
+        Self::is_void_like(expected) && Self::is_void_like(found)
+    }
+
+    fn reject_plain_void_value_type(&mut self, ty: &Type, span: Span) {
+        if is_void(ty) {
+            self.error(
+                "plain `void` is only valid as a function return type; use `void*` for opaque data",
+                span,
+            );
+        }
     }
 
     fn common_numeric_type(&self, left: &Type, right: &Type) -> Option<Type> {
+        let left = Type::Primitive(self.numeric_type(left)?);
+        let right = Type::Primitive(self.numeric_type(right)?);
         if left == right {
-            return Some(left.clone());
+            return Some(left);
         }
-        if self.is_implicitly_castable(right, left) {
-            return Some(left.clone());
+        if self.is_implicitly_castable(&right, &left) {
+            return Some(left);
         }
-        if self.is_implicitly_castable(left, right) {
-            return Some(right.clone());
+        if self.is_implicitly_castable(&left, &right) {
+            return Some(right);
         }
         None
     }
@@ -1910,6 +2037,12 @@ impl TypeChecker {
         };
 
         let struct_name = path.last()?;
+        if let Some(enum_def) = self.enum_defs.get(struct_name) {
+            if enum_def.variants.contains_key(field_name) {
+                return Some(current.clone());
+            }
+            return None;
+        }
         let struct_def = self.struct_defs.get(struct_name)?;
         let field_ty = struct_def.fields.get(field_name)?;
 
@@ -1946,6 +2079,99 @@ impl TypeChecker {
             let layout = struct_layout(&self.type_ctx, &field_types, &attrs);
             let path = vec![struct_item.name.name.clone()];
             self.type_ctx.register_named(&path, layout);
+        }
+    }
+
+    fn build_enum_def(&mut self, enum_item: &ast::EnumItem) -> Option<EnumDef> {
+        let mut variants = HashMap::new();
+        let mut next_value = 0i128;
+        let mut min_value = 0i128;
+        let mut max_value = 0i128;
+        let mut saw_any = false;
+
+        for variant in &enum_item.variants {
+            if !matches!(variant.data, ast::EnumVariantData::Unit) {
+                self.error(
+                    "enum variants currently support only unit members",
+                    variant.span.clone(),
+                );
+                continue;
+            }
+
+            let value = variant.discriminant.unwrap_or(next_value);
+            if variants.insert(variant.name.name.clone(), value).is_some() {
+                self.error(
+                    format!(
+                        "duplicate enum variant '{}' in '{}'",
+                        variant.name.name, enum_item.name.name
+                    ),
+                    variant.name.span.clone(),
+                );
+                continue;
+            }
+
+            next_value = match value.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    self.error(
+                        format!(
+                            "enum variant '{}' overflows automatic discriminant resolution",
+                            variant.name.name
+                        ),
+                        variant.span.clone(),
+                    );
+                    value
+                }
+            };
+
+            if !saw_any {
+                min_value = value;
+                max_value = value;
+                saw_any = true;
+            } else {
+                min_value = min_value.min(value);
+                max_value = max_value.max(value);
+            }
+        }
+
+        Some(EnumDef {
+            backing_type: choose_enum_backing_type(min_value, max_value),
+            variants,
+        })
+    }
+
+    fn register_enum_layout(&mut self, name: &str, backing_type: &ast::PrimitiveType) {
+        let bytes = match backing_type {
+            ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,
+            ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
+            ast::PrimitiveType::I32
+            | ast::PrimitiveType::U32
+            | ast::PrimitiveType::Char => 4,
+            ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => 8,
+            ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
+            _ => return,
+        };
+        self.type_ctx
+            .register_named(&[name.to_string()], TypeLayout::known(bytes, bytes));
+    }
+
+    fn enum_backing_type(&self, ty: &Type) -> Option<ast::PrimitiveType> {
+        match ty {
+            Type::Primitive(primitive) => Some(primitive.clone()),
+            Type::Named { path, .. } if path.len() == 1 => self
+                .enum_defs
+                .get(&path[0])
+                .map(|enum_def| enum_def.backing_type.clone()),
+            _ => None,
+        }
+    }
+
+    fn numeric_type(&self, ty: &Type) -> Option<ast::PrimitiveType> {
+        let primitive = self.enum_backing_type(ty)?;
+        if is_numeric(&Type::Primitive(primitive.clone())) {
+            Some(primitive)
+        } else {
+            None
         }
     }
 
@@ -2004,6 +2230,32 @@ impl TypeChecker {
         for error in validate_global_attributes(attributes) {
             self.error(error.message, error.span);
         }
+    }
+}
+
+fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveType {
+    if min_value < 0 {
+        if min_value >= i8::MIN as i128 && max_value <= i8::MAX as i128 {
+            ast::PrimitiveType::I8
+        } else if min_value >= i16::MIN as i128 && max_value <= i16::MAX as i128 {
+            ast::PrimitiveType::I16
+        } else if min_value >= i32::MIN as i128 && max_value <= i32::MAX as i128 {
+            ast::PrimitiveType::I32
+        } else if min_value >= i64::MIN as i128 && max_value <= i64::MAX as i128 {
+            ast::PrimitiveType::I64
+        } else {
+            ast::PrimitiveType::I128
+        }
+    } else if max_value <= u8::MAX as i128 {
+        ast::PrimitiveType::U8
+    } else if max_value <= u16::MAX as i128 {
+        ast::PrimitiveType::U16
+    } else if max_value <= u32::MAX as i128 {
+        ast::PrimitiveType::U32
+    } else if max_value <= u64::MAX as i128 {
+        ast::PrimitiveType::U64
+    } else {
+        ast::PrimitiveType::U128
     }
 }
 
@@ -2103,6 +2355,40 @@ mod tests {
         let program = parse("i32 main() { bool b = true; i32 x = b; return x; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_enum_member_access_and_backing_casts() {
+        let program = parse(
+            "enum Color { Red; Blue = 255; } Color id() { return Color.Blue; } i32 main() { Color x = Color.Red; return x; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_signed_enum_members() {
+        let program = parse(
+            "enum Status { Ok; Err = -1; } Status id() { return Status.Err; } i32 main() { Status x = Status.Ok; return x; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_instance_style_enum_member_access() {
+        let program = parse(
+            "enum Status { Ok; Err = -1; } i32 main() { Status x = Status.Ok; return x.Ok; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error
+                    .message
+                    .contains("enum members must be accessed through the enum type name")),
+            "expected enum member access error, got {errors:?}"
+        );
     }
 
     #[test]
@@ -2307,6 +2593,46 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
+    }
+
+    #[test]
+    fn allows_explicit_void_return_type() {
+        let program = parse("void sink(i32 x) { return; } i32 main() { sink(1); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn allows_void_pointer_types() {
+        let program = parse(
+            "void consume(void* p) { return; } i32 main() { i32 x = 1; void* p = &x; consume(p); return 0; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_plain_void_value_bindings() {
+        let program = parse("i32 main() { void x; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected type errors");
+        assert!(
+            errors.iter().any(|error| error.message.contains("plain `void`")),
+            "expected plain void diagnostic, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_returning_value_from_void_function() {
+        let program = parse("void bad() { return 1; } i32 main() { bad(); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected type errors");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("void function cannot return a value")),
+            "expected void return diagnostic, got {errors:?}"
+        );
     }
 
     #[test]

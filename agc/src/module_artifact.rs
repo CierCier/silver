@@ -1,9 +1,11 @@
 use std::path::Path;
 
+use crate::lexer;
+use crate::parser;
 use crate::parser::ast;
 use crate::types::Type;
 
-const MODULE_MAGIC: &[u8; 6] = b"AGBM\x00\x01";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x01";
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -106,7 +108,7 @@ impl ModuleArtifact {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
         if magic != MODULE_MAGIC {
-            return Err("invalid module artifact header".to_string());
+            return Err("invalid module interface header".to_string());
         }
         let module_name = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -157,6 +159,33 @@ impl ModuleArtifact {
         let bytes =
             std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         Self::from_bytes(&bytes)
+    }
+
+    pub fn from_source(path: &Path) -> Result<Self, String> {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+
+        let tokens = lexer::lex(&src).map_err(|e| format!("lexer errors in {path:?}: {e:?}"))?;
+
+        let mut parser = parser::Parser::new_with_source(tokens, path.display().to_string());
+        let (ast, errors) = parser.parse_program();
+
+        if !errors.is_empty() {
+            return Err(format!(
+                "parser errors in {}: {:?}",
+                path.display(),
+                errors[0].format_with_help()
+            ));
+        }
+
+        Ok(Self::from_program(
+            module_name_from_path(path),
+            path.display().to_string(),
+            &src,
+            &ast,
+            "unknown".to_string(),
+            Vec::new(),
+        ))
     }
 }
 
@@ -246,7 +275,7 @@ fn write_string(out: &mut Vec<u8>, text: &str) -> Result<(), String> {
 
 fn read_exact<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8], String> {
     if *cursor + len > bytes.len() {
-        return Err("unexpected end of module artifact".to_string());
+        return Err("unexpected end of module interface".to_string());
     }
     let start = *cursor;
     let end = start + len;
@@ -274,7 +303,7 @@ fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     let len = read_len(bytes, cursor)? as usize;
     let slice = read_exact(bytes, cursor, len)?;
     let text =
-        std::str::from_utf8(slice).map_err(|_| "invalid utf-8 in module artifact".to_string())?;
+        std::str::from_utf8(slice).map_err(|_| "invalid utf-8 in module interface".to_string())?;
     Ok(text.to_string())
 }
 

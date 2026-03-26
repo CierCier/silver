@@ -23,6 +23,7 @@ pub fn collect_program_link_libraries(
     program: &ast::Program,
 ) -> Result<Vec<String>, AttributeError> {
     let mut libs = Vec::new();
+    extend_link_libraries_from_attributes(&mut libs, &program.attributes)?;
     for item in &program.items {
         extend_link_libraries_from_attributes(&mut libs, &item.attributes)?;
     }
