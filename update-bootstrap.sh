@@ -29,7 +29,7 @@ if [ -d "$std_dir" ]; then
     rel="${src#$std_dir/}"
     dotted="${rel//\//.}"
     base="${dotted%.ag}"
-    out="$lib_dir/$base.agbm"
+    out="$lib_dir/$base.agm"
     "$bin_dir/agc" "$src" --emit=module -I "$include_dir" -o "$out"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
 fi

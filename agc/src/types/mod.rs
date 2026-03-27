@@ -309,6 +309,72 @@ impl Type {
         Ok(ty)
     }
 
+    pub fn to_ast(&self) -> ast::Type {
+        fn ident(name: &str) -> ast::Identifier {
+            ast::Identifier {
+                name: name.to_string(),
+                span: Span { start: 0, end: 0 },
+            }
+        }
+
+        fn lower(ty: &Type) -> ast::TypeKind {
+            match ty {
+                Type::Unit => ast::TypeKind::Tuple(Vec::new()),
+                Type::Primitive(primitive) => ast::TypeKind::Primitive(primitive.clone()),
+                Type::Named { path, generics } => ast::TypeKind::Named(ast::NamedType {
+                    path: path.iter().map(|segment| ident(segment)).collect(),
+                    generics: if generics.is_empty() {
+                        None
+                    } else {
+                        Some(generics.iter().map(Type::to_ast).collect())
+                    },
+                }),
+                Type::Reference { is_mutable, inner } => {
+                    ast::TypeKind::Reference(ast::ReferenceType {
+                        is_mutable: *is_mutable,
+                        lifetime: None,
+                        inner: Box::new(inner.to_ast()),
+                    })
+                }
+                Type::Pointer { is_mutable, inner } => ast::TypeKind::Pointer(ast::PointerType {
+                    is_mutable: *is_mutable,
+                    inner: Box::new(inner.to_ast()),
+                }),
+                Type::Array { element, length } => ast::TypeKind::Array(Box::new(ast::ArrayType {
+                    element_type: Box::new(element.to_ast()),
+                    size: length.map(|len| {
+                        Box::new(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
+                                len as i128,
+                            ))),
+                            span: Span { start: 0, end: 0 },
+                        })
+                    }),
+                })),
+                Type::Optional { inner } => ast::TypeKind::Optional(Box::new(inner.to_ast())),
+                Type::Tuple(items) => {
+                    ast::TypeKind::Tuple(items.iter().map(Type::to_ast).collect())
+                }
+                Type::Function {
+                    params,
+                    return_type,
+                } => ast::TypeKind::Function(ast::FunctionType {
+                    parameters: params.iter().map(Type::to_ast).collect(),
+                    return_type: Box::new(return_type.to_ast()),
+                }),
+                Type::Unknown => ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ident("unknown")],
+                    generics: None,
+                }),
+            }
+        }
+
+        ast::Type {
+            kind: Box::new(lower(self)),
+            span: Span { start: 0, end: 0 },
+        }
+    }
+
     pub fn substitute(&self, mapping: &HashMap<String, Type>) -> Type {
         match self {
             Type::Named { path, generics } => {

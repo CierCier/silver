@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString};
 
 use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
-use crate::module_artifact::{ModuleArtifact, module_name_from_path};
+use crate::module_artifact::{
+    ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
+};
 use crate::module_loader::{ModuleLoader, module_loader_default_dirs};
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
@@ -62,6 +64,7 @@ struct CompilePlan {
     target: Option<String>,
     sysroot: Option<PathBuf>,
     no_std: bool,
+    shared: bool,
     verbose: bool,
     dry_run: bool,
 }
@@ -87,6 +90,9 @@ impl CompilePlan {
         }
         if self.no_std {
             parts.push("no_std=true".to_string());
+        }
+        if self.shared {
+            parts.push("shared=true".to_string());
         }
         if !self.include_dirs.is_empty() {
             parts.push(format!("I={}", self.include_dirs.len()));
@@ -176,6 +182,10 @@ struct Cli {
     /// Do not link the standard library (accepted for clang-compat; not yet used)
     #[arg(long = "no-std", action = ArgAction::SetTrue)]
     no_std: bool,
+
+    /// Prefer shared module artifacts and emit shared libraries for module packaging
+    #[arg(long = "shared", action = ArgAction::SetTrue)]
+    shared: bool,
 
     /// Verbose output
     #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue)]
@@ -289,6 +299,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         target: cli.target,
         sysroot: cli.sysroot,
         no_std: cli.no_std,
+        shared: cli.shared,
         verbose: cli.verbose,
         dry_run: cli.dry_run,
     })
@@ -308,6 +319,97 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     }
 
     loader
+}
+
+fn module_path_from_source_path(plan: &CompilePlan, input: &Path) -> String {
+    let path = input.strip_prefix(&plan.package_root).unwrap_or(input);
+    let without_ext = path.with_extension("");
+    without_ext
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn module_binary_output_path(manifest_path: &Path, shared: bool) -> PathBuf {
+    manifest_path.with_extension(if shared { "so" } else { "o" })
+}
+
+fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> Option<String> {
+    let expected_target = plan.target.clone().unwrap_or_else(|| {
+        TargetMachine::get_default_triple()
+            .as_str()
+            .to_str()
+            .unwrap_or("<unknown>")
+            .to_string()
+    });
+
+    if module.target_triple != "unknown" && module.target_triple != expected_target {
+        return Some(format!(
+            "module `{}` target `{}` is incompatible with current build `{expected_target}`",
+            module.module_path, module.target_triple
+        ));
+    }
+
+    let expected_version = env!("CARGO_PKG_VERSION");
+    if module.compiler_version != expected_version {
+        return Some(format!(
+            "module `{}` was built by compiler version `{}` but current compiler is `{expected_version}`",
+            module.module_path, module.compiler_version
+        ));
+    }
+
+    for candidate in module.source_candidate_paths() {
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(source_text) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        let current_hash = hash_source_text(&source_text);
+        if current_hash != module.source_hash_fnv1a64 {
+            return Some(format!(
+                "module `{}` is stale: source at `{}` has changed since `{}` was built",
+                module.module_path,
+                candidate.display(),
+                module
+                    .artifact_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "its manifest".to_string())
+            ));
+        }
+        break;
+    }
+
+    None
+}
+
+fn collect_dependency_link_artifacts(
+    loader: &ModuleLoader,
+    roots: &[ModuleArtifact],
+    plan: &CompilePlan,
+    shared: bool,
+) -> Result<Vec<PathBuf>, String> {
+    let closure = loader.resolve_module_closure(roots)?;
+    let mut paths = Vec::new();
+    for module in closure {
+        if let Some(error) = artifact_compatibility_error(&module, plan) {
+            return Err(error);
+        }
+        let path = if shared {
+            module.shared_library_path()
+        } else {
+            module.static_library_path()
+        };
+        let Some(path) = path else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn main() {
@@ -507,6 +609,7 @@ fn main() {
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
             let mut native_libs = plan.libs.clone();
+            let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
 
             for input in &plan.inputs {
                 let src = match std::fs::read_to_string(input) {
@@ -595,7 +698,14 @@ fn main() {
                         std::process::exit(2);
                     }
                 };
+                let module_dependencies = import_lowering.module_dependencies;
                 let imported_modules = import_lowering.module_artifacts;
+                for module in &imported_modules {
+                    if let Some(error) = artifact_compatibility_error(module, &plan) {
+                        eprintln!("agc: {}: {error}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                }
 
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
@@ -661,6 +771,19 @@ fn main() {
                 for module in &imported_modules {
                     extend_unique_libs(&mut native_libs, &module.native_libs);
                 }
+                match collect_dependency_link_artifacts(&loader, &imported_modules, &plan, plan.shared) {
+                    Ok(paths) => {
+                        for path in paths {
+                            if !dependency_link_artifacts.contains(&path) {
+                                dependency_link_artifacts.push(path);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("agc: {}: {error}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                }
 
                 semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
                 symbol_table.touch_phase(
@@ -678,10 +801,16 @@ fn main() {
                     });
                     let artifact = ModuleArtifact::from_program(
                         module_name_from_path(input),
+                        module_path_from_source_path(&plan, input),
                         input.display().to_string(),
                         &src,
                         &ast,
                         target_triple,
+                        ModuleCodeArtifacts {
+                            has_static_library: !plan.shared,
+                            has_shared_library: plan.shared,
+                        },
+                        module_dependencies,
                         native_libs.clone(),
                     );
                     let bytes = match artifact.to_bytes() {
@@ -702,6 +831,72 @@ fn main() {
                         );
                         std::process::exit(2);
                     }
+                    let binary_output = module_binary_output_path(&plan.output, plan.shared);
+                    if plan.shared {
+                        let temp_object = plan.output.with_extension("module.tmp.o");
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
+                            &ast,
+                            &imported_modules,
+                            &temp_object,
+                            plan.target.as_deref(),
+                            plan.opt_level.as_deref(),
+                            &mut symbol_table,
+                        );
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        &src,
+                                        &input.display().to_string(),
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                        if let Err(error) = link_shared_module(
+                            &plan,
+                            &temp_object,
+                            &binary_output,
+                            &dependency_link_artifacts,
+                            &native_libs,
+                        ) {
+                            eprintln!("agc: {}: {error}", "error".red().bold());
+                            std::process::exit(2);
+                        }
+                        let _ = std::fs::remove_file(&temp_object);
+                    } else {
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
+                            &ast,
+                            &imported_modules,
+                            &binary_output,
+                            plan.target.as_deref(),
+                            plan.opt_level.as_deref(),
+                            &mut symbol_table,
+                        );
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        &src,
+                                        &input.display().to_string(),
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                    }
                     continue;
                 }
 
@@ -712,8 +907,9 @@ fn main() {
                     symbol_table.touch_phase(CompilerPhase::Codegen, "LLVM codegen");
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_table(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
                             &ast,
+                            &imported_modules,
                             &plan.output,
                             plan.target.as_deref(),
                             plan.opt_level.as_deref(),
@@ -738,8 +934,9 @@ fn main() {
                         }
                     } else if matches!(plan.emit, EmitKind::Asm) {
                         let result =
-                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_table(
+                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table(
                                 &ast,
+                                &imported_modules,
                                 &plan.output,
                                 plan.target.as_deref(),
                                 plan.opt_level.as_deref(),
@@ -763,8 +960,9 @@ fn main() {
                             std::process::exit(2);
                         }
                     } else {
-                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_table(
+                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table(
                             &ast,
+                            &imported_modules,
                             &mut symbol_table,
                         );
                         match output {
@@ -825,7 +1023,12 @@ fn main() {
             }
 
             if matches!(plan.emit, EmitKind::Exe) {
-                if let Err(e) = build_with_llvm_tools(&plan, &llvm_units, &native_libs) {
+                if let Err(e) = build_with_llvm_tools(
+                    &plan,
+                    &llvm_units,
+                    &dependency_link_artifacts,
+                    &native_libs,
+                ) {
                     eprintln!("agc: {}: {e}", "error".red().bold());
                     std::process::exit(2);
                 }
@@ -916,6 +1119,7 @@ fn map_llc_opt_level(level: Option<&str>) -> &'static str {
 fn build_with_llvm_tools(
     plan: &CompilePlan,
     units: &[(PathBuf, String)],
+    dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
     if units.is_empty() {
@@ -968,9 +1172,9 @@ fn build_with_llvm_tools(
     llc.arg(&linked_ll);
     run_tool(llc, "llc")?;
 
-    let link_result = link_with_ld_lld(plan, &object_path, native_libs).or_else(|ld_err| {
+    let link_result = link_with_ld_lld(plan, &object_path, dependency_paths, native_libs).or_else(|ld_err| {
         // Keep a compatibility fallback for systems without lld installed.
-        link_with_cc(plan, &object_path, native_libs).map_err(|cc_err| {
+        link_with_cc(plan, &object_path, dependency_paths, native_libs).map_err(|cc_err| {
             format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
         })
     });
@@ -1031,9 +1235,24 @@ fn should_force_non_pie(target: Option<&str>) -> bool {
     }
 }
 
+fn dependency_library_dirs(dependency_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for path in dependency_paths {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let parent = parent.to_path_buf();
+        if !dirs.contains(&parent) {
+            dirs.push(parent);
+        }
+    }
+    dirs
+}
+
 fn link_with_ld_lld(
     plan: &CompilePlan,
     object_path: &Path,
+    dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
     let lld_name = if command_exists("ld.lld") {
@@ -1070,12 +1289,19 @@ fn link_with_ld_lld(
     }
 
     link.arg(object_path);
+    for dep in dependency_paths {
+        link.arg(dep);
+    }
 
     for dir in cc_library_dirs()? {
         link.arg("-L").arg(dir);
     }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
+    }
+    for dir in dependency_library_dirs(dependency_paths) {
+        link.arg("-L").arg(&dir);
+        link.arg("-rpath").arg(&dir);
     }
 
     if !plan.no_std {
@@ -1097,10 +1323,14 @@ fn link_with_ld_lld(
 fn link_with_cc(
     plan: &CompilePlan,
     object_path: &Path,
+    dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
     let mut link = Command::new("cc");
     link.arg("-o").arg(&plan.output).arg(object_path);
+    for dep in dependency_paths {
+        link.arg(dep);
+    }
     if should_force_non_pie(plan.target.as_deref()) {
         link.arg("-no-pie");
     }
@@ -1116,10 +1346,42 @@ fn link_with_cc(
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
     }
+    for dir in dependency_library_dirs(dependency_paths) {
+        link.arg("-L").arg(&dir);
+        link.arg(format!("-Wl,-rpath,{}", dir.display()));
+    }
     for lib in native_libs {
         link.arg(format!("-l{lib}"));
     }
     run_tool(link, "cc linker")
+}
+
+fn link_shared_module(
+    plan: &CompilePlan,
+    object_path: &Path,
+    output_path: &Path,
+    dependency_paths: &[PathBuf],
+    native_libs: &[String],
+) -> Result<(), String> {
+    let mut link = Command::new("cc");
+    link.arg("-shared").arg("-o").arg(output_path).arg(object_path);
+    if let Some(sysroot) = &plan.sysroot {
+        link.arg("--sysroot").arg(sysroot);
+    }
+    for dep in dependency_paths {
+        link.arg(dep);
+    }
+    for dir in &plan.lib_dirs {
+        link.arg("-L").arg(dir);
+    }
+    for dir in dependency_library_dirs(dependency_paths) {
+        link.arg("-L").arg(&dir);
+        link.arg(format!("-Wl,-rpath,{}", dir.display()));
+    }
+    for lib in native_libs {
+        link.arg(format!("-l{lib}"));
+    }
+    run_tool(link, "cc shared linker")
 }
 
 fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
@@ -1171,4 +1433,86 @@ fn list_available_llvm_targets() -> Vec<String> {
     }
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_plan() -> CompilePlan {
+        CompilePlan {
+            emit: EmitKind::Exe,
+            inputs: Vec::new(),
+            output: PathBuf::from("a.out"),
+            package_root: PathBuf::from("."),
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            lib_dirs: Vec::new(),
+            libs: Vec::new(),
+            opt_level: None,
+            debug_info: false,
+            target: None,
+            sysroot: None,
+            no_std: false,
+            shared: false,
+            verbose: false,
+            dry_run: false,
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("agc-main-{label}-{nonce}"))
+    }
+
+    fn test_module_artifact() -> ModuleArtifact {
+        ModuleArtifact {
+            module_name: "sample".to_string(),
+            module_path: "sample".to_string(),
+            source_path: String::new(),
+            source_hash_fnv1a64: hash_source_text("pub i32 answer() { return 42; }\n"),
+            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_triple: "unknown".to_string(),
+            code_artifacts: ModuleCodeArtifacts {
+                has_static_library: true,
+                has_shared_library: false,
+            },
+            module_deps: Vec::new(),
+            exports: Vec::new(),
+            native_libs: Vec::new(),
+            artifact_path: None,
+        }
+    }
+
+    #[test]
+    fn rejects_module_artifact_from_different_compiler_version() {
+        let mut artifact = test_module_artifact();
+        artifact.compiler_version = "0.0.0-test".to_string();
+
+        let error = artifact_compatibility_error(&artifact, &test_plan())
+            .expect("expected compiler version mismatch");
+        assert!(error.contains("compiler version"));
+    }
+
+    #[test]
+    fn rejects_stale_module_artifact_when_source_changed() {
+        let root = unique_temp_dir("stale-artifact");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("sample.ag");
+        let manifest_path = root.join("sample.agm");
+        std::fs::write(&source_path, "pub i32 answer() { return 7; }\n").unwrap();
+
+        let mut artifact = test_module_artifact();
+        artifact.artifact_path = Some(manifest_path);
+
+        let error = artifact_compatibility_error(&artifact, &test_plan())
+            .expect("expected stale source mismatch");
+        assert!(error.contains("is stale"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

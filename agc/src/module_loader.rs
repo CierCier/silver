@@ -143,6 +143,33 @@ impl ModuleLoader {
         None
     }
 
+    pub fn resolve_module_closure(
+        &self,
+        roots: &[ModuleArtifact],
+    ) -> Result<Vec<ModuleArtifact>, String> {
+        let mut resolved = Vec::new();
+        let mut seen = HashSet::new();
+        let mut pending = roots.to_vec();
+
+        while let Some(module) = pending.pop() {
+            if !seen.insert(module.module_path.clone()) {
+                continue;
+            }
+            for dep in &module.module_deps {
+                if seen.contains(dep) {
+                    continue;
+                }
+                let artifact_path = self
+                    .find_module_path(dep)
+                    .ok_or_else(|| format!("module `{dep}` not found"))?;
+                pending.push(ModuleArtifact::from_path(&artifact_path)?);
+            }
+            resolved.push(module);
+        }
+
+        Ok(resolved)
+    }
+
     pub fn find_source_import(
         &self,
         path: &[ast::Identifier],
@@ -406,7 +433,11 @@ mod tests {
         let sys_dir = unique_temp_dir("priority-sys");
 
         // Setup std/io.ag in all locations relevant to search order.
-        for (dir, content) in [(&rel_dir, "rel"), (&include_dir, "include"), (&sys_dir, "sys")] {
+        for (dir, content) in [
+            (&rel_dir, "rel"),
+            (&include_dir, "include"),
+            (&sys_dir, "sys"),
+        ] {
             std::fs::create_dir_all(dir.join("std")).unwrap();
             std::fs::write(dir.join("std").join("io.ag"), content).unwrap();
         }
@@ -419,7 +450,10 @@ mod tests {
         let catalog = loader
             .resolve_source_imports(&import_program(&["std", "io"]), Some(&rel_dir))
             .unwrap();
-        assert_eq!(catalog.imports[0].source_path, rel_dir.join("std").join("io.ag"));
+        assert_eq!(
+            catalog.imports[0].source_path,
+            rel_dir.join("std").join("io.ag")
+        );
 
         // 2. Check include-dir priority (without relative source)
         std::fs::remove_file(rel_dir.join("std").join("io.ag")).unwrap();
@@ -439,7 +473,10 @@ mod tests {
         let catalog = loader
             .resolve_source_imports(&import_program(&["std", "unique"]), None)
             .unwrap();
-        assert_eq!(catalog.imports[0].source_path, sys_dir.join("std").join("unique.ag"));
+        assert_eq!(
+            catalog.imports[0].source_path,
+            sys_dir.join("std").join("unique.ag")
+        );
 
         let _ = std::fs::remove_dir_all(rel_dir);
         let _ = std::fs::remove_dir_all(include_dir);
@@ -495,8 +532,16 @@ mod tests {
         let root = unique_temp_dir("conflict-non-function");
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
-        std::fs::write(root.join("a").join("mod1.ag"), "pub struct Thing { i32 x; }").unwrap();
-        std::fs::write(root.join("b").join("mod2.ag"), "pub struct Thing { i32 y; }").unwrap();
+        std::fs::write(
+            root.join("a").join("mod1.ag"),
+            "pub struct Thing { i32 x; }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b").join("mod2.ag"),
+            "pub struct Thing { i32 y; }",
+        )
+        .unwrap();
 
         let program = ast::Program {
             attributes: Vec::new(),
