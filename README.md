@@ -55,6 +55,12 @@ Refresh the bootstrap toolchain and stdlib artifacts:
 bash ./update-bootstrap.sh
 ```
 
+Create a Linux release bundle:
+
+```bash
+bash ./scripts/create-linux-bundle.sh 2026-03-27
+```
+
 Compile a Silver source file:
 
 ```bash
