@@ -2,15 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::attributes::validate_global_attributes;
 use crate::lexer::Span;
-use crate::module_artifact::ModuleArtifact;
+use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
 use crate::semantic::analyzer::Analyzer;
 use crate::semantic::monomorph::MonomorphRequest;
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::traits::validate_traits_with_imports;
 use crate::types::{
-    StructAttrError, Type, TypeContext, TypeLayout, is_bool, is_integer, is_numeric, is_string,
-    is_void, parse_struct_attributes, struct_layout,
+    is_bool, is_integer, is_numeric, is_string, is_void, parse_struct_attributes, struct_layout,
+    StructAttrError, Type, TypeContext, TypeLayout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,9 +192,58 @@ impl TypeChecker {
                             .push(sig);
                     }
                 }
-                crate::module_artifact::ExportKind::Struct
-                | crate::module_artifact::ExportKind::Enum => {
+                crate::module_artifact::ExportKind::Struct => {
                     self.imported_types.insert(export.name.clone());
+                    let mut fields = HashMap::new();
+                    for field in &export.fields {
+                        if let Ok(field_ty) =
+                            crate::types::Type::from_canonical_key(&field.type_key)
+                        {
+                            fields.insert(field.name.clone(), field_ty);
+                        }
+                    }
+                    if !fields.is_empty() {
+                        self.struct_defs.insert(
+                            export.name.clone(),
+                            StructDef {
+                                type_params: Vec::new(),
+                                fields,
+                            },
+                        );
+                    }
+                    if let Some(layout) = export.layout {
+                        if let (Some(size), Some(align)) = (layout.size, layout.align) {
+                            self.type_ctx.register_named(
+                                &[export.name.clone()],
+                                TypeLayout::known(size as usize, align as usize),
+                            );
+                        }
+                    }
+                }
+                crate::module_artifact::ExportKind::Enum => {
+                    self.imported_types.insert(export.name.clone());
+                    let backing_type = export
+                        .enum_backing_type
+                        .as_deref()
+                        .and_then(|text| ast_type_from_canonical_key(text).ok())
+                        .and_then(|ty| match *ty.kind {
+                            ast::TypeKind::Primitive(ref primitive) => Some(primitive.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or(ast::PrimitiveType::I32);
+                    let variants = export
+                        .enum_variants
+                        .iter()
+                        .map(|variant| (variant.name.clone(), variant.value))
+                        .collect::<HashMap<_, _>>();
+                    self.enum_defs.insert(
+                        export.name.clone(),
+                        EnumDef {
+                            backing_type: backing_type.clone(),
+                            variants,
+                        },
+                    );
+                    self.register_enum_layout(&export.name, &backing_type);
                 }
                 crate::module_artifact::ExportKind::Trait => {
                     self.imported_traits.insert(export.name.clone());
@@ -410,10 +459,7 @@ impl TypeChecker {
                     Some(expr) => {
                         let found = self.check_expr(expr, Some(&expected));
                         if Self::is_void_like(&expected) {
-                            self.error(
-                                "void function cannot return a value",
-                                expr.span.clone(),
-                            );
+                            self.error("void function cannot return a value", expr.span.clone());
                         } else if !self.is_assignable(&expected, &found)
                             && !self.is_implicitly_castable(&found, &expected)
                         {
@@ -1474,7 +1520,10 @@ impl TypeChecker {
             return true;
         }
 
-        match (self.enum_backing_type(expected), self.enum_backing_type(found)) {
+        match (
+            self.enum_backing_type(expected),
+            self.enum_backing_type(found),
+        ) {
             (Some(expected_backing), Some(found_backing)) => expected_backing == found_backing,
             _ => false,
         }
@@ -1613,10 +1662,8 @@ impl TypeChecker {
             (self.enum_backing_type(from), self.enum_backing_type(to))
         {
             if !matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)) {
-                return self.is_castable(
-                    &Type::Primitive(from_backing),
-                    &Type::Primitive(to_backing),
-                );
+                return self
+                    .is_castable(&Type::Primitive(from_backing), &Type::Primitive(to_backing));
             }
         }
         self.is_primitive_type(from) && self.is_primitive_type(to)
@@ -2144,9 +2191,7 @@ impl TypeChecker {
         let bytes = match backing_type {
             ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,
             ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
-            ast::PrimitiveType::I32
-            | ast::PrimitiveType::U32
-            | ast::PrimitiveType::Char => 4,
+            ast::PrimitiveType::I32 | ast::PrimitiveType::U32 | ast::PrimitiveType::Char => 4,
             ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => 8,
             ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
             _ => return,
@@ -2382,11 +2427,9 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            errors
-                .iter()
-                .any(|error| error
-                    .message
-                    .contains("enum members must be accessed through the enum type name")),
+            errors.iter().any(|error| error
+                .message
+                .contains("enum members must be accessed through the enum type name")),
             "expected enum member access error, got {errors:?}"
         );
     }
@@ -2617,7 +2660,9 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
         assert!(
-            errors.iter().any(|error| error.message.contains("plain `void`")),
+            errors
+                .iter()
+                .any(|error| error.message.contains("plain `void`")),
             "expected plain void diagnostic, got {errors:?}"
         );
     }
@@ -2628,9 +2673,9 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("void function cannot return a value")),
+            errors.iter().any(|error| error
+                .message
+                .contains("void function cannot return a value")),
             "expected void return diagnostic, got {errors:?}"
         );
     }

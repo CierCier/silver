@@ -2,10 +2,6 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
-use inkwell::AddressSpace;
-use inkwell::FloatPredicate;
-use inkwell::IntPredicate;
-use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
@@ -17,9 +13,14 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionTy
 use inkwell::values::{
     ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
+use inkwell::AddressSpace;
+use inkwell::FloatPredicate;
+use inkwell::IntPredicate;
+use inkwell::OptimizationLevel;
 
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::lexer::Span;
+use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::types::Type;
@@ -67,6 +68,7 @@ pub struct LlvmIrGenerator<'ctx> {
     variables: Vec<HashMap<String, VarInfo<'ctx>>>,
     function_sigs: HashMap<SymbolId, FunctionSig>,
     function_name_to_symbol: HashMap<String, SymbolId>,
+    imported_function_links: HashMap<String, String>,
     extern_globals: HashMap<String, ast::Type>,
     global_variables: HashMap<String, ast::Type>,
     struct_types: HashMap<String, StructType<'ctx>>,
@@ -129,6 +131,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
+            imported_function_links: HashMap::new(),
             extern_globals: HashMap::new(),
             global_variables: HashMap::new(),
             struct_types: HashMap::new(),
@@ -142,6 +145,43 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_stack: Vec::new(),
             symbol_table: table.clone(),
         };
+        generator.generate_program(program)?;
+        table.absorb_from(&generator.symbol_table);
+        Ok(generator.finish())
+    }
+
+    pub fn generate_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<String> {
+        let context = Context::create();
+        let module = context.create_module("silver");
+        let builder = context.create_builder();
+        let mut generator = LlvmIrGenerator {
+            context: &context,
+            module,
+            builder,
+            current_fn: None,
+            current_return_type: None,
+            variables: vec![HashMap::new()],
+            function_sigs: HashMap::new(),
+            function_name_to_symbol: HashMap::new(),
+            imported_function_links: HashMap::new(),
+            extern_globals: HashMap::new(),
+            global_variables: HashMap::new(),
+            struct_types: HashMap::new(),
+            struct_fields: HashMap::new(),
+            enum_backing_types: HashMap::new(),
+            enum_variants: HashMap::new(),
+            method_receivers: HashMap::new(),
+            string_constants: HashMap::new(),
+            struct_generics: HashMap::new(),
+            generic_impl_templates: Vec::new(),
+            loop_stack: Vec::new(),
+            symbol_table: table.clone(),
+        };
+        generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())
@@ -166,6 +206,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<()> {
         Self::emit_target_file(
             program,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+        )
+    }
+
+    pub fn emit_object_file_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
             path,
             target_triple,
             opt_level,
@@ -201,8 +260,47 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    pub fn emit_assembly_file_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Assembly,
+            table,
+        )
+    }
+
     fn emit_target_file(
         program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        file_type: FileType,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            &[],
+            path,
+            target_triple,
+            opt_level,
+            file_type,
+            table,
+        )
+    }
+
+    fn emit_target_file_with_imports(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
         path: &Path,
         target_triple: Option<&str>,
         opt_level: Option<&str>,
@@ -221,6 +319,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             variables: vec![HashMap::new()],
             function_sigs: HashMap::new(),
             function_name_to_symbol: HashMap::new(),
+            imported_function_links: HashMap::new(),
             extern_globals: HashMap::new(),
             global_variables: HashMap::new(),
             struct_types: HashMap::new(),
@@ -234,6 +333,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_stack: Vec::new(),
             symbol_table: table.clone(),
         };
+        generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
 
@@ -276,6 +376,118 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     path.display()
                 ))
             })
+    }
+
+    fn declare_imported_modules(
+        &mut self,
+        imported_modules: &[ModuleArtifact],
+    ) -> CodegenResult<()> {
+        for module in imported_modules {
+            for export in &module.exports {
+                if !export.is_struct() {
+                    continue;
+                }
+                self.struct_types
+                    .entry(export.name.clone())
+                    .or_insert_with(|| self.context.opaque_struct_type(&export.name));
+                let fields = export
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        ast_type_from_canonical_key(&field.type_key)
+                            .map(|ty| (field.name.clone(), ty))
+                            .map_err(CodegenError::new)
+                    })
+                    .collect::<CodegenResult<Vec<_>>>()?;
+                self.struct_fields.insert(export.name.clone(), fields);
+            }
+        }
+
+        for module in imported_modules {
+            for export in &module.exports {
+                match export.kind {
+                    crate::module_artifact::ExportKind::Function => {
+                        let llvm_name = export
+                            .link_name
+                            .clone()
+                            .unwrap_or_else(|| export.name.clone());
+                        let (params, return_type) =
+                            crate::types::parse_canonical_function_signature(&export.signature)
+                                .map_err(CodegenError::new)?;
+                        let param_ast = params
+                            .into_iter()
+                            .map(|param| param.to_ast())
+                            .collect::<Vec<_>>();
+                        let return_ast = if matches!(return_type, Type::Unit) {
+                            None
+                        } else {
+                            Some(return_type.to_ast())
+                        };
+                        self.imported_function_links
+                            .insert(export.name.clone(), llvm_name.clone());
+                        self.register_function_signature(
+                            &llvm_name,
+                            FunctionSig {
+                                params: param_ast.clone(),
+                                return_type: return_ast.clone(),
+                                is_variadic: export.is_variadic,
+                            },
+                            None,
+                            SymbolKind::ExternFunction,
+                        );
+                        if self.module.get_function(&llvm_name).is_none() {
+                            let fn_ty = self.lower_function_type(
+                                &param_ast,
+                                return_ast.as_ref(),
+                                export.is_variadic,
+                            )?;
+                            self.module.add_function(&llvm_name, fn_ty, None);
+                        }
+                    }
+                    crate::module_artifact::ExportKind::Struct => {
+                        let Some(struct_ty) = self.struct_types.get(&export.name).copied() else {
+                            continue;
+                        };
+                        let field_types = export
+                            .fields
+                            .iter()
+                            .map(|field| {
+                                ast_type_from_canonical_key(&field.type_key)
+                                    .map_err(CodegenError::new)
+                            })
+                            .collect::<CodegenResult<Vec<_>>>()?;
+                        let llvm_fields = field_types
+                            .iter()
+                            .map(|field| self.lower_basic_type(field))
+                            .collect::<CodegenResult<Vec<_>>>()?;
+                        if struct_ty.count_fields() == 0 {
+                            struct_ty.set_body(&llvm_fields, false);
+                        }
+                    }
+                    crate::module_artifact::ExportKind::Enum => {
+                        if let Some(backing) = &export.enum_backing_type {
+                            let ty =
+                                ast_type_from_canonical_key(backing).map_err(CodegenError::new)?;
+                            if let ast::TypeKind::Primitive(primitive) = *ty.kind {
+                                self.enum_backing_types
+                                    .insert(export.name.clone(), primitive);
+                            }
+                        }
+                        self.enum_variants.insert(
+                            export.name.clone(),
+                            export
+                                .enum_variants
+                                .iter()
+                                .map(|variant| (variant.name.clone(), variant.value))
+                                .collect(),
+                        );
+                    }
+                    crate::module_artifact::ExportKind::Trait => {}
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
@@ -721,10 +933,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(struct_ty)
     }
 
-    fn enum_backing_type_for_named(
-        &self,
-        named: &ast::NamedType,
-    ) -> Option<ast::PrimitiveType> {
+    fn enum_backing_type_for_named(&self, named: &ast::NamedType) -> Option<ast::PrimitiveType> {
         if named.path.len() != 1 {
             return None;
         }
@@ -786,7 +995,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 last_underscore = true;
             }
         }
-        if out.is_empty() { "_".to_string() } else { out }
+        if out.is_empty() {
+            "_".to_string()
+        } else {
+            out
+        }
     }
 
     fn monomorph_owner_name_from_named(named: &ast::NamedType) -> String {
@@ -3035,13 +3248,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ));
         };
 
-        let function = self.module.get_function(&identifier.name).ok_or_else(|| {
+        let llvm_name = self
+            .imported_function_links
+            .get(&identifier.name)
+            .cloned()
+            .unwrap_or_else(|| identifier.name.clone());
+        let function = self.module.get_function(&llvm_name).ok_or_else(|| {
             CodegenError::with_span(
                 format!("unknown function `{}`", identifier.name),
                 identifier.span.clone(),
             )
         })?;
-        let signature = self.signature_for_name(&identifier.name);
+        let signature = self
+            .signature_for_name(&llvm_name)
+            .or_else(|| self.signature_for_name(&identifier.name));
         let declared_param_count = signature
             .as_ref()
             .map(|sig| sig.params.len())
@@ -3495,7 +3715,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
         })?;
 
-        if return_old { Ok(current) } else { Ok(updated) }
+        if return_old {
+            Ok(current)
+        } else {
+            Ok(updated)
+        }
     }
 
     fn emit_binary_expression(
@@ -4727,8 +4951,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
         }
 
-        self.enum_backing_types
-            .insert(item.name.name.clone(), choose_enum_backing_type(min_value, max_value));
+        self.enum_backing_types.insert(
+            item.name.name.clone(),
+            choose_enum_backing_type(min_value, max_value),
+        );
         self.enum_variants.insert(item.name.name.clone(), variants);
         Ok(())
     }

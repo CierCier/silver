@@ -6,24 +6,21 @@
 struct FILE {
     i32 _opaque;
 }
-
-
 const i32 EOF = -1;
 
-
 enum IO_SEEK {
-	SET = 0;
-	CURSOR = 1;
-	END = 2;
-};
+    SET = 0;
+    CURSOR = 1;
+    END = 2;
+}
 
 enum IO_BUFFERING {
-	FULL = 0;
-	LINE = 1;
-	NONE = 2;
-};
+    FULL = 0;
+    LINE = 1;
+    NONE = 2;
+}
 
-
+// Raw stdio symbols.
 extern "C" FILE* stdin;
 extern "C" FILE* stdout;
 extern "C" FILE* stderr;
@@ -68,6 +65,7 @@ extern "C" i32 feof(FILE* stream);
 extern "C" i32 ferror(FILE* stream);
 extern "C" void perror(const char* message);
 
+// Safer FILE wrapper.
 struct File {
     FILE* raw;
     bool is_open;
@@ -106,8 +104,12 @@ impl File {
         return self.raw != 0;
     }
 
+    bool invalid(File self) {
+        return !self.valid();
+    }
+
     i32 close(File* self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             self.is_open = false;
             return 0;
         }
@@ -120,35 +122,35 @@ impl File {
     }
 
     i32 flush(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         return fflush(self.raw);
     }
 
     i32 read_char(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         return fgetc(self.raw);
     }
 
     i32 write_char(File self, i32 ch) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         return fputc(ch, self.raw);
     }
 
     i32 write_str(File self, str text) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         return fputs(text, self.raw);
     }
 
     i32 write_line(File self, str text) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         i32 result = fputs(text, self.raw);
@@ -159,42 +161,47 @@ impl File {
     }
 
     i64 read(File self, void* buffer, i64 elem_size, i64 elem_count) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return 0;
         }
         return fread(buffer, elem_size, elem_count, self.raw);
     }
 
     i64 write(File self, const void* buffer, i64 elem_size, i64 elem_count) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return 0;
         }
         return fwrite(buffer, elem_size, elem_count, self.raw);
     }
 
     i32 push_back(File self, i32 ch) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return EOF;
         }
         return ungetc(ch, self.raw);
     }
 
     bool seek(File self, i64 offset) {
-        return self.seek_from(offset, io_seek_set());
+        return self.seek_from(offset, IO_SEEK.SET);
     }
 
-    bool seek_from(File self, i64 offset, i32 origin) {
-        if (!self.valid()) {
+    bool seek_to_start(File self) {
+        return self.seek_from(0, IO_SEEK.SET);
+    }
+
+    bool seek_to_end(File self) {
+        return self.seek_from(0, IO_SEEK.END);
+    }
+
+    bool seek_from(File self, i64 offset, IO_SEEK origin) {
+        if (self.invalid()) {
             return false;
         }
-        if (fseek(self.raw, offset, origin) == 0) {
-            return true;
-        }
-        return false;
+        return fseek(self.raw, offset, (i32) origin) == 0;
     }
 
     i64 tell(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return -1;
         }
         return ftell(self.raw);
@@ -207,23 +214,17 @@ impl File {
     }
 
     bool eof(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return true;
         }
-        if (feof(self.raw) != 0) {
-            return true;
-        }
-        return false;
+        return feof(self.raw) != 0;
     }
 
     bool error(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return true;
         }
-        if (ferror(self.raw) != 0) {
-            return true;
-        }
-        return false;
+        return ferror(self.raw) != 0;
     }
 
     void clear_error(File self) {
@@ -233,7 +234,7 @@ impl File {
     }
 
     i64 size(File self) {
-        if (!self.valid()) {
+        if (self.invalid()) {
             return -1;
         }
 
@@ -241,20 +242,32 @@ impl File {
         if (pos < 0) {
             return -1;
         }
-        if (fseek(self.raw, 0, io_seek_end()) != 0) {
+        if (!self.seek_to_end()) {
             return -1;
         }
 
         i64 end = ftell(self.raw);
-        fseek(self.raw, pos, io_seek_set());
+        self.seek_from(pos, IO_SEEK.SET);
         return end;
     }
 
-    i32 set_buffer(File self, char* buffer, i32 mode, i64 size) {
-        if (!self.valid()) {
+    i32 set_buffer(File self, char* buffer, IO_BUFFERING mode, i64 size) {
+        if (self.invalid()) {
             return EOF;
         }
-        return setvbuf(self.raw, buffer, mode, size);
+        return setvbuf(self.raw, buffer, (i32) mode, size);
+    }
+
+    i32 set_full_buffer(File self, char* buffer, i64 size) {
+        return self.set_buffer(buffer, IO_BUFFERING.FULL, size);
+    }
+
+    i32 set_line_buffer(File self, char* buffer, i64 size) {
+        return self.set_buffer(buffer, IO_BUFFERING.LINE, size);
+    }
+
+    i32 set_no_buffer(File self) {
+        return self.set_buffer(0, IO_BUFFERING.NONE, 0);
     }
 
     void set_unbuffered(File self) {
@@ -264,6 +277,7 @@ impl File {
     }
 }
 
+// Convenience constructors.
 File stdin_file() {
     return File.from_raw(stdin);
 }
@@ -280,6 +294,7 @@ File temp_file() {
     return File.from_raw(tmpfile());
 }
 
+// High-level helpers.
 i32 println(str text) {
     return puts(text);
 }
@@ -298,7 +313,7 @@ i32 eprintln(str text) {
 
 bool file_exists(str path) {
     File file = File.open_read(path);
-    if (!file.valid()) {
+    if (file.invalid()) {
         return false;
     }
     file.close();
@@ -306,15 +321,9 @@ bool file_exists(str path) {
 }
 
 bool file_delete(str path) {
-    if (remove(path) == 0) {
-        return true;
-    }
-    return false;
+    return remove(path) == 0;
 }
 
 bool file_rename(str from, str to) {
-    if (rename(from, to) == 0) {
-        return true;
-    }
-    return false;
+    return rename(from, to) == 0;
 }

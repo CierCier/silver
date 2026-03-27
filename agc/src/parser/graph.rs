@@ -2255,9 +2255,12 @@ impl GraphParser {
         let mut path = Vec::new();
         let mut cursor = start + 1;
 
-        while cursor + 1 < end {
+        while cursor < end {
             let token = &tokens[cursor];
             if let Token::Identifier(name) = &token.kind {
+                if name == "as" {
+                    break;
+                }
                 path.push(ast::Identifier {
                     name: name.clone(),
                     span: token.span.clone(),
@@ -2283,10 +2286,106 @@ impl GraphParser {
             });
         }
 
+        let mut alias = None;
+        if cursor < end {
+            if let Token::Identifier(keyword) = &tokens[cursor].kind {
+                if keyword == "as" {
+                    cursor += 1;
+                    let token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected alias after `as`".to_string(),
+                        span: tokens[end.saturating_sub(1)].span.clone(),
+                    })?;
+                    let Token::Identifier(name) = &token.kind else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected identifier after `as`".to_string(),
+                            span: token.span.clone(),
+                        });
+                    };
+                    alias = Some(ast::Identifier {
+                        name: name.clone(),
+                        span: token.span.clone(),
+                    });
+                    cursor += 1;
+                }
+            }
+        }
+
+        let mut items = None;
+        if cursor < end && !matches!(tokens[cursor].kind, Token::Semicolon) {
+            if !matches!(tokens[cursor].kind, Token::LeftBrace) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected `{` or `;` after import path".to_string(),
+                    span: tokens[cursor].span.clone(),
+                });
+            }
+            cursor += 1;
+            let mut imported_items = Vec::new();
+            while cursor < end {
+                if matches!(tokens[cursor].kind, Token::RightBrace) {
+                    break;
+                }
+                let token = &tokens[cursor];
+                let Token::Identifier(name) = &token.kind else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected imported item name".to_string(),
+                        span: token.span.clone(),
+                    });
+                };
+                let mut item_alias = None;
+                let item_name = ast::Identifier {
+                    name: name.clone(),
+                    span: token.span.clone(),
+                };
+                cursor += 1;
+                if cursor < end {
+                    if let Token::Identifier(keyword) = &tokens[cursor].kind {
+                        if keyword == "as" {
+                            cursor += 1;
+                            let alias_token = tokens.get(cursor).ok_or_else(|| {
+                                ParseError::InvalidSyntax {
+                                    message: "expected alias after `as`".to_string(),
+                                    span: token.span.clone(),
+                                }
+                            })?;
+                            let Token::Identifier(alias_name) = &alias_token.kind else {
+                                return Err(ParseError::InvalidSyntax {
+                                    message: "expected identifier after `as`".to_string(),
+                                    span: alias_token.span.clone(),
+                                });
+                            };
+                            item_alias = Some(ast::Identifier {
+                                name: alias_name.clone(),
+                                span: alias_token.span.clone(),
+                            });
+                            cursor += 1;
+                        }
+                    }
+                }
+                imported_items.push(ast::ImportedItem {
+                    name: item_name,
+                    alias: item_alias,
+                });
+                if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                    cursor += 1;
+                    continue;
+                }
+                if cursor < end && matches!(tokens[cursor].kind, Token::RightBrace) {
+                    continue;
+                }
+                if cursor < end {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected `,` or `}` in import item list".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                }
+            }
+            items = Some(imported_items);
+        }
+
         Ok(ast::ImportItem {
             path,
-            alias: None,
-            items: None,
+            alias,
+            items,
         })
     }
 
