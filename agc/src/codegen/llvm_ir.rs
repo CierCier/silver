@@ -1023,6 +1023,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         format!("{owner}__{method}")
     }
 
+    fn cast_method_name(target_type: &ast::Type) -> String {
+        match target_type.kind.as_ref() {
+            ast::TypeKind::Primitive(prim) => format!("cast_{:?}", prim).to_lowercase(),
+            ast::TypeKind::Named(named) => {
+                format!("cast_{}", Self::named_type_name(named))
+            }
+            ast::TypeKind::Pointer(ptr) => {
+                format!("cast_ptr_{}", Self::cast_method_name(&ptr.inner))
+            }
+            _ => {
+                format!("cast_custom")
+            }
+        }
+    }
+
     fn owner_name_from_type(ty: &ast::Type) -> Option<String> {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => Some(Self::monomorph_owner_name_from_named(named)),
@@ -1448,57 +1463,102 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         };
 
         for impl_item in &item.items {
-            let ast::ImplItemKind::Function(func) = impl_item else {
-                continue;
-            };
-            if func.generics.is_some() {
-                continue;
-            }
-            if self.has_generic_placeholder_signature(&func.parameters, func.return_type.as_ref()) {
-                continue;
-            }
+            match impl_item {
+                ast::ImplItemKind::Function(func) => {
+                    if func.generics.is_some() {
+                        continue;
+                    }
+                    if self.has_generic_placeholder_signature(
+                        &func.parameters,
+                        func.return_type.as_ref(),
+                    ) {
+                        continue;
+                    }
 
-            let expects_ref = func
-                .parameters
-                .first()
-                .map(|param| matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_)))
-                .unwrap_or(false);
-            self.method_receivers
-                .entry((owner.clone(), func.name.name.clone()))
-                .or_insert(expects_ref);
-
-            let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
-            let effective_visibility =
-                Self::method_effective_visibility(impl_visibility, &func.visibility);
-            self.register_function_signature(
-                &mangled_name,
-                FunctionSig {
-                    params: func
+                    let expects_ref = func
                         .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect(),
-                    return_type: func.return_type.clone(),
-                    is_variadic: false,
-                },
-                Some(func.name.span.clone()),
-                SymbolKind::ImplMethod,
-            );
+                        .first()
+                        .map(|param| {
+                            matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_))
+                        })
+                        .unwrap_or(false);
+                    self.method_receivers
+                        .entry((owner.clone(), func.name.name.clone()))
+                        .or_insert(expects_ref);
 
-            if self.module.get_function(&mangled_name).is_none() {
-                let fn_ty = self.lower_function_type(
-                    &func
-                        .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect::<Vec<_>>(),
-                    func.return_type.as_ref(),
-                    false,
-                )?;
-                let function = self.module.add_function(&mangled_name, fn_ty, None);
-                Self::apply_function_linkage(function, &effective_visibility);
-            } else if let Some(function) = self.module.get_function(&mangled_name) {
-                Self::apply_function_linkage(function, &effective_visibility);
+                    let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
+                    let effective_visibility =
+                        Self::method_effective_visibility(impl_visibility, &func.visibility);
+                    self.register_function_signature(
+                        &mangled_name,
+                        FunctionSig {
+                            params: func
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect(),
+                            return_type: func.return_type.clone(),
+                            is_variadic: false,
+                        },
+                        Some(func.name.span.clone()),
+                        SymbolKind::ImplMethod,
+                    );
+
+                    if self.module.get_function(&mangled_name).is_none() {
+                        let fn_ty = self.lower_function_type(
+                            &func
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect::<Vec<_>>(),
+                            func.return_type.as_ref(),
+                            false,
+                        )?;
+                        let function = self.module.add_function(&mangled_name, fn_ty, None);
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    } else if let Some(function) = self.module.get_function(&mangled_name) {
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    }
+                }
+                ast::ImplItemKind::Cast(cast) => {
+                    if self.has_generic_placeholder_signature(&cast.parameters, Some(&cast.target_type)) {
+                        continue;
+                    }
+                    let cast_method_name = Self::cast_method_name(&cast.target_type);
+                    let mangled_name = Self::mangle_method_name(&owner, &cast_method_name);
+                    let effective_visibility =
+                        Self::method_effective_visibility(impl_visibility, &ast::Visibility::Private);
+                    self.register_function_signature(
+                        &mangled_name,
+                        FunctionSig {
+                            params: cast
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect(),
+                            return_type: Some(cast.target_type.clone()),
+                            is_variadic: false,
+                        },
+                        Some(cast.span.clone()),
+                        SymbolKind::ImplMethod,
+                    );
+                    if self.module.get_function(&mangled_name).is_none() {
+                        let fn_ty = self.lower_function_type(
+                            &cast
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect::<Vec<_>>(),
+                            Some(&cast.target_type),
+                            false,
+                        )?;
+                        let function = self.module.add_function(&mangled_name, fn_ty, None);
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    } else if let Some(function) = self.module.get_function(&mangled_name) {
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -2171,7 +2231,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 target_type,
             } => {
                 let source = self.emit_expression_value(expression)?;
-                self.cast_value_to_ast_type(source, target_type, &expr.span)
+
+                let cast_method_name = Self::cast_method_name(target_type);
+                let owners = self.receiver_owner_candidates(expression);
+                let found = owners.iter().find_map(|owner| {
+                    let name = Self::mangle_method_name(owner, &cast_method_name);
+                    self.module.get_function(&name)
+                });
+
+                if let Some(cast_fn) = found {
+                    let args = vec![BasicMetadataValueEnum::from(source)];
+                    let call = self
+                        .builder
+                        .build_call(cast_fn, &args, "cast.result")
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to call user-defined cast: {e}"),
+                                expr.span.clone(),
+                            )
+                        })?;
+                    call.try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::with_span(
+                                "user-defined cast returned void".to_string(),
+                                expr.span.clone(),
+                            )
+                        })
+                } else {
+                    self.cast_value_to_ast_type(source, target_type, &expr.span)
+                }
             }
             ast::ExpressionKind::If {
                 condition,
@@ -2209,6 +2298,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             expr.span.clone(),
                         )
                     })
+            }
+            ast::ExpressionKind::Reference { expression, .. } => {
+                let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
+                Ok(ptr.as_basic_value_enum())
             }
             _ => Err(CodegenError::with_span(
                 format!(
@@ -3153,54 +3246,107 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::Index { object, index } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
-                let ast::TypeKind::Array(array) = object_ty.kind.as_ref() else {
-                    return Err(CodegenError::with_span(
-                        "index access currently supports only array values",
-                        object.span.clone(),
-                    ));
-                };
-
-                let array_ty = self.lower_basic_type(&object_ty)?;
-
-                let index_value = self.emit_expression_value(index)?;
-                let BasicValueEnum::IntValue(index_int) = index_value else {
-                    return Err(CodegenError::with_span(
-                        "array index must be an integer",
-                        index.span.clone(),
-                    ));
-                };
-
-                let i32_ty = self.context.i32_type();
-                let index_i32 = if index_int.get_type().get_bit_width() == 32 {
-                    index_int
-                } else {
-                    self.builder
-                        .build_int_cast(index_int, i32_ty, "idx.cast")
+                match object_ty.kind.as_ref() {
+                    ast::TypeKind::Array(array) => {
+                        let array_ty = self.lower_basic_type(&object_ty)?;
+                        let index_value = self.emit_expression_value(index)?;
+                        let BasicValueEnum::IntValue(index_int) = index_value else {
+                            return Err(CodegenError::with_span(
+                                "array index must be an integer",
+                                index.span.clone(),
+                            ));
+                        };
+                        let i32_ty = self.context.i32_type();
+                        let index_i32 = if index_int.get_type().get_bit_width() == 32 {
+                            index_int
+                        } else {
+                            self.builder
+                                .build_int_cast(index_int, i32_ty, "idx.cast")
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("failed to cast array index: {e}"),
+                                        index.span.clone(),
+                                    )
+                                })?
+                        };
+                        let zero = i32_ty.const_zero();
+                        let element_ptr = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                array_ty,
+                                object_ptr,
+                                &[zero, index_i32],
+                                "idx.ptr",
+                            )
+                        }
                         .map_err(|e| {
                             CodegenError::with_span(
-                                format!("failed to cast array index: {e}"),
+                                format!("failed array indexing: {e}"),
                                 index.span.clone(),
                             )
-                        })?
-                };
-
-                let zero = i32_ty.const_zero();
-                let element_ptr = unsafe {
-                    self.builder.build_in_bounds_gep(
-                        array_ty,
-                        object_ptr,
-                        &[zero, index_i32],
-                        "idx.ptr",
-                    )
+                        })?;
+                        Ok((element_ptr, (*array.element_type).clone()))
+                    }
+                    ast::TypeKind::Pointer(pointer) => {
+                        let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
+                        let loaded = self
+                            .builder
+                            .build_load(ptr_llvm_ty, object_ptr, "ptr.idx.load")
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to load pointer for indexing: {e}"),
+                                    object.span.clone(),
+                                )
+                            })?;
+                        let BasicValueEnum::PointerValue(base_ptr) = loaded else {
+                            return Err(CodegenError::with_span(
+                                "pointer indexing requires a pointer value",
+                                object.span.clone(),
+                            ));
+                        };
+                        let index_value = self.emit_expression_value(index)?;
+                        let BasicValueEnum::IntValue(index_int) = index_value else {
+                            return Err(CodegenError::with_span(
+                                "pointer index must be an integer",
+                                index.span.clone(),
+                            ));
+                        };
+                        let i32_ty = self.context.i32_type();
+                        let index_i32 = if index_int.get_type().get_bit_width() == 32 {
+                            index_int
+                        } else {
+                            self.builder
+                                .build_int_cast(index_int, i32_ty, "idx.cast")
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("failed to cast pointer index: {e}"),
+                                        index.span.clone(),
+                                    )
+                                })?
+                        };
+                        let element_llvm_ty = self.lower_basic_type(&pointer.inner)?;
+                        let element_ptr = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                element_llvm_ty,
+                                base_ptr,
+                                &[index_i32],
+                                "ptr.idx.ptr",
+                            )
+                        }
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed pointer indexing: {e}"),
+                                index.span.clone(),
+                            )
+                        })?;
+                        Ok((element_ptr, (*pointer.inner).clone()))
+                    }
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "index access currently supports only array and pointer values",
+                            object.span.clone(),
+                        ));
+                    }
                 }
-                .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("failed array indexing: {e}"),
-                        index.span.clone(),
-                    )
-                })?;
-
-                Ok((element_ptr, (*array.element_type).clone()))
             }
             _ => Err(CodegenError::with_span(
                 "expression is not assignable",
@@ -3341,6 +3487,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             function
         } else {
             let receiver_ty = match receiver.kind.as_ref() {
+                ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
                 ast::ExpressionKind::Identifier(identifier) => {
                     self.lookup_value_type(&identifier.name)
                 }
@@ -3606,6 +3753,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         whole_expr.span.clone(),
                     )),
                 }
+            }
+            ast::UnaryOperator::Dereference => {
+                let (operand_ptr, operand_ty) = self.resolve_lvalue_ptr(operand)?;
+                let ptr_llvm_ty = self.lower_basic_type(&operand_ty)?;
+                let loaded_ptr = self
+                    .builder
+                    .build_load(ptr_llvm_ty, operand_ptr, "deref.ptr")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to load dereference operand: {e}"),
+                            whole_expr.span.clone(),
+                        )
+                    })?;
+                let inner_ty = match operand_ty.kind.as_ref() {
+                    ast::TypeKind::Pointer(pointer) => &pointer.inner,
+                    ast::TypeKind::Reference(reference) => &reference.inner,
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "dereference requires pointer or reference operand",
+                            whole_expr.span.clone(),
+                        ));
+                    }
+                };
+                let BasicValueEnum::PointerValue(ptr_value) = loaded_ptr else {
+                    return Err(CodegenError::with_span(
+                        "dereference operand did not lower to a pointer",
+                        whole_expr.span.clone(),
+                    ));
+                };
+                let inner_llvm_ty = self.lower_basic_type(inner_ty)?;
+                self.builder
+                    .build_load(inner_llvm_ty, ptr_value, "deref.load")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to dereference pointer: {e}"),
+                            whole_expr.span.clone(),
+                        )
+                    })
             }
             ast::UnaryOperator::Not => {
                 let value = self.emit_expression_value(operand)?;
@@ -4980,49 +5165,91 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         };
 
         for impl_item in &item.items {
-            let ast::ImplItemKind::Function(func) = impl_item else {
-                continue;
-            };
-            if func.generics.is_some() {
-                continue;
-            }
-            if self.has_generic_placeholder_signature(&func.parameters, func.return_type.as_ref()) {
-                continue;
-            }
+            match impl_item {
+                ast::ImplItemKind::Function(func) => {
+                    if func.generics.is_some() {
+                        continue;
+                    }
+                    if self.has_generic_placeholder_signature(
+                        &func.parameters,
+                        func.return_type.as_ref(),
+                    ) {
+                        continue;
+                    }
 
-            let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
-            let effective_visibility =
-                Self::method_effective_visibility(visibility, &func.visibility);
-            if self.module.get_function(&mangled_name).is_none() {
-                let fn_ty = self.lower_function_type(
-                    &func
-                        .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect::<Vec<_>>(),
-                    func.return_type.as_ref(),
-                    false,
-                )?;
-                let function = self.module.add_function(&mangled_name, fn_ty, None);
-                Self::apply_function_linkage(function, &effective_visibility);
+                    let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
+                    let effective_visibility =
+                        Self::method_effective_visibility(visibility, &func.visibility);
+                    if self.module.get_function(&mangled_name).is_none() {
+                        let fn_ty = self.lower_function_type(
+                            &func
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect::<Vec<_>>(),
+                            func.return_type.as_ref(),
+                            false,
+                        )?;
+                        let function = self.module.add_function(&mangled_name, fn_ty, None);
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    }
+
+                    let Some(function) = self.module.get_function(&mangled_name) else {
+                        return Err(CodegenError::with_span(
+                            format!("method `{mangled_name}` declaration is missing"),
+                            func.span.clone(),
+                        ));
+                    };
+                    Self::apply_function_linkage(function, &effective_visibility);
+
+                    self.emit_function_body(
+                        function,
+                        &func.parameters,
+                        func.return_type.as_ref(),
+                        &func.body,
+                        &mangled_name,
+                        &func.body.span,
+                    )?;
+                }
+                ast::ImplItemKind::Cast(cast) => {
+                    let cast_method_name = Self::cast_method_name(&cast.target_type);
+                    let mangled_name =
+                        Self::mangle_method_name(&owner, &cast_method_name);
+                    let effective_visibility =
+                        Self::method_effective_visibility(visibility, &ast::Visibility::Private);
+                    if self.module.get_function(&mangled_name).is_none() {
+                        let fn_ty = self.lower_function_type(
+                            &cast
+                                .parameters
+                                .iter()
+                                .map(|param| param.param_type.clone())
+                                .collect::<Vec<_>>(),
+                            Some(&cast.target_type),
+                            false,
+                        )?;
+                        let function = self.module.add_function(&mangled_name, fn_ty, None);
+                        Self::apply_function_linkage(function, &effective_visibility);
+                    }
+
+                    let Some(function) = self.module.get_function(&mangled_name) else {
+                        return Err(CodegenError::with_span(
+                            format!("cast function `{mangled_name}` declaration is missing"),
+                            cast.span.clone(),
+                        ));
+                    };
+                    Self::apply_function_linkage(function, &effective_visibility);
+
+                    self.emit_function_body(
+                        function,
+                        &cast.parameters,
+                        Some(&cast.target_type),
+                        &cast.body,
+                        &mangled_name,
+                        &cast.body.span,
+                    )?;
+                }
+                _ => {}
             }
-
-            let Some(function) = self.module.get_function(&mangled_name) else {
-                return Err(CodegenError::with_span(
-                    format!("method `{mangled_name}` declaration is missing"),
-                    func.span.clone(),
-                ));
-            };
-            Self::apply_function_linkage(function, &effective_visibility);
-
-            self.emit_function_body(
-                function,
-                &func.parameters,
-                func.return_type.as_ref(),
-                &func.body,
-                &mangled_name,
-                &func.body.span,
-            )?;
         }
 
         Ok(())

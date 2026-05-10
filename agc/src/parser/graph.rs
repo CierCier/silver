@@ -3497,20 +3497,26 @@ impl GraphParser {
         let mut items = Vec::new();
         cursor = body_open + 1;
         while cursor < end - 1 {
-            let Some((method, next_cursor)) = self.parse_impl_method(
-                tokens,
-                cursor,
-                end - 1,
-                &self_type,
-            )?
-            else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "invalid impl item".to_string(),
-                    span: tokens[cursor].span.clone(),
-                });
-            };
-            items.push(ast::ImplItemKind::Function(method));
-            cursor = next_cursor;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Cast)) {
+                let (cast_item, next_cursor) = self.parse_impl_cast(tokens, cursor, end - 1)?;
+                items.push(ast::ImplItemKind::Cast(cast_item));
+                cursor = next_cursor;
+            } else {
+                let Some((method, next_cursor)) = self.parse_impl_method(
+                    tokens,
+                    cursor,
+                    end - 1,
+                    &self_type,
+                )?
+                else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "invalid impl item".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                };
+                items.push(ast::ImplItemKind::Function(method));
+                cursor = next_cursor;
+            }
         }
 
         Ok(ast::ImplItem {
@@ -3588,6 +3594,100 @@ impl GraphParser {
             },
             method_end,
         )))
+    }
+
+    fn parse_impl_cast(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<(ast::ImplCast, usize), ParseError> {
+        let cast_start = tokens[start].span.start;
+        let mut cursor = start + 1;
+        let (target_type, after_type) = self
+            .parse_type_prefix(tokens, cursor, end)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "invalid cast target type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            })?;
+        cursor = after_type;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '(' after cast target type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let Some(rparen) =
+            self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated cast parameter list".to_string(),
+                span: tokens[cursor].span.clone(),
+            });
+        };
+        let mut parameters = Vec::new();
+        let mut pcursor = cursor + 1;
+        while pcursor < rparen {
+            if matches!(tokens.get(pcursor).map(|t| &t.kind), Some(Token::Comma)) {
+                pcursor += 1;
+                continue;
+            }
+            let (param_type, after_param_type) = self
+                .parse_type_prefix(tokens, pcursor, end)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "invalid cast parameter type".to_string(),
+                    span: tokens[pcursor.min(end - 1)].span.clone(),
+                })?;
+            let Token::Identifier(ref param_name) = tokens[after_param_type].kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected cast parameter name".to_string(),
+                    span: tokens[after_param_type.min(end - 1)].span.clone(),
+                });
+            };
+            parameters.push(ast::Parameter {
+                name: ast::Identifier {
+                    name: param_name.clone(),
+                    span: tokens[after_param_type].span.clone(),
+                },
+                param_type,
+                is_mutable: false,
+                span: Span {
+                    start: tokens[pcursor].span.start,
+                    end: tokens[after_param_type].span.end,
+                },
+            });
+            pcursor = after_param_type + 1;
+        }
+        cursor = rparen + 1;
+        let lbrace = cursor;
+        if !matches!(tokens.get(lbrace).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after cast parameters".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let Some(rbrace) =
+            self.find_matching_token(tokens, lbrace, end, Token::LeftBrace, Token::RightBrace)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated cast body".to_string(),
+                span: tokens[lbrace].span.clone(),
+            });
+        };
+        cursor = rbrace + 1;
+        let body = self.parse_block_reduction(tokens, lbrace, cursor)?;
+        Ok((
+            ast::ImplCast {
+                target_type,
+                parameters,
+                body,
+                span: Span {
+                    start: cast_start,
+                    end: tokens[cursor - 1].span.end,
+                },
+            },
+            cursor,
+        ))
     }
 
     fn classify_impl_method(parameters: &[ast::Parameter], impl_self_type: &ast::Type) -> ast::MethodKind {

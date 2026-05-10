@@ -559,11 +559,25 @@ impl PRT_Parser {
             return false;
         };
 
-        self.known_type_names.contains(name)
+        if self.known_type_names.contains(name)
             || matches!(
                 tokens.get(index + 1).map(|next| &next.kind),
                 Some(Token::DoubleColon)
             )
+        {
+            return true;
+        }
+
+        if matches!(tokens.get(index + 1).map(|next| &next.kind), Some(Token::Less)) {
+            if let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len()) {
+                return matches!(
+                    tokens.get(after_type).map(|next| &next.kind),
+                    Some(Token::Identifier(_))
+                );
+            }
+        }
+
+        false
     }
 
     fn statement_type_start_is_unambiguous(
@@ -634,8 +648,19 @@ impl PRT_Parser {
                 | Token::Str
                 | Token::Char
                 | Token::Void
+                | Token::Vec
+                | Token::Optional
                 | Token::Identifier(_)
         )
+    }
+
+    fn type_name_token_name(token: &Token) -> Option<&str> {
+        match token {
+            Token::Identifier(name) => Some(name.as_str()),
+            Token::Vec => Some("Vec"),
+            Token::Optional => Some("Optional"),
+            _ => None,
+        }
     }
 
     fn lookahead_classes(&self, tokens: &[LexToken], start: usize) -> Vec<TokenClass> {
@@ -876,19 +901,28 @@ impl PRT_Parser {
         } else {
             let mut path = Vec::new();
             let base_start = cursor;
-            if let Token::Identifier(name) = &tokens[cursor].kind {
+            let first_name = match &tokens[cursor].kind {
+                Token::Identifier(name) => Some(name.clone()),
+                Token::Vec => Some("Vec".to_string()),
+                Token::Optional => Some("Optional".to_string()),
+                _ => None,
+            };
+            if let Some(name) = first_name {
                 path.push(ast::Identifier {
-                    name: name.clone(),
+                    name,
                     span: tokens[cursor].span.clone(),
                 });
                 cursor += 1;
                 while cursor + 1 < end && matches!(tokens[cursor].kind, Token::DoubleColon) {
                     cursor += 1;
-                    let Token::Identifier(seg) = &tokens[cursor].kind else {
-                        return None;
+                    let seg = match &tokens[cursor].kind {
+                        Token::Identifier(seg) => seg.clone(),
+                        Token::Vec => "Vec".to_string(),
+                        Token::Optional => "Optional".to_string(),
+                        _ => return None,
                     };
                     path.push(ast::Identifier {
-                        name: seg.clone(),
+                        name: seg,
                         span: tokens[cursor].span.clone(),
                     });
                     cursor += 1;
@@ -1324,6 +1358,20 @@ impl PRT_Parser {
                     }],
                     generics: None,
                 }),
+                Token::Vec => ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "Vec".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    }],
+                    generics: None,
+                }),
+                Token::Optional => ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "Optional".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    }],
+                    generics: None,
+                }),
                 _ => return None,
             };
             let mut ty = ast::Type {
@@ -1352,6 +1400,205 @@ impl PRT_Parser {
             Some(ty)
         }
 
+        fn parse_simple_type_prefix(
+            tokens: &[LexToken],
+            start: usize,
+            end: usize,
+        ) -> Option<(ast::Type, usize)> {
+            if start >= end {
+                return None;
+            }
+
+            let mut cursor = start;
+            let mut is_const = false;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Const)) {
+                is_const = true;
+                cursor += 1;
+                if cursor >= end {
+                    return None;
+                }
+            }
+
+            let mut ty = if matches!(tokens[cursor].kind, Token::LeftBracket) {
+                let (element_type, after_element) =
+                    parse_simple_type_prefix(tokens, cursor + 1, end)?;
+                if !matches!(tokens.get(after_element).map(|t| &t.kind), Some(Token::Semicolon)) {
+                    return None;
+                }
+                let size_start = after_element + 1;
+                let mut depth = 0usize;
+                let mut size_end = cursor;
+                while size_end < end {
+                    match tokens[size_end].kind {
+                        Token::LeftBracket => depth += 1,
+                        Token::RightBracket => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    size_end += 1;
+                }
+                if size_end >= end || size_start > size_end {
+                    return None;
+                }
+                let size = if size_start == size_end {
+                    None
+                } else {
+                    None
+                };
+                cursor = size_end + 1;
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+                        element_type: Box::new(element_type),
+                        size,
+                    }))),
+                    span: Span {
+                        start: tokens[start].span.start,
+                        end: tokens[size_end].span.end,
+                    },
+                }
+            } else {
+                let mut path = Vec::new();
+                let base_start = cursor;
+                let first_name = match &tokens[cursor].kind {
+                    Token::Identifier(name) => Some(name.clone()),
+                    Token::Vec => Some("Vec".to_string()),
+                    Token::Optional => Some("Optional".to_string()),
+                    _ => None,
+                };
+                if let Some(name) = first_name {
+                    path.push(ast::Identifier {
+                        name,
+                        span: tokens[cursor].span.clone(),
+                    });
+                    cursor += 1;
+                    while cursor + 1 < end && matches!(tokens[cursor].kind, Token::DoubleColon) {
+                        cursor += 1;
+                        let seg = match &tokens[cursor].kind {
+                            Token::Identifier(seg) => seg.clone(),
+                            Token::Vec => "Vec".to_string(),
+                            Token::Optional => "Optional".to_string(),
+                            _ => return None,
+                        };
+                        path.push(ast::Identifier {
+                            name: seg,
+                            span: tokens[cursor].span.clone(),
+                        });
+                        cursor += 1;
+                    }
+                }
+
+                if !path.is_empty() {
+                    let mut generics = None;
+                    if cursor < end && matches!(tokens[cursor].kind, Token::Less) {
+                        let mut depth = 0usize;
+                        let mut close = cursor;
+                        while close < end {
+                            match tokens[close].kind {
+                                Token::Less => depth += 1,
+                                Token::Greater => {
+                                    depth = depth.saturating_sub(1);
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            close += 1;
+                        }
+                        if close >= end || !matches!(tokens[close].kind, Token::Greater) {
+                            return None;
+                        }
+                        let mut args = Vec::new();
+                        let mut arg_cursor = cursor + 1;
+                        while arg_cursor < close {
+                            let (arg, next_arg) = parse_simple_type_prefix(tokens, arg_cursor, close)?;
+                            args.push(arg);
+                            arg_cursor = next_arg;
+                            if arg_cursor < close {
+                                if !matches!(tokens[arg_cursor].kind, Token::Comma) {
+                                    return None;
+                                }
+                                arg_cursor += 1;
+                            }
+                        }
+                        generics = Some(args);
+                        cursor = close + 1;
+                    }
+
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Named(ast::NamedType { path, generics })),
+                        span: Span {
+                            start: tokens[base_start].span.start,
+                            end: tokens[cursor - 1].span.end,
+                        },
+                    }
+                } else {
+                    let base = match tokens.get(cursor)?.kind {
+                        Token::I8 => ast::TypeKind::Primitive(ast::PrimitiveType::I8),
+                        Token::I16 => ast::TypeKind::Primitive(ast::PrimitiveType::I16),
+                        Token::I32 => ast::TypeKind::Primitive(ast::PrimitiveType::I32),
+                        Token::I64 => ast::TypeKind::Primitive(ast::PrimitiveType::I64),
+                        Token::I128 => ast::TypeKind::Primitive(ast::PrimitiveType::I128),
+                        Token::U8 => ast::TypeKind::Primitive(ast::PrimitiveType::U8),
+                        Token::U16 => ast::TypeKind::Primitive(ast::PrimitiveType::U16),
+                        Token::U32 => ast::TypeKind::Primitive(ast::PrimitiveType::U32),
+                        Token::U64 => ast::TypeKind::Primitive(ast::PrimitiveType::U64),
+                        Token::U128 => ast::TypeKind::Primitive(ast::PrimitiveType::U128),
+                        Token::F32 => ast::TypeKind::Primitive(ast::PrimitiveType::F32),
+                        Token::F64 => ast::TypeKind::Primitive(ast::PrimitiveType::F64),
+                        Token::F80 => ast::TypeKind::Primitive(ast::PrimitiveType::F80),
+                        Token::Bool => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
+                        Token::Str => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
+                        Token::Char => ast::TypeKind::Primitive(ast::PrimitiveType::Char),
+                        Token::Void => ast::TypeKind::Primitive(ast::PrimitiveType::Void),
+                        _ => return None,
+                    };
+                    cursor += 1;
+                    ast::Type {
+                        kind: Box::new(base),
+                        span: tokens[cursor - 1].span.clone(),
+                    }
+                }
+            };
+
+            while cursor < end && matches!(tokens[cursor].kind, Token::Star) {
+                let is_mutable = !is_const;
+                ty = ast::Type {
+                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                        is_mutable,
+                        inner: Box::new(ty),
+                    })),
+                    span: Span {
+                        start: tokens[start].span.start,
+                        end: tokens[cursor].span.end,
+                    },
+                };
+                cursor += 1;
+            }
+
+            Some((ty, cursor))
+        }
+
+        fn parse_named_type_expr_prefix(
+            tokens: &[LexToken],
+            start: usize,
+            end: usize,
+        ) -> Option<(ast::Type, usize)> {
+            let (ty, next) = parse_simple_type_prefix(tokens, start, end)?;
+            let ast::TypeKind::Named(named) = ty.kind.as_ref() else {
+                return None;
+            };
+            if named.generics.is_some() || named.path.len() > 1 {
+                Some((ty, next))
+            } else {
+                None
+            }
+        }
+
         fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
             let token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected expression".to_string(),
@@ -1359,13 +1606,27 @@ impl PRT_Parser {
             })?;
 
             let expr = match &token.kind {
-                Token::Identifier(name) => ast::Expression {
-                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                        name: name.clone(),
+                Token::Identifier(_) | Token::Vec | Token::Optional => {
+                    if let Some((ty, next)) =
+                        parse_named_type_expr_prefix(cursor.tokens, cursor.pos, cursor.end)
+                    {
+                        cursor.pos = next;
+                        return Ok(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
+                            span: ty.span.clone(),
+                        });
+                    }
+                    ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                            name: match &token.kind {
+                                Token::Identifier(name) => name.clone(),
+                                _ => unreachable!(),
+                            },
+                            span: token.span.clone(),
+                        })),
                         span: token.span.clone(),
-                    })),
-                    span: token.span.clone(),
-                },
+                    }
+                }
                 Token::IntLiteral(value) => ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(*value))),
                     span: token.span.clone(),
@@ -1781,6 +2042,7 @@ impl PRT_Parser {
             let operator = match token.kind {
                 Token::Minus => Some(ast::UnaryOperator::Minus),
                 Token::Plus => Some(ast::UnaryOperator::Plus),
+                Token::Star => Some(ast::UnaryOperator::Dereference),
                 Token::Not => Some(ast::UnaryOperator::Not),
                 Token::BitwiseNot => Some(ast::UnaryOperator::BitwiseNot),
                 Token::Increment => Some(ast::UnaryOperator::Increment),
@@ -2222,16 +2484,44 @@ impl PRT_Parser {
                 unreachable!();
             };
 
+            let mut decl_ty = decl_ty;
+            let mut cursor = after_type + 1;
+            while cursor < end - 1 && matches!(tokens[cursor].kind, Token::LeftBracket) {
+                let Some(close) =
+                    self.find_matching_token(tokens, cursor, end - 1, Token::LeftBracket, Token::RightBracket)
+                else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "unterminated array declarator".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                };
+                let size = if cursor + 1 < close {
+                    Some(Box::new(self.parse_expression_reduction(tokens, cursor + 1, close)?))
+                } else {
+                    None
+                };
+                decl_ty = ast::Type {
+                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+                        element_type: Box::new(decl_ty),
+                        size,
+                    }))),
+                    span: Span {
+                        start: tokens[start].span.start,
+                        end: tokens[close].span.end,
+                    },
+                };
+                cursor = close + 1;
+            }
+
             let mut initializer = None;
-            if after_type + 1 < end - 1 {
-                if !matches!(tokens[after_type + 1].kind, Token::Assign) {
+            if cursor < end - 1 {
+                if !matches!(tokens[cursor].kind, Token::Assign) {
                     return Err(ParseError::InvalidSyntax {
                         message: "unsupported declaration syntax in bootstrap parser".to_string(),
-                        span: tokens[after_type + 1].span.clone(),
+                        span: tokens[cursor].span.clone(),
                     });
                 }
-                initializer =
-                    Some(self.parse_expression_reduction(tokens, after_type + 2, end - 1)?);
+                initializer = Some(self.parse_expression_reduction(tokens, cursor + 1, end - 1)?);
             }
             self.known_ident_names.insert(name.clone());
 
@@ -3155,7 +3445,7 @@ impl PRT_Parser {
                 message: "missing struct name".to_string(),
                 span: tokens[start].span.clone(),
             })?;
-        let Token::Identifier(struct_name) = &name_token.kind else {
+        let Some(struct_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected struct identifier".to_string(),
                 span: name_token.span.clone(),
@@ -3230,7 +3520,7 @@ impl PRT_Parser {
 
         Ok(ast::StructItem {
             name: ast::Identifier {
-                name: struct_name.clone(),
+                name: struct_name.to_string(),
                 span: name_token.span.clone(),
             },
             generics,
@@ -3251,7 +3541,7 @@ impl PRT_Parser {
                 message: "missing enum name".to_string(),
                 span: tokens[start].span.clone(),
             })?;
-        let Token::Identifier(enum_name) = &name_token.kind else {
+        let Some(enum_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected enum identifier".to_string(),
                 span: name_token.span.clone(),
@@ -3344,7 +3634,7 @@ impl PRT_Parser {
 
         Ok(ast::EnumItem {
             name: ast::Identifier {
-                name: enum_name.clone(),
+                name: enum_name.to_string(),
                 span: name_token.span.clone(),
             },
             generics,
@@ -3365,7 +3655,7 @@ impl PRT_Parser {
                 message: "missing trait name".to_string(),
                 span: tokens[start].span.clone(),
             })?;
-        let Token::Identifier(trait_name) = &name_token.kind else {
+        let Some(trait_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait identifier".to_string(),
                 span: name_token.span.clone(),
@@ -3444,7 +3734,7 @@ impl PRT_Parser {
 
         Ok(ast::TraitItem {
             name: ast::Identifier {
-                name: trait_name.clone(),
+                name: trait_name.to_string(),
                 span: name_token.span.clone(),
             },
             generics,
@@ -3739,16 +4029,22 @@ impl PRT_Parser {
         let mut items = Vec::new();
         cursor = body_open + 1;
         while cursor < end - 1 {
-            let Some((method, next_cursor)) =
-                self.parse_impl_method(tokens, cursor, end - 1, &self_type)?
-            else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "invalid impl item".to_string(),
-                    span: tokens[cursor].span.clone(),
-                });
-            };
-            items.push(ast::ImplItemKind::Function(method));
-            cursor = next_cursor;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Cast)) {
+                let (cast_item, next_cursor) = self.parse_impl_cast(tokens, cursor, end - 1)?;
+                items.push(ast::ImplItemKind::Cast(cast_item));
+                cursor = next_cursor;
+            } else {
+                let Some((method, next_cursor)) =
+                    self.parse_impl_method(tokens, cursor, end - 1, &self_type)?
+                else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "invalid impl item".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                };
+                items.push(ast::ImplItemKind::Function(method));
+                cursor = next_cursor;
+            }
         }
 
         Ok(ast::ImplItem {
@@ -3831,6 +4127,100 @@ impl PRT_Parser {
             },
             method_end,
         )))
+    }
+
+    fn parse_impl_cast(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<(ast::ImplCast, usize), ParseError> {
+        let cast_start = tokens[start].span.start;
+        let mut cursor = start + 1;
+        let (target_type, after_type) = self
+            .parse_type_prefix(tokens, cursor, end)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "invalid cast target type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            })?;
+        cursor = after_type;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '(' after cast target type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let Some(rparen) =
+            self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated cast parameter list".to_string(),
+                span: tokens[cursor].span.clone(),
+            });
+        };
+        let mut parameters = Vec::new();
+        let mut pcursor = cursor + 1;
+        while pcursor < rparen {
+            if matches!(tokens.get(pcursor).map(|t| &t.kind), Some(Token::Comma)) {
+                pcursor += 1;
+                continue;
+            }
+            let (param_type, after_param_type) = self
+                .parse_type_prefix(tokens, pcursor, end)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "invalid cast parameter type".to_string(),
+                    span: tokens[pcursor.min(end - 1)].span.clone(),
+                })?;
+            let Token::Identifier(ref param_name) = tokens[after_param_type].kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected cast parameter name".to_string(),
+                    span: tokens[after_param_type.min(end - 1)].span.clone(),
+                });
+            };
+            parameters.push(ast::Parameter {
+                name: ast::Identifier {
+                    name: param_name.clone(),
+                    span: tokens[after_param_type].span.clone(),
+                },
+                param_type,
+                is_mutable: false,
+                span: Span {
+                    start: tokens[pcursor].span.start,
+                    end: tokens[after_param_type].span.end,
+                },
+            });
+            pcursor = after_param_type + 1;
+        }
+        cursor = rparen + 1;
+        let lbrace = cursor;
+        if !matches!(tokens.get(lbrace).map(|t| &t.kind), Some(Token::LeftBrace)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after cast parameters".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let Some(rbrace) =
+            self.find_matching_token(tokens, lbrace, end, Token::LeftBrace, Token::RightBrace)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated cast body".to_string(),
+                span: tokens[lbrace].span.clone(),
+            });
+        };
+        cursor = rbrace + 1;
+        let body = self.parse_block_reduction(tokens, lbrace, cursor)?;
+        Ok((
+            ast::ImplCast {
+                target_type,
+                parameters,
+                body,
+                span: Span {
+                    start: cast_start,
+                    end: tokens[cursor - 1].span.end,
+                },
+            },
+            cursor,
+        ))
     }
 
     fn classify_impl_method(
@@ -4788,5 +5178,32 @@ mod tests {
             program.items[1].attributes.is_empty(),
             "extern should not own #[link] attributes"
         );
+    }
+
+    #[test]
+    fn parses_generic_type_receiver_method_call() {
+        let source = "i32 main() { Optional<i32>.none(); return 0; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(main_fn) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        let ast::StatementKind::Expression(expr) = &main_fn.body.statements[0].kind else {
+            panic!("expected expression statement");
+        };
+        let ast::ExpressionKind::MethodCall { receiver, method, .. } = expr.kind.as_ref() else {
+            panic!("expected method call");
+        };
+        assert_eq!(method.name, "none");
+        let ast::ExpressionKind::TypeName(receiver_ty) = receiver.kind.as_ref() else {
+            panic!("expected type-name receiver");
+        };
+        let ast::TypeKind::Named(named) = receiver_ty.kind.as_ref() else {
+            panic!("expected named type");
+        };
+        assert_eq!(named.path[0].name, "Optional");
+        assert_eq!(named.generics.as_ref().map(|args| args.len()), Some(1));
     }
 }

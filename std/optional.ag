@@ -1,0 +1,85 @@
+struct Optional<T> {
+    bool present;
+    T thing;
+}
+
+impl Optional<T> {
+    Optional<T> none() {
+        Optional<T> value;
+        value.present = false;
+        return value;
+    }
+
+    Optional<T> some(T thing) {
+        Optional<T> value;
+        value.present = true;
+        value.thing = thing;
+        return value;
+    }
+
+    bool is_some(Optional<T> self) {
+        return self.present;
+    }
+
+    bool is_none(Optional<T> self) {
+        return !self.present;
+    }
+
+    T unwrap(Optional<T> self) {
+        return self.thing;
+    }
+
+    T unwrap_or(Optional<T> self, T fallback) {
+        if (self.present) {
+            return self.thing;
+        }
+        return fallback;
+    }
+}
+
+struct Result<T, E> {
+    bool ok;
+    T value;
+    E error;
+}
+
+impl Result<i32, i32> {
+    Result<i32, i32> ok(i32 value) {
+        Result<i32, i32> result;
+        result.ok = true;
+        result.value = value;
+        result.error = 0;
+        return result;
+    }
+
+    Result<i32, i32> err(i32 error) {
+        Result<i32, i32> result;
+        result.ok = false;
+        result.value = 0;
+        result.error = error;
+        return result;
+    }
+
+    bool success(Result<i32, i32> self) {
+        return self.ok;
+    }
+
+    bool failed(Result<i32, i32> self) {
+        return !self.ok;
+    }
+
+    i32 unwrap(Result<i32, i32> self) {
+        return self.value;
+    }
+
+    i32 unwrap_or(Result<i32, i32> self, i32 fallback) {
+        if (self.ok) {
+            return self.value;
+        }
+        return fallback;
+    }
+
+    i32 get_error(Result<i32, i32> self) {
+        return self.error;
+    }
+}

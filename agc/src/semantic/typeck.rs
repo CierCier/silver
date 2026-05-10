@@ -41,6 +41,7 @@ pub struct TypeChecker {
     imported_types: HashSet<String>,
     imported_traits: HashSet<String>,
     imported_modules: Vec<ModuleArtifact>,
+    casts: HashMap<(String, String), ()>,
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +526,16 @@ impl TypeChecker {
                         }
                         operand_ty
                     }
+                    ast::UnaryOperator::Dereference => match operand_ty {
+                        Type::Pointer { inner, .. } | Type::Reference { inner, .. } => *inner,
+                        _ => {
+                            self.error(
+                                "dereference requires pointer or reference operand",
+                                expr.span.clone(),
+                            );
+                            Type::Unknown
+                        }
+                    },
                     ast::UnaryOperator::Not => {
                         if !is_bool(&operand_ty) {
                             self.error("logical not requires bool", expr.span.clone());
@@ -609,6 +620,12 @@ impl TypeChecker {
                         if self.common_numeric_type(&left_ty, &right_ty).is_none() {
                             self.error("comparison operands must be compatible", expr.span.clone());
                         }
+                        return Type::Primitive(ast::PrimitiveType::Bool);
+                    }
+
+                    if left_ty == right_ty
+                        && matches!(left_ty, Type::Pointer { .. } | Type::Reference { .. })
+                    {
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
@@ -1658,6 +1675,9 @@ impl TypeChecker {
         if Self::is_void_like(from) || Self::is_void_like(to) {
             return Self::void_compatible(from, to);
         }
+        if matches!(from, Type::Pointer { .. }) && matches!(to, Type::Pointer { .. }) {
+            return true;
+        }
         if let (Some(from_backing), Some(to_backing)) =
             (self.enum_backing_type(from), self.enum_backing_type(to))
         {
@@ -1666,7 +1686,10 @@ impl TypeChecker {
                     .is_castable(&Type::Primitive(from_backing), &Type::Primitive(to_backing));
             }
         }
-        self.is_primitive_type(from) && self.is_primitive_type(to)
+        if self.is_primitive_type(from) && self.is_primitive_type(to) {
+            return true;
+        }
+        self.casts.contains_key(&(self.method_key(from), self.method_key(to)))
     }
 
     fn is_implicitly_castable(&self, from: &Type, to: &Type) -> bool {
@@ -1918,58 +1941,67 @@ impl TypeChecker {
             let bounds = self.collect_bounds(impl_item.generics.as_ref());
 
             for impl_member in &impl_item.items {
-                let ast::ImplItemKind::Function(func) = impl_member else {
-                    continue;
-                };
-                let mut type_params = impl_type_params.clone();
-                if let Some(generics) = &func.generics {
-                    for param in &generics.params {
-                        if let ast::GenericParam::Type(type_param) = param {
-                            type_params.push(type_param.name.name.clone());
+                match impl_member {
+                    ast::ImplItemKind::Function(func) => {
+                        let mut type_params = impl_type_params.clone();
+                        if let Some(generics) = &func.generics {
+                            for param in &generics.params {
+                                if let ast::GenericParam::Type(type_param) = param {
+                                    type_params.push(type_param.name.name.clone());
+                                }
+                            }
                         }
+                        type_params = self.dedup_type_params(type_params);
+
+                        let mut func_bounds = bounds.clone();
+                        func_bounds.extend(self.collect_bounds(func.generics.as_ref()));
+
+                        let params = func
+                            .parameters
+                            .iter()
+                            .map(|param| Type::from_ast(&param.param_type))
+                            .collect::<Vec<_>>();
+                        let return_type = func
+                            .return_type
+                            .as_ref()
+                            .map(Type::from_ast)
+                            .unwrap_or(Type::Unit);
+                        let symbol_key =
+                            self.method_symbol_key(&self_ty, &func.name.name, &params, &return_type);
+                        let symbol_id = table.intern_symbol(
+                            symbol_key.clone(),
+                            SymbolKind::ImplMethod,
+                            Some(func.name.span.clone()),
+                            CompilerPhase::TypeCheck,
+                        );
+                        debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
+                        debug_assert_eq!(table.symbol_key(symbol_id), Some(symbol_key.as_str()));
+                        self.method_symbols.insert(
+                            symbol_id,
+                            MethodSig {
+                                params,
+                                return_type,
+                                type_params,
+                                owner: self_ty.clone(),
+                                bounds: func_bounds,
+                                source_impl: impl_item.clone(),
+                                source_method: func.clone(),
+                            },
+                        );
+                        self.methods
+                            .entry((self_key.clone(), func.name.name.clone()))
+                            .or_default()
+                            .push(symbol_id);
                     }
+                    ast::ImplItemKind::Cast(cast) => {
+                        let from_ty = Type::from_ast(&impl_item.self_type);
+                        let to_ty = Type::from_ast(&cast.target_type);
+                        let from_key = self.method_key(&from_ty);
+                        let to_key = self.method_key(&to_ty);
+                        self.casts.insert((from_key, to_key), ());
+                    }
+                    _ => {}
                 }
-                type_params = self.dedup_type_params(type_params);
-
-                let mut func_bounds = bounds.clone();
-                func_bounds.extend(self.collect_bounds(func.generics.as_ref()));
-
-                let params = func
-                    .parameters
-                    .iter()
-                    .map(|param| Type::from_ast(&param.param_type))
-                    .collect::<Vec<_>>();
-                let return_type = func
-                    .return_type
-                    .as_ref()
-                    .map(Type::from_ast)
-                    .unwrap_or(Type::Unit);
-                let symbol_key =
-                    self.method_symbol_key(&self_ty, &func.name.name, &params, &return_type);
-                let symbol_id = table.intern_symbol(
-                    symbol_key.clone(),
-                    SymbolKind::ImplMethod,
-                    Some(func.name.span.clone()),
-                    CompilerPhase::TypeCheck,
-                );
-                debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
-                debug_assert_eq!(table.symbol_key(symbol_id), Some(symbol_key.as_str()));
-                self.method_symbols.insert(
-                    symbol_id,
-                    MethodSig {
-                        params,
-                        return_type,
-                        type_params,
-                        owner: self_ty.clone(),
-                        bounds: func_bounds,
-                        source_impl: impl_item.clone(),
-                        source_method: func.clone(),
-                    },
-                );
-                self.methods
-                    .entry((self_key.clone(), func.name.name.clone()))
-                    .or_default()
-                    .push(symbol_id);
             }
         }
     }
@@ -2531,6 +2563,24 @@ mod tests {
     fn resolves_static_method_call_on_type_name() {
         let program = parse(
             "struct Counter { i32 value; } impl Counter { i32 one() { return 1; } } i32 main() { i32 x = Counter.one(); return x; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn resolves_static_method_call_on_generic_type_name() {
+        let program = parse(
+            "struct Box<T> { T value; } impl Box<T> { Box<T> none() { Box<T> result; return result; } } i32 main() { Box<i32> x = Box<i32>.none(); return 0; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn resolves_static_method_call_on_optional_keyword_type_name() {
+        let program = parse(
+            "struct Optional<T> { T value; } impl Optional<T> { Optional<T> none() { Optional<T> result; return result; } } i32 main() { Optional<i32> x = Optional<i32>.none(); return 0; }",
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "type errors: {errors:?}");

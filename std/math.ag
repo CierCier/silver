@@ -1,0 +1,120 @@
+#[link(m)]
+
+// C math library wrapper for Silver.
+
+// Constants
+const f64 M_E = 2.71828182845904523536;
+const f64 M_LOG2E = 1.44269504088896340736;
+const f64 M_LOG10E = 0.43429448190325182765;
+const f64 M_LN2 = 0.69314718055994530942;
+const f64 M_LN10 = 2.30258509299404568402;
+const f64 M_PI = 3.14159265358979323846;
+const f64 M_PI_2 = 1.57079632679489661923;
+const f64 M_PI_4 = 0.78539816339744830962;
+const f64 M_1_PI = 0.31830988618379067154;
+const f64 M_2_PI = 0.63661977236758134308;
+const f64 M_2_SQRTPI = 1.12837916709551257390;
+const f64 M_SQRT2 = 1.41421356237309504880;
+const f64 M_SQRT1_2 = 0.70710678118654752440;
+
+// Trigonometry (f64)
+extern "C" f64 sin(f64 x);
+extern "C" f64 cos(f64 x);
+extern "C" f64 tan(f64 x);
+extern "C" f64 asin(f64 x);
+extern "C" f64 acos(f64 x);
+extern "C" f64 atan(f64 x);
+extern "C" f64 atan2(f64 y, f64 x);
+
+// Trigonometry (f32)
+extern "C" f32 sinf(f32 x);
+extern "C" f32 cosf(f32 x);
+extern "C" f32 tanf(f32 x);
+extern "C" f32 asinf(f32 x);
+extern "C" f32 acosf(f32 x);
+extern "C" f32 atanf(f32 x);
+extern "C" f32 atan2f(f32 y, f32 x);
+
+// Hyperbolic (f64)
+extern "C" f64 sinh(f64 x);
+extern "C" f64 cosh(f64 x);
+extern "C" f64 tanh(f64 x);
+extern "C" f64 asinh(f64 x);
+extern "C" f64 acosh(f64 x);
+extern "C" f64 atanh(f64 x);
+
+// Hyperbolic (f32)
+extern "C" f32 sinhf(f32 x);
+extern "C" f32 coshf(f32 x);
+extern "C" f32 tanhf(f32 x);
+extern "C" f32 asinhf(f32 x);
+extern "C" f32 acoshf(f32 x);
+extern "C" f32 atanhf(f32 x);
+
+// Exponents and logarithms (f64)
+extern "C" f64 exp(f64 x);
+extern "C" f64 exp2(f64 x);
+extern "C" f64 expm1(f64 x);
+extern "C" f64 log(f64 x);
+extern "C" f64 log2(f64 x);
+extern "C" f64 log10(f64 x);
+extern "C" f64 log1p(f64 x);
+
+// Exponents and logarithms (f32)
+extern "C" f32 expf(f32 x);
+extern "C" f32 exp2f(f32 x);
+extern "C" f32 expm1f(f32 x);
+extern "C" f32 logf(f32 x);
+extern "C" f32 log2f(f32 x);
+extern "C" f32 log10f(f32 x);
+extern "C" f32 log1pf(f32 x);
+
+// Power (f64)
+extern "C" f64 pow(f64 x, f64 y);
+extern "C" f64 sqrt(f64 x);
+extern "C" f64 cbrt(f64 x);
+extern "C" f64 hypot(f64 x, f64 y);
+
+// Power (f32)
+extern "C" f32 powf(f32 x, f32 y);
+extern "C" f32 sqrtf(f32 x);
+extern "C" f32 cbrtf(f32 x);
+extern "C" f32 hypotf(f32 x, f32 y);
+
+// Rounding (f64)
+extern "C" f64 ceil(f64 x);
+extern "C" f64 floor(f64 x);
+extern "C" f64 round(f64 x);
+extern "C" f64 trunc(f64 x);
+extern "C" f64 rint(f64 x);
+extern "C" i64 lrint(f64 x);
+extern "C" i64 lround(f64 x);
+
+// Rounding (f32)
+extern "C" f32 ceilf(f32 x);
+extern "C" f32 floorf(f32 x);
+extern "C" f32 roundf(f32 x);
+extern "C" f32 truncf(f32 x);
+extern "C" f32 rintf(f32 x);
+extern "C" i64 lrintf(f32 x);
+extern "C" i64 lroundf(f32 x);
+
+// Absolute value, min, max (f64)
+extern "C" f64 fabs(f64 x);
+extern "C" f64 fmin(f64 x, f64 y);
+extern "C" f64 fmax(f64 x, f64 y);
+
+// Absolute value, min, max (f32)
+extern "C" f32 fabsf(f32 x);
+extern "C" f32 fminf(f32 x, f32 y);
+extern "C" f32 fmaxf(f32 x, f32 y);
+
+// Remainder / modulo
+extern "C" f64 fmod(f64 x, f64 y);
+extern "C" f64 remainder(f64 x, f64 y);
+extern "C" f32 fmodf(f32 x, f32 y);
+extern "C" f32 remainderf(f32 x, f32 y);
+
+// Copy sign
+extern "C" f64 copysign(f64 x, f64 y);
+extern "C" f32 copysignf(f32 x, f32 y);

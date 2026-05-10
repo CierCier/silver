@@ -77,7 +77,7 @@ i32 main() {
     
     Optional<i64> some64 = Optional<i64>.some(9223372036854775807);  // Max i64
     assert_true(some64.is_some(), "Optional<i64>.some() works with large value");
-    assert_eq_i64(some64.unwrap(), 9223372036854775807, "large i64 value preserved");
+    assert_eq_i64(some64.unwrap(), (i64)9223372036854775807, "large i64 value preserved");
     
     // Test: Optional<f64>
     printf("\n=== Optional<f64> Tests ===\n\n");
@@ -108,7 +108,7 @@ i32 main() {
     assert_eq_i32(*ptr, 42, "pointer value accessible through optional");
     
     void* default_ptr = none_p.unwrap_or(&x);
-    assert_true(default_ptr == &x, "unwrap_or() returns default pointer");
+    assert_true(default_ptr == (void*)&x, "unwrap_or() returns default pointer");
     
     // Test: Result<i32, i32>
     printf("\n=== Result<i32, i32> Tests ===\n\n");
@@ -202,5 +202,8 @@ i32 main() {
     printf("Passed: %d\n", tests_passed);
     printf("Failed: %d\n", tests_failed);
     
-    return tests_failed > 0 ? 1 : 0;
+    if (tests_failed > 0) {
+        return 1;
+    }
+    return 0;
 }
