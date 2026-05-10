@@ -1,7 +1,6 @@
 // Zero-cost stdio.h wrapper for Silver.
 //
 // The raw C entry points remain available where variadic formatting is useful,
-// while the higher-level `File` wrapper keeps ordinary file I/O pointer-safe.
 
 struct FILE {
     i32 _opaque;

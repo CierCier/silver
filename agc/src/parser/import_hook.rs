@@ -236,9 +236,10 @@ fn filter_program_items(
     import_item: &ast::ImportItem,
 ) -> Result<ast::Program, String> {
     let Some(items) = &import_item.items else {
-        program
-            .items
-            .retain(|item| !matches!(item.visibility, ast::Visibility::Private));
+        program.items.retain(|item| {
+            !matches!(item.visibility, ast::Visibility::Private)
+                || matches!(item.kind, ast::ItemKind::Impl(_))
+        });
         return Ok(program);
     };
 

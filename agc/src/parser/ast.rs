@@ -625,6 +625,7 @@ pub enum BinaryOperator {
 pub enum UnaryOperator {
     Plus,
     Minus,
+    Dereference,
     Not,
     BitwiseNot,
     Increment,

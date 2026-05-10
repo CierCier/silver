@@ -1,11 +1,10 @@
 import std.io;
 
-extern "C" i32 printf(const char* format, ...);
 
 i32 main(i32 argc, char** argv) {
     printf("Hello, Silver!\n");
 
-    asm("nop");
+    // asm("nop");
 
     for (i32 i = 0; i < argc; i++) {
         printf("Arg%d: %s\n", i, argv[i]);
