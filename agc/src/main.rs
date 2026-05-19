@@ -19,6 +19,7 @@ use symbol_table::{CompilerPhase, CompilerSymbolTable};
 mod ast_tree;
 mod attributes;
 mod codegen;
+mod debug_info;
 mod diagnostics;
 mod lexer;
 mod module_artifact;
@@ -856,13 +857,16 @@ fn main() {
                     let binary_output = module_binary_output_path(&plan.output, plan.shared);
                     if plan.shared {
                         let temp_object = plan.output.with_extension("module.tmp.o");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
                             &ast,
                             &imported_modules,
                             &temp_object,
                             plan.target.as_deref(),
                             plan.opt_level.as_deref(),
                             &mut symbol_table,
+                            Some(input),
+                            Some(&src),
+                            plan.debug_info,
                         );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -893,13 +897,16 @@ fn main() {
                         }
                         let _ = std::fs::remove_file(&temp_object);
                     } else {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
                             &ast,
                             &imported_modules,
                             &binary_output,
                             plan.target.as_deref(),
                             plan.opt_level.as_deref(),
                             &mut symbol_table,
+                            Some(input),
+                            Some(&src),
+                            plan.debug_info,
                         );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -930,13 +937,16 @@ fn main() {
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
                         profiler.begin_phase("codegen");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
                             &ast,
                             &imported_modules,
                             &plan.output,
                             plan.target.as_deref(),
                             plan.opt_level.as_deref(),
                             &mut symbol_table,
+                            Some(input),
+                            Some(&src),
+                            plan.debug_info,
                         );
                         profiler.end_phase("codegen");
                         if let Err(error) = result {
@@ -959,13 +969,16 @@ fn main() {
                     } else if matches!(plan.emit, EmitKind::Asm) {
                         profiler.begin_phase("codegen");
                         let result =
-                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table(
+                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table_and_source(
                                 &ast,
                                 &imported_modules,
                                 &plan.output,
                                 plan.target.as_deref(),
                                 plan.opt_level.as_deref(),
                                 &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
                             );
                         profiler.end_phase("codegen");
                         if let Err(error) = result {
@@ -987,10 +1000,13 @@ fn main() {
                         }
                     } else {
                         profiler.begin_phase("codegen");
-                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table(
+                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source(
                             &ast,
                             &imported_modules,
                             &mut symbol_table,
+                            Some(input),
+                            Some(&src),
+                            plan.debug_info,
                         );
                         profiler.end_phase("codegen");
                         match output {

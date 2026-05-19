@@ -19,6 +19,7 @@ use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
 
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
+use crate::debug_info::{DebugContext, SourceMap};
 use crate::lexer::Span;
 use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
@@ -84,6 +85,9 @@ pub struct LlvmIrGenerator<'ctx> {
         inkwell::basic_block::BasicBlock<'ctx>,
     )>,
     symbol_table: CompilerSymbolTable,
+    debug: Option<DebugContext<'ctx>>,
+    source_map: Option<SourceMap>,
+    source_path: String,
 }
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
@@ -119,9 +123,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         program: &ast::Program,
         table: &mut CompilerSymbolTable,
     ) -> CodegenResult<String> {
+        Self::generate_with_table_and_source(program, table, None, None, false)
+    }
+
+    pub fn generate_with_table_and_source(
+        program: &ast::Program,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        let source_path_str = source_path
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let source_map = source_text.map(|s| SourceMap::new(s));
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut generator = LlvmIrGenerator {
             context: &context,
             module,
@@ -144,6 +170,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             symbol_table: table.clone(),
+            debug,
+            source_map,
+            source_path: source_path_str,
         };
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
@@ -155,9 +184,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         imported_modules: &[ModuleArtifact],
         table: &mut CompilerSymbolTable,
     ) -> CodegenResult<String> {
+        Self::generate_with_imports_and_table_and_source(
+            program,
+            imported_modules,
+            table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn generate_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        let source_path_str = source_path
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let source_map = source_text.map(|s| SourceMap::new(s));
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut generator = LlvmIrGenerator {
             context: &context,
             module,
@@ -180,6 +239,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             symbol_table: table.clone(),
+            debug,
+            source_map,
+            source_path: source_path_str,
         };
         generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
@@ -211,6 +273,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             opt_level,
             FileType::Object,
             table,
+            None,
+            None,
+            false,
         )
     }
 
@@ -230,6 +295,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             opt_level,
             FileType::Object,
             table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn emit_object_file_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+            source_path,
+            source_text,
+            debug_info,
         )
     }
 
@@ -257,6 +350,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             opt_level,
             FileType::Assembly,
             table,
+            None,
+            None,
+            false,
         )
     }
 
@@ -276,6 +372,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             opt_level,
             FileType::Assembly,
             table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn emit_assembly_file_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Assembly,
+            table,
+            source_path,
+            source_text,
+            debug_info,
         )
     }
 
@@ -286,6 +410,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         opt_level: Option<&str>,
         file_type: FileType,
         table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
     ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
@@ -295,6 +422,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             opt_level,
             file_type,
             table,
+            source_path,
+            source_text,
+            debug_info,
         )
     }
 
@@ -306,10 +436,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         opt_level: Option<&str>,
         file_type: FileType,
         table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        let source_path_str = source_path
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let source_map = source_text.map(|s| SourceMap::new(s));
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(p), Some(text)) => Some(DebugContext::new(&context, &module, p, text)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut generator = LlvmIrGenerator {
             context: &context,
             module,
@@ -332,6 +477,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             symbol_table: table.clone(),
+            debug,
+            source_map,
+            source_path: source_path_str,
         };
         generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
@@ -364,6 +512,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+        generator.finalize_debug();
         machine
             .write_to_file(&generator.module, file_type, path)
             .map_err(|e| {
@@ -1334,7 +1483,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     func.return_type.as_ref(),
                     &func.body,
                     &mangled_name,
-                    &func.body.span,
+                    &func.name.span,
                 )?;
 
                 self.current_fn = saved_fn;
@@ -1578,8 +1727,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        if let Some(debug) = &mut self.debug {
+            let (line, col, _, _) = debug.source_map.span_to_line_col(&fn_span);
+            let subroutine_type = debug.create_subroutine_type(
+                return_type.map(|_| debug.di_types.get("i32").copied()).flatten(),
+                &[],
+            );
+            let subprogram = debug.create_function(
+                fn_name,
+                fn_name,
+                line,
+                subroutine_type,
+                false,
+                true,
+                line,
+            );
+            function.set_subprogram(subprogram);
+            debug.current_subprogram = Some(subprogram);
+        }
+
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+
+        if let Some(debug) = &self.debug {
+            let (line, col, _, _) = debug.source_map.span_to_line_col(&fn_span);
+            let loc = debug.create_debug_location(self.context, line, col);
+            self.builder.set_current_debug_location(loc);
+        }
+
         let saved_return_type = self.current_return_type.clone();
         self.current_fn = Some(function);
         self.current_return_type = return_type.cloned();
@@ -1630,6 +1805,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.pop_scope();
         self.current_fn = None;
         self.current_return_type = saved_return_type;
+        if let Some(debug) = &mut self.debug {
+            debug.current_subprogram = None;
+        }
         Ok(())
     }
 
@@ -4893,6 +5071,14 @@ fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
     }
 }
 
+impl<'ctx> LlvmIrGenerator<'ctx> {
+    fn finalize_debug(&mut self) {
+        if let Some(debug) = self.debug.take() {
+            debug.finalize();
+        }
+    }
+}
+
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()> {
         for item in &program.items {
@@ -5056,7 +5242,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             func.return_type.as_ref(),
             &func.body,
             &func.name.name,
-            &func.body.span,
+            &func.name.span,
         )
     }
 
@@ -5208,7 +5394,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         func.return_type.as_ref(),
                         &func.body,
                         &mangled_name,
-                        &func.body.span,
+                        &func.name.span,
                     )?;
                 }
                 ast::ImplItemKind::Cast(cast) => {
@@ -5245,7 +5431,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         Some(&cast.target_type),
                         &cast.body,
                         &mangled_name,
-                        &cast.body.span,
+                        &cast.span,
                     )?;
                 }
                 _ => {}
@@ -5549,6 +5735,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     }
 
     fn finish(self) -> String {
+        if let Some(debug) = self.debug {
+            debug.finalize();
+        }
         self.module.print_to_string().to_string()
     }
 }
