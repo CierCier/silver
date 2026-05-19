@@ -33,12 +33,14 @@ pub enum ResolvedSourceImportKind {
 #[derive(Debug)]
 pub struct ModuleLoader {
     search_dirs: Vec<PathBuf>,
+    cwd: Option<PathBuf>,
 }
 
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {
             search_dirs: Vec::new(),
+            cwd: std::env::current_dir().ok(),
         }
     }
 
@@ -194,9 +196,8 @@ impl ModuleLoader {
         }
 
         // Priority 2: cwd (current working directory of the process)
-        let cwd = std::env::current_dir().ok();
-        if let Some(cwd) = &cwd {
-            if let Some((source_path, kind)) = resolve_source_in_root(&cwd, &segments) {
+        if let Some(cwd) = &self.cwd {
+            if let Some((source_path, kind)) = resolve_source_in_root(cwd, &segments) {
                 return Some(ResolvedSourceImport {
                     module_path: module_path.clone(),
                     source_path,
@@ -211,7 +212,7 @@ impl ModuleLoader {
             if base_dir.is_some_and(|base| base == root) {
                 continue;
             }
-            if cwd.as_ref().is_some_and(|cwd| cwd == root) {
+            if self.cwd.as_ref().is_some_and(|cwd| cwd == root) {
                 continue;
             }
 
@@ -261,14 +262,15 @@ pub fn import_path_to_string(path: &[ast::Identifier]) -> String {
 
 pub fn filter_exports(artifact: &ModuleArtifact, import: &ast::ImportItem) -> Vec<ModuleExport> {
     if let Some(items) = &import.items {
+        let export_map: HashMap<&str, &ModuleExport> = artifact
+            .exports
+            .iter()
+            .map(|export| (export.name.as_str(), export))
+            .collect();
         let mut selected = Vec::new();
         for item in items {
-            if let Some(export) = artifact
-                .exports
-                .iter()
-                .find(|export| export.name == item.name.name)
-            {
-                selected.push(export.clone());
+            if let Some(export) = export_map.get(item.name.name.as_str()) {
+                selected.push((*export).clone());
             }
         }
         return selected;

@@ -5257,11 +5257,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
 
     fn generate_trait_item(
         &mut self,
-        item: &ast::TraitItem,
-        visibility: &ast::Visibility,
-        attributes: &[ast::Attribute],
+        _item: &ast::TraitItem,
+        _visibility: &ast::Visibility,
+        _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        todo!()
+        // Traits are a compile-time abstraction; no direct LLVM IR is emitted.
+        // Trait methods are concretized through impl blocks (generate_impl_item).
+        Ok(())
     }
 
     fn generate_import_item(
@@ -5463,23 +5465,87 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     }
 
     fn generate_pattern(&mut self, pattern: &ast::Pattern) -> CodegenResult<()> {
-        todo!()
+        Err(CodegenError::with_span(
+            "patterns must be generated in context (let binding or match arm)",
+            pattern.span.clone(),
+        ))
     }
 
     fn generate_type(&mut self, ty: &ast::Type) -> CodegenResult<()> {
-        todo!()
+        // Ensure the type is lowered and any dependent types (e.g., struct definitions)
+        // are registered in the LLVM module.
+        let _ = self.lower_basic_type(ty)?;
+        Ok(())
     }
 
-    fn generate_initializer_item(&mut self, item: &ast::InitializerItem) -> CodegenResult<()> {
-        todo!()
+    fn generate_initializer_item(&mut self, _item: &ast::InitializerItem) -> CodegenResult<()> {
+        Err(CodegenError::new(
+            "initializer items must be generated with a target type context (use emit_typed_initializer_value or emit_const_initializer_value)",
+        ))
     }
 
-    fn generate_macro_arg(&mut self, arg: &ast::MacroArg) -> CodegenResult<()> {
-        todo!()
+    fn generate_macro_arg(&mut self, _arg: &ast::MacroArg) -> CodegenResult<()> {
+        Err(CodegenError::new(
+            "macro arguments should be expanded before LLVM codegen",
+        ))
     }
 
     fn generate_literal(&mut self, literal: &ast::Literal) -> CodegenResult<()> {
-        todo!()
+        // Literals are typically generated within expression context.
+        // This standalone generation creates a private global constant.
+        match literal {
+            ast::Literal::Integer(value) => {
+                let global_name = format!(".lit.i64.{}", self.string_constants.len());
+                let global = self.module.add_global(self.context.i64_type(), None, &global_name);
+                global.set_initializer(&self.context.i64_type().const_int(*value as u64, true));
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+            }
+            ast::Literal::Float(value) => {
+                let global_name = format!(".lit.f64.{}", self.string_constants.len());
+                let global = self.module.add_global(self.context.f64_type(), None, &global_name);
+                global.set_initializer(&self.context.f64_type().const_float(*value));
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+            }
+            ast::Literal::Bool(value) => {
+                let global_name = format!(".lit.bool.{}", self.string_constants.len());
+                let global = self.module.add_global(self.context.bool_type(), None, &global_name);
+                global.set_initializer(&self.context.bool_type().const_int(u64::from(*value), false));
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+            }
+            ast::Literal::Char(value) => {
+                let global_name = format!(".lit.char.{}", self.string_constants.len());
+                let global = self.module.add_global(self.context.i32_type(), None, &global_name);
+                global.set_initializer(&self.context.i32_type().const_int(*value as u64, false));
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+            }
+            ast::Literal::String(value) => {
+                let _ = self.intern_const_string_global(value);
+            }
+            ast::Literal::Complex(re, im) => {
+                let complex_ty = self.context.struct_type(
+                    &[
+                        self.context.f64_type().as_basic_type_enum(),
+                        self.context.f64_type().as_basic_type_enum(),
+                    ],
+                    false,
+                );
+                let global_name = format!(".lit.c64.{}", self.string_constants.len());
+                let global = self.module.add_global(complex_ty, None, &global_name);
+                let real = self.context.f64_type().const_float(*re);
+                let imag = self.context.f64_type().const_float(*im);
+                global.set_initializer(&complex_ty.const_named_struct(&[
+                    real.as_basic_value_enum(),
+                    imag.as_basic_value_enum(),
+                ]));
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+            }
+        }
+        Ok(())
     }
 
     fn finish(self) -> String {

@@ -105,7 +105,7 @@ impl<'a> FileImportResolverHook<'a> {
         program: &mut ast::Program,
         base_dir: Option<&Path>,
     ) -> Result<(), String> {
-        let mut lowered_items = Vec::new();
+        let mut original_items = Vec::new();
         let mut lowered_program_attributes = std::mem::take(&mut program.attributes);
         let mut alias_plan = ImportAliasPlan::default();
 
@@ -118,7 +118,7 @@ impl<'a> FileImportResolverHook<'a> {
             } = item;
 
             let ast::ItemKind::Import(import_item) = kind else {
-                lowered_items.push(ast::Item {
+                original_items.push(ast::Item {
                     kind,
                     span,
                     visibility,
@@ -151,7 +151,7 @@ impl<'a> FileImportResolverHook<'a> {
                     record_import_aliases(&mut alias_plan, &import_item, &imported_names)?;
                     let imported_program = filter_program_items(imported_program, &import_item)?;
                     lowered_program_attributes.extend(imported_program.attributes);
-                    lowered_items.extend(imported_program.items);
+                    original_items.extend(imported_program.items);
                 }
                 ResolvedSourceImportKind::Module => {
                     let mut artifact = ModuleArtifact::from_path(&resolved.source_path)?;
@@ -181,13 +181,18 @@ impl<'a> FileImportResolverHook<'a> {
             }
         }
 
-        rewrite_import_aliases_in_items(&mut lowered_items, &alias_plan);
-        program.items = lowered_items;
+        if !alias_plan.direct.is_empty() || !alias_plan.namespaces.is_empty() {
+            rewrite_import_aliases_in_items(&mut original_items, &alias_plan);
+        }
+        program.items = original_items;
         program.attributes = lowered_program_attributes;
         Ok(())
     }
 
     fn mark_file_seen(&mut self, path: &Path) -> bool {
+        if self.seen_files.contains(path) {
+            return false;
+        }
         let stable = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.seen_files.insert(stable)
     }
@@ -296,14 +301,14 @@ fn rewrite_import_aliases_in_items(items: &mut [ast::Item], plan: &ImportAliasPl
 
 struct ImportAliasRewriter<'a> {
     plan: &'a ImportAliasPlan,
-    value_scopes: Vec<HashSet<String>>,
+    bound_names: HashMap<String, u32>,
 }
 
 impl<'a> ImportAliasRewriter<'a> {
     fn new(plan: &'a ImportAliasPlan) -> Self {
         Self {
             plan,
-            value_scopes: vec![HashSet::new()],
+            bound_names: HashMap::new(),
         }
     }
 
@@ -371,11 +376,10 @@ impl<'a> ImportAliasRewriter<'a> {
     }
 
     fn rewrite_function(&mut self, func: &mut ast::FunctionItem) {
-        self.push_scope();
         if let Some(generics) = &mut func.generics {
             self.rewrite_generics(generics);
         }
-        for param in &mut func.parameters {
+        for param in &mut *func.parameters {
             self.rewrite_type(&mut param.param_type);
             self.bind_value(&param.name.name);
         }
@@ -383,7 +387,9 @@ impl<'a> ImportAliasRewriter<'a> {
             self.rewrite_type(return_type);
         }
         self.rewrite_block(&mut func.body);
-        self.pop_scope();
+        for param in &func.parameters {
+            self.unbind_value(&param.name.name);
+        }
     }
 
     fn rewrite_function_signature(&mut self, sig: &mut ast::FunctionSignature) {
@@ -395,15 +401,16 @@ impl<'a> ImportAliasRewriter<'a> {
         params: &mut [ast::Parameter],
         return_type: &mut Option<ast::Type>,
     ) {
-        self.push_scope();
-        for param in params {
+        for param in &mut *params {
             self.rewrite_type(&mut param.param_type);
             self.bind_value(&param.name.name);
         }
         if let Some(return_type) = return_type {
             self.rewrite_type(return_type);
         }
-        self.pop_scope();
+        for param in &*params {
+            self.unbind_value(&param.name.name);
+        }
     }
 
     fn rewrite_generics(&mut self, generics: &mut ast::Generics) {
@@ -430,11 +437,9 @@ impl<'a> ImportAliasRewriter<'a> {
     }
 
     fn rewrite_block(&mut self, block: &mut ast::Block) {
-        self.push_scope();
         for statement in &mut block.statements {
             self.rewrite_statement(statement);
         }
-        self.pop_scope();
     }
 
     fn rewrite_statement(&mut self, statement: &mut ast::Statement) {
@@ -555,7 +560,6 @@ impl<'a> ImportAliasRewriter<'a> {
                 increment,
                 body,
             } => {
-                self.push_scope();
                 if let Some(type_annotation) = &mut init.type_annotation {
                     self.rewrite_type(type_annotation);
                 }
@@ -566,18 +570,17 @@ impl<'a> ImportAliasRewriter<'a> {
                 self.rewrite_expr(condition);
                 self.rewrite_expr(increment);
                 self.rewrite_block(body);
-                self.pop_scope();
+                self.unbind_pattern(&init.pattern);
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.rewrite_expr(expression);
                 for arm in arms {
-                    self.push_scope();
                     self.bind_pattern(&arm.pattern);
                     if let Some(guard) = &mut arm.guard {
                         self.rewrite_expr(guard);
                     }
                     self.rewrite_expr(&mut arm.body);
-                    self.pop_scope();
+                    self.unbind_pattern(&arm.pattern);
                 }
             }
             ast::ExpressionKind::Block(block) => self.rewrite_block(block),
@@ -671,16 +674,21 @@ impl<'a> ImportAliasRewriter<'a> {
     }
 
     fn push_scope(&mut self) {
-        self.value_scopes.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
-        self.value_scopes.pop();
     }
 
     fn bind_value(&mut self, name: &str) {
-        if let Some(scope) = self.value_scopes.last_mut() {
-            scope.insert(name.to_string());
+        *self.bound_names.entry(name.to_string()).or_insert(0) += 1;
+    }
+
+    fn unbind_value(&mut self, name: &str) {
+        if let Some(count) = self.bound_names.get_mut(name) {
+            *count -= 1;
+            if *count == 0 {
+                self.bound_names.remove(name);
+            }
         }
     }
 
@@ -708,11 +716,32 @@ impl<'a> ImportAliasRewriter<'a> {
         }
     }
 
+    fn unbind_pattern(&mut self, pattern: &ast::Pattern) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(ident) => self.unbind_value(&ident.name),
+            ast::PatternKind::Tuple(items) => {
+                for item in items {
+                    self.unbind_pattern(item);
+                }
+            }
+            ast::PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    if let Some(pattern) = &field.pattern {
+                        self.unbind_pattern(pattern);
+                    }
+                }
+            }
+            ast::PatternKind::Enum { data, .. } => {
+                if let Some(data) = data {
+                    self.unbind_pattern(data);
+                }
+            }
+            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard => {}
+        }
+    }
+
     fn is_value_bound(&self, name: &str) -> bool {
-        self.value_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
+        self.bound_names.get(name).is_some_and(|&c| c > 0)
     }
 }
 
