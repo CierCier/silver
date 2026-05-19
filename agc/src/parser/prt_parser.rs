@@ -120,6 +120,13 @@ enum ParsedExternDeclaration {
     Variable(ast::ExternVariableItem),
 }
 
+struct ParsedDeclarator {
+    name: ast::Identifier,
+    ty: ast::Type,
+    initializer: Option<ast::Expression>,
+    span: Span,
+}
+
 #[derive(Debug, Clone)]
 struct TransitionTable {
     max_lookahead: usize,
@@ -568,7 +575,10 @@ impl PRT_Parser {
             return true;
         }
 
-        if matches!(tokens.get(index + 1).map(|next| &next.kind), Some(Token::Less)) {
+        if matches!(
+            tokens.get(index + 1).map(|next| &next.kind),
+            Some(Token::Less)
+        ) {
             if let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len()) {
                 return matches!(
                     tokens.get(after_type).map(|next| &next.kind),
@@ -1068,6 +1078,156 @@ impl PRT_Parser {
         None
     }
 
+    fn find_top_level_comma(&self, tokens: &[LexToken], start: usize, end: usize) -> Option<usize> {
+        let mut paren = 0usize;
+        let mut bracket = 0usize;
+        let mut brace = 0usize;
+        for (idx, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                Token::LeftParen => paren += 1,
+                Token::RightParen => paren = paren.saturating_sub(1),
+                Token::LeftBracket => bracket += 1,
+                Token::RightBracket => bracket = bracket.saturating_sub(1),
+                Token::LeftBrace => brace += 1,
+                Token::RightBrace => brace = brace.saturating_sub(1),
+                Token::Comma if paren == 0 && bracket == 0 && brace == 0 => return Some(idx),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn parse_declarator_group(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+        allow_initializers: bool,
+    ) -> Result<(ast::Type, Vec<ParsedDeclarator>), ParseError> {
+        let (base_type, after_type) =
+            self.parse_type_prefix(tokens, start, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "expected declaration type".to_string(),
+                    span: tokens
+                        .get(start)
+                        .map(|token| token.span.clone())
+                        .unwrap_or(Span { start: 0, end: 0 }),
+                }
+            })?;
+
+        let mut cursor = after_type;
+        let mut declarators = Vec::new();
+        loop {
+            let name_token = tokens
+                .get(cursor)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected declaration name".to_string(),
+                    span: base_type.span.clone(),
+                })?;
+            let Token::Identifier(name) = &name_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected declaration name".to_string(),
+                    span: name_token.span.clone(),
+                });
+            };
+
+            let mut decl_ty = base_type.clone();
+            let mut declarator_end = name_token.span.end;
+            cursor += 1;
+            while cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
+                let Some(close) = self.find_matching_token(
+                    tokens,
+                    cursor,
+                    end,
+                    Token::LeftBracket,
+                    Token::RightBracket,
+                ) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "unterminated array declarator".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                };
+                let size = if cursor + 1 < close {
+                    Some(Box::new(self.parse_expression_reduction(
+                        tokens,
+                        cursor + 1,
+                        close,
+                    )?))
+                } else {
+                    None
+                };
+                decl_ty = ast::Type {
+                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+                        element_type: Box::new(decl_ty),
+                        size,
+                    }))),
+                    span: Span {
+                        start: base_type.span.start,
+                        end: tokens[close].span.end,
+                    },
+                };
+                declarator_end = tokens[close].span.end;
+                cursor = close + 1;
+            }
+
+            let mut initializer = None;
+            if cursor < end && matches!(tokens[cursor].kind, Token::Assign) {
+                if !allow_initializers {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "initializer is not allowed in this declaration".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                }
+                let expr_start = cursor + 1;
+                let expr_end = self
+                    .find_top_level_comma(tokens, expr_start, end)
+                    .unwrap_or(end);
+                if expr_start >= expr_end {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected initializer expression".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    });
+                }
+                let expr = self.parse_expression_reduction(tokens, expr_start, expr_end)?;
+                declarator_end = expr.span.end;
+                initializer = Some(expr);
+                cursor = expr_end;
+            }
+
+            declarators.push(ParsedDeclarator {
+                name: ast::Identifier {
+                    name: name.clone(),
+                    span: name_token.span.clone(),
+                },
+                ty: decl_ty,
+                initializer,
+                span: Span {
+                    start: base_type.span.start,
+                    end: declarator_end,
+                },
+            });
+
+            if cursor >= end {
+                break;
+            }
+            if !matches!(tokens[cursor].kind, Token::Comma) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ',' or end of declaration".to_string(),
+                    span: tokens[cursor].span.clone(),
+                });
+            }
+            cursor += 1;
+            if cursor >= end {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected declaration name after ','".to_string(),
+                    span: tokens[cursor - 1].span.clone(),
+                });
+            }
+        }
+
+        Ok((base_type, declarators))
+    }
+
     fn parse_if_statement_reduction(
         &mut self,
         tokens: &[LexToken],
@@ -1422,7 +1582,10 @@ impl PRT_Parser {
             let mut ty = if matches!(tokens[cursor].kind, Token::LeftBracket) {
                 let (element_type, after_element) =
                     parse_simple_type_prefix(tokens, cursor + 1, end)?;
-                if !matches!(tokens.get(after_element).map(|t| &t.kind), Some(Token::Semicolon)) {
+                if !matches!(
+                    tokens.get(after_element).map(|t| &t.kind),
+                    Some(Token::Semicolon)
+                ) {
                     return None;
                 }
                 let size_start = after_element + 1;
@@ -1444,11 +1607,7 @@ impl PRT_Parser {
                 if size_end >= end || size_start > size_end {
                     return None;
                 }
-                let size = if size_start == size_end {
-                    None
-                } else {
-                    None
-                };
+                let size = if size_start == size_end { None } else { None };
                 cursor = size_end + 1;
                 ast::Type {
                     kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
@@ -1515,7 +1674,8 @@ impl PRT_Parser {
                         let mut args = Vec::new();
                         let mut arg_cursor = cursor + 1;
                         while arg_cursor < close {
-                            let (arg, next_arg) = parse_simple_type_prefix(tokens, arg_cursor, close)?;
+                            let (arg, next_arg) =
+                                parse_simple_type_prefix(tokens, arg_cursor, close)?;
                             args.push(arg);
                             arg_cursor = next_arg;
                             if arg_cursor < close {
@@ -1735,57 +1895,93 @@ impl PRT_Parser {
                     cursor.bump();
                     let mut items = Vec::new();
                     while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBrace)) {
-                        let Some(dot) = cursor.current() else {
+                        let Some(item_start) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated initializer".to_string(),
                                 span: token.span.clone(),
                             });
                         };
-                        if !matches!(dot.kind, Token::Dot) {
-                            return Err(ParseError::InvalidSyntax {
-                                message: "expected '.' in initializer field".to_string(),
-                                span: dot.span.clone(),
-                            });
+                        match &item_start.kind {
+                            Token::Dot => {
+                                cursor.bump();
+
+                                let Some(name_token) = cursor.current() else {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected field name in initializer".to_string(),
+                                        span: item_start.span.clone(),
+                                    });
+                                };
+                                let Token::Identifier(field_name) = &name_token.kind else {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected field name in initializer".to_string(),
+                                        span: name_token.span.clone(),
+                                    });
+                                };
+                                let field_ident = ast::Identifier {
+                                    name: field_name.clone(),
+                                    span: name_token.span.clone(),
+                                };
+                                cursor.bump();
+
+                                let Some(assign) = cursor.current() else {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected '=' in initializer field".to_string(),
+                                        span: field_ident.span.clone(),
+                                    });
+                                };
+                                if !matches!(assign.kind, Token::Assign) {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected '=' in initializer field".to_string(),
+                                        span: assign.span.clone(),
+                                    });
+                                }
+                                cursor.bump();
+
+                                let value = parse_assignment(cursor)?;
+                                items.push(ast::InitializerItem::Field {
+                                    name: field_ident,
+                                    value,
+                                });
+                            }
+                            Token::LeftBracket => {
+                                cursor.bump();
+                                let index = parse_assignment(cursor)?;
+                                let Some(close) = cursor.current() else {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected ']' in initializer index".to_string(),
+                                        span: item_start.span.clone(),
+                                    });
+                                };
+                                if !matches!(close.kind, Token::RightBracket) {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected ']' in initializer index".to_string(),
+                                        span: close.span.clone(),
+                                    });
+                                }
+                                cursor.bump();
+
+                                let Some(assign) = cursor.current() else {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected '=' in initializer index".to_string(),
+                                        span: index.span.clone(),
+                                    });
+                                };
+                                if !matches!(assign.kind, Token::Assign) {
+                                    return Err(ParseError::InvalidSyntax {
+                                        message: "expected '=' in initializer index".to_string(),
+                                        span: assign.span.clone(),
+                                    });
+                                }
+                                cursor.bump();
+
+                                let value = parse_assignment(cursor)?;
+                                items.push(ast::InitializerItem::Index { index, value });
+                            }
+                            _ => {
+                                let value = parse_assignment(cursor)?;
+                                items.push(ast::InitializerItem::Positional(value));
+                            }
                         }
-                        cursor.bump();
-
-                        let Some(name_token) = cursor.current() else {
-                            return Err(ParseError::InvalidSyntax {
-                                message: "expected field name in initializer".to_string(),
-                                span: dot.span.clone(),
-                            });
-                        };
-                        let Token::Identifier(field_name) = &name_token.kind else {
-                            return Err(ParseError::InvalidSyntax {
-                                message: "expected field name in initializer".to_string(),
-                                span: name_token.span.clone(),
-                            });
-                        };
-                        let field_ident = ast::Identifier {
-                            name: field_name.clone(),
-                            span: name_token.span.clone(),
-                        };
-                        cursor.bump();
-
-                        let Some(assign) = cursor.current() else {
-                            return Err(ParseError::InvalidSyntax {
-                                message: "expected '=' in initializer field".to_string(),
-                                span: field_ident.span.clone(),
-                            });
-                        };
-                        if !matches!(assign.kind, Token::Assign) {
-                            return Err(ParseError::InvalidSyntax {
-                                message: "expected '=' in initializer field".to_string(),
-                                span: assign.span.clone(),
-                            });
-                        }
-                        cursor.bump();
-
-                        let value = parse_assignment(cursor)?;
-                        items.push(ast::InitializerItem::Field {
-                            name: field_ident,
-                            value,
-                        });
 
                         if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
                             cursor.bump();
@@ -2472,77 +2668,24 @@ impl PRT_Parser {
         }
 
         if self.statement_type_start_is_unambiguous(tokens, start, end - 1)
-            && let Some((decl_ty, after_type)) = self.parse_type_prefix(tokens, start, end - 1)
+            && let Some((_decl_ty, after_type)) = self.parse_type_prefix(tokens, start, end - 1)
             && after_type < end
             && matches!(
                 tokens.get(after_type).map(|t| &t.kind),
                 Some(Token::Identifier(_))
             )
         {
-            let name_token = &tokens[after_type];
-            let Token::Identifier(name) = &name_token.kind else {
-                unreachable!();
-            };
-
-            let mut decl_ty = decl_ty;
-            let mut cursor = after_type + 1;
-            while cursor < end - 1 && matches!(tokens[cursor].kind, Token::LeftBracket) {
-                let Some(close) =
-                    self.find_matching_token(tokens, cursor, end - 1, Token::LeftBracket, Token::RightBracket)
-                else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "unterminated array declarator".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    });
-                };
-                let size = if cursor + 1 < close {
-                    Some(Box::new(self.parse_expression_reduction(tokens, cursor + 1, close)?))
-                } else {
-                    None
-                };
-                decl_ty = ast::Type {
-                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                        element_type: Box::new(decl_ty),
-                        size,
-                    }))),
+            let statements = self.parse_let_statement_reductions(tokens, start, end)?;
+            if statements.len() != 1 {
+                return Err(ParseError::InvalidSyntax {
+                    message: "grouped declaration is not allowed in this context".to_string(),
                     span: Span {
                         start: tokens[start].span.start,
-                        end: tokens[close].span.end,
+                        end: tokens[end - 1].span.end,
                     },
-                };
-                cursor = close + 1;
+                });
             }
-
-            let mut initializer = None;
-            if cursor < end - 1 {
-                if !matches!(tokens[cursor].kind, Token::Assign) {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "unsupported declaration syntax in bootstrap parser".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    });
-                }
-                initializer = Some(self.parse_expression_reduction(tokens, cursor + 1, end - 1)?);
-            }
-            self.known_ident_names.insert(name.clone());
-
-            return Ok(ast::Statement {
-                kind: ast::StatementKind::Let(ast::LetStatement {
-                    pattern: ast::Pattern {
-                        kind: ast::PatternKind::Identifier(ast::Identifier {
-                            name: name.clone(),
-                            span: name_token.span.clone(),
-                        }),
-                        span: name_token.span.clone(),
-                    },
-                    type_annotation: Some(decl_ty),
-                    initializer,
-                    is_mutable: true,
-                }),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
-            });
+            return Ok(statements.into_iter().next().unwrap());
         }
 
         let expr = self.parse_expression_reduction(tokens, start, end - 1)?;
@@ -2553,6 +2696,37 @@ impl PRT_Parser {
                 end: tokens[end - 1].span.end,
             },
         })
+    }
+
+    fn parse_let_statement_reductions(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<ast::Statement>, ParseError> {
+        let (_, declarators) = self.parse_declarator_group(tokens, start, end - 1, true)?;
+        let statement_end = tokens[end - 1].span.end;
+        let mut statements = Vec::with_capacity(declarators.len());
+        for declarator in declarators {
+            self.known_ident_names.insert(declarator.name.name.clone());
+            let name_span = declarator.name.span.clone();
+            statements.push(ast::Statement {
+                kind: ast::StatementKind::Let(ast::LetStatement {
+                    pattern: ast::Pattern {
+                        kind: ast::PatternKind::Identifier(declarator.name),
+                        span: name_span,
+                    },
+                    type_annotation: Some(declarator.ty),
+                    initializer: declarator.initializer,
+                    is_mutable: true,
+                }),
+                span: Span {
+                    start: declarator.span.start,
+                    end: statement_end,
+                },
+            });
+        }
+        Ok(statements)
     }
 
     fn parse_block_reduction(
@@ -2725,7 +2899,22 @@ impl PRT_Parser {
                 });
             };
             let statement_end = semicolon + 1;
-            statements.push(self.parse_statement_reduction(tokens, cursor, statement_end)?);
+            if self.statement_type_start_is_unambiguous(tokens, cursor, semicolon)
+                && let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, semicolon)
+                && after_type < semicolon
+                && matches!(
+                    tokens.get(after_type).map(|t| &t.kind),
+                    Some(Token::Identifier(_))
+                )
+            {
+                statements.extend(self.parse_let_statement_reductions(
+                    tokens,
+                    cursor,
+                    statement_end,
+                )?);
+            } else {
+                statements.push(self.parse_statement_reduction(tokens, cursor, statement_end)?);
+            }
             cursor = statement_end;
         }
 
@@ -2783,10 +2972,12 @@ impl PRT_Parser {
             if let Token::Identifier(keyword) = &tokens[cursor].kind {
                 if keyword == "as" {
                     cursor += 1;
-                    let token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-                        message: "expected alias after `as`".to_string(),
-                        span: tokens[end.saturating_sub(1)].span.clone(),
-                    })?;
+                    let token = tokens
+                        .get(cursor)
+                        .ok_or_else(|| ParseError::InvalidSyntax {
+                            message: "expected alias after `as`".to_string(),
+                            span: tokens[end.saturating_sub(1)].span.clone(),
+                        })?;
                     let Token::Identifier(name) = &token.kind else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected identifier after `as`".to_string(),
@@ -2833,12 +3024,13 @@ impl PRT_Parser {
                     if let Token::Identifier(keyword) = &tokens[cursor].kind {
                         if keyword == "as" {
                             cursor += 1;
-                            let alias_token = tokens.get(cursor).ok_or_else(|| {
-                                ParseError::InvalidSyntax {
-                                    message: "expected alias after `as`".to_string(),
-                                    span: token.span.clone(),
-                                }
-                            })?;
+                            let alias_token =
+                                tokens
+                                    .get(cursor)
+                                    .ok_or_else(|| ParseError::InvalidSyntax {
+                                        message: "expected alias after `as`".to_string(),
+                                        span: token.span.clone(),
+                                    })?;
                             let Token::Identifier(alias_name) = &alias_token.kind else {
                                 return Err(ParseError::InvalidSyntax {
                                     message: "expected identifier after `as`".to_string(),
@@ -2874,11 +3066,7 @@ impl PRT_Parser {
             items = Some(imported_items);
         }
 
-        Ok(ast::ImportItem {
-            path,
-            alias,
-            items,
-        })
+        Ok(ast::ImportItem { path, alias, items })
     }
 
     fn parse_global_variable_reduction(
@@ -3470,52 +3658,22 @@ impl PRT_Parser {
 
         let mut fields = Vec::new();
         while cursor < end - 1 {
-            let field_type_token = tokens
-                .get(cursor)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected struct field type".to_string(),
-                    span: name_token.span.clone(),
-                })?;
-            let (field_type, after_type) = self
-                .parse_type_prefix(tokens, cursor, end - 1)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "invalid struct field type".to_string(),
-                    span: field_type_token.span.clone(),
-                })?;
-            cursor = after_type;
-            let field_name_token = tokens
-                .get(cursor)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected struct field name".to_string(),
-                    span: field_type.span.clone(),
-                })?;
-            let Token::Identifier(field_name) = &field_name_token.kind else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected struct field name".to_string(),
-                    span: field_name_token.span.clone(),
-                });
-            };
-            cursor += 1;
-            if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
+            let Some(semicolon) = self.find_statement_terminator(tokens, cursor, end - 1) else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ';' after struct field".to_string(),
                     span: tokens[cursor.min(end - 1)].span.clone(),
                 });
-            }
-            let field_span = Span {
-                start: field_type.span.start,
-                end: field_name_token.span.end,
             };
-            fields.push(ast::Field {
-                name: ast::Identifier {
-                    name: field_name.clone(),
-                    span: field_name_token.span.clone(),
-                },
-                field_type,
-                visibility: ast::Visibility::Private,
-                span: field_span,
-            });
-            cursor += 1;
+            let (_, declarators) = self.parse_declarator_group(tokens, cursor, semicolon, false)?;
+            for declarator in declarators {
+                fields.push(ast::Field {
+                    name: declarator.name,
+                    field_type: declarator.ty,
+                    visibility: ast::Visibility::Private,
+                    span: declarator.span,
+                });
+            }
+            cursor = semicolon + 1;
         }
 
         Ok(ast::StructItem {
@@ -3566,12 +3724,13 @@ impl PRT_Parser {
 
         let mut variants = Vec::new();
         while cursor < end - 1 {
-            let variant_name_token = tokens
-                .get(cursor)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected enum variant".to_string(),
-                    span: name_token.span.clone(),
-                })?;
+            let variant_name_token =
+                tokens
+                    .get(cursor)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected enum variant".to_string(),
+                        span: name_token.span.clone(),
+                    })?;
             let Token::Identifier(variant_name) = &variant_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected enum variant identifier".to_string(),
@@ -4137,11 +4296,12 @@ impl PRT_Parser {
     ) -> Result<(ast::ImplCast, usize), ParseError> {
         let cast_start = tokens[start].span.start;
         let mut cursor = start + 1;
-        let (target_type, after_type) = self
-            .parse_type_prefix(tokens, cursor, end)
-            .ok_or_else(|| ParseError::InvalidSyntax {
-                message: "invalid cast target type".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+        let (target_type, after_type) =
+            self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "invalid cast target type".to_string(),
+                    span: tokens[cursor.min(end - 1)].span.clone(),
+                }
             })?;
         cursor = after_type;
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
@@ -4718,7 +4878,10 @@ impl PRT_Parser {
         let mut variables = Vec::new();
         cursor = body_start;
         while cursor < body_end {
-            let Some(member_end) = self.find_statement_terminator(tokens, cursor, body_end).map(|idx| idx + 1) else {
+            let Some(member_end) = self
+                .find_statement_terminator(tokens, cursor, body_end)
+                .map(|idx| idx + 1)
+            else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated extern block declaration".to_string(),
                     span: tokens[cursor].span.clone(),
@@ -4807,11 +4970,9 @@ impl PRT_Parser {
                         }
                     }
                 }
-                ItemProduction::ExternBlock => {
-                    ast::ItemKind::ExternBlock(self.parse_extern_block_reduction(
-                        tokens, item_start, item_end,
-                    )?)
-                }
+                ItemProduction::ExternBlock => ast::ItemKind::ExternBlock(
+                    self.parse_extern_block_reduction(tokens, item_start, item_end)?,
+                ),
                 ItemProduction::Struct => ast::ItemKind::Struct(
                     self.parse_struct_reduction(tokens, item_start, item_end)?,
                 ),
@@ -4927,9 +5088,7 @@ impl PRT_Parser {
             ast::ItemKind::ExternVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
-            ast::ItemKind::Impl(_)
-            | ast::ItemKind::Import(_)
-            | ast::ItemKind::ExternBlock(_) => {}
+            ast::ItemKind::Impl(_) | ast::ItemKind::Import(_) | ast::ItemKind::ExternBlock(_) => {}
         }
     }
 }
@@ -5100,6 +5259,138 @@ mod tests {
     }
 
     #[test]
+    fn parses_comma_separated_local_declarations() {
+        let source = "i32 main() { i32 x, y, z; return 0; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(main_fn) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        assert_eq!(main_fn.body.statements.len(), 4);
+        for (idx, expected_name) in ["x", "y", "z"].iter().enumerate() {
+            let ast::StatementKind::Let(let_stmt) = &main_fn.body.statements[idx].kind else {
+                panic!("expected let statement");
+            };
+            let ast::PatternKind::Identifier(name) = &let_stmt.pattern.kind else {
+                panic!("expected identifier pattern");
+            };
+            assert_eq!(name.name, *expected_name);
+            assert!(let_stmt.initializer.is_none());
+        }
+    }
+
+    #[test]
+    fn parses_comma_separated_local_initializers() {
+        let source = "i32 main() { i32 x = foo(1, 2), y = 3; return y; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(main_fn) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        assert_eq!(main_fn.body.statements.len(), 3);
+        let ast::StatementKind::Let(first) = &main_fn.body.statements[0].kind else {
+            panic!("expected first let");
+        };
+        let ast::StatementKind::Let(second) = &main_fn.body.statements[1].kind else {
+            panic!("expected second let");
+        };
+        assert!(matches!(
+            first.initializer.as_ref().map(|expr| expr.kind.as_ref()),
+            Some(ast::ExpressionKind::Call { .. })
+        ));
+        assert!(matches!(
+            second.initializer.as_ref().map(|expr| expr.kind.as_ref()),
+            Some(ast::ExpressionKind::Literal(ast::Literal::Integer(3)))
+        ));
+    }
+
+    #[test]
+    fn parses_comma_separated_local_array_declarators() {
+        let source = "i32 main() { i32 x[2] = {1, 2}, y[3]; return 0; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(main_fn) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        let ast::StatementKind::Let(first) = &main_fn.body.statements[0].kind else {
+            panic!("expected first let");
+        };
+        let ast::StatementKind::Let(second) = &main_fn.body.statements[1].kind else {
+            panic!("expected second let");
+        };
+        assert!(matches!(
+            first.type_annotation.as_ref().map(|ty| ty.kind.as_ref()),
+            Some(ast::TypeKind::Array(_))
+        ));
+        assert!(matches!(
+            second.type_annotation.as_ref().map(|ty| ty.kind.as_ref()),
+            Some(ast::TypeKind::Array(_))
+        ));
+        assert!(matches!(
+            first.initializer.as_ref().map(|expr| expr.kind.as_ref()),
+            Some(ast::ExpressionKind::Initializer { .. })
+        ));
+        assert!(second.initializer.is_none());
+    }
+
+    #[test]
+    fn parses_comma_separated_struct_fields() {
+        let source = "struct Point { i32 x, y, z; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Struct(item) = &program.items[0].kind else {
+            panic!("expected struct item");
+        };
+        assert_eq!(item.fields.len(), 3);
+        assert_eq!(item.fields[0].name.name, "x");
+        assert_eq!(item.fields[1].name.name, "y");
+        assert_eq!(item.fields[2].name.name, "z");
+    }
+
+    #[test]
+    fn parses_comma_separated_struct_array_fields() {
+        let source = "struct Buffers { i32 x[4], y[8]; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Struct(item) = &program.items[0].kind else {
+            panic!("expected struct item");
+        };
+        assert_eq!(item.fields.len(), 2);
+        assert!(matches!(
+            item.fields[0].field_type.kind.as_ref(),
+            ast::TypeKind::Array(_)
+        ));
+        assert!(matches!(
+            item.fields[1].field_type.kind.as_ref(),
+            ast::TypeKind::Array(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_grouped_declaration_in_for_initializer() {
+        let source = "i32 main() { for (i32 x, y; x < 1; x = x + 1) { } return 0; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser
+            .parse_program(&tokens)
+            .expect_err("expected parse failure");
+        assert!(
+            err.format_with_help()
+                .contains("grouped declaration is not allowed in this context")
+        );
+    }
+
+    #[test]
     fn parses_void_and_void_pointer_types() {
         let source = "void consume(void* p) { return; }";
         let tokens = crate::lexer::lex(source).expect("lex failed");
@@ -5132,7 +5423,10 @@ mod tests {
         let ast::ItemKind::Import(item) = &program.items[0].kind else {
             panic!("expected import item");
         };
-        assert_eq!(item.alias.as_ref().map(|alias| alias.name.as_str()), Some("io"));
+        assert_eq!(
+            item.alias.as_ref().map(|alias| alias.name.as_str()),
+            Some("io")
+        );
         assert!(item.items.is_none());
     }
 
@@ -5149,7 +5443,10 @@ mod tests {
         let items = item.items.as_ref().expect("expected selected items");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name.name, "print");
-        assert_eq!(items[0].alias.as_ref().map(|alias| alias.name.as_str()), Some("p"));
+        assert_eq!(
+            items[0].alias.as_ref().map(|alias| alias.name.as_str()),
+            Some("p")
+        );
         assert_eq!(items[1].name.name, "println");
         assert!(items[1].alias.is_none());
     }
@@ -5162,7 +5459,11 @@ mod tests {
         let program = parser.parse_program(&tokens).expect("parse failed");
 
         assert_eq!(program.items.len(), 2, "expected import + extern");
-        assert_eq!(program.attributes.len(), 1, "expected one program attribute");
+        assert_eq!(
+            program.attributes.len(),
+            1,
+            "expected one program attribute"
+        );
         assert_eq!(program.attributes[0].name.name, "link");
         let ast::ItemKind::Import(_) = &program.items[0].kind else {
             panic!("expected import item first");
@@ -5193,7 +5494,10 @@ mod tests {
         let ast::StatementKind::Expression(expr) = &main_fn.body.statements[0].kind else {
             panic!("expected expression statement");
         };
-        let ast::ExpressionKind::MethodCall { receiver, method, .. } = expr.kind.as_ref() else {
+        let ast::ExpressionKind::MethodCall {
+            receiver, method, ..
+        } = expr.kind.as_ref()
+        else {
             panic!("expected method call");
         };
         assert_eq!(method.name, "none");
