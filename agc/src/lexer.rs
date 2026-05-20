@@ -109,11 +109,16 @@ pub enum Token {
     Semicolon,
     Comma,
     Dot,
+    DotDot,
+    DotDotDot,
     Colon,
     DoubleColon,
     Question,
     At,
     Hash,
+
+    // Keywords
+    Macro,
 
     // Special
     Identifier(String),
@@ -276,7 +281,17 @@ impl Lexer {
             ']' => Ok(Token::RightBracket),
             ';' => Ok(Token::Semicolon),
             ',' => Ok(Token::Comma),
-            '.' => Ok(Token::Dot),
+            '.' => {
+                if self.match_char('.') {
+                    if self.match_char('.') {
+                        Ok(Token::DotDotDot)
+                    } else {
+                        Ok(Token::DotDot)
+                    }
+                } else {
+                    Ok(Token::Dot)
+                }
+            }
             '?' => Ok(Token::Question),
             '@' => Ok(Token::At),
             '#' => Ok(Token::Hash),
@@ -593,6 +608,7 @@ impl Lexer {
             "pub" => Token::Pub,
             "private" => Token::Private,
             "asm" => Token::Asm,
+            "macro" => Token::Macro,
             "true" => Token::True,
             "false" => Token::False,
 

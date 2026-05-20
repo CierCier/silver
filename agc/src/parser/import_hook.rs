@@ -414,7 +414,7 @@ impl<'a> ImportAliasRewriter<'a> {
     }
 
     fn rewrite_generics(&mut self, generics: &mut ast::Generics) {
-        for clause in &mut generics.where_clause {
+        while let Some(clause) = &mut generics.where_clause {
             for predicate in &mut clause.predicates {
                 match predicate {
                     ast::WherePredicate::Type {
@@ -712,7 +712,7 @@ impl<'a> ImportAliasRewriter<'a> {
                     self.bind_pattern(data);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard => {}
+            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
         }
     }
 
@@ -736,7 +736,7 @@ impl<'a> ImportAliasRewriter<'a> {
                     self.unbind_pattern(data);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard => {}
+            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
         }
     }
 

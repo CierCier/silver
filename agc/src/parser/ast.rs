@@ -32,6 +32,15 @@ pub enum ItemKind {
     ExternFunction(ExternFunctionItem),
     ExternVariable(ExternVariableItem),
     ExternBlock(ExternBlockItem),
+    Macro(MacroDef),
+}
+
+/// Macro definition
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroDef {
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub body: Block,
 }
 
 /// Function definition
@@ -484,6 +493,11 @@ pub enum PatternKind {
     },
     Literal(Literal),
     Wildcard,
+    Range {
+        start: Expression,
+        end: Expression,
+        inclusive: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

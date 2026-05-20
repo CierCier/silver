@@ -70,6 +70,7 @@ fn item_node(item: &ast::Item) -> Node {
         ast::ItemKind::ExternFunction(extern_fn) => extern_fn_node(extern_fn),
         ast::ItemKind::ExternVariable(extern_var) => extern_var_node(extern_var),
         ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
+        ast::ItemKind::Macro(macro_def) => macro_node(macro_def),
     };
 
     node.label = format!("{} [{}..{}]", node.label, item.span.start, item.span.end);
@@ -250,6 +251,21 @@ fn extern_block_node(block: &ast::ExternBlockItem) -> Node {
         let mut variables = Node::new("variables");
         variables.children = block.variables.iter().map(extern_var_node).collect();
         node.children.push(variables);
+    }
+    node
+}
+
+fn macro_node(macro_def: &ast::MacroDef) -> Node {
+    let mut node = Node::new(format!("Macro: {}", macro_def.name.name));
+    if !macro_def.parameters.is_empty() {
+        let mut params = Node::new("parameters");
+        params.children = macro_def.parameters.iter().map(parameter_node).collect();
+        node.children.push(params);
+    }
+    if !macro_def.body.statements.is_empty() {
+        let mut body = Node::new("body");
+        body.children = macro_def.body.statements.iter().map(statement_node).collect();
+        node.children.push(body);
     }
     node
 }
@@ -498,6 +514,13 @@ fn pattern_node(pattern: &ast::Pattern) -> Node {
             Node::new(format!("Pattern::Literal {}", literal_name(literal)))
         }
         ast::PatternKind::Wildcard => Node::new("Pattern::Wildcard"),
+        ast::PatternKind::Range { start, end, inclusive } => {
+            let op = if *inclusive { ".." } else { "..." };
+            let mut node = Node::new(format!("Pattern::Range {}{}{}", expression_node(start).label, op, expression_node(end).label));
+            node.children.push(expression_node(start));
+            node.children.push(expression_node(end));
+            node
+        }
     }
 }
 
