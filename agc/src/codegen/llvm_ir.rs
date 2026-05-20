@@ -5183,6 +5183,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 &item.visibility,
                 &item.attributes,
             ),
+            ast::ItemKind::Macro(_) => Ok(()),
         }
     }
 

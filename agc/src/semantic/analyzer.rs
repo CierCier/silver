@@ -808,7 +808,7 @@ impl Analyzer {
                     self.bind_pattern(inner);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard => {}
+            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
         }
     }
 

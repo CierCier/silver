@@ -20,6 +20,7 @@ pub enum SymbolKind {
     Field,
     Parameter,
     Import,
+    Macro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -366,6 +367,14 @@ impl CompilerSymbolTable {
                         phase,
                     );
                 }
+            }
+            ast::ItemKind::Macro(macro_def) => {
+                self.upsert(
+                    &macro_def.name.name,
+                    SymbolKind::Macro,
+                    Some(macro_def.name.span.clone()),
+                    phase,
+                );
             }
         }
     }
