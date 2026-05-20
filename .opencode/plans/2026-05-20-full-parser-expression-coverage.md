@@ -184,7 +184,7 @@ match x {
 4. Parse arms in loop until `RightBrace`:
    - Parse pattern (see Pattern section below)
    - Expect `:` (colon)
-   - Parse body: if `LeftBrace` → `parse_block_reduction`, otherwise → parse single statement up to next arm or closing brace
+   - Parse body: if `LeftBrace` → `parse_block_reduction`, otherwise → scan forward to find the next arm boundary (a token sequence matching a valid pattern followed by `:`) or the closing `RightBrace`. The content between `:` and that boundary is parsed as a single statement via `parse_statement_reduction`.
 5. → `ExpressionKind::Match { expression, arms }`
 
 **Pattern parsing:**
@@ -233,9 +233,8 @@ fn parse_macro_reduction(&mut self, tokens: &[LexToken], start: usize, end: usiz
 1. Advance past `macro` keyword
 2. Parse name (identifier)
 3. If next token is `LeftParen` → parse comma-separated parameters → advance past `RightParen`
-4. If next token is `LeftBrace` → parse body via `parse_block_reduction`
-5. Otherwise → treat remaining tokens as a single-statement body
-6. Return `MacroDef { name, parameters, body }`
+4. Expect `LeftBrace` → parse body via `parse_block_reduction`
+5. Return `MacroDef { name, parameters, body }`
 
 ### Transition Table
 Add `(NonTerminal::Item, vec![TokenClass::Macro])` → `ItemProduction::Macro`
