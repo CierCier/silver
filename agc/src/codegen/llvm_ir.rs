@@ -7,7 +7,7 @@ use inkwell::context::Context;
 use inkwell::module::Linkage;
 use inkwell::module::Module;
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{
@@ -31,11 +31,13 @@ struct FunctionSig {
     params: Vec<ast::Type>,
     return_type: Option<ast::Type>,
     is_variadic: bool,
+    linkage: Option<ast::ExternLinkage>,
 }
 
 impl PartialEq for FunctionSig {
     fn eq(&self, other: &Self) -> bool {
         self.is_variadic == other.is_variadic
+            && self.linkage == other.linkage
             && self.params.len() == other.params.len()
             && self
                 .params
@@ -574,12 +576,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         };
                         self.imported_function_links
                             .insert(export.name.clone(), llvm_name.clone());
+                        let abi = export.abi.map(|abi| match abi {
+                            crate::module_artifact::ModuleAbi::C => ast::ExternLinkage::C,
+                            crate::module_artifact::ModuleAbi::Silver => ast::ExternLinkage::Silver,
+                            crate::module_artifact::ModuleAbi::System => ast::ExternLinkage::System,
+                            crate::module_artifact::ModuleAbi::Rust => ast::ExternLinkage::Rust,
+                            crate::module_artifact::ModuleAbi::Cdecl => ast::ExternLinkage::Cdecl,
+                            crate::module_artifact::ModuleAbi::Stdcall => {
+                                ast::ExternLinkage::Stdcall
+                            }
+                            crate::module_artifact::ModuleAbi::Fastcall => {
+                                ast::ExternLinkage::Fastcall
+                            }
+                        });
                         self.register_function_signature(
                             &llvm_name,
                             FunctionSig {
                                 params: param_ast.clone(),
                                 return_type: return_ast.clone(),
                                 is_variadic: export.is_variadic,
+                                linkage: abi.clone(),
                             },
                             None,
                             SymbolKind::ExternFunction,
@@ -589,6 +605,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 &param_ast,
                                 return_ast.as_ref(),
                                 export.is_variadic,
+                                abi,
                             )?;
                             self.module.add_function(&llvm_name, fn_ty, None);
                         }
@@ -797,15 +814,115 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    fn lower_abi_type(
+        &mut self,
+        ty: &ast::Type,
+        linkage: &ast::ExternLinkage,
+    ) -> CodegenResult<BasicTypeEnum<'ctx>> {
+        let lowered = self.lower_basic_type(ty)?;
+        if !matches!(linkage, ast::ExternLinkage::C) {
+            return Ok(lowered);
+        }
+
+        if let BasicTypeEnum::StructType(struct_ty) = lowered {
+            let target_data =
+                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+            let size = target_data.get_store_size(&struct_ty);
+            match size {
+                1 => Ok(self.context.i8_type().as_basic_type_enum()),
+                2 => Ok(self.context.i16_type().as_basic_type_enum()),
+                4 => Ok(self.context.i32_type().as_basic_type_enum()),
+                8 => {
+                    let fields = struct_ty.get_field_types();
+                    if fields.len() == 2 && fields.iter().all(|f| f.is_float_type()) {
+                        Ok(self.context.f32_type().vec_type(2).as_basic_type_enum())
+                    } else {
+                        Ok(self.context.i64_type().as_basic_type_enum())
+                    }
+                }
+                _ => Ok(lowered),
+            }
+        } else {
+            Ok(lowered)
+        }
+    }
+
+    fn coerce_value_to_abi(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &ast::Type,
+        linkage: &ast::ExternLinkage,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !matches!(linkage, ast::ExternLinkage::C) {
+            return Ok(value);
+        }
+
+        let abi_ty = self.lower_abi_type(ty, linkage)?;
+        if abi_ty == value.get_type() {
+            return Ok(value);
+        }
+
+        let alloca = self
+            .builder
+            .build_alloca(value.get_type(), "abi_coercion_tmp")
+            .map_err(|e| CodegenError::new(format!("failed to alloca for ABI coercion: {e}")))?;
+        self.builder
+            .build_store(alloca, value)
+            .map_err(|e| CodegenError::new(format!("failed to store for ABI coercion: {e}")))?;
+
+        let coerced = self
+            .builder
+            .build_load(abi_ty, alloca, "abi_coerced")
+            .map_err(|e| CodegenError::new(format!("failed to load coerced value: {e}")))?;
+
+        Ok(coerced)
+    }
+
+    fn uncoerce_value_from_abi(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &ast::Type,
+        linkage: &ast::ExternLinkage,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !matches!(linkage, ast::ExternLinkage::C) {
+            return Ok(value);
+        }
+
+        let native_ty = self.lower_basic_type(ty)?;
+        if native_ty == value.get_type() {
+            return Ok(value);
+        }
+
+        let alloca = self
+            .builder
+            .build_alloca(value.get_type(), "abi_uncoercion_tmp")
+            .map_err(|e| CodegenError::new(format!("failed to alloca for ABI uncoercion: {e}")))?;
+        self.builder
+            .build_store(alloca, value)
+            .map_err(|e| CodegenError::new(format!("failed to store for ABI uncoercion: {e}")))?;
+
+        let uncoerced = self
+            .builder
+            .build_load(native_ty, alloca, "abi_uncoerced")
+            .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
+
+        Ok(uncoerced)
+    }
+
     fn lower_function_type(
         &mut self,
         params: &[ast::Type],
         return_type: Option<&ast::Type>,
         is_variadic: bool,
+        linkage: Option<ast::ExternLinkage>,
     ) -> CodegenResult<FunctionType<'ctx>> {
         let mut llvm_params = Vec::with_capacity(params.len());
         for param in params {
-            let lowered = self.lower_basic_type(param)?;
+            let lowered = if let Some(linkage) = &linkage {
+                self.lower_abi_type(param, linkage)?
+            } else {
+                self.lower_basic_type(param)?
+            };
             llvm_params.push(BasicMetadataTypeEnum::from(lowered));
         }
 
@@ -813,7 +930,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if Self::is_void_primitive(ret) {
                 return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
             }
-            let llvm_ret = self.lower_basic_type(ret)?;
+            let llvm_ret = if let Some(linkage) = &linkage {
+                self.lower_abi_type(ret, linkage)?
+            } else {
+                self.lower_basic_type(ret)?
+            };
             Ok(llvm_ret.fn_type(&llvm_params, is_variadic))
         } else {
             Ok(self.context.void_type().fn_type(&llvm_params, is_variadic))
@@ -1460,6 +1581,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .collect::<Vec<_>>(),
                     func.return_type.as_ref(),
                     false,
+                    None,
                 )?;
                 let function = self.module.add_function(&mangled_name, fn_ty, None);
                 Self::apply_function_linkage(function, &func.visibility);
@@ -1648,6 +1770,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .collect(),
                             return_type: func.return_type.clone(),
                             is_variadic: false,
+                            linkage: None,
                         },
                         Some(func.name.span.clone()),
                         SymbolKind::ImplMethod,
@@ -1662,6 +1785,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .collect::<Vec<_>>(),
                             func.return_type.as_ref(),
                             false,
+                            None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
                         Self::apply_function_linkage(function, &effective_visibility);
@@ -1687,6 +1811,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .collect(),
                             return_type: Some(cast.target_type.clone()),
                             is_variadic: false,
+                            linkage: None,
                         },
                         Some(cast.span.clone()),
                         SymbolKind::ImplMethod,
@@ -1700,6 +1825,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .collect::<Vec<_>>(),
                             Some(&cast.target_type),
                             false,
+                            None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
                         Self::apply_function_linkage(function, &effective_visibility);
@@ -3605,6 +3731,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         &signature.params[index],
                         &argument.span,
                     )?;
+
+                    if let Some(linkage) = &signature.linkage {
+                        value = self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
+                    }
                 }
             } else if is_variadic {
                 value = self.apply_variadic_default_promotion(value, &argument.span)?;
@@ -3617,6 +3747,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .build_call(function, &args, "calltmp")
             .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
         if let Some(value) = call.try_as_basic_value().basic() {
+            if let Some(signature) = &signature {
+                if let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
+                    return Ok(Some(
+                        self.uncoerce_value_from_abi(value, ret_ty, linkage)?,
+                    ));
+                }
+            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -5210,6 +5347,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect(),
                 return_type: func.return_type.clone(),
                 is_variadic: false,
+                linkage: None,
             },
             Some(func.name.span.clone()),
             SymbolKind::Function,
@@ -5224,6 +5362,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect::<Vec<_>>(),
                 func.return_type.as_ref(),
                 false,
+                None,
             )?;
             let function = self.module.add_function(&func.name.name, fn_ty, None);
             Self::apply_function_linkage(function, visibility);
@@ -5376,6 +5515,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                                 .collect::<Vec<_>>(),
                             func.return_type.as_ref(),
                             false,
+                            None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
                         Self::apply_function_linkage(function, &effective_visibility);
@@ -5413,6 +5553,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                                 .collect::<Vec<_>>(),
                             Some(&cast.target_type),
                             false,
+                            None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
                         Self::apply_function_linkage(function, &effective_visibility);
@@ -5480,6 +5621,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect(),
                 return_type: item.signature.return_type.clone(),
                 is_variadic: item.signature.is_variadic,
+                linkage: Some(item.linkage.clone()),
             },
             Some(item.name.span.clone()),
             SymbolKind::ExternFunction,
@@ -5495,6 +5637,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect::<Vec<_>>(),
                 item.signature.return_type.as_ref(),
                 item.signature.is_variadic,
+                Some(item.linkage.clone()),
             )?;
             self.module.add_function(&item.name.name, fn_ty, None);
         }
