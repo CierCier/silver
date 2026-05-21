@@ -19,6 +19,7 @@ use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
 
+use crate::codegen::abi::{self, AbiHandler};
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::debug_info::{DebugContext, SourceMap};
 use crate::lexer::Span;
@@ -91,6 +92,7 @@ pub struct LlvmIrGenerator<'ctx> {
     debug: Option<DebugContext<'ctx>>,
     source_map: Option<SourceMap>,
     source_path: String,
+    abi_handler: Box<dyn AbiHandler>,
 }
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
@@ -176,6 +178,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             source_map,
             source_path: source_path_str,
+            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
         };
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
@@ -245,6 +248,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             source_map,
             source_path: source_path_str,
+            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
         };
         generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
@@ -483,6 +487,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             source_map,
             source_path: source_path_str,
+            abi_handler: abi::get_abi_handler(
+                target_triple.unwrap_or("x86_64-unknown-linux-gnu"),
+            ),
         };
         generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
@@ -829,6 +836,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         ty: &ast::Type,
         linkage: &ast::ExternLinkage,
     ) -> CodegenResult<BasicTypeEnum<'ctx>> {
+        // Handle void return types specially - they map to LLVM void type
+        // Note: void is not a BasicType, so we return an error here.
+        // Callers should check for void before calling this function.
+        if Self::is_void_primitive(ty) {
+            return Err(CodegenError::with_span(
+                "void is not a valid type for ABI lowering",
+                ty.span.clone(),
+            ));
+        }
+
         let lowered = self.lower_basic_type(ty)?;
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(lowered);
@@ -838,11 +855,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let target_data =
                 TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
             let size = target_data.get_store_size(&struct_ty);
+
             match size {
                 1 => Ok(self.context.i8_type().as_basic_type_enum()),
                 2 => Ok(self.context.i16_type().as_basic_type_enum()),
                 4 => Ok(self.context.i32_type().as_basic_type_enum()),
                 8 => {
+                    // Special case: two floats → <2 x float> for AMD64
                     let fields = struct_ty.get_field_types();
                     if fields.len() == 2 && fields.iter().all(|f| f.is_float_type()) {
                         Ok(self.context.f32_type().vec_type(2).as_basic_type_enum())
@@ -850,9 +869,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         Ok(self.context.i64_type().as_basic_type_enum())
                     }
                 }
-                12 => Ok(self.context.custom_width_int_type(96).as_basic_type_enum()),
-                16 => Ok(self.context.i128_type().as_basic_type_enum()),
-                s if s > 16 => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+                9..=16 => {
+                    // Use full ABI classification for 9-16 byte structs
+                    Ok(self.abi_handler.classify_argument(self.context, &target_data, struct_ty))
+                }
+                s if s > 16 => {
+                    // Large struct: pass by reference
+                    Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum())
+                }
                 _ => Ok(lowered),
             }
         } else {
@@ -886,7 +910,28 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if abi_ty.is_pointer_type() && !value.get_type().is_pointer_type() {
             // Large struct being passed by pointer (byval)
             Ok(alloca.as_basic_value_enum())
+        } else if abi_ty.is_struct_type() && value.get_type().is_struct_type() {
+            // Struct-to-struct conversion: use memcpy
+            let target_data =
+                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+            let struct_ty = value.get_type().into_struct_type();
+            let size = target_data.get_store_size(&struct_ty);
+
+            let abi_alloca = self
+                .builder
+                .build_alloca(abi_ty, "abi_coercion_tmp2")
+                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct coercion: {e}")))?;
+
+            self.build_memcpy(abi_alloca, 1, alloca, 1, size)?;
+
+            let coerced = self
+                .builder
+                .build_load(abi_ty, abi_alloca, "abi_coerced")
+                .map_err(|e| CodegenError::new(format!("failed to load coerced struct value: {e}")))?;
+
+            Ok(coerced)
         } else {
+            // Scalar conversion: load as new type
             let coerced = self
                 .builder
                 .build_load(abi_ty, alloca, "abi_coerced")
@@ -920,6 +965,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(uncoerced);
         }
 
+        if native_ty.is_struct_type() && value.get_type().is_struct_type() {
+            // Struct-to-struct conversion: use memcpy
+            let target_data =
+                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+            let abi_struct_ty = value.get_type().into_struct_type();
+            let size = target_data.get_store_size(&abi_struct_ty);
+
+            let native_alloca = self
+                .builder
+                .build_alloca(native_ty, "abi_uncoercion_tmp")
+                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct uncoercion: {e}")))?;
+
+            let abi_alloca = self
+                .builder
+                .build_alloca(value.get_type(), "abi_uncoercion_tmp2")
+                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct uncoercion: {e}")))?;
+
+            self.builder
+                .build_store(abi_alloca, value)
+                .map_err(|e| CodegenError::new(format!("failed to store for ABI struct uncoercion: {e}")))?;
+
+            self.build_memcpy(native_alloca, 1, abi_alloca, 1, size)?;
+
+            let uncoerced = self
+                .builder
+                .build_load(native_ty, native_alloca, "abi_uncoerced")
+                .map_err(|e| CodegenError::new(format!("failed to load uncoerced struct value: {e}")))?;
+
+            return Ok(uncoerced);
+        }
+
         let alloca = self
             .builder
             .build_alloca(value.get_type(), "abi_uncoercion_tmp")
@@ -934,6 +1010,52 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
 
         Ok(uncoerced)
+    }
+
+    /// Emits a call to the llvm.memcpy intrinsic.
+    ///
+    /// This is used to copy data between alloca slots of different types
+    /// during ABI coercion (e.g., copying a native struct to an ABI-classified struct).
+    fn build_memcpy(
+        &self,
+        dest: PointerValue<'ctx>,
+        dest_align: u32,
+        src: PointerValue<'ctx>,
+        src_align: u32,
+        size: u64,
+    ) -> CodegenResult<()> {
+        // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
+        let memcpy_fn = self.module.get_function("llvm.memcpy.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self.context.void_type().fn_type(
+                    &[
+                        ptr.into(),
+                        ptr.into(),
+                        i64.into(),
+                        i1.into(),
+                    ],
+                    false,
+                );
+                self.module.add_function("llvm.memcpy.p0.p0.i64", fn_type, None)
+            });
+
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    dest.into(),
+                    src.into(),
+                    self.context.i64_type().const_int(size, false).into(),
+                    self.context.bool_type().const_int(0, false).into(), // isVolatile = false
+                ],
+                "memcpy",
+            )
+            .map_err(|e| CodegenError::new(format!("failed to emit memcpy: {e}")))?;
+
+        Ok(())
     }
 
     fn apply_abi_attributes(
@@ -956,8 +1078,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let lowered = self.lower_basic_type(param_ty)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered {
                 let size = target_data.get_store_size(&struct_ty);
-                if size > 16 {
-                    // It was lowered to a pointer, so add byval
+                if self.abi_handler.needs_byval(size) {
+                    // Large struct: add byval attribute
                     let byval_kind = Attribute::get_named_enum_kind_id("byval");
                     let attr = self.context.create_type_attribute(
                         byval_kind,
@@ -965,10 +1087,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     );
                     function.add_attribute(AttributeLoc::Param(i as u32), attr);
 
-                    // Also add alignment
+                    // Add alignment attribute
+                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
                     let align_kind = Attribute::get_named_enum_kind_id("align");
-                    let align_attr = self.context.create_enum_attribute(align_kind, 8);
+                    let align_attr = self.context.create_enum_attribute(align_kind, align);
                     function.add_attribute(AttributeLoc::Param(i as u32), align_attr);
+                }
+            }
+        }
+
+        // Handle sret for struct returns > 16 bytes
+        if let Some(ret_ty) = &sig.return_type {
+            if Self::is_void_primitive(ret_ty) {
+                return Ok(());
+            }
+            let lowered_ret = self.lower_basic_type(ret_ty)?;
+            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
+                let size = target_data.get_store_size(&struct_ty);
+                if self.abi_handler.needs_sret(size) {
+                    // Add sret attribute to the first parameter (implicit return pointer)
+                    let sret_kind = Attribute::get_named_enum_kind_id("sret");
+                    let attr = self.context.create_type_attribute(
+                        sret_kind,
+                        struct_ty.as_any_type_enum(),
+                    );
+                    function.add_attribute(AttributeLoc::Param(0), attr);
+
+                    // Add noalias and nocapture attributes
+                    let noalias_kind = Attribute::get_named_enum_kind_id("noalias");
+                    function.add_attribute(AttributeLoc::Param(0), self.context.create_enum_attribute(noalias_kind, 0));
+
+                    let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
+                    function.add_attribute(AttributeLoc::Param(0), self.context.create_enum_attribute(nocapture_kind, 0));
+
+                    // Add alignment
+                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                    let align_kind = Attribute::get_named_enum_kind_id("align");
+                    let align_attr = self.context.create_enum_attribute(align_kind, align);
+                    function.add_attribute(AttributeLoc::Param(0), align_attr);
                 }
             }
         }
@@ -990,19 +1146,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } else {
                 self.lower_basic_type(param)?
             };
-            llvm_params.push(BasicMetadataTypeEnum::from(lowered));
+            let basic_meta = BasicMetadataTypeEnum::from(lowered);
+            llvm_params.push(basic_meta);
         }
 
         if let Some(ret) = return_type {
             if Self::is_void_primitive(ret) {
                 return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
             }
-            let llvm_ret = if let Some(linkage) = &linkage {
+            let basic_ret = if let Some(linkage) = &linkage {
                 self.lower_abi_type(ret, linkage)?
             } else {
                 self.lower_basic_type(ret)?
             };
-            Ok(llvm_ret.fn_type(&llvm_params, is_variadic))
+            Ok(basic_ret.fn_type(&llvm_params, is_variadic))
         } else {
             Ok(self.context.void_type().fn_type(&llvm_params, is_variadic))
         }
@@ -3813,6 +3970,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_call(function, &args, "calltmp")
             .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
+
+        // Add byval attributes to call site for large struct arguments
+        if let Some(sig) = &signature {
+            if let Some(linkage) = &sig.linkage {
+                if matches!(linkage, ast::ExternLinkage::C) {
+                    let target_data =
+                        TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                    for (index, param_ty) in sig.params.iter().enumerate() {
+                        let lowered = self.lower_basic_type(param_ty)?;
+                        if let BasicTypeEnum::StructType(struct_ty) = lowered {
+                            let size = target_data.get_store_size(&struct_ty);
+                            if self.abi_handler.needs_byval(size) {
+                                let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                                let attr = self.context.create_type_attribute(
+                                    byval_kind,
+                                    struct_ty.as_any_type_enum(),
+                                );
+                                call.add_attribute(AttributeLoc::Param(index as u32), attr);
+
+                                let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                                let align_kind = Attribute::get_named_enum_kind_id("align");
+                                let align_attr = self.context.create_enum_attribute(align_kind, align);
+                                call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(value) = call.try_as_basic_value().basic() {
             if let Some(signature) = &signature {
                 if let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
@@ -4016,7 +4202,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
             let receiver_arg = if let Some(signature) = &signature {
                 if let Some(first_param) = signature.params.first() {
-                    self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?
+                    let cast_arg = self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?;
+                    // Apply ABI coercion for extern methods
+                    if let Some(linkage) = &signature.linkage {
+                        self.coerce_value_to_abi(cast_arg, first_param, linkage)?
+                    } else {
+                        cast_arg
+                    }
                 } else {
                     receiver_arg
                 }
@@ -4036,6 +4228,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         &signature.params[param_index],
                         &argument.span,
                     )?;
+                    // Apply ABI coercion for extern methods
+                    if let Some(linkage) = &signature.linkage {
+                        value = self.coerce_value_to_abi(value, &signature.params[param_index], linkage)?;
+                    }
                 }
             } else if is_variadic {
                 value = self.apply_variadic_default_promotion(value, &argument.span)?;
@@ -4047,7 +4243,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_call(function, &args, &format!("call.{call_name}"))
             .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
+
+        // Add byval attributes to call site for large struct arguments
+        if let Some(sig) = &signature {
+            if let Some(linkage) = &sig.linkage {
+                if matches!(linkage, ast::ExternLinkage::C) {
+                    let target_data =
+                        TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                    for (index, param_ty) in sig.params.iter().enumerate() {
+                        let lowered = self.lower_basic_type(param_ty)?;
+                        if let BasicTypeEnum::StructType(struct_ty) = lowered {
+                            let size = target_data.get_store_size(&struct_ty);
+                            if self.abi_handler.needs_byval(size) {
+                                let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                                let attr = self.context.create_type_attribute(
+                                    byval_kind,
+                                    struct_ty.as_any_type_enum(),
+                                );
+                                call.add_attribute(AttributeLoc::Param(index as u32), attr);
+
+                                let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                                let align_kind = Attribute::get_named_enum_kind_id("align");
+                                let align_attr = self.context.create_enum_attribute(align_kind, align);
+                                call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(value) = call.try_as_basic_value().basic() {
+            if let Some(signature) = &signature {
+                if let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
+                    return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
+                }
+            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
