@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -51,7 +57,7 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          TAG_NAME="${{ github.ref_name }}"
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
           PREV_TAG=$(git describe --tags --abbrev=0 ${TAG_NAME}^ 2>/dev/null || echo "")
           
           if [ -z "$PREV_TAG" ]; then
