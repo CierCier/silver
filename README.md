@@ -61,6 +61,12 @@ Create a Linux release bundle:
 bash ./scripts/create-linux-bundle.sh 2026-03-27
 ```
 
+Tag, build, and publish a GitHub release locally:
+
+```bash
+bash ./scripts/release-local.sh v0.1.0
+```
+
 Compile a Silver source file:
 
 ```bash
