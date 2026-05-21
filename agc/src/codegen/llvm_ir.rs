@@ -2,6 +2,7 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
@@ -9,7 +10,7 @@ use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{
     ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
@@ -605,9 +606,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 &param_ast,
                                 return_ast.as_ref(),
                                 export.is_variadic,
-                                abi,
+                                abi.clone(),
                             )?;
-                            self.module.add_function(&llvm_name, fn_ty, None);
+                            let function = self.module.add_function(&llvm_name, fn_ty, None);
+                            self.apply_abi_attributes(
+                                function,
+                                &FunctionSig {
+                                    params: param_ast.clone(),
+                                    return_type: return_ast.clone(),
+                                    is_variadic: export.is_variadic,
+                                    linkage: abi,
+                                },
+                            )?;
                         }
                     }
                     crate::module_artifact::ExportKind::Struct => {
@@ -840,6 +850,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         Ok(self.context.i64_type().as_basic_type_enum())
                     }
                 }
+                12 => Ok(self.context.custom_width_int_type(96).as_basic_type_enum()),
+                16 => Ok(self.context.i128_type().as_basic_type_enum()),
+                s if s > 16 => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
                 _ => Ok(lowered),
             }
         } else {
@@ -870,12 +883,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .build_store(alloca, value)
             .map_err(|e| CodegenError::new(format!("failed to store for ABI coercion: {e}")))?;
 
-        let coerced = self
-            .builder
-            .build_load(abi_ty, alloca, "abi_coerced")
-            .map_err(|e| CodegenError::new(format!("failed to load coerced value: {e}")))?;
+        if abi_ty.is_pointer_type() && !value.get_type().is_pointer_type() {
+            // Large struct being passed by pointer (byval)
+            Ok(alloca.as_basic_value_enum())
+        } else {
+            let coerced = self
+                .builder
+                .build_load(abi_ty, alloca, "abi_coerced")
+                .map_err(|e| CodegenError::new(format!("failed to load coerced value: {e}")))?;
 
-        Ok(coerced)
+            Ok(coerced)
+        }
     }
 
     fn uncoerce_value_from_abi(
@@ -893,6 +911,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(value);
         }
 
+        if value.get_type().is_pointer_type() && !native_ty.is_pointer_type() {
+            // Large struct returned by pointer (unlikely for many C functions but possible)
+            let uncoerced = self
+                .builder
+                .build_load(native_ty, value.into_pointer_value(), "abi_uncoerced")
+                .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
+            return Ok(uncoerced);
+        }
+
         let alloca = self
             .builder
             .build_alloca(value.get_type(), "abi_uncoercion_tmp")
@@ -907,6 +934,46 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
 
         Ok(uncoerced)
+    }
+
+    fn apply_abi_attributes(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        sig: &FunctionSig,
+    ) -> CodegenResult<()> {
+        let Some(linkage) = &sig.linkage else {
+            return Ok(());
+        };
+
+        if !matches!(linkage, ast::ExternLinkage::C) {
+            return Ok(());
+        }
+
+        let target_data =
+            TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+
+        for (i, param_ty) in sig.params.iter().enumerate() {
+            let lowered = self.lower_basic_type(param_ty)?;
+            if let BasicTypeEnum::StructType(struct_ty) = lowered {
+                let size = target_data.get_store_size(&struct_ty);
+                if size > 16 {
+                    // It was lowered to a pointer, so add byval
+                    let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                    let attr = self.context.create_type_attribute(
+                        byval_kind,
+                        struct_ty.as_any_type_enum(),
+                    );
+                    function.add_attribute(AttributeLoc::Param(i as u32), attr);
+
+                    // Also add alignment
+                    let align_kind = Attribute::get_named_enum_kind_id("align");
+                    let align_attr = self.context.create_enum_attribute(align_kind, 8);
+                    function.add_attribute(AttributeLoc::Param(i as u32), align_attr);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn lower_function_type(
@@ -5628,18 +5695,25 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         );
 
         if self.module.get_function(&item.name.name).is_none() {
-            let fn_ty = self.lower_function_type(
-                &item
+            let sig = FunctionSig {
+                params: item
                     .signature
                     .parameters
                     .iter()
                     .map(|param| param.param_type.clone())
-                    .collect::<Vec<_>>(),
-                item.signature.return_type.as_ref(),
-                item.signature.is_variadic,
-                Some(item.linkage.clone()),
+                    .collect(),
+                return_type: item.signature.return_type.clone(),
+                is_variadic: item.signature.is_variadic,
+                linkage: Some(item.linkage.clone()),
+            };
+            let fn_ty = self.lower_function_type(
+                &sig.params,
+                sig.return_type.as_ref(),
+                sig.is_variadic,
+                sig.linkage.clone(),
             )?;
-            self.module.add_function(&item.name.name, fn_ty, None);
+            let function = self.module.add_function(&item.name.name, fn_ty, None);
+            self.apply_abi_attributes(function, &sig)?;
         }
 
         Ok(())
