@@ -1,6 +1,7 @@
 use crate::lexer::Span;
 use crate::parser::ast;
 
+pub mod abi;
 pub mod llvm_ir;
 
 pub type CodegenResult<T> = Result<T, CodegenError>;
