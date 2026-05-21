@@ -1,33 +1,4 @@
-const u32 RAYWHITE = 4294309365;
-const u32 RED = 4281805286;
-const u32 TOPRED = 4284109055;
-const u32 MAROON = 4281803198;
-const u32 DARKGRAY = 4283453520;
-const u32 GRAY = 4286743170;
-
-struct Point2 {
-    f32 x;
-    f32 y;
-    f32 z;
-}
-
-struct Vec2 {
-    f32 x;
-    f32 y;
-}
-
-#[link(raylib)]
-extern "C" void InitWindow(i32 width, i32 height);
-extern "C" void SetTargetFPS(i32 fps);
-extern "C" bool WindowShouldClose();
-extern "C" f64 GetTime();
-extern "C" void BeginDrawing();
-extern "C" void ClearBackground(u32 color);
-extern "C" void DrawRectangle(i32 posX, i32 posY, i32 width, i32 height, u32 color);
-extern "C" void DrawLine(i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, u32 color);
-extern "C" void DrawTriangle(Vec2 v1, Vec2 v2, Vec2 v3, u32 color);
-extern "C" void EndDrawing();
-
+import std.gfx.raylib;
 import std.math;
 
 void edge(i32 x1, i32 y1, i32 x2, i32 y2) {
