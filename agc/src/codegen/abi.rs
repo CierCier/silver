@@ -11,6 +11,8 @@
 ///   (https://gitlab.com/x86-psABIs/x86-64-ABI)
 /// - Inko compiler ABI implementation (https://github.com/inko-lang/inko)
 
+use std::num::NonZeroU32;
+
 use inkwell::targets::TargetData;
 use inkwell::types::{BasicType, BasicTypeEnum, StructType};
 
@@ -207,7 +209,8 @@ impl Amd64Abi {
     ) -> BasicTypeEnum<'ctx> {
         match cls {
             AbiClass::Integer(bytes) => {
-                context.custom_width_int_type((bytes * 8) as u32).as_basic_type_enum()
+                let bits = NonZeroU32::new((bytes * 8) as u32).unwrap();
+                context.custom_width_int_type(bits).unwrap().as_basic_type_enum()
             }
             AbiClass::Float(4) => context.f32_type().as_basic_type_enum(),
             AbiClass::Float(_) => context.f64_type().as_basic_type_enum(),
@@ -258,7 +261,7 @@ impl AbiHandler for Amd64Abi {
             let bits = (size * 8) as u32;
             // LLVM requires at least 1 bit
             let bits = if bits == 0 { 1 } else { bits };
-            context.custom_width_int_type(bits).as_basic_type_enum()
+            context.custom_width_int_type(NonZeroU32::new(bits).unwrap()).unwrap().as_basic_type_enum()
         } else if size <= 16 {
             // Medium struct: classify into eightbytes
             self.build_abi_struct(context, target_data, struct_ty)
