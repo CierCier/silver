@@ -1,0 +1,130 @@
+const u32 RAYWHITE = 4294309365;
+const u32 RED = 4281805286;
+const u32 TOPRED = 4284109055;
+const u32 MAROON = 4281803198;
+const u32 DARKGRAY = 4283453520;
+const u32 GRAY = 4286743170;
+
+struct Point2 {
+    f32 x;
+    f32 y;
+    f32 z;
+}
+
+struct Vec2 {
+    f32 x;
+    f32 y;
+}
+
+#[link(raylib)]
+extern "C" void InitWindow(i32 width, i32 height);
+extern "C" void SetTargetFPS(i32 fps);
+extern "C" bool WindowShouldClose();
+extern "C" f64 GetTime();
+extern "C" void BeginDrawing();
+extern "C" void ClearBackground(u32 color);
+extern "C" void DrawRectangle(i32 posX, i32 posY, i32 width, i32 height, u32 color);
+extern "C" void DrawLine(i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, u32 color);
+extern "C" void DrawTriangle(Vec2 v1, Vec2 v2, Vec2 v3, u32 color);
+extern "C" void EndDrawing();
+
+import std.math;
+
+void edge(i32 x1, i32 y1, i32 x2, i32 y2) {
+    DrawLine(x1, y1, x2, y2, MAROON);
+}
+
+Point2 project_cube_vertex(f32 x, f32 y, f32 z, f32 s, f32 c) {
+    f32 rx = x * c + z * s;
+    f32 rz = (f32)0.0 - x * s + z * c;
+
+    f32 dist = (f32)5.0;
+    f32 fov = (f32)250.0;
+    f32 depth = dist + rz;
+
+    Point2 p = {
+        .x = (f32)200.0 + rx * fov / depth,
+        .y = (f32)200.0 - y * fov / depth,
+        .z = rz
+    };
+    return p;
+}
+
+void fill_quad(
+    f32 x1, f32 y1,
+    f32 x2, f32 y2,
+    f32 x3, f32 y3,
+    f32 x4, f32 y4,
+    u32 color
+) {
+    Vec2 a = { .x = x1, .y = y1 };
+    Vec2 b = { .x = x2, .y = y2 };
+    Vec2 cc = { .x = x3, .y = y3 };
+    Vec2 d = { .x = x4, .y = y4 };
+
+    DrawTriangle(a, b, cc, color);
+    DrawTriangle(cc, b, a, color);
+    DrawTriangle(a, cc, d, color);
+    DrawTriangle(d, cc, a, color);
+}
+
+void draw_spinning_red_cube(f32 angle) {
+    f32 s = sinf(angle);
+    f32 c = cosf(angle);
+
+    Point2 v000 = project_cube_vertex((f32)-1.0, (f32)-1.0, (f32)-1.0, s, c);
+    Point2 v001 = project_cube_vertex((f32)-1.0, (f32)-1.0, (f32)1.0, s, c);
+    Point2 v010 = project_cube_vertex((f32)-1.0, (f32)1.0, (f32)-1.0, s, c);
+    Point2 v011 = project_cube_vertex((f32)-1.0, (f32)1.0, (f32)1.0, s, c);
+    Point2 v100 = project_cube_vertex((f32)1.0, (f32)-1.0, (f32)-1.0, s, c);
+    Point2 v101 = project_cube_vertex((f32)1.0, (f32)-1.0, (f32)1.0, s, c);
+    Point2 v110 = project_cube_vertex((f32)1.0, (f32)1.0, (f32)-1.0, s, c);
+    Point2 v111 = project_cube_vertex((f32)1.0, (f32)1.0, (f32)1.0, s, c);
+
+    fill_quad(v010.x, v010.y, v110.x, v110.y, v111.x, v111.y, v011.x, v011.y, TOPRED);
+
+    if (s >= (f32)0.0) {
+        fill_quad(v010.x, v010.y, v011.x, v011.y, v001.x, v001.y, v000.x, v000.y, MAROON);
+    } else {
+        fill_quad(v111.x, v111.y, v110.x, v110.y, v100.x, v100.y, v101.x, v101.y, MAROON);
+    }
+
+    if (c >= (f32)0.0) {
+        fill_quad(v011.x, v011.y, v111.x, v111.y, v101.x, v101.y, v001.x, v001.y, RED);
+    } else {
+        fill_quad(v110.x, v110.y, v010.x, v010.y, v000.x, v000.y, v100.x, v100.y, RED);
+    }
+
+    edge((i32)v010.x, (i32)v010.y, (i32)v110.x, (i32)v110.y);
+    edge((i32)v110.x, (i32)v110.y, (i32)v111.x, (i32)v111.y);
+    edge((i32)v111.x, (i32)v111.y, (i32)v011.x, (i32)v011.y);
+    edge((i32)v011.x, (i32)v011.y, (i32)v010.x, (i32)v010.y);
+
+    edge((i32)v000.x, (i32)v000.y, (i32)v100.x, (i32)v100.y);
+    edge((i32)v100.x, (i32)v100.y, (i32)v101.x, (i32)v101.y);
+    edge((i32)v101.x, (i32)v101.y, (i32)v001.x, (i32)v001.y);
+    edge((i32)v001.x, (i32)v001.y, (i32)v000.x, (i32)v000.y);
+
+    edge((i32)v000.x, (i32)v000.y, (i32)v010.x, (i32)v010.y);
+    edge((i32)v100.x, (i32)v100.y, (i32)v110.x, (i32)v110.y);
+    edge((i32)v101.x, (i32)v101.y, (i32)v111.x, (i32)v111.y);
+    edge((i32)v001.x, (i32)v001.y, (i32)v011.x, (i32)v011.y);
+}
+
+i32 main() {
+    InitWindow(400, 400);
+    SetTargetFPS(144);
+
+    while (!WindowShouldClose()) {
+        f32 angle = (f32)GetTime() * (f32)1.8;
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+
+        draw_spinning_red_cube(angle);
+
+        EndDrawing();
+    }
+
+    return 0;
+}
