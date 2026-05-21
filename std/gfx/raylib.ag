@@ -1,72 +1,82 @@
+/**********************************************************************************************
+*
+*   raylib v6.0 - A simple and easy-to-use library to enjoy videogames programming (www.raylib.com)
+*
+*   Translated to Silver language bindings
+*
+**********************************************************************************************/
+
+// ze funny link 
 #[link(raylib)]
+
+
 
 const i32 RAYLIB_VERSION_MAJOR = 6;
 const i32 RAYLIB_VERSION_MINOR = 0;
 const i32 RAYLIB_VERSION_PATCH = 0;
-const char* RAYLIB_VERSION = "6.0";
+const str RAYLIB_VERSION = "6.0";
 
 const f32 PI = 3.14159265358979323846;
 const f32 DEG2RAD = 0.017453292519943295;
 const f32 RAD2DEG = 57.29577951308232;
 
-#[repr(C)]
-struct Vector2 {
-    f32 x;
-    f32 y;
-}
+//----------------------------------------------------------------------------------
+// Types and Structures Definition
+//----------------------------------------------------------------------------------
 
-#[repr(C)]
-struct Vector3 {
-    f32 x;
-    f32 y;
-    f32 z;
-}
-
-#[repr(C)]
-struct Vector4 {
-    f32 x;
-    f32 y;
-    f32 z;
-    f32 w;
-}
-
-#[repr(C)]
-struct Quaternion {
-    f32 x;
-    f32 y;
-    f32 z;
-    f32 w;
-}
-
-#[repr(C)]
-struct Matrix {
-    f32 m0;
-    f32 m4;
-    f32 m8;
-    f32 m12;
-    f32 m1;
-    f32 m5;
-    f32 m9;
-    f32 m13;
-    f32 m2;
-    f32 m6;
-    f32 m10;
-    f32 m14;
-    f32 m3;
-    f32 m7;
-    f32 m11;
-    f32 m15;
-}
-
-#[repr(C)]
 struct Color {
-    u8 r;
-    u8 g;
-    u8 b;
-    u8 a;
+    u8 r, g, b, a;
 }
 
-#[repr(C)]
+const Color LIGHTGRAY = { 200, 200, 200, 255 };
+const Color GRAY      = { 130, 130, 130, 255 };
+const Color DARKGRAY  = { 80, 80, 80, 255 };
+const Color YELLOW    = { 253, 249, 0, 255 };
+const Color GOLD      = { 255, 203, 0, 255 };
+const Color ORANGE    = { 255, 161, 0, 255 };
+const Color PINK      = { 255, 109, 194, 255 };
+const Color RED       = { 230, 41, 55, 255 };
+const Color MAROON    = { 190, 33, 55, 255 };
+const Color GREEN     = { 0, 228, 48, 255 };
+const Color LIME      = { 0, 158, 47, 255 };
+const Color DARKGREEN = { 0, 117, 44, 255 };
+const Color SKYBLUE   = { 102, 191, 255, 255 };
+const Color BLUE      = { 0, 121, 241, 255 };
+const Color DARKBLUE  = { 0, 82, 172, 255 };
+const Color PURPLE    = { 200, 122, 255, 255 };
+const Color VIOLET    = { 135, 60, 190, 255 };
+const Color DARKPURPLE= { 112, 31, 126, 255 };
+const Color BEIGE     = { 211, 176, 131, 255 };
+const Color BROWN     = { 127, 106, 79, 255 };
+const Color DARKBROWN = { 76, 63, 47, 255 };
+const Color WHITE     = { 255, 255, 255, 255 };
+const Color BLACK     = { 0, 0, 0, 255 };
+const Color BLANK     = { 0, 0, 0, 0 };
+const Color MAGENTA   = { 255, 0, 255, 255 };
+const Color RAYWHITE  = { 245, 245, 245, 255 };
+
+struct Vector2 {
+    f32 x, y;
+}
+
+struct Vector3 {
+    f32 x, y, z;
+}
+
+struct Vector4 {
+    f32 x, y, z, w;
+}
+
+// Vector4 is Vector4
+// typedef Vector4 Vector4;
+
+struct Matrix {
+    f32 m0, m4, m8, m12;
+    f32 m1, m5, m9, m13;
+    f32 m2, m6, m10, m14;
+    f32 m3, m7, m11, m15;
+}
+
 struct Rectangle {
     f32 x;
     f32 y;
@@ -74,16 +84,14 @@ struct Rectangle {
     f32 height;
 }
 
-#[repr(C)]
 struct Image {
-    void* data;
+    void *data;
     i32 width;
     i32 height;
     i32 mipmaps;
     i32 format;
 }
 
-#[repr(C)]
 struct Texture {
     u32 id;
     i32 width;
@@ -92,39 +100,19 @@ struct Texture {
     i32 format;
 }
 
-#[repr(C)]
-struct Texture2D {
-    u32 id;
-    i32 width;
-    i32 height;
-    i32 mipmaps;
-    i32 format;
-}
+// Texture and Texture are Texture
+// typedef Texture Texture;
+// typedef Texture Texture;
 
-#[repr(C)]
-struct TextureCubemap {
-    u32 id;
-    i32 width;
-    i32 height;
-    i32 mipmaps;
-    i32 format;
-}
-
-#[repr(C)]
 struct RenderTexture {
     u32 id;
     Texture texture;
     Texture depth;
 }
 
-#[repr(C)]
-struct RenderTexture2D {
-    u32 id;
-    Texture texture;
-    Texture depth;
-}
+// RenderTexture is RenderTexture
+// typedef RenderTexture RenderTexture;
 
-#[repr(C)]
 struct NPatchInfo {
     Rectangle source;
     i32 left;
@@ -134,7 +122,6 @@ struct NPatchInfo {
     i32 layout;
 }
 
-#[repr(C)]
 struct GlyphInfo {
     i32 value;
     i32 offsetX;
@@ -143,17 +130,15 @@ struct GlyphInfo {
     Image image;
 }
 
-#[repr(C)]
 struct Font {
     i32 baseSize;
     i32 glyphCount;
     i32 glyphPadding;
-    Texture2D texture;
-    Rectangle* recs;
-    GlyphInfo* glyphs;
+    Texture texture;
+    Rectangle *recs;
+    GlyphInfo *glyphs;
 }
 
-#[repr(C)]
 struct Camera3D {
     Vector3 position;
     Vector3 target;
@@ -162,16 +147,9 @@ struct Camera3D {
     i32 projection;
 }
 
-#[repr(C)]
-struct Camera {
-    Vector3 position;
-    Vector3 target;
-    Vector3 up;
-    f32 fovy;
-    i32 projection;
-}
+// Camera3D is Camera3D
+// typedef Camera3D Camera3D;
 
-#[repr(C)]
 struct Camera2D {
     Vector2 offset;
     Vector2 target;
@@ -179,94 +157,86 @@ struct Camera2D {
     f32 zoom;
 }
 
-#[repr(C)]
 struct Mesh {
     i32 vertexCount;
     i32 triangleCount;
-    f32* vertices;
-    f32* texcoords;
-    f32* texcoords2;
-    f32* normals;
-    f32* tangents;
-    u8* colors;
-    u16* indices;
+    f32 *vertices;
+    f32 *texcoords;
+    f32 *texcoords2;
+    f32 *normals;
+    f32 *tangents;
+    u8 *colors;
+    u16 *indices;
     i32 boneCount;
-    u8* boneIndices;
-    f32* boneWeights;
-    f32* animVertices;
-    f32* animNormals;
+    u8 *boneIndices;
+    f32 *boneWeights;
+    f32 *animVertices;
+    f32 *animNormals;
     u32 vaoId;
-    u32* vboId;
+    u32 *vboId;
 }
 
-#[repr(C)]
 struct Shader {
     u32 id;
-    i32* locs;
+    i32 *locs;
 }
 
-#[repr(C)]
 struct MaterialMap {
-    Texture2D texture;
+    Texture texture;
     Color color;
     f32 value;
 }
 
-#[repr(C)]
 struct Material {
     Shader shader;
-    MaterialMap* maps;
-    [f32; 4] params;
+    MaterialMap *maps;
+    f32 params[4];
 }
 
-#[repr(C)]
 struct Transform {
     Vector3 translation;
-    Quaternion rotation;
+    Vector4 rotation;
     Vector3 scale;
 }
 
-#[repr(C)]
+// Transform* is Transform*
+// typedef Transform *Transform*;
+
 struct BoneInfo {
-    [i8; 32] name;
+    char name[32];
     i32 parent;
 }
 
-#[repr(C)]
 struct ModelSkeleton {
     i32 boneCount;
-    BoneInfo* bones;
+    BoneInfo *bones;
     Transform* bindPose;
 }
 
-#[repr(C)]
 struct Model {
     Matrix transform;
     i32 meshCount;
     i32 materialCount;
-    Mesh* meshes;
-    Material* materials;
-    i32* meshMaterial;
+    Mesh *meshes;
+    Material *materials;
+    i32 *meshMaterial;
     ModelSkeleton skeleton;
     Transform* currentPose;
-    Matrix* boneMatrices;
+    Matrix *boneMatrices;
 }
 
-#[repr(C)]
 struct ModelAnimation {
-    [i8; 32] name;
+    char name[32];
     i32 boneCount;
     i32 keyframeCount;
-    Transform** keyframePoses;
+    Transform* *keyframePoses;
 }
 
-#[repr(C)]
 struct Ray {
     Vector3 position;
     Vector3 direction;
 }
 
-#[repr(C)]
 struct RayCollision {
     bool hit;
     f32 distance;
@@ -274,56 +244,44 @@ struct RayCollision {
     Vector3 normal;
 }
 
-#[repr(C)]
 struct BoundingBox {
     Vector3 min;
     Vector3 max;
 }
 
-#[repr(C)]
 struct Wave {
     u32 frameCount;
     u32 sampleRate;
     u32 sampleSize;
     u32 channels;
-    void* data;
+    void *data;
 }
 
-#[repr(C)]
-struct rAudioBuffer {
-    i32 _opaque;
-}
+// Opaque audio types
+// struct rAudioBuffer;
+// struct rAudioProcessor;
 
-#[repr(C)]
-struct rAudioProcessor {
-    i32 _opaque;
-}
-
-#[repr(C)]
 struct AudioStream {
-    rAudioBuffer* buffer;
-    rAudioProcessor* processor;
+    void *buffer;
+    void *processor;
     u32 sampleRate;
     u32 sampleSize;
     u32 channels;
 }
 
-#[repr(C)]
 struct Sound {
     AudioStream stream;
     u32 frameCount;
 }
 
-#[repr(C)]
 struct Music {
     AudioStream stream;
     u32 frameCount;
     bool looping;
     i32 ctxType;
-    void* ctxData;
+    void *ctxData;
 }
 
-#[repr(C)]
 struct VrDeviceInfo {
     i32 hResolution;
     i32 vResolution;
@@ -332,68 +290,41 @@ struct VrDeviceInfo {
     f32 eyeToScreenDistance;
     f32 lensSeparationDistance;
     f32 interpupillaryDistance;
-    [f32; 4] lensDistortionValues;
-    [f32; 4] chromaAbCorrection;
+    f32 lensDistortionValues[4];
+    f32 chromaAbCorrection[4];
 }
 
-#[repr(C)]
 struct VrStereoConfig {
-    [Matrix; 2] projection;
-    [Matrix; 2] viewOffset;
-    [f32; 2] leftLensCenter;
-    [f32; 2] rightLensCenter;
-    [f32; 2] leftScreenCenter;
-    [f32; 2] rightScreenCenter;
-    [f32; 2] scale;
-    [f32; 2] scaleIn;
+    Matrix projection[2];
+    Matrix viewOffset[2];
+    f32 leftLensCenter[2];
+    f32 rightLensCenter[2];
+    f32 leftScreenCenter[2];
+    f32 rightScreenCenter[2];
+    f32 scale[2];
+    f32 scaleIn[2];
 }
 
-#[repr(C)]
 struct FilePathList {
     u32 count;
-    char** paths;
+    char **paths;
 }
 
-#[repr(C)]
 struct AutomationEvent {
     u32 frame;
     u32 type;
-    [i32; 4] params;
+    i32 params[4];
 }
 
-#[repr(C)]
 struct AutomationEventList {
     u32 capacity;
     u32 count;
-    AutomationEvent* events;
+    AutomationEvent *events;
 }
 
-const Color LIGHTGRAY = { .r = 200, .g = 200, .b = 200, .a = 255 };
-const Color GRAY = { .r = 130, .g = 130, .b = 130, .a = 255 };
-const Color DARKGRAY = { .r = 80, .g = 80, .b = 80, .a = 255 };
-const Color YELLOW = { .r = 253, .g = 249, .b = 0, .a = 255 };
-const Color GOLD = { .r = 255, .g = 203, .b = 0, .a = 255 };
-const Color ORANGE = { .r = 255, .g = 161, .b = 0, .a = 255 };
-const Color PINK = { .r = 255, .g = 109, .b = 194, .a = 255 };
-const Color RED = { .r = 230, .g = 41, .b = 55, .a = 255 };
-const Color MAROON = { .r = 190, .g = 33, .b = 55, .a = 255 };
-const Color GREEN = { .r = 0, .g = 228, .b = 48, .a = 255 };
-const Color LIME = { .r = 0, .g = 158, .b = 47, .a = 255 };
-const Color DARKGREEN = { .r = 0, .g = 117, .b = 44, .a = 255 };
-const Color SKYBLUE = { .r = 102, .g = 191, .b = 255, .a = 255 };
-const Color BLUE = { .r = 0, .g = 121, .b = 241, .a = 255 };
-const Color DARKBLUE = { .r = 0, .g = 82, .b = 172, .a = 255 };
-const Color PURPLE = { .r = 200, .g = 122, .b = 255, .a = 255 };
-const Color VIOLET = { .r = 135, .g = 60, .b = 190, .a = 255 };
-const Color DARKPURPLE = { .r = 112, .g = 31, .b = 126, .a = 255 };
-const Color BEIGE = { .r = 211, .g = 176, .b = 131, .a = 255 };
-const Color BROWN = { .r = 127, .g = 106, .b = 79, .a = 255 };
-const Color DARKBROWN = { .r = 76, .g = 63, .b = 47, .a = 255 };
-const Color WHITE = { .r = 255, .g = 255, .b = 255, .a = 255 };
-const Color BLACK = { .r = 0, .g = 0, .b = 0, .a = 255 };
-const Color BLANK = { .r = 0, .g = 0, .b = 0, .a = 0 };
-const Color MAGENTA = { .r = 255, .g = 0, .b = 255, .a = 255 };
-const Color RAYWHITE = { .r = 245, .g = 245, .b = 245, .a = 255 };
+//----------------------------------------------------------------------------------
+// Enumerators Definition
+//----------------------------------------------------------------------------------
 
 enum ConfigFlags {
     FLAG_VSYNC_HINT = 64;
@@ -416,13 +347,13 @@ enum ConfigFlags {
 
 enum TraceLogLevel {
     LOG_ALL = 0;
-    LOG_TRACE = 1;
-    LOG_DEBUG = 2;
-    LOG_INFO = 3;
-    LOG_WARNING = 4;
-    LOG_ERROR = 5;
-    LOG_FATAL = 6;
-    LOG_NONE = 7;
+    LOG_TRACE;
+    LOG_DEBUG;
+    LOG_INFO;
+    LOG_WARNING;
+    LOG_ERROR;
+    LOG_FATAL;
+    LOG_NONE;
 }
 
 enum KeyboardKey {
@@ -540,194 +471,198 @@ enum KeyboardKey {
 
 enum MouseButton {
     MOUSE_BUTTON_LEFT = 0;
-    MOUSE_BUTTON_RIGHT = 1;
-    MOUSE_BUTTON_MIDDLE = 2;
-    MOUSE_BUTTON_SIDE = 3;
-    MOUSE_BUTTON_EXTRA = 4;
-    MOUSE_BUTTON_FORWARD = 5;
-    MOUSE_BUTTON_BACK = 6;
+    MOUSE_BUTTON_RIGHT;
+    MOUSE_BUTTON_MIDDLE;
+    MOUSE_BUTTON_SIDE;
+    MOUSE_BUTTON_EXTRA;
+    MOUSE_BUTTON_FORWARD;
+    MOUSE_BUTTON_BACK;
 }
 
 enum MouseCursor {
     MOUSE_CURSOR_DEFAULT = 0;
-    MOUSE_CURSOR_ARROW = 1;
-    MOUSE_CURSOR_IBEAM = 2;
-    MOUSE_CURSOR_CROSSHAIR = 3;
-    MOUSE_CURSOR_POINTING_HAND = 4;
-    MOUSE_CURSOR_RESIZE_EW = 5;
-    MOUSE_CURSOR_RESIZE_NS = 6;
-    MOUSE_CURSOR_RESIZE_NWSE = 7;
-    MOUSE_CURSOR_RESIZE_NESW = 8;
-    MOUSE_CURSOR_RESIZE_ALL = 9;
-    MOUSE_CURSOR_NOT_ALLOWED = 10;
+    MOUSE_CURSOR_ARROW;
+    MOUSE_CURSOR_IBEAM;
+    MOUSE_CURSOR_CROSSHAIR;
+    MOUSE_CURSOR_POINTING_HAND;
+    MOUSE_CURSOR_RESIZE_EW;
+    MOUSE_CURSOR_RESIZE_NS;
+    MOUSE_CURSOR_RESIZE_NWSE;
+    MOUSE_CURSOR_RESIZE_NESW;
+    MOUSE_CURSOR_RESIZE_ALL;
+    MOUSE_CURSOR_NOT_ALLOWED;
 }
 
 enum GamepadButton {
     GAMEPAD_BUTTON_UNKNOWN = 0;
-    GAMEPAD_BUTTON_LEFT_FACE_UP = 1;
-    GAMEPAD_BUTTON_LEFT_FACE_RIGHT = 2;
-    GAMEPAD_BUTTON_LEFT_FACE_DOWN = 3;
-    GAMEPAD_BUTTON_LEFT_FACE_LEFT = 4;
-    GAMEPAD_BUTTON_RIGHT_FACE_UP = 5;
-    GAMEPAD_BUTTON_RIGHT_FACE_RIGHT = 6;
-    GAMEPAD_BUTTON_RIGHT_FACE_DOWN = 7;
-    GAMEPAD_BUTTON_RIGHT_FACE_LEFT = 8;
-    GAMEPAD_BUTTON_LEFT_TRIGGER_1 = 9;
-    GAMEPAD_BUTTON_LEFT_TRIGGER_2 = 10;
-    GAMEPAD_BUTTON_RIGHT_TRIGGER_1 = 11;
-    GAMEPAD_BUTTON_RIGHT_TRIGGER_2 = 12;
-    GAMEPAD_BUTTON_MIDDLE_LEFT = 13;
-    GAMEPAD_BUTTON_MIDDLE = 14;
-    GAMEPAD_BUTTON_MIDDLE_RIGHT = 15;
-    GAMEPAD_BUTTON_LEFT_THUMB = 16;
-    GAMEPAD_BUTTON_RIGHT_THUMB = 17;
+    GAMEPAD_BUTTON_LEFT_FACE_UP;
+    GAMEPAD_BUTTON_LEFT_FACE_RIGHT;
+    GAMEPAD_BUTTON_LEFT_FACE_DOWN;
+    GAMEPAD_BUTTON_LEFT_FACE_LEFT;
+    GAMEPAD_BUTTON_RIGHT_FACE_UP;
+    GAMEPAD_BUTTON_RIGHT_FACE_RIGHT;
+    GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
+    GAMEPAD_BUTTON_RIGHT_FACE_LEFT;
+    GAMEPAD_BUTTON_LEFT_TRIGGER_1;
+    GAMEPAD_BUTTON_LEFT_TRIGGER_2;
+    GAMEPAD_BUTTON_RIGHT_TRIGGER_1;
+    GAMEPAD_BUTTON_RIGHT_TRIGGER_2;
+    GAMEPAD_BUTTON_MIDDLE_LEFT;
+    GAMEPAD_BUTTON_MIDDLE;
+    GAMEPAD_BUTTON_MIDDLE_RIGHT;
+    GAMEPAD_BUTTON_LEFT_THUMB;
+    GAMEPAD_BUTTON_RIGHT_THUMB;
 }
 
 enum GamepadAxis {
     GAMEPAD_AXIS_LEFT_X = 0;
-    GAMEPAD_AXIS_LEFT_Y = 1;
-    GAMEPAD_AXIS_RIGHT_X = 2;
-    GAMEPAD_AXIS_RIGHT_Y = 3;
-    GAMEPAD_AXIS_LEFT_TRIGGER = 4;
-    GAMEPAD_AXIS_RIGHT_TRIGGER = 5;
+    GAMEPAD_AXIS_LEFT_Y;
+    GAMEPAD_AXIS_RIGHT_X;
+    GAMEPAD_AXIS_RIGHT_Y;
+    GAMEPAD_AXIS_LEFT_TRIGGER;
+    GAMEPAD_AXIS_RIGHT_TRIGGER;
 }
 
 enum MaterialMapIndex {
     MATERIAL_MAP_ALBEDO = 0;
-    MATERIAL_MAP_METALNESS = 1;
-    MATERIAL_MAP_NORMAL = 2;
-    MATERIAL_MAP_ROUGHNESS = 3;
-    MATERIAL_MAP_OCCLUSION = 4;
-    MATERIAL_MAP_EMISSION = 5;
-    MATERIAL_MAP_HEIGHT = 6;
-    MATERIAL_MAP_CUBEMAP = 7;
-    MATERIAL_MAP_IRRADIANCE = 8;
-    MATERIAL_MAP_PREFILTER = 9;
-    MATERIAL_MAP_BRDF = 10;
+    MATERIAL_MAP_METALNESS;
+    MATERIAL_MAP_NORMAL;
+    MATERIAL_MAP_ROUGHNESS;
+    MATERIAL_MAP_OCCLUSION;
+    MATERIAL_MAP_EMISSION;
+    MATERIAL_MAP_HEIGHT;
+    MATERIAL_MAP_CUBEMAP;
+    MATERIAL_MAP_IRRADIANCE;
+    MATERIAL_MAP_PREFILTER;
+    MATERIAL_MAP_BRDF;
 }
+
+// Aliases: MATERIAL_MAP_DIFFUSE = MATERIAL_MAP_ALBEDO, MATERIAL_MAP_SPECULAR = MATERIAL_MAP_METALNESS
 
 enum ShaderLocationIndex {
     SHADER_LOC_VERTEX_POSITION = 0;
-    SHADER_LOC_VERTEX_TEXCOORD01 = 1;
-    SHADER_LOC_VERTEX_TEXCOORD02 = 2;
-    SHADER_LOC_VERTEX_NORMAL = 3;
-    SHADER_LOC_VERTEX_TANGENT = 4;
-    SHADER_LOC_VERTEX_COLOR = 5;
-    SHADER_LOC_MATRIX_MVP = 6;
-    SHADER_LOC_MATRIX_VIEW = 7;
-    SHADER_LOC_MATRIX_PROJECTION = 8;
-    SHADER_LOC_MATRIX_MODEL = 9;
-    SHADER_LOC_MATRIX_NORMAL = 10;
-    SHADER_LOC_VECTOR_VIEW = 11;
-    SHADER_LOC_COLOR_DIFFUSE = 12;
-    SHADER_LOC_COLOR_SPECULAR = 13;
-    SHADER_LOC_COLOR_AMBIENT = 14;
-    SHADER_LOC_MAP_ALBEDO = 15;
-    SHADER_LOC_MAP_METALNESS = 16;
-    SHADER_LOC_MAP_NORMAL = 17;
-    SHADER_LOC_MAP_ROUGHNESS = 18;
-    SHADER_LOC_MAP_OCCLUSION = 19;
-    SHADER_LOC_MAP_EMISSION = 20;
-    SHADER_LOC_MAP_HEIGHT = 21;
-    SHADER_LOC_MAP_CUBEMAP = 22;
-    SHADER_LOC_MAP_IRRADIANCE = 23;
-    SHADER_LOC_MAP_PREFILTER = 24;
-    SHADER_LOC_MAP_BRDF = 25;
-    SHADER_LOC_VERTEX_BONEIDS = 26;
-    SHADER_LOC_VERTEX_BONEWEIGHTS = 27;
-    SHADER_LOC_MATRIX_BONETRANSFORMS = 28;
-    SHADER_LOC_VERTEX_INSTANCETRANSFORM = 29;
+    SHADER_LOC_VERTEX_TEXCOORD01;
+    SHADER_LOC_VERTEX_TEXCOORD02;
+    SHADER_LOC_VERTEX_NORMAL;
+    SHADER_LOC_VERTEX_TANGENT;
+    SHADER_LOC_VERTEX_COLOR;
+    SHADER_LOC_MATRIX_MVP;
+    SHADER_LOC_MATRIX_VIEW;
+    SHADER_LOC_MATRIX_PROJECTION;
+    SHADER_LOC_MATRIX_MODEL;
+    SHADER_LOC_MATRIX_NORMAL;
+    SHADER_LOC_VECTOR_VIEW;
+    SHADER_LOC_COLOR_DIFFUSE;
+    SHADER_LOC_COLOR_SPECULAR;
+    SHADER_LOC_COLOR_AMBIENT;
+    SHADER_LOC_MAP_ALBEDO;
+    SHADER_LOC_MAP_METALNESS;
+    SHADER_LOC_MAP_NORMAL;
+    SHADER_LOC_MAP_ROUGHNESS;
+    SHADER_LOC_MAP_OCCLUSION;
+    SHADER_LOC_MAP_EMISSION;
+    SHADER_LOC_MAP_HEIGHT;
+    SHADER_LOC_MAP_CUBEMAP;
+    SHADER_LOC_MAP_IRRADIANCE;
+    SHADER_LOC_MAP_PREFILTER;
+    SHADER_LOC_MAP_BRDF;
+    SHADER_LOC_VERTEX_BONEIDS;
+    SHADER_LOC_VERTEX_BONEWEIGHTS;
+    SHADER_LOC_MATRIX_BONETRANSFORMS;
+    SHADER_LOC_VERTEX_INSTANCETRANSFORM;
 }
+
+// Aliases: SHADER_LOC_MAP_DIFFUSE = SHADER_LOC_MAP_ALBEDO, SHADER_LOC_MAP_SPECULAR = SHADER_LOC_MAP_METALNESS
 
 enum ShaderUniformDataType {
     SHADER_UNIFORM_FLOAT = 0;
-    SHADER_UNIFORM_VEC2 = 1;
-    SHADER_UNIFORM_VEC3 = 2;
-    SHADER_UNIFORM_VEC4 = 3;
-    SHADER_UNIFORM_INT = 4;
-    SHADER_UNIFORM_IVEC2 = 5;
-    SHADER_UNIFORM_IVEC3 = 6;
-    SHADER_UNIFORM_IVEC4 = 7;
-    SHADER_UNIFORM_UINT = 8;
-    SHADER_UNIFORM_UIVEC2 = 9;
-    SHADER_UNIFORM_UIVEC3 = 10;
-    SHADER_UNIFORM_UIVEC4 = 11;
-    SHADER_UNIFORM_SAMPLER2D = 12;
+    SHADER_UNIFORM_VEC2;
+    SHADER_UNIFORM_VEC3;
+    SHADER_UNIFORM_VEC4;
+    SHADER_UNIFORM_INT;
+    SHADER_UNIFORM_IVEC2;
+    SHADER_UNIFORM_IVEC3;
+    SHADER_UNIFORM_IVEC4;
+    SHADER_UNIFORM_UINT;
+    SHADER_UNIFORM_UIVEC2;
+    SHADER_UNIFORM_UIVEC3;
+    SHADER_UNIFORM_UIVEC4;
+    SHADER_UNIFORM_SAMPLER2D;
 }
 
 enum ShaderAttributeDataType {
     SHADER_ATTRIB_FLOAT = 0;
-    SHADER_ATTRIB_VEC2 = 1;
-    SHADER_ATTRIB_VEC3 = 2;
-    SHADER_ATTRIB_VEC4 = 3;
+    SHADER_ATTRIB_VEC2;
+    SHADER_ATTRIB_VEC3;
+    SHADER_ATTRIB_VEC4;
 }
 
 enum PixelFormat {
     PIXELFORMAT_UNCOMPRESSED_GRAYSCALE = 1;
-    PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA = 2;
-    PIXELFORMAT_UNCOMPRESSED_R5G6B5 = 3;
-    PIXELFORMAT_UNCOMPRESSED_R8G8B8 = 4;
-    PIXELFORMAT_UNCOMPRESSED_R5G5B5A1 = 5;
-    PIXELFORMAT_UNCOMPRESSED_R4G4B4A4 = 6;
-    PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 = 7;
-    PIXELFORMAT_UNCOMPRESSED_R32 = 8;
-    PIXELFORMAT_UNCOMPRESSED_R32G32B32 = 9;
-    PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 = 10;
-    PIXELFORMAT_UNCOMPRESSED_R16 = 11;
-    PIXELFORMAT_UNCOMPRESSED_R16G16B16 = 12;
-    PIXELFORMAT_UNCOMPRESSED_R16G16B16A16 = 13;
-    PIXELFORMAT_COMPRESSED_DXT1_RGB = 14;
-    PIXELFORMAT_COMPRESSED_DXT1_RGBA = 15;
-    PIXELFORMAT_COMPRESSED_DXT3_RGBA = 16;
-    PIXELFORMAT_COMPRESSED_DXT5_RGBA = 17;
-    PIXELFORMAT_COMPRESSED_ETC1_RGB = 18;
-    PIXELFORMAT_COMPRESSED_ETC2_RGB = 19;
-    PIXELFORMAT_COMPRESSED_ETC2_EAC_RGBA = 20;
-    PIXELFORMAT_COMPRESSED_PVRT_RGB = 21;
-    PIXELFORMAT_COMPRESSED_PVRT_RGBA = 22;
-    PIXELFORMAT_COMPRESSED_ASTC_4x4_RGBA = 23;
-    PIXELFORMAT_COMPRESSED_ASTC_8x8_RGBA = 24;
+    PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA;
+    PIXELFORMAT_UNCOMPRESSED_R5G6B5;
+    PIXELFORMAT_UNCOMPRESSED_R8G8B8;
+    PIXELFORMAT_UNCOMPRESSED_R5G5B5A1;
+    PIXELFORMAT_UNCOMPRESSED_R4G4B4A4;
+    PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    PIXELFORMAT_UNCOMPRESSED_R32;
+    PIXELFORMAT_UNCOMPRESSED_R32G32B32;
+    PIXELFORMAT_UNCOMPRESSED_R32G32B32A32;
+    PIXELFORMAT_UNCOMPRESSED_R16;
+    PIXELFORMAT_UNCOMPRESSED_R16G16B16;
+    PIXELFORMAT_UNCOMPRESSED_R16G16B16A16;
+    PIXELFORMAT_COMPRESSED_DXT1_RGB;
+    PIXELFORMAT_COMPRESSED_DXT1_RGBA;
+    PIXELFORMAT_COMPRESSED_DXT3_RGBA;
+    PIXELFORMAT_COMPRESSED_DXT5_RGBA;
+    PIXELFORMAT_COMPRESSED_ETC1_RGB;
+    PIXELFORMAT_COMPRESSED_ETC2_RGB;
+    PIXELFORMAT_COMPRESSED_ETC2_EAC_RGBA;
+    PIXELFORMAT_COMPRESSED_PVRT_RGB;
+    PIXELFORMAT_COMPRESSED_PVRT_RGBA;
+    PIXELFORMAT_COMPRESSED_ASTC_4x4_RGBA;
+    PIXELFORMAT_COMPRESSED_ASTC_8x8_RGBA;
 }
 
 enum TextureFilter {
     TEXTURE_FILTER_POINT = 0;
-    TEXTURE_FILTER_BILINEAR = 1;
-    TEXTURE_FILTER_TRILINEAR = 2;
-    TEXTURE_FILTER_ANISOTROPIC_4X = 3;
-    TEXTURE_FILTER_ANISOTROPIC_8X = 4;
-    TEXTURE_FILTER_ANISOTROPIC_16X = 5;
+    TEXTURE_FILTER_BILINEAR;
+    TEXTURE_FILTER_TRILINEAR;
+    TEXTURE_FILTER_ANISOTROPIC_4X;
+    TEXTURE_FILTER_ANISOTROPIC_8X;
+    TEXTURE_FILTER_ANISOTROPIC_16X;
 }
 
 enum TextureWrap {
     TEXTURE_WRAP_REPEAT = 0;
-    TEXTURE_WRAP_CLAMP = 1;
-    TEXTURE_WRAP_MIRROR_REPEAT = 2;
-    TEXTURE_WRAP_MIRROR_CLAMP = 3;
+    TEXTURE_WRAP_CLAMP;
+    TEXTURE_WRAP_MIRROR_REPEAT;
+    TEXTURE_WRAP_MIRROR_CLAMP;
 }
 
 enum CubemapLayout {
     CUBEMAP_LAYOUT_AUTO_DETECT = 0;
-    CUBEMAP_LAYOUT_LINE_VERTICAL = 1;
-    CUBEMAP_LAYOUT_LINE_HORIZONTAL = 2;
-    CUBEMAP_LAYOUT_CROSS_THREE_BY_FOUR = 3;
-    CUBEMAP_LAYOUT_CROSS_FOUR_BY_THREE = 4;
+    CUBEMAP_LAYOUT_LINE_VERTICAL;
+    CUBEMAP_LAYOUT_LINE_HORIZONTAL;
+    CUBEMAP_LAYOUT_CROSS_THREE_BY_FOUR;
+    CUBEMAP_LAYOUT_CROSS_FOUR_BY_THREE;
 }
 
 enum FontType {
     FONT_DEFAULT = 0;
-    FONT_BITMAP = 1;
-    FONT_SDF = 2;
+    FONT_BITMAP;
+    FONT_SDF;
 }
 
 enum BlendMode {
     BLEND_ALPHA = 0;
-    BLEND_ADDITIVE = 1;
-    BLEND_MULTIPLIED = 2;
-    BLEND_ADD_COLORS = 3;
-    BLEND_SUBTRACT_COLORS = 4;
-    BLEND_ALPHA_PREMULTIPLY = 5;
-    BLEND_CUSTOM = 6;
-    BLEND_CUSTOM_SEPARATE = 7;
+    BLEND_ADDITIVE;
+    BLEND_MULTIPLIED;
+    BLEND_ADD_COLORS;
+    BLEND_SUBTRACT_COLORS;
+    BLEND_ALPHA_PREMULTIPLY;
+    BLEND_CUSTOM;
+    BLEND_CUSTOM_SEPARATE;
 }
 
 enum Gesture {
@@ -746,933 +681,753 @@ enum Gesture {
 
 enum CameraMode {
     CAMERA_CUSTOM = 0;
-    CAMERA_FREE = 1;
-    CAMERA_ORBITAL = 2;
-    CAMERA_FIRST_PERSON = 3;
-    CAMERA_THIRD_PERSON = 4;
+    CAMERA_FREE;
+    CAMERA_ORBITAL;
+    CAMERA_FIRST_PERSON;
+    CAMERA_THIRD_PERSON;
 }
 
 enum CameraProjection {
     CAMERA_PERSPECTIVE = 0;
-    CAMERA_ORTHOGRAPHIC = 1;
+    CAMERA_ORTHOGRAPHIC;
 }
 
 enum NPatchLayout {
     NPATCH_NINE_PATCH = 0;
-    NPATCH_THREE_PATCH_VERTICAL = 1;
-    NPATCH_THREE_PATCH_HORIZONTAL = 2;
+    NPATCH_THREE_PATCH_VERTICAL;
+    NPATCH_THREE_PATCH_HORIZONTAL;
 }
 
-const i32 FLAG_VSYNC_HINT = 64;
-const i32 FLAG_FULLSCREEN_MODE = 2;
-const i32 FLAG_WINDOW_RESIZABLE = 4;
-const i32 FLAG_WINDOW_UNDECORATED = 8;
-const i32 FLAG_WINDOW_HIDDEN = 128;
-const i32 FLAG_WINDOW_MINIMIZED = 512;
-const i32 FLAG_WINDOW_MAXIMIZED = 1024;
-const i32 FLAG_WINDOW_UNFOCUSED = 2048;
-const i32 FLAG_WINDOW_TOPMOST = 4096;
-const i32 FLAG_WINDOW_ALWAYS_RUN = 256;
-const i32 FLAG_WINDOW_TRANSPARENT = 16;
-const i32 FLAG_WINDOW_HIGHDPI = 8192;
-const i32 FLAG_WINDOW_MOUSE_PASSTHROUGH = 16384;
-const i32 FLAG_BORDERLESS_WINDOWED_MODE = 32768;
-const i32 FLAG_MSAA_4X_HINT = 32;
-const i32 FLAG_INTERLACED_HINT = 65536;
-const i32 LOG_ALL = 0;
-const i32 LOG_TRACE = 1;
-const i32 LOG_DEBUG = 2;
-const i32 LOG_INFO = 3;
-const i32 LOG_WARNING = 4;
-const i32 LOG_ERROR = 5;
-const i32 LOG_FATAL = 6;
-const i32 LOG_NONE = 7;
-const i32 KEY_NULL = 0;
-const i32 KEY_APOSTROPHE = 39;
-const i32 KEY_COMMA = 44;
-const i32 KEY_MINUS = 45;
-const i32 KEY_PERIOD = 46;
-const i32 KEY_SLASH = 47;
-const i32 KEY_ZERO = 48;
-const i32 KEY_ONE = 49;
-const i32 KEY_TWO = 50;
-const i32 KEY_THREE = 51;
-const i32 KEY_FOUR = 52;
-const i32 KEY_FIVE = 53;
-const i32 KEY_SIX = 54;
-const i32 KEY_SEVEN = 55;
-const i32 KEY_EIGHT = 56;
-const i32 KEY_NINE = 57;
-const i32 KEY_SEMICOLON = 59;
-const i32 KEY_EQUAL = 61;
-const i32 KEY_A = 65;
-const i32 KEY_B = 66;
-const i32 KEY_C = 67;
-const i32 KEY_D = 68;
-const i32 KEY_E = 69;
-const i32 KEY_F = 70;
-const i32 KEY_G = 71;
-const i32 KEY_H = 72;
-const i32 KEY_I = 73;
-const i32 KEY_J = 74;
-const i32 KEY_K = 75;
-const i32 KEY_L = 76;
-const i32 KEY_M = 77;
-const i32 KEY_N = 78;
-const i32 KEY_O = 79;
-const i32 KEY_P = 80;
-const i32 KEY_Q = 81;
-const i32 KEY_R = 82;
-const i32 KEY_S = 83;
-const i32 KEY_T = 84;
-const i32 KEY_U = 85;
-const i32 KEY_V = 86;
-const i32 KEY_W = 87;
-const i32 KEY_X = 88;
-const i32 KEY_Y = 89;
-const i32 KEY_Z = 90;
-const i32 KEY_LEFT_BRACKET = 91;
-const i32 KEY_BACKSLASH = 92;
-const i32 KEY_RIGHT_BRACKET = 93;
-const i32 KEY_GRAVE = 96;
-const i32 KEY_SPACE = 32;
-const i32 KEY_ESCAPE = 256;
-const i32 KEY_ENTER = 257;
-const i32 KEY_TAB = 258;
-const i32 KEY_BACKSPACE = 259;
-const i32 KEY_INSERT = 260;
-const i32 KEY_DELETE = 261;
-const i32 KEY_RIGHT = 262;
-const i32 KEY_LEFT = 263;
-const i32 KEY_DOWN = 264;
-const i32 KEY_UP = 265;
-const i32 KEY_PAGE_UP = 266;
-const i32 KEY_PAGE_DOWN = 267;
-const i32 KEY_HOME = 268;
-const i32 KEY_END = 269;
-const i32 KEY_CAPS_LOCK = 280;
-const i32 KEY_SCROLL_LOCK = 281;
-const i32 KEY_NUM_LOCK = 282;
-const i32 KEY_PRINT_SCREEN = 283;
-const i32 KEY_PAUSE = 284;
-const i32 KEY_F1 = 290;
-const i32 KEY_F2 = 291;
-const i32 KEY_F3 = 292;
-const i32 KEY_F4 = 293;
-const i32 KEY_F5 = 294;
-const i32 KEY_F6 = 295;
-const i32 KEY_F7 = 296;
-const i32 KEY_F8 = 297;
-const i32 KEY_F9 = 298;
-const i32 KEY_F10 = 299;
-const i32 KEY_F11 = 300;
-const i32 KEY_F12 = 301;
-const i32 KEY_LEFT_SHIFT = 340;
-const i32 KEY_LEFT_CONTROL = 341;
-const i32 KEY_LEFT_ALT = 342;
-const i32 KEY_LEFT_SUPER = 343;
-const i32 KEY_RIGHT_SHIFT = 344;
-const i32 KEY_RIGHT_CONTROL = 345;
-const i32 KEY_RIGHT_ALT = 346;
-const i32 KEY_RIGHT_SUPER = 347;
-const i32 KEY_KB_MENU = 348;
-const i32 KEY_KP_0 = 320;
-const i32 KEY_KP_1 = 321;
-const i32 KEY_KP_2 = 322;
-const i32 KEY_KP_3 = 323;
-const i32 KEY_KP_4 = 324;
-const i32 KEY_KP_5 = 325;
-const i32 KEY_KP_6 = 326;
-const i32 KEY_KP_7 = 327;
-const i32 KEY_KP_8 = 328;
-const i32 KEY_KP_9 = 329;
-const i32 KEY_KP_DECIMAL = 330;
-const i32 KEY_KP_DIVIDE = 331;
-const i32 KEY_KP_MULTIPLY = 332;
-const i32 KEY_KP_SUBTRACT = 333;
-const i32 KEY_KP_ADD = 334;
-const i32 KEY_KP_ENTER = 335;
-const i32 KEY_KP_EQUAL = 336;
-const i32 KEY_BACK = 4;
-const i32 KEY_MENU = 5;
-const i32 KEY_VOLUME_UP = 24;
-const i32 KEY_VOLUME_DOWN = 25;
-const i32 MOUSE_BUTTON_LEFT = 0;
-const i32 MOUSE_BUTTON_RIGHT = 1;
-const i32 MOUSE_BUTTON_MIDDLE = 2;
-const i32 MOUSE_BUTTON_SIDE = 3;
-const i32 MOUSE_BUTTON_EXTRA = 4;
-const i32 MOUSE_BUTTON_FORWARD = 5;
-const i32 MOUSE_BUTTON_BACK = 6;
-const i32 MOUSE_CURSOR_DEFAULT = 0;
-const i32 MOUSE_CURSOR_ARROW = 1;
-const i32 MOUSE_CURSOR_IBEAM = 2;
-const i32 MOUSE_CURSOR_CROSSHAIR = 3;
-const i32 MOUSE_CURSOR_POINTING_HAND = 4;
-const i32 MOUSE_CURSOR_RESIZE_EW = 5;
-const i32 MOUSE_CURSOR_RESIZE_NS = 6;
-const i32 MOUSE_CURSOR_RESIZE_NWSE = 7;
-const i32 MOUSE_CURSOR_RESIZE_NESW = 8;
-const i32 MOUSE_CURSOR_RESIZE_ALL = 9;
-const i32 MOUSE_CURSOR_NOT_ALLOWED = 10;
-const i32 GAMEPAD_BUTTON_UNKNOWN = 0;
-const i32 GAMEPAD_BUTTON_LEFT_FACE_UP = 1;
-const i32 GAMEPAD_BUTTON_LEFT_FACE_RIGHT = 2;
-const i32 GAMEPAD_BUTTON_LEFT_FACE_DOWN = 3;
-const i32 GAMEPAD_BUTTON_LEFT_FACE_LEFT = 4;
-const i32 GAMEPAD_BUTTON_RIGHT_FACE_UP = 5;
-const i32 GAMEPAD_BUTTON_RIGHT_FACE_RIGHT = 6;
-const i32 GAMEPAD_BUTTON_RIGHT_FACE_DOWN = 7;
-const i32 GAMEPAD_BUTTON_RIGHT_FACE_LEFT = 8;
-const i32 GAMEPAD_BUTTON_LEFT_TRIGGER_1 = 9;
-const i32 GAMEPAD_BUTTON_LEFT_TRIGGER_2 = 10;
-const i32 GAMEPAD_BUTTON_RIGHT_TRIGGER_1 = 11;
-const i32 GAMEPAD_BUTTON_RIGHT_TRIGGER_2 = 12;
-const i32 GAMEPAD_BUTTON_MIDDLE_LEFT = 13;
-const i32 GAMEPAD_BUTTON_MIDDLE = 14;
-const i32 GAMEPAD_BUTTON_MIDDLE_RIGHT = 15;
-const i32 GAMEPAD_BUTTON_LEFT_THUMB = 16;
-const i32 GAMEPAD_BUTTON_RIGHT_THUMB = 17;
-const i32 GAMEPAD_AXIS_LEFT_X = 0;
-const i32 GAMEPAD_AXIS_LEFT_Y = 1;
-const i32 GAMEPAD_AXIS_RIGHT_X = 2;
-const i32 GAMEPAD_AXIS_RIGHT_Y = 3;
-const i32 GAMEPAD_AXIS_LEFT_TRIGGER = 4;
-const i32 GAMEPAD_AXIS_RIGHT_TRIGGER = 5;
-const i32 MATERIAL_MAP_ALBEDO = 0;
-const i32 MATERIAL_MAP_METALNESS = 1;
-const i32 MATERIAL_MAP_NORMAL = 2;
-const i32 MATERIAL_MAP_ROUGHNESS = 3;
-const i32 MATERIAL_MAP_OCCLUSION = 4;
-const i32 MATERIAL_MAP_EMISSION = 5;
-const i32 MATERIAL_MAP_HEIGHT = 6;
-const i32 MATERIAL_MAP_CUBEMAP = 7;
-const i32 MATERIAL_MAP_IRRADIANCE = 8;
-const i32 MATERIAL_MAP_PREFILTER = 9;
-const i32 MATERIAL_MAP_BRDF = 10;
-const i32 SHADER_LOC_VERTEX_POSITION = 0;
-const i32 SHADER_LOC_VERTEX_TEXCOORD01 = 1;
-const i32 SHADER_LOC_VERTEX_TEXCOORD02 = 2;
-const i32 SHADER_LOC_VERTEX_NORMAL = 3;
-const i32 SHADER_LOC_VERTEX_TANGENT = 4;
-const i32 SHADER_LOC_VERTEX_COLOR = 5;
-const i32 SHADER_LOC_MATRIX_MVP = 6;
-const i32 SHADER_LOC_MATRIX_VIEW = 7;
-const i32 SHADER_LOC_MATRIX_PROJECTION = 8;
-const i32 SHADER_LOC_MATRIX_MODEL = 9;
-const i32 SHADER_LOC_MATRIX_NORMAL = 10;
-const i32 SHADER_LOC_VECTOR_VIEW = 11;
-const i32 SHADER_LOC_COLOR_DIFFUSE = 12;
-const i32 SHADER_LOC_COLOR_SPECULAR = 13;
-const i32 SHADER_LOC_COLOR_AMBIENT = 14;
-const i32 SHADER_LOC_MAP_ALBEDO = 15;
-const i32 SHADER_LOC_MAP_METALNESS = 16;
-const i32 SHADER_LOC_MAP_NORMAL = 17;
-const i32 SHADER_LOC_MAP_ROUGHNESS = 18;
-const i32 SHADER_LOC_MAP_OCCLUSION = 19;
-const i32 SHADER_LOC_MAP_EMISSION = 20;
-const i32 SHADER_LOC_MAP_HEIGHT = 21;
-const i32 SHADER_LOC_MAP_CUBEMAP = 22;
-const i32 SHADER_LOC_MAP_IRRADIANCE = 23;
-const i32 SHADER_LOC_MAP_PREFILTER = 24;
-const i32 SHADER_LOC_MAP_BRDF = 25;
-const i32 SHADER_LOC_VERTEX_BONEIDS = 26;
-const i32 SHADER_LOC_VERTEX_BONEWEIGHTS = 27;
-const i32 SHADER_LOC_MATRIX_BONETRANSFORMS = 28;
-const i32 SHADER_LOC_VERTEX_INSTANCETRANSFORM = 29;
-const i32 SHADER_UNIFORM_FLOAT = 0;
-const i32 SHADER_UNIFORM_VEC2 = 1;
-const i32 SHADER_UNIFORM_VEC3 = 2;
-const i32 SHADER_UNIFORM_VEC4 = 3;
-const i32 SHADER_UNIFORM_INT = 4;
-const i32 SHADER_UNIFORM_IVEC2 = 5;
-const i32 SHADER_UNIFORM_IVEC3 = 6;
-const i32 SHADER_UNIFORM_IVEC4 = 7;
-const i32 SHADER_UNIFORM_UINT = 8;
-const i32 SHADER_UNIFORM_UIVEC2 = 9;
-const i32 SHADER_UNIFORM_UIVEC3 = 10;
-const i32 SHADER_UNIFORM_UIVEC4 = 11;
-const i32 SHADER_UNIFORM_SAMPLER2D = 12;
-const i32 SHADER_ATTRIB_FLOAT = 0;
-const i32 SHADER_ATTRIB_VEC2 = 1;
-const i32 SHADER_ATTRIB_VEC3 = 2;
-const i32 SHADER_ATTRIB_VEC4 = 3;
-const i32 PIXELFORMAT_UNCOMPRESSED_GRAYSCALE = 1;
-const i32 PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA = 2;
-const i32 PIXELFORMAT_UNCOMPRESSED_R5G6B5 = 3;
-const i32 PIXELFORMAT_UNCOMPRESSED_R8G8B8 = 4;
-const i32 PIXELFORMAT_UNCOMPRESSED_R5G5B5A1 = 5;
-const i32 PIXELFORMAT_UNCOMPRESSED_R4G4B4A4 = 6;
-const i32 PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 = 7;
-const i32 PIXELFORMAT_UNCOMPRESSED_R32 = 8;
-const i32 PIXELFORMAT_UNCOMPRESSED_R32G32B32 = 9;
-const i32 PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 = 10;
-const i32 PIXELFORMAT_UNCOMPRESSED_R16 = 11;
-const i32 PIXELFORMAT_UNCOMPRESSED_R16G16B16 = 12;
-const i32 PIXELFORMAT_UNCOMPRESSED_R16G16B16A16 = 13;
-const i32 PIXELFORMAT_COMPRESSED_DXT1_RGB = 14;
-const i32 PIXELFORMAT_COMPRESSED_DXT1_RGBA = 15;
-const i32 PIXELFORMAT_COMPRESSED_DXT3_RGBA = 16;
-const i32 PIXELFORMAT_COMPRESSED_DXT5_RGBA = 17;
-const i32 PIXELFORMAT_COMPRESSED_ETC1_RGB = 18;
-const i32 PIXELFORMAT_COMPRESSED_ETC2_RGB = 19;
-const i32 PIXELFORMAT_COMPRESSED_ETC2_EAC_RGBA = 20;
-const i32 PIXELFORMAT_COMPRESSED_PVRT_RGB = 21;
-const i32 PIXELFORMAT_COMPRESSED_PVRT_RGBA = 22;
-const i32 PIXELFORMAT_COMPRESSED_ASTC_4x4_RGBA = 23;
-const i32 PIXELFORMAT_COMPRESSED_ASTC_8x8_RGBA = 24;
-const i32 TEXTURE_FILTER_POINT = 0;
-const i32 TEXTURE_FILTER_BILINEAR = 1;
-const i32 TEXTURE_FILTER_TRILINEAR = 2;
-const i32 TEXTURE_FILTER_ANISOTROPIC_4X = 3;
-const i32 TEXTURE_FILTER_ANISOTROPIC_8X = 4;
-const i32 TEXTURE_FILTER_ANISOTROPIC_16X = 5;
-const i32 TEXTURE_WRAP_REPEAT = 0;
-const i32 TEXTURE_WRAP_CLAMP = 1;
-const i32 TEXTURE_WRAP_MIRROR_REPEAT = 2;
-const i32 TEXTURE_WRAP_MIRROR_CLAMP = 3;
-const i32 CUBEMAP_LAYOUT_AUTO_DETECT = 0;
-const i32 CUBEMAP_LAYOUT_LINE_VERTICAL = 1;
-const i32 CUBEMAP_LAYOUT_LINE_HORIZONTAL = 2;
-const i32 CUBEMAP_LAYOUT_CROSS_THREE_BY_FOUR = 3;
-const i32 CUBEMAP_LAYOUT_CROSS_FOUR_BY_THREE = 4;
-const i32 FONT_DEFAULT = 0;
-const i32 FONT_BITMAP = 1;
-const i32 FONT_SDF = 2;
-const i32 BLEND_ALPHA = 0;
-const i32 BLEND_ADDITIVE = 1;
-const i32 BLEND_MULTIPLIED = 2;
-const i32 BLEND_ADD_COLORS = 3;
-const i32 BLEND_SUBTRACT_COLORS = 4;
-const i32 BLEND_ALPHA_PREMULTIPLY = 5;
-const i32 BLEND_CUSTOM = 6;
-const i32 BLEND_CUSTOM_SEPARATE = 7;
-const i32 GESTURE_NONE = 0;
-const i32 GESTURE_TAP = 1;
-const i32 GESTURE_DOUBLETAP = 2;
-const i32 GESTURE_HOLD = 4;
-const i32 GESTURE_DRAG = 8;
-const i32 GESTURE_SWIPE_RIGHT = 16;
-const i32 GESTURE_SWIPE_LEFT = 32;
-const i32 GESTURE_SWIPE_UP = 64;
-const i32 GESTURE_SWIPE_DOWN = 128;
-const i32 GESTURE_PINCH_IN = 256;
-const i32 GESTURE_PINCH_OUT = 512;
-const i32 CAMERA_CUSTOM = 0;
-const i32 CAMERA_FREE = 1;
-const i32 CAMERA_ORBITAL = 2;
-const i32 CAMERA_FIRST_PERSON = 3;
-const i32 CAMERA_THIRD_PERSON = 4;
-const i32 CAMERA_PERSPECTIVE = 0;
-const i32 CAMERA_ORTHOGRAPHIC = 1;
-const i32 NPATCH_NINE_PATCH = 0;
-const i32 NPATCH_THREE_PATCH_VERTICAL = 1;
-const i32 NPATCH_THREE_PATCH_HORIZONTAL = 2;
-const i32 MATERIAL_MAP_DIFFUSE = 0;
-const i32 MATERIAL_MAP_SPECULAR = 1;
-const i32 MOUSE_LEFT_BUTTON = 0;
-const i32 MOUSE_MIDDLE_BUTTON = 2;
-const i32 MOUSE_RIGHT_BUTTON = 1;
-const i32 SHADER_LOC_MAP_DIFFUSE = 15;
-const i32 SHADER_LOC_MAP_SPECULAR = 16;
+//----------------------------------------------------------------------------------
+// Global Variables Definition
+//----------------------------------------------------------------------------------
 
-extern "C" void InitWindow(i32 width, i32 height, const char* title);
-extern "C" void CloseWindow();
-extern "C" bool WindowShouldClose();
-extern "C" bool IsWindowReady();
-extern "C" bool IsWindowFullscreen();
-extern "C" bool IsWindowHidden();
-extern "C" bool IsWindowMinimized();
-extern "C" bool IsWindowMaximized();
-extern "C" bool IsWindowFocused();
-extern "C" bool IsWindowResized();
-extern "C" bool IsWindowState(u32 flag);
-extern "C" void SetWindowState(u32 flags);
-extern "C" void ClearWindowState(u32 flags);
-extern "C" void ToggleFullscreen();
-extern "C" void ToggleBorderlessWindowed();
-extern "C" void MaximizeWindow();
-extern "C" void MinimizeWindow();
-extern "C" void RestoreWindow();
-extern "C" void SetWindowIcon(Image image);
-extern "C" void SetWindowIcons(Image* images, i32 count);
-extern "C" void SetWindowTitle(const char* title);
-extern "C" void SetWindowPosition(i32 x, i32 y);
-extern "C" void SetWindowMonitor(i32 monitor);
-extern "C" void SetWindowMinSize(i32 width, i32 height);
-extern "C" void SetWindowMaxSize(i32 width, i32 height);
-extern "C" void SetWindowSize(i32 width, i32 height);
-extern "C" void SetWindowOpacity(f32 opacity);
-extern "C" void SetWindowFocused();
-extern "C" void* GetWindowHandle();
-extern "C" i32 GetScreenWidth();
-extern "C" i32 GetScreenHeight();
-extern "C" i32 GetRenderWidth();
-extern "C" i32 GetRenderHeight();
-extern "C" i32 GetMonitorCount();
-extern "C" i32 GetCurrentMonitor();
-extern "C" Vector2 GetMonitorPosition(i32 monitor);
-extern "C" i32 GetMonitorWidth(i32 monitor);
-extern "C" i32 GetMonitorHeight(i32 monitor);
-extern "C" i32 GetMonitorPhysicalWidth(i32 monitor);
-extern "C" i32 GetMonitorPhysicalHeight(i32 monitor);
-extern "C" i32 GetMonitorRefreshRate(i32 monitor);
-extern "C" Vector2 GetWindowPosition();
-extern "C" Vector2 GetWindowScaleDPI();
-extern "C" const char* GetMonitorName(i32 monitor);
-extern "C" void SetClipboardText(const char* text);
-extern "C" const char* GetClipboardText();
-extern "C" Image GetClipboardImage();
-extern "C" void EnableEventWaiting();
-extern "C" void DisableEventWaiting();
-extern "C" void ShowCursor();
-extern "C" void HideCursor();
-extern "C" bool IsCursorHidden();
-extern "C" void EnableCursor();
-extern "C" void DisableCursor();
-extern "C" bool IsCursorOnScreen();
-extern "C" void ClearBackground(Color color);
-extern "C" void BeginDrawing();
-extern "C" void EndDrawing();
-extern "C" void BeginMode2D(Camera2D camera);
-extern "C" void EndMode2D();
-extern "C" void BeginMode3D(Camera3D camera);
-extern "C" void EndMode3D();
-extern "C" void BeginTextureMode(RenderTexture2D target);
-extern "C" void EndTextureMode();
-extern "C" void BeginShaderMode(Shader shader);
-extern "C" void EndShaderMode();
-extern "C" void BeginBlendMode(i32 mode);
-extern "C" void EndBlendMode();
-extern "C" void BeginScissorMode(i32 x, i32 y, i32 width, i32 height);
-extern "C" void EndScissorMode();
-extern "C" void BeginVrStereoMode(VrStereoConfig config);
-extern "C" void EndVrStereoMode();
-extern "C" VrStereoConfig LoadVrStereoConfig(VrDeviceInfo device);
-extern "C" void UnloadVrStereoConfig(VrStereoConfig config);
-extern "C" Shader LoadShader(const char* vsFileName, const char* fsFileName);
-extern "C" Shader LoadShaderFromMemory(const char* vsCode, const char* fsCode);
-extern "C" bool IsShaderValid(Shader shader);
-extern "C" i32 GetShaderLocation(Shader shader, const char* uniformName);
-extern "C" i32 GetShaderLocationAttrib(Shader shader, const char* attribName);
-extern "C" void SetShaderValue(Shader shader, i32 locIndex, const void* value, i32 uniformType);
-extern "C" void SetShaderValueV(Shader shader, i32 locIndex, const void* value, i32 uniformType, i32 count);
-extern "C" void SetShaderValueMatrix(Shader shader, i32 locIndex, Matrix mat);
-extern "C" void SetShaderValueTexture(Shader shader, i32 locIndex, Texture2D texture);
-extern "C" void UnloadShader(Shader shader);
-extern "C" Ray GetScreenToWorldRay(Vector2 position, Camera camera);
-extern "C" Ray GetScreenToWorldRayEx(Vector2 position, Camera camera, i32 width, i32 height);
-extern "C" Vector2 GetWorldToScreen(Vector3 position, Camera camera);
-extern "C" Vector2 GetWorldToScreenEx(Vector3 position, Camera camera, i32 width, i32 height);
-extern "C" Vector2 GetWorldToScreen2D(Vector2 position, Camera2D camera);
-extern "C" Vector2 GetScreenToWorld2D(Vector2 position, Camera2D camera);
-extern "C" Matrix GetCameraMatrix(Camera camera);
-extern "C" Matrix GetCameraMatrix2D(Camera2D camera);
-extern "C" void SetTargetFPS(i32 fps);
-extern "C" f32 GetFrameTime();
-extern "C" f64 GetTime();
-extern "C" i32 GetFPS();
-extern "C" void SwapScreenBuffer();
-extern "C" void PollInputEvents();
-extern "C" void WaitTime(f64 seconds);
-extern "C" void SetRandomSeed(u32 seed);
-extern "C" i32 GetRandomValue(i32 min, i32 max);
-extern "C" i32* LoadRandomSequence(u32 count, i32 min, i32 max);
-extern "C" void UnloadRandomSequence(i32* sequence);
-extern "C" void TakeScreenshot(const char* fileName);
-extern "C" void SetConfigFlags(u32 flags);
-extern "C" void OpenURL(const char* url);
-extern "C" void SetTraceLogLevel(i32 logLevel);
-extern "C" void TraceLog(i32 logLevel, const char* text, ...);
-extern "C" void SetTraceLogCallback(void* callback);
-extern "C" void* MemAlloc(u32 size);
-extern "C" void* MemRealloc(void* ptr, u32 size);
-extern "C" void MemFree(void* ptr);
-extern "C" u8* LoadFileData(const char* fileName, i32* dataSize);
-extern "C" void UnloadFileData(u8* data);
-extern "C" bool SaveFileData(const char* fileName, void* data, i32 dataSize);
-extern "C" bool ExportDataAsCode(const u8* data, i32 dataSize, const char* fileName);
-extern "C" char* LoadFileText(const char* fileName);
-extern "C" void UnloadFileText(char* text);
-extern "C" bool SaveFileText(const char* fileName, const char* text);
-extern "C" void SetLoadFileDataCallback(void* callback);
-extern "C" void SetSaveFileDataCallback(void* callback);
-extern "C" void SetLoadFileTextCallback(void* callback);
-extern "C" void SetSaveFileTextCallback(void* callback);
-extern "C" i32 FileRename(const char* fileName, const char* fileRename);
-extern "C" i32 FileRemove(const char* fileName);
-extern "C" i32 FileCopy(const char* srcPath, const char* dstPath);
-extern "C" i32 FileMove(const char* srcPath, const char* dstPath);
-extern "C" i32 FileTextReplace(const char* fileName, const char* search, const char* replacement);
-extern "C" i32 FileTextFindIndex(const char* fileName, const char* search);
-extern "C" bool FileExists(const char* fileName);
-extern "C" bool DirectoryExists(const char* dirPath);
-extern "C" bool IsFileExtension(const char* fileName, const char* ext);
-extern "C" i32 GetFileLength(const char* fileName);
-extern "C" i64 GetFileModTime(const char* fileName);
-extern "C" const char* GetFileExtension(const char* fileName);
-extern "C" const char* GetFileName(const char* filePath);
-extern "C" const char* GetFileNameWithoutExt(const char* filePath);
-extern "C" const char* GetDirectoryPath(const char* filePath);
-extern "C" const char* GetPrevDirectoryPath(const char* dirPath);
-extern "C" const char* GetWorkingDirectory();
-extern "C" const char* GetApplicationDirectory();
-extern "C" i32 MakeDirectory(const char* dirPath);
-extern "C" bool ChangeDirectory(const char* dirPath);
-extern "C" bool IsPathFile(const char* path);
-extern "C" bool IsFileNameValid(const char* fileName);
-extern "C" FilePathList LoadDirectoryFiles(const char* dirPath);
-extern "C" FilePathList LoadDirectoryFilesEx(const char* basePath, const char* filter, bool scanSubdirs);
-extern "C" void UnloadDirectoryFiles(FilePathList files);
-extern "C" bool IsFileDropped();
-extern "C" FilePathList LoadDroppedFiles();
-extern "C" void UnloadDroppedFiles(FilePathList files);
-extern "C" u32 GetDirectoryFileCount(const char* dirPath);
-extern "C" u32 GetDirectoryFileCountEx(const char* basePath, const char* filter, bool scanSubdirs);
-extern "C" u8* CompressData(const u8* data, i32 dataSize, i32* compDataSize);
-extern "C" u8* DecompressData(const u8* compData, i32 compDataSize, i32* dataSize);
-extern "C" char* EncodeDataBase64(const u8* data, i32 dataSize, i32* outputSize);
-extern "C" u8* DecodeDataBase64(const char* text, i32* outputSize);
-extern "C" u32 ComputeCRC32(u8* data, i32 dataSize);
-extern "C" u32* ComputeMD5(u8* data, i32 dataSize);
-extern "C" u32* ComputeSHA1(u8* data, i32 dataSize);
-extern "C" u32* ComputeSHA256(u8* data, i32 dataSize);
-extern "C" AutomationEventList LoadAutomationEventList(const char* fileName);
-extern "C" void UnloadAutomationEventList(AutomationEventList list);
-extern "C" bool ExportAutomationEventList(AutomationEventList list, const char* fileName);
-extern "C" void SetAutomationEventList(AutomationEventList* list);
-extern "C" void SetAutomationEventBaseFrame(i32 frame);
-extern "C" void StartAutomationEventRecording();
-extern "C" void StopAutomationEventRecording();
-extern "C" void PlayAutomationEvent(AutomationEvent event);
-extern "C" bool IsKeyPressed(i32 key);
-extern "C" bool IsKeyPressedRepeat(i32 key);
-extern "C" bool IsKeyDown(i32 key);
-extern "C" bool IsKeyReleased(i32 key);
-extern "C" bool IsKeyUp(i32 key);
-extern "C" i32 GetKeyPressed();
-extern "C" i32 GetCharPressed();
-extern "C" const char* GetKeyName(i32 key);
-extern "C" void SetExitKey(i32 key);
-extern "C" bool IsGamepadAvailable(i32 gamepad);
-extern "C" const char* GetGamepadName(i32 gamepad);
-extern "C" bool IsGamepadButtonPressed(i32 gamepad, i32 button);
-extern "C" bool IsGamepadButtonDown(i32 gamepad, i32 button);
-extern "C" bool IsGamepadButtonReleased(i32 gamepad, i32 button);
-extern "C" bool IsGamepadButtonUp(i32 gamepad, i32 button);
-extern "C" i32 GetGamepadButtonPressed();
-extern "C" i32 GetGamepadAxisCount(i32 gamepad);
-extern "C" f32 GetGamepadAxisMovement(i32 gamepad, i32 axis);
-extern "C" i32 SetGamepadMappings(const char* mappings);
-extern "C" void SetGamepadVibration(i32 gamepad, f32 leftMotor, f32 rightMotor, f32 duration);
-extern "C" bool IsMouseButtonPressed(i32 button);
-extern "C" bool IsMouseButtonDown(i32 button);
-extern "C" bool IsMouseButtonReleased(i32 button);
-extern "C" bool IsMouseButtonUp(i32 button);
-extern "C" i32 GetMouseX();
-extern "C" i32 GetMouseY();
-extern "C" Vector2 GetMousePosition();
-extern "C" Vector2 GetMouseDelta();
-extern "C" void SetMousePosition(i32 x, i32 y);
-extern "C" void SetMouseOffset(i32 offsetX, i32 offsetY);
-extern "C" void SetMouseScale(f32 scaleX, f32 scaleY);
-extern "C" f32 GetMouseWheelMove();
-extern "C" Vector2 GetMouseWheelMoveV();
-extern "C" void SetMouseCursor(i32 cursor);
-extern "C" i32 GetTouchX();
-extern "C" i32 GetTouchY();
-extern "C" Vector2 GetTouchPosition(i32 index);
-extern "C" i32 GetTouchPointId(i32 index);
-extern "C" i32 GetTouchPointCount();
-extern "C" void SetGesturesEnabled(u32 flags);
-extern "C" bool IsGestureDetected(u32 gesture);
-extern "C" i32 GetGestureDetected();
-extern "C" f32 GetGestureHoldDuration();
-extern "C" Vector2 GetGestureDragVector();
-extern "C" f32 GetGestureDragAngle();
-extern "C" Vector2 GetGesturePinchVector();
-extern "C" f32 GetGesturePinchAngle();
-extern "C" void UpdateCamera(Camera* camera, i32 mode);
-extern "C" void UpdateCameraPro(Camera* camera, Vector3 movement, Vector3 rotation, f32 zoom);
-extern "C" void SetShapesTexture(Texture2D texture, Rectangle source);
-extern "C" Texture2D GetShapesTexture();
-extern "C" Rectangle GetShapesTextureRectangle();
-extern "C" void DrawPixel(i32 posX, i32 posY, Color color);
-extern "C" void DrawPixelV(Vector2 position, Color color);
-extern "C" void DrawLine(i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, Color color);
-extern "C" void DrawLineV(Vector2 startPos, Vector2 endPos, Color color);
-extern "C" void DrawLineEx(Vector2 startPos, Vector2 endPos, f32 thick, Color color);
-extern "C" void DrawLineStrip(const Vector2* points, i32 pointCount, Color color);
-extern "C" void DrawLineBezier(Vector2 startPos, Vector2 endPos, f32 thick, Color color);
-extern "C" void DrawLineDashed(Vector2 startPos, Vector2 endPos, i32 dashSize, i32 spaceSize, Color color);
-extern "C" void DrawCircle(i32 centerX, i32 centerY, f32 radius, Color color);
-extern "C" void DrawCircleV(Vector2 center, f32 radius, Color color);
-extern "C" void DrawCircleGradient(Vector2 center, f32 radius, Color inner, Color outer);
-extern "C" void DrawCircleSector(Vector2 center, f32 radius, f32 startAngle, f32 endAngle, i32 segments, Color color);
-extern "C" void DrawCircleSectorLines(Vector2 center, f32 radius, f32 startAngle, f32 endAngle, i32 segments, Color color);
-extern "C" void DrawCircleLines(i32 centerX, i32 centerY, f32 radius, Color color);
-extern "C" void DrawCircleLinesV(Vector2 center, f32 radius, Color color);
-extern "C" void DrawEllipse(i32 centerX, i32 centerY, f32 radiusH, f32 radiusV, Color color);
-extern "C" void DrawEllipseV(Vector2 center, f32 radiusH, f32 radiusV, Color color);
-extern "C" void DrawEllipseLines(i32 centerX, i32 centerY, f32 radiusH, f32 radiusV, Color color);
-extern "C" void DrawEllipseLinesV(Vector2 center, f32 radiusH, f32 radiusV, Color color);
-extern "C" void DrawRing(Vector2 center, f32 innerRadius, f32 outerRadius, f32 startAngle, f32 endAngle, i32 segments, Color color);
-extern "C" void DrawRingLines(Vector2 center, f32 innerRadius, f32 outerRadius, f32 startAngle, f32 endAngle, i32 segments, Color color);
-extern "C" void DrawRectangle(i32 posX, i32 posY, i32 width, i32 height, Color color);
-extern "C" void DrawRectangleV(Vector2 position, Vector2 size, Color color);
-extern "C" void DrawRectangleRec(Rectangle rec, Color color);
-extern "C" void DrawRectanglePro(Rectangle rec, Vector2 origin, f32 rotation, Color color);
-extern "C" void DrawRectangleGradientV(i32 posX, i32 posY, i32 width, i32 height, Color top, Color bottom);
-extern "C" void DrawRectangleGradientH(i32 posX, i32 posY, i32 width, i32 height, Color left, Color right);
-extern "C" void DrawRectangleGradientEx(Rectangle rec, Color topLeft, Color bottomLeft, Color bottomRight, Color topRight);
-extern "C" void DrawRectangleLines(i32 posX, i32 posY, i32 width, i32 height, Color color);
-extern "C" void DrawRectangleLinesEx(Rectangle rec, f32 lineThick, Color color);
-extern "C" void DrawRectangleRounded(Rectangle rec, f32 roundness, i32 segments, Color color);
-extern "C" void DrawRectangleRoundedLines(Rectangle rec, f32 roundness, i32 segments, Color color);
-extern "C" void DrawRectangleRoundedLinesEx(Rectangle rec, f32 roundness, i32 segments, f32 lineThick, Color color);
-extern "C" void DrawTriangle(Vector2 v1, Vector2 v2, Vector2 v3, Color color);
-extern "C" void DrawTriangleLines(Vector2 v1, Vector2 v2, Vector2 v3, Color color);
-extern "C" void DrawTriangleFan(const Vector2* points, i32 pointCount, Color color);
-extern "C" void DrawTriangleStrip(const Vector2* points, i32 pointCount, Color color);
-extern "C" void DrawPoly(Vector2 center, i32 sides, f32 radius, f32 rotation, Color color);
-extern "C" void DrawPolyLines(Vector2 center, i32 sides, f32 radius, f32 rotation, Color color);
-extern "C" void DrawPolyLinesEx(Vector2 center, i32 sides, f32 radius, f32 rotation, f32 lineThick, Color color);
-extern "C" void DrawSplineLinear(const Vector2* points, i32 pointCount, f32 thick, Color color);
-extern "C" void DrawSplineBasis(const Vector2* points, i32 pointCount, f32 thick, Color color);
-extern "C" void DrawSplineCatmullRom(const Vector2* points, i32 pointCount, f32 thick, Color color);
-extern "C" void DrawSplineBezierQuadratic(const Vector2* points, i32 pointCount, f32 thick, Color color);
-extern "C" void DrawSplineBezierCubic(const Vector2* points, i32 pointCount, f32 thick, Color color);
-extern "C" void DrawSplineSegmentLinear(Vector2 p1, Vector2 p2, f32 thick, Color color);
-extern "C" void DrawSplineSegmentBasis(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 thick, Color color);
-extern "C" void DrawSplineSegmentCatmullRom(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 thick, Color color);
-extern "C" void DrawSplineSegmentBezierQuadratic(Vector2 p1, Vector2 c2, Vector2 p3, f32 thick, Color color);
-extern "C" void DrawSplineSegmentBezierCubic(Vector2 p1, Vector2 c2, Vector2 c3, Vector2 p4, f32 thick, Color color);
-extern "C" Vector2 GetSplinePointLinear(Vector2 startPos, Vector2 endPos, f32 t);
-extern "C" Vector2 GetSplinePointBasis(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 t);
-extern "C" Vector2 GetSplinePointCatmullRom(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 t);
-extern "C" Vector2 GetSplinePointBezierQuad(Vector2 p1, Vector2 c2, Vector2 p3, f32 t);
-extern "C" Vector2 GetSplinePointBezierCubic(Vector2 p1, Vector2 c2, Vector2 c3, Vector2 p4, f32 t);
-extern "C" bool CheckCollisionRecs(Rectangle rec1, Rectangle rec2);
-extern "C" bool CheckCollisionCircles(Vector2 center1, f32 radius1, Vector2 center2, f32 radius2);
-extern "C" bool CheckCollisionCircleRec(Vector2 center, f32 radius, Rectangle rec);
-extern "C" bool CheckCollisionCircleLine(Vector2 center, f32 radius, Vector2 p1, Vector2 p2);
-extern "C" bool CheckCollisionPointRec(Vector2 point, Rectangle rec);
-extern "C" bool CheckCollisionPointCircle(Vector2 point, Vector2 center, f32 radius);
-extern "C" bool CheckCollisionPointTriangle(Vector2 point, Vector2 p1, Vector2 p2, Vector2 p3);
-extern "C" bool CheckCollisionPointLine(Vector2 point, Vector2 p1, Vector2 p2, i32 threshold);
-extern "C" bool CheckCollisionPointPoly(Vector2 point, const Vector2* points, i32 pointCount);
-extern "C" bool CheckCollisionLines(Vector2 startPos1, Vector2 endPos1, Vector2 startPos2, Vector2 endPos2, Vector2* collisionPoint);
-extern "C" Rectangle GetCollisionRec(Rectangle rec1, Rectangle rec2);
-extern "C" Image LoadImage(const char* fileName);
-extern "C" Image LoadImageRaw(const char* fileName, i32 width, i32 height, i32 format, i32 headerSize);
-extern "C" Image LoadImageAnim(const char* fileName, i32* frames);
-extern "C" Image LoadImageAnimFromMemory(const char* fileType, const u8* fileData, i32 dataSize, i32* frames);
-extern "C" Image LoadImageFromMemory(const char* fileType, const u8* fileData, i32 dataSize);
-extern "C" Image LoadImageFromTexture(Texture2D texture);
-extern "C" Image LoadImageFromScreen();
-extern "C" bool IsImageValid(Image image);
-extern "C" void UnloadImage(Image image);
-extern "C" bool ExportImage(Image image, const char* fileName);
-extern "C" u8* ExportImageToMemory(Image image, const char* fileType, i32* fileSize);
-extern "C" bool ExportImageAsCode(Image image, const char* fileName);
-extern "C" Image GenImageColor(i32 width, i32 height, Color color);
-extern "C" Image GenImageGradientLinear(i32 width, i32 height, i32 direction, Color start, Color end);
-extern "C" Image GenImageGradientRadial(i32 width, i32 height, f32 density, Color inner, Color outer);
-extern "C" Image GenImageGradientSquare(i32 width, i32 height, f32 density, Color inner, Color outer);
-extern "C" Image GenImageChecked(i32 width, i32 height, i32 checksX, i32 checksY, Color col1, Color col2);
-extern "C" Image GenImageWhiteNoise(i32 width, i32 height, f32 factor);
-extern "C" Image GenImagePerlinNoise(i32 width, i32 height, i32 offsetX, i32 offsetY, f32 scale);
-extern "C" Image GenImageCellular(i32 width, i32 height, i32 tileSize);
-extern "C" Image GenImageText(i32 width, i32 height, const char* text);
-extern "C" Image ImageCopy(Image image);
-extern "C" Image ImageFromImage(Image image, Rectangle rec);
-extern "C" Image ImageFromChannel(Image image, i32 selectedChannel);
-extern "C" Image ImageText(const char* text, i32 fontSize, Color color);
-extern "C" Image ImageTextEx(Font font, const char* text, f32 fontSize, f32 spacing, Color tint);
-extern "C" void ImageFormat(Image* image, i32 newFormat);
-extern "C" void ImageToPOT(Image* image, Color fill);
-extern "C" void ImageCrop(Image* image, Rectangle crop);
-extern "C" void ImageAlphaCrop(Image* image, f32 threshold);
-extern "C" void ImageAlphaClear(Image* image, Color color, f32 threshold);
-extern "C" void ImageAlphaMask(Image* image, Image alphaMask);
-extern "C" void ImageAlphaPremultiply(Image* image);
-extern "C" void ImageBlurGaussian(Image* image, i32 blurSize);
-extern "C" void ImageKernelConvolution(Image* image, const f32* kernel, i32 kernelSize);
-extern "C" void ImageResize(Image* image, i32 newWidth, i32 newHeight);
-extern "C" void ImageResizeNN(Image* image, i32 newWidth, i32 newHeight);
-extern "C" void ImageResizeCanvas(Image* image, i32 newWidth, i32 newHeight, i32 offsetX, i32 offsetY, Color fill);
-extern "C" void ImageMipmaps(Image* image);
-extern "C" void ImageDither(Image* image, i32 rBpp, i32 gBpp, i32 bBpp, i32 aBpp);
-extern "C" void ImageFlipVertical(Image* image);
-extern "C" void ImageFlipHorizontal(Image* image);
-extern "C" void ImageRotate(Image* image, i32 degrees);
-extern "C" void ImageRotateCW(Image* image);
-extern "C" void ImageRotateCCW(Image* image);
-extern "C" void ImageColorTint(Image* image, Color color);
-extern "C" void ImageColorInvert(Image* image);
-extern "C" void ImageColorGrayscale(Image* image);
-extern "C" void ImageColorContrast(Image* image, f32 contrast);
-extern "C" void ImageColorBrightness(Image* image, i32 brightness);
-extern "C" void ImageColorReplace(Image* image, Color color, Color replace);
-extern "C" Color* LoadImageColors(Image image);
-extern "C" Color* LoadImagePalette(Image image, i32 maxPaletteSize, i32* colorCount);
-extern "C" void UnloadImageColors(Color* colors);
-extern "C" void UnloadImagePalette(Color* colors);
-extern "C" Rectangle GetImageAlphaBorder(Image image, f32 threshold);
-extern "C" Color GetImageColor(Image image, i32 x, i32 y);
-extern "C" void ImageClearBackground(Image* dst, Color color);
-extern "C" void ImageDrawPixel(Image* dst, i32 posX, i32 posY, Color color);
-extern "C" void ImageDrawPixelV(Image* dst, Vector2 position, Color color);
-extern "C" void ImageDrawLine(Image* dst, i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, Color color);
-extern "C" void ImageDrawLineV(Image* dst, Vector2 start, Vector2 end, Color color);
-extern "C" void ImageDrawLineEx(Image* dst, Vector2 start, Vector2 end, i32 thick, Color color);
-extern "C" void ImageDrawCircle(Image* dst, i32 centerX, i32 centerY, i32 radius, Color color);
-extern "C" void ImageDrawCircleV(Image* dst, Vector2 center, i32 radius, Color color);
-extern "C" void ImageDrawCircleLines(Image* dst, i32 centerX, i32 centerY, i32 radius, Color color);
-extern "C" void ImageDrawCircleLinesV(Image* dst, Vector2 center, i32 radius, Color color);
-extern "C" void ImageDrawRectangle(Image* dst, i32 posX, i32 posY, i32 width, i32 height, Color color);
-extern "C" void ImageDrawRectangleV(Image* dst, Vector2 position, Vector2 size, Color color);
-extern "C" void ImageDrawRectangleRec(Image* dst, Rectangle rec, Color color);
-extern "C" void ImageDrawRectangleLines(Image* dst, Rectangle rec, i32 thick, Color color);
-extern "C" void ImageDrawTriangle(Image* dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
-extern "C" void ImageDrawTriangleEx(Image* dst, Vector2 v1, Vector2 v2, Vector2 v3, Color c1, Color c2, Color c3);
-extern "C" void ImageDrawTriangleLines(Image* dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
-extern "C" void ImageDrawTriangleFan(Image* dst, const Vector2* points, i32 pointCount, Color color);
-extern "C" void ImageDrawTriangleStrip(Image* dst, const Vector2* points, i32 pointCount, Color color);
-extern "C" void ImageDraw(Image* dst, Image src, Rectangle srcRec, Rectangle dstRec, Color tint);
-extern "C" void ImageDrawText(Image* dst, const char* text, i32 posX, i32 posY, i32 fontSize, Color color);
-extern "C" void ImageDrawTextEx(Image* dst, Font font, const char* text, Vector2 position, f32 fontSize, f32 spacing, Color tint);
-extern "C" Texture2D LoadTexture(const char* fileName);
-extern "C" Texture2D LoadTextureFromImage(Image image);
-extern "C" TextureCubemap LoadTextureCubemap(Image image, i32 layout);
-extern "C" RenderTexture2D LoadRenderTexture(i32 width, i32 height);
-extern "C" bool IsTextureValid(Texture2D texture);
-extern "C" void UnloadTexture(Texture2D texture);
-extern "C" bool IsRenderTextureValid(RenderTexture2D target);
-extern "C" void UnloadRenderTexture(RenderTexture2D target);
-extern "C" void UpdateTexture(Texture2D texture, const void* pixels);
-extern "C" void UpdateTextureRec(Texture2D texture, Rectangle rec, const void* pixels);
-extern "C" void GenTextureMipmaps(Texture2D* texture);
-extern "C" void SetTextureFilter(Texture2D texture, i32 filter);
-extern "C" void SetTextureWrap(Texture2D texture, i32 wrap);
-extern "C" void DrawTexture(Texture2D texture, i32 posX, i32 posY, Color tint);
-extern "C" void DrawTextureV(Texture2D texture, Vector2 position, Color tint);
-extern "C" void DrawTextureEx(Texture2D texture, Vector2 position, f32 rotation, f32 scale, Color tint);
-extern "C" void DrawTextureRec(Texture2D texture, Rectangle source, Vector2 position, Color tint);
-extern "C" void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2 origin, f32 rotation, Color tint);
-extern "C" void DrawTextureNPatch(Texture2D texture, NPatchInfo nPatchInfo, Rectangle dest, Vector2 origin, f32 rotation, Color tint);
-extern "C" bool ColorIsEqual(Color col1, Color col2);
-extern "C" Color Fade(Color color, f32 alpha);
-extern "C" i32 ColorToInt(Color color);
-extern "C" Vector4 ColorNormalize(Color color);
-extern "C" Color ColorFromNormalized(Vector4 normalized);
-extern "C" Vector3 ColorToHSV(Color color);
-extern "C" Color ColorFromHSV(f32 hue, f32 saturation, f32 value);
-extern "C" Color ColorTint(Color color, Color tint);
-extern "C" Color ColorBrightness(Color color, f32 factor);
-extern "C" Color ColorContrast(Color color, f32 contrast);
-extern "C" Color ColorAlpha(Color color, f32 alpha);
-extern "C" Color ColorAlphaBlend(Color dst, Color src, Color tint);
-extern "C" Color ColorLerp(Color color1, Color color2, f32 factor);
-extern "C" Color GetColor(u32 hexValue);
-extern "C" Color GetPixelColor(void* srcPtr, i32 format);
-extern "C" void SetPixelColor(void* dstPtr, Color color, i32 format);
-extern "C" i32 GetPixelDataSize(i32 width, i32 height, i32 format);
-extern "C" Font GetFontDefault();
-extern "C" Font LoadFont(const char* fileName);
-extern "C" Font LoadFontEx(const char* fileName, i32 fontSize, const i32* codepoints, i32 codepointCount);
-extern "C" Font LoadFontFromImage(Image image, Color key, i32 firstChar);
-extern "C" Font LoadFontFromMemory(const char* fileType, const u8* fileData, i32 dataSize, i32 fontSize, const i32* codepoints, i32 codepointCount);
-extern "C" bool IsFontValid(Font font);
-extern "C" GlyphInfo* LoadFontData(const u8* fileData, i32 dataSize, i32 fontSize, const i32* codepoints, i32 codepointCount, i32 type, i32* glyphCount);
-extern "C" Image GenImageFontAtlas(const GlyphInfo* glyphs, Rectangle** glyphRecs, i32 glyphCount, i32 fontSize, i32 padding, i32 packMethod);
-extern "C" void UnloadFontData(GlyphInfo* glyphs, i32 glyphCount);
-extern "C" void UnloadFont(Font font);
-extern "C" bool ExportFontAsCode(Font font, const char* fileName);
-extern "C" void DrawFPS(i32 posX, i32 posY);
-extern "C" void DrawText(const char* text, i32 posX, i32 posY, i32 fontSize, Color color);
-extern "C" void DrawTextEx(Font font, const char* text, Vector2 position, f32 fontSize, f32 spacing, Color tint);
-extern "C" void DrawTextPro(Font font, const char* text, Vector2 position, Vector2 origin, f32 rotation, f32 fontSize, f32 spacing, Color tint);
-extern "C" void DrawTextCodepoint(Font font, i32 codepoint, Vector2 position, f32 fontSize, Color tint);
-extern "C" void DrawTextCodepoints(Font font, const i32* codepoints, i32 codepointCount, Vector2 position, f32 fontSize, f32 spacing, Color tint);
-extern "C" void SetTextLineSpacing(i32 spacing);
-extern "C" i32 MeasureText(const char* text, i32 fontSize);
-extern "C" Vector2 MeasureTextEx(Font font, const char* text, f32 fontSize, f32 spacing);
-extern "C" Vector2 MeasureTextCodepoints(Font font, const i32* codepoints, i32 length, f32 fontSize, f32 spacing);
-extern "C" i32 GetGlyphIndex(Font font, i32 codepoint);
-extern "C" GlyphInfo GetGlyphInfo(Font font, i32 codepoint);
-extern "C" Rectangle GetGlyphAtlasRec(Font font, i32 codepoint);
-extern "C" char* LoadUTF8(const i32* codepoints, i32 length);
-extern "C" void UnloadUTF8(char* text);
-extern "C" i32* LoadCodepoints(const char* text, i32* count);
-extern "C" void UnloadCodepoints(i32* codepoints);
-extern "C" i32 GetCodepointCount(const char* text);
-extern "C" i32 GetCodepoint(const char* text, i32* codepointSize);
-extern "C" i32 GetCodepointNext(const char* text, i32* codepointSize);
-extern "C" i32 GetCodepointPrevious(const char* text, i32* codepointSize);
-extern "C" const char* CodepointToUTF8(i32 codepoint, i32* utf8Size);
-extern "C" char** LoadTextLines(const char* text, i32* count);
-extern "C" void UnloadTextLines(char** text, i32 lineCount);
-extern "C" i32 TextCopy(char* dst, const char* src);
-extern "C" bool TextIsEqual(const char* text1, const char* text2);
-extern "C" u32 TextLength(const char* text);
-extern "C" const char* TextFormat(const char* text, ...);
-extern "C" const char* TextSubtext(const char* text, i32 position, i32 length);
-extern "C" const char* TextRemoveSpaces(const char* text);
-extern "C" char* GetTextBetween(const char* text, const char* begin, const char* end);
-extern "C" char* TextReplace(const char* text, const char* search, const char* replacement);
-extern "C" char* TextReplaceAlloc(const char* text, const char* search, const char* replacement);
-extern "C" char* TextReplaceBetween(const char* text, const char* begin, const char* end, const char* replacement);
-extern "C" char* TextReplaceBetweenAlloc(const char* text, const char* begin, const char* end, const char* replacement);
-extern "C" char* TextInsert(const char* text, const char* insert, i32 position);
-extern "C" char* TextInsertAlloc(const char* text, const char* insert, i32 position);
-extern "C" char* TextJoin(char** textList, i32 count, const char* delimiter);
-extern "C" char** TextSplit(const char* text, i8 delimiter, i32* count);
-extern "C" void TextAppend(char* text, const char* append, i32* position);
-extern "C" i32 TextFindIndex(const char* text, const char* search);
-extern "C" char* TextToUpper(const char* text);
-extern "C" char* TextToLower(const char* text);
-extern "C" char* TextToPascal(const char* text);
-extern "C" char* TextToSnake(const char* text);
-extern "C" char* TextToCamel(const char* text);
-extern "C" i32 TextToInteger(const char* text);
-extern "C" f32 TextToFloat(const char* text);
-extern "C" void DrawLine3D(Vector3 startPos, Vector3 endPos, Color color);
-extern "C" void DrawPoint3D(Vector3 position, Color color);
-extern "C" void DrawCircle3D(Vector3 center, f32 radius, Vector3 rotationAxis, f32 rotationAngle, Color color);
-extern "C" void DrawTriangle3D(Vector3 v1, Vector3 v2, Vector3 v3, Color color);
-extern "C" void DrawTriangleStrip3D(const Vector3* points, i32 pointCount, Color color);
-extern "C" void DrawCube(Vector3 position, f32 width, f32 height, f32 length, Color color);
-extern "C" void DrawCubeV(Vector3 position, Vector3 size, Color color);
-extern "C" void DrawCubeWires(Vector3 position, f32 width, f32 height, f32 length, Color color);
-extern "C" void DrawCubeWiresV(Vector3 position, Vector3 size, Color color);
-extern "C" void DrawSphere(Vector3 centerPos, f32 radius, Color color);
-extern "C" void DrawSphereEx(Vector3 centerPos, f32 radius, i32 rings, i32 slices, Color color);
-extern "C" void DrawSphereWires(Vector3 centerPos, f32 radius, i32 rings, i32 slices, Color color);
-extern "C" void DrawCylinder(Vector3 position, f32 radiusTop, f32 radiusBottom, f32 height, i32 slices, Color color);
-extern "C" void DrawCylinderEx(Vector3 startPos, Vector3 endPos, f32 startRadius, f32 endRadius, i32 sides, Color color);
-extern "C" void DrawCylinderWires(Vector3 position, f32 radiusTop, f32 radiusBottom, f32 height, i32 slices, Color color);
-extern "C" void DrawCylinderWiresEx(Vector3 startPos, Vector3 endPos, f32 startRadius, f32 endRadius, i32 sides, Color color);
-extern "C" void DrawCapsule(Vector3 startPos, Vector3 endPos, f32 radius, i32 slices, i32 rings, Color color);
-extern "C" void DrawCapsuleWires(Vector3 startPos, Vector3 endPos, f32 radius, i32 slices, i32 rings, Color color);
-extern "C" void DrawPlane(Vector3 centerPos, Vector2 size, Color color);
-extern "C" void DrawRay(Ray ray, Color color);
-extern "C" void DrawGrid(i32 slices, f32 spacing);
-extern "C" Model LoadModel(const char* fileName);
-extern "C" Model LoadModelFromMesh(Mesh mesh);
-extern "C" bool IsModelValid(Model model);
-extern "C" void UnloadModel(Model model);
-extern "C" BoundingBox GetModelBoundingBox(Model model);
-extern "C" void DrawModel(Model model, Vector3 position, f32 scale, Color tint);
-extern "C" void DrawModelEx(Model model, Vector3 position, Vector3 rotationAxis, f32 rotationAngle, Vector3 scale, Color tint);
-extern "C" void DrawModelWires(Model model, Vector3 position, f32 scale, Color tint);
-extern "C" void DrawModelWiresEx(Model model, Vector3 position, Vector3 rotationAxis, f32 rotationAngle, Vector3 scale, Color tint);
-extern "C" void DrawBoundingBox(BoundingBox box, Color color);
-extern "C" void DrawBillboard(Camera camera, Texture2D texture, Vector3 position, f32 scale, Color tint);
-extern "C" void DrawBillboardRec(Camera camera, Texture2D texture, Rectangle source, Vector3 position, Vector2 size, Color tint);
-extern "C" void DrawBillboardPro(Camera camera, Texture2D texture, Rectangle source, Vector3 position, Vector3 up, Vector2 size, Vector2 origin, f32 rotation, Color tint);
-extern "C" void UploadMesh(Mesh* mesh, bool dynamic);
-extern "C" void UpdateMeshBuffer(Mesh mesh, i32 index, const void* data, i32 dataSize, i32 offset);
-extern "C" void UnloadMesh(Mesh mesh);
-extern "C" void DrawMesh(Mesh mesh, Material material, Matrix transform);
-extern "C" void DrawMeshInstanced(Mesh mesh, Material material, const Matrix* transforms, i32 instances);
-extern "C" BoundingBox GetMeshBoundingBox(Mesh mesh);
-extern "C" void GenMeshTangents(Mesh* mesh);
-extern "C" bool ExportMesh(Mesh mesh, const char* fileName);
-extern "C" bool ExportMeshAsCode(Mesh mesh, const char* fileName);
-extern "C" Mesh GenMeshPoly(i32 sides, f32 radius);
-extern "C" Mesh GenMeshPlane(f32 width, f32 length, i32 resX, i32 resZ);
-extern "C" Mesh GenMeshCube(f32 width, f32 height, f32 length);
-extern "C" Mesh GenMeshSphere(f32 radius, i32 rings, i32 slices);
-extern "C" Mesh GenMeshHemiSphere(f32 radius, i32 rings, i32 slices);
-extern "C" Mesh GenMeshCylinder(f32 radius, f32 height, i32 slices);
-extern "C" Mesh GenMeshCone(f32 radius, f32 height, i32 slices);
-extern "C" Mesh GenMeshTorus(f32 radius, f32 size, i32 radSeg, i32 sides);
-extern "C" Mesh GenMeshKnot(f32 radius, f32 size, i32 radSeg, i32 sides);
-extern "C" Mesh GenMeshHeightmap(Image heightmap, Vector3 size);
-extern "C" Mesh GenMeshCubicmap(Image cubicmap, Vector3 cubeSize);
-extern "C" Material* LoadMaterials(const char* fileName, i32* materialCount);
-extern "C" Material LoadMaterialDefault();
-extern "C" bool IsMaterialValid(Material material);
-extern "C" void UnloadMaterial(Material material);
-extern "C" void SetMaterialTexture(Material* material, i32 mapType, Texture2D texture);
-extern "C" void SetModelMeshMaterial(Model* model, i32 meshId, i32 materialId);
-extern "C" ModelAnimation* LoadModelAnimations(const char* fileName, i32* animCount);
-extern "C" void UpdateModelAnimation(Model model, ModelAnimation anim, f32 frame);
-extern "C" void UpdateModelAnimationEx(Model model, ModelAnimation animA, f32 frameA, ModelAnimation animB, f32 frameB, f32 blend);
-extern "C" void UnloadModelAnimations(ModelAnimation* animations, i32 animCount);
-extern "C" bool IsModelAnimationValid(Model model, ModelAnimation anim);
-extern "C" bool CheckCollisionSpheres(Vector3 center1, f32 radius1, Vector3 center2, f32 radius2);
-extern "C" bool CheckCollisionBoxes(BoundingBox box1, BoundingBox box2);
-extern "C" bool CheckCollisionBoxSphere(BoundingBox box, Vector3 center, f32 radius);
-extern "C" RayCollision GetRayCollisionSphere(Ray ray, Vector3 center, f32 radius);
-extern "C" RayCollision GetRayCollisionBox(Ray ray, BoundingBox box);
-extern "C" RayCollision GetRayCollisionMesh(Ray ray, Mesh mesh, Matrix transform);
-extern "C" RayCollision GetRayCollisionTriangle(Ray ray, Vector3 p1, Vector3 p2, Vector3 p3);
-extern "C" RayCollision GetRayCollisionQuad(Ray ray, Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4);
-extern "C" void InitAudioDevice();
-extern "C" void CloseAudioDevice();
-extern "C" bool IsAudioDeviceReady();
-extern "C" void SetMasterVolume(f32 volume);
-extern "C" f32 GetMasterVolume();
-extern "C" Wave LoadWave(const char* fileName);
-extern "C" Wave LoadWaveFromMemory(const char* fileType, const u8* fileData, i32 dataSize);
-extern "C" bool IsWaveValid(Wave wave);
-extern "C" Sound LoadSound(const char* fileName);
-extern "C" Sound LoadSoundFromWave(Wave wave);
-extern "C" Sound LoadSoundAlias(Sound source);
-extern "C" bool IsSoundValid(Sound sound);
-extern "C" void UpdateSound(Sound sound, const void* data, i32 sampleCount);
-extern "C" void UnloadWave(Wave wave);
-extern "C" void UnloadSound(Sound sound);
-extern "C" void UnloadSoundAlias(Sound alias);
-extern "C" bool ExportWave(Wave wave, const char* fileName);
-extern "C" bool ExportWaveAsCode(Wave wave, const char* fileName);
-extern "C" void PlaySound(Sound sound);
-extern "C" void StopSound(Sound sound);
-extern "C" void PauseSound(Sound sound);
-extern "C" void ResumeSound(Sound sound);
-extern "C" bool IsSoundPlaying(Sound sound);
-extern "C" void SetSoundVolume(Sound sound, f32 volume);
-extern "C" void SetSoundPitch(Sound sound, f32 pitch);
-extern "C" void SetSoundPan(Sound sound, f32 pan);
-extern "C" Wave WaveCopy(Wave wave);
-extern "C" void WaveCrop(Wave* wave, i32 initFrame, i32 finalFrame);
-extern "C" void WaveFormat(Wave* wave, i32 sampleRate, i32 sampleSize, i32 channels);
-extern "C" f32* LoadWaveSamples(Wave wave);
-extern "C" void UnloadWaveSamples(f32* samples);
-extern "C" Music LoadMusicStream(const char* fileName);
-extern "C" Music LoadMusicStreamFromMemory(const char* fileType, const u8* data, i32 dataSize);
-extern "C" bool IsMusicValid(Music music);
-extern "C" void UnloadMusicStream(Music music);
-extern "C" void PlayMusicStream(Music music);
-extern "C" bool IsMusicStreamPlaying(Music music);
-extern "C" void UpdateMusicStream(Music music);
-extern "C" void StopMusicStream(Music music);
-extern "C" void PauseMusicStream(Music music);
-extern "C" void ResumeMusicStream(Music music);
-extern "C" void SeekMusicStream(Music music, f32 position);
-extern "C" void SetMusicVolume(Music music, f32 volume);
-extern "C" void SetMusicPitch(Music music, f32 pitch);
-extern "C" void SetMusicPan(Music music, f32 pan);
-extern "C" f32 GetMusicTimeLength(Music music);
-extern "C" f32 GetMusicTimePlayed(Music music);
-extern "C" AudioStream LoadAudioStream(u32 sampleRate, u32 sampleSize, u32 channels);
-extern "C" bool IsAudioStreamValid(AudioStream stream);
-extern "C" void UnloadAudioStream(AudioStream stream);
-extern "C" void UpdateAudioStream(AudioStream stream, const void* data, i32 frameCount);
-extern "C" bool IsAudioStreamProcessed(AudioStream stream);
-extern "C" void PlayAudioStream(AudioStream stream);
-extern "C" void PauseAudioStream(AudioStream stream);
-extern "C" void ResumeAudioStream(AudioStream stream);
-extern "C" bool IsAudioStreamPlaying(AudioStream stream);
-extern "C" void StopAudioStream(AudioStream stream);
-extern "C" void SetAudioStreamVolume(AudioStream stream, f32 volume);
-extern "C" void SetAudioStreamPitch(AudioStream stream, f32 pitch);
-extern "C" void SetAudioStreamPan(AudioStream stream, f32 pan);
-extern "C" void SetAudioStreamBufferSizeDefault(i32 size);
-extern "C" void SetAudioStreamCallback(AudioStream stream, void* callback);
-extern "C" void AttachAudioStreamProcessor(AudioStream stream, void* processor);
-extern "C" void DetachAudioStreamProcessor(AudioStream stream, void* processor);
-extern "C" void AttachAudioMixedProcessor(void* processor);
-extern "C" void DetachAudioMixedProcessor(void* processor);
+//----------------------------------------------------------------------------------
+// Module Functions Declaration
+//----------------------------------------------------------------------------------
+
+extern "C" {
+
+// Window-related functions
+void InitWindow(i32 width, i32 height, const char *title);
+void CloseWindow();
+bool WindowShouldClose();
+bool IsWindowReady();
+bool IsWindowFullscreen();
+bool IsWindowHidden();
+bool IsWindowMinimized();
+bool IsWindowMaximized();
+bool IsWindowFocused();
+bool IsWindowResized();
+bool IsWindowState(u32 flag);
+void SetWindowState(u32 flags);
+void ClearWindowState(u32 flags);
+void ToggleFullscreen();
+void ToggleBorderlessWindowed();
+void MaximizeWindow();
+void MinimizeWindow();
+void RestoreWindow();
+void SetWindowIcon(Image image);
+void SetWindowIcons(Image *images, i32 count);
+void SetWindowTitle(const char *title);
+void SetWindowPosition(i32 x, i32 y);
+void SetWindowMonitor(i32 monitor);
+void SetWindowMinSize(i32 width, i32 height);
+void SetWindowMaxSize(i32 width, i32 height);
+void SetWindowSize(i32 width, i32 height);
+void SetWindowOpacity(f32 opacity);
+void SetWindowFocused();
+void *GetWindowHandle();
+i32 GetScreenWidth();
+i32 GetScreenHeight();
+i32 GetRenderWidth();
+i32 GetRenderHeight();
+i32 GetMonitorCount();
+i32 GetCurrentMonitor();
+Vector2 GetMonitorPosition(i32 monitor);
+i32 GetMonitorWidth(i32 monitor);
+i32 GetMonitorHeight(i32 monitor);
+i32 GetMonitorPhysicalWidth(i32 monitor);
+i32 GetMonitorPhysicalHeight(i32 monitor);
+i32 GetMonitorRefreshRate(i32 monitor);
+Vector2 GetWindowPosition();
+Vector2 GetWindowScaleDPI();
+const char *GetMonitorName(i32 monitor);
+void SetClipboardText(const char *text);
+const char *GetClipboardText();
+Image GetClipboardImage();
+void EnableEventWaiting();
+void DisableEventWaiting();
+
+// Cursor-related functions
+void ShowCursor();
+void HideCursor();
+bool IsCursorHidden();
+void EnableCursor();
+void DisableCursor();
+bool IsCursorOnScreen();
+
+// Drawing-related functions
+void ClearBackground(Color color);
+void BeginDrawing();
+void EndDrawing();
+void BeginMode2D(Camera2D camera);
+void EndMode2D();
+void BeginMode3D(Camera3D camera);
+void EndMode3D();
+void BeginTextureMode(RenderTexture target);
+void EndTextureMode();
+void BeginShaderMode(Shader shader);
+void EndShaderMode();
+void BeginBlendMode(i32 mode);
+void EndBlendMode();
+void BeginScissorMode(i32 x, i32 y, i32 width, i32 height);
+void EndScissorMode();
+void BeginVrStereoMode(VrStereoConfig config);
+void EndVrStereoMode();
+
+// VR stereo config functions
+VrStereoConfig LoadVrStereoConfig(VrDeviceInfo device);
+void UnloadVrStereoConfig(VrStereoConfig config);
+
+// Shader management functions
+Shader LoadShader(const char *vsFileName, const char *fsFileName);
+Shader LoadShaderFromMemory(const char *vsCode, const char *fsCode);
+bool IsShaderValid(Shader shader);
+i32 GetShaderLocation(Shader shader, const char *uniformName);
+i32 GetShaderLocationAttrib(Shader shader, const char *attribName);
+void SetShaderValue(Shader shader, i32 locIndex, const void *value, i32 uniformType);
+void SetShaderValueV(Shader shader, i32 locIndex, const void *value, i32 uniformType, i32 count);
+void SetShaderValueMatrix(Shader shader, i32 locIndex, Matrix mat);
+void SetShaderValueTexture(Shader shader, i32 locIndex, Texture texture);
+void UnloadShader(Shader shader);
+
+// Screen-space-related functions
+Ray GetScreenToWorldRay(Vector2 position, Camera3D camera);
+Ray GetScreenToWorldRayEx(Vector2 position, Camera3D camera, i32 width, i32 height);
+Vector2 GetWorldToScreen(Vector3 position, Camera3D camera);
+Vector2 GetWorldToScreenEx(Vector3 position, Camera3D camera, i32 width, i32 height);
+Vector2 GetWorldToScreen2D(Vector2 position, Camera2D camera);
+Vector2 GetScreenToWorld2D(Vector2 position, Camera2D camera);
+Matrix GetCameraMatrix(Camera3D camera);
+Matrix GetCameraMatrix2D(Camera2D camera);
+
+// Timing-related functions
+void SetTargetFPS(i32 fps);
+f32 GetFrameTime();
+f64 GetTime();
+i32 GetFPS();
+
+// Custom frame control functions
+void SwapScreenBuffer();
+void PollInputEvents();
+void WaitTime(f64 seconds);
+
+// Random values generation functions
+void SetRandomSeed(u32 seed);
+i32 GetRandomValue(i32 min, i32 max);
+i32 *LoadRandomSequence(u32 count, i32 min, i32 max);
+void UnloadRandomSequence(i32 *sequence);
+
+// Misc. functions
+void TakeScreenshot(const char *fileName);
+void SetConfigFlags(u32 flags);
+void OpenURL(const char *url);
+
+// Logging system
+void SetTraceLogLevel(i32 logLevel);
+void TraceLog(i32 logLevel, const char *text, ...);
+
+// Memory management
+void *MemAlloc(u32 size);
+void *MemRealloc(void *ptr, u32 size);
+void MemFree(void *ptr);
+
+// File system management functions
+u8 *LoadFileData(const char *fileName, i32 *dataSize);
+void UnloadFileData(u8 *data);
+bool SaveFileData(const char *fileName, void *data, i32 dataSize);
+bool ExportDataAsCode(const u8 *data, i32 dataSize, const char *fileName);
+char *LoadFileText(const char *fileName);
+void UnloadFileText(char *text);
+bool SaveFileText(const char *fileName, const char *text);
+
+i32 FileRename(const char *fileName, const char *fileRename);
+i32 FileRemove(const char *fileName);
+i32 FileCopy(const char *srcPath, const char *dstPath);
+i32 FileMove(const char *srcPath, const char *dstPath);
+i32 FileTextReplace(const char *fileName, const char *search, const char *replacement);
+i32 FileTextFindIndex(const char *fileName, const char *search);
+bool FileExists(const char *fileName);
+bool DirectoryExists(const char *dirPath);
+bool IsFileExtension(const char *fileName, const char *ext);
+i32 GetFileLength(const char *fileName);
+i64 GetFileModTime(const char *fileName);
+const char *GetFileExtension(const char *fileName);
+const char *GetFileName(const char *filePath);
+const char *GetFileNameWithoutExt(const char *filePath);
+const char *GetDirectoryPath(const char *filePath);
+const char *GetPrevDirectoryPath(const char *dirPath);
+const char *GetWorkingDirectory();
+const char *GetApplicationDirectory();
+i32 MakeDirectory(const char *dirPath);
+bool ChangeDirectory(const char *dirPath);
+bool IsPathFile(const char *path);
+bool IsFileNameValid(const char *fileName);
+FilePathList LoadDirectoryFiles(const char *dirPath);
+FilePathList LoadDirectoryFilesEx(const char *basePath, const char *filter, bool scanSubdirs);
+void UnloadDirectoryFiles(FilePathList files);
+bool IsFileDropped();
+FilePathList LoadDroppedFiles();
+void UnloadDroppedFiles(FilePathList files);
+u32 GetDirectoryFileCount(const char *dirPath);
+u32 GetDirectoryFileCountEx(const char *basePath, const char *filter, bool scanSubdirs);
+
+// Compression/Encoding functionality
+u8 *CompressData(const u8 *data, i32 dataSize, i32 *compDataSize);
+u8 *DecompressData(const u8 *compData, i32 compDataSize, i32 *dataSize);
+char *EncodeDataBase64(const u8 *data, i32 dataSize, i32 *outputSize);
+u8 *DecodeDataBase64(const char *text, i32 *outputSize);
+u32 ComputeCRC32(u8 *data, i32 dataSize);
+u32 *ComputeMD5(u8 *data, i32 dataSize);
+u32 *ComputeSHA1(u8 *data, i32 dataSize);
+u32 *ComputeSHA256(u8 *data, i32 dataSize);
+
+// Automation events functionality
+AutomationEventList LoadAutomationEventList(const char *fileName);
+void UnloadAutomationEventList(AutomationEventList list);
+bool ExportAutomationEventList(AutomationEventList list, const char *fileName);
+void SetAutomationEventList(AutomationEventList *list);
+void SetAutomationEventBaseFrame(i32 frame);
+void StartAutomationEventRecording();
+void StopAutomationEventRecording();
+void PlayAutomationEvent(AutomationEvent event);
+
+//----------------------------------------------------------------------------------
+// Input Handling Functions (Module: core)
+//----------------------------------------------------------------------------------
+
+// Input-related functions: keyboard
+bool IsKeyPressed(i32 key);
+bool IsKeyPressedRepeat(i32 key);
+bool IsKeyDown(i32 key);
+bool IsKeyReleased(i32 key);
+bool IsKeyUp(i32 key);
+i32 GetKeyPressed();
+i32 GetCharPressed();
+const char *GetKeyName(i32 key);
+void SetExitKey(i32 key);
+
+// Input-related functions: gamepads
+bool IsGamepadAvailable(i32 gamepad);
+const char *GetGamepadName(i32 gamepad);
+bool IsGamepadButtonPressed(i32 gamepad, i32 button);
+bool IsGamepadButtonDown(i32 gamepad, i32 button);
+bool IsGamepadButtonReleased(i32 gamepad, i32 button);
+bool IsGamepadButtonUp(i32 gamepad, i32 button);
+i32 GetGamepadButtonPressed();
+i32 GetGamepadAxisCount(i32 gamepad);
+f32 GetGamepadAxisMovement(i32 gamepad, i32 axis);
+i32 SetGamepadMappings(const char *mappings);
+void SetGamepadVibration(i32 gamepad, f32 leftMotor, f32 rightMotor, f32 duration);
+
+// Input-related functions: mouse
+bool IsMouseButtonPressed(i32 button);
+bool IsMouseButtonDown(i32 button);
+bool IsMouseButtonReleased(i32 button);
+bool IsMouseButtonUp(i32 button);
+i32 GetMouseX();
+i32 GetMouseY();
+Vector2 GetMousePosition();
+Vector2 GetMouseDelta();
+void SetMousePosition(i32 x, i32 y);
+void SetMouseOffset(i32 offsetX, i32 offsetY);
+void SetMouseScale(f32 scaleX, f32 scaleY);
+f32 GetMouseWheelMove();
+Vector2 GetMouseWheelMoveV();
+void SetMouseCursor(i32 cursor);
+
+// Input-related functions: touch
+i32 GetTouchX();
+i32 GetTouchY();
+Vector2 GetTouchPosition(i32 index);
+i32 GetTouchPointId(i32 index);
+i32 GetTouchPointCount();
+
+//----------------------------------------------------------------------------------
+// Gestures and Touch Handling Functions (Module: rgestures)
+//----------------------------------------------------------------------------------
+void SetGesturesEnabled(u32 flags);
+bool IsGestureDetected(u32 gesture);
+i32 GetGestureDetected();
+f32 GetGestureHoldDuration();
+Vector2 GetGestureDragVector();
+f32 GetGestureDragAngle();
+Vector2 GetGesturePinchVector();
+f32 GetGesturePinchAngle();
+
+//----------------------------------------------------------------------------------
+// Camera3D System Functions (Module: rcamera)
+//----------------------------------------------------------------------------------
+void UpdateCamera(Camera3D *camera, i32 mode);
+void UpdateCameraPro(Camera3D *camera, Vector3 movement, Vector3 rotation, f32 zoom);
+
+//----------------------------------------------------------------------------------
+// Basic Shapes Drawing Functions (Module: shapes)
+//----------------------------------------------------------------------------------
+void SetShapesTexture(Texture texture, Rectangle source);
+Texture GetShapesTexture();
+Rectangle GetShapesTextureRectangle();
+
+// Basic shapes drawing functions
+void DrawPixel(i32 posX, i32 posY, Color color);
+void DrawPixelV(Vector2 position, Color color);
+void DrawLine(i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, Color color);
+void DrawLineV(Vector2 startPos, Vector2 endPos, Color color);
+void DrawLineEx(Vector2 startPos, Vector2 endPos, f32 thick, Color color);
+void DrawLineStrip(const Vector2 *points, i32 pointCount, Color color);
+void DrawLineBezier(Vector2 startPos, Vector2 endPos, f32 thick, Color color);
+void DrawLineDashed(Vector2 startPos, Vector2 endPos, i32 dashSize, i32 spaceSize, Color color);
+void DrawCircle(i32 centerX, i32 centerY, f32 radius, Color color);
+void DrawCircleV(Vector2 center, f32 radius, Color color);
+void DrawCircleGradient(Vector2 center, f32 radius, Color inner, Color outer);
+void DrawCircleSector(Vector2 center, f32 radius, f32 startAngle, f32 endAngle, i32 segments, Color color);
+void DrawCircleSectorLines(Vector2 center, f32 radius, f32 startAngle, f32 endAngle, i32 segments, Color color);
+void DrawCircleLines(i32 centerX, i32 centerY, f32 radius, Color color);
+void DrawCircleLinesV(Vector2 center, f32 radius, Color color);
+void DrawEllipse(i32 centerX, i32 centerY, f32 radiusH, f32 radiusV, Color color);
+void DrawEllipseV(Vector2 center, f32 radiusH, f32 radiusV, Color color);
+void DrawEllipseLines(i32 centerX, i32 centerY, f32 radiusH, f32 radiusV, Color color);
+void DrawEllipseLinesV(Vector2 center, f32 radiusH, f32 radiusV, Color color);
+void DrawRing(Vector2 center, f32 innerRadius, f32 outerRadius, f32 startAngle, f32 endAngle, i32 segments, Color color);
+void DrawRingLines(Vector2 center, f32 innerRadius, f32 outerRadius, f32 startAngle, f32 endAngle, i32 segments, Color color);
+void DrawRectangle(i32 posX, i32 posY, i32 width, i32 height, Color color);
+void DrawRectangleV(Vector2 position, Vector2 size, Color color);
+void DrawRectangleRec(Rectangle rec, Color color);
+void DrawRectanglePro(Rectangle rec, Vector2 origin, f32 rotation, Color color);
+void DrawRectangleGradientV(i32 posX, i32 posY, i32 width, i32 height, Color top, Color bottom);
+void DrawRectangleGradientH(i32 posX, i32 posY, i32 width, i32 height, Color left, Color right);
+void DrawRectangleGradientEx(Rectangle rec, Color topLeft, Color bottomLeft, Color bottomRight, Color topRight);
+void DrawRectangleLines(i32 posX, i32 posY, i32 width, i32 height, Color color);
+void DrawRectangleLinesEx(Rectangle rec, f32 lineThick, Color color);
+void DrawRectangleRounded(Rectangle rec, f32 roundness, i32 segments, Color color);
+void DrawRectangleRoundedLines(Rectangle rec, f32 roundness, i32 segments, Color color);
+void DrawRectangleRoundedLinesEx(Rectangle rec, f32 roundness, i32 segments, f32 lineThick, Color color);
+void DrawTriangle(Vector2 v1, Vector2 v2, Vector2 v3, Color color);
+void DrawTriangleLines(Vector2 v1, Vector2 v2, Vector2 v3, Color color);
+void DrawTriangleFan(const Vector2 *points, i32 pointCount, Color color);
+void DrawTriangleStrip(const Vector2 *points, i32 pointCount, Color color);
+void DrawPoly(Vector2 center, i32 sides, f32 radius, f32 rotation, Color color);
+void DrawPolyLines(Vector2 center, i32 sides, f32 radius, f32 rotation, Color color);
+void DrawPolyLinesEx(Vector2 center, i32 sides, f32 radius, f32 rotation, f32 lineThick, Color color);
+
+// Splines drawing functions
+void DrawSplineLinear(const Vector2 *points, i32 pointCount, f32 thick, Color color);
+void DrawSplineBasis(const Vector2 *points, i32 pointCount, f32 thick, Color color);
+void DrawSplineCatmullRom(const Vector2 *points, i32 pointCount, f32 thick, Color color);
+void DrawSplineBezierQuadratic(const Vector2 *points, i32 pointCount, f32 thick, Color color);
+void DrawSplineBezierCubic(const Vector2 *points, i32 pointCount, f32 thick, Color color);
+void DrawSplineSegmentLinear(Vector2 p1, Vector2 p2, f32 thick, Color color);
+void DrawSplineSegmentBasis(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 thick, Color color);
+void DrawSplineSegmentCatmullRom(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 thick, Color color);
+void DrawSplineSegmentBezierQuadratic(Vector2 p1, Vector2 c2, Vector2 p3, f32 thick, Color color);
+void DrawSplineSegmentBezierCubic(Vector2 p1, Vector2 c2, Vector2 c3, Vector2 p4, f32 thick, Color color);
+
+// Spline segment point evaluation functions
+Vector2 GetSplinePointLinear(Vector2 startPos, Vector2 endPos, f32 t);
+Vector2 GetSplinePointBasis(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 t);
+Vector2 GetSplinePointCatmullRom(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, f32 t);
+Vector2 GetSplinePointBezierQuad(Vector2 p1, Vector2 c2, Vector2 p3, f32 t);
+Vector2 GetSplinePointBezierCubic(Vector2 p1, Vector2 c2, Vector2 c3, Vector2 p4, f32 t);
+
+// Basic shapes collision detection functions
+bool CheckCollisionRecs(Rectangle rec1, Rectangle rec2);
+bool CheckCollisionCircles(Vector2 center1, f32 radius1, Vector2 center2, f32 radius2);
+bool CheckCollisionCircleRec(Vector2 center, f32 radius, Rectangle rec);
+bool CheckCollisionCircleLine(Vector2 center, f32 radius, Vector2 p1, Vector2 p2);
+bool CheckCollisionPointRec(Vector2 point, Rectangle rec);
+bool CheckCollisionPointCircle(Vector2 point, Vector2 center, f32 radius);
+bool CheckCollisionPointTriangle(Vector2 point, Vector2 p1, Vector2 p2, Vector2 p3);
+bool CheckCollisionPointLine(Vector2 point, Vector2 p1, Vector2 p2, i32 threshold);
+bool CheckCollisionPointPoly(Vector2 point, const Vector2 *points, i32 pointCount);
+bool CheckCollisionLines(Vector2 startPos1, Vector2 endPos1, Vector2 startPos2, Vector2 endPos2, Vector2 *collisionPoint);
+Rectangle GetCollisionRec(Rectangle rec1, Rectangle rec2);
+
+//----------------------------------------------------------------------------------
+// Texture Loading and Drawing Functions (Module: textures)
+//----------------------------------------------------------------------------------
+
+// Image loading functions
+Image LoadImage(const char *fileName);
+Image LoadImageRaw(const char *fileName, i32 width, i32 height, i32 format, i32 headerSize);
+Image LoadImageAnim(const char *fileName, i32 *frames);
+Image LoadImageAnimFromMemory(const char *fileType, const u8 *fileData, i32 dataSize, i32 *frames);
+Image LoadImageFromMemory(const char *fileType, const u8 *fileData, i32 dataSize);
+Image LoadImageFromTexture(Texture texture);
+Image LoadImageFromScreen();
+bool IsImageValid(Image image);
+void UnloadImage(Image image);
+bool ExportImage(Image image, const char *fileName);
+u8 *ExportImageToMemory(Image image, const char *fileType, i32 *fileSize);
+bool ExportImageAsCode(Image image, const char *fileName);
+
+// Image generation functions
+Image GenImageColor(i32 width, i32 height, Color color);
+Image GenImageGradientLinear(i32 width, i32 height, i32 direction, Color start, Color end);
+Image GenImageGradientRadial(i32 width, i32 height, f32 density, Color inner, Color outer);
+Image GenImageGradientSquare(i32 width, i32 height, f32 density, Color inner, Color outer);
+Image GenImageChecked(i32 width, i32 height, i32 checksX, i32 checksY, Color col1, Color col2);
+Image GenImageWhiteNoise(i32 width, i32 height, f32 factor);
+Image GenImagePerlinNoise(i32 width, i32 height, i32 offsetX, i32 offsetY, f32 scale);
+Image GenImageCellular(i32 width, i32 height, i32 tileSize);
+Image GenImageText(i32 width, i32 height, const char *text);
+
+// Image manipulation functions
+Image ImageCopy(Image image);
+Image ImageFromImage(Image image, Rectangle rec);
+Image ImageFromChannel(Image image, i32 selectedChannel);
+Image ImageText(const char *text, i32 fontSize, Color color);
+Image ImageTextEx(Font font, const char *text, f32 fontSize, f32 spacing, Color tint);
+void ImageFormat(Image *image, i32 newFormat);
+void ImageToPOT(Image *image, Color fill);
+void ImageCrop(Image *image, Rectangle crop);
+void ImageAlphaCrop(Image *image, f32 threshold);
+void ImageAlphaClear(Image *image, Color color, f32 threshold);
+void ImageAlphaMask(Image *image, Image alphaMask);
+void ImageAlphaPremultiply(Image *image);
+void ImageBlurGaussian(Image *image, i32 blurSize);
+void ImageKernelConvolution(Image *image, const f32 *kernel, i32 kernelSize);
+void ImageResize(Image *image, i32 newWidth, i32 newHeight);
+void ImageResizeNN(Image *image, i32 newWidth, i32 newHeight);
+void ImageResizeCanvas(Image *image, i32 newWidth, i32 newHeight, i32 offsetX, i32 offsetY, Color fill);
+void ImageMipmaps(Image *image);
+void ImageDither(Image *image, i32 rBpp, i32 gBpp, i32 bBpp, i32 aBpp);
+void ImageFlipVertical(Image *image);
+void ImageFlipHorizontal(Image *image);
+void ImageRotate(Image *image, i32 degrees);
+void ImageRotateCW(Image *image);
+void ImageRotateCCW(Image *image);
+void ImageColorTint(Image *image, Color color);
+void ImageColorInvert(Image *image);
+void ImageColorGrayscale(Image *image);
+void ImageColorContrast(Image *image, f32 contrast);
+void ImageColorBrightness(Image *image, i32 brightness);
+void ImageColorReplace(Image *image, Color color, Color replace);
+Color *LoadImageColors(Image image);
+Color *LoadImagePalette(Image image, i32 maxPaletteSize, i32 *colorCount);
+void UnloadImageColors(Color *colors);
+void UnloadImagePalette(Color *colors);
+Rectangle GetImageAlphaBorder(Image image, f32 threshold);
+Color GetImageColor(Image image, i32 x, i32 y);
+
+// Image drawing functions
+void ImageClearBackground(Image *dst, Color color);
+void ImageDrawPixel(Image *dst, i32 posX, i32 posY, Color color);
+void ImageDrawPixelV(Image *dst, Vector2 position, Color color);
+void ImageDrawLine(Image *dst, i32 startPosX, i32 startPosY, i32 endPosX, i32 endPosY, Color color);
+void ImageDrawLineV(Image *dst, Vector2 start, Vector2 end, Color color);
+void ImageDrawLineEx(Image *dst, Vector2 start, Vector2 end, i32 thick, Color color);
+void ImageDrawCircle(Image *dst, i32 centerX, i32 centerY, i32 radius, Color color);
+void ImageDrawCircleV(Image *dst, Vector2 center, i32 radius, Color color);
+void ImageDrawCircleLines(Image *dst, i32 centerX, i32 centerY, i32 radius, Color color);
+void ImageDrawCircleLinesV(Image *dst, Vector2 center, i32 radius, Color color);
+void ImageDrawRectangle(Image *dst, i32 posX, i32 posY, i32 width, i32 height, Color color);
+void ImageDrawRectangleV(Image *dst, Vector2 position, Vector2 size, Color color);
+void ImageDrawRectangleRec(Image *dst, Rectangle rec, Color color);
+void ImageDrawRectangleLines(Image *dst, Rectangle rec, i32 thick, Color color);
+void ImageDrawTriangle(Image *dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
+void ImageDrawTriangleEx(Image *dst, Vector2 v1, Vector2 v2, Vector2 v3, Color c1, Color c2, Color c3);
+void ImageDrawTriangleLines(Image *dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
+void ImageDrawTriangleFan(Image *dst, const Vector2 *points, i32 pointCount, Color color);
+void ImageDrawTriangleStrip(Image *dst, const Vector2 *points, i32 pointCount, Color color);
+void ImageDraw(Image *dst, Image src, Rectangle srcRec, Rectangle dstRec, Color tint);
+void ImageDrawText(Image *dst, const char *text, i32 posX, i32 posY, i32 fontSize, Color color);
+void ImageDrawTextEx(Image *dst, Font font, const char *text, Vector2 position, f32 fontSize, f32 spacing, Color tint);
+
+// Texture loading functions
+Texture LoadTexture(const char *fileName);
+Texture LoadTextureFromImage(Image image);
+Texture LoadTextureCubemap(Image image, i32 layout);
+RenderTexture LoadRenderTexture(i32 width, i32 height);
+bool IsTextureValid(Texture texture);
+void UnloadTexture(Texture texture);
+bool IsRenderTextureValid(RenderTexture target);
+void UnloadRenderTexture(RenderTexture target);
+void UpdateTexture(Texture texture, const void *pixels);
+void UpdateTextureRec(Texture texture, Rectangle rec, const void *pixels);
+
+// Texture configuration functions
+void GenTextureMipmaps(Texture *texture);
+void SetTextureFilter(Texture texture, i32 filter);
+void SetTextureWrap(Texture texture, i32 wrap);
+
+// Texture drawing functions
+void DrawTexture(Texture texture, i32 posX, i32 posY, Color tint);
+void DrawTextureV(Texture texture, Vector2 position, Color tint);
+void DrawTextureEx(Texture texture, Vector2 position, f32 rotation, f32 scale, Color tint);
+void DrawTextureRec(Texture texture, Rectangle source, Vector2 position, Color tint);
+void DrawTexturePro(Texture texture, Rectangle source, Rectangle dest, Vector2 origin, f32 rotation, Color tint);
+void DrawTextureNPatch(Texture texture, NPatchInfo nPatchInfo, Rectangle dest, Vector2 origin, f32 rotation, Color tint);
+
+// Color/pixel related functions
+bool ColorIsEqual(Color col1, Color col2);
+Color Fade(Color color, f32 alpha);
+i32 ColorToInt(Color color);
+Vector4 ColorNormalize(Color color);
+Color ColorFromNormalized(Vector4 normalized);
+Vector3 ColorToHSV(Color color);
+Color ColorFromHSV(f32 hue, f32 saturation, f32 value);
+Color ColorTint(Color color, Color tint);
+Color ColorBrightness(Color color, f32 factor);
+Color ColorContrast(Color color, f32 contrast);
+Color ColorAlpha(Color color, f32 alpha);
+Color ColorAlphaBlend(Color dst, Color src, Color tint);
+Color ColorLerp(Color color1, Color color2, f32 factor);
+Color GetColor(u32 hexValue);
+Color GetPixelColor(void *srcPtr, i32 format);
+void SetPixelColor(void *dstPtr, Color color, i32 format);
+i32 GetPixelDataSize(i32 width, i32 height, i32 format);
+
+//----------------------------------------------------------------------------------
+// Font Loading and Text Drawing Functions (Module: text)
+//----------------------------------------------------------------------------------
+
+// Font loading/unloading functions
+Font GetFontDefault();
+Font LoadFont(const char *fileName);
+Font LoadFontEx(const char *fileName, i32 fontSize, const i32 *codepoints, i32 codepointCount);
+Font LoadFontFromImage(Image image, Color key, i32 firstChar);
+Font LoadFontFromMemory(const char *fileType, const u8 *fileData, i32 dataSize, i32 fontSize, const i32 *codepoints, i32 codepointCount);
+bool IsFontValid(Font font);
+GlyphInfo *LoadFontData(const u8 *fileData, i32 dataSize, i32 fontSize, const i32 *codepoints, i32 codepointCount, i32 type, i32 *glyphCount);
+Image GenImageFontAtlas(const GlyphInfo *glyphs, Rectangle **glyphRecs, i32 glyphCount, i32 fontSize, i32 padding, i32 packMethod);
+void UnloadFontData(GlyphInfo *glyphs, i32 glyphCount);
+void UnloadFont(Font font);
+bool ExportFontAsCode(Font font, const char *fileName);
+
+// Text drawing functions
+void DrawFPS(i32 posX, i32 posY);
+void DrawText(const char *text, i32 posX, i32 posY, i32 fontSize, Color color);
+void DrawTextEx(Font font, const char *text, Vector2 position, f32 fontSize, f32 spacing, Color tint);
+void DrawTextPro(Font font, const char *text, Vector2 position, Vector2 origin, f32 rotation, f32 fontSize, f32 spacing, Color tint);
+void DrawTextCodepoint(Font font, i32 codepoint, Vector2 position, f32 fontSize, Color tint);
+void DrawTextCodepoints(Font font, const i32 *codepoints, i32 codepointCount, Vector2 position, f32 fontSize, f32 spacing, Color tint);
+
+// Text font info functions
+void SetTextLineSpacing(i32 spacing);
+i32 MeasureText(const char *text, i32 fontSize);
+Vector2 MeasureTextEx(Font font, const char *text, f32 fontSize, f32 spacing);
+Vector2 MeasureTextCodepoints(Font font, const i32 *codepoints, i32 length, f32 fontSize, f32 spacing);
+i32 GetGlyphIndex(Font font, i32 codepoint);
+GlyphInfo GetGlyphInfo(Font font, i32 codepoint);
+Rectangle GetGlyphAtlasRec(Font font, i32 codepoint);
+
+// Text codepoints management functions
+char *LoadUTF8(const i32 *codepoints, i32 length);
+void UnloadUTF8(char *text);
+i32 *LoadCodepoints(const char *text, i32 *count);
+void UnloadCodepoints(i32 *codepoints);
+i32 GetCodepointCount(const char *text);
+i32 GetCodepoint(const char *text, i32 *codepointSize);
+i32 GetCodepointNext(const char *text, i32 *codepointSize);
+i32 GetCodepointPrevious(const char *text, i32 *codepointSize);
+const char *CodepointToUTF8(i32 codepoint, i32 *utf8Size);
+
+// Text strings management functions
+i32 TextCopy(char *dst, const char *src);
+bool TextIsEqual(const char *text1, const char *text2);
+u32 TextLength(const char *text);
+const char *TextFormat(const char *text, ...);
+const char *TextSubtext(const char *text, i32 position, i32 length);
+const char *TextRemoveSpaces(const char *text);
+char *GetTextBetween(const char *text, const char *begin, const char *end);
+char *TextReplace(const char *text, const char *search, const char *replacement);
+char *TextReplaceAlloc(const char *text, const char *search, const char *replacement);
+char *TextReplaceBetween(const char *text, const char *begin, const char *end, const char *replacement);
+char *TextReplaceBetweenAlloc(const char *text, const char *begin, const char *end, const char *replacement);
+char *TextInsert(const char *text, const char *insert, i32 position);
+char *TextInsertAlloc(const char *text, const char *insert, i32 position);
+char *TextJoin(char **textList, i32 count, const char *delimiter);
+char **TextSplit(const char *text, char delimiter, i32 *count);
+void TextAppend(char *text, const char *append, i32 *position);
+i32 TextFindIndex(const char *text, const char *search);
+char *TextToUpper(const char *text);
+char *TextToLower(const char *text);
+char *TextToPascal(const char *text);
+char *TextToSnake(const char *text);
+char *TextToCamel(const char *text);
+i32 TextToInteger(const char *text);
+f32 TextToFloat(const char *text);
+
+//----------------------------------------------------------------------------------
+// Basic 3d Shapes Drawing Functions (Module: models)
+//----------------------------------------------------------------------------------
+
+void DrawLine3D(Vector3 startPos, Vector3 endPos, Color color);
+void DrawPoint3D(Vector3 position, Color color);
+void DrawCircle3D(Vector3 center, f32 radius, Vector3 rotationAxis, f32 rotationAngle, Color color);
+void DrawTriangle3D(Vector3 v1, Vector3 v2, Vector3 v3, Color color);
+void DrawTriangleStrip3D(const Vector3 *points, i32 pointCount, Color color);
+void DrawCube(Vector3 position, f32 width, f32 height, f32 length, Color color);
+void DrawCubeV(Vector3 position, Vector3 size, Color color);
+void DrawCubeWires(Vector3 position, f32 width, f32 height, f32 length, Color color);
+void DrawCubeWiresV(Vector3 position, Vector3 size, Color color);
+void DrawSphere(Vector3 centerPos, f32 radius, Color color);
+void DrawSphereEx(Vector3 centerPos, f32 radius, i32 rings, i32 slices, Color color);
+void DrawSphereWires(Vector3 centerPos, f32 radius, i32 rings, i32 slices, Color color);
+void DrawCylinder(Vector3 position, f32 radiusTop, f32 radiusBottom, f32 height, i32 slices, Color color);
+void DrawCylinderEx(Vector3 startPos, Vector3 endPos, f32 startRadius, f32 endRadius, i32 sides, Color color);
+void DrawCylinderWires(Vector3 position, f32 radiusTop, f32 radiusBottom, f32 height, i32 slices, Color color);
+void DrawCylinderWiresEx(Vector3 startPos, Vector3 endPos, f32 startRadius, f32 endRadius, i32 sides, Color color);
+void DrawCapsule(Vector3 startPos, Vector3 endPos, f32 radius, i32 slices, i32 rings, Color color);
+void DrawCapsuleWires(Vector3 startPos, Vector3 endPos, f32 radius, i32 slices, i32 rings, Color color);
+void DrawPlane(Vector3 centerPos, Vector2 size, Color color);
+void DrawRay(Ray ray, Color color);
+void DrawGrid(i32 slices, f32 spacing);
+
+//----------------------------------------------------------------------------------
+// Model 3d Loading and Drawing Functions (Module: models)
+//----------------------------------------------------------------------------------
+
+// Model management functions
+Model LoadModel(const char *fileName);
+Model LoadModelFromMesh(Mesh mesh);
+bool IsModelValid(Model model);
+void UnloadModel(Model model);
+BoundingBox GetModelBoundingBox(Model model);
+
+// Model drawing functions
+void DrawModel(Model model, Vector3 position, f32 scale, Color tint);
+void DrawModelEx(Model model, Vector3 position, Vector3 rotationAxis, f32 rotationAngle, Vector3 scale, Color tint);
+void DrawModelWires(Model model, Vector3 position, f32 scale, Color tint);
+void DrawModelWiresEx(Model model, Vector3 position, Vector3 rotationAxis, f32 rotationAngle, Vector3 scale, Color tint);
+void DrawBoundingBox(BoundingBox box, Color color);
+void DrawBillboard(Camera3D camera, Texture texture, Vector3 position, f32 scale, Color tint);
+void DrawBillboardRec(Camera3D camera, Texture texture, Rectangle source, Vector3 position, Vector2 size, Color tint);
+void DrawBillboardPro(Camera3D camera, Texture texture, Rectangle source, Vector3 position, Vector3 up, Vector2 size, Vector2 origin, f32 rotation, Color tint);
+
+// Mesh management functions
+void UploadMesh(Mesh *mesh, bool dynamic);
+void UpdateMeshBuffer(Mesh mesh, i32 index, const void *data, i32 dataSize, i32 offset);
+void UnloadMesh(Mesh mesh);
+void DrawMesh(Mesh mesh, Material material, Matrix transform);
+void DrawMeshInstanced(Mesh mesh, Material material, const Matrix *transforms, i32 instances);
+BoundingBox GetMeshBoundingBox(Mesh mesh);
+void GenMeshTangents(Mesh *mesh);
+bool ExportMesh(Mesh mesh, const char *fileName);
+bool ExportMeshAsCode(Mesh mesh, const char *fileName);
+
+// Mesh generation functions
+Mesh GenMeshPoly(i32 sides, f32 radius);
+Mesh GenMeshPlane(f32 width, f32 length, i32 resX, i32 resZ);
+Mesh GenMeshCube(f32 width, f32 height, f32 length);
+Mesh GenMeshSphere(f32 radius, i32 rings, i32 slices);
+Mesh GenMeshHemiSphere(f32 radius, i32 rings, i32 slices);
+Mesh GenMeshCylinder(f32 radius, f32 height, i32 slices);
+Mesh GenMeshCone(f32 radius, f32 height, i32 slices);
+Mesh GenMeshTorus(f32 radius, f32 size, i32 radSeg, i32 sides);
+Mesh GenMeshKnot(f32 radius, f32 size, i32 radSeg, i32 sides);
+Mesh GenMeshHeightmap(Image heightmap, Vector3 size);
+Mesh GenMeshCubicmap(Image cubicmap, Vector3 cubeSize);
+
+// Material loading/unloading functions
+Material *LoadMaterials(const char *fileName, i32 *materialCount);
+Material LoadMaterialDefault();
+bool IsMaterialValid(Material material);
+void UnloadMaterial(Material material);
+void SetMaterialTexture(Material *material, i32 mapType, Texture texture);
+void SetModelMeshMaterial(Model *model, i32 meshId, i32 materialId);
+
+// Model animations loading/unloading functions
+ModelAnimation *LoadModelAnimations(const char *fileName, i32 *animCount);
+void UpdateModelAnimation(Model model, ModelAnimation anim, f32 frame);
+void UpdateModelAnimationEx(Model model, ModelAnimation animA, f32 frameA, ModelAnimation animB, f32 frameB, f32 blend);
+void UnloadModelAnimations(ModelAnimation *animations, i32 animCount);
+bool IsModelAnimationValid(Model model, ModelAnimation anim);
+
+// Collision detection functions
+bool CheckCollisionSpheres(Vector3 center1, f32 radius1, Vector3 center2, f32 radius2);
+bool CheckCollisionBoxes(BoundingBox box1, BoundingBox box2);
+bool CheckCollisionBoxSphere(BoundingBox box, Vector3 center, f32 radius);
+RayCollision GetRayCollisionSphere(Ray ray, Vector3 center, f32 radius);
+RayCollision GetRayCollisionBox(Ray ray, BoundingBox box);
+RayCollision GetRayCollisionMesh(Ray ray, Mesh mesh, Matrix transform);
+RayCollision GetRayCollisionTriangle(Ray ray, Vector3 p1, Vector3 p2, Vector3 p3);
+RayCollision GetRayCollisionQuad(Ray ray, Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4);
+
+//----------------------------------------------------------------------------------
+// Audio Loading and Playing Functions (Module: audio)
+//----------------------------------------------------------------------------------
+
+// Audio device management functions
+void InitAudioDevice();
+void CloseAudioDevice();
+bool IsAudioDeviceReady();
+void SetMasterVolume(f32 volume);
+f32 GetMasterVolume();
+
+// Wave/Sound loading/unloading functions
+Wave LoadWave(const char *fileName);
+Wave LoadWaveFromMemory(const char *fileType, const u8 *fileData, i32 dataSize);
+bool IsWaveValid(Wave wave);
+Sound LoadSound(const char *fileName);
+Sound LoadSoundFromWave(Wave wave);
+Sound LoadSoundAlias(Sound source);
+bool IsSoundValid(Sound sound);
+void UpdateSound(Sound sound, const void *data, i32 sampleCount);
+void UnloadWave(Wave wave);
+void UnloadSound(Sound sound);
+void UnloadSoundAlias(Sound alias);
+bool ExportWave(Wave wave, const char *fileName);
+bool ExportWaveAsCode(Wave wave, const char *fileName);
+
+// Wave/Sound management functions
+void PlaySound(Sound sound);
+void StopSound(Sound sound);
+void PauseSound(Sound sound);
+void ResumeSound(Sound sound);
+bool IsSoundPlaying(Sound sound);
+void SetSoundVolume(Sound sound, f32 volume);
+void SetSoundPitch(Sound sound, f32 pitch);
+void SetSoundPan(Sound sound, f32 pan);
+Wave WaveCopy(Wave wave);
+void WaveCrop(Wave *wave, i32 initFrame, i32 finalFrame);
+void WaveFormat(Wave *wave, i32 sampleRate, i32 sampleSize, i32 channels);
+f32 *LoadWaveSamples(Wave wave);
+void UnloadWaveSamples(f32 *samples);
+
+// Music management functions
+Music LoadMusicStream(const char *fileName);
+Music LoadMusicStreamFromMemory(const char *fileType, const u8 *data, i32 dataSize);
+bool IsMusicValid(Music music);
+void UnloadMusicStream(Music music);
+void PlayMusicStream(Music music);
+bool IsMusicStreamPlaying(Music music);
+void UpdateMusicStream(Music music);
+void StopMusicStream(Music music);
+void PauseMusicStream(Music music);
+void ResumeMusicStream(Music music);
+void SeekMusicStream(Music music, f32 position);
+void SetMusicVolume(Music music, f32 volume);
+void SetMusicPitch(Music music, f32 pitch);
+void SetMusicPan(Music music, f32 pan);
+f32 GetMusicTimeLength(Music music);
+f32 GetMusicTimePlayed(Music music);
+
+// AudioStream management functions
+AudioStream LoadAudioStream(u32 sampleRate, u32 sampleSize, u32 channels);
+bool IsAudioStreamValid(AudioStream stream);
+void UnloadAudioStream(AudioStream stream);
+void UpdateAudioStream(AudioStream stream, const void *data, i32 frameCount);
+bool IsAudioStreamProcessed(AudioStream stream);
+void PlayAudioStream(AudioStream stream);
+void PauseAudioStream(AudioStream stream);
+void ResumeAudioStream(AudioStream stream);
+bool IsAudioStreamPlaying(AudioStream stream);
+void StopAudioStream(AudioStream stream);
+void SetAudioStreamVolume(AudioStream stream, f32 volume);
+void SetAudioStreamPitch(AudioStream stream, f32 pitch);
+void SetAudioStreamPan(AudioStream stream, f32 pan);
+void SetAudioStreamBufferSizeDefault(i32 size);
+
+} // extern "C"
