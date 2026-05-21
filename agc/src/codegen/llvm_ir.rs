@@ -1074,57 +1074,50 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let target_data =
             TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
 
+        // Check if return type needs sret to calculate parameter offset
+        let mut sret_offset: u32 = 0;
+        if let Some(ret_ty) = &sig.return_type {
+            if !Self::is_void_primitive(ret_ty) {
+                let lowered_ret = self.lower_basic_type(ret_ty)?;
+                if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
+                    let size = target_data.get_store_size(&struct_ty);
+                    if self.abi_handler.needs_sret(size) {
+                        sret_offset = 1;
+                        // Add sret attribute to the first parameter (implicit return pointer)
+                        let sret_kind = Attribute::get_named_enum_kind_id("sret");
+                        let attr = self.context.create_type_attribute(
+                            sret_kind,
+                            struct_ty.as_any_type_enum(),
+                        );
+                        function.add_attribute(AttributeLoc::Param(0), attr);
+
+                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                        let align_kind = Attribute::get_named_enum_kind_id("align");
+                        let align_attr = self.context.create_enum_attribute(align_kind, align);
+                        function.add_attribute(AttributeLoc::Param(0), align_attr);
+                    }
+                }
+            }
+        }
+
+        // Add byval attributes to user parameters (shifted by sret_offset)
         for (i, param_ty) in sig.params.iter().enumerate() {
             let lowered = self.lower_basic_type(param_ty)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered {
                 let size = target_data.get_store_size(&struct_ty);
                 if self.abi_handler.needs_byval(size) {
-                    // Large struct: add byval attribute
+                    let param_idx = (i as u32) + sret_offset;
                     let byval_kind = Attribute::get_named_enum_kind_id("byval");
                     let attr = self.context.create_type_attribute(
                         byval_kind,
                         struct_ty.as_any_type_enum(),
                     );
-                    function.add_attribute(AttributeLoc::Param(i as u32), attr);
+                    function.add_attribute(AttributeLoc::Param(param_idx), attr);
 
-                    // Add alignment attribute
                     let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
                     let align_kind = Attribute::get_named_enum_kind_id("align");
                     let align_attr = self.context.create_enum_attribute(align_kind, align);
-                    function.add_attribute(AttributeLoc::Param(i as u32), align_attr);
-                }
-            }
-        }
-
-        // Handle sret for struct returns > 16 bytes
-        if let Some(ret_ty) = &sig.return_type {
-            if Self::is_void_primitive(ret_ty) {
-                return Ok(());
-            }
-            let lowered_ret = self.lower_basic_type(ret_ty)?;
-            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                let size = target_data.get_store_size(&struct_ty);
-                if self.abi_handler.needs_sret(size) {
-                    // Add sret attribute to the first parameter (implicit return pointer)
-                    let sret_kind = Attribute::get_named_enum_kind_id("sret");
-                    let attr = self.context.create_type_attribute(
-                        sret_kind,
-                        struct_ty.as_any_type_enum(),
-                    );
-                    function.add_attribute(AttributeLoc::Param(0), attr);
-
-                    // Add noalias and nocapture attributes
-                    let noalias_kind = Attribute::get_named_enum_kind_id("noalias");
-                    function.add_attribute(AttributeLoc::Param(0), self.context.create_enum_attribute(noalias_kind, 0));
-
-                    let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
-                    function.add_attribute(AttributeLoc::Param(0), self.context.create_enum_attribute(nocapture_kind, 0));
-
-                    // Add alignment
-                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                    let align_kind = Attribute::get_named_enum_kind_id("align");
-                    let align_attr = self.context.create_enum_attribute(align_kind, align);
-                    function.add_attribute(AttributeLoc::Param(0), align_attr);
+                    function.add_attribute(AttributeLoc::Param(param_idx), align_attr);
                 }
             }
         }
@@ -1139,7 +1132,33 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         is_variadic: bool,
         linkage: Option<ast::ExternLinkage>,
     ) -> CodegenResult<FunctionType<'ctx>> {
-        let mut llvm_params = Vec::with_capacity(params.len());
+        let target_data =
+            TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+
+        // Check if return type needs sret (hidden pointer parameter)
+        let mut needs_sret = false;
+        if let Some(ret) = return_type {
+            if !Self::is_void_primitive(ret) {
+                if let Some(link) = &linkage {
+                    let lowered_ret = self.lower_basic_type(ret)?;
+                    if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
+                        let size = target_data.get_store_size(&struct_ty);
+                        if self.abi_handler.needs_sret(size) {
+                            needs_sret = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut llvm_params = Vec::with_capacity(params.len() + if needs_sret { 1 } else { 0 });
+
+        // If sret is needed, add implicit return pointer as first parameter
+        if needs_sret {
+            let ptr = self.context.ptr_type(AddressSpace::default());
+            llvm_params.push(BasicMetadataTypeEnum::from(ptr));
+        }
+
         for param in params {
             let lowered = if let Some(linkage) = &linkage {
                 self.lower_abi_type(param, linkage)?
@@ -1152,6 +1171,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         if let Some(ret) = return_type {
             if Self::is_void_primitive(ret) {
+                return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
+            }
+            if needs_sret {
+                // Return type becomes void when using sret
                 return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
             }
             let basic_ret = if let Some(linkage) = &linkage {
