@@ -414,7 +414,7 @@ impl<'a> ImportAliasRewriter<'a> {
     }
 
     fn rewrite_generics(&mut self, generics: &mut ast::Generics) {
-        while let Some(clause) = &mut generics.where_clause {
+        if let Some(clause) = &mut generics.where_clause {
             for predicate in &mut clause.predicates {
                 match predicate {
                     ast::WherePredicate::Type {
