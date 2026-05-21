@@ -1,4 +1,5 @@
 import std.gfx.raylib;
+import std.gfx.rlgl;
 
 i32 main() {
     InitWindow(800, 600, "Spinning 3D Cube - Silver + raylib");
@@ -6,39 +7,83 @@ i32 main() {
     Vector3 camera_position = { 5.0, 5.0, 5.0 };
     Vector3 camera_target = { 0.0, 0.0, 0.0 };
     Vector3 camera_up = { 0.0, 1.0, 0.0 };
-    f32 camera_fovy = 45.0;
-    i32 camera_projection = 0; // CAMERA_PERSPECTIVE
 
     Camera3D camera = {
         .position = camera_position,
         .target = camera_target,
         .up = camera_up,
-        .fovy = camera_fovy,
-        .projection = camera_projection,
+        .fovy = 45.0,
+        .projection = CameraProjection.CAMERA_PERSPECTIVE,
     };
 
     SetTargetFPS(60);
 
+    Vector3 cube_pos = { 0.0, 0.0, 0.0 };
+    Vector3 cube_size = { (f32)2.0, (f32)2.0, (f32)2.0 };
+
+    f32 cube_yaw = 0.0;
+
     while (!WindowShouldClose()) {
+
+        // Update
+        f32 frame_time = GetFrameTime();
+
+        cube_yaw += frame_time * 45.0;
+
+        // Draw
         BeginDrawing();
 
         ClearBackground(WHITE);
 
         BeginMode3D(camera);
 
-        DrawGrid(10, (f32) 1.0);
+        DrawGrid(10, (f32)1.0);
 
-        f32 angle = (f32) GetTime() * 45.0;
+        // Save current transform state
+        rlPushMatrix();
 
-        Vector3 cube_pos = { 0.0, 0.5, 0.0 };
-        Vector3 cube_size = { 1.0, 1.0, 1.0 };
+        // Move cube into world position
+        rlTranslatef(
+            cube_pos.x,
+            cube_pos.y,
+            cube_pos.z
+        );
 
-        DrawCubeV(cube_pos, cube_size, RED);
-        DrawCubeWiresV(cube_pos, cube_size, MAROON);
+        // Rotate around Y axis
+        rlRotatef(
+            cube_yaw,
+            (f32)0.0,
+            (f32)1.0,
+            (f32)0.0
+        );
+
+        // Draw cube centered at local origin
+        DrawCubeV(
+            cube_pos,
+            cube_size,
+            RED
+        );
+
+        DrawCubeWiresV(
+            cube_pos,
+            cube_size,
+            MAROON
+        );
+
+        // Restore transform state
+        rlPopMatrix();
 
         EndMode3D();
 
-        DrawText("Spinning 3D Cube", 10, 10, 20, DARKGRAY);
+        DrawText(
+            "Spinning 3D Cube",
+            10,
+            10,
+            20,
+            DARKGRAY
+        );
+
+        DrawFPS(10, 40);
 
         EndDrawing();
     }
