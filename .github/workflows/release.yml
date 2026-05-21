@@ -31,7 +31,7 @@ jobs:
       - name: Install LLVM 22
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm llvm git
+          pacman -S --noconfirm llvm git gcc
 
       - name: Cache cargo registry
         uses: actions/cache@v3
