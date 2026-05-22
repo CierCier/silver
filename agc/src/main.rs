@@ -18,6 +18,7 @@ use symbol_table::{CompilerPhase, CompilerSymbolTable};
 
 mod ast_tree;
 mod attributes;
+mod builtin_macros;
 mod codegen;
 mod debug_info;
 mod diagnostics;

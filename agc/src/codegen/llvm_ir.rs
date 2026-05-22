@@ -673,6 +673,83 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    fn type_name_to_ast_type(&self, name: &str) -> Option<ast::Type> {
+        let prim = match name {
+            "i8" => ast::PrimitiveType::I8,
+            "i16" => ast::PrimitiveType::I16,
+            "i32" => ast::PrimitiveType::I32,
+            "i64" => ast::PrimitiveType::I64,
+            "i128" => ast::PrimitiveType::I128,
+            "u8" => ast::PrimitiveType::U8,
+            "u16" => ast::PrimitiveType::U16,
+            "u32" => ast::PrimitiveType::U32,
+            "u64" => ast::PrimitiveType::U64,
+            "u128" => ast::PrimitiveType::U128,
+            "f32" => ast::PrimitiveType::F32,
+            "f64" => ast::PrimitiveType::F64,
+            "f80" => ast::PrimitiveType::F80,
+            "c32" => ast::PrimitiveType::C32,
+            "c64" => ast::PrimitiveType::C64,
+            "c80" => ast::PrimitiveType::C80,
+            "bool" => ast::PrimitiveType::Bool,
+            "char" => ast::PrimitiveType::Char,
+            "str" => ast::PrimitiveType::Str,
+            "void" => ast::PrimitiveType::Void,
+            _ => return None,
+        };
+        Some(ast::Type {
+            kind: Box::new(ast::TypeKind::Primitive(prim)),
+            span: crate::lexer::Span { start: 0, end: 0 },
+        })
+    }
+
+    pub(crate) fn size_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@size requires an expression argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let llvm_ty = match &inner_expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                let ast_ty = self.type_name_to_ast_type(&ident.name);
+                match ast_ty {
+                    Some(ty) => self.lower_basic_type(&ty)?.as_basic_type_enum(),
+                    None => {
+                        let named_ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span.clone(),
+                        };
+                        let type_result = self.lower_basic_type(&named_ty);
+                        match type_result {
+                            Ok(ty) => ty.as_basic_type_enum(),
+                            Err(_) => {
+                                let inner_val = self.emit_expression_value(inner_expr)?;
+                                inner_val.get_type()
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                let inner_val = self.emit_expression_value(inner_expr)?;
+                inner_val.get_type()
+            }
+        };
+        let target_data = TargetData::create(
+            &self.module.get_data_layout().as_str().to_str().unwrap(),
+        );
+        let size = target_data.get_abi_size(&llvm_ty);
+        Ok(self.context.i64_type().const_int(size, false).into())
+    }
+
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(primitive) => {
@@ -2853,6 +2930,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Reference { expression, .. } => {
                 let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
                 Ok(ptr.as_basic_value_enum())
+            }
+            ast::ExpressionKind::MacroCall { name, args } => {
+                match crate::builtin_macros::handle_codegen(&name.name, self, expr, args) {
+                    Some(result) => return result,
+                    None => {}
+                }
+                Err(CodegenError::with_span(
+                    format!("unknown builtin macro '@{}'", name.name),
+                    expr.span.clone(),
+                ))
             }
             _ => Err(CodegenError::with_span(
                 format!(
