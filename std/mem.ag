@@ -1,0 +1,19 @@
+#[link(c)]
+
+T* alloc<T>() {
+    return (T*)(malloc(@size(T)));
+}
+
+T* alloc<T>(i64 count) {
+    return (T*)(calloc(count, @size(T)));
+}
+
+extern "C" {
+    void* malloc(i64 size);
+    void* calloc(i64 count, i64 size);
+    void free(void* ptr);
+    void* memset(void* ptr, i32 value, i64 num);
+    void* memcpy(void* dest, const void* src, i64 num);
+    void* memmove(void* dest, const void* src, i64 num);
+    void* realloc(void* ptr, i64 new_size);
+}

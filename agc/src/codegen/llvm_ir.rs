@@ -738,6 +738,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
+            ast::ExpressionKind::TypeName(ty) => {
+                self.lower_basic_type(ty)?.as_basic_type_enum()
+            }
             _ => {
                 let inner_val = self.emit_expression_value(inner_expr)?;
                 inner_val.get_type()
@@ -3882,6 +3885,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 Ok((field_ptr, field_ty.clone()))
             }
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => {
+                let (operand_ptr, operand_ty) = self.resolve_lvalue_ptr(operand)?;
+                let ptr_llvm_ty = self.lower_basic_type(&operand_ty)?;
+                let loaded_ptr = self
+                    .builder
+                    .build_load(ptr_llvm_ty, operand_ptr, "deref.lvalue.ptr")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to load dereference operand for lvalue: {e}"),
+                            expr.span.clone(),
+                        )
+                    })?;
+                let BasicValueEnum::PointerValue(ptr) = loaded_ptr else {
+                    return Err(CodegenError::with_span(
+                        "dereference operand must be a pointer value",
+                        expr.span.clone(),
+                    ));
+                };
+                let inner_ty = match operand_ty.kind.as_ref() {
+                    ast::TypeKind::Pointer(pointer) => *pointer.inner.clone(),
+                    ast::TypeKind::Reference(reference) => *reference.inner.clone(),
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "dereference requires pointer or reference type",
+                            expr.span.clone(),
+                        ));
+                    }
+                };
+                Ok((ptr, inner_ty))
+            }
             ast::ExpressionKind::Index { object, index } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
                 match object_ty.kind.as_ref() {
@@ -4025,27 +4061,55 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         allow_void: bool,
         span: &Span,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ast::ExpressionKind::Identifier(identifier) = function_expr.kind.as_ref() else {
-            return Err(CodegenError::with_span(
-                "only direct function calls are supported in LLVM IR codegen",
-                function_expr.span.clone(),
-            ));
+        let (fn_name, explicit_generics) = match function_expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(identifier) => {
+                (identifier.name.clone(), None)
+            }
+            ast::ExpressionKind::TypeName(ty) => {
+                if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                    if named.path.len() == 1 {
+                        (named.path[0].name.clone(), named.generics.clone())
+                    } else {
+                        return Err(CodegenError::with_span(
+                            "only direct function calls are supported in LLVM IR codegen",
+                            function_expr.span.clone(),
+                        ));
+                    }
+                } else {
+                    return Err(CodegenError::with_span(
+                        "only direct function calls are supported in LLVM IR codegen",
+                        function_expr.span.clone(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(CodegenError::with_span(
+                    "only direct function calls are supported in LLVM IR codegen",
+                    function_expr.span.clone(),
+                ));
+            }
         };
 
-        let llvm_name = self
-            .imported_function_links
-            .get(&identifier.name)
-            .cloned()
-            .unwrap_or_else(|| identifier.name.clone());
+        let llvm_name = if let Some(generics) = explicit_generics {
+            if !generics.is_empty() {
+                let type_args: Vec<Type> = generics.iter().map(|t| Type::from_ast(t)).collect();
+                let mangled = crate::semantic::monomorph::mangle_name(&fn_name, &type_args);
+                self.imported_function_links.get(&mangled).cloned().unwrap_or(mangled)
+            } else {
+                self.imported_function_links.get(&fn_name).cloned().unwrap_or_else(|| fn_name.clone())
+            }
+        } else {
+            self.imported_function_links.get(&fn_name).cloned().unwrap_or_else(|| fn_name.clone())
+        };
         let function = self.module.get_function(&llvm_name).ok_or_else(|| {
             CodegenError::with_span(
-                format!("unknown function `{}`", identifier.name),
-                identifier.span.clone(),
+                format!("unknown function `{}`", fn_name),
+                function_expr.span.clone(),
             )
         })?;
         let signature = self
             .signature_for_name(&llvm_name)
-            .or_else(|| self.signature_for_name(&identifier.name));
+            .or_else(|| self.signature_for_name(&fn_name));
         let declared_param_count = signature
             .as_ref()
             .map(|sig| sig.params.len())
@@ -5638,7 +5702,40 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
         }
 
-        // Pass 1: collect declarations/types so forward references can resolve.
+        // Pass 1a: Declare all functions (declaration only, no bodies) so forward references resolve.
+        for item in &program.items {
+            if let ast::ItemKind::Function(function_item) = &item.kind {
+                if function_item.generics.is_some() {
+                    continue;
+                }
+                if self.has_generic_placeholder_signature(&function_item.parameters, function_item.return_type.as_ref()) {
+                    continue;
+                }
+                if self.module.get_function(&function_item.name.name).is_some() {
+                    continue;
+                }
+                self.register_function_signature(
+                    &function_item.name.name,
+                    FunctionSig {
+                        params: function_item.parameters.iter().map(|param| param.param_type.clone()).collect(),
+                        return_type: function_item.return_type.clone(),
+                        is_variadic: false,
+                        linkage: None,
+                    },
+                    Some(function_item.name.span.clone()),
+                    SymbolKind::Function,
+                );
+                let fn_ty = self.lower_function_type(
+                    &function_item.parameters.iter().map(|param| param.param_type.clone()).collect::<Vec<_>>(),
+                    function_item.return_type.as_ref(),
+                    false,
+                    None,
+                )?;
+                self.module.add_function(&function_item.name.name, fn_ty, None);
+            }
+        }
+
+        // Pass 1b: collect declarations/types so forward references can resolve.
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Struct(struct_item) => {

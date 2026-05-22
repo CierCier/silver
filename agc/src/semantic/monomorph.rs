@@ -432,10 +432,21 @@ fn collect_expression_instantiations(
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => collect_expression_instantiations(inner, generic_structs, instantiations, scopes),
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    collect_expression_instantiations(
+                        expr,
+                        generic_structs,
+                        instantiations,
+                        scopes,
+                    );
+                }
+            }
+        }
         ast::ExpressionKind::Literal(_)
         | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_)
-        | ast::ExpressionKind::MacroCall { .. } => {}
+        | ast::ExpressionKind::Asm(_) => {}
     }
 }
 
@@ -886,9 +897,14 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => substitute_expression_types(inner, mapping),
-        ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Asm(_)
-        | ast::ExpressionKind::MacroCall { .. } => {}
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    substitute_expression_types(expr, mapping);
+                }
+            }
+        }
+        ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Asm(_) => {}
     }
 }
 
@@ -981,19 +997,28 @@ fn rewrite_expression_function_calls(
             function,
             arguments,
         } => {
-            if expr.span == *span {
-                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_mut() {
-                    if ident.name == name {
-                        *function = Box::new(ast::Expression {
-                            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                                name: mangled.to_string(),
-                                span: ident.span.clone(),
-                            })),
-                            span: function.span.clone(),
-                        });
+                    if expr.span == *span {
+                        let should_rewrite = match function.kind.as_mut() {
+                            ast::ExpressionKind::Identifier(ident) => ident.name == name,
+                            ast::ExpressionKind::TypeName(ty) => {
+                                if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
+                                    named.path.len() == 1 && named.path[0].name == name
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if should_rewrite {
+                            *function = Box::new(ast::Expression {
+                                kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                    name: mangled.to_string(),
+                                    span: function.span.clone(),
+                                })),
+                                span: function.span.clone(),
+                            });
+                        }
                     }
-                }
-            }
             for arg in arguments {
                 rewrite_expression_function_calls(arg, name, args, mangled, span);
             }
@@ -1564,7 +1589,7 @@ fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
     named.path.last().map(|id| id.name.clone())
 }
 
-fn mangle_name(base: &str, args: &[Type]) -> String {
+pub fn mangle_name(base: &str, args: &[Type]) -> String {
     let mut parts = Vec::new();
     for arg in args {
         parts.push(sanitize(&arg.canonical_key()));

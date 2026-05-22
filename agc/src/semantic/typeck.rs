@@ -872,6 +872,22 @@ impl TypeChecker {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
                     return self.resolve_overload(ident, arguments, expr.span.clone());
                 }
+                if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
+                    if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                        if named.path.len() == 1 {
+                            let ident = &named.path[0];
+                            if self.functions.contains_key(&ident.name) {
+                                let explicit_types: Vec<Type> = named.generics
+                                    .as_ref()
+                                    .map(|gs| gs.iter().map(|t| Type::from_ast(t)).collect())
+                                    .unwrap_or_default();
+                                return self.resolve_overload_with_explicit(
+                                    ident, &explicit_types, arguments, expr.span.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
                 for arg in arguments {
                     self.check_expr(arg, None);
                 }
@@ -998,6 +1014,16 @@ impl TypeChecker {
         arguments: &[ast::Expression],
         span: Span,
     ) -> Type {
+        self.resolve_overload_with_explicit(ident, &[], arguments, span)
+    }
+
+    fn resolve_overload_with_explicit(
+        &mut self,
+        ident: &ast::Identifier,
+        explicit_types: &[Type],
+        arguments: &[ast::Expression],
+        span: Span,
+    ) -> Type {
         let arg_types = arguments
             .iter()
             .map(|arg| self.check_expr(arg, None))
@@ -1024,6 +1050,14 @@ impl TypeChecker {
             let mut ok = true;
             let mut score = 0usize;
             let mut mapping = HashMap::new();
+            if !explicit_types.is_empty() {
+                if explicit_types.len() != candidate.type_params.len() {
+                    continue;
+                }
+                for (i, tp) in candidate.type_params.iter().enumerate() {
+                    mapping.insert(tp.clone(), explicit_types[i].clone());
+                }
+            }
 
             for (param_ty, arg_ty) in candidate.params.iter().zip(arg_types.iter()) {
                 let mut matched = false;
@@ -1905,6 +1939,10 @@ impl TypeChecker {
         let sized_ty = match sized_ty {
             Some(ty) => ty,
             None => {
+                // Could be a generic type parameter — defer to codegen
+                if matches!(inner_expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
+                    return Type::Primitive(ast::PrimitiveType::U64);
+                }
                 self.error(
                     "cannot determine size: argument is not a known type name or variable"
                         .to_string(),
@@ -1915,6 +1953,9 @@ impl TypeChecker {
         };
         let layout = self.type_ctx.layout_of(&sized_ty);
         if layout.size.is_some() {
+            Type::Primitive(ast::PrimitiveType::U64)
+        } else if matches!(&sized_ty, Type::Named { .. }) {
+            // Generic type param like T — will be resolved during monomorphization
             Type::Primitive(ast::PrimitiveType::U64)
         } else {
             self.error(
@@ -1954,10 +1995,15 @@ impl TypeChecker {
                 if let Some(ty) = builtin {
                     return Some(ty);
                 }
-                // Not a built-in name — try as a variable or user-defined type
-                let inner_ty = self.check_expr(expr, None);
-                if inner_ty != Type::Unknown {
-                    return Some(inner_ty);
+                // Not a built-in name — try lookup without emitting errors
+                if let Some(ty) = self.lookup(&ident.name) {
+                    return Some(ty);
+                }
+                if self.known_types.contains_key(&ident.name) {
+                    return Some(Type::Named {
+                        path: vec![ident.name.clone()],
+                        generics: Vec::new(),
+                    });
                 }
                 None
             }
