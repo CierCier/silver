@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -481,6 +482,57 @@ impl Type {
 
     pub fn normalized_eq(&self, other: &Type) -> bool {
         self.canonical_key() == other.canonical_key()
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Unit => write!(f, "void"),
+            Type::Primitive(p) => write!(f, "{}", format!("{:?}", p).to_lowercase()),
+            Type::Named { path, generics } => {
+                let name = path.join("::");
+                if generics.is_empty() {
+                    write!(f, "{}", name)
+                } else {
+                    let args: Vec<String> = generics.iter().map(|g| g.to_string()).collect();
+                    write!(f, "{}<{}>", name, args.join(", "))
+                }
+            }
+            Type::Reference { is_mutable, inner } => {
+                if *is_mutable {
+                    write!(f, "&mut {}", inner)
+                } else {
+                    write!(f, "&{}", inner)
+                }
+            }
+            Type::Pointer { is_mutable, inner } => {
+                if matches!(inner.as_ref(), Type::Unit) {
+                    write!(f, "void*")
+                } else if *is_mutable {
+                    write!(f, "{}*", inner)
+                } else {
+                    write!(f, "const {}*", inner)
+                }
+            }
+            Type::Array { element, length } => match length {
+                Some(len) => write!(f, "[{}; {}]", element, len),
+                None => write!(f, "[{}]", element),
+            },
+            Type::Optional { inner } => write!(f, "Optional<{}>", inner),
+            Type::Tuple(items) => {
+                let args: Vec<String> = items.iter().map(|t| t.to_string()).collect();
+                write!(f, "({})", args.join(", "))
+            }
+            Type::Function {
+                params,
+                return_type,
+            } => {
+                let args: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                write!(f, "fn({}) -> {}", args.join(", "), return_type)
+            }
+            Type::Unknown => write!(f, "unknown"),
+        }
     }
 }
 

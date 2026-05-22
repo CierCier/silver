@@ -431,7 +431,7 @@ impl TypeChecker {
                     {
                         self.error(
                             format!(
-                                "type mismatch: expected {:?}, found {:?}",
+                                "type mismatch: expected {}, found {}",
                                 declared, init_type
                             ),
                             init.span.clone(),
@@ -466,7 +466,7 @@ impl TypeChecker {
                         {
                             self.error(
                                 format!(
-                                    "return type mismatch: expected {:?}, found {:?}",
+                                    "return type mismatch: expected {}, found {}",
                                     expected, found
                                 ),
                                 expr.span.clone(),
@@ -522,29 +522,44 @@ impl TypeChecker {
                 match operator {
                     ast::UnaryOperator::Plus | ast::UnaryOperator::Minus => {
                         if !self.is_numeric_type(&operand_ty) {
-                            self.error("unary +/- requires numeric operand", expr.span.clone());
+                            self.error(
+                                format!("unary +/- requires numeric operand, found {}", operand_ty),
+                                expr.span.clone(),
+                            );
                         }
                         operand_ty
                     }
-                    ast::UnaryOperator::Dereference => match operand_ty {
-                        Type::Pointer { inner, .. } | Type::Reference { inner, .. } => *inner,
-                        _ => {
-                            self.error(
-                                "dereference requires pointer or reference operand",
-                                expr.span.clone(),
-                            );
-                            Type::Unknown
+                    ast::UnaryOperator::Dereference => {
+                        let operand_ty_clone = operand_ty.clone();
+                        match operand_ty {
+                            Type::Pointer { inner, .. } | Type::Reference { inner, .. } => *inner,
+                            _ => {
+                                self.error(
+                                    format!(
+                                        "dereference requires pointer or reference operand, found {}",
+                                        operand_ty_clone
+                                    ),
+                                    expr.span.clone(),
+                                );
+                                Type::Unknown
+                            }
                         }
-                    },
+                    }
                     ast::UnaryOperator::Not => {
                         if !is_bool(&operand_ty) {
-                            self.error("logical not requires bool", expr.span.clone());
+                            self.error(
+                                format!("logical not requires bool, found {}", operand_ty),
+                                expr.span.clone(),
+                            );
                         }
                         Type::Primitive(ast::PrimitiveType::Bool)
                     }
                     ast::UnaryOperator::BitwiseNot => {
                         if !self.is_integer_type(&operand_ty) {
-                            self.error("bitwise not requires integer", expr.span.clone());
+                            self.error(
+                                format!("bitwise not requires integer, found {}", operand_ty),
+                                expr.span.clone(),
+                            );
                         }
                         operand_ty
                     }
@@ -565,7 +580,7 @@ impl TypeChecker {
                     ast::UnaryOperator::Increment | ast::UnaryOperator::Decrement => {
                         if !self.is_incdec_type(&operand_ty) {
                             self.error(
-                                "increment/decrement requires numeric or pointer operand",
+                                format!("increment/decrement requires numeric or pointer operand, found {}", operand_ty),
                                 expr.span.clone(),
                             );
                         }
@@ -603,7 +618,10 @@ impl TypeChecker {
                     }
 
                     self.error(
-                        "binary operator requires numeric operands",
+                        format!(
+                            "binary operator requires numeric operands, got {} and {}",
+                            left_ty, right_ty
+                        ),
                         expr.span.clone(),
                     );
                     Type::Unknown
@@ -618,7 +636,13 @@ impl TypeChecker {
                     let right_ty = self.check_expr(right, None);
                     if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
                         if self.common_numeric_type(&left_ty, &right_ty).is_none() {
-                            self.error("comparison operands must be compatible", expr.span.clone());
+                            self.error(
+                                format!(
+                                    "comparison operands must be compatible, got {} and {}",
+                                    left_ty, right_ty
+                                ),
+                                expr.span.clone(),
+                            );
                         }
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
@@ -634,13 +658,25 @@ impl TypeChecker {
                     {
                         let bool_ty = Type::Primitive(ast::PrimitiveType::Bool);
                         if !self.is_implicitly_castable(&ty, &bool_ty) {
-                            self.error("comparison operator must return bool", expr.span.clone());
+                            self.error(
+                                format!(
+                                    "comparison operator must return bool, found {}",
+                                    ty
+                                ),
+                                expr.span.clone(),
+                            );
                         }
                         return bool_ty;
                     }
 
                     if left_ty != right_ty {
-                        self.error("comparison operands must match types", expr.span.clone());
+                        self.error(
+                            format!(
+                                "comparison operands must match, got {} and {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
                     }
                     Type::Primitive(ast::PrimitiveType::Bool)
                 }
@@ -649,10 +685,22 @@ impl TypeChecker {
                     let right_ty = self.check_expr(right, None);
                     let bool_ty = Type::Primitive(ast::PrimitiveType::Bool);
                     if !is_bool(&left_ty) && !self.is_implicitly_castable(&left_ty, &bool_ty) {
-                        self.error("logical operator requires bool operands", expr.span.clone());
+                        self.error(
+                            format!(
+                                "logical operator requires bool operands, found {}",
+                                left_ty
+                            ),
+                            expr.span.clone(),
+                        );
                     }
                     if !is_bool(&right_ty) && !self.is_implicitly_castable(&right_ty, &bool_ty) {
-                        self.error("logical operator requires bool operands", expr.span.clone());
+                        self.error(
+                            format!(
+                                "logical operator requires bool operands, found {}",
+                                right_ty
+                            ),
+                            expr.span.clone(),
+                        );
                     }
                     Type::Primitive(ast::PrimitiveType::Bool)
                 }
@@ -664,11 +712,20 @@ impl TypeChecker {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty {
-                        self.error("bitwise operands must match types", expr.span.clone());
+                        self.error(
+                            format!(
+                                "bitwise operands must match, got {} and {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
                     }
                     if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
                         self.error(
-                            "bitwise operator requires integer operands",
+                            format!(
+                                "bitwise operator requires integer operands, got {} and {}",
+                                left_ty, right_ty
+                            ),
                             expr.span.clone(),
                         );
                     }
@@ -683,7 +740,13 @@ impl TypeChecker {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
-                        self.error("assignment operands must match types", expr.span.clone());
+                        self.error(
+                            format!(
+                                "assignment type mismatch: {} = {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
                     }
                     left_ty
                 }
@@ -695,7 +758,10 @@ impl TypeChecker {
             } => {
                 let cond_ty = self.check_expr(condition, None);
                 if !is_bool(&cond_ty) {
-                    self.error("if condition must be bool", condition.span.clone());
+                    self.error(
+                        format!("if condition must be bool, found {}", cond_ty),
+                        condition.span.clone(),
+                    );
                 }
                 self.check_block(then_branch);
                 if let Some(block) = else_branch {
@@ -706,7 +772,10 @@ impl TypeChecker {
             ast::ExpressionKind::While { condition, body } => {
                 let cond_ty = self.check_expr(condition, None);
                 if !is_bool(&cond_ty) {
-                    self.error("while condition must be bool", condition.span.clone());
+                    self.error(
+                        format!("while condition must be bool, found {}", cond_ty),
+                        condition.span.clone(),
+                    );
                 }
                 self.check_block(body);
                 Type::Unit
@@ -725,7 +794,10 @@ impl TypeChecker {
                 self.check_statement(&init_stmt);
                 let cond_ty = self.check_expr(condition, None);
                 if !is_bool(&cond_ty) {
-                    self.error("for condition must be bool", condition.span.clone());
+                    self.error(
+                        format!("for condition must be bool, found {}", cond_ty),
+                        condition.span.clone(),
+                    );
                 }
                 self.check_expr(increment, None);
                 self.check_block(body);
@@ -741,7 +813,13 @@ impl TypeChecker {
                     for element_expr in elements {
                         let item_ty = self.check_expr(element_expr, Some(element));
                         if !self.is_assignable(element, &item_ty) {
-                            self.error("array element type mismatch", element_expr.span.clone());
+                            self.error(
+                                format!(
+                                    "array element type mismatch: expected {}, found {}",
+                                    element, item_ty
+                                ),
+                                element_expr.span.clone(),
+                            );
                         }
                     }
                     Type::Array {
@@ -771,7 +849,7 @@ impl TypeChecker {
                 let to = Type::from_ast(target_type);
                 if !self.is_castable(&from, &to) {
                     self.error(
-                        format!("invalid cast: {:?} -> {:?}", from, to),
+                        format!("invalid cast: {} -> {}", from, to),
                         expr.span.clone(),
                     );
                 }
@@ -822,8 +900,12 @@ impl TypeChecker {
                 let object_ty = self.check_expr(object, None);
                 let index_ty = self.check_expr(index, None);
                 if !is_integer(&index_ty) {
-                    self.error("index expression must be integer", index.span.clone());
+                    self.error(
+                        format!("index expression must be integer, found {}", index_ty),
+                        index.span.clone(),
+                    );
                 }
+                let object_ty_display = object_ty.to_string();
                 match object_ty {
                     Type::Array { element, .. } => (*element).clone(),
                     Type::Pointer { inner, .. } => match inner.as_ref() {
@@ -838,7 +920,10 @@ impl TypeChecker {
                         },
                         _ => {
                             self.error(
-                                "indexing requires array or pointer type",
+                                format!(
+                                    "indexing requires array or pointer type, found {}",
+                                    object_ty_display
+                                ),
                                 object.span.clone(),
                             );
                             Type::Unknown
@@ -846,7 +931,10 @@ impl TypeChecker {
                     },
                     _ => {
                         self.error(
-                            "indexing requires array or pointer type",
+                            format!(
+                                "indexing requires array or pointer type, found {}",
+                                object_ty_display
+                            ),
                             object.span.clone(),
                         );
                         Type::Unknown
@@ -874,7 +962,7 @@ impl TypeChecker {
                     field_ty
                 } else {
                     self.error(
-                        format!("unknown field '{}' on type {:?}", field.name, object_ty),
+                        format!("unknown field '{}' on type {}", field.name, object_ty),
                         field.span.clone(),
                     );
                     Type::Unknown
@@ -911,8 +999,8 @@ impl TypeChecker {
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, FunctionSig)> = Vec::new();
 
-        for candidate_id in candidate_ids {
-            let Some(candidate) = self.function_symbols.get(&candidate_id).cloned() else {
+        for candidate_id in &candidate_ids {
+            let Some(candidate) = self.function_symbols.get(candidate_id).cloned() else {
                 continue;
             };
             if candidate.is_variadic {
@@ -927,18 +1015,39 @@ impl TypeChecker {
             let mut mapping = HashMap::new();
 
             for (param_ty, arg_ty) in candidate.params.iter().zip(arg_types.iter()) {
-                if !self.infer_type_params(param_ty, &arg_ty, &candidate.type_params, &mut mapping)
-                {
-                    ok = false;
-                    break;
+                let mut matched = false;
+
+                // Phase 1: try with inferred type-parameter mapping
+                let mut inferred_mapping = mapping.clone();
+                if self.infer_type_params(
+                    param_ty,
+                    &arg_ty,
+                    &candidate.type_params,
+                    &mut inferred_mapping,
+                ) {
+                    let substituted = self.substitute_type(param_ty, &inferred_mapping);
+                    if self.is_assignable(&substituted, &arg_ty) {
+                        mapping = inferred_mapping;
+                        matched = true;
+                    } else if self.is_implicitly_castable(&arg_ty, &substituted) {
+                        score += 1;
+                        mapping = inferred_mapping;
+                        matched = true;
+                    }
                 }
-                let substituted = self.substitute_type(param_ty, &mapping);
-                if self.is_assignable(&substituted, &arg_ty) {
-                    continue;
+
+                // Phase 2: fallback for concrete types (e.g. f32 vs f64)
+                if !matched {
+                    let substituted = self.substitute_type(param_ty, &mapping);
+                    if self.is_assignable(&substituted, &arg_ty) {
+                        matched = true;
+                    } else if self.is_implicitly_castable(&arg_ty, &substituted) {
+                        score += 1;
+                        matched = true;
+                    }
                 }
-                if self.is_implicitly_castable(&arg_ty, &substituted) {
-                    score += 1;
-                } else {
+
+                if !matched {
                     ok = false;
                     break;
                 }
@@ -954,7 +1063,31 @@ impl TypeChecker {
         }
 
         if matches.is_empty() {
-            self.error(format!("no matching overload for '{}'", ident.name), span);
+            let arg_desc: String = if arg_types.len() == 1 {
+                format!("{}", arg_types[0])
+            } else {
+                let args: Vec<String> = arg_types.iter().map(|t| t.to_string()).collect();
+                format!("({})", args.join(", "))
+            };
+            let mut msg = format!(
+                "no matching overload for '{}', given {}",
+                ident.name, arg_desc
+            );
+            let candidates: Vec<String> = candidate_ids
+                .iter()
+                .filter_map(|id| {
+                    self.function_symbols.get(id).map(|c| {
+                        let params: Vec<String> =
+                            c.params.iter().map(|p| p.to_string()).collect();
+                        format!("{}({})", ident.name, params.join(", "))
+                    })
+                })
+                .collect();
+            if !candidates.is_empty() {
+                msg.push_str(", expected one of: ");
+                msg.push_str(&candidates.join(", "));
+            }
+            self.error(msg, span);
             return Type::Unknown;
         }
         matches.sort_by_key(|(score, _, _, _)| *score);
@@ -965,7 +1098,20 @@ impl TypeChecker {
             .collect();
 
         if best_matches.len() > 1 {
-            self.error(format!("ambiguous overload for '{}'", ident.name), span);
+            let mut msg = format!("ambiguous overload for '{}'", ident.name);
+            let candidates: Vec<String> = best_matches
+                .iter()
+                .filter_map(|(_, _, _, c)| {
+                    let params: Vec<String> =
+                        c.params.iter().map(|p| p.to_string()).collect();
+                    Some(format!("{}({})", ident.name, params.join(", ")))
+                })
+                .collect();
+            if candidates.len() > 1 {
+                msg.push_str(", candidates: ");
+                msg.push_str(&candidates.join(", "));
+            }
+            self.error(msg, span);
             return Type::Unknown;
         }
 
@@ -996,7 +1142,34 @@ impl TypeChecker {
         ) {
             Some(ty) => ty,
             None => {
-                self.error(format!("no matching overload for '{}'", method.name), span);
+                let arg_desc: String = if arg_types.len() == 1 {
+                    format!("{}", arg_types[0])
+                } else {
+                    let args: Vec<String> = arg_types.iter().map(|t| t.to_string()).collect();
+                    format!("({})", args.join(", "))
+                };
+                let key = (self.method_key(receiver_ty), method.name.clone());
+                let mut msg = format!(
+                    "no matching overload for '{}', given {}",
+                    method.name, arg_desc
+                );
+                if let Some(candidate_ids) = self.methods.get(&key) {
+                    let candidates: Vec<String> = candidate_ids
+                        .iter()
+                        .filter_map(|id| {
+                            self.method_symbols.get(id).map(|c| {
+                                let params: Vec<String> =
+                                    c.params.iter().map(|p| p.to_string()).collect();
+                                format!("{}({})", method.name, params.join(", "))
+                            })
+                        })
+                        .collect();
+                    if !candidates.is_empty() {
+                        msg.push_str(", expected one of: ");
+                        msg.push_str(&candidates.join(", "));
+                    }
+                }
+                self.error(msg, span);
                 Type::Unknown
             }
         }
@@ -1142,7 +1315,20 @@ impl TypeChecker {
             .filter(|(score, _, _, _)| *score == best_score)
             .collect();
         if best_matches.len() > 1 {
-            self.error(format!("ambiguous overload for '{}'", name), span);
+            let mut msg = format!("ambiguous overload for '{}'", name);
+            let candidates: Vec<String> = best_matches
+                .iter()
+                .filter_map(|(_, _, _, c)| {
+                    let params: Vec<String> =
+                        c.params.iter().map(|p| p.to_string()).collect();
+                    Some(format!("{}({})", name, params.join(", ")))
+                })
+                .collect();
+            if candidates.len() > 1 {
+                msg.push_str(", candidates: ");
+                msg.push_str(&candidates.join(", "));
+            }
+            self.error(msg, span);
             return None;
         }
 
@@ -1706,7 +1892,22 @@ impl TypeChecker {
                 );
             }
         }
-        if self.is_castable(from, to) {
+        if from == to {
+            return true;
+        }
+        if matches!(from, Type::Unknown) || matches!(to, Type::Unknown) {
+            return true;
+        }
+        // Numeric and bool primitives are implicitly castable to each other
+        if let (Type::Primitive(from_p), Type::Primitive(to_p)) = (from, to) {
+            if Self::is_numeric_or_bool_primitive(from_p)
+                && Self::is_numeric_or_bool_primitive(to_p)
+            {
+                return true;
+            }
+        }
+        // User-defined casts
+        if self.casts.contains_key(&(self.method_key(from), self.method_key(to))) {
             return true;
         }
 
@@ -1729,6 +1930,29 @@ impl TypeChecker {
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
             _ => false,
         }
+    }
+
+    fn is_numeric_or_bool_primitive(p: &ast::PrimitiveType) -> bool {
+        matches!(
+            p,
+            ast::PrimitiveType::I8
+                | ast::PrimitiveType::I16
+                | ast::PrimitiveType::I32
+                | ast::PrimitiveType::I64
+                | ast::PrimitiveType::I128
+                | ast::PrimitiveType::U8
+                | ast::PrimitiveType::U16
+                | ast::PrimitiveType::U32
+                | ast::PrimitiveType::U64
+                | ast::PrimitiveType::U128
+                | ast::PrimitiveType::F32
+                | ast::PrimitiveType::F64
+                | ast::PrimitiveType::F80
+                | ast::PrimitiveType::C32
+                | ast::PrimitiveType::C64
+                | ast::PrimitiveType::C80
+                | ast::PrimitiveType::Bool
+        )
     }
 
     fn is_numeric_type(&self, ty: &Type) -> bool {
@@ -2495,13 +2719,13 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
         assert!(
-            errors.iter().any(|error| error.message.contains("Pointer")),
+            errors.iter().any(|error| error.message.contains("i32*")),
             "expected pointer type in diagnostics: {errors:?}"
         );
         assert!(
             !errors
                 .iter()
-                .any(|error| error.message.contains("Reference")),
+                .any(|error| error.message.contains("&")),
             "did not expect reference type in diagnostics: {errors:?}"
         );
     }
@@ -2682,10 +2906,33 @@ mod tests {
     #[test]
     fn reports_no_matching_overload() {
         let program = parse(
-            "i32 add(i32 a, i32 b) { return a; } i32 main() { i32 x = add(1, true); return x; }",
+            "struct Foo {} i32 add(i32 a, i32 b) { return a; } i32 main() { Foo f; i32 x = add(1, f); return x; }",
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
-        assert!(!errors.is_empty(), "expected type errors");
+        assert!(!errors.is_empty(), "expected type errors, got: {errors:?}");
+        assert!(
+            errors[0].message.contains("no matching overload"),
+            "expected 'no matching overload' error, got: {}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn matches_concrete_overload_with_implicit_cast() {
+        let program = parse(
+            "i32 add(i32 a, i32 b) { return a; } i32 main() { f64 x = 1.0; f64 y = 2.0; i32 z = add(x, y); return z; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn matches_concrete_f32_overload_with_f64_arg() {
+        let program = parse(
+            "void take_f32(f32 x) {} i32 main() { f64 a = 3.0; take_f32(a); return 0; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
     }
 
     #[test]
