@@ -752,6 +752,36 @@ impl Lexer {
     }
 }
 
+impl Token {
+    pub fn keyword_name(&self) -> Option<&'static str> {
+        match self {
+            Token::I8 => Some("i8"),
+            Token::I16 => Some("i16"),
+            Token::I32 => Some("i32"),
+            Token::I64 => Some("i64"),
+            Token::I128 => Some("i128"),
+            Token::U8 => Some("u8"),
+            Token::U16 => Some("u16"),
+            Token::U32 => Some("u32"),
+            Token::U64 => Some("u64"),
+            Token::U128 => Some("u128"),
+            Token::F32 => Some("f32"),
+            Token::F64 => Some("f64"),
+            Token::F80 => Some("f80"),
+            Token::C32 => Some("c32"),
+            Token::C64 => Some("c64"),
+            Token::C80 => Some("c80"),
+            Token::Bool => Some("bool"),
+            Token::Str => Some("str"),
+            Token::Char => Some("char"),
+            Token::Void => Some("void"),
+            Token::Vec => Some("Vec"),
+            Token::Optional => Some("Optional"),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

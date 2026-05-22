@@ -2026,7 +2026,7 @@ impl PRT_Parser {
                         span,
                     });
                 }
-                Token::Identifier(_) | Token::Vec | Token::Optional => {
+                Token::Identifier(name) => {
                     if let Some((ty, next)) =
                         parse_named_type_expr_prefix(cursor.tokens, cursor.pos, cursor.end)
                     {
@@ -2038,10 +2038,48 @@ impl PRT_Parser {
                     }
                     ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                            name: match &token.kind {
-                                Token::Identifier(name) => name.clone(),
-                                _ => unreachable!(),
-                            },
+                            name: name.clone(),
+                            span: token.span.clone(),
+                        })),
+                        span: token.span.clone(),
+                    }
+                }
+                Token::Vec
+                | Token::Optional
+                | Token::I8
+                | Token::I16
+                | Token::I32
+                | Token::I64
+                | Token::I128
+                | Token::U8
+                | Token::U16
+                | Token::U32
+                | Token::U64
+                | Token::U128
+                | Token::F32
+                | Token::F64
+                | Token::F80
+                | Token::C32
+                | Token::C64
+                | Token::C80
+                | Token::Bool
+                | Token::Str
+                | Token::Char
+                | Token::Void => {
+                    if let Some((ty, next)) =
+                        parse_named_type_expr_prefix(cursor.tokens, cursor.pos, cursor.end)
+                    {
+                        cursor.pos = next;
+                        return Ok(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
+                            span: ty.span.clone(),
+                        });
+                    }
+                    let name = token.kind.keyword_name()
+                        .unwrap_or_else(|| panic!("keyword token without keyword_name: {:?}", token.kind));
+                    ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                            name: name.to_string(),
                             span: token.span.clone(),
                         })),
                         span: token.span.clone(),

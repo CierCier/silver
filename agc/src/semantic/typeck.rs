@@ -969,13 +969,24 @@ impl TypeChecker {
                 }
             }
             ast::ExpressionKind::Match { .. }
-            | ast::ExpressionKind::StructLiteral { .. }
-            | ast::ExpressionKind::MacroCall { .. } => {
+            | ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(
                     "type checking for this expression is not implemented",
                     expr.span.clone(),
                 );
                 Type::Unknown
+            }
+            ast::ExpressionKind::MacroCall { name, args } => {
+                match crate::builtin_macros::handle_typeck(&name.name, self, expr, args) {
+                    Some(ty) => ty,
+                    None => {
+                        self.error(
+                            format!("unknown builtin macro '@{}'", name.name),
+                            expr.span.clone(),
+                        );
+                        Type::Unknown
+                    }
+                }
             }
             ast::ExpressionKind::Asm(_) => Type::Unit,
         }
@@ -1876,6 +1887,92 @@ impl TypeChecker {
             return true;
         }
         self.casts.contains_key(&(self.method_key(from), self.method_key(to)))
+    }
+
+    pub(crate) fn size_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 1 {
+            self.error("@size expects exactly one argument", expr.span.clone());
+            return Type::Unknown;
+        }
+        let inner_expr = match args.first() {
+            Some(ast::MacroArg::Expression(e)) => e,
+            _ => {
+                self.error("@size requires an expression argument", expr.span.clone());
+                return Type::Unknown;
+            }
+        };
+        let sized_ty = self.resolve_type_name(inner_expr);
+        let sized_ty = match sized_ty {
+            Some(ty) => ty,
+            None => {
+                self.error(
+                    "cannot determine size: argument is not a known type name or variable"
+                        .to_string(),
+                    expr.span.clone(),
+                );
+                return Type::Unknown;
+            }
+        };
+        let layout = self.type_ctx.layout_of(&sized_ty);
+        if layout.size.is_some() {
+            Type::Primitive(ast::PrimitiveType::U64)
+        } else {
+            self.error(
+                format!("cannot determine size of type {}", sized_ty),
+                expr.span.clone(),
+            );
+            Type::Unknown
+        }
+    }
+
+    fn resolve_type_name(&mut self, expr: &ast::Expression) -> Option<Type> {
+        match &expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                let builtin = match ident.name.as_str() {
+                    "i8" => Some(Type::Primitive(ast::PrimitiveType::I8)),
+                    "i16" => Some(Type::Primitive(ast::PrimitiveType::I16)),
+                    "i32" => Some(Type::Primitive(ast::PrimitiveType::I32)),
+                    "i64" => Some(Type::Primitive(ast::PrimitiveType::I64)),
+                    "i128" => Some(Type::Primitive(ast::PrimitiveType::I128)),
+                    "u8" => Some(Type::Primitive(ast::PrimitiveType::U8)),
+                    "u16" => Some(Type::Primitive(ast::PrimitiveType::U16)),
+                    "u32" => Some(Type::Primitive(ast::PrimitiveType::U32)),
+                    "u64" => Some(Type::Primitive(ast::PrimitiveType::U64)),
+                    "u128" => Some(Type::Primitive(ast::PrimitiveType::U128)),
+                    "f32" => Some(Type::Primitive(ast::PrimitiveType::F32)),
+                    "f64" => Some(Type::Primitive(ast::PrimitiveType::F64)),
+                    "f80" => Some(Type::Primitive(ast::PrimitiveType::F80)),
+                    "c32" => Some(Type::Primitive(ast::PrimitiveType::C32)),
+                    "c64" => Some(Type::Primitive(ast::PrimitiveType::C64)),
+                    "c80" => Some(Type::Primitive(ast::PrimitiveType::C80)),
+                    "bool" => Some(Type::Primitive(ast::PrimitiveType::Bool)),
+                    "char" => Some(Type::Primitive(ast::PrimitiveType::Char)),
+                    "str" => Some(Type::Primitive(ast::PrimitiveType::Str)),
+                    "void" => Some(Type::Unit),
+                    _ => None,
+                };
+                if let Some(ty) = builtin {
+                    return Some(ty);
+                }
+                // Not a built-in name — try as a variable or user-defined type
+                let inner_ty = self.check_expr(expr, None);
+                if inner_ty != Type::Unknown {
+                    return Some(inner_ty);
+                }
+                None
+            }
+            ast::ExpressionKind::TypeName(ty) => {
+                Some(Type::from_ast(ty))
+            }
+            _ => {
+                let inner_ty = self.check_expr(expr, None);
+                if inner_ty != Type::Unknown {
+                    Some(inner_ty)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn is_implicitly_castable(&self, from: &Type, to: &Type) -> bool {
