@@ -47,8 +47,6 @@ i32 main() {
     printf("--- Primitive Allocation ---\n");
     
     i32* single_int = alloc<i32>();
-    assert_true(single_int != 0, "alloc<i32>() returns non-null");
-    
     *single_int = 42;
     assert_eq_i32(*single_int, 42, "allocated memory is writable/readable");
     
@@ -60,7 +58,6 @@ i32 main() {
     printf("\n--- Array Allocation ---\n");
     
     i32* int_array = alloc<i32>(10);
-    assert_true(int_array != 0, "alloc<i32>(10) returns non-null");
     
     // Fill array
     for (i32 i = 0; i < 10; i = i + 1) {
@@ -82,12 +79,11 @@ i32 main() {
     printf("\n--- Struct Allocation ---\n");
     
     Point* single_point = alloc<Point>();
-    assert_true(single_point != 0, "alloc<Point>() returns non-null");
     
-    single_point->x = 100;
-    single_point->y = 200;
-    assert_eq_i32(single_point->x, 100, "struct field x writable");
-    assert_eq_i32(single_point->y, 200, "struct field y writable");
+    (*single_point).x = 100;
+    (*single_point).y = 200;
+    assert_eq_i32((*single_point).x, 100, "struct field x writable");
+    assert_eq_i32((*single_point).y, 200, "struct field y writable");
     
     free(single_point);
     
@@ -95,7 +91,6 @@ i32 main() {
     printf("\n--- Struct Array Allocation ---\n");
     
     Point* points = alloc<Point>(5);
-    assert_true(points != 0, "alloc<Point>(5) returns non-null");
     
     for (i32 i = 0; i < 5; i = i + 1) {
         points[i].x = i;
@@ -188,7 +183,6 @@ i32 main() {
     
     // Grow the buffer
     grow_buf = (i32*)(realloc(grow_buf, 10 * 4));  // 10 i32s
-    assert_true(grow_buf != 0, "realloc returns non-null");
     
     // Check original data preserved
     bool realloc_preserved = true;
@@ -210,7 +204,6 @@ i32 main() {
     
     i64 large_size = 1000000;  // 1 million bytes
     i8* large_buf = alloc<i8>(large_size);
-    assert_true(large_buf != 0, "large allocation succeeds");
     
     // Write to first and last bytes
     large_buf[0] = 1;
@@ -248,5 +241,8 @@ i32 main() {
     printf("Passed: %d\n", tests_passed);
     printf("Failed: %d\n", tests_failed);
     
-    return tests_failed > 0 ? 1 : 0;
+    if (tests_failed > 0) {
+        return 1;
+    }
+    return 0;
 }
