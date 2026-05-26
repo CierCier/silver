@@ -1,0 +1,118 @@
+import std.mem.alloc;
+
+extern "C" {
+    i64 strlen(const char* s);
+    i32 memcmp(const void* s1, const void* s2, i64 n);
+}
+
+struct String {
+    u8* data;
+    i64 len;
+    i64 capacity;
+}
+
+impl String {
+    String new() {
+        return String.with_capacity(16);
+    }
+
+    String with_capacity(i64 capacity) {
+        String s;
+        s.len = 0;
+        s.capacity = capacity;
+        if (capacity > 0) {
+            s.data = alloc<u8>(capacity);
+            s.data[0] = (u8)0;
+        } else {
+            s.data = (u8*)0;
+        }
+        return s;
+    }
+
+    void drop(String* self) {
+        if (self.data != (u8*)0) {
+            free(self.data);
+            self.data = (u8*)0;
+        }
+        self.len = 0;
+        self.capacity = 0;
+    }
+
+    i64 len(String self) {
+        return self.len;
+    }
+
+    i64 capacity(String self) {
+        return self.capacity;
+    }
+
+    void clear(String* self) {
+        self.len = 0;
+        if (self.data != (u8*)0) {
+            self.data[0] = (u8)0;
+        }
+    }
+
+    void push(String* self, u8 ch) {
+        // Need space for the character plus the null terminator
+        if (self.len + 2 > self.capacity) {
+            i64 new_cap = self.capacity * 2;
+            if (new_cap < 16) {
+                new_cap = 16;
+            }
+            self.data = (u8*)realloc(self.data, new_cap);
+            self.capacity = new_cap;
+        }
+        self.data[self.len] = ch;
+        self.len = self.len + 1;
+        self.data[self.len] = (u8)0;
+    }
+
+    void push_str(String* self, str text) {
+        if (text == (str)0) {
+            return;
+        }
+        i64 text_len = strlen(text);
+        if (text_len == 0) {
+            return;
+        }
+        if (self.len + text_len + 1 > self.capacity) {
+            i64 new_cap = self.capacity * 2;
+            if (new_cap < self.len + text_len + 16) {
+                new_cap = self.len + text_len + 16;
+            }
+            self.data = (u8*)realloc(self.data, new_cap);
+            self.capacity = new_cap;
+        }
+        memcpy((void*)&self.data[self.len], (const void*)text, text_len);
+        self.len = self.len + text_len;
+        self.data[self.len] = (u8)0;
+    }
+
+    String clone(String self) {
+        String s = String.with_capacity(self.capacity);
+        s.len = self.len;
+        if (self.len > 0) {
+            memcpy((void*)s.data, (const void*)self.data, self.len);
+            s.data[s.len] = (u8)0;
+        }
+        return s;
+    }
+
+    bool equals(String self, String other) {
+        if (self.len != other.len) {
+            return false;
+        }
+        if (self.len == 0) {
+            return true;
+        }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
+    }
+
+    const char* to_str(String self) {
+        if (self.data == (u8*)0) {
+            return "";
+        }
+        return (const char*)self.data;
+    }
+}

@@ -150,6 +150,20 @@ impl TypeChecker {
             if let ast::ItemKind::GlobalVariable(var) = &item.kind {
                 self.check_global_variable(var);
             }
+            if let ast::ItemKind::Impl(impl_item) = &item.kind {
+                let self_ty = Type::from_ast(&impl_item.self_type);
+                for impl_member in &impl_item.items {
+                    match impl_member {
+                        ast::ImplItemKind::Function(func) => {
+                            self.check_impl_method(&self_ty, func);
+                        }
+                        ast::ImplItemKind::Cast(cast) => {
+                            self.check_impl_cast(&self_ty, cast);
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         table.touch_phase(
             CompilerPhase::TypeCheck,
@@ -397,6 +411,40 @@ impl TypeChecker {
             self.bind(&param.name.name, param_type, param.span.clone());
         }
         self.check_block(&func.body);
+        self.pop_scope();
+        self.current_return = None;
+    }
+
+    fn check_impl_method(&mut self, self_ty: &Type, func: &ast::ImplFunction) {
+        let return_type = func
+            .return_type
+            .as_ref()
+            .map(|t| self.substitute_self_type(&Type::from_ast(t), self_ty))
+            .unwrap_or(Type::Unit);
+        self.current_return = Some(return_type);
+
+        self.push_scope();
+        for param in &func.parameters {
+            let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
+            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
+            self.bind(&param.name.name, param_type, param.span.clone());
+        }
+        self.check_block(&func.body);
+        self.pop_scope();
+        self.current_return = None;
+    }
+
+    fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast) {
+        let return_type = self.substitute_self_type(&Type::from_ast(&cast.target_type), self_ty);
+        self.current_return = Some(return_type);
+
+        self.push_scope();
+        for param in &cast.parameters {
+            let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
+            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
+            self.bind(&param.name.name, param_type, param.span.clone());
+        }
+        self.check_block(&cast.body);
         self.pop_scope();
         self.current_return = None;
     }
@@ -1341,7 +1389,8 @@ impl TypeChecker {
             }
 
             if ok {
-                if !self.bounds_satisfied(&candidate.bounds, &mapping, span.clone()) {
+                let sat = self.bounds_satisfied(&candidate.bounds, &mapping, span.clone());
+                if !sat {
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -1906,7 +1955,9 @@ impl TypeChecker {
         if Self::is_void_like(from) || Self::is_void_like(to) {
             return Self::void_compatible(from, to);
         }
-        if matches!(from, Type::Pointer { .. }) && matches!(to, Type::Pointer { .. }) {
+        let from_ok = self.is_primitive_type(from) || matches!(from, Type::Pointer { .. } | Type::Reference { .. });
+        let to_ok = self.is_primitive_type(to) || matches!(to, Type::Pointer { .. } | Type::Reference { .. });
+        if from_ok && to_ok {
             return true;
         }
         if let (Some(from_backing), Some(to_backing)) =

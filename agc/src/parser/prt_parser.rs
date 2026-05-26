@@ -1515,7 +1515,9 @@ impl PRT_Parser {
             }
 
             let mut cursor = start;
+            let mut is_const = false;
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Const)) {
+                is_const = true;
                 cursor += 1;
                 if cursor >= end {
                     return None;
@@ -1569,13 +1571,14 @@ impl PRT_Parser {
             };
             cursor += 1;
 
+            let mut current_is_const = is_const;
             while cursor < end {
                 if !matches!(tokens[cursor].kind, Token::Star) {
                     return None;
                 }
                 ty = ast::Type {
                     kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
-                        is_mutable: true,
+                        is_mutable: !current_is_const,
                         inner: Box::new(ty),
                     })),
                     span: Span {
@@ -1583,6 +1586,7 @@ impl PRT_Parser {
                         end: tokens[cursor].span.end,
                     },
                 };
+                current_is_const = false;
                 cursor += 1;
             }
 

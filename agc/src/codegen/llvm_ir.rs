@@ -1947,38 +1947,63 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(None)
     }
 
+    fn resolve_receiver_type(&mut self, expr: &ast::Expression) -> Option<ast::Type> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
+            ast::ExpressionKind::Identifier(identifier) => self.lookup_value_type(&identifier.name),
+            ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
+            ast::ExpressionKind::FieldAccess { .. }
+            | ast::ExpressionKind::Index { .. }
+            | ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                ..
+            } => self.resolve_lvalue_ptr(expr).ok().map(|(_, ty)| ty),
+            ast::ExpressionKind::Reference {
+                is_mutable,
+                expression,
+            } => {
+                let inner_ty = self.resolve_receiver_type(expression)?;
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                        inner: Box::new(inner_ty),
+                        is_mutable: *is_mutable,
+                    })),
+                    span: expr.span.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn receiver_owner_name(&mut self, expr: &ast::Expression) -> Option<String> {
         match expr.kind.as_ref() {
-            ast::ExpressionKind::Identifier(identifier) => self
-                .lookup_value_type(&identifier.name)
-                .as_ref()
-                .and_then(Self::owner_name_from_type)
-                .or_else(|| Some(Self::sanitize_monomorph(&identifier.name))),
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_from_type(ty),
             ast::ExpressionKind::StructLiteral { path, .. } => Some(Self::path_name(path)),
-            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => self
-                .resolve_lvalue_ptr(expr)
-                .ok()
-                .and_then(|(_, ty)| Self::owner_name_from_type(&ty)),
-            _ => None,
+            _ => {
+                if let Some(ty) = self.resolve_receiver_type(expr) {
+                    Self::owner_name_from_type(&ty)
+                } else if let ast::ExpressionKind::Identifier(identifier) = expr.kind.as_ref() {
+                    Some(Self::sanitize_monomorph(&identifier.name))
+                } else {
+                    None
+                }
+            }
         }
     }
 
     fn receiver_owner_candidates(&mut self, expr: &ast::Expression) -> Vec<String> {
         match expr.kind.as_ref() {
-            ast::ExpressionKind::Identifier(identifier) => self
-                .lookup_value_type(&identifier.name)
-                .as_ref()
-                .map(Self::owner_name_candidates_from_type)
-                .unwrap_or_else(|| vec![Self::sanitize_monomorph(&identifier.name)]),
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_candidates_from_type(ty),
             ast::ExpressionKind::StructLiteral { path, .. } => vec![Self::path_name(path)],
-            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => self
-                .resolve_lvalue_ptr(expr)
-                .ok()
-                .map(|(_, ty)| Self::owner_name_candidates_from_type(&ty))
-                .unwrap_or_default(),
-            _ => Vec::new(),
+            _ => {
+                if let Some(ty) = self.resolve_receiver_type(expr) {
+                    Self::owner_name_candidates_from_type(&ty)
+                } else if let ast::ExpressionKind::Identifier(identifier) = expr.kind.as_ref() {
+                    vec![Self::sanitize_monomorph(&identifier.name)]
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -4228,16 +4253,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = if let Some(function) = selected_fn {
             function
         } else {
-            let receiver_ty = match receiver.kind.as_ref() {
-                ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
-                ast::ExpressionKind::Identifier(identifier) => {
-                    self.lookup_value_type(&identifier.name)
-                }
-                ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
-                    self.resolve_lvalue_ptr(receiver).ok().map(|(_, ty)| ty)
-                }
-                _ => None,
-            };
+            let receiver_ty = self.resolve_receiver_type(receiver);
 
             if let Some(receiver_ty) = receiver_ty {
                 if let Some(instantiated_name) =
@@ -4284,15 +4300,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
         if inject_receiver {
-            let receiver_ty = match receiver.kind.as_ref() {
-                ast::ExpressionKind::Identifier(identifier) => {
-                    self.lookup_value_type(&identifier.name)
-                }
-                ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
-                    self.resolve_lvalue_ptr(receiver).ok().map(|(_, ty)| ty)
-                }
-                _ => None,
-            };
+            let receiver_ty = self.resolve_receiver_type(receiver);
             let receiver_is_pointer = receiver_ty
                 .as_ref()
                 .map(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)))
