@@ -100,13 +100,13 @@ impl File {
 
     File reopen(File self, str path, str mode) {
         if (!self.valid()) {
-            return File.from_raw(0);
+            return File.from_raw((FILE*)0);
         }
         return File.from_raw(freopen(path, mode, self.raw));
     }
 
     bool valid(File self) {
-        return self.raw != 0;
+        return self.raw != (FILE*)0;
     }
 
     bool invalid(File self) {
@@ -114,13 +114,13 @@ impl File {
     }
 
     i32 close(File* self) {
-        if (self.invalid()) {
+        if ((*self).invalid()) {
             self.is_open = false;
             return 0;
         }
         i32 result = fclose(self.raw);
         if (result == 0) {
-            self.raw = 0;
+            self.raw = (FILE*)0;
             self.is_open = false;
         }
         return result;
@@ -272,12 +272,12 @@ impl File {
     }
 
     i32 set_no_buffer(File self) {
-        return self.set_buffer(0, IO_BUFFERING.NONE, 0);
+        return self.set_buffer((char*)0, IO_BUFFERING.NONE, (i64)0);
     }
 
     void set_unbuffered(File self) {
         if (self.valid()) {
-            setbuf(self.raw, 0);
+            setbuf(self.raw, (char*)0);
         }
     }
 }
