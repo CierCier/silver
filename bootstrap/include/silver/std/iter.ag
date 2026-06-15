@@ -1,0 +1,8 @@
+trait IntoIterator {
+    type Item;
+    type IntoIter;
+}
+
+trait Iterator {
+    type Item;
+}

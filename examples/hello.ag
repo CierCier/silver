@@ -1,6 +1,6 @@
 import std.io;
 
-i32 main(){
-    println("Hello world");
+i32 main() {
+    println("Hello, World!");
     return 0;
 }

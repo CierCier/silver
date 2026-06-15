@@ -35,6 +35,7 @@ pub enum Token {
     Pub,
     Private,
     Asm,
+    In,
     True,
     False,
 
@@ -608,6 +609,7 @@ impl Lexer {
             "pub" => Token::Pub,
             "private" => Token::Private,
             "asm" => Token::Asm,
+            "in" => Token::In,
             "macro" => Token::Macro,
             "true" => Token::True,
             "false" => Token::False,
@@ -1117,6 +1119,7 @@ mod tests {
             ("pub", Token::Pub),
             ("private", Token::Private),
             ("asm", Token::Asm),
+            ("in", Token::In),
             ("true", Token::True),
             ("false", Token::False),
         ];

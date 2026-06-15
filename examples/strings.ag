@@ -1,0 +1,39 @@
+import std.io;
+import std.string;
+
+i32 main() {
+    String greeting = String.new();
+    greeting.push_str("Hello");
+    greeting.push((u8)32);       // space
+    greeting.push_str("Silver");
+    greeting.push((u8)33);       // '!'
+    printf("greeting: %s\n", greeting.to_str());
+    printf("length: %ld\n", greeting.len());
+
+    String clone = greeting.clone();
+    if (greeting.equals(clone)) {
+        printf("clone equals greeting: true\n");
+    } else {
+        printf("clone equals greeting: false\n");
+    }
+
+    greeting.push_str("!!");
+    printf("after append: %s\n", greeting.to_str());
+    printf("clone unchanged: %s\n", clone.to_str());
+
+    clone.clear();
+    printf("after clear, len=%ld\n", clone.len());
+
+    String built = String.new();
+    for i in 0..5 {
+        built.push((u8)(65 + i));  // A B C D E
+    }
+    built.push((u8)10);  // newline
+    printf("built: %s", built.to_str());
+
+    greeting.drop();
+    clone.drop();
+    built.drop();
+
+    return 0;
+}

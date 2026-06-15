@@ -710,6 +710,12 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children.push(expression_node(inner));
             n
         }
+        ast::ExpressionKind::ForIn { binding, iterable, body, .. } => {
+            let mut n = Node::new(format!("Expr::ForIn {{ binding: {} }}", binding.name));
+            n.children.push(expression_node(iterable));
+            n.children.push(block_node(body));
+            n
+        }
         ast::ExpressionKind::MacroCall { name, args } => {
             let mut n = Node::new(format!("Expr::MacroCall {}", name.name));
             n.children = args.iter().map(macro_arg_node).collect();

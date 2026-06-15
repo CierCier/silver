@@ -1,0 +1,65 @@
+import std.io;
+import std.optional;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+struct Point<T> {
+    T x;
+    T y;
+}
+
+struct Circle<T> {
+    Point<T> center;
+    T radius;
+}
+
+struct ColoredPoint<T> {
+    Point<T> point;
+    Color color;
+}
+
+impl Point<T> {
+    Point<T> new(T x, T y) {
+        Point<T> p = { .x = x, .y = y };
+        return p;
+    }
+}
+
+impl Point<i32> {
+    i32 magnitude_sq(Point<i32> self) {
+        return self.x * self.x + self.y * self.y;
+    }
+}
+
+i32 main() {
+    Point<i32> p1 = Point<i32>.new(3, 4);
+    printf("p1: (%d, %d), mag^2 = %d\n", p1.x, p1.y, p1.magnitude_sq());
+
+    Point<f64> p2 = { .x = 1.5, .y = 2.5 };
+    printf("p2: (%.1f, %.1f)\n", p2.x, p2.y);
+
+    Circle<i32> c = { .center = Point<i32>.new(0, 0), .radius = 10 };
+    printf("Circle center=(%d,%d) radius=%d\n", c.center.x, c.center.y, c.radius);
+
+    Color col = Color.Red;
+    if (col == Color.Red) {
+        printf("Color is Red\n");
+    }
+
+    ColoredPoint<f64> cp = { .point = p2, .color = Color.Green };
+    printf("Colored point at (%.1f,%.1f)\n", cp.point.x, cp.point.y);
+
+    Optional<i32> maybe = Optional<i32>.some(42);
+    if (maybe.is_some()) {
+        printf("Optional has value: %d\n", maybe.unwrap());
+    }
+
+    Optional<i32> empty = Optional<i32>.none();
+    printf("Optional default: %d\n", empty.unwrap_or(-1));
+
+    return 0;
+}

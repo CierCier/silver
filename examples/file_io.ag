@@ -1,0 +1,37 @@
+import std.io;
+
+i32 main() {
+    str path = "/tmp/silver_example.txt";
+
+    File w = File.open_write(path);
+    if (w.invalid()) {
+        printf("ERROR: could not open for writing\n");
+        return 1;
+    }
+    w.write_line("Hello from Silver!");
+    w.write_line("Line two");
+    w.write_line("Line three");
+    w.close();
+
+    File r = File.open_read(path);
+    if (r.invalid()) {
+        printf("ERROR: could not open for reading\n");
+        return 1;
+    }
+
+    printf("File size: %ld bytes\n", r.size());
+
+    i32 count = 0;
+    i32 ch = r.read_char();
+    while (ch != -1) {
+        count = count + 1;
+        ch = r.read_char();
+    }
+    printf("Total characters: %d\n", count);
+    r.close();
+
+    file_delete(path);
+    printf("Cleanup complete\n");
+
+    return 0;
+}

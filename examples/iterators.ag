@@ -1,0 +1,80 @@
+import std.io;
+import std.optional;
+
+i32 sum_to(i32 n) {
+    i32 total = 0;
+    for i in 0..n {
+        total = total + i;
+    }
+    return total;
+}
+
+i32 factorial(i32 n) {
+    i32 result = 1;
+    for i in 1..n + 1 {
+        result = result * i;
+    }
+    return result;
+}
+
+void multiplication_table(i32 size) {
+    for row in 1..size + 1 {
+        for col in 1..size + 1 {
+            printf("%4d", row * col);
+        }
+        printf("\n");
+    }
+}
+
+struct Counter {
+    i32 current;
+    i32 end;
+}
+
+impl Counter {
+    Counter new(i32 end) {
+        Counter c;
+        c.current = 0;
+        c.end = end;
+        return c;
+    }
+
+    Counter into_iter(Counter self) {
+        return self;
+    }
+
+    Optional<i32> next(Counter self) {
+        if (self.current < self.end) {
+            Optional<i32> result = Optional<i32>.some(self.current);
+            return result;
+        }
+        return Optional<i32>.none();
+    }
+}
+
+i32 main() {
+    printf("Sum to 10: %d\n", sum_to(10));
+
+    for i in 0..5 {
+        printf("%d! = %d\n", i, factorial(i));
+    }
+
+    printf("\nMultiplication table (5x5):\n");
+    multiplication_table(5);
+
+    i32 total = 0;
+    for i in 0..100 {
+        if (i % 2 == 0) {
+            total = total + i;
+        }
+    }
+    printf("Sum of even numbers 0..99: %d\n", total);
+
+    printf("\nCustom Counter via into_iter/next protocol:\n");
+    Counter c = Counter.new(5);
+    for i in c {
+        printf("counter: %d\n", i);
+    }
+
+    return 0;
+}

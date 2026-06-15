@@ -1,31 +1,40 @@
-trait Add {
-    fn add(Point self, Point other) -> Point;
+import std.io;
+
+struct Circle {
+    f64 radius;
 }
 
-trait Display {
-    type Output = str;
-    fn display(Vec3 self) -> str { return "vec3"; }
+struct Rectangle {
+    f64 width;
+    f64 height;
 }
 
-struct Point {
-    f64 x;
-    f64 y;
+impl Circle {
+    f64 area(Circle self) {
+        return 3.14159265 * self.radius * self.radius;
+    }
+
+    str kind(Circle self) {
+        return "circle";
+    }
 }
 
-struct Vec3 {
-    f64 x;
-    f64 y;
-    f64 z;
+impl Rectangle {
+    f64 area(Rectangle self) {
+        return self.width * self.height;
+    }
+
+    str kind(Rectangle self) {
+        return "rectangle";
+    }
 }
 
-impl Add for Point {
-    Point add(Point self, Point other) { return self; }
-}
+i32 main() {
+    Circle c = { .radius = 5.0 };
+    Rectangle r = { .width = 3.0, .height = 4.0 };
 
-trait Pair<A, B> {
-    fn pair(A self, B other) -> A;
-}
+    printf("A %s has area %.2f\n", c.kind(), c.area());
+    printf("A %s has area %.2f\n", r.kind(), r.area());
 
-impl Pair<Point, Vec3> for Point {
-    Point pair(Point self, Vec3 other) { return self; }
+    return 0;
 }

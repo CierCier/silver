@@ -162,6 +162,10 @@ fn rewrite_expression(expression: &mut ast::Expression) {
             }
         }
         ast::ExpressionKind::Cast { expression, .. } => rewrite_expression(expression),
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            rewrite_expression(iterable);
+            rewrite_block(body);
+        }
         ast::ExpressionKind::Comptime(inner) => {
             rewrite_expression(inner);
             if let Some(folded) = fold_comptime_cast(inner) {

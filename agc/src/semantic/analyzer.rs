@@ -623,6 +623,13 @@ impl Analyzer {
             | ast::ExpressionKind::Reference {
                 expression: expr, ..
             } => self.check_expression(expr),
+            ast::ExpressionKind::ForIn { binding, iterable, body, .. } => {
+                self.check_expression(iterable);
+                self.push_var_scope();
+                self.bind_var(binding, binding.span.clone());
+                self.check_block(body);
+                self.pop_var_scope();
+            }
             ast::ExpressionKind::Asm(_) => {}
             ast::ExpressionKind::MacroCall { .. } => {}
         }

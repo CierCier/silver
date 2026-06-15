@@ -1,5 +1,8 @@
-fn main() {
+import std.io;
+
+i32 main() {
     for i in 0..3 {
-        println(i);
+        printf("%d\n", i);
     }
+    return 0;
 }

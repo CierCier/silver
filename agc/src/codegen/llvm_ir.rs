@@ -1804,6 +1804,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                Self::substitute_expression_types(iterable, mapping);
+                Self::substitute_block_types(body, mapping);
+            }
             ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Identifier(_) => {}
         }
     }
@@ -2969,6 +2973,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     expr.span.clone(),
                 ))
             }
+            ast::ExpressionKind::ForIn { .. } => Err(CodegenError::with_span(
+                "for-in loop cannot be used as a value expression",
+                expr.span.clone(),
+            )),
             _ => Err(CodegenError::with_span(
                 format!(
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
@@ -5400,6 +5408,264 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    fn emit_for_in_statement(
+        &mut self,
+        binding: &ast::Identifier,
+        iterable: &ast::Expression,
+        body: &ast::Block,
+        item_type: Option<&ast::Type>,
+        span: &Span,
+    ) -> CodegenResult<()> {
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for for-in statement"))?;
+
+        match iterable.kind.as_ref() {
+            ast::ExpressionKind::Binary {
+                left,
+                operator: ast::BinaryOperator::Range,
+                right,
+            } => {
+                self.push_scope();
+                let start_val = self.emit_expression_value(left)?;
+                let end_val = self.emit_expression_value(right)?;
+
+                let llvm_ty = start_val.get_type();
+                let i_ptr = self
+                    .create_entry_alloca(function, &binding.name, llvm_ty)?;
+                self.builder
+                    .build_store(i_ptr, start_val)
+                    .map_err(|e| CodegenError::new(format!("failed to init loop var: {e}")))?;
+
+                let ast_ty = self.infer_ast_type_from_value(&start_val, span);
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(binding.name.clone(), VarInfo { ptr: i_ptr, ty: ast_ty });
+                }
+
+                let cond_bb = self.context.append_basic_block(function, "forin.cond");
+                let body_bb = self.context.append_basic_block(function, "forin.body");
+                let end_bb = self.context.append_basic_block(function, "forin.end");
+
+                self.builder
+                    .build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::new(format!("failed to enter for-in cond: {e}")))?;
+
+                self.builder.position_at_end(cond_bb);
+                let i_val_raw = self
+                    .builder
+                    .build_load(llvm_ty, i_ptr, &binding.name)
+                    .map_err(|e| CodegenError::new(format!("failed to load loop var: {e}")))?;
+                let (i_val, end_val) = match (i_val_raw, end_val) {
+                    (BasicValueEnum::IntValue(iv), BasicValueEnum::IntValue(ev)) => {
+                        let iv_ty = iv.get_type();
+                        let ev_ty = ev.get_type();
+                        let iv_width = iv_ty.get_bit_width();
+                        let ev_width = ev_ty.get_bit_width();
+                        let ev = if iv_width > ev_width {
+                            self.builder.build_int_s_extend(ev, iv_ty, "forin.end.cast")
+                                .map_err(|e| CodegenError::new(format!("failed to extend end bound: {e}")))?
+                        } else if iv_width < ev_width {
+                            self.builder.build_int_truncate(ev, iv_ty, "forin.end.cast")
+                                .map_err(|e| CodegenError::new(format!("failed to truncate end bound: {e}")))?
+                        } else {
+                            ev
+                        };
+                        (iv, ev)
+                    }
+                    _ => return Err(CodegenError::new("for-in range loop requires integer type")),
+                };
+                let is_slt = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SLT, i_val, end_val, "forin.cmp")
+                    .map_err(|e| CodegenError::new(format!("failed for-in cmp: {e}")))?;
+                self.builder
+                    .build_conditional_branch(is_slt, body_bb, end_bb)
+                    .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
+
+                self.loop_stack.push((end_bb, cond_bb));
+                self.builder.position_at_end(body_bb);
+                self.generate_block(body)?;
+
+                let i_val2_raw = self
+                    .builder
+                    .build_load(llvm_ty, i_ptr, &binding.name)
+                    .map_err(|e| CodegenError::new(format!("failed to load loop var: {e}")))?;
+                let i_val2 = match i_val2_raw {
+                    BasicValueEnum::IntValue(iv) => iv,
+                    _ => return Err(CodegenError::new("for-in range loop requires integer type")),
+                };
+                let one = i_val2.get_type().const_int(1, false);
+                let next = self
+                    .builder
+                    .build_int_add(i_val2, one, "forin.incr")
+                    .map_err(|e| CodegenError::new(format!("failed for-in incr: {e}")))?;
+                self.builder
+                    .build_store(i_ptr, next)
+                    .map_err(|e| CodegenError::new(format!("failed to store incr: {e}")))?;
+
+                let body_terminated = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|bb| bb.get_terminator())
+                    .is_some();
+                if !body_terminated {
+                    self.builder
+                        .build_unconditional_branch(cond_bb)
+                        .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
+                }
+                self.loop_stack.pop();
+
+                self.builder.position_at_end(end_bb);
+                self.pop_scope();
+                Ok(())
+            }
+            _ => {
+                self.push_scope();
+
+                let dummy_span = Span { start: 0, end: 0 };
+                let iterable_name = "__forin_iterable";
+                let iter_name = "__forin_iter";
+                let next_name = "__forin_next";
+
+                let iterable_val = self.emit_expression_value(iterable)?;
+                let iterable_llvm_ty = iterable_val.get_type();
+                let iterable_ast_ty = self
+                    .resolve_receiver_type(iterable)
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&iterable_val, span));
+                let iterable_ptr = self.create_entry_alloca(function, iterable_name, iterable_llvm_ty)?;
+                self.builder.build_store(iterable_ptr, iterable_val)
+                    .map_err(|e| CodegenError::new(format!("failed to store iterable: {e}")))?;
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(iterable_name.to_string(), VarInfo { ptr: iterable_ptr, ty: iterable_ast_ty });
+                }
+
+                let iterable_expr = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(
+                        ast::Identifier { name: iterable_name.to_string(), span: dummy_span.clone() }
+                    )),
+                    span: dummy_span.clone(),
+                };
+                let into_iter_ident = ast::Identifier { name: "into_iter".to_string(), span: dummy_span.clone() };
+                let iterator_val = self.emit_method_call_expression(
+                    &iterable_expr, &into_iter_ident, &[], false, span
+                )?.ok_or_else(|| CodegenError::new("into_iter() must not return void"))?;
+
+                let iter_llvm_ty = iterator_val.get_type();
+
+                // Look up the actual AST return type of into_iter() for method dispatch
+                let iter_ast_ty = {
+                    let owners = self.receiver_owner_candidates(&iterable_expr);
+                    let mut found = None;
+                    for owner_name in &owners {
+                        let mangled = Self::mangle_method_name(&owner_name, &into_iter_ident.name);
+                        if let Some(sig) = self.signature_for_name(&mangled) {
+                            found = sig.return_type;
+                            break;
+                        }
+                    }
+                    found.unwrap_or_else(|| self.infer_ast_type_from_value(&iterator_val, span))
+                };
+                let iter_ptr = self.create_entry_alloca(function, iter_name, iter_llvm_ty)?;
+                self.builder.build_store(iter_ptr, iterator_val)
+                    .map_err(|e| CodegenError::new(format!("failed to store iterator: {e}")))?;
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(iter_name.to_string(), VarInfo { ptr: iter_ptr, ty: iter_ast_ty });
+                }
+
+                let next_ident = ast::Identifier { name: "next".to_string(), span: dummy_span.clone() };
+                let iter_expr = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(
+                        ast::Identifier { name: iter_name.to_string(), span: dummy_span.clone() }
+                    )),
+                    span: dummy_span.clone(),
+                };
+                let next_val = self.emit_method_call_expression(
+                    &iter_expr, &next_ident, &[], false, span
+                )?.ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
+
+                let next_llvm_ty = next_val.get_type();
+                let next_ptr = self.create_entry_alloca(function, next_name, next_llvm_ty)?;
+                self.builder.build_store(next_ptr, next_val)
+                    .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
+
+                let cond_bb = self.context.append_basic_block(function, "forin.cond");
+                let body_bb = self.context.append_basic_block(function, "forin.body");
+                let end_bb = self.context.append_basic_block(function, "forin.end");
+
+                self.builder.build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::new(format!("failed to enter for-in cond: {e}")))?;
+
+                self.builder.position_at_end(cond_bb);
+
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let opt_ptr = self.builder.build_load(ptr_ty, next_ptr, "forin.opt")
+                    .map_err(|e| CodegenError::new(format!("failed to load optional: {e}")))?;
+                let opt_int = match opt_ptr {
+                    BasicValueEnum::PointerValue(pv) => self.builder.build_is_null(pv, "forin.isnull")
+                        .map_err(|e| CodegenError::new(format!("failed to check null: {e}")))?,
+                    _ => return Err(CodegenError::new("next() must return an Optional<T> (pointer)")),
+                };
+
+                self.builder.build_conditional_branch(opt_int, body_bb, end_bb)
+                    .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
+
+                self.loop_stack.push((end_bb, cond_bb));
+                self.builder.position_at_end(body_bb);
+
+                let next_ptr_val = match opt_ptr {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    _ => unreachable!(),
+                };
+                let item_llvm_ty = {
+                    let owners = self.receiver_owner_candidates(&iter_expr);
+                    let mut found = None;
+                    for owner_name in &owners {
+                        let mangled = Self::mangle_method_name(owner_name, &next_ident.name);
+                        if let Some(sig) = self.signature_for_name(&mangled) {
+                            if let Some(return_type) = &sig.return_type {
+                                if let ast::TypeKind::Optional(inner) = return_type.kind.as_ref() {
+                                    found = Some(self.lower_basic_type(inner.as_ref())?);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    found.unwrap_or_else(|| self.context.i64_type().as_basic_type_enum())
+                };
+                let thing_loaded = self.builder.build_load(item_llvm_ty, next_ptr_val, &binding.name)
+                    .map_err(|e| CodegenError::new(format!("failed to load thing: {e}")))?;
+
+                let ast_ty = self.infer_ast_type_from_value(&thing_loaded, span);
+                let var_ptr = self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
+                self.builder.build_store(var_ptr, thing_loaded)
+                    .map_err(|e| CodegenError::new(format!("failed to store loop var: {e}")))?;
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(binding.name.clone(), VarInfo { ptr: var_ptr, ty: ast_ty });
+                }
+
+                self.generate_block(body)?;
+
+                let next_val2 = self.emit_method_call_expression(
+                    &iter_expr, &next_ident, &[], false, span
+                )?.ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
+                self.builder.build_store(next_ptr, next_val2)
+                    .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
+
+                let body_terminated = self.builder.get_insert_block()
+                    .and_then(|bb| bb.get_terminator()).is_some();
+                if !body_terminated {
+                    self.builder.build_unconditional_branch(cond_bb)
+                        .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
+                }
+                self.loop_stack.pop();
+
+                self.builder.position_at_end(end_bb);
+                self.pop_scope();
+                Ok(())
+            }
+        }
+    }
+
     fn emit_let_statement(
         &mut self,
         let_stmt: &ast::LetStatement,
@@ -6247,6 +6513,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     self.emit_match_statement(expression, arms)
                 }
                 ast::ExpressionKind::Block(block) => self.generate_block(block),
+                ast::ExpressionKind::ForIn {
+                    binding,
+                    iterable,
+                    body,
+                    item_type,
+                } => self.emit_for_in_statement(binding, iterable, body, item_type.as_deref(), &statement.span),
                 _ => self.emit_expression_statement(expr),
             },
             ast::StatementKind::Let(let_stmt) => self.emit_let_statement(let_stmt, &statement.span),
@@ -6603,6 +6875,17 @@ mod tests {
         assert!(
             ir.contains("%p1 = load ptr, ptr %p"),
             "method receiver should load pointer value before call:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_protocol_for_in() {
+        let ir = lower_to_llvm(
+            "struct Optional<T> { bool present; T thing; } struct Empty { i32 x; } impl Empty { Empty into_iter(Empty self) { return self; } Optional<i32> next(Empty self) { Optional<i32> r; return r; } } i32 main() { Empty e = { .x = 0 }; for i in e { return 0; } return 0; }",
+        );
+        assert!(
+            ir.contains("forin.cond"),
+            "expected protocol for-in loop in IR:\n{ir}"
         );
     }
 }

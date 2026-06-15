@@ -798,6 +798,28 @@ impl TypeChecker {
                     }
                     left_ty
                 }
+                ast::BinaryOperator::Range => {
+                    let left_ty = self.check_expr(left, None);
+                    let right_ty = self.check_expr(right, None);
+                    if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
+                        self.error(
+                            format!(
+                                "range bounds must be integers, got {} and {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
+                    } else if left_ty != right_ty {
+                        self.error(
+                            format!(
+                                "range bounds must be the same type, got {} and {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
+                    }
+                    left_ty
+                }
             },
             ast::ExpressionKind::If {
                 condition,
@@ -1051,6 +1073,95 @@ impl TypeChecker {
                         Type::Unknown
                     }
                 }
+            }
+            ast::ExpressionKind::ForIn {
+                binding,
+                iterable,
+                body,
+                ..
+            } => {
+                self.push_scope();
+                let item_ty = match iterable.kind.as_ref() {
+                    ast::ExpressionKind::Binary {
+                        left,
+                        operator: ast::BinaryOperator::Range,
+                        right,
+                    } => {
+                        let left_ty = self.check_expr(left, None);
+                        let right_ty = self.check_expr(right, None);
+                        if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
+                            self.error(
+                                format!(
+                                    "range bounds must be integers, got {} and {}",
+                                    left_ty, right_ty
+                                ),
+                                expr.span.clone(),
+                            );
+                            Type::Unknown
+                        } else if left_ty != right_ty {
+                            self.error(
+                                format!(
+                                    "range bounds must be the same type, got {} and {}",
+                                    left_ty, right_ty
+                                ),
+                                expr.span.clone(),
+                            );
+                            Type::Unknown
+                        } else {
+                            left_ty
+                        }
+                    }
+                    _ => {
+                        let iterable_ty = self.check_expr(iterable, None);
+                        let method_ident = ast::Identifier {
+                            name: "into_iter".to_string(),
+                            span: iterable.span.clone(),
+                        };
+                        let iterator_ty = self.resolve_method_overload(
+                            &iterable_ty,
+                            &method_ident,
+                            &[],
+                            MethodCallStyle::Instance,
+                            iterable.span.clone(),
+                        );
+                        let next_ret = self.resolve_method_overload_types(
+                            &iterator_ty,
+                            "next",
+                            &[],
+                            MethodCallStyle::Instance,
+                            expr.span.clone(),
+                        );
+                        match next_ret {
+                            Some(Type::Named { path, generics }) if path.last().map(|s| s.as_str()) == Some("Optional") => {
+                                generics.first().cloned().unwrap_or(Type::Unknown)
+                            }
+                            Some(other) => {
+                                self.error(
+                                    format!(
+                                        "'next' on iterator must return Optional<T>, found {}",
+                                        other
+                                    ),
+                                    expr.span.clone(),
+                                );
+                                Type::Unknown
+                            }
+                            None => {
+                                self.error(
+                                    format!(
+                                        "type {} has no 'next' method returning Optional<T>",
+                                        iterator_ty
+                                    ),
+                                    expr.span.clone(),
+                                );
+                                Type::Unknown
+                            }
+                        }
+                    }
+                };
+                self.bind(&binding.name, item_ty, binding.span.clone());
+                self.check_block(body);
+                self.pop_scope();
+                Type::Unit
             }
             ast::ExpressionKind::Asm(_) => Type::Unit,
         }
@@ -2998,7 +3109,7 @@ mod tests {
     #[test]
     fn resolves_static_method_call_on_optional_keyword_type_name() {
         let program = parse(
-            "struct Optional<T> { T value; } impl Optional<T> { Optional<T> none() { Optional<T> result; return result; } } i32 main() { Optional<i32> x = Optional<i32>.none(); return 0; }",
+            "struct Wrapper<T> { T value; } impl Wrapper<T> { Wrapper<T> none() { Wrapper<T> result; return result; } } i32 main() { Wrapper<i32> x = Wrapper<i32>.none(); return 0; }",
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "type errors: {errors:?}");
