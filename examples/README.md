@@ -1,38 +1,68 @@
 # Silver Examples
 
-These `.ag` files are meant to be a living “syntax spec by example”.
+Each file demonstrates one or more Silver language features.
+Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 
-## Conventions used in these examples
+## Getting Started
 
-- **Modules**: prefer `import <module>;` (e.g. `import std.io;`).
-- **Entry point**: prefer `i32 main(...) { ... }` and `return 0;` on success.
-- **Output**: prefer builtin `println("...")` for simple lines, and builtin `printf("...", ...)` for formatted output.
-- **Structs**:
-  - `struct Name { Type field; ... }`
-  - Fields end with `;`.
-  - Optional attributes: `#[packed]`, `#[repr(C)]`, `#[align(n)]`.
-- **Initializers**:
-  - Positional: `{ 1, 2 }`
-  - Named: `{ .x = 1, .y = 2 }` (missing fields default to 0)
-  - Array designators: `{ [2] = 10, [4] = 20 }`
-- **Enums**:
-  - `enum Name { Variant; Variant(Type payload); ... }`
-  - Variants end with `;`.
-- **Methods / impl**:
-  - `impl Type { ... }`
-  - Static method: no `self` parameter (e.g. `Type<T>.new(...)`).
-  - Instance method (non-mutating): first parameter is `Type self`.
-  - Instance method (mutating): first parameter is `Type* self`.
-  - Instance calls use `obj.method(...)`; static calls use `Type<T>.method(...)`.
-- **Traits**:
-  - `trait Name { fn method(Type self) -> Type; }`
-  - `trait Derived: Base { ... }` for super-traits.
-  - `impl Trait for Type where Type: Bound { ... }` for trailing where-clauses.
-  - Multiple type params: `trait Pair<A, B> { ... }` / `impl Pair<i32, i64> for i32 { ... }`.
-  - See `examples/traits.ag` for `Point`, `Vec3`, and `Pair` examples.
-- **Closures**: `list.each(|Type a, Type b| { ... });`
-- **Casts**: explicit numeric casts use C-style syntax: `(f64) x`.
-- **Inline blocks**:
-  - `asm("...")` for inline assembly.
+| File | What it shows |
+|------|---------------|
+| `hello.ag` | Minimal working program — imports, `i32 main()`, `println()` |
+| `fizzbuzz.ag` | `for-in` ranges, `if/else`, modulo, `printf()` |
+| `control_flow.ag` | `while` loops, `break`/`continue`, iteration patterns |
 
-If you want to introduce a new syntax feature, add or update an example here first so it stays documented.
+## Data & Types
+
+| File | What it shows |
+|------|---------------|
+| `data_types.ag` | `struct` with generics, `enum`, `Optional<T>`, `impl` blocks |
+| `traits.ag` | `trait` definitions, `impl Trait for Type`, method dispatch |
+| `casting.ag` | Numeric casts `(f64)x`, struct `cast` operators |
+| `array_init.ag` | Positional/designated array init, multi-dimensional arrays |
+| `struct_attributes.ag` | `#[packed]`, `#[align(n)]`, `#[repr(C)]`, `@size(T)` |
+| `const_inference.ag` | const vs mutable inference, pointer access |
+
+## Standard Library
+
+| File | What it shows |
+|------|---------------|
+| `strings.ag` | `String` type — `push`, `push_str`, `clone`, `equals`, `clear` |
+| `file_io.ag` | `File` open/read/write/close, `file_delete`, error handling |
+| `math.ag` | `f64` trig, `M_PI`, `extern "C"` math library bindings |
+
+## Advanced Features
+
+| File | What it shows |
+|------|---------------|
+| `iterators.ag` | `for i in 0..n` range loops, nested loops, accumulation |
+| `calculator.ag` | Interactive stdin, `scanf`/`printf`, `while`, `pow()` |
+| `macros.ag` | `@size(T)` builtin macro, Fibonacci recursion |
+| `comptime.ag` | Recursive `f64` factorial, no comptime keyword needed |
+
+## Graphics (requires raylib)
+
+| File | What it shows |
+|------|---------------|
+| `gfx_raylib.ag` | 3D rendering with raylib — camera, rotation, drawing |
+
+## Language Quick Reference
+
+- **Entry point**: `i32 main()` or `i32 main(i32 argc, char** argv)`
+- **Output**: `println(str)` for simple lines, `printf(fmt, ...)` for formatted
+- **Variables**: `i32 x = 42;` — type annotations required for locals
+- **Structs**: `struct Name { Type field; ... }` — fields end with `;`
+- **Enums**: `enum Name { Variant; Variant(Type); ... }` — variants end with `;`
+- **Methods**: `impl Type { fn method(Type self, ...) { ... } }`
+  - Non-mutating: `Type self` as first param, called as `obj.method()`
+  - Mutating: `Type* self`, called as `obj.method()`
+  - Static: no `self` param, called as `Type.method()`
+- **Generics**: `struct Foo<T> { T val; }` — works on structs, enums, impls
+- **for-in**: `for i in 0..10 { ... }` — range-based, integer types
+- **Traits**: `trait Name { fn method(Type self) -> Ret; }` with `impl Trait for Type { ... }`
+- **Casts**: explicit numeric: `(f64) x`; struct: `impl Type { cast Target(Type self) { ... } }`
+- **C interop**: `extern "C" { fn name(params); }` — link with `#[link(lib)]`
+- **Comptime**: `comptime expr` — evaluate at compile time
+- **Builtin macros**: `@size(T)` — type size in bytes
+- **Struct attributes**: `#[packed]`, `#[align(n)]`, `#[repr(C)]`
+- **Array init**: `{ 1, 2, 3 }`, `{ [2] = 10, [4] = 20 }`, `{ 1, 2, [4] = 9, 10 }`
+- **Multi-dim arrays**: `i32 grid[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };`

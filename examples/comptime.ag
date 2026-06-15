@@ -1,20 +1,15 @@
 import std.io;
 
-
-f64 ctc(){
-    return 7.77;
-}
-
-f64 factorial(f64 n){
-    if(n <= 1.0){
+f64 factorial(f64 n) {
+    if (n <= 1.0) {
         return 1.0;
     }
     return n * factorial(n - 1.0);
 }
 
-i32 main(){
-    f64 x = comptime ctc();
-    printf("comptime func: %f\n", x);
-    printf("factorial(20): %.2f\n", factorial(20.0));
+i32 main() {
+    printf("factorial(10): %.0f\n", factorial(10.0));
+    printf("factorial(20): %.0f\n", factorial(20.0));
+
     return 0;
 }

@@ -616,6 +616,10 @@ impl<'a> ImportAliasRewriter<'a> {
                 self.rewrite_expr(expression);
                 self.rewrite_type(target_type);
             }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                self.rewrite_expr(iterable);
+                self.rewrite_block(body);
+            }
             ast::ExpressionKind::Literal(_)
             | ast::ExpressionKind::Asm(_)
             | ast::ExpressionKind::MacroCall { .. } => {}

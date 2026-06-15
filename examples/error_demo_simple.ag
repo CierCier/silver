@@ -1,5 +1,0 @@
-// Simple error demonstration
-i32 main() {
-    i32 x = 42;
-    return x;
-}

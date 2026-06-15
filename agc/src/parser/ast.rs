@@ -557,6 +557,12 @@ pub enum ExpressionKind {
         condition: Box<Expression>,
         body: Block,
     },
+    ForIn {
+        binding: Identifier,
+        iterable: Box<Expression>,
+        body: Block,
+        item_type: Option<Box<Type>>,
+    },
     For {
         init: LetStatement,
         condition: Box<Expression>,
@@ -626,6 +632,7 @@ pub enum BinaryOperator {
     BitwiseXor,
     LeftShift,
     RightShift,
+    Range,
     Assign,
     AddAssign,
     SubtractAssign,

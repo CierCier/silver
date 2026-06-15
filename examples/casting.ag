@@ -8,27 +8,22 @@ struct Point {
 
 impl Point {
     cast f64(Point self) {
-		f64 x_2 = self.x * self.x;
-		f64 y_2 = self.y * self.y;
-
-        return sqrt(x_2 + y_2);
+        return sqrt(self.x * self.x + self.y * self.y);
     }
 }
 
 i32 main() {
-    i32 x = 10;
-    f64 y = (f64) x;
-    printf("x as f64: %f\n", y);
+    i32 x = 42;
+    f64 y = (f64)x;
+    printf("i32 %d as f64: %.1f\n", x, y);
 
-    f64 z = 3.14;
-    i32 w = (i32) z;
-    printf("z as i32: %d\n", w);
+    f64 z = 3.14159;
+    i32 w = (i32)z;
+    printf("f64 %.5f as i32: %d\n", z, w);
 
-    Point p = { .x = 2.0, .y = 1.0 };
-
-    f64 magnitude = (f64) p;
-
-    printf("Magnitude of Point p: %f\n", magnitude);
+    Point p = { .x = 3.0, .y = 4.0 };
+    f64 mag = (f64)p;
+    printf("Point(3,4) magnitude: %.1f\n", mag);
 
     return 0;
 }

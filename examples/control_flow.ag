@@ -1,12 +1,11 @@
 import std.io;
 
-
 i32 factorial(i32 n) {
-    if (n <= 1) {
-        return 1;
-    } else {
-        return n * factorial(n - 1);
-    }
+	if (n <= 1){
+		return 1;
+	}
+
+	return n * factorial(n-1);
 }
 
 i32 count_to(i32 limit) {
@@ -56,5 +55,9 @@ i32 main() {
     printf("sum10: %d\n", sum10);
     printf("first_even: %d\n", first_even);
     printf("partial: %d\n", partial);
+
+    for i in 0..5 {
+        printf("for-in: %d\n", i);
+    }
     return 0;
 }

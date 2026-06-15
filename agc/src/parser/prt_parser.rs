@@ -990,8 +990,10 @@ impl PRT_Parser {
                     cursor = close + 1;
                 }
 
+                let kind = ast::TypeKind::Named(ast::NamedType { path, generics });
+
                 ast::Type {
-                    kind: Box::new(ast::TypeKind::Named(ast::NamedType { path, generics })),
+                    kind: Box::new(kind),
                     span: Span {
                         start: tokens[base_start].span.start,
                         end: tokens[cursor - 1].span.end,
@@ -1102,6 +1104,21 @@ impl PRT_Parser {
                 Token::RightBrace => brace = brace.saturating_sub(1),
                 Token::Semicolon if paren == 0 && bracket == 0 && brace == 0 => return Some(idx),
                 _ => {}
+            }
+        }
+        None
+    }
+
+    fn find_token_in_range(
+        &self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+        target: Token,
+    ) -> Option<usize> {
+        for (idx, token) in tokens.iter().enumerate().take(end).skip(start) {
+            if token.kind == target {
+                return Some(idx);
             }
         }
         None
@@ -1466,6 +1483,86 @@ impl PRT_Parser {
                     condition: Box::new(condition),
                     increment: Box::new(increment),
                     body,
+                }),
+                span: Span {
+                    start: tokens[start].span.start,
+                    end: tokens[end - 1].span.end,
+                },
+            }),
+            span: Span {
+                start: tokens[start].span.start,
+                end: tokens[end - 1].span.end,
+            },
+        })
+    }
+
+    fn parse_for_in_statement_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::Statement, ParseError> {
+        let token = &tokens[start + 1];
+        let ident_name = match &token.kind {
+            Token::Identifier(name) => name.clone(),
+            _ if token.kind.keyword_name().is_some() => token.kind.keyword_name().unwrap().to_string(),
+            _ => return Err(ParseError::InvalidSyntax {
+                message: "expected identifier after for".to_string(),
+                span: token.span.clone(),
+            }),
+        };
+        let binding = ast::Identifier {
+            name: ident_name,
+            span: token.span.clone(),
+        };
+
+        let Some(in_pos) = self.find_token_in_range(tokens, start + 2, end, Token::In) else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected 'in' after for binding".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        };
+
+        let Some(body_start) = self.find_token_in_range(tokens, in_pos + 1, end, Token::LeftBrace)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "missing for block".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        };
+        let iterable = if in_pos + 1 < body_start {
+            self.parse_expression_reduction(tokens, in_pos + 1, body_start)?
+        } else {
+            return Err(ParseError::InvalidSyntax {
+                message: "missing iterable expression".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        };
+
+        let Some(body_end_inclusive) =
+            self.find_matching_token(tokens, body_start, end, Token::LeftBrace, Token::RightBrace)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "missing for block close".to_string(),
+                span: tokens[body_start].span.clone(),
+            });
+        };
+        let body_end = body_end_inclusive + 1;
+        if body_end != end {
+            return Err(ParseError::InvalidSyntax {
+                message: "unexpected tokens after for statement".to_string(),
+                span: tokens[body_end].span.clone(),
+            });
+        }
+        let body = self.parse_block_reduction(tokens, body_start, body_end)?;
+
+        Ok(ast::Statement {
+            kind: ast::StatementKind::Expression(ast::Expression {
+                kind: Box::new(ast::ExpressionKind::ForIn {
+                    binding,
+                    iterable: Box::new(iterable),
+                    body,
+                    item_type: None,
                 }),
                 span: Span {
                     start: tokens[start].span.start,
@@ -2827,11 +2924,16 @@ impl PRT_Parser {
                     Token::Greater => Some(ast::BinaryOperator::Greater),
                     Token::LessEqual => Some(ast::BinaryOperator::LessEqual),
                     Token::GreaterEqual => Some(ast::BinaryOperator::GreaterEqual),
+                    Token::DotDot => Some(ast::BinaryOperator::Range),
                     _ => None,
                 };
                 let Some(operator) = operator else { break };
                 cursor.bump();
-                let rhs = parse_additive(cursor)?;
+                let rhs = if matches!(operator, ast::BinaryOperator::Range) {
+                    parse_shift(cursor)?
+                } else {
+                    parse_additive(cursor)?
+                };
                 let span = Span {
                     start: expr.span.start,
                     end: rhs.span.end,
@@ -3258,23 +3360,53 @@ impl PRT_Parser {
             }
 
             if matches!(tokens[cursor].kind, Token::For) {
-                let header_open = cursor + 1;
-                let Some(header_close) = self.find_matching_token(
-                    tokens,
-                    header_open,
-                    end,
-                    Token::LeftParen,
-                    Token::RightParen,
-                ) else {
+                let next = cursor + 1;
+                if next < end && matches!(tokens[next].kind, Token::LeftParen) {
+                    let header_open = next;
+                    let Some(header_close) = self.find_matching_token(
+                        tokens,
+                        header_open,
+                        end,
+                        Token::LeftParen,
+                        Token::RightParen,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "unterminated for header".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        });
+                    };
+                    let body_start = header_close + 1;
+                    let Some(body_end_inclusive) = self.find_matching_token(
+                        tokens,
+                        body_start,
+                        end,
+                        Token::LeftBrace,
+                        Token::RightBrace,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "missing for block".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        });
+                    };
+                    let stmt_end = body_end_inclusive + 1;
+                    statements.push(self.parse_for_statement_reduction(tokens, cursor, stmt_end)?);
+                    cursor = stmt_end;
+                    continue;
+                }
+                // for-in: find body block
+                let mut block_start = cursor + 1;
+                while block_start < end && !matches!(tokens[block_start].kind, Token::LeftBrace) {
+                    block_start += 1;
+                }
+                if block_start >= end {
                     return Err(ParseError::InvalidSyntax {
-                        message: "unterminated for header".to_string(),
+                        message: "missing for block".to_string(),
                         span: tokens[cursor].span.clone(),
                     });
-                };
-                let body_start = header_close + 1;
+                }
                 let Some(body_end_inclusive) = self.find_matching_token(
                     tokens,
-                    body_start,
+                    block_start,
                     end,
                     Token::LeftBrace,
                     Token::RightBrace,
@@ -3285,7 +3417,7 @@ impl PRT_Parser {
                     });
                 };
                 let stmt_end = body_end_inclusive + 1;
-                statements.push(self.parse_for_statement_reduction(tokens, cursor, stmt_end)?);
+                statements.push(self.parse_for_in_statement_reduction(tokens, cursor, stmt_end)?);
                 cursor = stmt_end;
                 continue;
             }
