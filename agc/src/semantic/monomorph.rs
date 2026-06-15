@@ -1541,7 +1541,7 @@ fn build_mapping_from_generics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
+    use crate::lexer::{lex, Span};
     use crate::parser::Parser;
 
     fn parse(source: &str) -> ast::Program {
@@ -1550,6 +1550,21 @@ mod tests {
         let (program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         program
+    }
+
+    fn find_function(program: &ast::Program, name: &str) -> ast::FunctionItem {
+        program
+            .items
+            .iter()
+            .find_map(|item| {
+                if let ast::ItemKind::Function(f) = &item.kind {
+                    if f.name.name == name {
+                        return Some(f.clone());
+                    }
+                }
+                None
+            })
+            .expect("function not found")
     }
 
     #[test]
@@ -1561,6 +1576,152 @@ mod tests {
             _ => false,
         });
         assert!(has_struct, "expected monomorphized struct");
+    }
+
+    #[test]
+    fn monomorphizes_generic_function() {
+        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "foo");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "foo__i32",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function foo__i32");
+    }
+
+    #[test]
+    fn monomorphizes_generic_function_with_multiple_type_params() {
+        let mut program = parse("T bar<T, U>(T x, U y) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "bar");
+        let type_params = vec!["T".to_string(), "U".to_string()];
+        let mapping = HashMap::from_iter([
+            ("T".to_string(), Type::Primitive(ast::PrimitiveType::I32)),
+            ("U".to_string(), Type::Primitive(ast::PrimitiveType::F64)),
+        ]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function bar__i32_f64");
+    }
+
+    #[test]
+    fn monomorphizes_duplicate_request_only_once() {
+        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "foo");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let request = MonomorphRequest::Function {
+            source,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        };
+
+        let items = append_monomorphs(&mut program, &[request.clone(), request]);
+        let count = items
+            .iter()
+            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32"))
+            .count();
+        assert_eq!(count, 1, "duplicate request should only produce one monomorph");
+    }
+
+    #[test]
+    fn monomorphizes_struct_and_function_together() {
+        let mut program =
+            parse("struct Pair<T, U> { T first; U second; } T id<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "id");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "id__i32",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function id__i32");
+    }
+
+    #[test]
+    fn mangle_name_empty_args() {
+        assert_eq!(mangle_name("foo", &[]), "foo");
+    }
+
+    #[test]
+    fn mangle_name_single_arg() {
+        assert_eq!(
+            mangle_name("foo", &[Type::Primitive(ast::PrimitiveType::I32)]),
+            "foo__i32"
+        );
+    }
+
+    #[test]
+    fn mangle_name_multiple_args() {
+        assert_eq!(
+            mangle_name(
+                "convert",
+                &[
+                    Type::Primitive(ast::PrimitiveType::I32),
+                    Type::Primitive(ast::PrimitiveType::F64)
+                ]
+            ),
+            "convert__i32_f64"
+        );
+    }
+
+    #[test]
+    fn mangle_name_pointer_type() {
+        let mangled = mangle_name(
+            "deref",
+            &[Type::Pointer {
+                is_mutable: false,
+                inner: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
+            }],
+        );
+        // canonical key for pointer is just the inner type
+        assert_eq!(mangled, "deref__i32");
+    }
+
+    #[test]
+    fn mangle_name_named_type() {
+        assert_eq!(
+            mangle_name(
+                "alloc",
+                &[Type::Named {
+                    path: vec!["Point".to_string()],
+                    generics: vec![]
+                }]
+            ),
+            "alloc__Point"
+        );
     }
 }
 
