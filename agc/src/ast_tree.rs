@@ -71,6 +71,9 @@ fn item_node(item: &ast::Item) -> Node {
         ast::ItemKind::ExternVariable(extern_var) => extern_var_node(extern_var),
         ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
         ast::ItemKind::Macro(macro_def) => macro_node(macro_def),
+        ast::ItemKind::TypeAlias(alias) => {
+            type_node(&alias.type_def)
+        }
     };
 
     node.label = format!("{} [{}..{}]", node.label, item.span.start, item.span.end);

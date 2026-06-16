@@ -104,7 +104,16 @@ impl TypeContext {
             Type::Reference { .. } | Type::Pointer { .. } | Type::Function { .. } => {
                 TypeLayout::known(self.pointer_size, self.pointer_align)
             }
-            Type::Optional { .. } => TypeLayout::known(self.pointer_size, self.pointer_align),
+            Type::Optional { inner } => {
+                let inner_layout = self.layout_of(inner);
+                // Optional<T> = { bool present; T thing; }
+                // Size = align_to(bool_size, inner.align) + inner.size, then aligned to max(bool_align, inner.align)
+                let bool_layout = TypeLayout::known(1, 1);
+                let offset = align_to(bool_layout.size.unwrap_or(0), inner_layout.align.unwrap_or(1));
+                let total_size = offset + inner_layout.size.unwrap_or(0);
+                let overall_align = inner_layout.align.unwrap_or(1).max(1);
+                TypeLayout::known(total_size, overall_align)
+            }
             Type::Array { element, length } => {
                 let elem_layout = self.layout_of(element);
                 let size = match (elem_layout.size, length) {
@@ -265,14 +274,15 @@ impl Type {
     pub fn from_ast(ty: &ast::Type) -> Self {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(p) => Type::Primitive(p.clone()),
-            ast::TypeKind::Named(named) => Type::Named {
-                path: named.path.iter().map(|id| id.name.clone()).collect(),
-                generics: named
+            ast::TypeKind::Named(named) => {
+                let path: Vec<String> = named.path.iter().map(|id| id.name.clone()).collect();
+                let generics: Vec<Type> = named
                     .generics
                     .as_ref()
                     .map(|gs| gs.iter().map(Type::from_ast).collect())
-                    .unwrap_or_default(),
-            },
+                    .unwrap_or_default();
+                Type::Named { path, generics }
+            }
             ast::TypeKind::Generic(generic) => Type::Named {
                 path: vec![generic.name.name.clone()],
                 generics: generic.args.iter().map(Type::from_ast).collect(),
@@ -455,7 +465,7 @@ impl Type {
                 Some(len) => format!("[{};{}]", element.canonical_key(), len),
                 None => format!("[{}]", element.canonical_key()),
             },
-            Type::Optional { inner } => format!("optional<{}>", inner.canonical_key()),
+            Type::Optional { inner } => format!("Optional<{}>", inner.canonical_key()),
             Type::Tuple(items) => {
                 let args = items
                     .iter()
@@ -696,7 +706,7 @@ impl<'a> TypeParser<'a> {
         if self.consume_str("unknown") {
             return Ok(Type::Unknown);
         }
-        if self.consume_str("optional<") {
+        if self.consume_str("optional<") || self.consume_str("Optional<") {
             let inner = self.parse_type()?;
             self.expect_byte(b'>')?;
             return Ok(Type::Optional {

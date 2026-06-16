@@ -1,5 +1,6 @@
 import std.io;
 import std.optional;
+import std.iter;
 
 i32 sum_to(i32 n) {
     i32 total = 0;
@@ -38,14 +39,22 @@ impl Counter {
         c.end = end;
         return c;
     }
+}
 
+impl IntoIterator for Counter {
+    type Item = i32;
+    type IntoIter = Counter;
     Counter into_iter(Counter self) {
         return self;
     }
+}
 
-    Optional<i32> next(Counter self) {
-        if (self.current < self.end) {
-            Optional<i32> result = Optional<i32>.some(self.current);
+impl Iterator for Counter {
+    type Item = i32;
+    Optional<i32> next(Counter* self) {
+        if ((*self).current < (*self).end) {
+            Optional<i32> result = Optional<i32>.some((*self).current);
+            (*self).current = (*self).current + 1;
             return result;
         }
         return Optional<i32>.none();

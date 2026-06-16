@@ -42,6 +42,7 @@ pub struct TypeChecker {
     imported_traits: HashSet<String>,
     imported_modules: Vec<ModuleArtifact>,
     casts: HashMap<(String, String), ()>,
+    type_aliases: HashMap<String, ast::Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +366,18 @@ impl TypeChecker {
                     self.known_type_ids.insert(type_id);
                     self.known_types
                         .insert(trait_item.name.name.clone(), type_id);
+                }
+                ast::ItemKind::TypeAlias(alias) => {
+                    let type_id = table.intern_symbol(
+                        format!("type::{}", alias.name.name),
+                        SymbolKind::Struct,
+                        Some(alias.name.span.clone()),
+                        CompilerPhase::TypeCheck,
+                    );
+                    self.known_type_ids.insert(type_id);
+                    self.known_types
+                        .insert(alias.name.name.clone(), type_id);
+                    self.type_aliases.insert(alias.name.name.clone(), alias.type_def.clone());
                 }
                 _ => {}
             }
@@ -1113,47 +1126,86 @@ impl TypeChecker {
                     }
                     _ => {
                         let iterable_ty = self.check_expr(iterable, None);
-                        let method_ident = ast::Identifier {
-                            name: "into_iter".to_string(),
-                            span: iterable.span.clone(),
-                        };
-                        let iterator_ty = self.resolve_method_overload(
-                            &iterable_ty,
-                            &method_ident,
-                            &[],
-                            MethodCallStyle::Instance,
-                            iterable.span.clone(),
-                        );
-                        let next_ret = self.resolve_method_overload_types(
-                            &iterator_ty,
-                            "next",
-                            &[],
-                            MethodCallStyle::Instance,
-                            expr.span.clone(),
-                        );
-                        match next_ret {
-                            Some(Type::Named { path, generics }) if path.last().map(|s| s.as_str()) == Some("Optional") => {
-                                generics.first().cloned().unwrap_or(Type::Unknown)
-                            }
-                            Some(other) => {
+
+                        // Validate impl IntoIterator for iterable_ty
+                        let iter_key = iterable_ty.canonical_key();
+                        let has_into_iter = self
+                            .trait_impls
+                            .get("IntoIterator")
+                            .map(|set| set.contains(&iter_key))
+                            .unwrap_or(false);
+                        if !has_into_iter {
+                            self.error(
+                                format!(
+                                    "type {} cannot be iterated over: missing `impl IntoIterator for {}`",
+                                    iterable_ty, iterable_ty
+                                ),
+                                iterable.span.clone(),
+                            );
+                            Type::Unknown
+                        } else {
+                            let method_ident = ast::Identifier {
+                                name: "into_iter".to_string(),
+                                span: iterable.span.clone(),
+                            };
+                            let iterator_ty = self.resolve_method_overload(
+                                &iterable_ty,
+                                &method_ident,
+                                &[],
+                                MethodCallStyle::Instance,
+                                iterable.span.clone(),
+                            );
+
+                            // Validate impl Iterator for iterator_ty
+                            let iter_key = iterator_ty.canonical_key();
+                            let has_iterator = self
+                                .trait_impls
+                                .get("Iterator")
+                                .map(|set| set.contains(&iter_key))
+                                .unwrap_or(false);
+                            if !has_iterator {
                                 self.error(
                                     format!(
-                                        "'next' on iterator must return Optional<T>, found {}",
-                                        other
-                                    ),
-                                    expr.span.clone(),
-                                );
-                                Type::Unknown
-                            }
-                            None => {
-                                self.error(
-                                    format!(
-                                        "type {} has no 'next' method returning Optional<T>",
+                                        "type {} does not implement `Iterator`",
                                         iterator_ty
                                     ),
                                     expr.span.clone(),
                                 );
                                 Type::Unknown
+                            } else {
+                                let next_ret = self.resolve_method_overload_types(
+                                    &iterator_ty,
+                                    "next",
+                                    &[],
+                                    MethodCallStyle::Instance,
+                                    expr.span.clone(),
+                                );
+                                match next_ret {
+                                    Some(Type::Named { path, generics }) if path.last().map(|s| s.as_str()) == Some("Optional") => {
+                                        generics.first().cloned().unwrap_or(Type::Unknown)
+                                    }
+                                    Some(Type::Optional { inner }) => *inner,
+                                    Some(other) => {
+                                        self.error(
+                                            format!(
+                                                "'next' on iterator must return Optional<T>, found {}",
+                                                other
+                                            ),
+                                            expr.span.clone(),
+                                        );
+                                        Type::Unknown
+                                    }
+                                    None => {
+                                        self.error(
+                                            format!(
+                                                "type {} has no 'next' method returning Optional<T>",
+                                                iterator_ty
+                                            ),
+                                            expr.span.clone(),
+                                        );
+                                        Type::Unknown
+                                    }
+                                }
                             }
                         }
                     }
@@ -2687,6 +2739,294 @@ impl TypeChecker {
             let layout = struct_layout(&self.type_ctx, &field_types, &attrs);
             let path = vec![struct_item.name.name.clone()];
             self.type_ctx.register_named(&path, layout);
+        }
+    }
+
+    pub fn resolve_type_aliases_in_program(program: &mut ast::Program) {
+        let aliases: HashMap<String, ast::Type> = program
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let ast::ItemKind::TypeAlias(alias) = &item.kind {
+                    Some((alias.name.name.clone(), alias.type_def.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if aliases.is_empty() {
+            return;
+        }
+
+        for item in &mut program.items {
+            Self::resolve_type_aliases_in_item(item, &aliases);
+        }
+    }
+
+    fn resolve_type_aliases_in_item(item: &mut ast::Item, aliases: &HashMap<String, ast::Type>) {
+        match &mut item.kind {
+            ast::ItemKind::Struct(s) => {
+                for field in &mut s.fields {
+                    Self::resolve_type_aliases_in_type(&mut field.field_type, aliases);
+                }
+            }
+            ast::ItemKind::Enum(e) => {
+                for variant in &mut e.variants {
+                    match &mut variant.data {
+                        ast::EnumVariantData::Tuple(types) => {
+                            for ty in types {
+                                Self::resolve_type_aliases_in_type(ty, aliases);
+                            }
+                        }
+                        ast::EnumVariantData::Struct(fields) => {
+                            for field in fields {
+                                Self::resolve_type_aliases_in_type(&mut field.field_type, aliases);
+                            }
+                        }
+                        ast::EnumVariantData::Unit => {}
+                    }
+                }
+            }
+            ast::ItemKind::Function(f) => {
+                for param in &mut f.parameters {
+                    Self::resolve_type_aliases_in_type(&mut param.param_type, aliases);
+                }
+                if let Some(return_type) = &mut f.return_type {
+                    Self::resolve_type_aliases_in_type(return_type, aliases);
+                }
+                Self::resolve_type_aliases_in_block(&mut f.body, aliases);
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                Self::resolve_type_aliases_in_type(&mut impl_item.self_type, aliases);
+                for member in &mut impl_item.items {
+                    match member {
+                        ast::ImplItemKind::Function(func) => {
+                            for param in &mut func.parameters {
+                                Self::resolve_type_aliases_in_type(&mut param.param_type, aliases);
+                            }
+                            if let Some(return_type) = &mut func.return_type {
+                                Self::resolve_type_aliases_in_type(return_type, aliases);
+                            }
+                        }
+                        ast::ImplItemKind::AssociatedType(assoc) => {
+                            Self::resolve_type_aliases_in_type(&mut assoc.type_def, aliases);
+                        }
+                        ast::ImplItemKind::Cast(cast) => {
+                            Self::resolve_type_aliases_in_type(&mut cast.target_type, aliases);
+                            for param in &mut cast.parameters {
+                                Self::resolve_type_aliases_in_type(&mut param.param_type, aliases);
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ItemKind::Trait(trait_item) => {
+                for member in &mut trait_item.items {
+                    match member {
+                        ast::TraitItemKind::Function(func) => {
+                            for param in &mut func.parameters {
+                                Self::resolve_type_aliases_in_type(&mut param.param_type, aliases);
+                            }
+                            if let Some(return_type) = &mut func.return_type {
+                                Self::resolve_type_aliases_in_type(return_type, aliases);
+                            }
+                        }
+                        ast::TraitItemKind::AssociatedType(assoc) => {
+                            if let Some(default) = &mut assoc.default {
+                                Self::resolve_type_aliases_in_type(default, aliases);
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ItemKind::ExternFunction(f) => {
+                for param in &mut f.signature.parameters {
+                    Self::resolve_type_aliases_in_type(&mut param.param_type, aliases);
+                }
+                if let Some(return_type) = &mut f.signature.return_type {
+                    Self::resolve_type_aliases_in_type(return_type, aliases);
+                }
+            }
+            ast::ItemKind::ExternVariable(v) => {
+                Self::resolve_type_aliases_in_type(&mut v.var_type, aliases);
+            }
+            ast::ItemKind::GlobalVariable(v) => {
+                Self::resolve_type_aliases_in_type(&mut v.var_type, aliases);
+            }
+            ast::ItemKind::TypeAlias(_) => {}
+            _ => {}
+        }
+    }
+
+    fn resolve_type_aliases_in_type(ty: &mut ast::Type, aliases: &HashMap<String, ast::Type>) {
+        // Resolve top-level alias
+        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+            if named.path.len() == 1 && named.generics.is_none() {
+                if let Some(aliased) = aliases.get(&named.path[0].name) {
+                    *ty = aliased.clone();
+                    return;
+                }
+            }
+        }
+        // Recurse into child types
+        match ty.kind.as_mut() {
+            ast::TypeKind::Named(named) => {
+                if let Some(generics) = &mut named.generics {
+                    for g in generics.iter_mut() {
+                        Self::resolve_type_aliases_in_type(g, aliases);
+                    }
+                }
+            }
+            ast::TypeKind::Reference(r) => Self::resolve_type_aliases_in_type(&mut r.inner, aliases),
+            ast::TypeKind::Pointer(p) => Self::resolve_type_aliases_in_type(&mut p.inner, aliases),
+            ast::TypeKind::Array(a) => Self::resolve_type_aliases_in_type(&mut a.element_type, aliases),
+            ast::TypeKind::Optional(inner) => Self::resolve_type_aliases_in_type(inner, aliases),
+            ast::TypeKind::Function(f) => {
+                for p in &mut f.parameters {
+                    Self::resolve_type_aliases_in_type(p, aliases);
+                }
+                Self::resolve_type_aliases_in_type(&mut f.return_type, aliases);
+            }
+            ast::TypeKind::Tuple(items) => {
+                for item in items.iter_mut() {
+                    Self::resolve_type_aliases_in_type(item, aliases);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_type_aliases_in_block(block: &mut ast::Block, aliases: &HashMap<String, ast::Type>) {
+        for stmt in &mut block.statements {
+            Self::resolve_type_aliases_in_statement(stmt, aliases);
+        }
+    }
+
+    fn resolve_type_aliases_in_statement(stmt: &mut ast::Statement, aliases: &HashMap<String, ast::Type>) {
+        match &mut stmt.kind {
+            ast::StatementKind::Let(var) => {
+                if let Some(type_ann) = &mut var.type_annotation {
+                    Self::resolve_type_aliases_in_type(type_ann, aliases);
+                }
+                if let Some(initializer) = &mut var.initializer {
+                    Self::resolve_type_aliases_in_expression(initializer, aliases);
+                }
+            }
+            ast::StatementKind::Expression(expr) => {
+                Self::resolve_type_aliases_in_expression(expr, aliases);
+            }
+            ast::StatementKind::Return(expr) => {
+                if let Some(expr) = expr {
+                    Self::resolve_type_aliases_in_expression(expr, aliases);
+                }
+            }
+            ast::StatementKind::Block(block) => {
+                Self::resolve_type_aliases_in_block(block, aliases);
+            }
+            ast::StatementKind::Break(_) | ast::StatementKind::Continue => {}
+        }
+    }
+
+    fn resolve_type_aliases_in_expression(expr: &mut ast::Expression, aliases: &HashMap<String, ast::Type>) {
+        use ast::ExpressionKind;
+        match expr.kind.as_mut() {
+            ExpressionKind::Binary { left, right, .. } => {
+                Self::resolve_type_aliases_in_expression(left, aliases);
+                Self::resolve_type_aliases_in_expression(right, aliases);
+            }
+            ExpressionKind::Unary { operand, .. } | ExpressionKind::Postfix { operand, .. } => {
+                Self::resolve_type_aliases_in_expression(operand, aliases);
+            }
+            ExpressionKind::Call { function, arguments } => {
+                Self::resolve_type_aliases_in_expression(function, aliases);
+                for arg in arguments.iter_mut() {
+                    Self::resolve_type_aliases_in_expression(arg, aliases);
+                }
+            }
+            ExpressionKind::MethodCall { receiver, arguments, .. } => {
+                Self::resolve_type_aliases_in_expression(receiver, aliases);
+                for arg in arguments.iter_mut() {
+                    Self::resolve_type_aliases_in_expression(arg, aliases);
+                }
+            }
+            ExpressionKind::FieldAccess { object, .. } => {
+                Self::resolve_type_aliases_in_expression(object, aliases);
+            }
+            ExpressionKind::Index { object, index } => {
+                Self::resolve_type_aliases_in_expression(object, aliases);
+                Self::resolve_type_aliases_in_expression(index, aliases);
+            }
+            ExpressionKind::Block(block) => {
+                Self::resolve_type_aliases_in_block(block, aliases);
+            }
+            ExpressionKind::If { condition, then_branch, else_branch } => {
+                Self::resolve_type_aliases_in_expression(condition, aliases);
+                Self::resolve_type_aliases_in_block(then_branch, aliases);
+                if let Some(else_branch) = else_branch {
+                    Self::resolve_type_aliases_in_block(else_branch, aliases);
+                }
+            }
+            ExpressionKind::While { condition, body } => {
+                Self::resolve_type_aliases_in_expression(condition, aliases);
+                Self::resolve_type_aliases_in_block(body, aliases);
+            }
+            ExpressionKind::ForIn { iterable, body, item_type, .. } => {
+                Self::resolve_type_aliases_in_expression(iterable, aliases);
+                if let Some(item_type) = item_type {
+                    Self::resolve_type_aliases_in_type(item_type, aliases);
+                }
+                Self::resolve_type_aliases_in_block(body, aliases);
+            }
+            ExpressionKind::For { init, condition, increment, body } => {
+                if let Some(type_ann) = &mut init.type_annotation {
+                    Self::resolve_type_aliases_in_type(type_ann, aliases);
+                }
+                if let Some(init_expr) = &mut init.initializer {
+                    Self::resolve_type_aliases_in_expression(init_expr, aliases);
+                }
+                Self::resolve_type_aliases_in_expression(condition, aliases);
+                Self::resolve_type_aliases_in_expression(increment, aliases);
+                Self::resolve_type_aliases_in_block(body, aliases);
+            }
+            ExpressionKind::Match { expression, arms } => {
+                Self::resolve_type_aliases_in_expression(expression, aliases);
+                for arm in arms.iter_mut() {
+                    if let Some(guard) = &mut arm.guard {
+                        Self::resolve_type_aliases_in_expression(guard, aliases);
+                    }
+                    Self::resolve_type_aliases_in_expression(&mut arm.body, aliases);
+                }
+            }
+            ExpressionKind::Cast { expression, target_type } => {
+                Self::resolve_type_aliases_in_type(target_type, aliases);
+                Self::resolve_type_aliases_in_expression(expression, aliases);
+            }
+            ExpressionKind::Move(inner) => {
+                Self::resolve_type_aliases_in_expression(inner, aliases);
+            }
+            ExpressionKind::Reference { expression, .. } => {
+                Self::resolve_type_aliases_in_expression(expression, aliases);
+            }
+            ExpressionKind::Comptime(inner) => {
+                Self::resolve_type_aliases_in_expression(inner, aliases);
+            }
+            ExpressionKind::TypeName(ty) => {
+                Self::resolve_type_aliases_in_type(ty, aliases);
+            }
+            ExpressionKind::Array(items) | ExpressionKind::Tuple(items) => {
+                for item in items.iter_mut() {
+                    Self::resolve_type_aliases_in_expression(item, aliases);
+                }
+            }
+            ExpressionKind::MacroCall { args, .. } => {
+                for arg in args.iter_mut() {
+                    if let ast::MacroArg::Type(ty) = arg {
+                        Self::resolve_type_aliases_in_type(ty, aliases);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
