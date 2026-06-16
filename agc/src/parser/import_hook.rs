@@ -232,6 +232,7 @@ fn item_name(item: &ast::Item) -> Option<String> {
         ast::ItemKind::Enum(item) => Some(item.name.name.clone()),
         ast::ItemKind::Trait(item) => Some(item.name.name.clone()),
         ast::ItemKind::GlobalVariable(item) => Some(item.name.name.clone()),
+        ast::ItemKind::TypeAlias(item) => Some(item.name.name.clone()),
         _ => None,
     }
 }
@@ -370,6 +371,9 @@ impl<'a> ImportAliasRewriter<'a> {
                 if let Some(initializer) = &mut item.initializer {
                     self.rewrite_expr(initializer);
                 }
+            }
+            ast::ItemKind::TypeAlias(item) => {
+                self.rewrite_type(&mut item.type_def);
             }
             _ => {}
         }

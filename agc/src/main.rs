@@ -751,6 +751,7 @@ fn main() {
                 }
 
                 profiler.begin_phase("type check");
+                TypeChecker::resolve_type_aliases_in_program(&mut ast);
                 let (type_errors, monomorphs) = TypeChecker::new()
                     .with_imported_modules(&imported_modules)
                     .check_program_with_table(&ast, &mut symbol_table);

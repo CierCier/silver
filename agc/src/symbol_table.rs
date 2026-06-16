@@ -376,6 +376,7 @@ impl CompilerSymbolTable {
                     phase,
                 );
             }
+            ast::ItemKind::TypeAlias(_) => {}
         }
     }
 }

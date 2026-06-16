@@ -21,6 +21,12 @@ pub struct Item {
 
 /// Different kinds of top-level items
 #[derive(Debug, Clone, PartialEq)]
+pub struct TypeAliasItem {
+    pub name: Identifier,
+    pub type_def: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind {
     Function(FunctionItem),
     GlobalVariable(GlobalVariableItem),
@@ -33,6 +39,7 @@ pub enum ItemKind {
     ExternVariable(ExternVariableItem),
     ExternBlock(ExternBlockItem),
     Macro(MacroDef),
+    TypeAlias(TypeAliasItem),
 }
 
 /// Macro definition

@@ -876,11 +876,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(element.array_type(size).as_basic_type_enum())
             }
             ast::TypeKind::Optional(inner) => {
-                let _ = self.lower_basic_type(inner)?;
-                Ok(self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .as_basic_type_enum())
+                let inner = self.lower_basic_type(inner)?;
+                Ok(self.context.struct_type(&[
+                    self.context.i8_type().as_basic_type_enum(),
+                    inner,
+                ], false).as_basic_type_enum())
             }
             ast::TypeKind::Tuple(items) => {
                 let mut fields = Vec::with_capacity(items.len());
@@ -5597,25 +5597,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 self.builder.position_at_end(cond_bb);
 
-                let ptr_ty = self.context.ptr_type(AddressSpace::default());
-                let opt_ptr = self.builder.build_load(ptr_ty, next_ptr, "forin.opt")
+                let opt_struct = self.builder.build_load(next_llvm_ty, next_ptr, "forin.opt")
                     .map_err(|e| CodegenError::new(format!("failed to load optional: {e}")))?;
-                let opt_int = match opt_ptr {
-                    BasicValueEnum::PointerValue(pv) => self.builder.build_is_null(pv, "forin.isnull")
-                        .map_err(|e| CodegenError::new(format!("failed to check null: {e}")))?,
-                    _ => return Err(CodegenError::new("next() must return an Optional<T> (pointer)")),
+                let opt_sv = match opt_struct {
+                    BasicValueEnum::StructValue(sv) => sv,
+                    _ => return Err(CodegenError::new("next() must return a struct Optional<T>")),
                 };
+                let is_present = self
+                    .builder
+                    .build_extract_value(opt_sv, 0, "forin.present")
+                    .map_err(|e| CodegenError::new(format!("failed to extract present: {e}")))?;
 
-                self.builder.build_conditional_branch(opt_int, body_bb, end_bb)
+                self.builder.build_conditional_branch(is_present.into_int_value(), body_bb, end_bb)
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
                 self.loop_stack.push((end_bb, cond_bb));
                 self.builder.position_at_end(body_bb);
 
-                let next_ptr_val = match opt_ptr {
-                    BasicValueEnum::PointerValue(pv) => pv,
-                    _ => unreachable!(),
-                };
                 let item_llvm_ty = {
                     let owners = self.receiver_owner_candidates(&iter_expr);
                     let mut found = None;
@@ -5623,8 +5621,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let mangled = Self::mangle_method_name(owner_name, &next_ident.name);
                         if let Some(sig) = self.signature_for_name(&mangled) {
                             if let Some(return_type) = &sig.return_type {
-                                if let ast::TypeKind::Optional(inner) = return_type.kind.as_ref() {
-                                    found = Some(self.lower_basic_type(inner.as_ref())?);
+                                let inner = match return_type.kind.as_ref() {
+                                    ast::TypeKind::Optional(inner) => Some(inner.as_ref()),
+                                    ast::TypeKind::Named(named) if named.path.last().map(|s| s.name.as_str()) == Some("Optional") => {
+                                        named.generics.as_ref().and_then(|g| g.first())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(inner_ty) = inner {
+                                    found = Some(self.lower_basic_type(inner_ty)?);
                                     break;
                                 }
                             }
@@ -5632,8 +5637,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                     found.unwrap_or_else(|| self.context.i64_type().as_basic_type_enum())
                 };
-                let thing_loaded = self.builder.build_load(item_llvm_ty, next_ptr_val, &binding.name)
-                    .map_err(|e| CodegenError::new(format!("failed to load thing: {e}")))?;
+                let thing_loaded = self
+                    .builder
+                    .build_extract_value(opt_sv, 1, &binding.name)
+                    .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
                 let ast_ty = self.infer_ast_type_from_value(&thing_loaded, span);
                 let var_ptr = self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
@@ -6100,6 +6107,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 &item.attributes,
             ),
             ast::ItemKind::Macro(_) => Ok(()),
+            ast::ItemKind::TypeAlias(_) => Ok(()),
         }
     }
 
@@ -6881,7 +6889,7 @@ mod tests {
     #[test]
     fn lowers_protocol_for_in() {
         let ir = lower_to_llvm(
-            "struct Optional<T> { bool present; T thing; } struct Empty { i32 x; } impl Empty { Empty into_iter(Empty self) { return self; } Optional<i32> next(Empty self) { Optional<i32> r; return r; } } i32 main() { Empty e = { .x = 0 }; for i in e { return 0; } return 0; }",
+            "trait IntoIterator {} trait Iterator {} struct Optional<T> { bool present; T thing; } struct Empty { i32 x; } impl IntoIterator for Empty { Empty into_iter(Empty self) { return self; } } impl Iterator for Empty { Optional<i32> next(Empty self) { Optional<i32> r; return r; } } i32 main() { Empty e = { .x = 0 }; for i in e { return 0; } return 0; }",
         );
         assert!(
             ir.contains("forin.cond"),

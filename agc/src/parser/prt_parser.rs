@@ -101,6 +101,7 @@ enum TokenClass {
     Impl,
     TypeStart,
     Macro,
+    TypeKeyword,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +116,7 @@ enum ItemProduction {
     Function,
     GlobalVariable,
     Macro,
+    TypeAlias,
 }
 
 enum ParsedExternDeclaration {
@@ -169,6 +171,10 @@ impl TransitionTable {
         rows.insert(
             (NonTerminal::Item, vec![TokenClass::Macro]),
             ItemProduction::Macro,
+        );
+        rows.insert(
+            (NonTerminal::Item, vec![TokenClass::TypeKeyword]),
+            ItemProduction::TypeAlias,
         );
         Self {
             max_lookahead: max_lookahead.max(1),
@@ -550,6 +556,7 @@ impl PRT_Parser {
             Token::Trait => Some(TokenClass::Trait),
             Token::Impl => Some(TokenClass::Impl),
             Token::Macro => Some(TokenClass::Macro),
+            Token::Identifier(name) if name == "type" => Some(TokenClass::TypeKeyword),
             Token::Identifier(_)
                 if self.classify_identifier_as_type_start(tokens, index)
                     || self.looks_like_function_item_start(tokens, index) =>
@@ -749,7 +756,8 @@ impl PRT_Parser {
         let item_end = match production {
             ItemProduction::Import
             | ItemProduction::ExternDeclaration
-            | ItemProduction::GlobalVariable => self
+            | ItemProduction::GlobalVariable
+            | ItemProduction::TypeAlias => self
                 .find_statement_terminator(tokens, item_start, tokens.len())
                 .map(|idx| idx + 1),
             ItemProduction::ExternBlock => {
@@ -3807,6 +3815,57 @@ impl PRT_Parser {
         })
     }
 
+    fn parse_type_alias_reduction(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::TypeAliasItem, ParseError> {
+        let mut cursor = start + 1;
+        let name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
+            message: "missing type alias name".to_string(),
+            span: tokens[start].span.clone(),
+        })?;
+        let Token::Identifier(name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected type alias identifier".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+        cursor += 1;
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '=' in type alias".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let (type_def, after_type) = self
+            .parse_type_prefix(tokens, cursor, end)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "expected type in type alias".to_string(),
+                span: tokens[cursor].span.clone(),
+            })?;
+        cursor = after_type;
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ';' after type alias".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+
+        Ok(ast::TypeAliasItem {
+            name: ast::Identifier {
+                name: name.clone(),
+                span: name_token.span.clone(),
+            },
+            type_def,
+        })
+    }
+
     fn parse_trait_ref_range(
         &self,
         tokens: &[LexToken],
@@ -4867,6 +4926,67 @@ impl PRT_Parser {
         ))
     }
 
+    fn parse_impl_assoc_type_item(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<(ast::ImplAssociatedType, usize), ParseError> {
+        let name_token = tokens
+            .get(start + 1)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "missing associated type name".to_string(),
+                span: tokens[start].span.clone(),
+            })?;
+        let Token::Identifier(type_name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected associated type name".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+        let mut cursor = start + 2;
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '=' for impl associated type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let (type_def, after_type) =
+            self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "invalid associated type value".to_string(),
+                    span: tokens[cursor].span.clone(),
+                }
+            })?;
+        cursor = after_type;
+
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ';' after associated type".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let item_end = cursor + 1;
+
+        Ok((
+            ast::ImplAssociatedType {
+                name: ast::Identifier {
+                    name: type_name.clone(),
+                    span: name_token.span.clone(),
+                },
+                type_def,
+                span: Span {
+                    start: tokens[start].span.start,
+                    end: tokens[item_end - 1].span.end,
+                },
+            },
+            item_end,
+        ))
+    }
+
     fn parse_impl_reduction(
         &mut self,
         tokens: &[LexToken],
@@ -4948,6 +5068,11 @@ impl PRT_Parser {
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Cast)) {
                 let (cast_item, next_cursor) = self.parse_impl_cast(tokens, cursor, end - 1)?;
                 items.push(ast::ImplItemKind::Cast(cast_item));
+                cursor = next_cursor;
+            } else if matches!(&tokens[cursor].kind, Token::Identifier(name) if name == "type") {
+                let (item, next_cursor) =
+                    self.parse_impl_assoc_type_item(tokens, cursor, end - 1)?;
+                items.push(ast::ImplItemKind::AssociatedType(item));
                 cursor = next_cursor;
             } else {
                 let Some((method, next_cursor)) =
@@ -5748,6 +5873,9 @@ impl PRT_Parser {
                 ItemProduction::Macro => ast::ItemKind::Macro(
                     self.parse_macro_reduction(tokens, item_start, item_end)?,
                 ),
+                ItemProduction::TypeAlias => ast::ItemKind::TypeAlias(
+                    self.parse_type_alias_reduction(tokens, item_start, item_end)?,
+                ),
             };
 
             let mut retained = Vec::new();
@@ -5910,7 +6038,7 @@ impl PRT_Parser {
             ast::ItemKind::ExternVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
-            ast::ItemKind::Impl(_) | ast::ItemKind::Import(_) | ast::ItemKind::ExternBlock(_) | ast::ItemKind::Macro(_) => {}
+            ast::ItemKind::Impl(_) | ast::ItemKind::Import(_) | ast::ItemKind::ExternBlock(_) | ast::ItemKind::Macro(_) | ast::ItemKind::TypeAlias(_) => {}
         }
     }
 }
