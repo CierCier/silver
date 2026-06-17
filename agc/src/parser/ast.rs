@@ -376,6 +376,14 @@ pub enum EnumVariantData {
 pub enum TraitItemKind {
     Function(TraitFunction),
     AssociatedType(AssociatedType),
+    AssociatedFunctionValue(AssociatedFunctionValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedFunctionValue {
+    pub name: Identifier,
+    pub fn_type: FunctionType,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

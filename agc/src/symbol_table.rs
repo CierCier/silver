@@ -291,14 +291,17 @@ impl CompilerSymbolTable {
                     phase,
                 );
                 for member in &trait_item.items {
-                    if let ast::TraitItemKind::Function(func) = member {
-                        self.upsert(
-                            format!("{}::{}", trait_item.name.name, func.name.name),
-                            SymbolKind::TraitMethod,
-                            Some(func.name.span.clone()),
-                            phase,
-                        );
-                    }
+                    let (name, span) = match member {
+                        ast::TraitItemKind::Function(func) => (&func.name.name, Some(func.name.span.clone())),
+                        ast::TraitItemKind::AssociatedFunctionValue(fv) => (&fv.name.name, Some(fv.name.span.clone())),
+                        _ => continue,
+                    };
+                    self.upsert(
+                        format!("{}::{}", trait_item.name.name, name),
+                        SymbolKind::TraitMethod,
+                        span,
+                        phase,
+                    );
                 }
             }
             ast::ItemKind::Impl(impl_item) => {
