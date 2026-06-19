@@ -627,6 +627,20 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             name: assoc.name.name.clone(),
                             signature: "associated_type".to_string(),
                         }),
+                        ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+                            let params = fv
+                                .fn_type
+                                .parameters
+                                .iter()
+                                .map(|p| Type::from_ast(p).canonical_key())
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let ret = Type::from_ast(&fv.fn_type.return_type).canonical_key();
+                            Some(ModuleTraitItem {
+                                name: fv.name.name.clone(),
+                                signature: format!("fn({params})->{ret}"),
+                            })
+                        }
                     })
                     .collect::<Vec<_>>();
                 exports.push(ModuleExport {

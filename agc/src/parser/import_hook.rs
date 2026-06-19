@@ -360,6 +360,7 @@ impl<'a> ImportAliasRewriter<'a> {
                             );
                         }
                         ast::TraitItemKind::AssociatedType(_) => {}
+                        ast::TraitItemKind::AssociatedFunctionValue(_) => {}
                     }
                 }
             }

@@ -1,15 +1,15 @@
 import std.io;
 
+trait Area {
+    fn area(Circle self) -> f64;
+    fn kind(Circle self) -> str { return "shape"; }
+}
+
 struct Circle {
     f64 radius;
 }
 
-struct Rectangle {
-    f64 width;
-    f64 height;
-}
-
-impl Circle {
+impl Area for Circle {
     f64 area(Circle self) {
         return 3.14159265 * self.radius * self.radius;
     }
@@ -19,22 +19,10 @@ impl Circle {
     }
 }
 
-impl Rectangle {
-    f64 area(Rectangle self) {
-        return self.width * self.height;
-    }
-
-    str kind(Rectangle self) {
-        return "rectangle";
-    }
-}
-
 i32 main() {
     Circle c = { .radius = 5.0 };
-    Rectangle r = { .width = 3.0, .height = 4.0 };
 
     printf("A %s has area %.2f\n", c.kind(), c.area());
-    printf("A %s has area %.2f\n", r.kind(), r.area());
 
     return 0;
 }

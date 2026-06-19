@@ -330,6 +330,14 @@ fn trait_item_node(item: &ast::TraitItemKind) -> Node {
             }
             node
         }
+        ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+            let mut node = Node::new(format!("AssociatedFunctionValue {}", fv.name.name));
+            node.children.push(type_node(&ast::Type {
+                kind: Box::new(ast::TypeKind::Function(fv.fn_type.clone())),
+                span: fv.span.clone(),
+            }));
+            node
+        }
     }
 }
 

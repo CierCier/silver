@@ -22,9 +22,17 @@ struct TraitDef {
     name: String,
     methods: HashMap<String, TraitMethod>,
     assoc_types: HashMap<String, TraitAssocType>,
+    assoc_fn_values: HashMap<String, TraitAssocFnValue>,
     super_traits: Vec<String>,
     type_params: Vec<String>,
     type_param_bounds: HashMap<String, Vec<ast::TraitBound>>,
+    span: Span,
+}
+
+#[derive(Debug, Clone)]
+struct TraitAssocFnValue {
+    name: String,
+    fn_type: Type,
     span: Span,
 }
 
@@ -88,6 +96,7 @@ impl TraitRegistry {
                 name: trait_item.name.name.clone(),
                 methods: HashMap::new(),
                 assoc_types: HashMap::new(),
+                assoc_fn_values: HashMap::new(),
                 super_traits: Vec::new(),
                 type_params: Vec::new(),
                 type_param_bounds: HashMap::new(),
@@ -199,6 +208,36 @@ impl TraitRegistry {
                         for bound in &assoc.bounds {
                             validate_bound_trait(&registry.trait_names, bound, &mut errors);
                         }
+                    }
+                    ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+                        let name = fv.name.name.clone();
+                        if def.assoc_fn_values.contains_key(&name) {
+                            errors.push(TraitError {
+                                message: format!(
+                                    "duplicate associated function value '{}' in trait '{}'",
+                                    name, trait_item.name.name
+                                ),
+                                span: fv.name.span.clone(),
+                            });
+                            continue;
+                        }
+                        let fn_type = Type::Function {
+                            params: fv
+                                .fn_type
+                                .parameters
+                                .iter()
+                                .map(Type::from_ast)
+                                .collect(),
+                            return_type: Box::new(Type::from_ast(&fv.fn_type.return_type)),
+                        };
+                        def.assoc_fn_values.insert(
+                            name.clone(),
+                            TraitAssocFnValue {
+                                name,
+                                fn_type,
+                                span: fv.span.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -428,6 +467,82 @@ impl TraitRegistry {
                             assoc.name, trait_def.name
                         ),
                         span: assoc.span.clone(),
+                    });
+                }
+            }
+
+            for fv in trait_def.assoc_fn_values.values() {
+                let Some(impl_method) = impl_methods.get(&fv.name) else {
+                    errors.push(TraitError {
+                        message: format!(
+                            "missing associated function value '{}' for trait '{}'",
+                            fv.name, trait_def.name
+                        ),
+                        span: fv.span.clone(),
+                    });
+                    continue;
+                };
+
+                if impl_method.method_kind != ast::MethodKind::Static {
+                    errors.push(TraitError {
+                        message: format!(
+                            "associated function value '{}' must be a static function (no self parameter)",
+                            fv.name
+                        ),
+                        span: impl_method.span.clone(),
+                    });
+                    continue;
+                }
+
+                let params: Vec<Type> = impl_method
+                    .parameters
+                    .iter()
+                    .map(|p| Type::from_ast(&p.param_type))
+                    .collect();
+                let expected_fn = &fv.fn_type;
+                let Type::Function { params: expected_params, return_type: expected_ret } = expected_fn else {
+                    continue;
+                };
+
+                if params.len() != expected_params.len() {
+                    errors.push(TraitError {
+                        message: format!(
+                            "associated function value '{}' parameter count mismatch: expected {}, found {}",
+                            fv.name, expected_params.len(), params.len()
+                        ),
+                        span: impl_method.span.clone(),
+                    });
+                    continue;
+                }
+
+                for (idx, (expected, found)) in expected_params.iter().zip(params.iter()).enumerate() {
+                    if !unify_type(expected, found, &subst, &impl_generics, &mut impl_subst) {
+                        errors.push(TraitError {
+                            message: format!(
+                                "associated function value '{}' parameter {} type mismatch",
+                                fv.name, idx
+                            ),
+                            span: impl_method.span.clone(),
+                        });
+                        break;
+                    }
+                }
+
+                let return_type = impl_method.return_type.as_ref().map(Type::from_ast);
+                let matches = match (expected_ret.as_ref(), &return_type) {
+                    (expected, Some(found)) => {
+                        unify_type(expected, found, &subst, &impl_generics, &mut impl_subst)
+                    }
+                    (Type::Unit, None) => true,
+                    _ => false,
+                };
+                if !matches {
+                    errors.push(TraitError {
+                        message: format!(
+                            "associated function value '{}' return type mismatch",
+                            fv.name
+                        ),
+                        span: impl_method.span.clone(),
                     });
                 }
             }
@@ -941,5 +1056,95 @@ mod tests {
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_missing_is_error() {
+        let program = parse(
+            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_provided_is_ok() {
+        let program = parse(
+            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_param_count_mismatch() {
+        let program = parse(
+            "trait HasHandler { handler: (i32, i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_param_type_mismatch() {
+        let program = parse(
+            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i64 handler(i64 x) { return x; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_return_type_mismatch() {
+        let program = parse(
+            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i64 handler(i32 x) { return 0; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_with_self_is_error() {
+        let program = parse(
+            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 self, i32 x) { return x; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_multi_param_ok() {
+        let program = parse(
+            "trait BinOp { op: (f64, f64) -> f64; } impl BinOp for i32 { f64 op(f64 a, f64 b) { return a + b; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_void_return_ok() {
+        let program = parse(
+            "trait Logger { log: (i32) -> void; } impl Logger for i32 { void log(i32 x) { } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
+    }
+
+    #[test]
+    fn trait_mixed_fn_value_and_methods_ok() {
+        let program = parse(
+            "trait Foo { handler: (i32) -> i32; fn do_thing(i32 self) -> i32; } impl Foo for i32 { i32 handler(i32 x) { return x; } i32 do_thing(i32 self) { return self; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
+    }
+
+    #[test]
+    fn trait_associated_fn_value_duplicate_is_error() {
+        let program = parse(
+            "trait Foo { handler: (i32) -> i32; handler: (i32) -> i32; }",
+        );
+        let errors = validate_traits(&program);
+        assert!(!errors.is_empty(), "expected trait errors");
     }
 }

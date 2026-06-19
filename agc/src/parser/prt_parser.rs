@@ -909,7 +909,46 @@ impl PRT_Parser {
             }
         }
 
-        let mut ty = if matches!(tokens[cursor].kind, Token::LeftBracket) {
+        let mut ty = if matches!(tokens[cursor].kind, Token::LeftParen) {
+            let open = cursor;
+            cursor += 1;
+            let mut params = Vec::new();
+            while cursor < end && !matches!(tokens[cursor].kind, Token::RightParen) {
+                let (param, next) = self.parse_type_prefix(tokens, cursor, end)?;
+                params.push(param);
+                cursor = next;
+                if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                    cursor += 1;
+                }
+            }
+            if cursor >= end {
+                return None;
+            }
+            cursor += 1;
+            if cursor < end && matches!(tokens[cursor].kind, Token::Arrow) {
+                cursor += 1;
+                let (ret, next) = self.parse_type_prefix(tokens, cursor, end)?;
+                cursor = next;
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
+                        parameters: params,
+                        return_type: Box::new(ret),
+                    })),
+                    span: Span {
+                        start: tokens[start].span.start,
+                        end: tokens[cursor - 1].span.end,
+                    },
+                }
+            } else {
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Tuple(params)),
+                    span: Span {
+                        start: tokens[open].span.start,
+                        end: tokens[cursor - 1].span.end,
+                    },
+                }
+            }
+        } else if matches!(tokens[cursor].kind, Token::LeftBracket) {
             let (element_type, after_element) = self.parse_type_prefix(tokens, cursor + 1, end)?;
             if !matches!(
                 tokens.get(after_element).map(|t| &t.kind),
@@ -4701,6 +4740,17 @@ impl PRT_Parser {
                 cursor = next_cursor;
                 continue;
             }
+            if let Token::Identifier(_) = &tokens[cursor].kind {
+                if cursor + 1 < end
+                    && matches!(tokens[cursor + 1].kind, Token::Colon)
+                {
+                    let (item, next_cursor) =
+                        self.parse_trait_associated_fn_value_item(tokens, cursor, end - 1)?;
+                    items.push(ast::TraitItemKind::AssociatedFunctionValue(item));
+                    cursor = next_cursor;
+                    continue;
+                }
+            }
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported trait item".to_string(),
                 span: tokens[cursor].span.clone(),
@@ -4917,6 +4967,72 @@ impl PRT_Parser {
                 },
                 bounds,
                 default,
+                span: Span {
+                    start: tokens[start].span.start,
+                    end: tokens[item_end - 1].span.end,
+                },
+            },
+            item_end,
+        ))
+    }
+
+    fn parse_trait_associated_fn_value_item(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<(ast::AssociatedFunctionValue, usize), ParseError> {
+        let name_token = &tokens[start];
+        let Token::Identifier(name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected associated function value name".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+
+        let mut cursor = start + 1;
+        if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ':' after associated function value name".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let (fn_type, next_cursor) =
+            self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "invalid associated function value type".to_string(),
+                    span: tokens[cursor.min(end - 1)].span.clone(),
+                }
+            })?;
+        cursor = next_cursor;
+
+        if cursor >= end || !matches!(tokens[cursor].kind, Token::Semicolon) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ';' after associated function value".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        let item_end = cursor + 1;
+
+        let func_type = match fn_type.kind.as_ref() {
+            ast::TypeKind::Function(f) => f.clone(),
+            _ => {
+                return Err(ParseError::InvalidSyntax {
+                    message: "associated function value must have a function type".to_string(),
+                    span: fn_type.span,
+                });
+            }
+        };
+
+        Ok((
+            ast::AssociatedFunctionValue {
+                name: ast::Identifier {
+                    name: name.clone(),
+                    span: name_token.span.clone(),
+                },
+                fn_type: func_type,
                 span: Span {
                     start: tokens[start].span.start,
                     end: tokens[item_end - 1].span.end,
