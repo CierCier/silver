@@ -92,8 +92,7 @@ pub enum Token {
     StarAssign,
     SlashAssign,
     PercentAssign,
-    LeftShift,
-    RightShift,
+
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
@@ -358,8 +357,6 @@ impl Lexer {
             '<' => {
                 if self.match_char('=') {
                     Ok(Token::LessEqual)
-                } else if self.match_char('<') {
-                    Ok(Token::LeftShift)
                 } else {
                     Ok(Token::Less)
                 }
@@ -367,8 +364,6 @@ impl Lexer {
             '>' => {
                 if self.match_char('=') {
                     Ok(Token::GreaterEqual)
-                } else if self.match_char('>') {
-                    Ok(Token::RightShift)
                 } else {
                     Ok(Token::Greater)
                 }
@@ -728,18 +723,19 @@ impl Lexer {
     }
 
     fn advance(&mut self) -> char {
-        let ch = self.input.chars().nth(self.position).unwrap_or('\0');
+        let ch = *self.input.as_bytes().get(self.position).unwrap_or(&0) as char;
         self.position += 1;
         self.column += 1;
         ch
     }
 
     fn peek(&self) -> char {
-        self.input.chars().nth(self.position).unwrap_or('\0')
+        self.input.as_bytes().get(self.position).copied().unwrap_or(0) as char
     }
 
     fn peek_next(&self) -> Option<char> {
-        self.input.chars().nth(self.position + 1)
+        let bytes = self.input.as_bytes();
+        bytes.get(self.position + 1).copied().map(|b| b as char)
     }
 
     fn match_char(&mut self, expected: char) -> bool {
