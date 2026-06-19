@@ -279,6 +279,12 @@ impl Analyzer {
                                 self.check_type(default);
                             }
                         }
+                        ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+                            for param in &fv.fn_type.parameters {
+                                self.check_type(param);
+                            }
+                            self.check_type(&fv.fn_type.return_type);
+                        }
                     }
                 }
                 self.pop_type_params();

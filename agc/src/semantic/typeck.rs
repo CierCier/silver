@@ -2837,6 +2837,12 @@ impl TypeChecker {
                                 Self::resolve_type_aliases_in_type(default, aliases);
                             }
                         }
+                        ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+                            for param in &mut fv.fn_type.parameters {
+                                Self::resolve_type_aliases_in_type(param, aliases);
+                            }
+                            Self::resolve_type_aliases_in_type(&mut fv.fn_type.return_type, aliases);
+                        }
                     }
                 }
             }

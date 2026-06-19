@@ -1,0 +1,26 @@
+import std.io;
+
+trait HasHandler {
+    handler: (i32) -> i32;
+}
+
+struct Doubler {}
+struct Tripler {}
+
+impl HasHandler for Doubler {
+    i32 handler(i32 x) {
+        return x * 2;
+    }
+}
+
+impl HasHandler for Tripler {
+    i32 handler(i32 x) {
+        return x * 3;
+    }
+}
+
+i32 main() {
+    printf("Doubler::handler(7) = %d\n", Doubler.handler(7));
+    printf("Tripler::handler(7) = %d\n", Tripler.handler(7));
+    return 0;
+}
