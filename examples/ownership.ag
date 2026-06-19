@@ -1,0 +1,78 @@
+// ownership.ag -- Ownership transfer with `move`
+//
+// Variables own their value. When a variable goes out of scope its
+// implicit destructor (`drop`) runs automatically.  The `move` keyword
+// transfers ownership: the source variable is left in an "already
+// dropped" state so only the destination cleans up.
+//
+// This prevents double-free without garbage collection.
+
+import std.io;
+import std.mem;
+
+// A resource that logs every construction and destruction.
+i32 live_count = 0;
+
+struct Buffer {
+    i32* data;
+    i32 length;
+}
+
+impl Buffer {
+    void init(Buffer* self, i32 len) {
+        (*self).data = alloc<i32>(len);
+        (*self).length = len;
+        live_count = live_count + 1;
+        printf("  [create] Buffer(len=%d)  live=%d\n", len, live_count);
+    }
+
+    void drop(Buffer* self) {
+        if ((*self).data != (i32*)0) {
+            free((*self).data);
+            (*self).data = (i32*)0;
+        }
+        live_count = live_count - 1;
+        printf("  [destroy] Buffer(len=%d)  live=%d\n",
+               (*self).length, live_count);
+    }
+}
+
+i32 main() {
+    printf("=== Ownership: scope-based teardown ===\n");
+    {
+        Buffer b;
+        b.init(16);
+        printf("  using buffer...\n");
+    }
+    printf("  (after scope) live=%d\n\n", live_count);
+
+    printf("=== Transfer: move prevents double-free ===\n");
+    {
+        Buffer a;
+        a.init(32);
+
+        // `move a` transfers ownership to `b`.
+        // `a`'s drop flag is cleared -- the destructor for `a`
+        // will NOT run, only `b`'s drops when this scope exits.
+        Buffer b = move a;
+        printf("  moved a -> b  (b.len=%d)\n", b.length);
+
+        // At scope exit, only `b` is destroyed.  Without `move`,
+        // both `a` and `b` would call `free()` on the same pointer.
+    }
+    printf("  (after move scope) live=%d\n\n", live_count);
+
+    // Without move, a copy would alias the same pointer and both
+    // destructors would fire.  `move` makes the intent explicit.
+    printf("=== Default: without move, destructor runs ===\n");
+    {
+        Buffer x;
+        x.init(8);
+        printf("  x.len=%d\n", x.length);
+        // x.drop() runs at scope end
+    }
+    printf("  live=%d\n\n", live_count);
+
+    printf("All OK\n");
+    return 0;
+}

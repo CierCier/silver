@@ -260,6 +260,14 @@ impl Analyzer {
             ast::ItemKind::Trait(trait_item) => {
                 self.push_type_params(trait_item.generics.as_ref());
                 self.check_generics_bounds(trait_item.generics.as_ref());
+                // Register associated type names so method signatures can reference them
+                for item in &trait_item.items {
+                    if let ast::TraitItemKind::AssociatedType(assoc) = item {
+                        if let Some(scope) = self.type_params.last_mut() {
+                            scope.insert(assoc.name.name.clone());
+                        }
+                    }
+                }
                 for item in &trait_item.items {
                     match item {
                         ast::TraitItemKind::Function(func) => {
@@ -407,6 +415,7 @@ impl Analyzer {
                 }
             }
             ast::StatementKind::Continue => {}
+            ast::StatementKind::Defer(inner) => self.check_statement(inner),
         }
     }
 

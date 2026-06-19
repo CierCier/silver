@@ -465,6 +465,7 @@ impl<'a> ImportAliasRewriter<'a> {
             ast::StatementKind::Return(None)
             | ast::StatementKind::Break(None)
             | ast::StatementKind::Continue => {}
+            ast::StatementKind::Defer(inner) => self.rewrite_statement(inner),
         }
     }
 

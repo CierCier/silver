@@ -1,17 +1,18 @@
 import std.io;
+import std.math;
 
-trait Area {
-    fn area(Circle self) -> f64;
-    fn kind(Circle self) -> str { return "shape"; }
+trait Area<Self> {
+    f64 area(Self self);
+    str kind(Self self) { return "shape"; }
 }
 
 struct Circle {
     f64 radius;
 }
 
-impl Area for Circle {
+impl Area<Circle> for Circle {
     f64 area(Circle self) {
-        return 3.14159265 * self.radius * self.radius;
+        return M_PI * self.radius * self.radius;
     }
 
     str kind(Circle self) {
@@ -21,7 +22,6 @@ impl Area for Circle {
 
 i32 main() {
     Circle c = { .radius = 5.0 };
-
     printf("A %s has area %.2f\n", c.kind(), c.area());
 
     return 0;

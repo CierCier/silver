@@ -26,6 +26,7 @@ pub enum Token {
     Break,
     Continue,
     Return,
+    Defer,
     Import,
     Comptime,
     Cast,
@@ -600,6 +601,7 @@ impl Lexer {
             "break" => Token::Break,
             "continue" => Token::Continue,
             "return" => Token::Return,
+            "defer" => Token::Defer,
             "import" => Token::Import,
             "comptime" => Token::Comptime,
             "cast" => Token::Cast,
@@ -1022,7 +1024,7 @@ mod tests {
         // Skip keywords as they should be tokenized as keywords, not identifiers
         let keywords = [
             "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "if", "else", "while",
-            "for", "break", "continue", "return", "import", "comptime", "cast", "move", "ref",
+            "for", "break", "continue", "return", "defer", "import", "comptime", "cast", "move", "ref",
             "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128", "u8",
             "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
             "bool", "str", "char", "void", "Vec", "Optional",
@@ -1110,6 +1112,7 @@ mod tests {
             ("break", Token::Break),
             ("continue", Token::Continue),
             ("return", Token::Return),
+            ("defer", Token::Defer),
             ("import", Token::Import),
             ("comptime", Token::Comptime),
             ("cast", Token::Cast),

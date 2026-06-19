@@ -463,6 +463,11 @@ fn statement_node(statement: &ast::Statement) -> Node {
             n
         }
         ast::StatementKind::Continue => Node::new("Statement::Continue"),
+        ast::StatementKind::Defer(inner) => {
+            let mut n = Node::new("Statement::Defer");
+            n.children.push(statement_node(inner));
+            n
+        }
     };
     node.label = format!(
         "{} [{}..{}]",

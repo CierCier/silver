@@ -164,6 +164,14 @@ fn collect_item_instantiations(
         }
         ast::ItemKind::Trait(trait_item) => {
             push_type_params(scopes, trait_item.generics.as_ref());
+            // Register associated type names so they're treated as type params
+            for item in &trait_item.items {
+                if let ast::TraitItemKind::AssociatedType(assoc) = item {
+                    if let Some(scope) = scopes.last_mut() {
+                        scope.insert(assoc.name.name.clone());
+                    }
+                }
+            }
             for item in &trait_item.items {
                 if let ast::TraitItemKind::Function(func) = item {
                     push_type_params(scopes, func.generics.as_ref());
@@ -288,6 +296,9 @@ fn collect_statement_instantiations(
             collect_expression_instantiations(expr, generic_structs, instantiations, scopes)
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+        ast::StatementKind::Defer(inner) => {
+            collect_statement_instantiations(inner, generic_structs, instantiations, scopes)
+        }
         ast::StatementKind::Continue => {}
     }
 }
@@ -775,6 +786,7 @@ fn substitute_statement_types(stmt: &mut ast::Statement, mapping: &HashMap<Strin
         | ast::StatementKind::Break(Some(expr)) => substitute_expression_types(expr, mapping),
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
         ast::StatementKind::Continue => {}
+        ast::StatementKind::Defer(inner) => substitute_statement_types(inner, mapping),
     }
 }
 
@@ -990,6 +1002,9 @@ fn rewrite_statement_function_calls(
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
         ast::StatementKind::Continue => {}
+        ast::StatementKind::Defer(inner) => {
+            rewrite_statement_function_calls(inner, name, args, mangled, span)
+        }
     }
 }
 
@@ -1205,6 +1220,9 @@ fn rewrite_statement_method_calls(
             rewrite_expression_method_calls(expr, base, method, args, span)
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+        ast::StatementKind::Defer(inner) => {
+            rewrite_statement_method_calls(inner, base, method, args, span)
+        }
         ast::StatementKind::Continue => {}
     }
 }

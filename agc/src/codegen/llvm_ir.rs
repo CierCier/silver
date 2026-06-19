@@ -64,6 +64,22 @@ struct VarInfo<'ctx> {
     ty: ast::Type,
 }
 
+#[derive(Clone)]
+enum DeferAction<'ctx> {
+    /// Execute a parsed AST statement (from `defer { }` or `defer stmt;`)
+    Statement(ast::Statement),
+    /// Call the drop function for a variable: (mangled_fn_name, ptr_to_var)
+    DropCall(String, PointerValue<'ctx>),
+}
+
+#[derive(Clone)]
+struct DeferredEntry<'ctx> {
+    action: DeferAction<'ctx>,
+    /// Optional i1* drop flag; if set, action only executes when the flag is true
+    flag: Option<PointerValue<'ctx>>,
+}
+
+
 pub struct LlvmIrGenerator<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -80,6 +96,8 @@ pub struct LlvmIrGenerator<'ctx> {
     struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     enum_backing_types: HashMap<String, ast::PrimitiveType>,
     enum_variants: HashMap<String, HashMap<String, i128>>,
+    defers: Vec<Vec<DeferredEntry<'ctx>>>,
+    drop_flags: HashMap<String, PointerValue<'ctx>>,
     method_receivers: HashMap<(String, String), bool>,
     string_constants: HashMap<String, PointerValue<'ctx>>,
     struct_generics: HashMap<String, Vec<String>>,
@@ -88,6 +106,7 @@ pub struct LlvmIrGenerator<'ctx> {
         inkwell::basic_block::BasicBlock<'ctx>,
         inkwell::basic_block::BasicBlock<'ctx>,
     )>,
+    loop_defers_base: Vec<usize>,
     symbol_table: CompilerSymbolTable,
     debug: Option<DebugContext<'ctx>>,
     source_map: Option<SourceMap>,
@@ -169,11 +188,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_fields: HashMap::new(),
             enum_backing_types: HashMap::new(),
             enum_variants: HashMap::new(),
+            defers: vec![vec![]],
+            drop_flags: HashMap::new(),
             method_receivers: HashMap::new(),
             string_constants: HashMap::new(),
             struct_generics: HashMap::new(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
+            loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
             source_map,
@@ -239,11 +261,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_fields: HashMap::new(),
             enum_backing_types: HashMap::new(),
             enum_variants: HashMap::new(),
+            defers: vec![vec![]],
+            drop_flags: HashMap::new(),
             method_receivers: HashMap::new(),
             string_constants: HashMap::new(),
             struct_generics: HashMap::new(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
+            loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
             source_map,
@@ -478,11 +503,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_fields: HashMap::new(),
             enum_backing_types: HashMap::new(),
             enum_variants: HashMap::new(),
+            defers: vec![vec![]],
+            drop_flags: HashMap::new(),
             method_receivers: HashMap::new(),
             string_constants: HashMap::new(),
             struct_generics: HashMap::new(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
+            loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
             source_map,
@@ -1277,11 +1305,77 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     fn push_scope(&mut self) {
         self.variables.push(HashMap::new());
+        self.defers.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
         let _ = self.variables.pop();
+        let _ = self.defers.pop();
     }
+
+    fn emit_defers(&mut self, levels: usize) -> CodegenResult<()> {
+        let total = self.defers.len();
+        if levels == 0 || total == 0 {
+            return Ok(());
+        }
+        let start = total.saturating_sub(levels);
+        // Clone scopes to avoid borrow conflicts, emit without draining
+        let scopes: Vec<Vec<DeferredEntry<'ctx>>> = self.defers[start..].to_vec();
+        for mut scope in scopes.into_iter() {
+            for entry in scope.iter_mut().rev() {
+                let function = self.current_fn.ok_or_else(|| {
+                    CodegenError::new("no active function for defer emission".to_string())
+                })?;
+
+                // Build conditional guard if drop flag is present
+                let after_bb = if let Some(flag_ptr) = entry.flag {
+                    let flag_val = self.builder.build_load(
+                        self.context.bool_type(),
+                        flag_ptr,
+                        "defer.flag",
+                    ).map_err(|e| CodegenError::new(format!("failed to load defer flag: {e}")))?;
+
+                    let run_bb = self.context.append_basic_block(function, "defer.run");
+                    let after_bb = self.context.append_basic_block(function, "defer.after");
+
+                    self.builder.build_conditional_branch(
+                        flag_val.into_int_value(),
+                        run_bb,
+                        after_bb,
+                    ).map_err(|e| CodegenError::new(format!("failed to branch defer: {e}")))?;
+
+                    self.builder.position_at_end(run_bb);
+                    Some(after_bb)
+                } else {
+                    None
+                };
+
+                // Execute the deferred action
+                match &entry.action {
+                    DeferAction::Statement(stmt) => {
+                        self.generate_statement(stmt)?;
+                    }
+                    DeferAction::DropCall(drop_fn_name, var_ptr) => {
+                        if let Some(func) = self.module.get_function(drop_fn_name) {
+                            let args = vec![BasicMetadataValueEnum::from(*var_ptr)];
+                            self.builder.build_call(func, &args, "drop").map_err(|e| {
+                                CodegenError::new(format!("failed to call drop: {e}"))
+                            })?;
+                        }
+                    }
+                }
+
+                // If we had a conditional guard, resume at after_bb
+                if let Some(after) = after_bb {
+                    self.builder.build_unconditional_branch(after)
+                        .map_err(|e| CodegenError::new(format!("failed to branch after defer: {e}")))?;
+                    self.builder.position_at_end(after);
+                }
+            }
+        }
+        Ok(())
+    }
+
 
     fn lookup_variable(&self, name: &str) -> Option<VarInfo<'ctx>> {
         self.variables
@@ -1832,6 +1926,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::StatementKind::Return(None)
                 | ast::StatementKind::Break(None)
                 | ast::StatementKind::Continue => {}
+                ast::StatementKind::Defer(inner) => {
+                    match &mut inner.kind {
+                        ast::StatementKind::Block(block) => {
+                            Self::substitute_block_types(block, mapping)
+                        }
+                        ast::StatementKind::Let(let_stmt) => {
+                            if let Some(annotation) = &mut let_stmt.type_annotation {
+                                *annotation = Self::substitute_generic_type(annotation, mapping);
+                            }
+                            if let Some(init) = &mut let_stmt.initializer {
+                                Self::substitute_expression_types(init, mapping);
+                            }
+                        }
+                        ast::StatementKind::Expression(expr)
+                        | ast::StatementKind::Return(Some(expr))
+                        | ast::StatementKind::Break(Some(expr)) => {
+                            Self::substitute_expression_types(expr, mapping)
+                        }
+                        ast::StatementKind::Return(None)
+                        | ast::StatementKind::Break(None)
+                        | ast::StatementKind::Continue => {}
+                        ast::StatementKind::Defer(_) => {} // nested defer (no further nesting to chase)
+                    }
+                }
             }
         }
     }
@@ -2977,6 +3095,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "for-in loop cannot be used as a value expression",
                 expr.span.clone(),
             )),
+            ast::ExpressionKind::Move(inner) => {
+                let value = self.emit_expression_value(inner)?;
+                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
+                    if let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
+                        self.builder.build_store(
+                            flag_ptr,
+                            self.context.bool_type().const_int(0, false),
+                        ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+                    }
+                }
+                Ok(value)
+            }
+            ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
             _ => Err(CodegenError::with_span(
                 format!(
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
@@ -5325,8 +5456,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed while condition branch: {e}")))?;
 
         self.loop_stack.push((end_bb, cond_bb));
+        self.loop_defers_base.push(self.defers.len());
         self.builder.position_at_end(body_bb);
         self.generate_block(body)?;
+        self.loop_defers_base.pop();
         let body_terminated = self
             .builder
             .get_insert_block()
@@ -5376,8 +5509,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed for condition branch: {e}")))?;
 
         self.loop_stack.push((end_bb, incr_bb));
+        self.loop_defers_base.push(self.defers.len());
         self.builder.position_at_end(body_bb);
         self.generate_block(body)?;
+        self.loop_defers_base.pop();
         let body_terminated = self
             .builder
             .get_insert_block()
@@ -5483,8 +5618,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
                 self.loop_stack.push((end_bb, cond_bb));
+                self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
                 self.generate_block(body)?;
+                self.loop_defers_base.pop();
 
                 let i_val2_raw = self
                     .builder
@@ -5612,6 +5749,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
                 self.loop_stack.push((end_bb, cond_bb));
+                self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
 
                 let item_llvm_ty = {
@@ -5664,6 +5802,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.builder.build_unconditional_branch(cond_bb)
                         .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
                 }
+                self.loop_defers_base.pop();
                 self.loop_stack.pop();
 
                 self.builder.position_at_end(end_bb);
@@ -5736,8 +5875,48 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         })?;
 
         let ty = inferred_ty;
+        let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
             scope.insert(identifier.name.clone(), VarInfo { ptr: alloca, ty });
+        }
+
+        // Check if this variable's type has a drop method (implicit destructor)
+        let drop_owners = Self::owner_name_candidates_from_type(&ty_for_drop);
+        let needs_drop = drop_owners.iter().any(|owner| {
+            let drop_name = Self::mangle_method_name(owner, "drop");
+            self.module.get_function(&drop_name).is_some()
+                || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                    .ok()
+                    .flatten()
+                    .is_some()
+        });
+
+        if needs_drop {
+            let function = self.current_fn.ok_or_else(|| {
+                CodegenError::new("no active function for destructor".to_string())
+            })?;
+            // Create a drop flag (i1), initialized to true
+            let flag_alloca = self.create_entry_alloca(function, &format!("{}.drop", identifier.name), self.context.bool_type().as_basic_type_enum())?;
+            self.builder.build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+                .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
+            self.drop_flags.insert(identifier.name.clone(), flag_alloca);
+
+            // Construct the drop function name from the first matching owner
+            let drop_fn_name = drop_owners.iter().find_map(|owner| {
+                let name = Self::mangle_method_name(owner, "drop");
+                if self.module.get_function(&name).is_some() || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop").ok().flatten().is_some() {
+                    Some(name)
+                } else {
+                    None
+                }
+            }).unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
+
+            if let Some(scope) = self.defers.last_mut() {
+                scope.push(DeferredEntry {
+                    action: DeferAction::DropCall(drop_fn_name, alloca),
+                    flag: Some(flag_alloca),
+                });
+            }
         }
         Ok(())
     }
@@ -6490,6 +6669,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 break;
             }
         }
+        self.emit_defers(1)?;
         self.pop_scope();
         Ok(())
     }
@@ -6530,7 +6710,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 _ => self.emit_expression_statement(expr),
             },
             ast::StatementKind::Let(let_stmt) => self.emit_let_statement(let_stmt, &statement.span),
+            ast::StatementKind::Defer(inner) => {
+                if let Some(scope) = self.defers.last_mut() {
+                    scope.push(DeferredEntry {
+                        action: DeferAction::Statement(*inner.clone()),
+                        flag: None,
+                    });
+                }
+                Ok(())
+            }
             ast::StatementKind::Return(expr) => {
+                self.emit_defers(self.defers.len())?;
                 if let Some(expr) = expr {
                     let mut value = self.emit_expression_value(expr)?;
                     if let Some(return_ty) = self.current_return_type.clone() {
@@ -6553,6 +6743,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 Ok(())
             }
             ast::StatementKind::Break(_) => {
+                let loop_base = self.loop_defers_base.last().copied().unwrap_or(0);
+                let levels = self.defers.len().saturating_sub(loop_base);
+                self.emit_defers(levels)?;
                 let Some((break_block, _)) = self.loop_stack.last().copied() else {
                     return Err(CodegenError::with_span(
                         "break used outside of a loop",
@@ -6570,6 +6763,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 Ok(())
             }
             ast::StatementKind::Continue => {
+                let loop_base = self.loop_defers_base.last().copied().unwrap_or(0);
+                let levels = self.defers.len().saturating_sub(loop_base);
+                self.emit_defers(levels)?;
                 let Some((_, continue_block)) = self.loop_stack.last().copied() else {
                     return Err(CodegenError::with_span(
                         "continue used outside of a loop",
