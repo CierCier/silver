@@ -475,6 +475,7 @@ pub enum StatementKind {
     Return(Option<Expression>),
     Break(Option<Expression>),
     Continue,
+    Defer(Box<Statement>),
 }
 
 /// Let statements (variable declarations)

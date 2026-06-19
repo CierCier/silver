@@ -385,6 +385,12 @@ impl TraitRegistry {
                 }
             }
 
+            // Insert associated types into subst so method signatures can
+            // reference them (e.g. fn next(&self) -> Optional<Item>)
+            for (name, assoc) in &impl_assoc {
+                subst.insert(name.clone(), Type::from_ast(&assoc.type_def));
+            }
+
             for super_name in &trait_def.super_traits {
                 if !self.has_impl(super_name, &self_key, program) {
                     errors.push(TraitError {

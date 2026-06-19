@@ -1,0 +1,33 @@
+import std.mem;
+
+i32 drop_count = 0;
+
+i32 main() {
+    // Test that defer works
+    {
+        defer {
+            drop_count = drop_count + 1;
+        }
+    }
+
+    if (drop_count != 1) {
+        return 1;
+    }
+
+    // Test multiple defers run in reverse order
+    drop_count = 0;
+    {
+        defer {
+            drop_count = drop_count + 10;
+        }
+        defer {
+            drop_count = drop_count + 3;
+        }
+    }
+    // LIFO: +3 first, then +10: 0+3+10 = 13
+    if (drop_count != 13) {
+        return 2;
+    }
+
+    return 0;
+}

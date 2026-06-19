@@ -56,6 +56,7 @@ fn rewrite_statement(statement: &mut ast::Statement) {
             }
         }
         ast::StatementKind::Continue => {}
+        ast::StatementKind::Defer(inner) => rewrite_statement(inner),
     }
 }
 

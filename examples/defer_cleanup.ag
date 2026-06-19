@@ -1,0 +1,68 @@
+// defer_cleanup.ag -- Deterministic cleanup with defer
+//
+// `defer` postpones a statement or block until the enclosing scope
+// exits -- whether by fallthrough, return, break, or continue.
+//
+// Patterns shown:
+//   1. Paired acquire/release at the same scope depth
+//   2. Multiple resources, reverse release (LIFO)
+//   3. Cleanup fires before early return
+
+import std.io;
+
+// Simulated resource tracking
+i32 next_id = 100;
+i32 cleanup_log = 0;
+
+i32 open(str name) {
+    i32 id = next_id;
+    next_id = next_id + 1;
+    printf("  [open] %s (fd=%d)\n", name, id);
+    return id;
+}
+
+void close(str name, i32 fd) {
+    printf("  [close] %s (fd=%d)\n", name, fd);
+    cleanup_log = cleanup_log + 1;
+}
+
+i32 main() {
+    // -- Single resource: open + defer on the same line --
+    printf("=== Single resource ===\n");
+    {
+        i32 fd = open("log");
+        defer { close("log", fd); }
+        printf("  using fd %d ...\n", fd);
+    }
+    printf("cleanup count: %d (expected 1)\n\n", cleanup_log);
+
+    // -- Multiple resources in one scope: LIFO release --
+    // Releases run in reverse order: pool, cache, config
+    printf("=== Multiple resources (LIFO) ===\n");
+    {
+        i32 cfg = open("config");
+        defer { close("config", cfg); }
+
+        i32 cache = open("cache");
+        defer { close("cache", cache); }
+
+        i32 pool = open("pool");
+        defer { close("pool", pool); }
+    }
+    printf("cleanup count: %d (expected 4)\n\n", cleanup_log);
+
+    // -- Early return still triggers all defers --
+    printf("=== Early return ===\n");
+    {
+        i32 a = open("alpha");
+        defer { close("alpha", a); }
+
+        i32 b = open("beta");
+        defer { close("beta", b); }
+
+        printf("  early return triggered\n");
+        return 0;
+    }
+
+    return 1; // unreachable
+}

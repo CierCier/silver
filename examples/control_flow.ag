@@ -1,14 +1,13 @@
 import std.io;
 
 i32 factorial(i32 n) {
-	if (n <= 1){
-		return 1;
-	}
-
-	return n * factorial(n-1);
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
 }
 
-i32 count_to(i32 limit) {
+i32 sum_while(i32 limit) {
     i32 sum = 0;
     i32 i = 0;
     while (i < limit) {
@@ -16,17 +15,6 @@ i32 count_to(i32 limit) {
         i = i + 1;
     }
     return sum;
-}
-
-i32 find_first_even(i32 start, i32 end) {
-    i32 i = start;
-    while (i < end) {
-        if (i % 2 == 0) {
-            return i;
-        }
-        i = i + 1;
-    }
-    return -1;
 }
 
 i32 skip_threes(i32 limit) {
@@ -46,18 +34,18 @@ i32 skip_threes(i32 limit) {
 }
 
 i32 main() {
-    i32 fact5 = factorial(5);
-    i32 sum10 = count_to(10);
-    i32 first_even = find_first_even(7, 20);
-    i32 partial = skip_threes(50);
-
-    printf("fact5: %d\n", fact5);
-    printf("sum10: %d\n", sum10);
-    printf("first_even: %d\n", first_even);
-    printf("partial: %d\n", partial);
+    printf("factorial(5) = %d\n", factorial(5));
+    printf("sum 0..9 = %d\n", sum_while(10));
+    printf("skip_threes(50) = %d\n", skip_threes(50));
 
     for i in 0..5 {
         printf("for-in: %d\n", i);
     }
+
+    i32 z = 40;
+    i32* p = &z;
+    *p = 50;
+    printf("z via pointer: %d\n", z);
+
     return 0;
 }

@@ -1,0 +1,50 @@
+i32 global_counter = 0;
+
+void increment() {
+    global_counter = global_counter + 1;
+}
+
+void decrement() {
+    global_counter = global_counter - 1;
+}
+
+i32 main() {
+    // Test 1: defer runs at block exit
+    {
+        defer increment();
+    }
+    // Counter should be 1 after block exits
+    if (global_counter != 1) {
+        return 1;
+    }
+
+    // Test 2: defer after decrement to restore
+    global_counter = 5;
+    {
+        defer {
+            global_counter = global_counter - 1;
+        }
+        global_counter = 100;
+    }
+    // Counter should be 99 (100 - 1)
+    if (global_counter != 99) {
+        return 2;
+    }
+
+    // Test 3: multiple defers in same block run in reverse order
+    global_counter = 0;
+    {
+        defer {
+            global_counter = global_counter * 10;
+        }
+        defer {
+            global_counter = global_counter + 3;
+        }
+    }
+    // First +3 runs (defer order: reverse), then *10: (0+3)*10 = 30
+    if (global_counter != 30) {
+        return 3;
+    }
+
+    return 0;
+}

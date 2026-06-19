@@ -3511,6 +3511,59 @@ impl PRT_Parser {
                 continue;
             }
 
+            if matches!(tokens[cursor].kind, Token::Defer) {
+                let defer_start = cursor;
+                let next = cursor + 1;
+                if next < end && matches!(tokens[next].kind, Token::LeftBrace) {
+                    let Some(close) = self.find_matching_token(
+                        tokens,
+                        next,
+                        end,
+                        Token::LeftBrace,
+                        Token::RightBrace,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "unterminated defer block".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        });
+                    };
+                    let nested = self.parse_block_reduction(tokens, next, close + 1)?;
+                    statements.push(ast::Statement {
+                        kind: ast::StatementKind::Defer(Box::new(ast::Statement {
+                            kind: ast::StatementKind::Block(nested),
+                            span: Span {
+                                start: tokens[next].span.start,
+                                end: tokens[close].span.end,
+                            },
+                        })),
+                        span: Span {
+                            start: tokens[defer_start].span.start,
+                            end: tokens[close].span.end,
+                        },
+                    });
+                    cursor = close + 1;
+                    continue;
+                } else {
+                    let Some(semicolon) = self.find_statement_terminator(tokens, next, end) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "missing ';' after defer statement".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        });
+                    };
+                    let statement_end = semicolon + 1;
+                    let stmt = self.parse_statement_reduction(tokens, next, statement_end)?;
+                    statements.push(ast::Statement {
+                        kind: ast::StatementKind::Defer(Box::new(stmt)),
+                        span: Span {
+                            start: tokens[defer_start].span.start,
+                            end: tokens[semicolon].span.end,
+                        },
+                    });
+                    cursor = statement_end;
+                    continue;
+                }
+            }
+
             if matches!(tokens[cursor].kind, Token::LeftBrace) {
                 let Some(close) = self.find_matching_token(
                     tokens,
@@ -4751,6 +4804,29 @@ impl PRT_Parser {
                     continue;
                 }
             }
+            // Fallthrough: try return-type-first syntax (like impl methods).
+            // <return_type> <name>(<params>) [; | { body }]
+            if let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, end - 1) {
+                if after_type < end - 1
+                    && matches!(
+                        tokens.get(after_type).map(|t| &t.kind),
+                        Some(Token::Identifier(_))
+                    )
+                    && after_type + 1 < end - 1
+                    && matches!(
+                        tokens.get(after_type + 1).map(|t| &t.kind),
+                        Some(Token::LeftParen)
+                    )
+                {
+                    let (item, next_cursor) =
+                        self.parse_trait_function_item_from_return_type(
+                            tokens, cursor, end - 1,
+                        )?;
+                    items.push(ast::TraitItemKind::Function(item));
+                    cursor = next_cursor;
+                    continue;
+                }
+            }
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported trait item".to_string(),
                 span: tokens[cursor].span.clone(),
@@ -4879,6 +4955,120 @@ impl PRT_Parser {
                 generics: None,
                 parameters,
                 return_type,
+                default_body,
+                span: Span {
+                    start: tokens[start].span.start,
+                    end: tokens[item_end - 1].span.end,
+                },
+            },
+            item_end,
+        ))
+    }
+
+    fn parse_trait_function_item_from_return_type(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<(ast::TraitFunction, usize), ParseError> {
+        let (return_type, after_type) =
+            self.parse_type_prefix(tokens, start, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "invalid trait method return type".to_string(),
+                    span: tokens[start].span.clone(),
+                }
+            })?;
+        let mut cursor = after_type;
+        let name_token = tokens.get(cursor).ok_or_else(|| {
+            ParseError::InvalidSyntax {
+                message: "missing trait method name".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            }
+        })?;
+        let Token::Identifier(method_name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected trait method name".to_string(),
+                span: name_token.span.clone(),
+            });
+        };
+        cursor += 1;
+        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '(' after trait method name".to_string(),
+                span: tokens[cursor.min(end - 1)].span.clone(),
+            });
+        }
+        cursor += 1;
+
+        let mut parameters = Vec::new();
+        while cursor < end {
+            if matches!(tokens[cursor].kind, Token::RightParen) {
+                cursor += 1;
+                break;
+            }
+            let (param_type, after_param_type) =
+                self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
+                    ParseError::InvalidSyntax {
+                        message: "invalid trait method parameter type".to_string(),
+                        span: tokens[cursor].span.clone(),
+                    }
+                })?;
+            cursor = after_param_type;
+            let param_name_token = tokens.get(cursor).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "expected trait method parameter name".to_string(),
+                    span: param_type.span.clone(),
+                }
+            })?;
+            let Token::Identifier(param_name) = &param_name_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected trait method parameter name".to_string(),
+                    span: param_name_token.span.clone(),
+                });
+            };
+            parameters.push(ast::Parameter {
+                name: ast::Identifier {
+                    name: param_name.clone(),
+                    span: param_name_token.span.clone(),
+                },
+                param_type: param_type.clone(),
+                is_mutable: false,
+                span: Span {
+                    start: param_type.span.start,
+                    end: param_name_token.span.end,
+                },
+            });
+            cursor += 1;
+            if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                cursor += 1;
+            }
+        }
+
+        let mut default_body = None;
+        let item_end = if cursor < end && matches!(tokens[cursor].kind, Token::Semicolon) {
+            cursor + 1
+        } else {
+            let Some(close) =
+                self.find_matching_token(tokens, cursor, end, Token::LeftBrace, Token::RightBrace)
+            else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unterminated trait method body".to_string(),
+                    span: tokens[cursor.min(end - 1)].span.clone(),
+                });
+            };
+            default_body = Some(self.parse_block_reduction(tokens, cursor, close + 1)?);
+            close + 1
+        };
+
+        Ok((
+            ast::TraitFunction {
+                name: ast::Identifier {
+                    name: method_name.clone(),
+                    span: name_token.span.clone(),
+                },
+                generics: None,
+                parameters,
+                return_type: Some(return_type),
                 default_body,
                 span: Span {
                     start: tokens[start].span.start,

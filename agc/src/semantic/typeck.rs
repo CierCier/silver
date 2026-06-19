@@ -23,8 +23,10 @@ pub struct TypeError {
 pub struct TypeChecker {
     errors: Vec<TypeError>,
     scopes: Vec<HashMap<String, Type>>,
+    moved_locals: Vec<HashSet<String>>,
     current_return: Option<Type>,
     method_symbols: HashMap<SymbolId, MethodSig>,
+    defer_depth: u32,
     methods: HashMap<(String, String), Vec<SymbolId>>,
     type_ctx: TypeContext,
     function_symbols: HashMap<SymbolId, FunctionSig>,
@@ -516,6 +518,9 @@ impl TypeChecker {
                 self.check_expr(expr, None);
             }
             ast::StatementKind::Return(value) => {
+                if self.defer_depth > 0 {
+                    self.error("return statement is not allowed inside a defer block", stmt.span.clone());
+                }
                 let expected = self.current_return.clone().unwrap_or(Type::Unit);
                 match value {
                     Some(expr) => {
@@ -548,11 +553,23 @@ impl TypeChecker {
                 }
             }
             ast::StatementKind::Break(value) => {
+                if self.defer_depth > 0 {
+                    self.error("break statement is not allowed inside a defer block", stmt.span.clone());
+                }
                 if let Some(expr) = value {
                     self.check_expr(expr, None);
                 }
             }
-            ast::StatementKind::Continue => {}
+            ast::StatementKind::Continue => {
+                if self.defer_depth > 0 {
+                    self.error("continue statement is not allowed inside a defer block", stmt.span.clone());
+                }
+            }
+            ast::StatementKind::Defer(inner) => {
+                self.defer_depth += 1;
+                self.check_statement(inner);
+                self.defer_depth -= 1;
+            }
         }
     }
 
@@ -560,7 +577,15 @@ impl TypeChecker {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected),
             ast::ExpressionKind::Identifier(ident) => match self.lookup(&ident.name) {
-                Some(ty) => ty,
+                Some(ty) => {
+                    if self.is_moved(&ident.name) {
+                        self.error(
+                            format!("use of moved variable '{}'", ident.name),
+                            ident.span.clone(),
+                        );
+                    }
+                    ty
+                }
                 None => {
                     if self.known_types.contains_key(&ident.name) {
                         return Type::Named {
@@ -945,7 +970,16 @@ impl TypeChecker {
                 is_mutable: true,
                 inner: Box::new(self.check_expr(expression, None)),
             },
-            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
+            ast::ExpressionKind::Move(inner) => {
+                let ty = self.check_expr(inner, None);
+                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
+                    self.mark_moved(&ident.name);
+                } else {
+                    self.error("move operand must be an identifier", inner.span.clone());
+                }
+                ty
+            }
+            ast::ExpressionKind::Comptime(inner) => {
                 self.check_expr(inner, None)
             }
             ast::ExpressionKind::Call {
@@ -2931,6 +2965,9 @@ impl TypeChecker {
                 Self::resolve_type_aliases_in_block(block, aliases);
             }
             ast::StatementKind::Break(_) | ast::StatementKind::Continue => {}
+            ast::StatementKind::Defer(inner) => {
+                Self::resolve_type_aliases_in_statement(inner, aliases);
+            }
         }
     }
 
@@ -3129,10 +3166,12 @@ impl TypeChecker {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.moved_locals.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.moved_locals.pop();
     }
 
     fn bind(&mut self, name: &str, ty: Type, span: Span) {
@@ -3160,6 +3199,22 @@ impl TypeChecker {
         }
         None
     }
+
+    fn is_moved(&self, name: &str) -> bool {
+        for scope in self.moved_locals.iter().rev() {
+            if scope.contains(name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn mark_moved(&mut self, name: &str) {
+        if let Some(scope) = self.moved_locals.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
 
     fn error(&mut self, message: impl Into<String>, span: Span) {
         self.errors.push(TypeError {
