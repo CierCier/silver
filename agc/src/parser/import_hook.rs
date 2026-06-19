@@ -201,8 +201,8 @@ impl<'a> FileImportResolverHook<'a> {
 fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let tokens =
-        lexer::lex(&src).map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
+    let tokens = lexer::lex(&src)
+        .map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
     let mut parser = Parser::new_with_source(tokens, path.display().to_string());
     let (program, errors) = parser.parse_program();
     if errors.is_empty() {

@@ -1097,6 +1097,7 @@ impl PRT_Parser {
                 if depth == 0 {
                     return Some(idx);
                 }
+
             }
         }
         None
@@ -2939,12 +2940,24 @@ impl PRT_Parser {
             loop {
                 let Some(token) = cursor.current() else { break };
                 let operator = match token.kind {
-                    Token::LeftShift => Some(ast::BinaryOperator::LeftShift),
-                    Token::RightShift => Some(ast::BinaryOperator::RightShift),
+                    Token::Less
+                        if cursor.pos + 1 < cursor.end
+                            && matches!(cursor.tokens[cursor.pos + 1].kind, Token::Less) =>
+                    {
+                        cursor.bump(); // consume first <
+                        Some(ast::BinaryOperator::LeftShift)
+                    }
+                    Token::Greater
+                        if cursor.pos + 1 < cursor.end
+                            && matches!(cursor.tokens[cursor.pos + 1].kind, Token::Greater) =>
+                    {
+                        cursor.bump(); // consume first >
+                        Some(ast::BinaryOperator::RightShift)
+                    }
                     _ => None,
                 };
                 let Some(operator) = operator else { break };
-                cursor.bump();
+                cursor.bump(); // consume second < or >
                 let rhs = parse_additive(cursor)?;
                 let span = Span {
                     start: expr.span.start,
