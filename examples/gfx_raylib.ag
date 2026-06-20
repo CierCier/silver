@@ -1,5 +1,5 @@
-import std.gfx.raylib;
-import std.gfx.rlgl;
+import vendor.gfx.raylib;
+import vendor.gfx.rlgl;
 
 i32 main() {
     InitWindow(800, 600, "Spinning 3D Cube - Silver + raylib");
