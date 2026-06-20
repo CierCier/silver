@@ -319,6 +319,12 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
     loader.add_search_dir(&plan.package_root);
 
+    // Automatically search lib/silver/ under the package root for module artifacts.
+    let local_lib = plan.package_root.join("lib").join("silver");
+    if local_lib.is_dir() {
+        loader.add_search_dir(local_lib);
+    }
+
     for dir in &plan.include_dirs {
         loader.add_search_dir(dir);
     }
