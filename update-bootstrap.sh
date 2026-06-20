@@ -3,25 +3,26 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 std_dir="$root_dir/std"
+vendor_dir="$root_dir/vendor"
 bootstrap_dir="$root_dir/bootstrap"
 bin_dir="$bootstrap_dir/bin"
 include_root="$bootstrap_dir/include/silver"
-include_dir="$include_root/std"
 lib_dir="$bootstrap_dir/lib/silver"
 
 echo "Building agc (release)..."
 cargo build -p agc --release
 
-mkdir -p "$bin_dir" "$include_dir" "$lib_dir"
+mkdir -p "$bin_dir" "$include_root" "$lib_dir"
 cp "$root_dir/target/release/agc" "$bin_dir/agc"
 
 rm -rf "$include_root" "$lib_dir"
-mkdir -p "$include_dir" "$lib_dir"
+mkdir -p "$include_root" "$lib_dir"
 
+# Build std modules (flat naming for backward compat)
 if [ -d "$std_dir" ]; then
   while IFS= read -r -d '' src; do
     rel="${src#$std_dir/}"
-    dest="$include_dir/$rel"
+    dest="$include_root/$rel"
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
@@ -31,8 +32,28 @@ if [ -d "$std_dir" ]; then
     dotted="${rel//\//.}"
     base="${dotted%.ag}"
     out="$lib_dir/$base.agm"
+    echo "  std module: $rel -> $base.agm"
     "$bin_dir/agc" "$src" --emit=module -I "$include_root" -o "$out"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
+fi
+
+# Build vendor modules (directory hierarchy)
+if [ -d "$vendor_dir" ]; then
+  while IFS= read -r -d '' src; do
+    rel="${src#$root_dir/}"
+    dest="$include_root/$rel"
+    mkdir -p "$(dirname "$dest")"
+    cp "$src" "$dest"
+  done < <(find "$vendor_dir" -type f -name '*.ag' -print0)
+
+  while IFS= read -r -d '' src; do
+    rel="${src#$root_dir/}"
+    base="${rel%.ag}"
+    out="$lib_dir/$base.agm"
+    mkdir -p "$(dirname "$out")"
+    echo "  vendor module: $rel -> $base.agm"
+    "$bin_dir/agc" "$src" --emit=module -I "$include_root" -o "$out"
+  done < <(find "$vendor_dir" -type f -name '*.ag' -print0)
 fi
 
 echo "Bootstrap updated at $bootstrap_dir"
