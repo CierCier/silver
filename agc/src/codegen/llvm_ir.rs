@@ -1902,7 +1902,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Self::substitute_expression_types(iterable, mapping);
                 Self::substitute_block_types(body, mapping);
             }
-            ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Identifier(_) => {}
+            ast::ExpressionKind::Identifier(ident) => {
+                let name = ident.name.clone();
+                if let Some(concrete_ty) = mapping.get(&name) {
+                    *expr.kind = ast::ExpressionKind::TypeName(concrete_ty.clone());
+                }
+            }
+            ast::ExpressionKind::Literal(_) => {}
         }
     }
 
@@ -2047,6 +2053,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let saved_fn = self.current_fn;
                 let saved_block = self.builder.get_insert_block();
+                let saved_defers = std::mem::take(&mut self.defers);
+                let saved_drop_flags = std::mem::take(&mut self.drop_flags);
+                let saved_variables = std::mem::take(&mut self.variables);
+
+                self.defers.push(Vec::new());
+                self.variables.push(HashMap::new());
 
                 self.emit_function_body(
                     function,
@@ -2057,6 +2069,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     &func.name.span,
                 )?;
 
+                self.defers = saved_defers;
+                self.drop_flags = saved_drop_flags;
+                self.variables = saved_variables;
                 self.current_fn = saved_fn;
                 if let Some(saved_block) = saved_block {
                     self.builder.position_at_end(saved_block);
@@ -2383,12 +2398,80 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
 
-        self.generate_block(body)?;
+        // Set up drop flags and defers for parameters with destructors.
+        // This mirrors the logic in emit_let_statement (lines 5883-5920).
+        for param in parameters {
+            // Skip pointer/reference types: the caller owns the pointee,
+            // so we must NOT call the pointee's drop on function exit.
+            if matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+                continue;
+            }
+            let ty_for_drop = param.param_type.clone();
+            let drop_owners = Self::owner_name_candidates_from_type(&ty_for_drop);
+            let needs_drop = drop_owners.iter().any(|owner| {
+                let drop_name = Self::mangle_method_name(owner, "drop");
+                self.module.get_function(&drop_name).is_some()
+                    || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                        .ok()
+                        .flatten()
+                        .is_some()
+            });
+            if needs_drop {
+                let function = self.current_fn.ok_or_else(|| {
+                    CodegenError::new("no active function for destructor".to_string())
+                })?;
+                let flag_alloca = self.create_entry_alloca(
+                    function,
+                    &format!("{}.drop", param.name.name),
+                    self.context.bool_type().as_basic_type_enum(),
+                )?;
+                self.builder.build_store(
+                    flag_alloca,
+                    self.context.bool_type().const_int(1, false),
+                ).map_err(|e| CodegenError::new(format!("failed to init param drop flag: {e}")))?;
+                self.drop_flags.insert(param.name.name.clone(), flag_alloca);
 
-        let needs_terminator = self
-            .builder
-            .get_insert_block()
-            .and_then(|block| block.get_terminator())
+                let drop_fn_name = drop_owners.iter().find_map(|owner| {
+                    let name = Self::mangle_method_name(owner, "drop");
+                    if self.module.get_function(&name).is_some()
+                        || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                            .ok().flatten().is_some()
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                }).unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
+
+                let alloca = self.variables.last()
+                    .and_then(|scope| scope.get(&param.name.name))
+                    .map(|vi| vi.ptr)
+                    .ok_or_else(|| CodegenError::new(format!(
+                        "parameter alloca for `{}` not found", param.name.name
+                    )))?;
+
+                if let Some(scope) = self.defers.last_mut() {
+                    scope.push(DeferredEntry {
+                        action: DeferAction::DropCall(drop_fn_name, alloca),
+                        flag: Some(flag_alloca),
+                    });
+                }
+            }
+        }
+
+        self.generate_block(body)?;
+        // Fire any remaining defers (e.g. parameter destructors that were
+        // registered in the function scope but not in the body scope).
+        // This must happen before the terminator check so that the block
+        // created by emit_defers is properly terminated.
+        if !self.builder.get_insert_block()
+            .and_then(|bb| bb.get_terminator()).is_some()
+        {
+            self.emit_defers(self.defers.len())?;
+        }
+
+        let needs_terminator = self.builder.get_insert_block()
+            .and_then(|bb| bb.get_terminator())
             .is_none();
         if needs_terminator {
             if return_type.is_some_and(|ret| !Self::is_void_primitive(ret)) {
@@ -2405,6 +2488,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.pop_scope();
         self.current_fn = None;
         self.current_return_type = saved_return_type;
+        self.drop_flags.clear();
         if let Some(debug) = &mut self.debug {
             debug.current_subprogram = None;
         }
@@ -5421,13 +5505,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .build_unconditional_branch(cont_bb)
                 .map_err(|e| CodegenError::new(format!("failed to branch from else: {e}")))?;
         }
-
+        // When both branches are terminated (e.g., both contain `return`),
+        // `cont_bb` is unreachable.  Insert an `unreachable` terminator so
+        // the parent's terminator check sees a terminated block.
         self.builder.position_at_end(cont_bb);
-
         if then_terminated && else_terminated {
-            let _ = span;
+            self.builder.build_unreachable()
+                .map_err(|e| CodegenError::new(format!("failed to emit unreachable: {e}")))?;
         }
-
         Ok(())
     }
 
@@ -5878,6 +5963,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
             scope.insert(identifier.name.clone(), VarInfo { ptr: alloca, ty });
+        }
+
+        // Skip pointer/reference types: the variable is a borrowed view,
+        // not an owner.  Only value-type variables get implicit destructors.
+        if matches!(ty_for_drop.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+            return Ok(());
         }
 
         // Check if this variable's type has a drop method (implicit destructor)
@@ -6669,7 +6760,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 break;
             }
         }
-        self.emit_defers(1)?;
+        // Only fire defers for the innermost scope if the block hasn't
+        // already been terminated (e.g. by a return/break/continue that
+        // already handled the defers itself).
+        if !self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_some()
+        {
+            self.emit_defers(1)?;
+        }
         self.pop_scope();
         Ok(())
     }
@@ -6720,16 +6821,28 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 Ok(())
             }
             ast::StatementKind::Return(expr) => {
-                self.emit_defers(self.defers.len())?;
-                if let Some(expr) = expr {
+                // Evaluate return value FIRST, before running defers.
+                // This prevents use-after-free when the return expression
+                // references a variable whose destructor would be fired by
+                // emit_defers (Bug A).
+                let saved_value = if let Some(expr) = expr {
+                    let expr_span = expr.span.clone();
                     let mut value = self.emit_expression_value(expr)?;
                     if let Some(return_ty) = self.current_return_type.clone() {
-                        value = self.cast_value_to_ast_type(value, &return_ty, &expr.span)?;
+                        value = self.cast_value_to_ast_type(value, &return_ty, &expr_span)?;
                     }
+                    Some((value, expr_span))
+                } else {
+                    None
+                };
+                // Now run defers (the return value is safely saved)
+                self.emit_defers(self.defers.len())?;
+                // Return the saved value
+                if let Some((value, span)) = saved_value {
                     self.builder.build_return(Some(&value)).map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to emit return value: {e}"),
-                            expr.span.clone(),
+                            span,
                         )
                     })?;
                 } else {
