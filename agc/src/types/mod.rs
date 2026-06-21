@@ -445,8 +445,9 @@ impl Type {
     }
 
     pub fn canonical_key(&self) -> String {
-        let ty = self.strip_refs();
-        match ty {
+        match self {
+            Type::Pointer { inner, .. } => format!("*{}", inner.canonical_key()),
+            Type::Reference { inner, .. } => format!("&{}", inner.canonical_key()),
             Type::Unit => "unit".to_string(),
             Type::Primitive(p) => format!("{:?}", p).to_lowercase(),
             Type::Named { path, generics } => {
@@ -485,7 +486,6 @@ impl Type {
                     .join(",");
                 format!("fn({})->{}", args, return_type.canonical_key())
             }
-            Type::Reference { .. } | Type::Pointer { .. } => ty.canonical_key(),
             Type::Unknown => "unknown".to_string(),
         }
     }
@@ -700,6 +700,20 @@ impl<'a> TypeParser<'a> {
 
     fn parse_type(&mut self) -> Result<Type, String> {
         self.skip_ws();
+        if self.consume_byte(b'*') {
+            let inner = self.parse_type()?;
+            return Ok(Type::Pointer {
+                is_mutable: true,
+                inner: Box::new(inner),
+            });
+        }
+        if self.consume_byte(b'&') {
+            let inner = self.parse_type()?;
+            return Ok(Type::Reference {
+                is_mutable: true,
+                inner: Box::new(inner),
+            });
+        }
         if self.consume_str("unit") {
             return Ok(Type::Unit);
         }
@@ -1004,6 +1018,15 @@ mod tests {
     fn canonical_parser_understands_void() {
         let ty = Type::from_canonical_key("void").expect("expected void type");
         assert_eq!(ty, Type::Primitive(ast::PrimitiveType::Void));
+    }
+
+    #[test]
+    fn canonical_parser_preserves_pointer_and_reference_wrappers() {
+        let pointer = Type::from_canonical_key("*f64").expect("expected pointer type");
+        assert_eq!(pointer.canonical_key(), "*f64");
+
+        let reference = Type::from_canonical_key("&f64").expect("expected reference type");
+        assert_eq!(reference.canonical_key(), "&f64");
     }
 
     #[test]

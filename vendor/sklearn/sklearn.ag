@@ -1,0 +1,158 @@
+// vendor/sklearn/sklearn.ag
+// Prototype sklearn-like regression and classification library for Silver.
+
+import std.math;
+
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
+
+pub f64 dot(f64* a, f64* b, i32 n) {
+    f64 sum = 0.0;
+    for (i32 i = 0; i < n; i = i + 1) {
+        sum = sum + a[i] * b[i];
+    }
+    return sum;
+}
+
+pub void vec_fill(f64* a, i32 n, f64 val) {
+    for (i32 i = 0; i < n; i = i + 1) {
+        a[i] = val;
+    }
+}
+
+// ------------------------------------------------------------------
+// Dataset
+// ------------------------------------------------------------------
+
+pub struct Dataset {
+    f64* X;
+    f64* y;
+    i32 n_samples;
+    i32 n_features;
+}
+
+pub Dataset dataset_from(f64* X, f64* y, i32 n_samples, i32 n_features) {
+    Dataset ds;
+    ds.X = X;
+    ds.y = y;
+    ds.n_samples = n_samples;
+    ds.n_features = n_features;
+    return ds;
+}
+
+pub f64* dataset_row(Dataset* ds, i32 i) {
+    return &ds.X[i * ds.n_features];
+}
+
+// ------------------------------------------------------------------
+// Linear Regression
+// ------------------------------------------------------------------
+
+pub struct LinearRegression {
+    f64* weights;
+    f64 bias;
+    i32 n_features;
+}
+
+pub void linear_regression_init(LinearRegression* model, f64* weights, i32 n_features) {
+    model.weights = weights;
+    model.bias = 0.0;
+    model.n_features = n_features;
+}
+
+pub f64 linear_regression_predict(LinearRegression* model, f64* x) {
+    return dot(model.weights, x, model.n_features) + model.bias;
+}
+
+pub void linear_regression_fit(LinearRegression* model, Dataset* ds, i32 epochs, f64 learning_rate) {
+    i32 n = ds.n_samples;
+    i32 m = model.n_features;
+
+    for (i32 epoch = 0; epoch < epochs; epoch = epoch + 1) {
+        for (i32 i = 0; i < n; i = i + 1) {
+            f64* x_i = dataset_row(ds, i);
+            f64 y_hat = linear_regression_predict(model, x_i);
+            f64 error = y_hat - ds.y[i];
+
+            for (i32 j = 0; j < m; j = j + 1) {
+                model.weights[j] = model.weights[j] - learning_rate * error * x_i[j];
+            }
+            model.bias = model.bias - learning_rate * error;
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// Logistic Regression
+// ------------------------------------------------------------------
+
+pub struct LogisticRegression {
+    f64* weights;
+    f64 bias;
+    i32 n_features;
+}
+
+pub void logistic_regression_init(LogisticRegression* model, f64* weights, i32 n_features) {
+    model.weights = weights;
+    model.bias = 0.0;
+    model.n_features = n_features;
+}
+
+pub f64 logistic_regression_predict_proba(LogisticRegression* model, f64* x) {
+    f64 z = dot(model.weights, x, model.n_features) + model.bias;
+    return 1.0 / (1.0 + exp(-z));
+}
+
+pub i32 logistic_regression_predict(LogisticRegression* model, f64* x) {
+    f64 p = logistic_regression_predict_proba(model, x);
+    if (p >= 0.5) {
+        return 1;
+    }
+    return 0;
+}
+
+pub void logistic_regression_fit(LogisticRegression* model, Dataset* ds, i32 epochs, f64 learning_rate) {
+    i32 n = ds.n_samples;
+    i32 m = model.n_features;
+
+    for (i32 epoch = 0; epoch < epochs; epoch = epoch + 1) {
+        for (i32 i = 0; i < n; i = i + 1) {
+            f64* x_i = dataset_row(ds, i);
+            f64 y_hat = logistic_regression_predict_proba(model, x_i);
+            f64 error = y_hat - ds.y[i];
+
+            for (i32 j = 0; j < m; j = j + 1) {
+                model.weights[j] = model.weights[j] - learning_rate * error * x_i[j];
+            }
+            model.bias = model.bias - learning_rate * error;
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// Metrics
+// ------------------------------------------------------------------
+
+pub f64 mse(Dataset* ds, LinearRegression* model) {
+    f64 sum = 0.0;
+    for (i32 i = 0; i < ds.n_samples; i = i + 1) {
+        f64* x_i = dataset_row(ds, i);
+        f64 y_hat = linear_regression_predict(model, x_i);
+        f64 diff = y_hat - ds.y[i];
+        sum = sum + diff * diff;
+    }
+    return sum / (f64) ds.n_samples;
+}
+
+pub f64 accuracy(Dataset* ds, LogisticRegression* model) {
+    i32 correct = 0;
+    for (i32 i = 0; i < ds.n_samples; i = i + 1) {
+        f64* x_i = dataset_row(ds, i);
+        i32 y_hat = logistic_regression_predict(model, x_i);
+        if ((f64) y_hat == ds.y[i]) {
+            correct = correct + 1;
+        }
+    }
+    return (f64) correct / (f64) ds.n_samples;
+}
