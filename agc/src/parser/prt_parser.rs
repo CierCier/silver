@@ -1550,7 +1550,9 @@ impl PRT_Parser {
         start: usize,
         end: usize,
     ) -> Result<ast::Statement, ParseError> {
-        let token = &tokens[start + 1];
+        let binding_is_mut = !(start + 1 < end && matches!(tokens[start + 1].kind, Token::Const));
+        let binding_token_idx = if binding_is_mut { start + 1 } else { start + 2 };
+        let token = &tokens[binding_token_idx];
         let ident_name = match &token.kind {
             Token::Identifier(name) => name.clone(),
             _ if token.kind.keyword_name().is_some() => token.kind.keyword_name().unwrap().to_string(),
@@ -1608,6 +1610,7 @@ impl PRT_Parser {
             kind: ast::StatementKind::Expression(ast::Expression {
                 kind: Box::new(ast::ExpressionKind::ForIn {
                     binding,
+                    is_mutable: binding_is_mut,
                     iterable: Box::new(iterable),
                     body,
                     item_type: None,
@@ -2808,7 +2811,7 @@ impl PRT_Parser {
                 let inner = parse_unary(cursor)?;
                 return Ok(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Reference {
-                        is_mutable: false,
+                        is_mutable: true,
                         expression: Box::new(inner.clone()),
                     }),
                     span: Span {
@@ -3252,8 +3255,9 @@ impl PRT_Parser {
             });
         }
 
-        if self.statement_type_start_is_unambiguous(tokens, start, end - 1)
-            && let Some((_decl_ty, after_type)) = self.parse_type_prefix(tokens, start, end - 1)
+        let const_offset = if matches!(tokens[start].kind, Token::Const) { 1 } else { 0 };
+        if self.statement_type_start_is_unambiguous(tokens, start + const_offset, end - 1)
+            && let Some((_decl_ty, after_type)) = self.parse_type_prefix(tokens, start + const_offset, end - 1)
             && after_type < end
             && matches!(
                 tokens.get(after_type).map(|t| &t.kind),
@@ -3289,7 +3293,9 @@ impl PRT_Parser {
         start: usize,
         end: usize,
     ) -> Result<Vec<ast::Statement>, ParseError> {
-        let (_, declarators) = self.parse_declarator_group(tokens, start, end - 1, true)?;
+        let has_const = matches!(tokens[start].kind, Token::Const);
+        let decl_start = if has_const { start + 1 } else { start };
+        let (_, declarators) = self.parse_declarator_group(tokens, decl_start, end - 1, true)?;
         let statement_end = tokens[end - 1].span.end;
         let mut statements = Vec::with_capacity(declarators.len());
         for declarator in declarators {
@@ -3303,7 +3309,7 @@ impl PRT_Parser {
                     },
                     type_annotation: Some(declarator.ty),
                     initializer: declarator.initializer,
-                    is_mutable: true,
+                    is_mutable: !has_const,
                 }),
                 span: Span {
                     start: declarator.span.start,
@@ -3609,8 +3615,9 @@ impl PRT_Parser {
                 });
             };
             let statement_end = semicolon + 1;
-            if self.statement_type_start_is_unambiguous(tokens, cursor, semicolon)
-                && let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, semicolon)
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
+            if self.statement_type_start_is_unambiguous(tokens, cursor + const_offset, semicolon)
+                && let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor + const_offset, semicolon)
                 && after_type < semicolon
                 && matches!(
                     tokens.get(after_type).map(|t| &t.kind),
@@ -4891,6 +4898,7 @@ impl PRT_Parser {
                 cursor += 1;
                 break;
             }
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
             let (param_type, after_type) =
                 self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                     ParseError::InvalidSyntax {
@@ -4917,7 +4925,7 @@ impl PRT_Parser {
                     span: param_name_token.span.clone(),
                 },
                 param_type: param_type.clone(),
-                is_mutable: false,
+                is_mutable: const_offset == 0,
                 span: Span {
                     start: param_type.span.start,
                     end: param_name_token.span.end,
@@ -5019,6 +5027,7 @@ impl PRT_Parser {
                 cursor += 1;
                 break;
             }
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
             let (param_type, after_param_type) =
                 self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                     ParseError::InvalidSyntax {
@@ -5045,7 +5054,7 @@ impl PRT_Parser {
                     span: param_name_token.span.clone(),
                 },
                 param_type: param_type.clone(),
-                is_mutable: false,
+                is_mutable: const_offset == 0,
                 span: Span {
                     start: param_type.span.start,
                     end: param_name_token.span.end,
@@ -5526,6 +5535,7 @@ impl PRT_Parser {
                 pcursor += 1;
                 continue;
             }
+            let const_offset = if matches!(tokens[pcursor].kind, Token::Const) { 1 } else { 0 };
             let (param_type, after_param_type) = self
                 .parse_type_prefix(tokens, pcursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -5544,7 +5554,7 @@ impl PRT_Parser {
                     span: tokens[after_param_type].span.clone(),
                 },
                 param_type,
-                is_mutable: false,
+                is_mutable: const_offset == 0,
                 span: Span {
                     start: tokens[pcursor].span.start,
                     end: tokens[after_param_type].span.end,
@@ -5733,6 +5743,7 @@ impl PRT_Parser {
                     message: "expected parameter type".to_string(),
                     span: name_token.span.clone(),
                 })?;
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
             let (param_type, next_after_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -5761,7 +5772,7 @@ impl PRT_Parser {
                     span: param_name_token.span.clone(),
                 },
                 param_type: param_type.clone(),
-                is_mutable: false,
+                is_mutable: const_offset == 0,
                 span: Span {
                     start: param_type.span.start,
                     end: param_name_token.span.end,
@@ -5930,6 +5941,7 @@ impl PRT_Parser {
                     message: "expected extern parameter type".to_string(),
                     span: name_token.span.clone(),
                 })?;
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
             let (param_type, next_after_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -5962,7 +5974,7 @@ impl PRT_Parser {
                     span: parameter_span,
                 },
                 param_type,
-                is_mutable: false,
+                is_mutable: const_offset == 0,
                 span: Span {
                     start: param_type_token.span.start,
                     end: parameter_end,

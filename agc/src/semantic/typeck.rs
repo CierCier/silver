@@ -22,7 +22,7 @@ pub struct TypeError {
 #[derive(Default)]
 pub struct TypeChecker {
     errors: Vec<TypeError>,
-    scopes: Vec<HashMap<String, Type>>,
+    scopes: Vec<HashMap<String, (Type, bool)>>,
     moved_locals: Vec<HashSet<String>>,
     current_return: Option<Type>,
     method_symbols: HashMap<SymbolId, MethodSig>,
@@ -423,7 +423,7 @@ impl TypeChecker {
         for param in &func.parameters {
             let param_type = Type::from_ast(&param.param_type);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.span.clone());
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -442,7 +442,7 @@ impl TypeChecker {
         for param in &func.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.span.clone());
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -457,7 +457,7 @@ impl TypeChecker {
         for param in &cast.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.span.clone());
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
         }
         self.check_block(&cast.body);
         self.pop_scope();
@@ -504,7 +504,7 @@ impl TypeChecker {
 
                 match &let_stmt.pattern.kind {
                     ast::PatternKind::Identifier(ident) => {
-                        self.bind(&ident.name, declared, let_stmt.pattern.span.clone());
+                        self.bind(&ident.name, declared, let_stmt.is_mutable, let_stmt.pattern.span.clone());
                     }
                     _ => {
                         self.error(
@@ -576,7 +576,7 @@ impl TypeChecker {
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected),
-            ast::ExpressionKind::Identifier(ident) => match self.lookup(&ident.name) {
+            ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
                     if self.is_moved(&ident.name) {
                         self.error(
@@ -834,6 +834,29 @@ impl TypeChecker {
                             expr.span.clone(),
                         );
                     }
+                    // Check mutability of assignment target
+                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref() {
+                        if let Some((_, is_mut)) = self.lookup(&ident.name) {
+                            if !is_mut {
+                                self.error(
+                                    format!("cannot assign to const variable '{}'", ident.name),
+                                    ident.span.clone(),
+                                );
+                            }
+                        }
+                    }
+                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref() {
+                        if let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref() {
+                            if let Some((_, is_mut)) = self.lookup(&ident.name) {
+                                if !is_mut {
+                                    self.error(
+                                        format!("cannot assign to field of const variable '{}'", ident.name),
+                                        ident.span.clone(),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     left_ty
                 }
                 ast::BinaryOperator::Range => {
@@ -966,9 +989,21 @@ impl TypeChecker {
             ast::ExpressionKind::Reference {
                 expression,
                 is_mutable: _is_mutable,
-            } => Type::Pointer {
-                is_mutable: true,
-                inner: Box::new(self.check_expr(expression, None)),
+            } => {
+                let inner = self.check_expr(expression, None);
+                // Constness of &expr depends on the source variable:
+                // if the source is const, the pointer is immutable regardless of syntax.
+                let source_is_mutable = if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
+                    self.lookup(&ident.name)
+                        .map(|(_, mutability)| mutability)
+                        .unwrap_or(true)  // unknown/global → assume mutable
+                } else {
+                    true  // non-identifier expression → assume mutable
+                };
+                Type::Pointer {
+                    is_mutable: source_is_mutable,
+                    inner: Box::new(inner),
+                }
             },
             ast::ExpressionKind::Move(inner) => {
                 let ty = self.check_expr(inner, None);
@@ -1123,6 +1158,7 @@ impl TypeChecker {
             }
             ast::ExpressionKind::ForIn {
                 binding,
+                is_mutable,
                 iterable,
                 body,
                 ..
@@ -1244,7 +1280,7 @@ impl TypeChecker {
                         }
                     }
                 };
-                self.bind(&binding.name, item_ty, binding.span.clone());
+                self.bind(&binding.name, item_ty, *is_mutable, binding.span.clone());
                 self.check_block(body);
                 self.pop_scope();
                 Type::Unit
@@ -2243,8 +2279,7 @@ impl TypeChecker {
                 if let Some(ty) = builtin {
                     return Some(ty);
                 }
-                // Not a built-in name — try lookup without emitting errors
-                if let Some(ty) = self.lookup(&ident.name) {
+                if let Some(ty) = self.lookup_type(&ident.name) {
                     return Some(ty);
                 }
                 if self.known_types.contains_key(&ident.name) {
@@ -2519,7 +2554,7 @@ impl TypeChecker {
         match receiver.kind.as_ref() {
             ast::ExpressionKind::TypeName(_) => MethodCallStyle::Static,
             ast::ExpressionKind::Identifier(ident) => {
-                if self.lookup(&ident.name).is_some() {
+                if self.lookup_type(&ident.name).is_some() {
                     MethodCallStyle::Instance
                 } else if self.known_types.contains_key(&ident.name) {
                     MethodCallStyle::Static
@@ -3174,30 +3209,33 @@ impl TypeChecker {
         self.moved_locals.pop();
     }
 
-    fn bind(&mut self, name: &str, ty: Type, span: Span) {
+    fn bind(&mut self, name: &str, ty: Type, is_mutable: bool, span: Span) {
         let mut duplicate = false;
         if let Some(scope) = self.scopes.last_mut() {
             duplicate = scope.contains_key(name);
-            scope.insert(name.to_string(), ty);
+            scope.insert(name.to_string(), (ty, is_mutable));
         }
         if duplicate {
             self.error(format!("duplicate binding for '{}'", name), span.clone());
         }
     }
 
-    fn lookup(&self, name: &str) -> Option<Type> {
+    fn lookup(&self, name: &str) -> Option<(Type, bool)> {
         for scope in self.scopes.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
+            if let Some((ty, is_mut)) = scope.get(name) {
+                return Some((ty.clone(), *is_mut));
             }
         }
         if let Some(ty) = self.extern_variables.get(name) {
-            return Some(ty.clone());
+            return Some((ty.clone(), true));
         }
         if let Some(ty) = self.global_variables.get(name) {
-            return Some(ty.clone());
+            return Some((ty.clone(), true));
         }
         None
+    }
+    fn lookup_type(&self, name: &str) -> Option<Type> {
+        self.lookup(name).map(|(ty, _)| ty)
     }
 
     fn is_moved(&self, name: &str) -> bool {
