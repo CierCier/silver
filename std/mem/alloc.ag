@@ -8,6 +8,10 @@ T* alloc<T>(i64 count) {
     return (T*)(calloc(count, @size(T)));
 }
 
+T* realloc<T>(T* ptr, i64 count) {
+    return (T*)(realloc(ptr, @size(T) * count));
+}
+
 extern "C" {
     void* malloc(i64 size);
     void* calloc(i64 count, i64 size);
