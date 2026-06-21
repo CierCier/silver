@@ -27,8 +27,14 @@ if [ -d "$std_dir" ]; then
     cp "$src" "$dest"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
 
+  # NOTE: box.ag is a draft and fails to compile as a module
+  #       (generic `alloc<T>()` is not resolved across modules).
+  #       Its import is commented out in std/mem.ag.
   while IFS= read -r -d '' src; do
     rel="${src#$std_dir/}"
+    case "$rel" in
+      mem/box.ag) echo "  (skipping draft: $rel)"; continue ;;
+    esac
     dotted="${rel//\//.}"
     base="${dotted%.ag}"
     out="$lib_dir/$base.agm"
