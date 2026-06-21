@@ -1,3 +1,5 @@
+import std.optional;
+
 // IntoIterator: types that can be iterated over via into_iter(self).
 // Required method: Iterator into_iter(self);
 trait IntoIterator<Self> {
