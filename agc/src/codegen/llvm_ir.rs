@@ -62,6 +62,7 @@ impl PartialEq for FunctionSig {
 struct VarInfo<'ctx> {
     ptr: PointerValue<'ctx>,
     ty: ast::Type,
+    is_mutable: bool,
 }
 
 #[derive(Clone)]
@@ -2393,6 +2394,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     VarInfo {
                         ptr: alloca,
                         ty: param.param_type.clone(),
+                        is_mutable: param.is_mutable,
                     },
                 );
             }
@@ -3939,6 +3941,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         VarInfo {
                             ptr: alloca,
                             ty: inferred,
+                            is_mutable: false,
                         },
                     );
                 }
@@ -4881,6 +4884,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         return_old: bool,
         whole_expr: &ast::Expression,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        self.check_assignment_mutability(operand)?;
         let (target_ptr, target_ty) = self.resolve_lvalue_ptr(operand)?;
         let llvm_ty = self.lower_basic_type(&target_ty)?;
         let current = self
@@ -4937,6 +4941,68 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+
+    /// Check that an assignment target is mutable. Returns Ok(()) or a CodegenError
+    /// with a message like "cannot assign to const variable 'x'".
+    fn check_assignment_mutability(
+        &self,
+        target: &ast::Expression,
+    ) -> CodegenResult<()> {
+        match target.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                if let Some(info) = self.lookup_variable(&ident.name) {
+                    if !info.is_mutable {
+                        return Err(CodegenError::with_span(
+                            format!("cannot assign to const variable '{}'", ident.name),
+                            ident.span.clone(),
+                        ));
+                    }
+                    Ok(())
+                } else if self.global_variables.contains_key(&ident.name)
+                    || self.extern_globals.contains_key(&ident.name)
+                    || self.lookup_module_global(&ident.name).is_some()
+                {
+                    Ok(())  // globals are always mutable
+                } else {
+                    Err(CodegenError::with_span(
+                        format!("unknown variable `{}`", ident.name),
+                        ident.span.clone(),
+                    ))
+                }
+            }
+            ast::ExpressionKind::FieldAccess { object, .. } => {
+                self.check_assignment_mutability(object)
+            }
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => {
+                // *ptr = val — check pointer/reference type mutability
+                if let ast::ExpressionKind::Identifier(ident) = operand.kind.as_ref() {
+                    if let Some(ty) = self.lookup_value_type(&ident.name) {
+                        match ty.kind.as_ref() {
+                            ast::TypeKind::Pointer(ptr) if !ptr.is_mutable => {
+                                return Err(CodegenError::with_span(
+                                    "cannot write through immutable pointer",
+                                    ident.span.clone(),
+                                ));
+                            }
+                            ast::TypeKind::Reference(r) if !r.is_mutable => {
+                                return Err(CodegenError::with_span(
+                                    "cannot write through immutable reference",
+                                    ident.span.clone(),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn emit_binary_expression(
         &mut self,
         left: &ast::Expression,
@@ -4952,6 +5018,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.emit_short_circuit_logical(left, right, false, &whole_expr.span)
             }
             ast::BinaryOperator::Assign => {
+                self.check_assignment_mutability(left)?;
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let value = if let ast::ExpressionKind::Initializer { items } = right.kind.as_ref()
                 {
@@ -4973,6 +5040,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::BinaryOperator::MultiplyAssign
             | ast::BinaryOperator::DivideAssign
             | ast::BinaryOperator::ModuloAssign => {
+                self.check_assignment_mutability(left)?;
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let llvm_ty = self.lower_basic_type(&target_ty)?;
                 let lhs = self
@@ -5643,6 +5711,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     fn emit_for_in_statement(
         &mut self,
         binding: &ast::Identifier,
+        is_mutable: bool,
         iterable: &ast::Expression,
         body: &ast::Block,
         item_type: Option<&ast::Type>,
@@ -5671,7 +5740,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let ast_ty = self.infer_ast_type_from_value(&start_val, span);
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(binding.name.clone(), VarInfo { ptr: i_ptr, ty: ast_ty });
+                    scope.insert(binding.name.clone(), VarInfo { ptr: i_ptr, ty: ast_ty, is_mutable });
                 }
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
@@ -5770,7 +5839,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(iterable_ptr, iterable_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterable: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(iterable_name.to_string(), VarInfo { ptr: iterable_ptr, ty: iterable_ast_ty });
+                    scope.insert(iterable_name.to_string(), VarInfo { ptr: iterable_ptr, ty: iterable_ast_ty, is_mutable: true });
                 }
 
                 let iterable_expr = ast::Expression {
@@ -5803,7 +5872,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(iter_ptr, iterator_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterator: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(iter_name.to_string(), VarInfo { ptr: iter_ptr, ty: iter_ast_ty });
+                    scope.insert(iter_name.to_string(), VarInfo { ptr: iter_ptr, ty: iter_ast_ty, is_mutable: true });
                 }
 
                 let next_ident = ast::Identifier { name: "next".to_string(), span: dummy_span.clone() };
@@ -5882,7 +5951,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(var_ptr, thing_loaded)
                     .map_err(|e| CodegenError::new(format!("failed to store loop var: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(binding.name.clone(), VarInfo { ptr: var_ptr, ty: ast_ty });
+                    scope.insert(binding.name.clone(), VarInfo { ptr: var_ptr, ty: ast_ty, is_mutable });
                 }
 
                 self.generate_block(body)?;
@@ -5974,7 +6043,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let ty = inferred_ty;
         let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
-            scope.insert(identifier.name.clone(), VarInfo { ptr: alloca, ty });
+            scope.insert(identifier.name.clone(), VarInfo { ptr: alloca, ty, is_mutable: let_stmt.is_mutable });
         }
 
         // Skip pointer/reference types: the variable is a borrowed view,
@@ -6160,6 +6229,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         VarInfo {
                             ptr: alloca,
                             ty: inferred,
+                            is_mutable: false,
                         },
                     );
                 }
@@ -6816,10 +6886,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 ast::ExpressionKind::Block(block) => self.generate_block(block),
                 ast::ExpressionKind::ForIn {
                     binding,
+                    is_mutable,
                     iterable,
                     body,
                     item_type,
-                } => self.emit_for_in_statement(binding, iterable, body, item_type.as_deref(), &statement.span),
+                } => self.emit_for_in_statement(binding, *is_mutable, iterable, body, item_type.as_deref(), &statement.span),
                 _ => self.emit_expression_statement(expr),
             },
             ast::StatementKind::Let(let_stmt) => self.emit_let_statement(let_stmt, &statement.span),

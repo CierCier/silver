@@ -575,6 +575,7 @@ pub enum ExpressionKind {
     },
     ForIn {
         binding: Identifier,
+        is_mutable: bool,
         iterable: Box<Expression>,
         body: Block,
         item_type: Option<Box<Type>>,
