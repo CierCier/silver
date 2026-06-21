@@ -4648,6 +4648,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_call(function, &args, &format!("call.{call_name}"))
             .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
+        // If this is an explicit drop() call, clear the drop flag so
+        // the implicit destructor at scope exit doesn't double-free.
+        if method.name == "drop" {
+            if let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref() {
+                if let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
+                    self.builder.build_store(
+                        flag_ptr,
+                        self.context.bool_type().const_int(0, false),
+                    ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+                }
+            }
+        }
 
         // Add byval attributes to call site for large struct arguments
         if let Some(sig) = &signature {
