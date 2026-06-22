@@ -1,30 +1,45 @@
-# Silver
+# Silver — A Systems Programming Language Experiment
 
-Silver is an experimental systems programming language and compiler toolchain built in this repository.
+Silver is an open-source, statically typed systems programming language built on LLVM.
+It explores a pragmatic design space between C-level control and modern ergonomics:
+deterministic destruction, zero-cost iterators, first-class RAII, and a module system
+with packaged compilation. The compiler (`agc`) implements parsing, semantic analysis,
+type checking, and LLVM-based code generation, all from a single self-hosted pipeline.
 
 The project currently includes:
 - `agc`, the Silver compiler
 - `silver_runtime`, the runtime crate
 - `std`, the standard library sources used for bootstrapping
+- `vendor`, imports/includes for third-party libraries
 - `bootstrap`, generated compiler and standard library artifacts for local development
 
 Silver is still under active development. Expect sharp edges, incomplete features, and regular iteration on syntax, semantics, and tooling.
 
-## Current Focus
+## Features
 
-The compiler currently supports:
-- parsing, semantic analysis, and LLVM-based code generation
-- a bootstrap standard library flow
-- module packaging through `.agm` metadata plus compiled artifacts
-- source imports and packaged module imports
-
-Recent work has focused on making the module system usable end to end, including packaged metadata, import resolution, and bootstrap generation.
+- **Mutable by default, `const` for immutability** — variables are mutable unless declared
+  `const`. Constness propagates through pointers: `&x` on a `const` variable yields an
+  immutable pointer. The compiler enforces immutability in assignments, field writes, and
+  pointer dereferences.
+- **LLVM code generation** — compiles to native code via LLVM with optimizations,
+  debug info, and target-specific back ends.
+- **Deterministic destruction** — RAII-style resource management with `drop` trait and
+  guaranteed cleanup at scope exit.
+- **Zero-cost iterators** — `for x in iter` compiles to explicit state-machine loops
+  with no hidden allocation or dispatch.
+- **Module system** — packaged `.agm` artifacts with metadata for dependency resolution;
+  supports both source imports and precompiled module imports.
+- **Bootstrap pipeline** — the compiler compiles itself and the standard library through
+  a cached bootstrap cycle.
+- **Memory safety primitives** — `Box<T>`, `Vec<T>`, slices, and a borrow-checker-light
+  ownership model, all testable via a memory-pentest suite.
 
 ## Repository Layout
 
 - `agc/` - compiler sources
 - `silver_runtime/` - runtime crate
 - `std/` - standard library sources
+- `vendor/` - third-party library headers
 - `bootstrap/` - generated bootstrap compiler and stdlib outputs
 - `examples/` - sample Silver programs
 - `tests/` - project test inputs and supporting material
@@ -34,8 +49,19 @@ Recent work has focused on making the module system usable end to end, including
 
 Prerequisites:
 - Rust toolchain with Cargo
-- LLVM 21 compatible development environment for `inkwell`
+- LLVM 22 compatible development environment for `inkwell`
 - a working system C toolchain for linking
+
+A minimal Silver program:
+
+```silver
+import std.io;
+
+i32 main() {
+    println("Hello, world!");
+    return 0;
+}
+```
 
 Build the compiler:
 
@@ -87,7 +113,7 @@ cargo run -p agc -- path/to/file.ag --emit=module --shared -o path/to/file.agm
 
 ## Contributing
 
-Contributions are welcome. If you want to help, please read `CONTRIBUTING.md` before opening a pull request.
+Contributions are welcome. Please read `CONTRIBUTING.md` before opening a pull request.
 
 Please also read `CODE_OF_CONDUCT.md` before participating in discussions or reviews.
 
