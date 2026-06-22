@@ -1740,8 +1740,7 @@ mod tests {
                 inner: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
             }],
         );
-        // canonical key for pointer is just the inner type
-        assert_eq!(mangled, "deref__i32");
+        assert_eq!(mangled, "deref__ptr_i32");
     }
 
     #[test]
@@ -1787,7 +1786,11 @@ fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
 pub fn mangle_name(base: &str, args: &[Type]) -> String {
     let mut parts = Vec::new();
     for arg in args {
-        parts.push(sanitize(&arg.canonical_key()));
+        let key = arg
+            .canonical_key()
+            .replace('*', "ptr_")
+            .replace('&', "ref_");
+        parts.push(sanitize(&key));
     }
     if parts.is_empty() {
         base.to_string()
