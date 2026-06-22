@@ -608,12 +608,35 @@ impl TypeChecker {
                 match operator {
                     ast::UnaryOperator::Plus | ast::UnaryOperator::Minus => {
                         if !self.is_numeric_type(&operand_ty) {
-                            self.error(
-                                format!("unary +/- requires numeric operand, found {}", operand_ty),
-                                expr.span.clone(),
-                            );
+                            // For Minus on non-primitive types, try __neg overload
+                            if *operator == ast::UnaryOperator::Minus
+                                && !self.is_primitive_type(&operand_ty)
+                            {
+                                if let Some(result_ty) = self.resolve_method_overload_types(
+                                    &operand_ty,
+                                    "__neg",
+                                    &[],
+                                    MethodCallStyle::Instance,
+                                    expr.span.clone(),
+                                ) {
+                                    result_ty
+                                } else {
+                                    self.error(
+                                        format!("unary +/- requires numeric operand, found {}", operand_ty),
+                                        expr.span.clone(),
+                                    );
+                                    operand_ty
+                                }
+                            } else {
+                                self.error(
+                                    format!("unary +/- requires numeric operand, found {}", operand_ty),
+                                    expr.span.clone(),
+                                );
+                                operand_ty
+                            }
+                        } else {
+                            operand_ty
                         }
-                        operand_ty
                     }
                     ast::UnaryOperator::Dereference => {
                         let operand_ty_clone = operand_ty.clone();
@@ -632,22 +655,58 @@ impl TypeChecker {
                         }
                     }
                     ast::UnaryOperator::Not => {
-                        if !is_bool(&operand_ty) {
+                        if is_bool(&operand_ty) {
+                            Type::Primitive(ast::PrimitiveType::Bool)
+                        } else if !self.is_primitive_type(&operand_ty) {
+                            if let Some(result_ty) = self.resolve_method_overload_types(
+                                &operand_ty,
+                                "__not",
+                                &[],
+                                MethodCallStyle::Instance,
+                                expr.span.clone(),
+                            ) {
+                                result_ty
+                            } else {
+                                self.error(
+                                    format!("logical not requires bool, found {}", operand_ty),
+                                    expr.span.clone(),
+                                );
+                                Type::Primitive(ast::PrimitiveType::Bool)
+                            }
+                        } else {
                             self.error(
                                 format!("logical not requires bool, found {}", operand_ty),
                                 expr.span.clone(),
                             );
+                            Type::Primitive(ast::PrimitiveType::Bool)
                         }
-                        Type::Primitive(ast::PrimitiveType::Bool)
                     }
                     ast::UnaryOperator::BitwiseNot => {
-                        if !self.is_integer_type(&operand_ty) {
+                        if self.is_integer_type(&operand_ty) {
+                            operand_ty
+                        } else if !self.is_primitive_type(&operand_ty) {
+                            if let Some(result_ty) = self.resolve_method_overload_types(
+                                &operand_ty,
+                                "__bitnot",
+                                &[],
+                                MethodCallStyle::Instance,
+                                expr.span.clone(),
+                            ) {
+                                result_ty
+                            } else {
+                                self.error(
+                                    format!("bitwise not requires integer, found {}", operand_ty),
+                                    expr.span.clone(),
+                                );
+                                operand_ty
+                            }
+                        } else {
                             self.error(
                                 format!("bitwise not requires integer, found {}", operand_ty),
                                 expr.span.clone(),
                             );
+                            operand_ty
                         }
-                        operand_ty
                     }
                     ast::UnaryOperator::Increment | ast::UnaryOperator::Decrement => {
                         if !self.is_incdec_type(&operand_ty) {
@@ -815,6 +874,15 @@ impl TypeChecker {
                             expr.span.clone(),
                         );
                     }
+                    // Try operator overload for non-primitive types
+                    if !self.is_primitive_type(&left_ty) {
+                        if let Some(result_ty) = self.resolve_operator_overload(
+                            &left_ty, &right_ty, operator, expr,
+                        ) {
+                            return result_ty;
+                        }
+                    }
+
                     left_ty
                 }
                 ast::BinaryOperator::Assign
@@ -857,6 +925,87 @@ impl TypeChecker {
                             }
                         }
                     }
+                    // Try operator overload for compound assignment
+                    if !self.is_primitive_type(&left_ty)
+                        && matches!(operator,
+                            ast::BinaryOperator::AddAssign
+                            | ast::BinaryOperator::SubtractAssign
+                            | ast::BinaryOperator::MultiplyAssign
+                            | ast::BinaryOperator::DivideAssign
+                            | ast::BinaryOperator::ModuloAssign)
+                    {
+                        let bin_op = match operator {
+                            ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
+                            ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
+                            ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
+                            ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
+                            ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                            _ => unreachable!(),
+                        };
+                        self.resolve_operator_overload(&left_ty, &right_ty, &bin_op, expr);
+                    }
+
+                    left_ty
+                }
+                ast::BinaryOperator::AddAssign
+                | ast::BinaryOperator::SubtractAssign
+                | ast::BinaryOperator::MultiplyAssign
+                | ast::BinaryOperator::DivideAssign
+                | ast::BinaryOperator::ModuloAssign => {
+                    let left_ty = self.check_expr(left, None);
+                    let right_ty = self.check_expr(right, None);
+                    if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
+                        self.error(
+                            format!(
+                                "assignment type mismatch: {} = {}",
+                                left_ty, right_ty
+                            ),
+                            expr.span.clone(),
+                        );
+                    }
+                    // Check mutability of assignment target
+                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref() {
+                        if let Some((_, is_mut)) = self.lookup(&ident.name) {
+                            if !is_mut {
+                                self.error(
+                                    format!("cannot assign to const variable '{}'", ident.name),
+                                    ident.span.clone(),
+                                );
+                            }
+                        }
+                    }
+                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref() {
+                        if let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref() {
+                            if let Some((_, is_mut)) = self.lookup(&ident.name) {
+                                if !is_mut {
+                                    self.error(
+                                        format!("cannot assign to field of const variable '{}'", ident.name),
+                                        ident.span.clone(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Try operator overload for compound assignment
+                    if !self.is_primitive_type(&left_ty)
+                        && matches!(operator,
+                            ast::BinaryOperator::AddAssign
+                            | ast::BinaryOperator::SubtractAssign
+                            | ast::BinaryOperator::MultiplyAssign
+                            | ast::BinaryOperator::DivideAssign
+                            | ast::BinaryOperator::ModuloAssign)
+                    {
+                        let bin_op = match operator {
+                            ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
+                            ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
+                            ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
+                            ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
+                            ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                            _ => unreachable!(),
+                        };
+                        self.resolve_operator_overload(&left_ty, &right_ty, &bin_op, expr);
+                    }
+
                     left_ty
                 }
                 ast::BinaryOperator::Range => {
@@ -940,7 +1089,7 @@ impl TypeChecker {
                 Type::Unit
             }
             ast::ExpressionKind::Array(elements) => {
-                if let Some(Type::Array { element, length }) = expected {
+                if let Some(Type::Slice { element }) = expected {
                     for element_expr in elements {
                         let item_ty = self.check_expr(element_expr, Some(element));
                         if !self.is_assignable(element, &item_ty) {
@@ -953,9 +1102,8 @@ impl TypeChecker {
                             );
                         }
                     }
-                    Type::Array {
+                    Type::Slice {
                         element: element.clone(),
-                        length: *length,
                     }
                 } else {
                     for element_expr in elements {
@@ -1074,16 +1222,16 @@ impl TypeChecker {
                     );
                 }
                 let object_ty_display = object_ty.to_string();
-                match object_ty {
-                    Type::Array { element, .. } => (*element).clone(),
-                    Type::Pointer { inner, .. } => match inner.as_ref() {
-                        Type::Array { element, .. } => (**element).clone(),
+                match &object_ty {
+                    Type::Slice { element } => (**element).clone(),
+                    Type::Pointer { inner, .. } => match &**inner {
+                        Type::Slice { element } => (**element).clone(),
                         _ => inner.as_ref().clone(),
                     },
-                    Type::Reference { inner, .. } => match inner.as_ref() {
-                        Type::Array { element, .. } => (**element).clone(),
-                        Type::Pointer { inner, .. } => match inner.as_ref() {
-                            Type::Array { element, .. } => (**element).clone(),
+                    Type::Reference { inner, .. } => match &**inner {
+                        Type::Slice { element } => (**element).clone(),
+                        Type::Pointer { inner, .. } => match &**inner {
+                            Type::Slice { element } => (**element).clone(),
                             _ => inner.as_ref().clone(),
                         },
                         _ => {
@@ -1098,14 +1246,24 @@ impl TypeChecker {
                         }
                     },
                     _ => {
-                        self.error(
-                            format!(
-                                "indexing requires array or pointer type, found {}",
-                                object_ty_display
-                            ),
+                        if let Some(result_ty) = self.resolve_method_overload_types(
+                            &object_ty,
+                            "__index_get",
+                            &[index_ty],
+                            MethodCallStyle::Instance,
                             object.span.clone(),
-                        );
-                        Type::Unknown
+                        ) {
+                            result_ty
+                        } else {
+                            self.error(
+                                format!(
+                                    "indexing requires array or pointer type, found {}",
+                                    object_ty_display
+                                ),
+                                object.span.clone(),
+                            );
+                            Type::Unknown
+                        }
                     }
                 }
             }
@@ -2030,6 +2188,7 @@ impl TypeChecker {
             Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
                 self.is_concrete_type(inner)
             }
+            Type::Slice { element } => self.is_concrete_type(element),
             Type::Array { element, .. } => self.is_concrete_type(element),
             Type::Optional { inner } => self.is_concrete_type(inner),
             Type::Tuple(items) => items.iter().all(|inner| self.is_concrete_type(inner)),
@@ -2123,16 +2282,7 @@ impl TypeChecker {
                 is_mutable == found_mut
                     && self.infer_type_params(inner, found_inner, type_params, mapping)
             }
-            (
-                Type::Array { element, length },
-                Type::Array {
-                    element: found_elem,
-                    length: found_len,
-                },
-            ) => {
-                if length != found_len {
-                    return false;
-                }
+            (Type::Slice { element }, Type::Slice { element: found_elem }) => {
                 self.infer_type_params(element, found_elem, type_params, mapping)
             }
             (Type::Optional { inner }, Type::Optional { inner: found_inner }) => {
@@ -2452,9 +2602,8 @@ impl TypeChecker {
                 is_mutable: *is_mutable,
                 inner: Box::new(self.substitute_self_type(inner, receiver)),
             },
-            Type::Array { element, length } => Type::Array {
+            Type::Slice { element } => Type::Slice {
                 element: Box::new(self.substitute_self_type(element, receiver)),
-                length: *length,
             },
             Type::Optional { inner } => Type::Optional {
                 inner: Box::new(self.substitute_self_type(inner, receiver)),
@@ -2684,6 +2833,9 @@ impl TypeChecker {
             }
             ast::TypeKind::Pointer(pointer) => {
                 self.collect_implicit_type_params(&pointer.inner, params)
+            }
+            ast::TypeKind::Slice(slice) => {
+                self.collect_implicit_type_params(&slice.element_type, params)
             }
             ast::TypeKind::Array(array) => {
                 self.collect_implicit_type_params(&array.element_type, params)
@@ -2955,7 +3107,7 @@ impl TypeChecker {
             }
             ast::TypeKind::Reference(r) => Self::resolve_type_aliases_in_type(&mut r.inner, aliases),
             ast::TypeKind::Pointer(p) => Self::resolve_type_aliases_in_type(&mut p.inner, aliases),
-            ast::TypeKind::Array(a) => Self::resolve_type_aliases_in_type(&mut a.element_type, aliases),
+            ast::TypeKind::Slice(s) => Self::resolve_type_aliases_in_type(&mut s.element_type, aliases),
             ast::TypeKind::Optional(inner) => Self::resolve_type_aliases_in_type(inner, aliases),
             ast::TypeKind::Function(f) => {
                 for p in &mut f.parameters {
@@ -3304,7 +3456,7 @@ fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveT
     }
 }
 
-fn operator_method_name(operator: &ast::BinaryOperator) -> Option<&'static str> {
+pub(crate) fn operator_method_name(operator: &ast::BinaryOperator) -> Option<&'static str> {
     match operator {
         ast::BinaryOperator::Add => Some("__add"),
         ast::BinaryOperator::Subtract => Some("__sub"),
@@ -3317,10 +3469,24 @@ fn operator_method_name(operator: &ast::BinaryOperator) -> Option<&'static str> 
         ast::BinaryOperator::Greater => Some("__gt"),
         ast::BinaryOperator::LessEqual => Some("__le"),
         ast::BinaryOperator::GreaterEqual => Some("__ge"),
+        ast::BinaryOperator::BitwiseAnd => Some("__bitand"),
+        ast::BinaryOperator::BitwiseOr => Some("__bitor"),
+        ast::BinaryOperator::BitwiseXor => Some("__bitxor"),
+        ast::BinaryOperator::LeftShift => Some("__shl"),
+        ast::BinaryOperator::RightShift => Some("__shr"),
         _ => None,
     }
 }
 
+
+pub(crate) fn unary_operator_method_name(operator: &ast::UnaryOperator) -> Option<&'static str> {
+    match operator {
+        ast::UnaryOperator::Minus => Some("__neg"),
+        ast::UnaryOperator::Not => Some("__not"),
+        ast::UnaryOperator::BitwiseNot => Some("__bitnot"),
+        _ => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

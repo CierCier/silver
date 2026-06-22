@@ -1,3 +1,4 @@
+use crate::diagnostics;
 use std::path::{Path, PathBuf};
 
 use crate::lexer::{self, Span};
@@ -351,9 +352,14 @@ impl ModuleArtifact {
 
         if !errors.is_empty() {
             return Err(format!(
-                "parser errors in {}: {:?}",
-                path.display(),
-                errors[0].format_with_help()
+                "{}",
+                diagnostics::render(
+                    &src,
+                    &path.display().to_string(),
+                    errors[0].span().clone(),
+                    &errors[0].format_with_help(),
+                    diagnostics::Severity::Error,
+                )
             ));
         }
 

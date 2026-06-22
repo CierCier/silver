@@ -865,14 +865,14 @@ fn type_node(ty: &ast::Type) -> Node {
             n.children.push(type_node(&pointer.inner));
             n
         }
+        ast::TypeKind::Slice(slice) => {
+            let mut n = Node::new("Type::Slice");
+            n.children.push(type_node(&slice.element_type));
+            n
+        }
         ast::TypeKind::Array(array) => {
-            let mut n = Node::new("Type::Array");
+            let mut n = Node::new(format!("Type::Array[{}]", array.size));
             n.children.push(type_node(&array.element_type));
-            if let Some(size) = &array.size {
-                let mut size_node = Node::new("size");
-                size_node.children.push(expression_node(size));
-                n.children.push(size_node);
-            }
             n
         }
         ast::TypeKind::Optional(inner) => {

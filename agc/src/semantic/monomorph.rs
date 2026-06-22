@@ -520,6 +520,12 @@ fn collect_type_instantiations(
         ast::TypeKind::Pointer(pointer) => {
             collect_type_instantiations(&pointer.inner, generic_structs, instantiations, scopes)
         }
+        ast::TypeKind::Slice(slice) => collect_type_instantiations(
+            &slice.element_type,
+            generic_structs,
+            instantiations,
+            scopes,
+        ),
         ast::TypeKind::Array(array) => collect_type_instantiations(
             &array.element_type,
             generic_structs,
@@ -1410,18 +1416,18 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
             is_mutable: *is_mutable,
             inner: Box::new(type_to_ast(inner, span.clone())),
         }),
-        Type::Array { element, length } => {
-            let size = length.map(|len| ast::Expression {
-                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
-                    len as i128,
-                ))),
+        Type::Slice { element } => ast::TypeKind::Named(ast::NamedType {
+            path: vec![ast::Identifier {
+                name: "Slice".to_string(),
                 span: span.clone(),
-            });
-            ast::TypeKind::Array(Box::new(ast::ArrayType {
-                element_type: Box::new(type_to_ast(element, span.clone())),
-                size: size.map(Box::new),
-            }))
-        }
+            }],
+            generics: Some(vec![type_to_ast(element, span.clone())]),
+        }),
+        Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
+            element_type: Box::new(type_to_ast(element, span.clone())),
+            size: *size as i64,
+            span: span.clone(),
+        })),
         Type::Optional { inner } => {
             ast::TypeKind::Optional(Box::new(type_to_ast(inner, span.clone())))
         }
@@ -1492,7 +1498,10 @@ fn collect_implicit_type_params(ty: &ast::Type, params: &mut HashSet<String>) {
             collect_implicit_type_params(&reference.inner, params)
         }
         ast::TypeKind::Pointer(pointer) => collect_implicit_type_params(&pointer.inner, params),
-        ast::TypeKind::Array(array) => collect_implicit_type_params(&array.element_type, params),
+        ast::TypeKind::Slice(slice) => collect_implicit_type_params(&slice.element_type, params),
+        ast::TypeKind::Array(array) => {
+            collect_implicit_type_params(&array.element_type, params)
+        }
         ast::TypeKind::Optional(inner) => collect_implicit_type_params(inner, params),
         ast::TypeKind::Tuple(items) => {
             for item in items {
@@ -1539,10 +1548,11 @@ fn is_concrete_type(ty: &Type, scopes: &Vec<HashSet<String>>) -> bool {
             }
             generics.iter().all(|inner| is_concrete_type(inner, scopes))
         }
+        Type::Array { element, .. } => is_concrete_type(element, scopes),
+        Type::Slice { element } => is_concrete_type(element, scopes),
         Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
             is_concrete_type(inner, scopes)
         }
-        Type::Array { element, .. } => is_concrete_type(element, scopes),
         Type::Optional { inner } => is_concrete_type(inner, scopes),
         Type::Tuple(items) => items.iter().all(|inner| is_concrete_type(inner, scopes)),
         Type::Function {

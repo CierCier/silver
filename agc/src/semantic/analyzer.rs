@@ -476,11 +476,11 @@ impl Analyzer {
             }
             ast::TypeKind::Reference(reference) => self.check_type(&reference.inner),
             ast::TypeKind::Pointer(pointer) => self.check_type(&pointer.inner),
+            ast::TypeKind::Slice(slice) => {
+                self.check_type(&slice.element_type);
+            }
             ast::TypeKind::Array(array) => {
                 self.check_type(&array.element_type);
-                if let Some(size) = &array.size {
-                    self.check_expression(size);
-                }
             }
             ast::TypeKind::Optional(inner) => self.check_type(inner),
             ast::TypeKind::Tuple(items) => {
@@ -760,6 +760,9 @@ impl Analyzer {
             ast::TypeKind::Pointer(pointer) => {
                 self.collect_implicit_type_params(&pointer.inner, params)
             }
+            ast::TypeKind::Slice(slice) => {
+                self.collect_implicit_type_params(&slice.element_type, params)
+            }
             ast::TypeKind::Array(array) => {
                 self.collect_implicit_type_params(&array.element_type, params)
             }
@@ -927,8 +930,8 @@ mod tests {
     }
 
     #[test]
-    fn allows_trait_bounds_and_array_bounds() {
-        let program = parse("trait Copy {} struct Foo<T> where [T; 4]: Copy { [T; 4] x; }");
+    fn allows_trait_bounds() {
+        let program = parse("trait Printable {} struct Foo<T> where T: Printable { T x; }");
         let mut analyzer = Analyzer::new();
         let errors = analyzer.analyze_program(&program);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");

@@ -1,0 +1,24 @@
+// Operator overloading traits.
+//
+// Each trait defines a method named `__<op>` so the existing
+// operator_method_name → resolve_operator_overload path works unchanged.
+
+pub trait Add<A, B>        { fn __add(A self, B other) -> A; }
+pub trait Sub<A, B>        { fn __sub(A self, B other) -> A; }
+pub trait Mul<A, B>        { fn __mul(A self, B other) -> A; }
+pub trait Div<A, B>        { fn __div(A self, B other) -> A; }
+pub trait Mod<A, B>        { fn __mod(A self, B other) -> A; }
+pub trait Neg<A>                { fn __neg(A self) -> A; }
+
+pub trait Eq<A>   { fn __eq(A self, A other) -> bool; }
+pub trait Ne<A>   { fn __ne(A self, A other) -> bool; }
+pub trait Lt<A>   { fn __lt(A self, A other) -> bool; }
+pub trait Gt<A>   { fn __gt(A self, A other) -> bool; }
+pub trait Le<A>   { fn __le(A self, A other) -> bool; }
+pub trait Ge<A>   { fn __ge(A self, A other) -> bool; }
+
+pub trait IndexedAccess<Container> {
+    type Item;
+    fn __index_get(Container* self, i64 index) -> Item;
+    fn __index_set(Container* self, i64 index, Item value) -> void;
+}

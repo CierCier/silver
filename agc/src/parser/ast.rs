@@ -253,6 +253,7 @@ pub enum TypeKind {
     Generic(GenericType),
     Reference(ReferenceType),
     Pointer(PointerType),
+    Slice(Box<SliceType>),
     Array(Box<ArrayType>),
     Optional(Box<Type>),
     Function(FunctionType),
@@ -314,9 +315,15 @@ pub struct PointerType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SliceType {
+    pub element_type: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArrayType {
     pub element_type: Box<Type>,
-    pub size: Option<Box<Expression>>,
+    pub size: i64,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

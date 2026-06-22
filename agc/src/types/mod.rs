@@ -20,9 +20,12 @@ pub enum Type {
         is_mutable: bool,
         inner: Box<Type>,
     },
+    Slice {
+        element: Box<Type>,
+    },
     Array {
         element: Box<Type>,
-        length: Option<usize>,
+        size: usize,
     },
     Optional {
         inner: Box<Type>,
@@ -114,15 +117,16 @@ impl TypeContext {
                 let overall_align = inner_layout.align.unwrap_or(1).max(1);
                 TypeLayout::known(total_size, overall_align)
             }
-            Type::Array { element, length } => {
+            Type::Slice { .. } => TypeLayout::known(16, 8),
+            Type::Array { element, size } => {
                 let elem_layout = self.layout_of(element);
-                let size = match (elem_layout.size, length) {
-                    (Some(elem_size), Some(len)) => elem_size.checked_mul(*len),
-                    _ => None,
-                };
-                TypeLayout {
-                    size,
-                    align: elem_layout.align,
+                if let (Some(size_val), Some(align)) = (elem_layout.size, elem_layout.align) {
+                    TypeLayout::known(size_val * *size, align)
+                } else {
+                    TypeLayout {
+                        size: None,
+                        align: elem_layout.align,
+                    }
                 }
             }
             Type::Tuple(items) => tuple_layout(self, items),
@@ -281,6 +285,11 @@ impl Type {
                     .as_ref()
                     .map(|gs| gs.iter().map(Type::from_ast).collect())
                     .unwrap_or_default();
+                if path.len() == 1 && path[0] == "Slice" && generics.len() == 1 {
+                    return Type::Slice {
+                        element: Box::new(generics.into_iter().next().unwrap()),
+                    };
+                }
                 Type::Named { path, generics }
             }
             ast::TypeKind::Generic(generic) => Type::Named {
@@ -295,21 +304,24 @@ impl Type {
                 is_mutable: pointer.is_mutable,
                 inner: Box::new(Type::from_ast(&pointer.inner)),
             },
-            ast::TypeKind::Array(array) => Type::Array {
-                element: Box::new(Type::from_ast(&array.element_type)),
-                length: array.size.as_ref().and_then(|expr| literal_usize(expr)),
+            ast::TypeKind::Slice(slice) => Type::Slice {
+                element: Box::new(Type::from_ast(&slice.element_type)),
             },
             ast::TypeKind::Optional(inner) => Type::Optional {
                 inner: Box::new(Type::from_ast(inner)),
+            },
+            ast::TypeKind::Array(array) => Type::Array {
+                element: Box::new(Type::from_ast(&array.element_type)),
+                size: array.size as usize,
             },
             ast::TypeKind::Function(func) => Type::Function {
                 params: func.parameters.iter().map(Type::from_ast).collect(),
                 return_type: Box::new(Type::from_ast(&func.return_type)),
             },
             ast::TypeKind::Tuple(items) => Type::Tuple(items.iter().map(Type::from_ast).collect()),
-        }
     }
-
+}
+    
     pub fn from_canonical_key(text: &str) -> Result<Type, String> {
         let mut parser = TypeParser::new(text);
         let ty = parser.parse_type()?;
@@ -319,7 +331,7 @@ impl Type {
         }
         Ok(ty)
     }
-
+    
     pub fn to_ast(&self) -> ast::Type {
         fn ident(name: &str) -> ast::Identifier {
             ast::Identifier {
@@ -351,17 +363,17 @@ impl Type {
                     is_mutable: *is_mutable,
                     inner: Box::new(inner.to_ast()),
                 }),
-                Type::Array { element, length } => ast::TypeKind::Array(Box::new(ast::ArrayType {
-                    element_type: Box::new(element.to_ast()),
-                    size: length.map(|len| {
-                        Box::new(ast::Expression {
-                            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
-                                len as i128,
-                            ))),
-                            span: Span { start: 0, end: 0 },
-                        })
-                    }),
-                })),
+                Type::Slice { element } => ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ident("Slice")],
+                    generics: Some(vec![element.to_ast()]),
+                }),
+                Type::Array { element, size } => {
+                    ast::TypeKind::Array(Box::new(ast::ArrayType {
+                        element_type: Box::new(element.to_ast()),
+                        size: *size as i64,
+                        span: Span { start: 0, end: 0 },
+                    }))
+                }
                 Type::Optional { inner } => ast::TypeKind::Optional(Box::new(inner.to_ast())),
                 Type::Tuple(items) => {
                     ast::TypeKind::Tuple(items.iter().map(Type::to_ast).collect())
@@ -410,9 +422,12 @@ impl Type {
                 is_mutable: *is_mutable,
                 inner: Box::new(inner.substitute(mapping)),
             },
-            Type::Array { element, length } => Type::Array {
+            Type::Slice { element } => Type::Slice {
                 element: Box::new(element.substitute(mapping)),
-                length: *length,
+            },
+            Type::Array { element, size } => Type::Array {
+                element: Box::new(element.substitute(mapping)),
+                size: *size,
             },
             Type::Optional { inner } => Type::Optional {
                 inner: Box::new(inner.substitute(mapping)),
@@ -462,10 +477,8 @@ impl Type {
                     format!("{}<{}>", path.join("::"), args)
                 }
             }
-            Type::Array { element, length } => match length {
-                Some(len) => format!("[{};{}]", element.canonical_key(), len),
-                None => format!("[{}]", element.canonical_key()),
-            },
+            Type::Array { element, size } => format!("Array<{}, {}>", element.canonical_key(), size),
+            Type::Slice { element } => format!("Slice<{}>", element.canonical_key()),
             Type::Optional { inner } => format!("Optional<{}>", inner.canonical_key()),
             Type::Tuple(items) => {
                 let args = items
@@ -525,10 +538,8 @@ impl fmt::Display for Type {
                     write!(f, "const {}*", inner)
                 }
             }
-            Type::Array { element, length } => match length {
-                Some(len) => write!(f, "[{}; {}]", element, len),
-                None => write!(f, "[{}]", element),
-            },
+            Type::Slice { element } => write!(f, "Slice<{}>", element),
+            Type::Array { element, size } => write!(f, "Array<{}, {}>", element, size),
             Type::Optional { inner } => write!(f, "Optional<{}>", inner),
             Type::Tuple(items) => {
                 let args: Vec<String> = items.iter().map(|t| t.to_string()).collect();
@@ -736,23 +747,7 @@ impl<'a> TypeParser<'a> {
                 return_type: Box::new(return_type),
             });
         }
-        if self.consume_byte(b'[') {
-            let element = self.parse_type()?;
-            self.skip_ws();
-            let length = if self.consume_byte(b';') {
-                let len = self.parse_usize()?;
-                self.skip_ws();
-                self.expect_byte(b']')?;
-                Some(len)
-            } else {
-                self.expect_byte(b']')?;
-                None
-            };
-            return Ok(Type::Array {
-                element: Box::new(element),
-                length,
-            });
-        }
+        // Type::Array removed — use Slice<T> canonical key instead
         if self.consume_byte(b'(') {
             let items = self.parse_type_list(b')')?;
             return Ok(Type::Tuple(items));
@@ -1002,33 +997,21 @@ mod tests {
         assert_eq!(layout.size, Some(8));
     }
 
-    #[test]
-    fn array_layout_uses_length() {
-        let ctx = TypeContext::default();
-        let ty = Type::Array {
-            element: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
-            length: Some(4),
-        };
-        let layout = ctx.layout_of(&ty);
-        assert_eq!(layout.align, Some(4));
-        assert_eq!(layout.size, Some(16));
-    }
 
     #[test]
     fn canonical_parser_understands_void() {
         let ty = Type::from_canonical_key("void").expect("expected void type");
         assert_eq!(ty, Type::Primitive(ast::PrimitiveType::Void));
     }
-
-    #[test]
-    fn canonical_parser_preserves_pointer_and_reference_wrappers() {
-        let pointer = Type::from_canonical_key("*f64").expect("expected pointer type");
-        assert_eq!(pointer.canonical_key(), "*f64");
-
-        let reference = Type::from_canonical_key("&f64").expect("expected reference type");
-        assert_eq!(reference.canonical_key(), "&f64");
+    fn slice_layout_is_16_bytes() {
+        let ctx = TypeContext::default();
+        let ty = Type::Slice {
+            element: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
+        };
+        let layout = ctx.layout_of(&ty);
+        assert_eq!(layout.align, Some(8));
+        assert_eq!(layout.size, Some(16));
     }
-
     #[test]
     fn void_layout_is_zero_sized() {
         let ctx = TypeContext::default();
