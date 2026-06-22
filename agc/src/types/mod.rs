@@ -461,7 +461,13 @@ impl Type {
 
     pub fn canonical_key(&self) -> String {
         match self {
-            Type::Pointer { inner, .. } => format!("*{}", inner.canonical_key()),
+            Type::Pointer { is_mutable, inner } => {
+                if *is_mutable {
+                    format!("*mut {}", inner.canonical_key())
+                } else {
+                    format!("*{}", inner.canonical_key())
+                }
+            }
             Type::Reference { inner, .. } => format!("&{}", inner.canonical_key()),
             Type::Unit => "unit".to_string(),
             Type::Primitive(p) => format!("{:?}", p).to_lowercase(),
@@ -712,9 +718,10 @@ impl<'a> TypeParser<'a> {
     fn parse_type(&mut self) -> Result<Type, String> {
         self.skip_ws();
         if self.consume_byte(b'*') {
+            let is_mutable = self.consume_str("mut ");
             let inner = self.parse_type()?;
             return Ok(Type::Pointer {
-                is_mutable: true,
+                is_mutable,
                 inner: Box::new(inner),
             });
         }
