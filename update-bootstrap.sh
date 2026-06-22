@@ -16,13 +16,13 @@ mkdir -p "$bin_dir" "$include_root" "$lib_dir"
 cp "$root_dir/target/release/agc" "$bin_dir/agc"
 
 rm -rf "$include_root" "$lib_dir"
-mkdir -p "$include_root" "$lib_dir"
+mkdir -p "$bin_dir"
 
-# Build std modules (flat naming for backward compat)
+# Build std modules: source -> include/silver/std/... , compiled -> lib/silver/std/...
 if [ -d "$std_dir" ]; then
   while IFS= read -r -d '' src; do
     rel="${src#$std_dir/}"
-    dest="$include_root/$rel"
+    dest="$include_root/std/$rel"
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
@@ -30,6 +30,7 @@ if [ -d "$std_dir" ]; then
   # NOTE: box.ag is a draft and fails to compile as a module
   #       (generic `alloc<T>()` is not resolved across modules).
   #       Its import is commented out in std/mem.ag.
+  # NOTE: slice.ag is a compiler-builtin; cffi.ag is documentation-only.
   while IFS= read -r -d '' src; do
     rel="${src#$std_dir/}"
     case "$rel" in
@@ -37,31 +38,32 @@ if [ -d "$std_dir" ]; then
       slice.ag) echo "  (compiler-builtin, skipping: $rel)"; continue ;;
       cffi.ag) echo "  (documentation-only, skipping: $rel)"; continue ;;
     esac
-    dotted="${rel//\//.}"
-    base="${dotted%.ag}"
-    out="$lib_dir/$base.agm"
-    echo "  std module: $rel -> $base.agm"
+    module_path="std.${rel%.ag}"
+    module_path="${module_path//\//.}"
+    out="$lib_dir/${module_path//.//}.agm"
+    mkdir -p "$(dirname "$out")"
+    echo "  std module: $rel -> std/$rel"
     "$bin_dir/agc" "$src" --emit=module -I "$include_root" -o "$out"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
 fi
 
-# Build vendor modules (directory hierarchy)
+# Build vendor modules: source -> include/silver/vendor/... , compiled -> lib/silver/vendor/...
 if [ -d "$vendor_dir" ]; then
   while IFS= read -r -d '' src; do
-    rel="${src#$root_dir/}"
-    dest="$include_root/$rel"
+    rel="${src#$root_dir/vendor/}"
+    dest="$include_root/vendor/$rel"
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
   done < <(find "$vendor_dir" -type f -name '*.ag' -print0)
 
   while IFS= read -r -d '' src; do
-    rel="${src#$root_dir/}"
-    base="${rel%.ag}"
-    out="$lib_dir/$base.agm"
+    rel="${src#$root_dir/vendor/}"
+    module_path="vendor.${rel%.ag}"
+    module_path="${module_path//\//.}"
+    out="$lib_dir/${module_path//.//}.agm"
     mkdir -p "$(dirname "$out")"
-    echo "  vendor module: $rel -> $base.agm"
+    echo "  vendor module: vendor/$rel -> vendor/$rel"
     "$bin_dir/agc" "$src" --emit=module -I "$include_root" -o "$out"
   done < <(find "$vendor_dir" -type f -name '*.ag' -print0)
 fi
-
 echo "Bootstrap updated at $bootstrap_dir"

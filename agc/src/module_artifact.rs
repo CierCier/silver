@@ -664,6 +664,37 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     trait_items: items,
                 });
             }
+            ast::ItemKind::ExternBlock(block) => {
+                for func in &block.functions {
+                    let params = func
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|p| Type::from_ast(&p.param_type).canonical_key())
+                        .collect::<Vec<_>>();
+                    let ret = func
+                        .signature
+                        .return_type
+                        .as_ref()
+                        .map(Type::from_ast)
+                        .unwrap_or(Type::Unit)
+                        .canonical_key();
+                    exports.push(ModuleExport {
+                        kind: ExportKind::Function,
+                        name: func.name.name.clone(),
+                        signature: format!("fn({})->{ret}", params.join(",")),
+                        link_name: Some(func.name.name.clone()),
+                        abi: Some(ModuleAbi::from_linkage(&block.linkage)),
+                        is_variadic: func.signature.is_variadic,
+                        type_key: None,
+                        fields: Vec::new(),
+                        layout: None,
+                        enum_backing_type: None,
+                        enum_variants: Vec::new(),
+                        trait_items: Vec::new(),
+                    });
+                }
+            }
             _ => {}
         }
     }
