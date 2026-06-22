@@ -25,6 +25,7 @@ use crate::debug_info::{DebugContext, SourceMap};
 use crate::lexer::Span;
 use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
+use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::types::Type;
 
@@ -883,26 +884,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .ptr_type(AddressSpace::default())
                     .as_basic_type_enum())
             }
+            ast::TypeKind::Slice(slice) => {
+                let _ = self.lower_basic_type(&slice.element_type)?;
+                let ptr_ty = self
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum();
+                let i64_ty = self.context.i64_type().as_basic_type_enum();
+                Ok(self
+                    .context
+                    .struct_type(&[ptr_ty, i64_ty], false)
+                    .as_basic_type_enum())
+            }
             ast::TypeKind::Array(array) => {
-                let element = self.lower_basic_type(&array.element_type)?;
-                let Some(size_expr) = &array.size else {
-                    return Err(CodegenError::with_span(
-                        "array fields require a constant size in LLVM IR codegen",
-                        ty.span.clone(),
-                    ));
-                };
-                let ast::ExpressionKind::Literal(ast::Literal::Integer(size_value)) =
-                    size_expr.kind.as_ref()
-                else {
-                    return Err(CodegenError::with_span(
-                        "array size must be an integer literal in LLVM IR codegen",
-                        size_expr.span.clone(),
-                    ));
-                };
-                let size = u32::try_from(*size_value).map_err(|_| {
-                    CodegenError::with_span("array size is out of range", size_expr.span.clone())
-                })?;
-                Ok(element.array_type(size).as_basic_type_enum())
+                let elem_ty = self.lower_basic_type(&array.element_type)?;
+                // Compile-time fixed-size arrays — use LLVM's `[N x elem]` type, no pointer+length wrapper.
+                Ok(elem_ty.array_type(array.size as u32).as_basic_type_enum())
             }
             ast::TypeKind::Optional(inner) => {
                 let inner = self.lower_basic_type(inner)?;
@@ -1526,13 +1523,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 is_mutable: pointer.is_mutable,
                 inner: Box::new(Self::substitute_generic_type(&pointer.inner, substitutions)),
             })),
-            ast::TypeKind::Array(array) => {
-                Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+            ast::TypeKind::Slice(slice) => {
+                Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
                     element_type: Box::new(Self::substitute_generic_type(
-                        &array.element_type,
+                        &slice.element_type,
                         substitutions,
                     )),
-                    size: array.size.clone(),
                 })))
             }
             ast::TypeKind::Optional(inner) => Box::new(ast::TypeKind::Optional(Box::new(
@@ -2168,7 +2164,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.has_generic_placeholder_type(&reference.inner)
             }
             ast::TypeKind::Pointer(pointer) => self.has_generic_placeholder_type(&pointer.inner),
-            ast::TypeKind::Array(array) => self.has_generic_placeholder_type(&array.element_type),
+            ast::TypeKind::Slice(slice) => self.has_generic_placeholder_type(&slice.element_type),
             ast::TypeKind::Optional(inner) => self.has_generic_placeholder_type(inner),
             ast::TypeKind::Function(function) => {
                 self.has_generic_placeholder_type(&function.return_type)
@@ -2789,81 +2785,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .const_struct(&values, false)
                     .as_basic_value_enum())
             }
-            ast::TypeKind::Array(array) => {
-                let element_ty = self.lower_basic_type(&array.element_type)?;
-                let Some(size_expr) = &array.size else {
-                    return Err(CodegenError::with_span(
-                        "array initializer requires a known array size",
-                        span.clone(),
-                    ));
-                };
-                let ast::ExpressionKind::Literal(ast::Literal::Integer(size_value)) =
-                    size_expr.kind.as_ref()
-                else {
-                    return Err(CodegenError::with_span(
-                        "array size must be an integer literal",
-                        size_expr.span.clone(),
-                    ));
-                };
-                let size = usize::try_from(*size_value).map_err(|_| {
-                    CodegenError::with_span("array size is out of range", size_expr.span.clone())
-                })?;
-
-                let mut slots = vec![element_ty.const_zero(); size];
-                let mut next_positional = 0usize;
-                for item in items {
-                    match item {
-                        ast::InitializerItem::Positional(expr) => {
-                            if next_positional >= size {
-                                return Err(CodegenError::with_span(
-                                    "too many positional array initializer items",
-                                    expr.span.clone(),
-                                ));
-                            }
-                            slots[next_positional] =
-                                self.emit_const_value_for_type(expr, &array.element_type)?;
-                            next_positional += 1;
-                        }
-                        ast::InitializerItem::Index { index, value } => {
-                            let ast::ExpressionKind::Literal(ast::Literal::Integer(index_value)) =
-                                index.kind.as_ref()
-                            else {
-                                return Err(CodegenError::with_span(
-                                    "array designated index must be an integer literal",
-                                    index.span.clone(),
-                                ));
-                            };
-                            let idx = usize::try_from(*index_value).map_err(|_| {
-                                CodegenError::with_span(
-                                    "array designated index is out of range",
-                                    index.span.clone(),
-                                )
-                            })?;
-                            if idx >= size {
-                                return Err(CodegenError::with_span(
-                                    "array designated index exceeds array size",
-                                    index.span.clone(),
-                                ));
-                            }
-                            slots[idx] =
-                                self.emit_const_value_for_type(value, &array.element_type)?;
-                        }
-                        ast::InitializerItem::Field { name, .. } => {
-                            return Err(CodegenError::with_span(
-                                format!(
-                                    "field designator `{}` is invalid for array initializer",
-                                    name.name
-                                ),
-                                name.span.clone(),
-                            ));
-                        }
-                    }
-                }
-
-                Ok(self
-                    .const_array_value_from_values(element_ty, &slots, span)?
-                    .as_basic_value_enum())
-            }
             _ => Err(CodegenError::with_span(
                 "initializer is not supported for this global type",
                 target_type.span.clone(),
@@ -3151,17 +3072,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "initializer expression requires a target type context",
                 expr.span.clone(),
             )),
-            ast::ExpressionKind::Index { .. } => {
-                let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
-                let llvm_ty = self.lower_basic_type(&ty)?;
-                self.builder
-                    .build_load(llvm_ty, ptr, "lvalue.load")
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to load lvalue: {e}"),
-                            expr.span.clone(),
-                        )
-                    })
+            ast::ExpressionKind::Index { object, index } => {
+                // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
+                let object_ty = self.resolve_receiver_type(object);
+                if let Some(ty) = &object_ty {
+                    if matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
+                        let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
+                        let llvm_ty = self.lower_basic_type(&ty)?;
+                        return self.builder
+                            .build_load(llvm_ty, ptr, "lvalue.load")
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to load lvalue: {e}"),
+                                    expr.span.clone(),
+                                )
+                            });
+                    }
+                }
+                // For non-pointer types (struct, slice), use the trait path (__index_get)
+                let method_ident = ast::Identifier { name: "__index_get".to_string(), span: expr.span.clone() };
+                let result = self.emit_method_call_expression(object, &method_ident, &[*index.clone()], false, &expr.span)?;
+                result.ok_or_else(|| CodegenError::with_span("__index_get returned void", expr.span.clone()))
             }
             ast::ExpressionKind::Reference { expression, .. } => {
                 let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
@@ -3318,7 +3249,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 span.clone(),
             ));
         }
-
+    
         let first = self.emit_expression_value(&items[0])?;
         let element_ty = first.get_type();
         let mut values = vec![first];
@@ -3332,23 +3263,61 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             values.push(value);
         }
-
-        let array_ty = element_ty.array_type(values.len() as u32);
-        let mut aggregate = array_ty.get_undef();
+    
+        // Emit as a Slice<T> struct: { T* data; i64 len; }
+        let n = values.len() as u32;
+    
+        // Allocate a stack buffer for the elements
+        let array_llvm_ty = element_ty.array_type(n);
+        let alloca = self.builder.build_alloca(array_llvm_ty, "arr.lit.buf").map_err(|e| {
+            CodegenError::with_span(format!("failed to allocate array buffer: {e}"), span.clone())
+        })?;
+    
+        // Store each element
         for (index, value) in values.iter().enumerate() {
-            aggregate = self
-                .builder
-                .build_insert_value(aggregate, *value, index as u32, "arr.lit.ins")
-                .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("failed to build array literal element {index}: {e}"),
-                        span.clone(),
-                    )
-                })?
-                .into_array_value();
+            let indices = [
+                self.context.i32_type().const_zero(),
+                self.context.i32_type().const_int(index as u64, false),
+            ];
+            let ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(array_llvm_ty, alloca, &indices, "arr.lit.ptr")
+            }
+            .map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to build array literal element pointer {index}: {e}"),
+                    span.clone(),
+                )
+            })?;
+            self.builder.build_store(ptr, *value).map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to store array literal element {index}: {e}"),
+                    span.clone(),
+                )
+            })?;
         }
-
-        Ok(aggregate.as_basic_value_enum())
+    
+        // Build the Slice struct value
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let slice_ty = self.context.struct_type(&[ptr_ty.as_basic_type_enum(), i64_ty.as_basic_type_enum()], false);
+        let mut slice = slice_ty.get_undef();
+    
+        // Field 0: data pointer
+        let data_ptr = alloca.as_basic_value_enum();
+        slice = self.builder
+            .build_insert_value(slice, data_ptr, 0, "slice.data")
+            .map_err(|e| CodegenError::with_span(format!("failed to build slice data field: {e}"), span.clone()))?
+            .into_struct_value();
+    
+        // Field 1: length
+        let len = i64_ty.const_int(values.len() as u64, false);
+        slice = self.builder
+            .build_insert_value(slice, len.as_basic_value_enum(), 1, "slice.len")
+            .map_err(|e| CodegenError::with_span(format!("failed to build slice len field: {e}"), span.clone()))?
+            .into_struct_value();
+    
+        Ok(slice.as_basic_value_enum())
     }
 
     fn emit_tuple_literal_value(
@@ -3531,105 +3500,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             span.clone(),
                         )
                     })
-            }
-            ast::TypeKind::Array(array) => {
-                let element_ty = self.lower_basic_type(&array.element_type)?;
-                let Some(size_expr) = &array.size else {
-                    return Err(CodegenError::with_span(
-                        "array initializer requires a known array size",
-                        span.clone(),
-                    ));
-                };
-                let ast::ExpressionKind::Literal(ast::Literal::Integer(size_value)) =
-                    size_expr.kind.as_ref()
-                else {
-                    return Err(CodegenError::with_span(
-                        "array size must be an integer literal",
-                        size_expr.span.clone(),
-                    ));
-                };
-                let size = usize::try_from(*size_value).map_err(|_| {
-                    CodegenError::with_span("array size is out of range", size_expr.span.clone())
-                })?;
-
-                let array_ty = element_ty.array_type(size as u32);
-                let mut slots: Vec<Option<BasicValueEnum<'ctx>>> = vec![None; size];
-                let mut next_positional = 0usize;
-
-                for item in items {
-                    match item {
-                        ast::InitializerItem::Positional(expr) => {
-                            while next_positional < size && slots[next_positional].is_some() {
-                                next_positional += 1;
-                            }
-                            if next_positional >= size {
-                                return Err(CodegenError::with_span(
-                                    "too many positional array initializer items",
-                                    expr.span.clone(),
-                                ));
-                            }
-                            let value =
-                                self.emit_expression_value_for_expected(expr, &array.element_type)?;
-                            let value =
-                                self.cast_value_to_basic_type(value, element_ty, &expr.span)?;
-                            slots[next_positional] = Some(value);
-                            next_positional += 1;
-                        }
-                        ast::InitializerItem::Index { index, value } => {
-                            let ast::ExpressionKind::Literal(ast::Literal::Integer(index_value)) =
-                                index.kind.as_ref()
-                            else {
-                                return Err(CodegenError::with_span(
-                                    "array designated index must be an integer literal",
-                                    index.span.clone(),
-                                ));
-                            };
-                            let idx = usize::try_from(*index_value).map_err(|_| {
-                                CodegenError::with_span(
-                                    "array designated index is out of range",
-                                    index.span.clone(),
-                                )
-                            })?;
-                            if idx >= size {
-                                return Err(CodegenError::with_span(
-                                    "array designated index exceeds array size",
-                                    index.span.clone(),
-                                ));
-                            }
-                            let evaluated = self
-                                .emit_expression_value_for_expected(value, &array.element_type)?;
-                            let evaluated =
-                                self.cast_value_to_basic_type(evaluated, element_ty, &value.span)?;
-                            slots[idx] = Some(evaluated);
-                        }
-                        ast::InitializerItem::Field { name, .. } => {
-                            return Err(CodegenError::with_span(
-                                format!(
-                                    "field designator `{}` is invalid for array initializer",
-                                    name.name
-                                ),
-                                name.span.clone(),
-                            ));
-                        }
-                    }
-                }
-
-                let mut aggregate = array_ty.get_undef();
-                for (index, slot) in slots.into_iter().enumerate() {
-                    let value = slot.unwrap_or_else(|| element_ty.const_zero());
-                    aggregate = self
-                        .builder
-                        .build_insert_value(aggregate, value, index as u32, "init.array.ins")
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed to build array initializer element {index}: {e}"),
-                                span.clone(),
-                            )
-                        })?
-                        .into_array_value();
-                }
-
-                Ok(aggregate.as_basic_value_enum())
             }
             ast::TypeKind::Tuple(types) => {
                 if items.len() != types.len() {
@@ -4172,44 +4042,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Index { object, index } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
                 match object_ty.kind.as_ref() {
-                    ast::TypeKind::Array(array) => {
-                        let array_ty = self.lower_basic_type(&object_ty)?;
-                        let index_value = self.emit_expression_value(index)?;
-                        let BasicValueEnum::IntValue(index_int) = index_value else {
-                            return Err(CodegenError::with_span(
-                                "array index must be an integer",
-                                index.span.clone(),
-                            ));
-                        };
-                        let i32_ty = self.context.i32_type();
-                        let index_i32 = if index_int.get_type().get_bit_width() == 32 {
-                            index_int
-                        } else {
-                            self.builder
-                                .build_int_cast(index_int, i32_ty, "idx.cast")
-                                .map_err(|e| {
-                                    CodegenError::with_span(
-                                        format!("failed to cast array index: {e}"),
-                                        index.span.clone(),
-                                    )
-                                })?
-                        };
-                        let zero = i32_ty.const_zero();
-                        let element_ptr = unsafe {
-                            self.builder.build_in_bounds_gep(
-                                array_ty,
-                                object_ptr,
-                                &[zero, index_i32],
-                                "idx.ptr",
-                            )
-                        }
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed array indexing: {e}"),
-                                index.span.clone(),
-                            )
-                        })?;
-                        Ok((element_ptr, (*array.element_type).clone()))
+                    ast::TypeKind::Slice(_slice) => {
+                        return Err(CodegenError::with_span(
+                            "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
+                            object.span.clone(),
+                        ));
                     }
                     ast::TypeKind::Pointer(pointer) => {
                         let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
@@ -4756,6 +4593,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         operand: &ast::Expression,
         whole_expr: &ast::Expression,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Check for operator overload on struct types
+        let operand_val = self.emit_expression_value(operand)?;
+        if operand_val.get_type().is_struct_type() {
+            if let Some(method_name) = unary_operator_method_name(operator) {
+                let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
+                let result = self.emit_method_call_expression(
+                    operand, &method_ident, &[], false, &whole_expr.span
+                )?;
+                if let Some(val) = result {
+                    return Ok(val);
+                }
+            }
+        }
         match operator {
             ast::UnaryOperator::Plus => self.emit_expression_value(operand),
             ast::UnaryOperator::Minus => {
@@ -4860,7 +4710,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::UnaryOperator::Decrement => self.emit_inc_dec(operand, false, false, whole_expr),
         }
     }
-
     fn emit_postfix_expression(
         &mut self,
         operator: &ast::UnaryOperator,
@@ -5018,6 +4867,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.emit_short_circuit_logical(left, right, false, &whole_expr.span)
             }
             ast::BinaryOperator::Assign => {
+                // For Index on a non-pointer type, emit __index_set instead of direct store
+                if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref() {
+                    let object_ty = self.resolve_receiver_type(object);
+                    if !object_ty.map_or(false, |ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))) {
+                        self.check_assignment_mutability(left)?;
+                        let value = self.emit_expression_value(right)?;
+                        let method_ident = ast::Identifier { name: "__index_set".to_string(), span: left.span.clone() };
+                        self.emit_method_call_expression(object, &method_ident, &[(**index).clone(), right.clone()], true, &whole_expr.span)?;
+                        return Ok(value);
+                    }
+                }
                 self.check_assignment_mutability(left)?;
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let value = if let ast::ExpressionKind::Initializer { items } = right.kind.as_ref()
@@ -5048,8 +4908,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_load(llvm_ty, target_ptr, "assign.load")
                     .map_err(|e| CodegenError::new(format!("load failed: {e}")))?;
                 let rhs = self.emit_expression_value(right)?;
-                let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
-                let updated = self.emit_arith_values(&lhs, operator, &rhs, whole_expr)?;
+
+                let updated = if lhs.get_type().is_struct_type() {
+                    // Use trait method for struct types: a += b desugars to a = a + b
+                    let bin_op = match operator {
+                        ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
+                        ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
+                        ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
+                        ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
+                        ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                        _ => unreachable!(),
+                    };
+                    if let Some(method_name) = operator_method_name(&bin_op) {
+                        let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
+                        let result = self.emit_method_call_expression(
+                            left, &method_ident, &[right.clone()], false, &whole_expr.span
+                        )?;
+                        if let Some(val) = result {
+                            val
+                        } else {
+                            return Err(CodegenError::with_span("operator returned void", whole_expr.span.clone()));
+                        }
+                    } else {
+                        return Err(CodegenError::with_span("operator not found for struct type", whole_expr.span.clone()));
+                    }
+                } else {
+                    let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
+                    self.emit_arith_values(&lhs, operator, &rhs, whole_expr)?
+                };
                 self.builder.build_store(target_ptr, updated).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed assignment: {e}"),
@@ -5060,6 +4946,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => {
                 let lhs = self.emit_expression_value(left)?;
+                // For struct types, use trait method call instead of inline IR
+                if lhs.get_type().is_struct_type() {
+                    if let Some(method_name) = operator_method_name(operator) {
+                        let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
+                        let result = self.emit_method_call_expression(
+                            left, &method_ident, &[right.clone()], false, &whole_expr.span
+                        )?;
+                        if let Some(val) = result {
+                            return Ok(val);
+                        }
+                    }
+                }
                 let mut rhs = self.emit_expression_value(right)?;
                 if rhs.get_type() != lhs.get_type() {
                     rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
@@ -7287,5 +7185,83 @@ mod tests {
             ir.contains("forin.cond"),
             "expected protocol for-in loop in IR:\n{ir}"
         );
+    }
+    #[test]
+    fn lowers_operator_overload_add() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a + b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____add"), "expected __add call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_operator_overload_div() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __div(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x / other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a / b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____div"), "expected __div call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_operator_overload_sub() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __sub(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x - other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a - b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____sub"), "expected __sub call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_operator_overload_mul() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __mul(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x * other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a * b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____mul"), "expected __mul call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_operator_overload_compound_assign() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; a += b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____add"), "expected __add call for compound assign:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_unary_operator_neg() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __neg(Vec2 self) { Vec2 r; r.x = -self.x; return r; } } i32 main() { Vec2 a; Vec2 b = -a; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____neg"), "expected __neg call:\n{ir}");
+    }
+    #[test]
+    fn lowers_indexed_access_get() {
+        let ir = lower_to_llvm(
+            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } } i32 main() { Buffer b; i32 x = b[0]; return x; }"
+        );
+        assert!(ir.contains("@Buffer____index_get"), "expected __index_get call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_index_assign() {
+        let ir = lower_to_llvm(
+            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } void __index_set(Buffer* self, i64 index, i32 value) { (*self).data[index] = value; } } i32 main() { Buffer b; b[0] = 42; return 0; }"
+        );
+        assert!(ir.contains("@Buffer____index_set"), "expected __index_set call:\n{ir}");
+    }
+    
+    #[test]
+    fn lowers_comparison_eq() {
+        let ir = lower_to_llvm(
+            "struct Vec2 { i32 x; } impl Vec2 { bool __eq(Vec2 self, Vec2 other) { return self.x == other.x; } } i32 main() { Vec2 a; Vec2 b; bool c = a == b; return 0; }"
+        );
+        assert!(ir.contains("@Vec2____eq"), "expected __eq call:\n{ir}");
+    }
+    #[test]
+    fn lowers_primitive_arithmetic_stays_inline() {
+        // Primitives should NOT go through the trait path
+        let ir = lower_to_llvm(
+            "i32 main() { i32 a = 1; i32 b = 2; i32 c = a + b; return c; }"
+        );
+        assert!(!ir.contains("__add"), "primitive add should not call __add:\n{ir}");
     }
 }

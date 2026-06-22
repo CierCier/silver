@@ -1,6 +1,5 @@
 // Test suite for std.file - File I/O
 import std.io;
-import std.file;
 
 i32 tests_passed = 0;
 i32 tests_failed = 0;
@@ -232,12 +231,12 @@ i32 main() {
     
     File ff = File.open_write(test_file);
     ff.write_str("flush test");
-    bool flush_ok = ff.flush();
+    bool flush_ok = ff.flush() == 0;
     assert_true(flush_ok, "flush() on valid file succeeds");
     ff.close();
     
-    bool bad_flush = bad.flush();
-    assert_true(!bad_flush, "flush() on invalid file returns false");
+    bool bad_flush = bad.flush() == -1;
+    assert_true(bad_flush, "flush() on invalid file returns false");
     
     // Summary
     printf("\n=== Results ===\n");

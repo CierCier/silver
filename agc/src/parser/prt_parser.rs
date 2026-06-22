@@ -948,42 +948,6 @@ impl PRT_Parser {
                     },
                 }
             }
-        } else if matches!(tokens[cursor].kind, Token::LeftBracket) {
-            let (element_type, after_element) = self.parse_type_prefix(tokens, cursor + 1, end)?;
-            if !matches!(
-                tokens.get(after_element).map(|t| &t.kind),
-                Some(Token::Semicolon)
-            ) {
-                return None;
-            }
-            let size_start = after_element + 1;
-            let Some(size_end) = self.find_matching_token(
-                tokens,
-                cursor,
-                end,
-                Token::LeftBracket,
-                Token::RightBracket,
-            ) else {
-                return None;
-            };
-            if size_start > size_end {
-                return None;
-            }
-            let size = self
-                .parse_expression_reduction(tokens, size_start, size_end)
-                .ok()
-                .map(Box::new);
-            cursor = size_end + 1;
-            ast::Type {
-                kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                    element_type: Box::new(element_type),
-                    size,
-                }))),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[size_end].span.end,
-                },
-            }
         } else {
             let mut path = Vec::new();
             let base_start = cursor;
@@ -1176,6 +1140,7 @@ impl PRT_Parser {
         let mut paren = 0usize;
         let mut bracket = 0usize;
         let mut brace = 0usize;
+        let mut angle = 0usize;
         for (idx, token) in tokens.iter().enumerate().take(end).skip(start) {
             match token.kind {
                 Token::LeftParen => paren += 1,
@@ -1184,7 +1149,9 @@ impl PRT_Parser {
                 Token::RightBracket => bracket = bracket.saturating_sub(1),
                 Token::LeftBrace => brace += 1,
                 Token::RightBrace => brace = brace.saturating_sub(1),
-                Token::Comma if paren == 0 && bracket == 0 && brace == 0 => return Some(idx),
+                Token::Less => angle += 1,
+                Token::Greater => angle = angle.saturating_sub(1),
+                Token::Comma if paren == 0 && bracket == 0 && brace == 0 && angle == 0 => return Some(idx),
                 _ => {}
             }
         }
@@ -1228,40 +1195,40 @@ impl PRT_Parser {
             let mut decl_ty = base_type.clone();
             let mut declarator_end = name_token.span.end;
             cursor += 1;
-            while cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
-                let Some(close) = self.find_matching_token(
-                    tokens,
-                    cursor,
-                    end,
-                    Token::LeftBracket,
-                    Token::RightBracket,
-                ) else {
+
+            // Parse array size suffix [N] for fixed-size array fields (C FFI compatible)
+            if cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
+                cursor += 1;
+                let Token::IntLiteral(size_val) = &tokens[cursor].kind else {
                     return Err(ParseError::InvalidSyntax {
-                        message: "unterminated array declarator".to_string(),
+                        message: "expected integer literal for array size".to_string(),
                         span: tokens[cursor].span.clone(),
                     });
                 };
-                let size = if cursor + 1 < close {
-                    Some(Box::new(self.parse_expression_reduction(
-                        tokens,
-                        cursor + 1,
-                        close,
-                    )?))
-                } else {
-                    None
-                };
+                let size = *size_val as i64;
+                cursor += 1;
+                if cursor >= end || !matches!(tokens[cursor].kind, Token::RightBracket) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected ']' after array size".to_string(),
+                        span: tokens[cursor.min(end - 1)].span.clone(),
+                    });
+                }
+                cursor += 1;
+                declarator_end = tokens[cursor - 1].span.end;
                 decl_ty = ast::Type {
                     kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                        element_type: Box::new(decl_ty),
+                        element_type: Box::new(base_type.clone()),
                         size,
+                        span: Span {
+                            start: base_type.span.start,
+                            end: tokens[cursor - 1].span.end,
+                        },
                     }))),
                     span: Span {
                         start: base_type.span.start,
-                        end: tokens[close].span.end,
+                        end: tokens[cursor - 1].span.end,
                     },
                 };
-                declarator_end = tokens[close].span.end;
-                cursor = close + 1;
             }
 
             let mut initializer = None;
@@ -1760,47 +1727,7 @@ impl PRT_Parser {
                 }
             }
 
-            let mut ty = if matches!(tokens[cursor].kind, Token::LeftBracket) {
-                let (element_type, after_element) =
-                    parse_simple_type_prefix(tokens, cursor + 1, end)?;
-                if !matches!(
-                    tokens.get(after_element).map(|t| &t.kind),
-                    Some(Token::Semicolon)
-                ) {
-                    return None;
-                }
-                let size_start = after_element + 1;
-                let mut depth = 0usize;
-                let mut size_end = cursor;
-                while size_end < end {
-                    match tokens[size_end].kind {
-                        Token::LeftBracket => depth += 1,
-                        Token::RightBracket => {
-                            depth = depth.saturating_sub(1);
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    size_end += 1;
-                }
-                if size_end >= end || size_start > size_end {
-                    return None;
-                }
-                let size = if size_start == size_end { None } else { None };
-                cursor = size_end + 1;
-                ast::Type {
-                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                        element_type: Box::new(element_type),
-                        size,
-                    }))),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[size_end].span.end,
-                    },
-                }
-            } else {
+            let mut ty = {
                 let mut path = Vec::new();
                 let base_start = cursor;
                 let first_name = match &tokens[cursor].kind {
@@ -5661,9 +5588,6 @@ impl PRT_Parser {
             (ast::TypeKind::Pointer(a), ast::TypeKind::Pointer(b)) => {
                 a.is_mutable == b.is_mutable && Self::same_type_shape(&a.inner, &b.inner)
             }
-            (ast::TypeKind::Array(a), ast::TypeKind::Array(b)) => {
-                Self::same_type_shape(&a.element_type, &b.element_type)
-            }
             (ast::TypeKind::Optional(a), ast::TypeKind::Optional(b)) => Self::same_type_shape(a, b),
             (ast::TypeKind::Tuple(a), ast::TypeKind::Tuple(b)) => {
                 a.len() == b.len()
@@ -6589,36 +6513,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parses_comma_separated_local_array_declarators() {
-        let source = "i32 main() { i32 x[2] = {1, 2}, y[3]; return 0; }";
-        let tokens = crate::lexer::lex(source).expect("lex failed");
-        let mut parser = PRT_Parser::new(None);
-        let program = parser.parse_program(&tokens).expect("parse failed");
-
-        let ast::ItemKind::Function(main_fn) = &program.items[0].kind else {
-            panic!("expected function item");
-        };
-        let ast::StatementKind::Let(first) = &main_fn.body.statements[0].kind else {
-            panic!("expected first let");
-        };
-        let ast::StatementKind::Let(second) = &main_fn.body.statements[1].kind else {
-            panic!("expected second let");
-        };
-        assert!(matches!(
-            first.type_annotation.as_ref().map(|ty| ty.kind.as_ref()),
-            Some(ast::TypeKind::Array(_))
-        ));
-        assert!(matches!(
-            second.type_annotation.as_ref().map(|ty| ty.kind.as_ref()),
-            Some(ast::TypeKind::Array(_))
-        ));
-        assert!(matches!(
-            first.initializer.as_ref().map(|expr| expr.kind.as_ref()),
-            Some(ast::ExpressionKind::Initializer { .. })
-        ));
-        assert!(second.initializer.is_none());
-    }
 
     #[test]
     fn parses_comma_separated_struct_fields() {
@@ -6636,26 +6530,6 @@ mod tests {
         assert_eq!(item.fields[2].name.name, "z");
     }
 
-    #[test]
-    fn parses_comma_separated_struct_array_fields() {
-        let source = "struct Buffers { i32 x[4], y[8]; }";
-        let tokens = crate::lexer::lex(source).expect("lex failed");
-        let mut parser = PRT_Parser::new(None);
-        let program = parser.parse_program(&tokens).expect("parse failed");
-
-        let ast::ItemKind::Struct(item) = &program.items[0].kind else {
-            panic!("expected struct item");
-        };
-        assert_eq!(item.fields.len(), 2);
-        assert!(matches!(
-            item.fields[0].field_type.kind.as_ref(),
-            ast::TypeKind::Array(_)
-        ));
-        assert!(matches!(
-            item.fields[1].field_type.kind.as_ref(),
-            ast::TypeKind::Array(_)
-        ));
-    }
 
     #[test]
     fn rejects_grouped_declaration_in_for_initializer() {

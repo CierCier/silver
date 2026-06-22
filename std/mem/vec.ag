@@ -1,3 +1,6 @@
+extern "C" {
+    void abort();
+}
 // Generic contiguous-growable array (Vec<T>).
 //
 // Memory management (malloc/realloc/free) is linked from the C runtime;
@@ -13,7 +16,7 @@
 // the Vec goes out of scope.  POD types (i32, structs of i32, etc.)
 // are always safe.
 import std.mem.alloc;
-
+import std.ops;
 pub struct Vec<T> {
     T* data;
     i64 len;
@@ -149,5 +152,16 @@ impl Vec<T> {
         }
         (*self).len = 0;
         (*self).cap = 0;
+    }
+}
+impl<T> IndexedAccess<Vec<T>> for Vec<T> {
+    type Item = T;
+    T __index_get(Vec<T>* self, i64 index) {
+        if (index < 0 || index >= (*self).len) { abort(); }
+        return (*self).data[index];
+    }
+    void __index_set(Vec<T>* self, i64 index, T value) {
+        if (index < 0 || index >= (*self).len) { abort(); }
+        (*self).data[index] = move value;
     }
 }

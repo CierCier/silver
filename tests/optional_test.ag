@@ -1,6 +1,7 @@
 // Test suite for std.optional - Optional and Result types
 import std.io;
 import std.optional;
+import std.mem.alloc;
 
 i32 tests_passed = 0;
 i32 tests_failed = 0;
@@ -168,7 +169,7 @@ i32 main() {
     // Simulate looking up a value
     printf("\nSimulating lookup:\n");
     
-    i32 array[5];
+    i32* array = alloc<i32>(5);
     array[0] = 10;
     array[1] = 20;
     array[2] = 30;

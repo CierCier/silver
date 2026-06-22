@@ -1,4 +1,8 @@
+extern "C" {
+    void abort();
+}
 import std.mem.alloc;
+import std.ops;
 
 extern "C" {
     i64 strlen(const char* s);
@@ -117,5 +121,16 @@ impl String {
             return "";
         }
         return (const char*)(*self).data;
+    }
+}
+impl IndexedAccess<String> for String {
+    type Item = u8;
+    u8 __index_get(String* self, i64 index) {
+        if (index < 0 || index >= (*self).len) { abort(); }
+        return (*self).data[index];
+    }
+    void __index_set(String* self, i64 index, u8 value) {
+        if (index < 0 || index >= (*self).len) { abort(); }
+        (*self).data[index] = value;
     }
 }

@@ -757,15 +757,11 @@ fn unify_type(
                 && unify_type(inner, found_inner, subst, impl_generics, impl_subst)
         }
         (
-            Type::Array { element, length },
-            Type::Array {
+            Type::Slice { element },
+            Type::Slice {
                 element: found_elem,
-                length: found_len,
             },
         ) => {
-            if length != found_len {
-                return false;
-            }
             unify_type(element, found_elem, subst, impl_generics, impl_subst)
         }
         (Type::Optional { inner }, Type::Optional { inner: found_inner }) => {
@@ -818,6 +814,7 @@ fn contains_impl_generic(ty: &Type, impl_generics: &HashSet<String>) -> bool {
         }
         Type::Reference { inner, .. }
         | Type::Pointer { inner, .. }
+        | Type::Slice { element: inner, .. }
         | Type::Array { element: inner, .. }
         | Type::Optional { inner } => contains_impl_generic(inner, impl_generics),
         Type::Tuple(items) => items

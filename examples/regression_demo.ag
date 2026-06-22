@@ -3,6 +3,7 @@
 
 import std.io;
 import std.math;
+import std.mem.alloc;
 
 // ------------------------------------------------------------------
 // Helpers
@@ -155,51 +156,74 @@ pub f64 accuracy(Dataset* ds, LogisticRegression* model) {
 
 i32 main() {
     // --- Synthetic regression: y = 2*x + 1 ---
-    f64 reg_X[10] = { 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
-    f64 reg_y[10] = { 1.0, 3.1, 4.9, 7.2, 8.8, 11.1, 12.9, 15.0, 17.2, 19.1 };
-
+    // --- Synthetic regression: y = 2*x + 1 (using alloc for stack-like arrays) ---
+    i64 reg_n = 10;
+    f64* reg_X = alloc<f64>(reg_n);
+    reg_X[0] = 0.0; reg_X[1] = 1.0; reg_X[2] = 2.0; reg_X[3] = 3.0; reg_X[4] = 4.0;
+    reg_X[5] = 5.0; reg_X[6] = 6.0; reg_X[7] = 7.0; reg_X[8] = 8.0; reg_X[9] = 9.0;
+    f64* reg_y = alloc<f64>(reg_n);
+    reg_y[0] = 1.0; reg_y[1] = 3.1; reg_y[2] = 4.9; reg_y[3] = 7.2; reg_y[4] = 8.8;
+    reg_y[5] = 11.1; reg_y[6] = 12.9; reg_y[7] = 15.0; reg_y[8] = 17.2; reg_y[9] = 19.1;
+    
     printf("=== Silver sklearn demo ===\n\n");
-
+    
     // --- Linear Regression ---
     printf("--- Linear Regression ---\n");
-    f64 reg_weights[1] = { 0.0 };
-    LinearRegression reg = LinearRegression.new(&reg_weights[0], 1);
-
-    Dataset reg_ds = Dataset.new(&reg_X[0], &reg_y[0], 10, 1);
+    f64* reg_weights = alloc<f64>(1);
+    reg_weights[0] = 0.0;
+    LinearRegression reg = LinearRegression.new(reg_weights, 1);
+    
+    Dataset reg_ds = Dataset.new(reg_X, reg_y, 10, 1);
     reg.fit(&reg_ds, 2000, 0.01);
-
+    
     printf("Trained weights: w=%f, b=%f\n", reg.weights[0], reg.bias);
-
-    f64 test_x[1] = { 5.0 };
-    f64 pred = reg.predict(&test_x[0]);
+    
+    f64* test_x = alloc<f64>(1);
+    test_x[0] = 5.0;
+    f64 pred = reg.predict(test_x);
     printf("Prediction for x=5.0: %f\n", pred);
-
+    
     f64 err = mse(&reg_ds, &reg);
     printf("Training MSE: %f\n", err);
-
+    
     // --- Logistic Regression ---
     printf("\n--- Logistic Regression ---\n");
-    f64 cls_X[16] = {
-        0.5, 1.0, 1.0, 1.5, 1.5, 0.5, 2.0, 2.0,
-        3.0, 3.5, 3.5, 3.0, 4.0, 4.5, 4.5, 4.0,
-    };
-    f64 cls_y[8] = { 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0 };
-
-    f64 cls_weights[2] = { 0.0, 0.0 };
-    LogisticRegression cls = LogisticRegression.new(&cls_weights[0], 2);
-
-    Dataset cls_ds = Dataset.new(&cls_X[0], &cls_y[0], 8, 2);
+    i64 cls_n = 16;
+    f64* cls_X = alloc<f64>(cls_n);
+    cls_X[0] = 0.5; cls_X[1] = 1.0; cls_X[2] = 1.0; cls_X[3] = 1.5;
+    cls_X[4] = 1.5; cls_X[5] = 0.5; cls_X[6] = 2.0; cls_X[7] = 2.0;
+    cls_X[8] = 3.0; cls_X[9] = 3.5; cls_X[10] = 3.5; cls_X[11] = 3.0;
+    cls_X[12] = 4.0; cls_X[13] = 4.5; cls_X[14] = 4.5; cls_X[15] = 4.0;
+    i64 cls_y_n = 8;
+    f64* cls_y = alloc<f64>(cls_y_n);
+    cls_y[0] = 0.0; cls_y[1] = 0.0; cls_y[2] = 0.0; cls_y[3] = 0.0;
+    cls_y[4] = 1.0; cls_y[5] = 1.0; cls_y[6] = 1.0; cls_y[7] = 1.0;
+    
+    f64* cls_weights = alloc<f64>(2);
+    cls_weights[0] = 0.0; cls_weights[1] = 0.0;
+    LogisticRegression cls = LogisticRegression.new(cls_weights, 2);
+    
+    Dataset cls_ds = Dataset.new(cls_X, cls_y, 8, 2);
     cls.fit(&cls_ds, 3000, 0.1);
-
+    
     printf("Trained weights: w0=%f, w1=%f, b=%f\n",
            cls.weights[0], cls.weights[1], cls.bias);
-
-    f64 test_cls[2] = { 1.0, 1.5 };
-    i32 cls_pred = cls.predict(&test_cls[0]);
+    
+    f64* test_cls = alloc<f64>(2);
+    test_cls[0] = 1.0; test_cls[1] = 1.5;
+    i32 cls_pred = cls.predict(test_cls);
     printf("Prediction for (1.0, 1.5): class %d\n", cls_pred);
-
+    
     f64 acc = accuracy(&cls_ds, &cls);
     printf("Training accuracy: %f\n", acc);
-
+    
+    free(reg_X);
+    free(reg_y);
+    free(reg_weights);
+    free(test_x);
+    free(cls_X);
+    free(cls_y);
+    free(cls_weights);
+    free(test_cls);
     return 0;
 }

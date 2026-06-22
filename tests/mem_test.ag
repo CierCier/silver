@@ -216,7 +216,7 @@ i32 main() {
     // Test: Multiple allocations
     printf("\n--- Multiple Allocations ---\n");
     
-    i32* ptrs[10];
+    i32** ptrs = alloc<i32*>(10);
     for (i32 i = 0; i < 10; i = i + 1) {
         ptrs[i] = alloc<i32>(100);
         ptrs[i][0] = i;
@@ -233,8 +233,7 @@ i32 main() {
     for (i32 i = 0; i < 10; i = i + 1) {
         free(ptrs[i]);
     }
-    printf("  [PASS] multiple frees complete without crash\n");
-    tests_passed = tests_passed + 1;
+    free(ptrs);
     
     // Summary
     printf("\n=== Results ===\n");

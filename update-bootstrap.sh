@@ -34,6 +34,8 @@ if [ -d "$std_dir" ]; then
     rel="${src#$std_dir/}"
     case "$rel" in
       mem/box.ag) echo "  (skipping draft: $rel)"; continue ;;
+      slice.ag) echo "  (compiler-builtin, skipping: $rel)"; continue ;;
+      cffi.ag) echo "  (documentation-only, skipping: $rel)"; continue ;;
     esac
     dotted="${rel//\//.}"
     base="${dotted%.ag}"

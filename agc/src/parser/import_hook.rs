@@ -209,9 +209,14 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
         return Ok(program);
     }
     Err(format!(
-        "parser errors in {}: {:?}",
-        path.display(),
-        errors[0].format_with_help()
+        "{}",
+        crate::diagnostics::render(
+            &src,
+            &path.display().to_string(),
+            errors[0].span().clone(),
+            &errors[0].format_with_help(),
+            crate::diagnostics::Severity::Error,
+        )
     ))
 }
 
@@ -644,6 +649,7 @@ impl<'a> ImportAliasRewriter<'a> {
             }
             ast::TypeKind::Reference(reference) => self.rewrite_type(&mut reference.inner),
             ast::TypeKind::Pointer(pointer) => self.rewrite_type(&mut pointer.inner),
+            ast::TypeKind::Slice(slice) => self.rewrite_type(&mut slice.element_type),
             ast::TypeKind::Array(array) => self.rewrite_type(&mut array.element_type),
             ast::TypeKind::Optional(inner) => self.rewrite_type(inner),
             ast::TypeKind::Function(function) => {
