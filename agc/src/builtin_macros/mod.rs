@@ -33,6 +33,7 @@ impl MacroRegistry {
             handlers: HashMap::new(),
         };
         registry.register("size", Box::new(SizeHandler));
+        registry.register("hash", Box::new(HashHandler));
         registry
     }
 
@@ -89,6 +90,27 @@ impl MacroHandler for SizeHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.size_codegen(expr, args)
+    }
+}
+pub struct HashHandler;
+
+impl MacroHandler for HashHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.hash_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.hash_codegen(expr, args)
     }
 }
 

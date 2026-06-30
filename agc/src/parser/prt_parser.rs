@@ -1680,6 +1680,7 @@ impl PRT_Parser {
                 }),
                 _ => return None,
             };
+            let from_identifier = matches!(tokens[cursor].kind, Token::Identifier(_));
             let mut ty = ast::Type {
                 kind: Box::new(base),
                 span: tokens[cursor].span.clone(),
@@ -1687,10 +1688,12 @@ impl PRT_Parser {
             cursor += 1;
 
             let mut current_is_const = is_const;
+            let mut has_pointer = false;
             while cursor < end {
                 if !matches!(tokens[cursor].kind, Token::Star) {
                     return None;
                 }
+                has_pointer = true;
                 ty = ast::Type {
                     kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                         is_mutable: !current_is_const,
@@ -1703,6 +1706,15 @@ impl PRT_Parser {
                 };
                 current_is_const = false;
                 cursor += 1;
+            }
+
+            // A bare identifier in parens is ambiguous between a cast type and
+            // a parenthesized expression (e.g. `(a)` could be cast-to-type-a
+            // or parenthesized-var-a). Only treat it as a cast type when it's
+            // followed by `*` (pointer type, unambiguous) or when it's a
+            // primitive/vector/optional keyword (unambiguous tokens).
+            if !has_pointer && from_identifier {
+                return None;
             }
 
             Some(ty)

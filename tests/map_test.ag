@@ -1,0 +1,82 @@
+import std.io;
+import std.map;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== HashMap Tests ===\n\n");
+
+    // --- i32 -> i64 ---
+    printf("--- i32 -> i64 ---\n");
+    HashMap<i32, i64> m = HashMap<i32, i64>.new();
+    assert_eq_i64(m.len(), 0, "new map is empty");
+    assert_true(m.is_empty(), "new map is_empty true");
+
+    m.insert(1, 100);
+    m.insert(2, 200);
+    m.insert(3, 300);
+    assert_eq_i64(m.len(), 3, "len=3 after 3 inserts");
+    assert_true(!m.is_empty(), "non-empty after inserts");
+
+    assert_true(m.contains_key(1), "contains key 1");
+    assert_true(m.contains_key(2), "contains key 2");
+    assert_true(m.contains_key(3), "contains key 3");
+    assert_true(!m.contains_key(4), "does NOT contain key 4");
+
+    assert_eq_i64(m.get(1), 100, "get(1) == 100");
+    assert_eq_i64(m.get(2), 200, "get(2) == 200");
+    assert_eq_i64(m.get(3), 300, "get(3) == 300");
+
+    // Erase
+    assert_true(m.erase(2), "erase(2) returns true");
+    assert_true(!m.contains_key(2), "key 2 gone after erase");
+    assert_eq_i64(m.len(), 2, "len=2 after erase");
+
+    // Get ptr
+    i64* ptr = m.get_ptr(1);
+    if ((i64)(ptr) != 0) {
+        assert_eq_i64(*ptr, 100, "*get_ptr(1) == 100");
+    }
+
+    m.drop();
+
+    // --- Resize test (triggers grow) ---
+    printf("\n--- Resize ---\n");
+    HashMap<i32, i64> m2 = HashMap<i32, i64>.new();
+    i32 i = 0;
+    while (i < 16) {
+        m2.insert(i, (i64)(i * 10));
+        i = i + 1;
+    }
+    assert_eq_i64(m2.len(), 16, "len=16 after 16 inserts");
+    i = 0;
+    while (i < 16) {
+        assert_eq_i64(m2.get(i), (i64)(i * 10), "value intact after resize");
+        i = i + 1;
+    }
+    m2.drop();
+
+    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
+    return tests_failed;
+}
