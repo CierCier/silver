@@ -281,11 +281,14 @@ pub fn filter_exports(artifact: &ModuleArtifact, import: &ast::ImportItem) -> Ve
 pub fn module_loader_default_dirs(sysroot: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(root) = sysroot {
+        dirs.push(root.join("include").join("silver"));
         dirs.push(root.join("lib").join("silver"));
     }
     if let Ok(home) = std::env::var("SILVER_SYSROOT") {
         if !home.is_empty() {
-            dirs.push(PathBuf::from(home).join("lib").join("silver"));
+            let root = PathBuf::from(home);
+            dirs.push(root.join("include").join("silver"));
+            dirs.push(root.join("lib").join("silver"));
         }
     }
     dirs
