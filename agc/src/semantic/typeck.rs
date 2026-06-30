@@ -798,6 +798,16 @@ impl TypeChecker {
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
+                    // Matching generic type params: allow ==/!= without explicit overload.
+                    // The concrete type comparison is checked at monomorphization time.
+                    if left_ty == right_ty {
+                        if let Type::Named { path, generics } = &left_ty {
+                            if path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0]) {
+                                return Type::Primitive(ast::PrimitiveType::Bool);
+                            }
+                        }
+                    }
+
                     if let Some(ty) =
                         self.resolve_operator_overload(&left_ty, &right_ty, operator, expr)
                     {
@@ -2448,6 +2458,21 @@ impl TypeChecker {
         }
     }
 
+    pub(crate) fn hash_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 1 {
+            self.error("@hash expects exactly one argument", expr.span.clone());
+            return Type::Unknown;
+        }
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            self.error("@hash requires an expression argument", expr.span.clone());
+            return Type::Unknown;
+        };
+        // Type-check the inner expression (emits errors if invalid, returns type)
+        let _ = self.check_expr(inner_expr, None);
+        // @hash always returns i64
+        Type::Primitive(ast::PrimitiveType::I64)
+    }
+
     fn resolve_type_name(&mut self, expr: &ast::Expression) -> Option<Type> {
         match &expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
@@ -2780,9 +2805,11 @@ impl TypeChecker {
                     }
                 }
             } else {
-                let mut implicit = HashSet::new();
-                self.collect_implicit_type_params(&impl_item.self_type, &mut implicit);
-                impl_type_params.extend(implicit.into_iter());
+                // Preserve parameter order from the AST (HashSet loses order,
+                // causing non-deterministic generic argument swapping).
+                let mut implicit = Vec::new();
+                self.collect_implicit_type_params_ordered(&impl_item.self_type, &mut implicit);
+                impl_type_params.extend(implicit);
             }
 
             let bounds = self.collect_bounds(impl_item.generics.as_ref());
@@ -2899,6 +2926,68 @@ impl TypeChecker {
                     self.collect_implicit_type_params(param, params);
                 }
                 self.collect_implicit_type_params(&func.return_type, params)
+            }
+            ast::TypeKind::Primitive(_) => {}
+        }
+    }
+
+    /// Collects implicit type parameters from a type AST, preserving insertion order.
+    /// Uses Vec + contains() for dedup instead of HashSet, so that parameter order
+    /// matches the order they appear in the source.
+    fn collect_implicit_type_params_ordered(
+        &self,
+        ty: &ast::Type,
+        params: &mut Vec<String>,
+    ) {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => {
+                if named.path.len() == 1 {
+                    let name = &named.path[0].name;
+                    if !self.known_types.contains_key(name) && !params.contains(name) {
+                        params.push(name.clone());
+                    }
+                }
+                if let Some(generics) = &named.generics {
+                    for arg in generics {
+                        self.collect_implicit_type_params_ordered(arg, params);
+                    }
+                }
+            }
+            ast::TypeKind::Generic(generic) => {
+                if !self.known_types.contains_key(&generic.name.name)
+                    && !params.contains(&generic.name.name)
+                {
+                    params.push(generic.name.name.clone());
+                }
+                for arg in &generic.args {
+                    self.collect_implicit_type_params_ordered(arg, params);
+                }
+            }
+            ast::TypeKind::Reference(reference) => {
+                self.collect_implicit_type_params_ordered(&reference.inner, params)
+            }
+            ast::TypeKind::Pointer(pointer) => {
+                self.collect_implicit_type_params_ordered(&pointer.inner, params)
+            }
+            ast::TypeKind::Slice(slice) => {
+                self.collect_implicit_type_params_ordered(&slice.element_type, params)
+            }
+            ast::TypeKind::Array(array) => {
+                self.collect_implicit_type_params_ordered(&array.element_type, params)
+            }
+            ast::TypeKind::Optional(inner) => {
+                self.collect_implicit_type_params_ordered(inner, params)
+            }
+            ast::TypeKind::Tuple(items) => {
+                for item in items {
+                    self.collect_implicit_type_params_ordered(item, params);
+                }
+            }
+            ast::TypeKind::Function(func) => {
+                for param in &func.parameters {
+                    self.collect_implicit_type_params_ordered(param, params);
+                }
+                self.collect_implicit_type_params_ordered(&func.return_type, params)
             }
             ast::TypeKind::Primitive(_) => {}
         }
