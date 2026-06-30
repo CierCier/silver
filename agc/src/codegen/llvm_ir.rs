@@ -866,19 +866,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let struct_ty = self.ensure_named_struct_type(named)?;
                 Ok(struct_ty.as_basic_type_enum())
             }
-            ast::TypeKind::Reference(reference) => {
-                if !Self::is_void_primitive(&reference.inner) {
-                    let _ = self.lower_basic_type(&reference.inner)?;
-                }
+            ast::TypeKind::Reference(_reference) => {
+                // Note: we do NOT recursively lower the inner type here,
+                // for the same reason as Pointer — it prevents infinite
+                // recursion with recursive structs.
                 Ok(self
                     .context
                     .ptr_type(AddressSpace::default())
                     .as_basic_type_enum())
             }
-            ast::TypeKind::Pointer(pointer) => {
-                if !Self::is_void_primitive(&pointer.inner) {
-                    let _ = self.lower_basic_type(&pointer.inner)?;
-                }
+            ast::TypeKind::Pointer(_pointer) => {
+                // Note: we do NOT recursively lower the inner type here.
+                // LLVM pointers work with opaque pointee types, and skipping
+                // this prevents infinite recursion for recursive structs
+                // (e.g. struct Node<T> { T val; Node<T>* next; }).
+                // The inner type will be fully lowered when it's actually
+                // needed (field access, GEP, etc.).
                 Ok(self
                     .context
                     .ptr_type(AddressSpace::default())

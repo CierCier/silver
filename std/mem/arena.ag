@@ -1,0 +1,76 @@
+// Arena allocator — region-based bump allocation.
+//
+// Allocates objects from a pre-allocated memory block.  The entire block is
+// freed at once when the Arena goes out of scope — no per-object free needed.
+// Ideal for graph structures where all nodes share a lifetime.
+//
+// USAGE:
+//   Arena arena = Arena.new(1024 * 1024);   // 1 MiB
+//   GraphNode* n = arena_alloc<GraphNode>(&arena);
+//   *n = GraphNode.new(id);
+//   // ... use n freely ...
+//   // arena.drop() called automatically — frees everything
+//
+// LIMITATIONS
+//   - Does not call per-element destructors on drop (same as Vec).
+//     Use with POD types or types that manage their own resources.
+//   - No per-object free — individual allocations cannot be recycled.
+//   - Returns null (T*)0 on OOM.
+import std.mem.alloc;
+
+pub struct Arena {
+    u8* base;
+    i64 capacity;
+    i64 offset;
+}
+
+impl Arena {
+    /// Allocate a new arena with `capacity` bytes.
+    pub Arena new(i64 capacity) {
+        Arena a;
+        a.base = (u8*)malloc(capacity);
+        a.capacity = capacity;
+        a.offset = 0;
+        return move a;
+    }
+
+    /// Reset the arena — all previous allocations become invalid.
+    pub void reset(Arena* self) {
+        (*self).offset = 0;
+    }
+
+    /// Free the entire arena memory.
+    pub void drop(Arena* self) {
+        if ((*self).base != (u8*)0) {
+            free((*self).base);
+            (*self).base = (u8*)0;
+        }
+        (*self).capacity = 0;
+        (*self).offset = 0;
+    }
+}
+
+/// Allocate space for one `T` from arena `a`.
+/// Returns `(T*)0` if out of memory.
+pub T* arena_alloc<T>(Arena* a) {
+    i64 needed = @size(T);
+    i64 new_offset = (*a).offset + needed;
+    if (new_offset > (*a).capacity) {
+        return (T*)0;
+    }
+    i64 addr = (i64)(*a).base + (*a).offset;
+    (*a).offset = new_offset;
+    return (T*)addr;
+}
+
+/// Allocate space for `count` elements of `T` from arena `a`.
+pub T* arena_alloc_n<T>(Arena* a, i64 count) {
+    i64 needed = @size(T) * count;
+    i64 new_offset = (*a).offset + needed;
+    if (new_offset > (*a).capacity) {
+        return (T*)0;
+    }
+    i64 addr = (i64)(*a).base + (*a).offset;
+    (*a).offset = new_offset;
+    return (T*)addr;
+}

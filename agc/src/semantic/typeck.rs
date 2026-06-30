@@ -87,7 +87,7 @@ struct EnumDef {
     variants: HashMap<String, i128>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MethodCallStyle {
     Instance,
     Static,
@@ -1604,6 +1604,25 @@ impl TypeChecker {
         return_type.clone()
     }
 
+    /// Collect type-parameter-like names from an owner type — the set of bare
+    /// single-segment `Named` types that appear as generic arguments.
+    fn owner_type_param_names(&self, ty: &Type) -> Vec<String> {
+        match ty {
+            Type::Named { generics, .. } => {
+                let mut out = Vec::new();
+                for g in generics {
+                    if let Type::Named { path, generics: inner_gs } = g {
+                        if path.len() == 1 && inner_gs.is_empty() {
+                            out.push(path[0].clone());
+                        }
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn resolve_method_overload(
         &mut self,
         receiver_ty: &Type,
@@ -1692,13 +1711,30 @@ impl TypeChecker {
             let mut score = 0usize;
             let mut mapping = HashMap::new();
 
-            if !self.infer_type_params(
+            // Try owner type inference — but if the receiver type lacks generic args
+            // that correspond to method type params, don't fail: those can be
+            // inferred from argument types further below.
+            let owner_inferred = self.infer_type_params(
                 &candidate.owner,
                 owner_ty,
                 &candidate.type_params,
                 &mut mapping,
-            ) {
-                continue;
+            );
+            if !owner_inferred {
+                // If all type params are generic placeholders that could not be matched
+                // because the receiver type has fewer generics than the owner type,
+                // allow them to be inferred from arguments instead.
+                let all_type_params = self.owner_type_param_names(&candidate.owner);
+                if all_type_params.is_empty()
+                    || !self.infer_type_params(
+                        &candidate.owner,
+                        owner_ty,
+                        &all_type_params,
+                        &mut mapping,
+                    )
+                {
+                    continue;
+                }
             }
 
             if style == MethodCallStyle::Instance && candidate.params.len() == arg_types.len() + 1 {
@@ -2252,7 +2288,19 @@ impl TypeChecker {
                     generics: found_generics,
                 },
             ) => {
-                if path != found_path || generics.len() != found_generics.len() {
+                if path != found_path {
+                    return false;
+                }
+                // If the expected type has generic arguments but the found type
+                // does not, allow the mismatch when the missing generics are
+                // all type-parameter references (they'll be inferred from
+                // argument types instead).
+                if generics.len() != found_generics.len() {
+                    if found_generics.is_empty() && generics.iter().all(|g| {
+                        matches!(g, Type::Named { path, generics: gs } if path.len() == 1 && gs.is_empty() && type_params.contains(&path[0]))
+                    }) {
+                        return true;
+                    }
                     return false;
                 }
                 for (exp, got) in generics.iter().zip(found_generics.iter()) {

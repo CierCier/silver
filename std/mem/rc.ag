@@ -1,0 +1,76 @@
+// Rc<T> — reference-counted shared-ownership smart pointer.
+//
+// Multiple Rc handles can share ownership of the same heap object.
+// The object is freed when the last handle is dropped.
+//
+// USAGE:
+//   Rc<GraphNode> n = Rc.new(GraphNode.new(id));
+//   Rc<GraphNode> m = n.clone();  // shared ownership
+//   (*n.get()).payload[0] = 42;
+//
+// NOTE: Does NOT call T's destructor on last-drop (same as Box/Vec).
+//       The heap memory for T is freed; if T holds owned resources
+//       those must be managed separately.
+import std.mem.alloc;
+
+pub struct Rc<T> {
+    T* ptr;
+    i32* count;
+}
+
+impl Rc<T> {
+    /// Create a new reference-counted handle.
+    pub Rc<T> new(T val) {
+        T* p = alloc<T>();
+        *p = val;
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<T> rc;
+        rc.ptr = p;
+        rc.count = c;
+        return move rc;
+    }
+
+    /// Create a new reference-counted handle from a heap pointer.
+    /// The count starts at 1 — the caller must ensure `ptr` is heap-allocated.
+    pub Rc<T> from_ptr(T* ptr) {
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<T> rc;
+        rc.ptr = ptr;
+        rc.count = c;
+        return move rc;
+    }
+
+    /// Clone the handle — increments the reference count.
+    pub Rc<T> clone(Rc<T>* self) {
+        if ((*self).count != (i32*)0) {
+            *((*self).count) = *((*self).count) + 1;
+        }
+        Rc<T> c;
+        c.ptr = (*self).ptr;
+        c.count = (*self).count;
+        return move c;
+    }
+
+    /// Get a raw pointer to the value.
+    pub T* get(Rc<T>* self) {
+        return (*self).ptr;
+    }
+
+    /// Drop one handle — decrements the reference count.
+    /// Frees the value and count when it reaches zero.
+    pub void drop(Rc<T>* self) {
+        if ((*self).count != (i32*)0) {
+            *((*self).count) = *((*self).count) - 1;
+            if (*((*self).count) == 0) {
+                if ((*self).ptr != (T*)0) {
+                    free((*self).ptr);
+                }
+                free((*self).count);
+            }
+        }
+        (*self).ptr = (T*)0;
+        (*self).count = (i32*)0;
+    }
+}

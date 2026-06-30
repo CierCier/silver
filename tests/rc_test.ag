@@ -1,0 +1,56 @@
+// Test suite for Rc<T> — reference-counted smart pointer
+import std.io;
+import std.mem;
+
+i32 main() {
+    printf("=== Rc<T> Test Suite ===\n");
+
+    // Test 1: Rc.new with primitive
+    printf("--- Test 1: Rc.new with primitive ---\n");
+    {
+        Rc<i32> r = Rc.new(42);
+        i32* p = r.get(&r);
+        printf("  r: %d (expect 42)\n", *p);
+    }
+
+    // Test 2: Rc.clone
+    printf("--- Test 2: Rc.clone ---\n");
+    {
+        Rc<i32> a = Rc.new(42);
+        Rc<i32> b = a.clone(&a);
+        i32* pa = a.get(&a);
+        i32* pb = b.get(&b);
+        printf("  a: %d (expect 42)\n", *pa);
+        printf("  b: %d (expect 42)\n", *pb);
+    }
+
+    // Test 3: Shared mutation
+    printf("--- Test 3: Shared mutation ---\n");
+    {
+        Rc<i32> a = Rc.new(100);
+        Rc<i32> b = a.clone(&a);
+        i32* p = a.get(&a);
+        *p = 200;
+        i32* pb = b.get(&b);
+        printf("  a: %d (expect 200)\n", *p);
+        printf("  b: %d (expect 200)\n", *pb);
+    }
+
+    // Test 4: Three-way sharing
+    printf("--- Test 4: Three-way sharing ---\n");
+    {
+        Rc<i32> a = Rc.new(1);
+        Rc<i32> b = a.clone(&a);
+        Rc<i32> c = a.clone(&a);
+        i32* pa = a.get(&a);
+        *pa = 42;
+        i32* pb = b.get(&b);
+        i32* pc = c.get(&c);
+        printf("  a: %d\n", *pa);
+        printf("  b: %d\n", *pb);
+        printf("  c: %d\n", *pc);
+    }
+
+    printf("=== All Rc tests passed ===\n");
+    return 0;
+}
