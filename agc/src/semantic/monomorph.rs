@@ -733,10 +733,13 @@ fn instantiate_requests(
                 let base = impl_self_base_name(&impl_item.self_type).unwrap_or_default();
                 let mangled = mangle_name(&base, &args);
                 let key = format!("impl::{mangled}");
+                // Always rewrite method calls — this must happen for EVERY request
+                // (each method in the same impl needs its method calls rewritten).
+                rewrite_method_calls(program, &base, &method.name.name, &args, call_span);
+                // Only generate the monomorphized impl once per unique key.
                 if !generated.insert(key) {
                     continue;
                 }
-                rewrite_method_calls(program, &base, &method.name.name, &args, call_span);
                 let mut new_impl = impl_item.clone();
                 new_impl.generics = None;
                 new_impl.self_type = substitute_ast_type(&impl_item.self_type, mapping);
@@ -1247,30 +1250,54 @@ fn rewrite_expression_method_calls(
             arguments,
         } => {
             if expr.span == *span && call_method.name == method {
-                if let ast::ExpressionKind::TypeName(ty) = receiver.kind.as_ref() {
-                    if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                        if let Some(last) = named.path.last() {
-                            if last.name == base {
-                                if args.len()
-                                    == named.generics.as_ref().map(|g| g.len()).unwrap_or(0)
-                                {
-                                    let new_args = args
-                                        .iter()
-                                        .map(|arg| type_to_ast(arg, span.clone()))
-                                        .collect::<Vec<_>>();
-                                    let mut new_named = named.clone();
-                                    new_named.generics = Some(new_args);
-                                    let new_ty = ast::Type {
-                                        kind: Box::new(ast::TypeKind::Named(new_named)),
-                                        span: ty.span.clone(),
-                                    };
-                                    *receiver = Box::new(ast::Expression {
-                                        kind: Box::new(ast::ExpressionKind::TypeName(new_ty)),
-                                        span: receiver.span.clone(),
-                                    });
+                // Determine the base type name — may be Identifier("Rc") for static
+                // calls like `Rc.new(...)` or TypeName(Named("Rc")) for explicit
+                // type expressions like `Rc<i32>.new(...)`.
+                let mut base_name: Option<String> = None;
+                let mut current_generics: Option<&Vec<ast::Type>> = None;
+                match receiver.kind.as_ref() {
+                    ast::ExpressionKind::TypeName(ty) => {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            if let Some(last) = named.path.last() {
+                                if last.name == base {
+                                    base_name = Some(last.name.clone());
+                                    current_generics = named.generics.as_ref();
                                 }
                             }
                         }
+                    }
+                    ast::ExpressionKind::Identifier(ident) => {
+                        if ident.name == base {
+                            base_name = Some(ident.name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(_) = base_name {
+                    // For Identifier receivers (Rc.new(...)), current_generics is None and
+                    // we always need to rewrite. For TypeName receivers (Rc<i32>.new(...)),
+                    // skip if the generic count already matches.
+                    let should_rewrite = current_generics.is_none()
+                        || args.len() == current_generics.unwrap().len();
+                    if should_rewrite {
+                        let new_args = args
+                            .iter()
+                            .map(|arg| type_to_ast(arg, span.clone()))
+                            .collect::<Vec<_>>();
+                        let new_named = ast::NamedType {
+                            path: vec![ast::Identifier {
+                                name: base.to_string(),
+                                span: span.clone(),
+                            }],
+                            generics: Some(new_args),
+                        };
+                        *receiver = Box::new(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::TypeName(ast::Type {
+                                kind: Box::new(ast::TypeKind::Named(new_named)),
+                                span: receiver.span.clone(),
+                            })),
+                            span: receiver.span.clone(),
+                        });
                     }
                 }
             }

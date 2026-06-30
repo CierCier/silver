@@ -3,3 +3,5 @@ pub import std.mem.alloc;
 // pub import std.mem.box;
 pub import std.mem.drop;
 pub import std.mem.vec;
+pub import std.mem.arena;
+pub import std.mem.rc;

@@ -6267,22 +6267,36 @@ impl PRT_Parser {
         }
     }
 
+    fn record_generic_type_params(&mut self, generics: &Option<ast::Generics>) {
+        if let Some(g) = generics {
+            for param in &g.params {
+                if let ast::GenericParam::Type(tp) = param {
+                    self.known_type_names.insert(tp.name.name.clone());
+                }
+            }
+        }
+    }
+
     fn record_known_item(&mut self, kind: &ast::ItemKind) {
         match kind {
             ast::ItemKind::Struct(item) => {
                 self.known_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
+                self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::Enum(item) => {
                 self.known_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
+                self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::Trait(item) => {
                 self.known_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
+                self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::Function(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
+                self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::GlobalVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());

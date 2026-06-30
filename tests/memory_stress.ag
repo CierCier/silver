@@ -1,0 +1,438 @@
+// Heavy memory-model stress test.
+// Exercises RAII drop flags, move chains, by-value params, return-by-value,
+// cross-linked structs, nested owned fields, raw heap pressure, realloc, and memmove.
+import std.io;
+import std.mem;
+
+// ---------------- Assertions ----------------
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void pass(str msg) {
+    tests_passed = tests_passed + 1;
+    printf("  [PASS] %s\n", msg);
+}
+
+void fail(str msg) {
+    tests_failed = tests_failed + 1;
+    printf("  [FAIL] %s\n", msg);
+}
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        pass(msg);
+    } else {
+        fail(msg);
+    }
+}
+
+void assert_eq_i32(i32 got, i32 expected, str msg) {
+    if (got == expected) {
+        pass(msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, expected, got);
+    }
+}
+
+void assert_eq_i64(i64 got, i64 expected, str msg) {
+    if (got == expected) {
+        pass(msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, expected, got);
+    }
+}
+
+// ---------------- Raw cross-linked graph node ----------------
+i32 node_drop_count = 0;
+i32 node_payload_free_count = 0;
+i64 node_payload_words_freed = 0;
+
+struct RawNode {
+    i32 id;
+    i32* payload;
+    i64 payload_words;
+    bool owns_payload;
+    RawNode* next;
+    RawNode* prev;
+    RawNode* alias;
+}
+
+impl RawNode {
+    RawNode new(i32 id, i64 payload_words) {
+        RawNode n;
+        n.id = id;
+        n.payload_words = payload_words;
+        n.payload = alloc<i32>(payload_words);
+        n.owns_payload = true;
+        n.next = (RawNode*)0;
+        n.prev = (RawNode*)0;
+        n.alias = (RawNode*)0;
+        for (i64 i = 0; i < payload_words; i = i + 1) {
+            n.payload[i] = id * 1000 + (i32)i;
+        }
+        return move n;
+    }
+
+    i32 checksum_edges(RawNode* self) {
+        i32 sum = (*self).id;
+        if ((*self).next != (RawNode*)0) {
+            sum = sum + (*((*self).next)).id;
+        }
+        if ((*self).prev != (RawNode*)0) {
+            sum = sum + (*((*self).prev)).id;
+        }
+        if ((*self).alias != (RawNode*)0) {
+            sum = sum + (*((*self).alias)).id;
+        }
+        return sum;
+    }
+
+    bool payload_ok(RawNode* self) {
+        if ((*self).payload == (i32*)0) {
+            return false;
+        }
+        if ((*self).payload[0] != (*self).id * 1000) {
+            return false;
+        }
+        if ((*self).payload[(*self).payload_words - 1] != (*self).id * 1000 + (i32)((*self).payload_words - 1)) {
+            return false;
+        }
+        return true;
+    }
+
+    void drop(RawNode* self) {
+        node_drop_count = node_drop_count + 1;
+        if ((*self).owns_payload && (*self).payload != (i32*)0) {
+            node_payload_free_count = node_payload_free_count + 1;
+            node_payload_words_freed = node_payload_words_freed + (*self).payload_words;
+            free((*self).payload);
+            (*self).payload = (i32*)0;
+            (*self).owns_payload = false;
+        }
+        (*self).next = (RawNode*)0;
+        (*self).prev = (RawNode*)0;
+        (*self).alias = (RawNode*)0;
+        (*self).id = -((*self).id);
+    }
+}
+
+// ---------------- Nested owner ----------------
+i32 leaf_drop_count = 0;
+i32 pair_drop_count = 0;
+i64 leaf_bytes_freed = 0;
+
+struct OwnedLeaf {
+    i32 id;
+    i8* bytes;
+    i64 len;
+    bool owns;
+}
+
+impl OwnedLeaf {
+    OwnedLeaf new(i32 id, i64 len) {
+        OwnedLeaf leaf;
+        leaf.id = id;
+        leaf.len = len;
+        leaf.bytes = alloc<i8>(len);
+        leaf.owns = true;
+        for (i64 i = 0; i < len; i = i + 1) {
+            leaf.bytes[i] = (i8)((id + (i32)i) % 127);
+        }
+        return move leaf;
+    }
+
+    i32 first(OwnedLeaf* self) {
+        return (i32)((*self).bytes[0]);
+    }
+
+    bool valid(OwnedLeaf* self) {
+        return (*self).owns && (*self).bytes != (i8*)0 && (*self).len > 0;
+    }
+
+    void drop(OwnedLeaf* self) {
+        leaf_drop_count = leaf_drop_count + 1;
+        if ((*self).owns && (*self).bytes != (i8*)0) {
+            leaf_bytes_freed = leaf_bytes_freed + (*self).len;
+            free((*self).bytes);
+            (*self).bytes = (i8*)0;
+            (*self).owns = false;
+        }
+        (*self).id = -((*self).id);
+    }
+}
+
+struct PairOwner {
+    i32 id;
+    OwnedLeaf left;
+    OwnedLeaf right;
+    PairOwner* peer;
+}
+
+impl PairOwner {
+    PairOwner new(i32 id, i64 left_len, i64 right_len) {
+        PairOwner p;
+        p.id = id;
+        p.left = OwnedLeaf.new(id * 10 + 1, left_len);
+        p.right = OwnedLeaf.new(id * 10 + 2, right_len);
+        p.peer = (PairOwner*)0;
+        return move p;
+    }
+
+    i32 sum(PairOwner* self) {
+        return (*self).id + (*self).left.id + (*self).right.id;
+    }
+
+    void drop(PairOwner* self) {
+        pair_drop_count = pair_drop_count + 1;
+        (*self).left.drop();
+        (*self).right.drop();
+        (*self).peer = (PairOwner*)0;
+        (*self).id = -((*self).id);
+    }
+}
+
+PairOwner make_pair(i32 id) {
+    PairOwner p = PairOwner.new(id, 64, 96);
+    return move p;
+}
+
+PairOwner forward_pair(PairOwner p) {
+    return move p;
+}
+
+void consume_pair(PairOwner p) {
+    // Parameter p must be dropped at function exit.
+}
+
+PairOwner choose_pair(i32 flag) {
+    if (flag > 0) {
+        PairOwner a = PairOwner.new(31, 128, 256);
+        return move a;
+    } else {
+        PairOwner b = PairOwner.new(32, 256, 128);
+        return move b;
+    }
+}
+
+PairOwner early_pair() {
+    PairOwner p = PairOwner.new(40, 33, 44);
+    RawNode scratch = RawNode.new(777, 32);
+    if (scratch.payload_ok()) {
+        return move p;
+    }
+    return move p;
+}
+
+void reset_owner_counters() {
+    leaf_drop_count = 0;
+    pair_drop_count = 0;
+    leaf_bytes_freed = 0;
+}
+
+void reset_node_counters() {
+    node_drop_count = 0;
+    node_payload_free_count = 0;
+    node_payload_words_freed = 0;
+}
+
+// ---------------- Test cases ----------------
+void stress_cross_linked_nodes() {
+    printf("\n--- Cross-linked RawNode graph ---\n");
+    reset_node_counters();
+    {
+        RawNode a = RawNode.new(1, 128);
+        RawNode b = RawNode.new(2, 129);
+        RawNode c = RawNode.new(3, 130);
+        RawNode d = RawNode.new(4, 131);
+        RawNode e = RawNode.new(5, 132);
+        RawNode f = RawNode.new(6, 133);
+
+        a.next = &b; b.prev = &a;
+        b.next = &c; c.prev = &b;
+        c.next = &d; d.prev = &c;
+        d.next = &e; e.prev = &d;
+        e.next = &f; f.prev = &e;
+        f.next = &a; a.prev = &f;
+
+        a.alias = &d;
+        b.alias = &e;
+        c.alias = &f;
+        d.alias = &a;
+        e.alias = &b;
+        f.alias = &c;
+
+        assert_true(a.payload_ok(), "a payload edges are intact");
+        assert_true(f.payload_ok(), "f payload edges are intact");
+        assert_eq_i32(a.checksum_edges(), 11, "a edge checksum includes id/next/prev/alias");
+        assert_eq_i32(c.checksum_edges(), 14, "c edge checksum includes id/next/prev/alias");
+
+        (*a.next).payload[10] = 4242;
+        assert_eq_i32(b.payload[10], 4242, "cross-reference write through next pointer");
+        (*d.alias).payload[20] = 9090;
+        assert_eq_i32(a.payload[20], 9090, "cross-reference write through alias pointer");
+    }
+    assert_eq_i32(node_drop_count, 6, "six graph nodes dropped once");
+    assert_eq_i32(node_payload_free_count, 6, "six graph payloads freed once");
+    assert_eq_i64(node_payload_words_freed, 783, "all graph payload word counts accounted");
+}
+
+void stress_owner_moves_and_params() {
+    printf("\n--- Nested owner moves, returns, params ---\n");
+
+    reset_owner_counters();
+    {
+        PairOwner p = make_pair(10);
+        PairOwner q = forward_pair(move p);
+        assert_eq_i32(q.sum(), 313, "forwarded pair contents survive move chain");
+    }
+    assert_eq_i32(pair_drop_count, 1, "forwarded pair dropped once");
+    assert_eq_i32(leaf_drop_count, 2, "forwarded pair leaves dropped once each");
+    assert_eq_i64(leaf_bytes_freed, 160, "forwarded pair leaf bytes accounted");
+
+    reset_owner_counters();
+    {
+        PairOwner p = PairOwner.new(20, 11, 13);
+        consume_pair(move p);
+    }
+    assert_eq_i32(pair_drop_count, 1, "by-value parameter dropped in callee");
+    assert_eq_i32(leaf_drop_count, 2, "by-value parameter leaves dropped");
+    assert_eq_i64(leaf_bytes_freed, 24, "by-value parameter leaf bytes accounted");
+
+    reset_owner_counters();
+    {
+        PairOwner p = choose_pair(1);
+        assert_eq_i32(p.sum(), 964, "positive conditional return preserved contents");
+    }
+    assert_eq_i32(pair_drop_count, 1, "positive conditional return dropped once");
+    assert_eq_i32(leaf_drop_count, 2, "positive conditional leaves dropped");
+
+    reset_owner_counters();
+    reset_node_counters();
+    {
+        PairOwner p = early_pair();
+        assert_eq_i32(p.sum(), 1243, "early return preserves returned owner");
+    }
+    assert_eq_i32(pair_drop_count, 1, "early-returned pair dropped once");
+    assert_eq_i32(leaf_drop_count, 2, "early-returned pair leaves dropped");
+    assert_eq_i32(node_drop_count, 1, "early-return scratch node dropped once");
+    assert_eq_i32(node_payload_free_count, 1, "early-return scratch payload freed");
+}
+
+void stress_loop_churn() {
+    printf("\n--- Loop churn and scope pressure ---\n");
+    reset_node_counters();
+    reset_owner_counters();
+
+    for (i32 i = 0; i < 40; i = i + 1) {
+        RawNode n = RawNode.new(1000 + i, 64 + (i % 7));
+        assert_true(n.payload_ok(), "loop node payload valid");
+        if (i % 3 == 0) {
+            PairOwner p = PairOwner.new(2000 + i, 16, 24);
+            assert_true(p.sum() > 0, "loop nested owner valid");
+        }
+    }
+
+    assert_eq_i32(node_drop_count, 40, "loop nodes dropped at each iteration scope");
+    assert_eq_i32(node_payload_free_count, 40, "loop node payloads freed");
+    assert_eq_i32(pair_drop_count, 14, "loop pair owners dropped for selected iterations");
+    assert_eq_i32(leaf_drop_count, 28, "loop pair leaves dropped for selected iterations");
+    assert_eq_i64(leaf_bytes_freed, 560, "loop pair leaf bytes accounted");
+}
+
+void stress_defer_and_break_continue() {
+    printf("\n--- Defer, break, continue with owned locals ---\n");
+    reset_node_counters();
+    reset_owner_counters();
+    i32 defer_marker = 0;
+
+    {
+        PairOwner p = PairOwner.new(50, 12, 14);
+        defer {
+            defer_marker = defer_marker + 10;
+        }
+    }
+    assert_eq_i32(defer_marker, 10, "defer executed when owned block exits");
+    assert_eq_i32(pair_drop_count, 1, "owned value dropped with defer present");
+    assert_eq_i32(leaf_drop_count, 2, "nested leaves dropped with defer present");
+
+    reset_node_counters();
+    for (i32 i = 0; i < 10; i = i + 1) {
+        RawNode n = RawNode.new(3000 + i, 24);
+        if (i == 5) {
+            break;
+        }
+    }
+    assert_eq_i32(node_drop_count, 6, "break drops current and prior loop locals");
+    assert_eq_i32(node_payload_free_count, 6, "break frees current and prior loop payloads");
+
+    reset_node_counters();
+    for (i32 i = 0; i < 9; i = i + 1) {
+        RawNode n = RawNode.new(4000 + i, 25);
+        if (i % 2 == 0) {
+            continue;
+        }
+    }
+    assert_eq_i32(node_drop_count, 9, "continue drops every iteration local");
+    assert_eq_i32(node_payload_free_count, 9, "continue frees every iteration payload");
+}
+
+void stress_large_raw_memory() {
+    printf("\n--- Large raw heap, realloc, memmove ---\n");
+
+    i64 large_size = 4000000;
+    i8* big = alloc<i8>(large_size);
+    for (i64 i = 0; i < large_size; i = i + 4096) {
+        big[i] = (i8)((i / 4096) % 127);
+    }
+    big[large_size - 1] = 99;
+
+    bool sparse_ok = true;
+    for (i64 i = 0; i < large_size; i = i + 4096) {
+        if (big[i] != (i8)((i / 4096) % 127)) {
+            sparse_ok = false;
+        }
+    }
+    assert_true(sparse_ok, "sparse writes across 4MB allocation survive");
+    assert_eq_i32((i32)big[large_size - 1], 99, "last byte of 4MB allocation writable");
+
+    big = realloc<i8>(big, 8000000);
+    assert_true(big != (i8*)0, "realloc to 8MB returned non-null");
+    assert_eq_i32((i32)big[large_size - 1], 99, "realloc preserved tail byte");
+    big[7999999] = 77;
+    assert_eq_i32((i32)big[7999999], 77, "new realloc tail byte writable");
+
+    // Overlap move: [0..4095] -> [2048..6143]
+    for (i64 i = 0; i < 4096; i = i + 1) {
+        big[i] = (i8)(i % 101);
+    }
+    memmove(&big[2048], big, 4096);
+    bool move_ok = true;
+    for (i64 i = 0; i < 4096; i = i + 1) {
+        if (big[2048 + i] != (i8)(i % 101)) {
+            move_ok = false;
+        }
+    }
+    assert_true(move_ok, "overlapping memmove preserved copied pattern");
+
+    free(big);
+}
+
+i32 main() {
+    printf("=== Memory Stress Torture Test ===\n");
+
+    stress_cross_linked_nodes();
+    stress_owner_moves_and_params();
+    stress_loop_churn();
+    stress_defer_and_break_continue();
+    stress_large_raw_memory();
+
+    printf("\n=== Results ===\n");
+    printf("Passed: %d\n", tests_passed);
+    printf("Failed: %d\n", tests_failed);
+    if (tests_failed > 0) {
+        return 1;
+    }
+    return 0;
+}
