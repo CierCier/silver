@@ -1,8 +1,13 @@
 import std.io;
-
+import std.map;
 
 i32 main(){
-	i64 hs = @hash("Hello nigga");
-	printf("%lld\n", hs);
+	HashMap<str, str> ids = HashMap<str, str>.new();
+
+	ids["wallahi"] = "balls";
+	ids["kurwa"] = "bigballs";
+
+	printf("%s:%s\n", "wallahi", ids["wallahi"]);
+
 	return 0;
 }
