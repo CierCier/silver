@@ -1225,34 +1225,86 @@ impl TypeChecker {
             ast::ExpressionKind::Index { object, index } => {
                 let object_ty = self.check_expr(object, None);
                 let index_ty = self.check_expr(index, None);
-                if !is_integer(&index_ty) {
-                    self.error(
-                        format!("index expression must be integer, found {}", index_ty),
-                        index.span.clone(),
-                    );
-                }
                 let object_ty_display = object_ty.to_string();
                 match &object_ty {
-                    Type::Slice { element } => (**element).clone(),
-                    Type::Pointer { inner, .. } => match &**inner {
-                        Type::Slice { element } => (**element).clone(),
-                        _ => inner.as_ref().clone(),
+                    Type::Slice { element } => {
+                        if !is_integer(&index_ty) {
+                            self.error(
+                                format!("slice index must be integer, found {}", index_ty),
+                                index.span.clone(),
+                            );
+                        }
+                        (**element).clone()
                     },
-                    Type::Reference { inner, .. } => match &**inner {
-                        Type::Slice { element } => (**element).clone(),
-                        Type::Pointer { inner, .. } => match &**inner {
-                            Type::Slice { element } => (**element).clone(),
-                            _ => inner.as_ref().clone(),
+                    Type::Pointer { inner, .. } => match &**inner {
+                        Type::Slice { element } => {
+                            if !is_integer(&index_ty) {
+                                self.error(
+                                    format!("slice index must be integer, found {}", index_ty),
+                                    index.span.clone(),
+                                );
+                            }
+                            (**element).clone()
                         },
                         _ => {
-                            self.error(
-                                format!(
-                                    "indexing requires array or pointer type, found {}",
-                                    object_ty_display
-                                ),
+                            if !is_integer(&index_ty) {
+                                self.error(
+                                    format!("pointer index must be integer, found {}", index_ty),
+                                    index.span.clone(),
+                                );
+                            }
+                            inner.as_ref().clone()
+                        },
+                    },
+                    Type::Reference { inner, .. } => match &**inner {
+                        Type::Slice { element } => {
+                            if !is_integer(&index_ty) {
+                                self.error(
+                                    format!("slice index must be integer, found {}", index_ty),
+                                    index.span.clone(),
+                                );
+                            }
+                            (**element).clone()
+                        },
+                        Type::Pointer { inner, .. } => match &**inner {
+                            Type::Slice { element } => {
+                                if !is_integer(&index_ty) {
+                                    self.error(
+                                        format!("slice index must be integer, found {}", index_ty),
+                                        index.span.clone(),
+                                    );
+                                }
+                                (**element).clone()
+                            },
+                            _ => {
+                                if !is_integer(&index_ty) {
+                                    self.error(
+                                        format!("pointer index must be integer, found {}", index_ty),
+                                        index.span.clone(),
+                                    );
+                                }
+                                inner.as_ref().clone()
+                            },
+                        },
+                        _ => {
+                            if let Some(result_ty) = self.resolve_method_overload_types(
+                                &object_ty,
+                                "__index_get",
+                                &[index_ty],
+                                MethodCallStyle::Instance,
                                 object.span.clone(),
-                            );
-                            Type::Unknown
+                            ) {
+                                result_ty
+                            } else {
+                                self.error(
+                                    format!(
+                                        "indexing requires array or pointer type with integer index, found {}",
+                                        object_ty_display
+                                    ),
+                                    object.span.clone(),
+                                );
+                                Type::Unknown
+                            }
                         }
                     },
                     _ => {
@@ -1267,7 +1319,7 @@ impl TypeChecker {
                         } else {
                             self.error(
                                 format!(
-                                    "indexing requires array or pointer type, found {}",
+                                    "indexing requires array or pointer type with integer index, found {}",
                                     object_ty_display
                                 ),
                                 object.span.clone(),
