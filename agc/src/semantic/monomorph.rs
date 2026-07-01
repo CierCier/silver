@@ -695,12 +695,33 @@ fn instantiate_requests(
                 call_span,
             } => {
                 let args = ordered_args(type_params, mapping);
-                let mangled = mangle_name(&source.name.name, &args);
+
+                // Compute parameter type signature to disambiguate overloaded generic functions
+                // (e.g. alloc<i32>() vs alloc<i32>(i64))
+                let param_sig: String = source.parameters.iter()
+                    .map(|p| {
+                        let concrete = Type::from_ast(&p.param_type).substitute(mapping);
+                        sanitize(&concrete.canonical_key())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+
+                let mangled_base = mangle_name(&source.name.name, &args);
+                let mangled = if param_sig.is_empty() {
+                    format!("{}__v", mangled_base)
+                } else {
+                    format!("{}_{}", mangled_base, param_sig)
+                };
                 let key = format!("fn::{mangled}");
+
+                // Always rewrite call sites, even if the function was already
+                // monomorphized from a different call site. The dedup below
+                // prevents generating duplicate function definitions.
+                rewrite_function_calls(program, &source.name.name, &args, &mangled, call_span);
+
                 if !generated.insert(key) {
                     continue;
                 }
-                rewrite_function_calls(program, &source.name.name, &args, &mangled, call_span);
                 let mut func = source.clone();
                 func.generics = None;
                 func.name = ast::Identifier {
@@ -1665,7 +1686,7 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "foo__i32",
+            ast::ItemKind::Function(f) => f.name.name == "foo__i32_i32",
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function foo__i32");
@@ -1690,7 +1711,7 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64",
+            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64_i32_f64",
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function bar__i32_f64");
@@ -1713,7 +1734,7 @@ mod tests {
         let items = append_monomorphs(&mut program, &[request.clone(), request]);
         let count = items
             .iter()
-            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32"))
+            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32_i32"))
             .count();
         assert_eq!(count, 1, "duplicate request should only produce one monomorph");
     }
@@ -1735,7 +1756,7 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "id__i32",
+            ast::ItemKind::Function(f) => f.name.name == "id__i32_i32",
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function id__i32");
