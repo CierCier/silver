@@ -1,0 +1,8 @@
+import std.io;
+
+
+i32 main(){
+	i64 hs = @hash("Hello nigga");
+	printf("%lld\n", hs);
+	return 0;
+}
