@@ -5104,6 +5104,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(updated)
             }
             _ => {
+                // For str equality (==, !=), use strcmp instead of pointer comparison
+                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual) {
+                    if self.expression_is_str_type(left) || self.expression_is_str_type(right) {
+                        let lhs = self.emit_expression_value(left)?;
+                        let rhs = self.emit_expression_value(right)?;
+                        return self.emit_strcmp_comparison(lhs, operator, rhs, whole_expr);
+                    }
+                }
+
                 let lhs = self.emit_expression_value(left)?;
                 // For struct types, use trait method call instead of inline IR
                 if lhs.get_type().is_struct_type() {
@@ -5124,6 +5133,158 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.emit_binary_values(&lhs, operator, &rhs, whole_expr)
             }
         }
+    }
+
+    /// Check whether an expression evaluates to `str` type.
+    /// Handles the most common expression forms; returns `false` for unhandled kinds
+    /// (falling back to standard pointer comparison in those cases).
+    fn expression_is_str_type(&mut self, expr: &ast::Expression) -> bool {
+        let str_ty = ast::TypeKind::Primitive(ast::PrimitiveType::Str);
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Literal(ast::Literal::String(_)) => true,
+            ast::ExpressionKind::Identifier(ident) => self
+                .lookup_value_type(&ident.name)
+                .map_or(false, |ty| *ty.kind == str_ty),
+            ast::ExpressionKind::Cast { target_type, .. } => *target_type.kind == str_ty,
+            _ => false,
+        }
+    }
+
+    /// Emit `strcmp(left, right)` and compare the result against zero.
+    /// Used for `str == str` and `str != str` comparisons.
+    ///
+    /// If either operand is a null pointer, falls back to pointer equality
+    /// (null check semantics like `other == (str)0`).
+    fn emit_strcmp_comparison(
+        &mut self,
+        lhs: BasicValueEnum<'ctx>,
+        operator: &ast::BinaryOperator,
+        rhs: BasicValueEnum<'ctx>,
+        whole_expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Both values must be pointers (str is ptr_type)
+        let lhs_ptr = match lhs {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => {
+                return Err(CodegenError::with_span(
+                    "strcmp requires pointer operands",
+                    whole_expr.span.clone(),
+                ))
+            }
+        };
+        let rhs_ptr = match rhs {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => {
+                return Err(CodegenError::with_span(
+                    "strcmp requires pointer operands",
+                    whole_expr.span.clone(),
+                ))
+            }
+        };
+
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for strcmp"))?;
+        let i1_ty = self.context.bool_type();
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Declare strcmp if not already present: int strcmp(const char*, const char*)
+        let strcmp_ty = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let strcmp_fn = self
+            .module
+            .get_function("strcmp")
+            .unwrap_or_else(|| self.module.add_function("strcmp", strcmp_ty, None));
+
+
+        // Check: if lhs_ptr == null || rhs_ptr == null → use pointer equality
+        let lhs_is_null = self
+            .builder
+            .build_is_null(lhs_ptr, "strcmp.lhs_null")
+            .map_err(|e| CodegenError::new(format!("strcmp null check: {e}")))?;
+        let rhs_is_null = self
+            .builder
+            .build_is_null(rhs_ptr, "strcmp.rhs_null")
+            .map_err(|e| CodegenError::new(format!("strcmp null check: {e}")))?;
+        let any_null = self
+            .builder
+            .build_or(lhs_is_null, rhs_is_null, "strcmp.any_null")
+            .map_err(|e| CodegenError::new(format!("strcmp null or: {e}")))?;
+
+        // Create blocks: then compare pointers, else call strcmp, merge
+        let ptr_cmp_bb = self.context.append_basic_block(function, "strcmp.ptr");
+        let strcmp_bb = self.context.append_basic_block(function, "strcmp.call");
+        let merge_bb = self.context.append_basic_block(function, "strcmp.merge");
+
+        self.builder
+            .build_conditional_branch(any_null, ptr_cmp_bb, strcmp_bb)
+            .map_err(|e| CodegenError::new(format!("strcmp branch: {e}")))?;
+
+        // Block 1: pointer comparison
+        self.builder.position_at_end(ptr_cmp_bb);
+        let ptr_pred = match operator {
+            ast::BinaryOperator::Equal => IntPredicate::EQ,
+            ast::BinaryOperator::NotEqual => IntPredicate::NE,
+            _ => unreachable!(),
+        };
+        let lhs_int = self
+            .builder
+            .build_ptr_to_int(lhs_ptr, i64_ty, "strcmp.ptr.lhs")
+            .map_err(|e| CodegenError::new(format!("strcmp ptr-to-int: {e}")))?;
+        let rhs_int = self
+            .builder
+            .build_ptr_to_int(rhs_ptr, i64_ty, "strcmp.ptr.rhs")
+            .map_err(|e| CodegenError::new(format!("strcmp ptr-to-int: {e}")))?;
+        let ptr_result = self
+            .builder
+            .build_int_compare(ptr_pred, lhs_int, rhs_int, "strcmp.ptr.cmp")
+            .map_err(|e| CodegenError::new(format!("strcmp ptr compare: {e}")))?;
+        let ptr_result_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::new("missing ptr cmp block"))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::new(format!("strcmp branch merge: {e}")))?;
+
+        // Block 2: strcmp call
+        self.builder.position_at_end(strcmp_bb);
+        let call_result = self
+            .builder
+            .build_call(strcmp_fn, &[lhs_ptr.into(), rhs_ptr.into()], "strcmp")
+            .map_err(|e| CodegenError::new(format!("strcmp call failed: {e}")))?;
+        let result_val = call_result
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::new("strcmp returned void"))?;
+        let result_int = result_val.into_int_value();
+
+        // Compare strcmp result against 0
+        let zero = i32_ty.const_zero();
+        let cmp = self
+            .builder
+            .build_int_compare(ptr_pred, result_int, zero, "strcmp.cmp")
+            .map_err(|e| CodegenError::new(format!("strcmp compare failed: {e}")))?;
+        let strcmp_result_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::new("missing strcmp block"))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::new(format!("strcmp branch merge: {e}")))?;
+
+        // Merge block: phi node for the result
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(i1_ty, "strcmp.result")
+            .map_err(|e| CodegenError::new(format!("strcmp phi: {e}")))?;
+        phi.add_incoming(&[
+            (&ptr_result, ptr_result_bb),
+            (&cmp, strcmp_result_bb),
+        ]);
+        Ok(phi.as_basic_value().as_basic_value_enum())
     }
 
     /// Emits short-circuiting `&&` / `||` semantics with explicit control flow.

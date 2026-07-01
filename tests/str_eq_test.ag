@@ -1,0 +1,60 @@
+import std.io;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_false(bool cond, str msg) {
+    if (!cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+i32 main() {
+    printf("=== str Equality Tests ===\n\n");
+
+    // Literal == literal (same content)
+    assert_true("hello" == "hello", "literal == literal (same)");
+    assert_false("hello" == "world", "literal == literal (different)");
+    assert_true("hello" != "world", "literal != literal (different)");
+    assert_false("hello" != "hello", "literal != literal (same)");
+
+    // Variable == variable
+    str a = "abc";
+    str b = "abc";
+    str c = "xyz";
+    assert_true(a == b, "variable == variable (same content)");
+    assert_false(a == c, "variable == variable (different content)");
+    assert_true(a != c, "variable != variable (different)");
+    assert_false(a != b, "variable != variable (same)");
+
+    // Variable == literal
+    assert_true(a == "abc", "variable == literal (match)");
+    assert_false(a == "xyz", "variable == literal (no match)");
+    assert_true(a != "xyz", "variable != literal (different)");
+    assert_false(a != "abc", "variable != literal (same)");
+
+    // Literal == variable
+    assert_true("abc" == a, "literal == variable (match)");
+    assert_false("xyz" == a, "literal == variable (no match)");
+
+    // Cast expression
+    str d = (str)("hello");
+    assert_true(d == "hello", "cast str == literal");
+
+    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
+    return tests_failed;
+}

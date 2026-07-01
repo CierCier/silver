@@ -1,13 +1,12 @@
 import std.io;
 import std.map;
+import std.iter;
 
 i32 main(){
-	HashMap<str, str> ids = HashMap<str, str>.new();
+	HashMap<i32, i32> ids = HashMap<i32,i32>.new();
 
-	ids["wallahi"] = "balls";
-	ids["kurwa"] = "bigballs";
+	i32 n = 5;
 
-	printf("%s:%s\n", "wallahi", ids["wallahi"]);
 
 	return 0;
 }
