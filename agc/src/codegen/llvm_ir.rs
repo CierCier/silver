@@ -810,7 +810,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // FNV-1a 64-bit constants
         let fnv_offset = i64_ty.const_int(0xcbf29ce484222325, false);
         let fnv_prime = i64_ty.const_int(0x100000001b3, false);
-        let len_val = i64_ty.const_int(size, false);
+        let is_str = llvm_ty.is_pointer_type();
+        let len_val: inkwell::values::IntValue<'ctx> = if is_str {
+            // For str (pointer) types, hash the string CONTENT.
+            // Length will be determined via strlen — set a dummy len here;
+            // the special case below replaces the data pointer and recomputes len.
+            i64_ty.const_int(0, false)
+        } else {
+            i64_ty.const_int(size, false)
+        };
 
         // Alloca the value so we can iterate its raw bytes
         let alloca = self.builder.build_alloca(llvm_ty, "hash_val")
@@ -819,8 +827,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("hash store: {e}")))?;
 
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
-        let ptr = self.builder.build_pointer_cast(alloca, ptr_ty, "hash_ptr")
-            .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
+        let (data_ptr, strlen_len) = if is_str {
+            // str is a pointer type — load the pointer value, then call strlen
+            // to hash the string CONTENT rather than the pointer bytes.
+            let str_ptr = self.builder.build_load(llvm_ty, alloca, "hash_str_ptr")
+                .map_err(|e| CodegenError::new(format!("hash load str: {e}")))?;
+            let str_ptr = str_ptr.into_pointer_value();
+
+            let strlen_fn = self.module.get_function("strlen")
+                .unwrap_or_else(|| {
+                    let i8_ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    let strlen_ty = i64_ty.fn_type(&[i8_ptr_ty.into()], false);
+                    self.module.add_function("strlen", strlen_ty, None)
+                });
+
+            let call_len = self.builder.build_call(strlen_fn, &[str_ptr.into()], "hash_strlen")
+                .map_err(|e| CodegenError::new(format!("hash strlen: {e}")))?;
+            let call_len = call_len.try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::new("strlen returned void"))?;
+            let call_len = call_len.into_int_value();
+
+            let data_ptr = self.builder.build_pointer_cast(str_ptr, ptr_ty, "hash_data_ptr")
+                .map_err(|e| CodegenError::new(format!("hash data ptr: {e}")))?;
+            (data_ptr, call_len)
+        } else {
+            // For non-str types, hash the raw byte representation
+            let ptr = self.builder.build_pointer_cast(alloca, ptr_ty, "hash_ptr")
+                .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
+            (ptr, len_val)
+        };
 
         // Save current block (predecessor of the loop)
         let curr_block = self.builder.get_insert_block()
@@ -855,7 +890,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Load byte at ptr[idx]
         let gep = unsafe {
-            self.builder.build_in_bounds_gep(i8_ty, ptr, &[idx_val], "hash_byte_gep")
+            self.builder.build_in_bounds_gep(i8_ty, data_ptr, &[idx_val], "hash_byte_gep")
         }
         .map_err(|e| CodegenError::new(format!("hash gep: {e}")))?;
         let byte = self.builder.build_load(i8_ty, gep, "hash_byte")
@@ -886,7 +921,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let cond = self.builder.build_int_compare(
             inkwell::IntPredicate::ULT,
             next_idx,
-            len_val,
+            strlen_len,
             "hash_cond",
         )
         .map_err(|e| CodegenError::new(format!("hash cmp: {e}")))?;
