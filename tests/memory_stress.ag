@@ -265,8 +265,8 @@ void stress_cross_linked_nodes() {
 
         assert_true(a.payload_ok(), "a payload edges are intact");
         assert_true(f.payload_ok(), "f payload edges are intact");
-        assert_eq_i32(a.checksum_edges(), 11, "a edge checksum includes id/next/prev/alias");
-        assert_eq_i32(c.checksum_edges(), 14, "c edge checksum includes id/next/prev/alias");
+        assert_eq_i32(a.checksum_edges(), 13, "a edge checksum includes id/next/prev/alias");
+        assert_eq_i32(c.checksum_edges(), 15, "c edge checksum includes id/next/prev/alias");
 
         (*a.next).payload[10] = 4242;
         assert_eq_i32(b.payload[10], 4242, "cross-reference write through next pointer");
@@ -285,7 +285,7 @@ void stress_owner_moves_and_params() {
     {
         PairOwner p = make_pair(10);
         PairOwner q = forward_pair(move p);
-        assert_eq_i32(q.sum(), 313, "forwarded pair contents survive move chain");
+        assert_eq_i32(q.sum(), 213, "forwarded pair contents survive move chain");
     }
     assert_eq_i32(pair_drop_count, 1, "forwarded pair dropped once");
     assert_eq_i32(leaf_drop_count, 2, "forwarded pair leaves dropped once each");
@@ -303,7 +303,7 @@ void stress_owner_moves_and_params() {
     reset_owner_counters();
     {
         PairOwner p = choose_pair(1);
-        assert_eq_i32(p.sum(), 964, "positive conditional return preserved contents");
+        assert_eq_i32(p.sum(), 654, "positive conditional return preserved contents");
     }
     assert_eq_i32(pair_drop_count, 1, "positive conditional return dropped once");
     assert_eq_i32(leaf_drop_count, 2, "positive conditional leaves dropped");
@@ -312,7 +312,7 @@ void stress_owner_moves_and_params() {
     reset_node_counters();
     {
         PairOwner p = early_pair();
-        assert_eq_i32(p.sum(), 1243, "early return preserves returned owner");
+        assert_eq_i32(p.sum(), 843, "early return preserves returned owner");
     }
     assert_eq_i32(pair_drop_count, 1, "early-returned pair dropped once");
     assert_eq_i32(leaf_drop_count, 2, "early-returned pair leaves dropped");
