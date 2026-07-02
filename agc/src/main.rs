@@ -800,7 +800,12 @@ fn main() {
                 for module in &imported_modules {
                     extend_unique_libs(&mut native_libs, &module.native_libs);
                 }
-                match collect_dependency_link_artifacts(&loader, &imported_modules, &plan, plan.shared) {
+                match collect_dependency_link_artifacts(
+                    &loader,
+                    &imported_modules,
+                    &plan,
+                    plan.shared,
+                ) {
                     Ok(paths) => {
                         for path in paths {
                             if !dependency_link_artifacts.contains(&path) {
@@ -1229,12 +1234,13 @@ fn build_with_llvm_tools(
     llc.arg(&linked_ll);
     run_tool(llc, "llc")?;
 
-    let link_result = link_with_ld_lld(plan, &object_path, dependency_paths, native_libs).or_else(|ld_err| {
-        // Keep a compatibility fallback for systems without lld installed.
-        link_with_cc(plan, &object_path, dependency_paths, native_libs).map_err(|cc_err| {
-            format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
-        })
-    });
+    let link_result =
+        link_with_ld_lld(plan, &object_path, dependency_paths, native_libs).or_else(|ld_err| {
+            // Keep a compatibility fallback for systems without lld installed.
+            link_with_cc(plan, &object_path, dependency_paths, native_libs).map_err(|cc_err| {
+                format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
+            })
+        });
     link_result?;
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1421,7 +1427,10 @@ fn link_shared_module(
     native_libs: &[String],
 ) -> Result<(), String> {
     let mut link = Command::new("cc");
-    link.arg("-shared").arg("-o").arg(output_path).arg(object_path);
+    link.arg("-shared")
+        .arg("-o")
+        .arg(output_path)
+        .arg(object_path);
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }
