@@ -27,26 +27,44 @@ pub fn append_monomorphs(
 ) -> Vec<ast::Item> {
     let generic_types = collect_generic_types(program);
     let generic_impls = collect_generic_impls(program);
+    let generic_fns = collect_generic_fns(program);
     let mut generated = HashSet::new();
-    let mut new_items = Vec::new();
+    let mut all_new_items = Vec::new();
 
     let mut instantiations = HashMap::new();
     collect_struct_instantiations(program, &generic_types, &mut instantiations);
 
     for (key, inst) in instantiations.iter() {
         if generated.insert(key.clone()) {
-            new_items.push(inst.item.clone());
+            let item = inst.item.clone();
+            all_new_items.push(item);
+            program.items.push(inst.item.clone());
         }
     }
 
     let impl_items = instantiate_impls(&generic_impls, &instantiations, &mut generated);
-    new_items.extend(impl_items);
+    for item in &impl_items {
+        all_new_items.push(item.clone());
+        program.items.push(item.clone());
+    }
 
-    let request_items = instantiate_requests(program, requests, &mut generated);
-    new_items.extend(request_items);
+    // Process function/method monomorphization requests to fixpoint.
+    // This handles nested generic calls: e.g., alloc<T>() inside Rc.new<T> is deferred
+    // during type checking (non-concrete mapping), so we must detect it here and
+    // create the monomorphized callee in a second round.
+    let mut current_requests: Vec<MonomorphRequest> = requests.to_vec();
+    while !current_requests.is_empty() {
+        let new_items = instantiate_requests(program, &current_requests, &mut generated);
+        for item in &new_items {
+            all_new_items.push(item.clone());
+            program.items.push(item.clone());
+        }
 
-    program.items.extend(new_items.clone());
-    new_items
+        // Scan for remaining generic calls with concrete type args in the updated program
+        current_requests = collect_remaining_function_requests(program, &new_items, &generic_fns, &generated);
+    }
+
+    all_new_items
 }
 
 #[derive(Clone)]
@@ -1050,27 +1068,40 @@ fn rewrite_expression_function_calls(
             function,
             arguments,
         } => {
-                    if expr.span == *span {
-                        let should_rewrite = match function.kind.as_mut() {
-                            ast::ExpressionKind::Identifier(ident) => ident.name == name,
-                            ast::ExpressionKind::TypeName(ty) => {
-                                if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
-                                    named.path.len() == 1 && named.path[0].name == name
+                    // For TypeName-style calls, match by function name AND generic argument types
+                    // (not just span). This handles nested generic calls inside monomorphized
+                    // bodies where the span differs from the original request's call_span.
+                    let should_rewrite = match function.kind.as_mut() {
+                        ast::ExpressionKind::Identifier(ident) => {
+                            ident.name == name && expr.span == *span
+                        }
+                        ast::ExpressionKind::TypeName(ty) => {
+                            if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
+                                if named.path.len() == 1 && named.path[0].name == name {
+                                    if let Some(generics) = &named.generics {
+                                        let actual_args: Vec<Type> =
+                                            generics.iter().map(|g| Type::from_ast(g)).collect();
+                                        actual_args == args
+                                    } else {
+                                        args.is_empty()
+                                    }
                                 } else {
                                     false
                                 }
+                            } else {
+                                false
                             }
-                            _ => false,
-                        };
-                        if should_rewrite {
-                            *function = Box::new(ast::Expression {
-                                kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                                    name: mangled.to_string(),
-                                    span: function.span.clone(),
-                                })),
-                                span: function.span.clone(),
-                            });
                         }
+                        _ => false,
+                    };
+                    if should_rewrite {
+                        *function = Box::new(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                name: mangled.to_string(),
+                                span: function.span.clone(),
+                            })),
+                            span: function.span.clone(),
+                        });
                     }
             for arg in arguments {
                 rewrite_expression_function_calls(arg, name, args, mangled, span);
@@ -1092,7 +1123,7 @@ fn rewrite_expression_function_calls(
         }
         ast::ExpressionKind::Cast {
             expression,
-            target_type: _,
+            ..
         } => {
             rewrite_expression_function_calls(expression, name, args, mangled, span);
         }
@@ -1170,6 +1201,13 @@ fn rewrite_expression_function_calls(
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => rewrite_expression_function_calls(inner, name, args, mangled, span),
+        ast::ExpressionKind::MacroCall { args: macro_args, .. } => {
+            for arg in macro_args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    rewrite_expression_function_calls(expr, name, args, mangled, span);
+                }
+            }
+        }
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
             rewrite_expression_function_calls(iterable, name, args, mangled, span);
             rewrite_block_function_calls(body, name, args, mangled, span);
@@ -1177,8 +1215,7 @@ fn rewrite_expression_function_calls(
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
         | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_)
-        | ast::ExpressionKind::MacroCall { .. } => {}
+        | ast::ExpressionKind::Asm(_) => {}
     }
 }
 
@@ -1878,4 +1915,295 @@ fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<
         .iter()
         .filter_map(|name| mapping.get(name).cloned())
         .collect()
+}
+
+/// Collect names of all generic functions (functions with generic type parameters).
+fn collect_generic_fns(program: &ast::Program) -> HashSet<String> {
+    let mut fns = HashSet::new();
+    for item in &program.items {
+        if let ast::ItemKind::Function(func) = &item.kind {
+            if func.generics.is_some() {
+                fns.insert(func.name.name.clone());
+            }
+        }
+    }
+    fns
+}
+
+/// Find a generic function by name and parameter count.
+fn find_generic_fn<'a>(program: &'a ast::Program, name: &str, param_count: usize) -> Option<&'a ast::FunctionItem> {
+    for item in &program.items {
+        if let ast::ItemKind::Function(func) = &item.kind {
+            if func.name.name == name && func.generics.is_some() && func.parameters.len() == param_count {
+                return Some(func);
+            }
+        }
+    }
+    None
+}
+
+/// Scan an expression tree for TypeName-style calls to generic functions with concrete
+/// type arguments, and return the list as MonomorphRequest values so they can be processed
+/// through the existing monomorphization pipeline.
+fn collect_expression_remaining_calls(
+    expr: &ast::Expression,
+    generic_fns: &HashSet<String>,
+) -> Vec<(String, Vec<Type>, Span, usize)> {
+    let mut results = Vec::new();
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Call { function, arguments } => {
+            if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
+                if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                    if named.path.len() == 1 {
+                        let fn_name = &named.path[0].name;
+                        if generic_fns.contains(fn_name) {
+                            if let Some(generics) = &named.generics {
+                                let concrete_args: Vec<Type> =
+                                    generics.iter().map(|g| Type::from_ast(g)).collect();
+                                // Only process if all type args are concrete
+                                if concrete_args.iter().all(|arg| is_concrete(arg)) {
+                                    results.push((
+                                        fn_name.clone(),
+                                        concrete_args,
+                                        expr.span.clone(),
+                                        arguments.len(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Recurse into arguments
+            for arg in arguments {
+                results.extend(collect_expression_remaining_calls(arg, generic_fns));
+            }
+        }
+        ast::ExpressionKind::MethodCall { receiver, arguments, .. } => {
+            results.extend(collect_expression_remaining_calls(receiver, generic_fns));
+            for arg in arguments {
+                results.extend(collect_expression_remaining_calls(arg, generic_fns));
+            }
+        }
+        ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } => {
+            results.extend(collect_expression_remaining_calls(object, generic_fns));
+        }
+        ast::ExpressionKind::Cast { expression, .. } => {
+            results.extend(collect_expression_remaining_calls(expression, generic_fns));
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            results.extend(collect_expression_remaining_calls(left, generic_fns));
+            results.extend(collect_expression_remaining_calls(right, generic_fns));
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. } => {
+            results.extend(collect_expression_remaining_calls(operand, generic_fns));
+        }
+        ast::ExpressionKind::If { condition, then_branch, else_branch } => {
+            results.extend(collect_expression_remaining_calls(condition, generic_fns));
+            results.extend(collect_block_remaining_calls(then_branch, generic_fns));
+            if let Some(branch) = else_branch {
+                results.extend(collect_block_remaining_calls(branch, generic_fns));
+            }
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            results.extend(collect_expression_remaining_calls(condition, generic_fns));
+            results.extend(collect_block_remaining_calls(body, generic_fns));
+        }
+        ast::ExpressionKind::For { init, condition, increment, body } => {
+            if let Some(init_expr) = &init.initializer {
+                results.extend(collect_expression_remaining_calls(init_expr, generic_fns));
+            }
+            results.extend(collect_expression_remaining_calls(condition, generic_fns));
+            results.extend(collect_expression_remaining_calls(increment, generic_fns));
+            results.extend(collect_block_remaining_calls(body, generic_fns));
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            results.extend(collect_expression_remaining_calls(expression, generic_fns));
+            for arm in arms {
+                results.extend(collect_expression_remaining_calls(&arm.body, generic_fns));
+            }
+        }
+        ast::ExpressionKind::Block(block) => {
+            results.extend(collect_block_remaining_calls(block, generic_fns));
+        }
+        ast::ExpressionKind::Initializer { items } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(expr)
+                    | ast::InitializerItem::Field { value: expr, .. } => {
+                        results.extend(collect_expression_remaining_calls(expr, generic_fns));
+                    }
+                    ast::InitializerItem::Index { index, value } => {
+                        results.extend(collect_expression_remaining_calls(index, generic_fns));
+                        results.extend(collect_expression_remaining_calls(value, generic_fns));
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+            for item in items {
+                results.extend(collect_expression_remaining_calls(item, generic_fns));
+            }
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                results.extend(collect_expression_remaining_calls(&field.value, generic_fns));
+            }
+        }
+        ast::ExpressionKind::Move(inner)
+        | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Reference { expression: inner, .. } => {
+            results.extend(collect_expression_remaining_calls(inner, generic_fns));
+        }
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    results.extend(collect_expression_remaining_calls(expr, generic_fns));
+                }
+            }
+        }
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            results.extend(collect_expression_remaining_calls(iterable, generic_fns));
+            results.extend(collect_block_remaining_calls(body, generic_fns));
+        }
+        ast::ExpressionKind::TypeName(_)
+        | ast::ExpressionKind::Literal(_)
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::Asm(_) => {}
+    }
+    results
+}
+
+fn collect_block_remaining_calls(
+    block: &ast::Block,
+    generic_fns: &HashSet<String>,
+) -> Vec<(String, Vec<Type>, Span, usize)> {
+    let mut results = Vec::new();
+    for stmt in &block.statements {
+        results.extend(collect_statement_remaining_calls(stmt, generic_fns));
+    }
+    results
+}
+
+fn collect_statement_remaining_calls(
+    stmt: &ast::Statement,
+    generic_fns: &HashSet<String>,
+) -> Vec<(String, Vec<Type>, Span, usize)> {
+    let mut results = Vec::new();
+    match &stmt.kind {
+        ast::StatementKind::Block(block) => {
+            results.extend(collect_block_remaining_calls(block, generic_fns));
+        }
+        ast::StatementKind::Let(let_stmt) => {
+            if let Some(init) = &let_stmt.initializer {
+                results.extend(collect_expression_remaining_calls(init, generic_fns));
+            }
+        }
+        ast::StatementKind::Expression(expr)
+        | ast::StatementKind::Return(Some(expr))
+        | ast::StatementKind::Break(Some(expr)) => {
+            results.extend(collect_expression_remaining_calls(expr, generic_fns));
+        }
+        ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+        ast::StatementKind::Continue => {}
+        ast::StatementKind::Defer(inner) => {
+            results.extend(collect_statement_remaining_calls(inner, generic_fns));
+        }
+    }
+    results
+}
+
+/// Check if a type is fully concrete (no type parameter references).
+fn is_concrete(ty: &Type) -> bool {
+    match ty {
+        Type::Named { generics, .. } => {
+            // In a monomorphized body, all type params are substituted.
+            // A Named type is concrete if all its generic args are concrete.
+            generics.iter().all(|inner| is_concrete(inner))
+        }
+        Type::Primitive(_) | Type::Unit => true,
+        Type::Pointer { inner, .. } | Type::Reference { inner, .. } => is_concrete(inner),
+        Type::Slice { element } => is_concrete(element),
+        Type::Optional { inner } => is_concrete(inner),
+        Type::Tuple(items) => items.iter().all(|inner| is_concrete(inner)),
+        Type::Function { params, return_type } => {
+            params.iter().all(|inner| is_concrete(inner)) && is_concrete(return_type)
+        }
+        Type::Array { element, .. } => is_concrete(element),
+        Type::Unknown => false,
+    }
+}
+
+/// Collect remaining concrete generic function calls that need monomorphization.
+/// Returns MonomorphRequest values to be processed in a subsequent round.
+fn collect_remaining_function_requests(
+    program: &ast::Program,
+    items: &[ast::Item],
+    generic_fns: &HashSet<String>,
+    generated: &HashSet<String>,
+) -> Vec<MonomorphRequest> {
+    let mut requests = Vec::new();
+    // Collect calls first (to avoid borrow issues with program.items)
+    let mut found_calls: Vec<(String, Vec<Type>, Span, usize)> = Vec::new();
+    for item in items {
+        match &item.kind {
+            ast::ItemKind::Function(func) => {
+                found_calls.extend(collect_block_remaining_calls(&func.body, generic_fns));
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                for member in &impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        found_calls.extend(collect_block_remaining_calls(&func.body, generic_fns));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (fn_name, concrete_args, call_span, param_count) in found_calls {
+        let mangled_base = mangle_name(&fn_name, &concrete_args);
+        let key = format!("fn::{mangled_base}");
+        if generated.contains(&key) {
+            continue;
+        }
+        if let Some(source) = find_generic_fn(program, &fn_name, param_count) {
+            let mapping = build_mapping_from_generics(source.generics.as_ref(), &concrete_args);
+            // Use source's type param order for deterministic mangling
+            let type_params: Vec<String> = source
+                .generics
+                .as_ref()
+                .map(|g| {
+                    g.params
+                        .iter()
+                        .filter_map(|p| {
+                            if let ast::GenericParam::Type(tp) = p {
+                                mapping.contains_key(&tp.name.name).then(|| tp.name.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Only add if all type params are covered and at least one exists
+            if !type_params.is_empty()
+                && type_params.len()
+                    == source
+                        .generics
+                        .as_ref()
+                        .map(|g| g.params.len())
+                        .unwrap_or(0)
+            {
+                requests.push(MonomorphRequest::Function {
+                    source: source.clone(),
+                    type_params,
+                    mapping,
+                    call_span,
+                });
+            }
+        }
+    }
+    requests
 }
