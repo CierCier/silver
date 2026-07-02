@@ -17,6 +17,6 @@ parking_lot = { version = "0.12", optional = true }
     lsp = ["tower-lsp", "tokio", "parking_lot"]
 
 [[bin]]
-name = "agc-lsp"
+name = "aglsp"
 path = "src/lsp_main.rs"
 required-features = ["lsp"]

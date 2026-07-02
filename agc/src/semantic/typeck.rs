@@ -4224,4 +4224,18 @@ mod tests {
             "expected invalid link attribute error, got {errors:?}"
         );
     }
+
+    #[test]
+    fn expr_types_is_populated_for_literals() {
+        let program = parse("i32 main() { return 1; }");
+        let mut tc = TypeChecker::new();
+        let mut table = CompilerSymbolTable::new();
+        let (_errors, _) = tc.check_program_with_table(&program, &mut table);
+        let types = std::mem::take(&mut tc.expr_types);
+        assert!(!types.is_empty(), "expected at least one expression type, got none");
+        for ((start, end), ty) in &types {
+            eprintln!("  span({start},{end}) → {ty}");
+        }
+    }
 }
+

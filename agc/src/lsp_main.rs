@@ -37,7 +37,7 @@ fn span_to_range(text: &str, span: &Span) -> Range {
     }
 }
 
-/// Convert an LSP position to a byte offset in `text`.
+/// Convert an LSP position (UTF-16 code units) to a byte offset in `text`.
 fn position_to_byte(text: &str, pos: Position) -> usize {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
@@ -73,7 +73,7 @@ struct Backend {
 }
 
 impl Backend {
-    fn check_diagnostics(&self, uri: &Url, text: &str) {
+    async fn check_diagnostics(&self, uri: &Url, text: &str) {
         let tokens = match lexer::lex(text) {
             Ok(t) => t,
             Err(errors) => {
@@ -89,7 +89,9 @@ impl Backend {
                 self.cache
                     .lock()
                     .insert(uri.clone(), (text.to_string(), HashMap::new()));
-                let _ = self.client.publish_diagnostics(uri.clone(), diags, None);
+                self.client
+                    .publish_diagnostics(uri.clone(), diags, None)
+                    .await;
                 return;
             }
         };
@@ -128,7 +130,9 @@ impl Backend {
         self.cache
             .lock()
             .insert(uri.clone(), (text.to_string(), expr_types));
-        let _ = self.client.publish_diagnostics(uri.clone(), diagnostics, None);
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 }
 
@@ -160,13 +164,13 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        self.check_diagnostics(&uri, &text);
+        self.check_diagnostics(&uri, &text).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
-            self.check_diagnostics(&uri, &change.text);
+            self.check_diagnostics(&uri, &change.text).await;
         }
     }
 
