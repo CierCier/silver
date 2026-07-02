@@ -532,7 +532,12 @@ impl TypeChecker {
 
                 match &let_stmt.pattern.kind {
                     ast::PatternKind::Identifier(ident) => {
-                        self.bind(&ident.name, declared, let_stmt.is_mutable, let_stmt.pattern.span.clone());
+                        self.bind(&ident.name, declared.clone(), let_stmt.is_mutable, let_stmt.pattern.span.clone());
+                        // Record for hover: variable name gets its declared type
+                        self.expr_types.insert(
+                            (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
+                            declared.to_string(),
+                        );
                     }
                     _ => {
                         self.error(
@@ -1208,9 +1213,8 @@ impl TypeChecker {
                 arguments,
             } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
-                    return self.resolve_overload(ident, arguments, expr.span.clone());
-                }
-                if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
+                    self.resolve_overload(ident, arguments, expr.span.clone())
+                } else if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
                     if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
                         if named.path.len() == 1 {
                             let ident = &named.path[0];
@@ -1219,21 +1223,49 @@ impl TypeChecker {
                                     .as_ref()
                                     .map(|gs| gs.iter().map(|t| Type::from_ast(t)).collect())
                                     .unwrap_or_default();
-                                return self.resolve_overload_with_explicit(
+                                self.resolve_overload_with_explicit(
                                     ident, &explicit_types, arguments, expr.span.clone(),
+                                )
+                            } else {
+                                for arg in arguments {
+                                    self.check_expr(arg, None);
+                                }
+                                self.error(
+                                    "type checking for this call expression is not implemented",
+                                    expr.span.clone(),
                                 );
+                                Type::Unknown
                             }
+                        } else {
+                            for arg in arguments {
+                                self.check_expr(arg, None);
+                            }
+                            self.error(
+                                "type checking for this call expression is not implemented",
+                                expr.span.clone(),
+                            );
+                            Type::Unknown
                         }
+                    } else {
+                        for arg in arguments {
+                            self.check_expr(arg, None);
+                        }
+                        self.error(
+                            "type checking for this call expression is not implemented",
+                            expr.span.clone(),
+                        );
+                        Type::Unknown
                     }
+                } else {
+                    for arg in arguments {
+                        self.check_expr(arg, None);
+                    }
+                    self.error(
+                        "type checking for this call expression is not implemented",
+                        expr.span.clone(),
+                    );
+                    Type::Unknown
                 }
-                for arg in arguments {
-                    self.check_expr(arg, None);
-                }
-                self.error(
-                    "type checking for this call expression is not implemented",
-                    expr.span.clone(),
-                );
-                Type::Unknown
             }
             ast::ExpressionKind::MethodCall {
                 receiver,
@@ -1242,13 +1274,13 @@ impl TypeChecker {
             } => {
                 let style = self.method_call_style(receiver);
                 let receiver_ty = self.check_expr(receiver, None);
-                return self.resolve_method_overload(
+                self.resolve_method_overload(
                     &receiver_ty,
                     method,
                     arguments,
                     style,
                     expr.span.clone(),
-                );
+                )
             }
             ast::ExpressionKind::Index { object, index } => {
                 let object_ty = self.check_expr(object, None);
