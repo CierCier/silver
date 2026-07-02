@@ -63,7 +63,6 @@ pub fn append_monomorphs(
         // Scan for remaining generic calls with concrete type args in the updated program
         current_requests = collect_remaining_function_requests(program, &new_items, &generic_fns, &generated);
     }
-
     all_new_items
 }
 

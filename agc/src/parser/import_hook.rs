@@ -136,7 +136,6 @@ impl<'a> FileImportResolverHook<'a> {
                 .loader
                 .find_source_import(&import_item.path, base_dir)
                 .ok_or_else(|| format!("import `{module_path}` could not be resolved"))?;
-
             match resolved.kind {
                 ResolvedSourceImportKind::File => {
                     if !self.mark_file_seen(&resolved.source_path) {
@@ -945,6 +944,7 @@ mod tests {
                 kind: ExportKind::Function,
                 name: "print".to_string(),
                 signature: "fn()->i32".to_string(),
+                type_params: Vec::new(),
                 link_name: Some("print".to_string()),
                 abi: Some(ModuleAbi::Silver),
                 is_variadic: false,
@@ -1014,6 +1014,7 @@ mod tests {
                 kind: ExportKind::Function,
                 name: "print".to_string(),
                 signature: "fn(str)->unit".to_string(),
+                type_params: Vec::new(),
                 link_name: Some("print".to_string()),
                 abi: Some(ModuleAbi::Silver),
                 is_variadic: false,

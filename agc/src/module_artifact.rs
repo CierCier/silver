@@ -34,6 +34,7 @@ pub struct ModuleExport {
     pub kind: ExportKind,
     pub name: String,
     pub signature: String,
+    pub type_params: Vec<String>,
     pub link_name: Option<String>,
     pub abi: Option<ModuleAbi>,
     pub is_variadic: bool,
@@ -191,6 +192,10 @@ impl ModuleArtifact {
             out.push(export.kind.as_u8());
             write_string(&mut out, &export.name)?;
             write_string(&mut out, &export.signature)?;
+            write_len(&mut out, export.type_params.len())?;
+            for param in &export.type_params {
+                write_string(&mut out, param)?;
+            }
             write_optional_string(&mut out, export.link_name.as_deref())?;
             write_optional_u8(&mut out, export.abi.map(ModuleAbi::as_u8));
             out.push(export.is_variadic as u8);
@@ -258,6 +263,11 @@ impl ModuleArtifact {
             };
             let name = read_string(bytes, &mut cursor)?;
             let signature = read_string(bytes, &mut cursor)?;
+            let type_params_len = read_len(bytes, &mut cursor)? as usize;
+            let mut type_params = Vec::with_capacity(type_params_len);
+            for _ in 0..type_params_len {
+                type_params.push(read_string(bytes, &mut cursor)?);
+            }
             let link_name = read_optional_string(bytes, &mut cursor)?;
             let abi = match read_optional_u8(bytes, &mut cursor)? {
                 Some(1) => Some(ModuleAbi::C),
@@ -302,6 +312,7 @@ impl ModuleArtifact {
                 kind,
                 name,
                 signature,
+                type_params,
                 link_name,
                 abi,
                 is_variadic,
@@ -479,10 +490,25 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     .map(Type::from_ast)
                     .unwrap_or(Type::Unit)
                     .canonical_key();
+                let type_params = func
+                    .generics
+                    .as_ref()
+                    .map(|generics| {
+                        generics
+                            .params
+                            .iter()
+                            .filter_map(|param| match param {
+                                ast::GenericParam::Type(type_param) => Some(type_param.name.name.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
                     signature: format!("fn({})->{ret}", params.join(",")),
+                    type_params,
                     link_name: Some(func.name.name.clone()),
                     abi: Some(ModuleAbi::Silver),
                     is_variadic: false,
@@ -512,6 +538,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
                     signature: format!("fn({})->{ret}", params.join(",")),
+                    type_params: Vec::new(),
                     link_name: Some(func.name.name.clone()),
                     abi: Some(ModuleAbi::from_linkage(&func.linkage)),
                     is_variadic: func.signature.is_variadic,
@@ -550,6 +577,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             .collect::<Vec<_>>()
                             .join(",")
                     ),
+                    type_params: Vec::new(),
                     link_name: None,
                     abi: None,
                     is_variadic: false,
@@ -580,6 +608,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     kind: ExportKind::Enum,
                     name: e.name.name.clone(),
                     signature: format!("enum[{} variants]", variants.len()),
+                    type_params: Vec::new(),
                     link_name: None,
                     abi: None,
                     is_variadic: false,
@@ -653,6 +682,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     kind: ExportKind::Trait,
                     name: t.name.name.clone(),
                     signature: format!("trait[{} items]", items.len()),
+                    type_params: Vec::new(),
                     link_name: None,
                     abi: None,
                     is_variadic: false,
@@ -683,6 +713,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                         kind: ExportKind::Function,
                         name: func.name.name.clone(),
                         signature: format!("fn({})->{ret}", params.join(",")),
+                        type_params: Vec::new(),
                         link_name: Some(func.name.name.clone()),
                         abi: Some(ModuleAbi::from_linkage(&block.linkage)),
                         is_variadic: func.signature.is_variadic,
@@ -982,6 +1013,7 @@ mod tests {
                     kind: ExportKind::Function,
                     name: "print".to_string(),
                     signature: "fn(str)->unit".to_string(),
+                    type_params: vec!["T".to_string()],
                     link_name: Some("silver_print".to_string()),
                     abi: Some(ModuleAbi::Silver),
                     is_variadic: false,
@@ -996,6 +1028,7 @@ mod tests {
                     kind: ExportKind::Struct,
                     name: "File".to_string(),
                     signature: "struct{raw:str,is_open:bool}".to_string(),
+                    type_params: Vec::new(),
                     link_name: None,
                     abi: None,
                     is_variadic: false,
@@ -1031,6 +1064,7 @@ mod tests {
         assert!(decoded.code_artifacts.has_shared_library);
         assert_eq!(decoded.module_deps, vec!["std.mem".to_string()]);
         assert_eq!(decoded.exports.len(), 2);
+        assert_eq!(decoded.exports[0].type_params, vec!["T".to_string()]);
         assert_eq!(
             decoded.exports[0].link_name.as_deref(),
             Some("silver_print")

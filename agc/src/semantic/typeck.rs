@@ -186,7 +186,7 @@ impl TypeChecker {
                         let sig = FunctionSig {
                             params,
                             return_type,
-                            type_params: Vec::new(),
+                            type_params: export.type_params.clone(),
                             span: Span { start: 0, end: 0 },
                             bounds: Vec::new(),
                             source: ast::FunctionItem {
@@ -194,7 +194,7 @@ impl TypeChecker {
                                     name: export.name.clone(),
                                     span: Span { start: 0, end: 0 },
                                 },
-                                generics: None,
+                                generics: Self::export_type_params_to_generics(&export.type_params),
                                 parameters: Vec::new(),
                                 return_type: None,
                                 body: ast::Block {
@@ -268,6 +268,31 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    fn export_type_params_to_generics(type_params: &[String]) -> Option<ast::Generics> {
+        if type_params.is_empty() {
+            return None;
+        }
+        let params = type_params
+            .iter()
+            .map(|name| {
+                ast::GenericParam::Type(ast::TypeParam {
+                    name: ast::Identifier {
+                        name: name.clone(),
+                        span: Span { start: 0, end: 0 },
+                    },
+                    bounds: Vec::new(),
+                    default: None,
+                    span: Span { start: 0, end: 0 },
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(ast::Generics {
+            params,
+            where_clause: None,
+            span: Span { start: 0, end: 0 },
+        })
     }
 
     fn register_imported_types(&mut self) {
@@ -3689,6 +3714,52 @@ mod tests {
         let (program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         program
+    }
+
+    #[test]
+    fn type_checks_imported_generic_alloc_call() {
+        let artifact = ModuleArtifact {
+            module_name: "mem".to_string(),
+            module_path: "std.mem".to_string(),
+            source_path: "std/mem.ag".to_string(),
+            source_hash_fnv1a64: 0,
+            compiler_version: "test".to_string(),
+            target_triple: "unknown".to_string(),
+            code_artifacts: crate::module_artifact::ModuleCodeArtifacts {
+                has_static_library: true,
+                has_shared_library: false,
+            },
+            module_deps: Vec::new(),
+            exports: vec![crate::module_artifact::ModuleExport {
+                kind: crate::module_artifact::ExportKind::Function,
+                name: "alloc".to_string(),
+                signature: "fn()->*mut T".to_string(),
+                type_params: vec!["T".to_string()],
+                link_name: Some("alloc".to_string()),
+                abi: Some(crate::module_artifact::ModuleAbi::Silver),
+                is_variadic: false,
+                type_key: None,
+                fields: Vec::new(),
+                layout: None,
+                enum_backing_type: None,
+                enum_variants: Vec::new(),
+                trait_items: Vec::new(),
+            }],
+            native_libs: Vec::new(),
+            artifact_path: None,
+        };
+
+        let program = parse("i32 main() { alloc<i32>(); return 0; }");
+        let (errors, _) = TypeChecker::new()
+            .with_imported_modules(&[artifact])
+            .check_program(&program);
+        
+        let has_alloc_error = errors.iter().any(|e| {
+            e.message.contains("no matching overload")
+                || e.message.contains("type count mismatch")
+                || e.message.contains("unknown function")
+        });
+        assert!(!has_alloc_error, "unexpected error for alloc: {:?}", errors);
     }
 
     #[test]
