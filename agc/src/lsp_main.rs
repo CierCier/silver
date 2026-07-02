@@ -60,10 +60,19 @@ fn find_expr_type(
     offset: usize,
     map: &HashMap<(usize, usize), String>,
 ) -> Option<String> {
-    map.iter()
-        .filter(|((start, end), _)| *start <= offset && offset <= *end)
-        .min_by_key(|((start, end), _)| end - start)
-        .map(|(_, ty)| ty.clone())
+    let mut best: Option<((usize, usize), &String)> = None;
+    for ((start, end), ty) in map {
+        if *start <= offset && offset <= *end {
+            match &best {
+                Some(((bs, be), _)) if (end - start) < (be - bs) => {
+                    best = Some(((*start, *end), ty))
+                }
+                None => best = Some(((*start, *end), ty)),
+                _ => {}
+            }
+        }
+    }
+    best.map(|(_, ty)| ty.clone())
 }
 
 struct Backend {
