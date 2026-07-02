@@ -43,43 +43,41 @@ struct Result<T, E> {
     E error;
 }
 
-impl Result<i32, i32> {
-    Result<i32, i32> ok(i32 value) {
-        Result<i32, i32> result;
+impl Result<T, E> {
+    Result<T, E> ok(T value) {
+        Result<T, E> result;
         result.ok = true;
         result.value = value;
-        result.error = 0;
         return result;
     }
 
-    Result<i32, i32> err(i32 error) {
-        Result<i32, i32> result;
+    Result<T, E> err(E error) {
+        Result<T, E> result;
         result.ok = false;
-        result.value = 0;
         result.error = error;
         return result;
     }
 
-    bool success(Result<i32, i32> self) {
+    bool success(Result<T, E> self) {
         return self.ok;
     }
 
-    bool failed(Result<i32, i32> self) {
+    bool failed(Result<T, E> self) {
         return !self.ok;
     }
 
-    i32 unwrap(Result<i32, i32> self) {
+    T unwrap(Result<T, E> self) {
         return self.value;
     }
 
-    i32 unwrap_or(Result<i32, i32> self, i32 fallback) {
+    T unwrap_or(Result<T, E> self, T fallback) {
         if (self.ok) {
             return self.value;
         }
         return fallback;
     }
 
-    i32 get_error(Result<i32, i32> self) {
+    E get_error(Result<T, E> self) {
         return self.error;
     }
 }
