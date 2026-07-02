@@ -1,16 +1,18 @@
-// Silver Language Server — diagnostics via compiler frontend.
+// Silver Language Server — diagnostics + hover via compiler frontend.
 
 use agc::lexer;
 use agc::lexer::Span;
 use agc::parser::Parser;
 use agc::semantic::typeck::TypeChecker;
+use agc::symbol_table::CompilerSymbolTable;
 
 use std::collections::HashMap;
+use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-/// Convert byte offset to 0-based line/column from source text.
+/// Convert byte offset to 0-based line/col from source text.
 fn byte_to_position(text: &str, offset: usize) -> Position {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
@@ -35,9 +37,39 @@ fn span_to_range(text: &str, span: &Span) -> Range {
     }
 }
 
+/// Convert an LSP position to a byte offset in `text`.
+fn position_to_byte(text: &str, pos: Position) -> usize {
+    let mut line: u32 = 0;
+    let mut col: u32 = 0;
+    for (i, ch) in text.char_indices() {
+        if line == pos.line && col == pos.character {
+            return i;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    text.len()
+}
+
+/// Find the tightest expression span containing `offset`.
+fn find_expr_type(
+    offset: usize,
+    map: &HashMap<(usize, usize), String>,
+) -> Option<String> {
+    map.iter()
+        .filter(|((start, end), _)| *start <= offset && offset <= *end)
+        .min_by_key(|((start, end), _)| end - start)
+        .map(|(_, ty)| ty.clone())
+}
+
 struct Backend {
     client: Client,
-    docs: HashMap<Url, String>,
+    /// Per-URI: (source text, expr_type map)
+    cache: Mutex<HashMap<Url, (String, HashMap<(usize, usize), String>)>>,
 }
 
 impl Backend {
@@ -54,6 +86,9 @@ impl Backend {
                         ..Default::default()
                     })
                     .collect();
+                self.cache
+                    .lock()
+                    .insert(uri.clone(), (text.to_string(), HashMap::new()));
                 let _ = self.client.publish_diagnostics(uri.clone(), diags, None);
                 return;
             }
@@ -75,7 +110,12 @@ impl Backend {
             })
             .collect();
 
-        let (type_errors, _monomorphs) = TypeChecker::new().check_program(&program);
+        // Type-check and capture expression types for hover.
+        let mut tc = TypeChecker::new();
+        let mut table = CompilerSymbolTable::new();
+        let (type_errors, _monomorphs) = tc.check_program_with_table(&program, &mut table);
+        let expr_types = std::mem::take(&mut tc.expr_types);
+
         for err in &type_errors {
             diagnostics.push(Diagnostic {
                 range: span_to_range(text, &err.span),
@@ -85,6 +125,9 @@ impl Backend {
             });
         }
 
+        self.cache
+            .lock()
+            .insert(uri.clone(), (text.to_string(), expr_types));
         let _ = self.client.publish_diagnostics(uri.clone(), diagnostics, None);
     }
 }
@@ -129,8 +172,24 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {}
 
-    async fn hover(&self, _: HoverParams) -> Result<Option<Hover>> {
-        Ok(None)
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let cache = self.cache.lock();
+        let Some((text, expr_types)) = cache.get(uri) else {
+            return Ok(None);
+        };
+
+        let offset = position_to_byte(text, pos);
+        let Some(ty) = find_expr_type(offset, expr_types) else {
+            return Ok(None);
+        };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::String(format!("type: {ty}"))),
+            range: None,
+        }))
     }
 }
 
@@ -141,7 +200,7 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        docs: HashMap::new(),
+        cache: Mutex::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

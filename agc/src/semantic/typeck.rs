@@ -45,6 +45,9 @@ pub struct TypeChecker {
     imported_modules: Vec<ModuleArtifact>,
     casts: HashMap<(String, String), ()>,
     type_aliases: HashMap<String, ast::Type>,
+    /// Expression type cache for LSP hover support.
+    /// Maps (start_byte, end_byte) → type string.
+    pub expr_types: HashMap<(usize, usize), String>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,13 +109,13 @@ impl TypeChecker {
         self
     }
 
-    pub fn check_program(self, program: &ast::Program) -> (Vec<TypeError>, Vec<MonomorphRequest>) {
+    pub fn check_program(mut self, program: &ast::Program) -> (Vec<TypeError>, Vec<MonomorphRequest>) {
         let mut table = CompilerSymbolTable::new();
         self.check_program_with_table(program, &mut table)
     }
 
     pub fn check_program_with_table(
-        mut self,
+        &mut self,
         program: &ast::Program,
         table: &mut CompilerSymbolTable,
     ) -> (Vec<TypeError>, Vec<MonomorphRequest>) {
@@ -173,7 +176,7 @@ impl TypeChecker {
             format!("type checking done (errors={})", self.errors.len()),
         );
         let requests = std::mem::take(&mut self.monomorph_requests);
-        (self.errors, requests)
+        (std::mem::take(&mut self.errors), requests)
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -599,7 +602,7 @@ impl TypeChecker {
     }
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
-        match expr.kind.as_ref() {
+        let ty = match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected),
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
@@ -1531,7 +1534,9 @@ impl TypeChecker {
                 Type::Unit
             }
             ast::ExpressionKind::Asm(_) => Type::Unit,
-        }
+        };
+        self.expr_types.insert((expr.span.start, expr.span.end), ty.to_string());
+        ty
     }
 
     fn resolve_overload(
