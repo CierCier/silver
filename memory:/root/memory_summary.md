@@ -1,7 +1,9 @@
-Silver is a systems programming language with an LLVM‑backed compiler (Rust crate `agc`). Recent work added HashMap with indexing, fixed string hashing and non‑integer index checks, implemented Arena and Rc, Vec, Box, defer/move/RAII, operator overloading, Slice replacing fixed arrays, and fixed generic parsing bugs.
+Silver is a systems programming language with an LLVM‑backed compiler (Rust crate `agc`). HashMap with indexing, string hashing fixes, Arena/Rc/Vec/Box, defer/move/RAII, operator overloading, Slice<T>, mutability enforcement, and module export generics are implemented.
 
-**Outstanding issues**: module export generics (WIP in working tree with debug `println!`s).
+**Compiler frontend**: now a reusable library (`libagc`) exposing lexer, parser, typeck, types, traits, etc. Both the CLI (`agc`) and LSP server (`agc-lsp`) use the same crate.
 
-**Fixed since last memory**: return‑before‑defers use‑after‑free, parameter drop flags, recursive struct compilation stack overflow, generic trait ref parsing, mutability enforcement, memory stress crash.
+**LSP server** (`agc-lsp`): minimal implementation using `tower-lsp`. Currently does diagnostics (lexer → parser → type checker → publishDiagnostics) on file open/change. Hover returns nothing. Requires `--features lsp` to build.
 
-**Test count**: 225 Rust tests pass.
+**Test count**: 435 tests pass (5 suites — lib + bin + silver_runtime × 2 targets + integration).
+
+**Stdlib**: Optional<T>, Result<T,E> (generic), HashMap<K,V>, Slice<T>, String, Vec<T>, Arena, Rc<T>, I/O, math, operator traits, iterator traits, C FFI helpers.

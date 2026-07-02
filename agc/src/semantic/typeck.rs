@@ -3717,6 +3717,39 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_source_files_parse_successfully() {
+        let std_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("std");
+        let mut files: Vec<_> = std::fs::read_dir(&std_dir)
+            .expect("std dir not found")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "ag"))
+            .map(|e| e.path())
+            .collect();
+        // Also add files from std/mem/
+        let mem_dir = std_dir.join("mem");
+        if mem_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&mem_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().is_some_and(|ext| ext == "ag") {
+                        files.push(entry.path());
+                    }
+                }
+            }
+        }
+        files.sort();
+        for path in &files {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {:?}: {e}", path));
+            let tokens = lex(&src).unwrap_or_else(|e| panic!("lex failed for {:?}: {e:?}", path));
+            let mut parser = Parser::new(tokens);
+            let (_program, errors) = parser.parse_program();
+            assert!(errors.is_empty(), "parse errors in {:?}: {errors:?}", path);
+        }
+    }
+
+    #[test]
     fn type_checks_imported_generic_alloc_call() {
         let artifact = ModuleArtifact {
             module_name: "mem".to_string(),

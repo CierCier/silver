@@ -1850,6 +1850,34 @@ mod tests {
             "alloc__Point"
         );
     }
+
+    #[test]
+    fn monomorphizes_nested_generic_struct() {
+        let mut program = parse("struct Wrapper<T> { T inner; } struct Pair<T, U> { T first; U second; } i32 main() { Pair<Wrapper<i32>, i32> p; return 0; }");
+        let items = append_monomorphs(&mut program, &[]);
+        let has_wrapper = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Struct(s) => s.name.name.starts_with("Wrapper__"),
+            _ => false,
+        });
+        let pair_names: Vec<&str> = items.iter().filter_map(|item| match &item.kind {
+            ast::ItemKind::Struct(s) => Some(s.name.name.as_str()),
+            _ => None,
+        }).collect();
+        let has_pair = pair_names.iter().any(|n| n.starts_with("Pair__"));
+        assert!(has_wrapper, "expected Wrapper<i32> monomorph");
+        assert!(has_pair, "expected Pair<Wrapper<i32>, i32> monomorph, got: {:?}", pair_names);
+    }
+
+    #[test]
+    fn monomorphizes_generic_enum() {
+        let mut program = parse("enum Option<T> { Some(T); None; } i32 main() { Option<i32> x; return 0; }");
+        let items = append_monomorphs(&mut program, &[]);
+        let has_enum = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Enum(e) => e.name.name.starts_with("Option__"),
+            _ => false,
+        });
+        assert!(has_enum, "expected Option<i32> monomorph");
+    }
 }
 
 fn mapping_covers_impl(mapping: &HashMap<String, Type>, generics: Option<&ast::Generics>) -> bool {
