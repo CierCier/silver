@@ -9,3 +9,4 @@ inkwell = { version = "0.9.0", features = ["llvm22-1"] }
 owo-colors = "4.1.0"
 quickcheck = "1.0"
 quickcheck_macros = "1.0"
+parking_lot = "0.12"
