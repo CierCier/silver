@@ -1,284 +1,27 @@
 // Silver Language Server — diagnostics, hover (type + definition), go-to-definition, import resolution.
 
-use agc::lexer;
-use agc::lexer::Span;
-use agc::parser::ast::{self, ItemKind};
-use agc::parser::{FileImportResolverHook, Parser};
-use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
-use agc::semantic::typeck::TypeChecker;
-use agc::symbol_table::CompilerSymbolTable;
+mod diagnostics;
+mod format;
+mod util;
 
+use agc::parser::ast;
+use agc::module_loader::ModuleLoader;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-/// Convert byte offset to 0‑based line/col from source text.
-fn byte_to_position(text: &str, offset: usize) -> Position {
-    let mut line: u32 = 0;
-    let mut col: u32 = 0;
-    for (i, ch) in text.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    Position { line, character: col }
-}
+use util::*;
 
-fn span_to_range(text: &str, span: &Span) -> Range {
-    Range {
-        start: byte_to_position(text, span.start),
-        end: byte_to_position(text, span.end),
-    }
-}
-
-/// Convert an LSP position (UTF‑16 code units) to a byte offset.
-fn position_to_byte(text: &str, pos: Position) -> usize {
-    let mut line: u32 = 0;
-    let mut col: u32 = 0;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line && col == pos.character {
-            return i;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    text.len()
-}
-
-/// Find the tightest expression span containing `offset`.
-fn find_expr_type(
-    offset: usize,
-    map: &HashMap<(usize, usize), String>,
-) -> Option<String> {
-    let mut best: Option<((usize, usize), &String)> = None;
-    for ((start, end), ty) in map {
-        if *start <= offset && offset <= *end {
-            match &best {
-                Some(((bs, be), _)) if (end - start) < (be - bs) => {
-                    best = Some(((*start, *end), ty))
-                }
-                None => best = Some(((*start, *end), ty)),
-                _ => {}
-            }
-        }
-    }
-    best.map(|(_, ty)| ty.clone())
-}
-
-/// Extract the identifier under `offset` from source text.
-/// Returns (start_byte, end_byte, name).
-fn extract_identifier(text: &str, offset: usize) -> Option<(usize, usize, String)> {
-    if offset >= text.len() {
-        return None;
-    }
-    let c = text[offset..].chars().next()?;
-    if !c.is_ascii_alphanumeric() && c != '_' {
-        return None;
-    }
-
-    // Walk forward to end of identifier.
-    let end = text[offset..]
-        .char_indices()
-        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
-        .map_or(text.len(), |(i, _)| offset + i);
-
-    // Walk backward to start of identifier.
-    let prefix = &text[..offset];
-    let start = prefix
-        .char_indices()
-        .rfind(|(_, c)| !c.is_alphanumeric() && *c != '_')
-        .map_or(0, |(i, c)| i + c.len_utf8());
-
-    if start < end {
-        Some((start, end, text[start..end].to_string()))
-    } else {
-        None
-    }
-}
-
-/// Collect top‑level definition names and their spans (current file only).
-fn collect_definitions(program: &ast::Program, source_len: usize) -> HashMap<String, Span> {
-    let mut defs = HashMap::new();
-    for item in &program.items {
-        let (name, span) = match &item.kind {
-            ItemKind::Function(f) => (&f.name.name, f.name.span.clone()),
-            ItemKind::Struct(s) => (&s.name.name, s.name.span.clone()),
-            ItemKind::Enum(e) => (&e.name.name, e.name.span.clone()),
-            ItemKind::GlobalVariable(v) => (&v.name.name, v.name.span.clone()),
-            ItemKind::Trait(t) => (&t.name.name, t.name.span.clone()),
-            ItemKind::TypeAlias(a) => (&a.name.name, a.name.span.clone()),
-            ItemKind::ExternFunction(f) => (&f.name.name, f.name.span.clone()),
-            ItemKind::ExternVariable(v) => (&v.name.name, v.name.span.clone()),
-            ItemKind::Macro(m) => (&m.name.name, m.name.span.clone()),
-            _ => continue,
-        };
-        // Skip imported items — their spans reference other files.
-        if span.start >= source_len {
-            continue;
-        }
-        defs.entry(name.clone()).or_insert(span);
-    }
-    defs
-}
-
-type ExprTypeMap = HashMap<(usize, usize), String>;
-type DefMap = HashMap<String, Span>;
-
-struct Backend {
-    client: Client,
-    /// Per‑URI: (source_text, expr_types, definitions)
-    cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap)>>,
-    loader: ModuleLoader,
-}
-
-/// Find the Silver std library search dirs (bootstrap/include/silver/ etc.).
-fn find_std_search_dirs() -> Vec<PathBuf> {
-    // Try SILVER_SYSROOT first.
-    if let Ok(home) = std::env::var("SILVER_SYSROOT") {
-        if !home.is_empty() {
-            let root = PathBuf::from(home);
-            let dirs = module_loader_default_dirs(Some(&root));
-            if !dirs.is_empty() {
-                return dirs;
-            }
-        }
-    }
-    // Try relative to the binary: ../bootstrap/include/silver/ etc.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("..").join("bootstrap").join("include").join("silver");
-            if candidate.is_dir() {
-                return vec![candidate];
-            }
-        }
-    }
-    Vec::new()
-}
-
-fn build_lsp_loader() -> ModuleLoader {
-    let mut loader = ModuleLoader::new();
-    for dir in find_std_search_dirs() {
-        loader.add_search_dir(dir);
-    }
-    loader
-}
-
-
-/// Extract the source line containing `offset`, trimmed.
-fn extract_line(text: &str, offset: usize) -> String {
-    // Walk backward to start of line.
-    let line_start = text[..offset]
-        .char_indices()
-        .rfind(|(_, c)| *c == '\n')
-        .map_or(0, |(i, _)| i + 1);
-    // Walk forward to end of line.
-    let line_end = text[offset..]
-        .char_indices()
-        .find(|(_, c)| *c == '\n')
-        .map_or(text.len(), |(i, _)| offset + i);
-    let line = &text[line_start..line_end];
-    line.trim().to_string()
-}
-
-impl Backend {
-    async fn check_diagnostics(&self, uri: &Url, text: &str) {
-        let tokens = match lexer::lex(text) {
-            Ok(t) => t,
-            Err(errors) => {
-                let diags: Vec<Diagnostic> = errors
-                    .iter()
-                    .map(|e| Diagnostic {
-                        range: span_to_range(text, &e.span),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        message: format!("{:?}", e.kind),
-                        ..Default::default()
-                    })
-                    .collect();
-                self.cache.lock().insert(
-                    uri.clone(),
-                    (text.to_string(), HashMap::new(), HashMap::new()),
-                );
-                self.client
-                    .publish_diagnostics(uri.clone(), diags, None)
-                    .await;
-                return;
-            }
-        };
-
-        let mut parser = Parser::new(tokens);
-        let (mut program, parse_errors) = parser.parse_program();
-
-        let mut diagnostics: Vec<Diagnostic> = parse_errors
-            .iter()
-            .map(|e| Diagnostic {
-                range: span_to_range(text, e.span()),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: match e {
-                    agc::parser::ParseError::InvalidSyntax { message, .. } => {
-                        message.clone()
-                    }
-                    _ => format!("{:?}", e),
-                },
-                ..Default::default()
-            })
-            .collect();
-
-        // Resolve imports.
-        let source_path = uri.to_file_path().ok();
-        let base_dir = source_path.as_ref().and_then(|p| p.parent());
-        let imported_modules = match FileImportResolverHook::new(&self.loader)
-            .lower_program_imports(&mut program, base_dir, source_path.as_deref())
-        {
-            Ok(result) => result.module_artifacts,
-            Err(e) => {
-                diagnostics.push(Diagnostic {
-                    range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 0 } },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!("import error: {e}"),
-                    ..Default::default()
-                });
-                Vec::new()
-            }
-        };
-
-        // Collect definitions for go‑to‑definition.
-        let defs = collect_definitions(&program, text.len());
-
-        // Type‑check and capture expression types for hover.
-        let mut tc = TypeChecker::new().with_imported_modules(&imported_modules);
-        let mut table = CompilerSymbolTable::new();
-        let (type_errors, _monomorphs) = tc.check_program_with_table(&program, &mut table);
-        let expr_types = std::mem::take(&mut tc.expr_types);
-
-        for err in &type_errors {
-            diagnostics.push(Diagnostic {
-                range: span_to_range(text, &err.span),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: err.message.clone(),
-                ..Default::default()
-            });
-        }
-
-        self.cache
-            .lock()
-            .insert(uri.clone(), (text.to_string(), expr_types, defs));
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
-    }
+pub(crate) struct Backend {
+    pub(crate) client: Client,
+    /// Per‑URI: (source_text, expr_types, definitions, hover_texts)
+    pub(crate) cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap, HoverTextMap)>>,
+    pub(crate) loader: ModuleLoader,
+    /// Path → (mtime_nanos, fully-parsed program) for imported files.
+    pub(crate) file_cache: parking_lot::Mutex<HashMap<PathBuf, (u128, ast::Program)>>,
 }
 
 #[tower_lsp::async_trait]
@@ -296,6 +39,7 @@ impl LanguageServer for Backend {
             ..Default::default()
         })
     }
+
     async fn initialized(&self, _: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "Silver LSP initialized")
@@ -327,13 +71,13 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
 
         let cache = self.cache.lock();
-        let Some((text, expr_types, defs)) = cache.get(uri) else {
+        let Some((text, expr_types, _defs, hover_texts)) = cache.get(uri) else {
             return Ok(None);
         };
 
         let offset = position_to_byte(text, pos);
 
-        // Build hover parts: type info + definition info.
+        // Build hover parts: type info + formatted definition info.
         let mut parts: Vec<MarkedString> = Vec::new();
 
         // Type from expression.
@@ -341,13 +85,14 @@ impl LanguageServer for Backend {
             parts.push(MarkedString::String(format!("type: {ty}")));
         }
 
-        // Definition source text if cursor is on a known identifier.
+        // Pre-formatted hover text from definition (top-level items, imported items).
         if let Some((_, _, name)) = extract_identifier(text, offset) {
-            if let Some(def_span) = defs.get(&name) {
-                if def_span.start < text.len() {
-                    let def_text = extract_line(text, def_span.start);
-                    parts.push(MarkedString::String(def_text));
-                }
+            if let Some(hover_text) = hover_texts.get(&name) {
+                parts.push(MarkedString::String(hover_text.clone()));
+            } else if is_builtin_type(&name) {
+                parts.push(MarkedString::String("builtin".to_string()));
+            } else if is_keyword(&name) {
+                parts.push(MarkedString::String("keyword".to_string()));
             }
         }
         if parts.is_empty() {
@@ -371,7 +116,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
 
         let cache = self.cache.lock();
-        let Some((text, _expr_types, defs)) = cache.get(uri) else {
+        let Some((text, _expr_types, defs, _hover_texts)) = cache.get(uri) else {
             return Ok(None);
         };
 
@@ -389,6 +134,7 @@ impl LanguageServer for Backend {
         })))
     }
 }
+
 #[tokio::main]
 async fn main() {
     let stdin = tokio::io::stdin();
@@ -398,6 +144,7 @@ async fn main() {
         client,
         cache: Mutex::new(HashMap::new()),
         loader: build_lsp_loader(),
+        file_cache: Mutex::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

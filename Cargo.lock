@@ -9,6 +9,7 @@ dependencies = [
  "clap",
  "inkwell",
  "owo-colors",
+ "parking_lot",
  "quickcheck",
  "quickcheck_macros",
 ]

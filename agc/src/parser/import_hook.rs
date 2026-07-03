@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use parking_lot::Mutex;
+use std::time::SystemTime;
 
 use crate::lexer;
 use crate::module_artifact::ModuleArtifact;
@@ -9,6 +11,9 @@ use crate::module_loader::{
 };
 use crate::parser::ast;
 use crate::parser::Parser;
+
+/// Cache keyed by file path: (mtime_nanos, fully-parsed program).
+pub type FileItemCache = HashMap<PathBuf, (u128, ast::Program)>;
 
 #[derive(Debug, Default)]
 pub struct ImportLoweringResult {
@@ -21,6 +26,7 @@ pub struct FileImportResolverHook<'a> {
     seen_modules: HashSet<String>,
     seen_files: HashSet<PathBuf>,
     module_imports: Vec<(String, ModuleArtifact)>,
+    file_cache: Option<&'a Mutex<FileItemCache>>,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +76,17 @@ impl<'a> FileImportResolverHook<'a> {
             seen_modules: HashSet::new(),
             seen_files: HashSet::new(),
             module_imports: Vec::new(),
+            file_cache: None,
+        }
+    }
+
+    pub fn with_cache(loader: &'a ModuleLoader, file_cache: &'a Mutex<FileItemCache>) -> Self {
+        Self {
+            loader,
+            seen_modules: HashSet::new(),
+            seen_files: HashSet::new(),
+            module_imports: Vec::new(),
+            file_cache: Some(file_cache),
         }
     }
 
@@ -141,7 +158,42 @@ impl<'a> FileImportResolverHook<'a> {
                     if !self.mark_file_seen(&resolved.source_path) {
                         continue;
                     }
-                    let mut imported_program = parse_program_from_file(&resolved.source_path)?;
+
+                    // Check file cache for pre-parsed program (mtime-based).
+                    let cache_hit = self.file_cache.and_then(|cache| {
+                        let mtime = std::fs::metadata(&resolved.source_path)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        let guard = cache.lock();
+                        guard.get(&resolved.source_path).and_then(|(cm, prog)| {
+                            if *cm == mtime {
+                                Some(prog.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+                    let mut imported_program = match cache_hit {
+                        Some(prog) => prog,
+                        None => {
+                            let prog = parse_program_from_file(&resolved.source_path)?;
+                            // Populate cache.
+                            if let Some(cache) = &self.file_cache {
+                                let mtime = std::fs::metadata(&resolved.source_path)
+                                    .and_then(|m| m.modified())
+                                    .ok()
+                                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_nanos())
+                                    .unwrap_or(0);
+                                cache.lock().insert(resolved.source_path.clone(), (mtime, prog.clone()));
+                            }
+                            prog
+                        }
+                    };
                     self.lower_program_recursive(
                         &mut imported_program,
                         resolved.source_path.parent(),
