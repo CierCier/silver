@@ -1,7 +1,8 @@
-// Silver Language Server — diagnostics + hover via compiler frontend.
+// Silver Language Server — diagnostics, hover (type + definition), go-to-definition.
 
 use agc::lexer;
 use agc::lexer::Span;
+use agc::parser::ast::{self, ItemKind};
 use agc::parser::Parser;
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_table::CompilerSymbolTable;
@@ -12,7 +13,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-/// Convert byte offset to 0-based line/col from source text.
+/// Convert byte offset to 0‑based line/col from source text.
 fn byte_to_position(text: &str, offset: usize) -> Position {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
@@ -37,7 +38,7 @@ fn span_to_range(text: &str, span: &Span) -> Range {
     }
 }
 
-/// Convert an LSP position (UTF-16 code units) to a byte offset in `text`.
+/// Convert an LSP position (UTF‑16 code units) to a byte offset.
 fn position_to_byte(text: &str, pos: Position) -> usize {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
@@ -75,10 +76,65 @@ fn find_expr_type(
     best.map(|(_, ty)| ty.clone())
 }
 
+/// Extract the identifier under `offset` from source text.
+/// Returns (start_byte, end_byte, name).
+fn extract_identifier(text: &str, offset: usize) -> Option<(usize, usize, String)> {
+    if offset >= text.len() {
+        return None;
+    }
+    let c = text[offset..].chars().next()?;
+    if !c.is_ascii_alphanumeric() && c != '_' {
+        return None;
+    }
+
+    // Walk forward to end of identifier.
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .map_or(text.len(), |(i, _)| offset + i);
+
+    // Walk backward to start of identifier.
+    let prefix = &text[..offset];
+    let start = prefix
+        .char_indices()
+        .rfind(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .map_or(0, |(i, c)| i + c.len_utf8());
+
+    if start < end {
+        Some((start, end, text[start..end].to_string()))
+    } else {
+        None
+    }
+}
+
+/// Collect top‑level definition names and their spans.
+fn collect_definitions(program: &ast::Program) -> HashMap<String, Span> {
+    let mut defs = HashMap::new();
+    for item in &program.items {
+        let (name, span) = match &item.kind {
+            ItemKind::Function(f) => (&f.name.name, f.name.span.clone()),
+            ItemKind::Struct(s) => (&s.name.name, s.name.span.clone()),
+            ItemKind::Enum(e) => (&e.name.name, e.name.span.clone()),
+            ItemKind::GlobalVariable(v) => (&v.name.name, v.name.span.clone()),
+            ItemKind::Trait(t) => (&t.name.name, t.name.span.clone()),
+            ItemKind::TypeAlias(a) => (&a.name.name, a.name.span.clone()),
+            ItemKind::ExternFunction(f) => (&f.name.name, f.name.span.clone()),
+            ItemKind::ExternVariable(v) => (&v.name.name, v.name.span.clone()),
+            ItemKind::Macro(m) => (&m.name.name, m.name.span.clone()),
+            _ => continue,
+        };
+        defs.entry(name.clone()).or_insert(span);
+    }
+    defs
+}
+
+type ExprTypeMap = HashMap<(usize, usize), String>;
+type DefMap = HashMap<String, Span>;
+
 struct Backend {
     client: Client,
-    /// Per-URI: (source text, expr_type map)
-    cache: Mutex<HashMap<Url, (String, HashMap<(usize, usize), String>)>>,
+    /// Per‑URI: (source_text, expr_types, definitions)
+    cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap)>>,
 }
 
 impl Backend {
@@ -95,9 +151,10 @@ impl Backend {
                         ..Default::default()
                     })
                     .collect();
-                self.cache
-                    .lock()
-                    .insert(uri.clone(), (text.to_string(), HashMap::new()));
+                self.cache.lock().insert(
+                    uri.clone(),
+                    (text.to_string(), HashMap::new(), HashMap::new()),
+                );
                 self.client
                     .publish_diagnostics(uri.clone(), diags, None)
                     .await;
@@ -114,14 +171,19 @@ impl Backend {
                 range: span_to_range(text, e.span()),
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: match e {
-                    agc::parser::ParseError::InvalidSyntax { message, .. } => message.clone(),
+                    agc::parser::ParseError::InvalidSyntax { message, .. } => {
+                        message.clone()
+                    }
                     _ => format!("{:?}", e),
                 },
                 ..Default::default()
             })
             .collect();
 
-        // Type-check and capture expression types for hover.
+        // Collect definitions for go‑to‑definition.
+        let defs = collect_definitions(&program);
+
+        // Type‑check and capture expression types for hover.
         let mut tc = TypeChecker::new();
         let mut table = CompilerSymbolTable::new();
         let (type_errors, _monomorphs) = tc.check_program_with_table(&program, &mut table);
@@ -138,7 +200,7 @@ impl Backend {
 
         self.cache
             .lock()
-            .insert(uri.clone(), (text.to_string(), expr_types));
+            .insert(uri.clone(), (text.to_string(), expr_types, defs));
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
@@ -154,6 +216,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -190,19 +253,69 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
 
         let cache = self.cache.lock();
-        let Some((text, expr_types)) = cache.get(uri) else {
+        let Some((text, expr_types, defs)) = cache.get(uri) else {
             return Ok(None);
         };
 
         let offset = position_to_byte(text, pos);
-        let Some(ty) = find_expr_type(offset, expr_types) else {
+
+        // Build hover parts: type info + definition info.
+        let mut parts: Vec<MarkedString> = Vec::new();
+
+        // Type from expression.
+        if let Some(ty) = find_expr_type(offset, expr_types) {
+            parts.push(MarkedString::String(format!("type: {ty}")));
+        }
+
+        // Definition location if cursor is on a known identifier.
+        if let Some((_, _, name)) = extract_identifier(text, offset) {
+            if let Some(def_span) = defs.get(&name) {
+                let loc = format!(
+                    "defined at {}:{}",
+                    byte_to_position(text, def_span.start).line + 1,
+                    byte_to_position(text, def_span.start).character + 1,
+                );
+                parts.push(MarkedString::String(loc));
+            }
+        }
+
+        if parts.is_empty() {
+            return Ok(None);
+        }
+
+        let contents = if parts.len() == 1 {
+            HoverContents::Scalar(parts.into_iter().next().unwrap())
+        } else {
+            HoverContents::Array(parts)
+        };
+
+        Ok(Some(Hover { contents, range: None }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let cache = self.cache.lock();
+        let Some((text, _expr_types, defs)) = cache.get(uri) else {
             return Ok(None);
         };
 
-        Ok(Some(Hover {
-            contents: HoverContents::Scalar(MarkedString::String(format!("type: {ty}"))),
-            range: None,
-        }))
+        let offset = position_to_byte(text, pos);
+        let Some((_, _, name)) = extract_identifier(text, offset) else {
+            return Ok(None);
+        };
+        let Some(def_span) = defs.get(&name) else {
+            return Ok(None);
+        };
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: uri.clone(),
+            range: span_to_range(text, def_span),
+        })))
     }
 }
 
