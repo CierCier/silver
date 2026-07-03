@@ -1,13 +1,15 @@
-// Silver Language Server — diagnostics, hover (type + definition), go-to-definition.
+// Silver Language Server — diagnostics, hover (type + definition), go-to-definition, import resolution.
 
 use agc::lexer;
 use agc::lexer::Span;
 use agc::parser::ast::{self, ItemKind};
-use agc::parser::Parser;
+use agc::parser::{FileImportResolverHook, Parser};
+use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_table::CompilerSymbolTable;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -135,7 +137,41 @@ struct Backend {
     client: Client,
     /// Per‑URI: (source_text, expr_types, definitions)
     cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap)>>,
+    loader: ModuleLoader,
 }
+
+/// Find the Silver std library search dirs (bootstrap/include/silver/ etc.).
+fn find_std_search_dirs() -> Vec<PathBuf> {
+    // Try SILVER_SYSROOT first.
+    if let Ok(home) = std::env::var("SILVER_SYSROOT") {
+        if !home.is_empty() {
+            let root = PathBuf::from(home);
+            let dirs = module_loader_default_dirs(Some(&root));
+            if !dirs.is_empty() {
+                return dirs;
+            }
+        }
+    }
+    // Try relative to the binary: ../bootstrap/include/silver/ etc.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("..").join("bootstrap").join("include").join("silver");
+            if candidate.is_dir() {
+                return vec![candidate];
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn build_lsp_loader() -> ModuleLoader {
+    let mut loader = ModuleLoader::new();
+    for dir in find_std_search_dirs() {
+        loader.add_search_dir(dir);
+    }
+    loader
+}
+
 
 /// Extract the source line containing `offset`, trimmed.
 fn extract_line(text: &str, offset: usize) -> String {
@@ -179,7 +215,7 @@ impl Backend {
         };
 
         let mut parser = Parser::new(tokens);
-        let (program, parse_errors) = parser.parse_program();
+        let (mut program, parse_errors) = parser.parse_program();
 
         let mut diagnostics: Vec<Diagnostic> = parse_errors
             .iter()
@@ -196,11 +232,29 @@ impl Backend {
             })
             .collect();
 
+        // Resolve imports.
+        let source_path = uri.to_file_path().ok();
+        let base_dir = source_path.as_ref().and_then(|p| p.parent());
+        let imported_modules = match FileImportResolverHook::new(&self.loader)
+            .lower_program_imports(&mut program, base_dir, source_path.as_deref())
+        {
+            Ok(result) => result.module_artifacts,
+            Err(e) => {
+                diagnostics.push(Diagnostic {
+                    range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 0 } },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: format!("import error: {e}"),
+                    ..Default::default()
+                });
+                Vec::new()
+            }
+        };
+
         // Collect definitions for go‑to‑definition.
         let defs = collect_definitions(&program);
 
         // Type‑check and capture expression types for hover.
-        let mut tc = TypeChecker::new();
+        let mut tc = TypeChecker::new().with_imported_modules(&imported_modules);
         let mut table = CompilerSymbolTable::new();
         let (type_errors, _monomorphs) = tc.check_program_with_table(&program, &mut table);
         let expr_types = std::mem::take(&mut tc.expr_types);
@@ -238,7 +292,6 @@ impl LanguageServer for Backend {
             ..Default::default()
         })
     }
-
     async fn initialized(&self, _: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "Silver LSP initialized")
@@ -332,7 +385,6 @@ impl LanguageServer for Backend {
         })))
     }
 }
-
 #[tokio::main]
 async fn main() {
     let stdin = tokio::io::stdin();
@@ -341,6 +393,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         cache: Mutex::new(HashMap::new()),
+        loader: build_lsp_loader(),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
