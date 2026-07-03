@@ -9,9 +9,16 @@ dependencies = [
  "clap",
  "inkwell",
  "owo-colors",
- "parking_lot",
  "quickcheck",
  "quickcheck_macros",
+]
+
+[[package]]
+name = "aglsp"
+version = "0.1.0"
+dependencies = [
+ "agc",
+ "parking_lot",
  "tokio",
  "tower-lsp",
 ]
