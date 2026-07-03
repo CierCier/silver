@@ -137,6 +137,22 @@ struct Backend {
     cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap)>>,
 }
 
+/// Extract the source line containing `offset`, trimmed.
+fn extract_line(text: &str, offset: usize) -> String {
+    // Walk backward to start of line.
+    let line_start = text[..offset]
+        .char_indices()
+        .rfind(|(_, c)| *c == '\n')
+        .map_or(0, |(i, _)| i + 1);
+    // Walk forward to end of line.
+    let line_end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| *c == '\n')
+        .map_or(text.len(), |(i, _)| offset + i);
+    let line = &text[line_start..line_end];
+    line.trim().to_string()
+}
+
 impl Backend {
     async fn check_diagnostics(&self, uri: &Url, text: &str) {
         let tokens = match lexer::lex(text) {
@@ -248,6 +264,7 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {}
 
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
@@ -267,15 +284,12 @@ impl LanguageServer for Backend {
             parts.push(MarkedString::String(format!("type: {ty}")));
         }
 
-        // Definition location if cursor is on a known identifier.
+        // Definition source text if cursor is on a known identifier.
         if let Some((_, _, name)) = extract_identifier(text, offset) {
             if let Some(def_span) = defs.get(&name) {
-                let loc = format!(
-                    "defined at {}:{}",
-                    byte_to_position(text, def_span.start).line + 1,
-                    byte_to_position(text, def_span.start).character + 1,
-                );
-                parts.push(MarkedString::String(loc));
+                // Extract the definition line(s) from source.
+                let def_text = extract_line(text, def_span.start);
+                parts.push(MarkedString::String(def_text));
             }
         }
 
