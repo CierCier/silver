@@ -109,8 +109,8 @@ fn extract_identifier(text: &str, offset: usize) -> Option<(usize, usize, String
     }
 }
 
-/// Collect top‑level definition names and their spans.
-fn collect_definitions(program: &ast::Program) -> HashMap<String, Span> {
+/// Collect top‑level definition names and their spans (current file only).
+fn collect_definitions(program: &ast::Program, source_len: usize) -> HashMap<String, Span> {
     let mut defs = HashMap::new();
     for item in &program.items {
         let (name, span) = match &item.kind {
@@ -125,6 +125,10 @@ fn collect_definitions(program: &ast::Program) -> HashMap<String, Span> {
             ItemKind::Macro(m) => (&m.name.name, m.name.span.clone()),
             _ => continue,
         };
+        // Skip imported items — their spans reference other files.
+        if span.start >= source_len {
+            continue;
+        }
         defs.entry(name.clone()).or_insert(span);
     }
     defs
@@ -251,7 +255,7 @@ impl Backend {
         };
 
         // Collect definitions for go‑to‑definition.
-        let defs = collect_definitions(&program);
+        let defs = collect_definitions(&program, text.len());
 
         // Type‑check and capture expression types for hover.
         let mut tc = TypeChecker::new().with_imported_modules(&imported_modules);
@@ -340,12 +344,12 @@ impl LanguageServer for Backend {
         // Definition source text if cursor is on a known identifier.
         if let Some((_, _, name)) = extract_identifier(text, offset) {
             if let Some(def_span) = defs.get(&name) {
-                // Extract the definition line(s) from source.
-                let def_text = extract_line(text, def_span.start);
-                parts.push(MarkedString::String(def_text));
+                if def_span.start < text.len() {
+                    let def_text = extract_line(text, def_span.start);
+                    parts.push(MarkedString::String(def_text));
+                }
             }
         }
-
         if parts.is_empty() {
             return Ok(None);
         }
