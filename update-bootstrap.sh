@@ -27,14 +27,10 @@ if [ -d "$std_dir" ]; then
     cp "$src" "$dest"
   done < <(find "$std_dir" -type f -name '*.ag' -print0)
 
-  # NOTE: box.ag is a draft and fails to compile as a module
-  #       (generic `alloc<T>()` is not resolved across modules).
-  #       Its import is commented out in std/mem.ag.
   # NOTE: slice.ag is a compiler-builtin; cffi.ag is documentation-only.
   while IFS= read -r -d '' src; do
     rel="${src#$std_dir/}"
     case "$rel" in
-      mem/box.ag) echo "  (skipping draft: $rel)"; continue ;;
       slice.ag) echo "  (compiler-builtin, skipping: $rel)"; continue ;;
       cffi.ag) echo "  (documentation-only, skipping: $rel)"; continue ;;
     esac
