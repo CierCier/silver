@@ -4,6 +4,7 @@ use crate::lexer::{LexToken, Span, Token};
 
 use super::ast;
 use super::error::ParseError;
+use crate::attributes;
 
 #[derive(Debug, Clone)]
 pub enum GrammarAtom {
@@ -6144,15 +6145,8 @@ impl PRT_Parser {
                     self.parse_type_alias_reduction(tokens, item_start, item_end)?,
                 ),
             };
-
-            let mut retained = Vec::new();
-            for attr in attributes {
-                if attr.name.name == "link" {
-                    program_attributes.push(attr);
-                } else {
-                    retained.push(attr);
-                }
-            }
+            let (prog_attrs, retained) = attributes::filter_program_attributes(attributes);
+            program_attributes.extend(prog_attrs);
 
             self.record_known_item(&kind);
             items.push(ast::Item {

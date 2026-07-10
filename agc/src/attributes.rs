@@ -10,10 +10,16 @@ pub struct AttributeError {
 pub fn validate_global_attributes(attributes: &[ast::Attribute]) -> Vec<AttributeError> {
     let mut errors = Vec::new();
     for attr in attributes {
-        if attr.name.name == "link"
-            && let Err(error) = parse_link_attribute(attr)
-        {
-            errors.push(error);
+        if !is_program_level_attribute(&attr.name.name) {
+            continue;
+        }
+        match attr.name.name.as_str() {
+            "link" => {
+                if let Err(error) = parse_link_attribute(attr) {
+                    errors.push(error);
+                }
+            }
+            _ => {}
         }
     }
     errors
@@ -24,9 +30,6 @@ pub fn collect_program_link_libraries(
 ) -> Result<Vec<String>, AttributeError> {
     let mut libs = Vec::new();
     extend_link_libraries_from_attributes(&mut libs, &program.attributes)?;
-    for item in &program.items {
-        extend_link_libraries_from_attributes(&mut libs, &item.attributes)?;
-    }
     Ok(libs)
 }
 
@@ -83,6 +86,27 @@ fn parse_link_attribute(attr: &ast::Attribute) -> Result<Option<String>, Attribu
     Ok(Some(lib))
 }
 
+
+/// Splits attributes into program-level and item-level attributes.
+/// Known program-level attributes: `link`.
+pub fn filter_program_attributes(
+    attrs: Vec<ast::Attribute>,
+) -> (Vec<ast::Attribute>, Vec<ast::Attribute>) {
+    let mut program = Vec::new();
+    let mut item = Vec::new();
+    for attr in attrs {
+        if is_program_level_attribute(&attr.name.name) {
+            program.push(attr);
+        } else {
+            item.push(attr);
+        }
+    }
+    (program, item)
+}
+
+fn is_program_level_attribute(name: &str) -> bool {
+    matches!(name, "link")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,4 +167,19 @@ mod tests {
             "link expects a library name identifier or string literal"
         );
     }
+}
+
+/// Extracts a `#[link_name("...")]` value from an attribute list, if present.
+/// Returns `None` if no valid `#[link_name]` attribute is found.
+pub fn function_link_name<'a>(attributes: &'a [ast::Attribute]) -> Option<&'a str> {
+    for attr in attributes {
+        if attr.name.name == "link_name" {
+            if let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first() {
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }

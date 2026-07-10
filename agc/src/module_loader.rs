@@ -30,22 +30,41 @@ pub enum ResolvedSourceImportKind {
     Module,
 }
 
-#[derive(Debug)]
-pub struct ModuleLoader {
-    search_dirs: Vec<PathBuf>,
-    cwd: Option<PathBuf>,
-}
+use parking_lot::Mutex;
+
+ #[derive(Debug)]
+ pub struct ModuleLoader {
+     search_dirs: Vec<PathBuf>,
+     cwd: Option<PathBuf>,
+    /// Cache of loaded module artifacts keyed by module path (e.g. "std.mem.vec").
+    module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
+ }
 
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {
             search_dirs: Vec::new(),
             cwd: std::env::current_dir().ok(),
+            module_cache: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn add_search_dir(&mut self, dir: impl Into<PathBuf>) {
         self.search_dirs.push(dir.into());
+    }
+
+    fn load_cached_module(&self, module_path: &str) -> Result<ModuleArtifact, String> {
+        let mut cache = self.module_cache.lock();
+        if let Some(entry) = cache.get(module_path) {
+            return entry.clone();
+        }
+        let artifact_path = self
+            .find_module_path(module_path)
+            .ok_or_else(|| format!("module `{module_path}` not found"))?;
+        let result = ModuleArtifact::from_path(&artifact_path);
+        let cached = result.clone();
+        cache.insert(module_path.to_string(), cached);
+        result
     }
 
     pub fn resolve_imports(&self, program: &ast::Program) -> Result<ModuleCatalog, String> {
@@ -63,10 +82,8 @@ impl ModuleLoader {
             if seen_modules.contains(&module_path) {
                 continue;
             }
-            let artifact_path = self
-                .find_module_path(&module_path)
-                .ok_or_else(|| format!("module `{module_path}` not found"))?;
-            let module = ModuleArtifact::from_path(&artifact_path)?;
+            let module = self.load_cached_module(&module_path)?;
+            let artifact_path = module.artifact_path.clone().unwrap_or_default();
             for lib in &module.native_libs {
                 if !native_libs.contains(lib) {
                     native_libs.push(lib.clone());
@@ -151,25 +168,46 @@ impl ModuleLoader {
     ) -> Result<Vec<ModuleArtifact>, String> {
         let mut resolved = Vec::new();
         let mut seen = HashSet::new();
-        let mut pending = roots.to_vec();
+        let mut path = Vec::new(); // modules currently on the DFS path
 
-        while let Some(module) = pending.pop() {
+        self.resolve_module_closure_dfs(roots, &mut seen, &mut path, &mut resolved)?;
+
+        Ok(resolved)
+    }
+
+    /// Recursive DFS helper for `resolve_module_closure` with cycle detection.
+    fn resolve_module_closure_dfs(
+        &self,
+        modules: &[ModuleArtifact],
+        seen: &mut HashSet<String>,
+        path: &mut Vec<String>,
+        resolved: &mut Vec<ModuleArtifact>,
+    ) -> Result<(), String> {
+        for module in modules {
             if !seen.insert(module.module_path.clone()) {
                 continue;
             }
-            for dep in &module.module_deps {
-                if seen.contains(dep) {
-                    continue;
-                }
-                let artifact_path = self
-                    .find_module_path(dep)
-                    .ok_or_else(|| format!("module `{dep}` not found"))?;
-                pending.push(ModuleArtifact::from_path(&artifact_path)?);
+            if path.contains(&module.module_path) {
+                return Err(format!(
+                    "cyclic module dependency: `{}` (resolution path: {})",
+                    module.module_path,
+                    path.join(" -> ")
+                ));
             }
-            resolved.push(module);
+            path.push(module.module_path.clone());
+            for dep in &module.module_deps {
+                let dep_module = self.load_cached_module(dep)?;
+                self.resolve_module_closure_dfs(
+                    std::slice::from_ref(&dep_module),
+                    seen,
+                    path,
+                    resolved,
+                )?;
+            }
+            path.pop();
+            resolved.push(module.clone());
         }
-
-        Ok(resolved)
+        Ok(())
     }
 
     pub fn find_source_import(

@@ -151,7 +151,13 @@ impl TypeChecker {
                 self.check_struct_attributes(&item.attributes);
             }
             if let ast::ItemKind::Function(func) = &item.kind {
+                self.errors
+                    .extend(Self::check_function_attributes(&item.attributes));
                 self.check_function(func);
+            }
+            if let ast::ItemKind::ExternFunction(_) = &item.kind {
+                self.errors
+                    .extend(Self::check_function_attributes(&item.attributes));
             }
             if let ast::ItemKind::GlobalVariable(var) = &item.kind {
                 self.check_global_variable(var);
@@ -437,6 +443,38 @@ impl TypeChecker {
             let key = self_ty.canonical_key();
             self.trait_impls.entry(name).or_default().insert(key);
         }
+    }
+
+    fn check_function_attributes(attributes: &[ast::Attribute]) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+        for attr in attributes {
+            if attr.name.name == "link_name" {
+                if attr.args.len() != 1 {
+                    errors.push(TypeError {
+                        message: "#[link_name] expects exactly one argument".to_string(),
+                        span: attr.span.clone(),
+                    });
+                } else if let Some(arg) = attr.args.first() {
+                    match arg {
+                        ast::AttributeArg::Literal(ast::Literal::String(s)) => {
+                            if s.is_empty() {
+                                errors.push(TypeError {
+                                    message: "#[link_name] requires a non-empty string".to_string(),
+                                    span: attr.span.clone(),
+                                });
+                            }
+                        }
+                        _ => {
+                            errors.push(TypeError {
+                                message: "#[link_name] requires a string literal".to_string(),
+                                span: attr.span.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        errors
     }
 
     fn check_function(&mut self, func: &ast::FunctionItem) {
@@ -3800,6 +3838,7 @@ mod tests {
                 has_shared_library: false,
             },
             module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
             exports: vec![crate::module_artifact::ModuleExport {
                 kind: crate::module_artifact::ExportKind::Function,
                 name: "alloc".to_string(),

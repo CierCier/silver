@@ -23,6 +23,7 @@ use crate::codegen::abi::{self, AbiHandler};
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::debug_info::{DebugContext, SourceMap};
 use crate::lexer::Span;
+use crate::attributes::function_link_name;
 use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
 use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
@@ -80,8 +81,6 @@ struct DeferredEntry<'ctx> {
     /// Optional i1* drop flag; if set, action only executes when the flag is true
     flag: Option<PointerValue<'ctx>>,
 }
-
-
 pub struct LlvmIrGenerator<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -6685,7 +6684,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         &mut self,
         func: &ast::FunctionItem,
         visibility: &ast::Visibility,
-        _attributes: &[ast::Attribute],
+        attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
         if func.generics.is_some() {
             return Ok(());
@@ -6694,8 +6693,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        let link_name = function_link_name(attributes);
+        let llvm_name = link_name.unwrap_or(&func.name.name);
+
         self.register_function_signature(
-            &func.name.name,
+            llvm_name,
             FunctionSig {
                 params: func
                     .parameters
@@ -6709,8 +6711,26 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             Some(func.name.span.clone()),
             SymbolKind::Function,
         );
+        // Also register under source name so callers using it can resolve.
+        if link_name.is_some() {
+            self.register_function_signature(
+                &func.name.name,
+                FunctionSig {
+                    params: func
+                        .parameters
+                        .iter()
+                        .map(|param| param.param_type.clone())
+                        .collect(),
+                    return_type: func.return_type.clone(),
+                    is_variadic: false,
+                    linkage: None,
+                },
+                Some(func.name.span.clone()),
+                SymbolKind::Function,
+            );
+        }
 
-        if self.module.get_function(&func.name.name).is_none() {
+        if self.module.get_function(llvm_name).is_none() {
             let fn_ty = self.lower_function_type(
                 &func
                     .parameters
@@ -6721,11 +6741,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 false,
                 None,
             )?;
-            let function = self.module.add_function(&func.name.name, fn_ty, None);
+            let function = self.module.add_function(llvm_name, fn_ty, None);
             Self::apply_function_linkage(function, visibility);
         }
 
-        let Some(function) = self.module.get_function(&func.name.name) else {
+        let Some(function) = self.module.get_function(llvm_name) else {
             return Err(CodegenError::with_span(
                 format!("function `{}` declaration is missing", func.name.name),
                 func.name.span.clone(),
@@ -6738,7 +6758,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             &func.parameters,
             func.return_type.as_ref(),
             &func.body,
-            &func.name.name,
+            llvm_name,
             &func.name.span,
         )
     }
@@ -6965,10 +6985,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         &mut self,
         item: &ast::ExternFunctionItem,
         _visibility: &ast::Visibility,
-        _attributes: &[ast::Attribute],
+        attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
+        let link_name = function_link_name(attributes);
+        let llvm_name = link_name.unwrap_or(&item.name.name);
+
         self.register_function_signature(
-            &item.name.name,
+            llvm_name,
             FunctionSig {
                 params: item
                     .signature
@@ -6983,8 +7006,27 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             Some(item.name.span.clone()),
             SymbolKind::ExternFunction,
         );
+        // Also register under source name so callers using it can resolve.
+        if link_name.is_some() {
+            self.register_function_signature(
+                &item.name.name,
+                FunctionSig {
+                    params: item
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|param| param.param_type.clone())
+                        .collect(),
+                    return_type: item.signature.return_type.clone(),
+                    is_variadic: item.signature.is_variadic,
+                    linkage: Some(item.linkage.clone()),
+                },
+                Some(item.name.span.clone()),
+                SymbolKind::ExternFunction,
+            );
+        }
 
-        if self.module.get_function(&item.name.name).is_none() {
+        if self.module.get_function(llvm_name).is_none() {
             let sig = FunctionSig {
                 params: item
                     .signature
@@ -7002,7 +7044,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 sig.is_variadic,
                 sig.linkage.clone(),
             )?;
-            let function = self.module.add_function(&item.name.name, fn_ty, None);
+            let function = self.module.add_function(llvm_name, fn_ty, None);
             self.apply_abi_attributes(function, &sig)?;
         }
 
