@@ -19,6 +19,7 @@ pub type FileItemCache = HashMap<PathBuf, (u128, ast::Program)>;
 pub struct ImportLoweringResult {
     pub module_artifacts: Vec<ModuleArtifact>,
     pub module_dependencies: Vec<String>,
+    pub transitive_module_deps: Vec<String>,
 }
 
 pub struct FileImportResolverHook<'a> {
@@ -27,6 +28,8 @@ pub struct FileImportResolverHook<'a> {
     seen_files: HashSet<PathBuf>,
     module_imports: Vec<(String, ModuleArtifact)>,
     file_cache: Option<&'a Mutex<FileItemCache>>,
+    /// Tracks the current recursion path for cycle detection.
+    pending_stack: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +80,7 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::new(),
             module_imports: Vec::new(),
             file_cache: None,
+            pending_stack: Vec::new(),
         }
     }
 
@@ -87,6 +91,7 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::new(),
             module_imports: Vec::new(),
             file_cache: Some(file_cache),
+            pending_stack: Vec::new(),
         }
     }
 
@@ -106,17 +111,25 @@ impl<'a> FileImportResolverHook<'a> {
                 .iter()
                 .map(|(module_path, module)| (module_path.as_str(), module)),
         )?;
+        let direct_deps: HashSet<String> = self
+            .module_imports
+            .iter()
+            .map(|(module_path, _)| module_path.clone())
+            .collect();
+        let transitive: Vec<String> = self
+            .seen_modules
+            .iter()
+            .filter(|p| !direct_deps.contains(p.as_str()))
+            .cloned()
+            .collect();
 
         Ok(ImportLoweringResult {
-            module_dependencies: self
-                .module_imports
-                .iter()
-                .map(|(module_path, _)| module_path.clone())
-                .collect(),
+            module_dependencies: direct_deps.into_iter().collect(),
+            transitive_module_deps: transitive,
             module_artifacts: self.module_imports.into_iter().map(|(_, m)| m).collect(),
         })
-    }
 
+    }
     fn lower_program_recursive(
         &mut self,
         program: &mut ast::Program,
@@ -146,6 +159,12 @@ impl<'a> FileImportResolverHook<'a> {
 
             let module_path = import_path_to_string(&import_item.path);
             if !self.seen_modules.insert(module_path.clone()) {
+                if self.pending_stack.contains(&module_path) {
+                    return Err(format!(
+                        "cyclic import: `{module_path}` (current resolution path: {})",
+                        self.pending_stack.join(" -> ")
+                    ));
+                }
                 continue;
             }
 
@@ -194,10 +213,12 @@ impl<'a> FileImportResolverHook<'a> {
                             prog
                         }
                     };
+                    self.pending_stack.push(module_path.clone());
                     self.lower_program_recursive(
                         &mut imported_program,
                         resolved.source_path.parent(),
                     )?;
+                    self.pending_stack.pop();
                     let imported_names = public_importable_item_names(&imported_program);
                     record_import_aliases(&mut alias_plan, &import_item, &imported_names)?;
                     let imported_program = filter_program_items(imported_program, &import_item)?;
@@ -992,6 +1013,7 @@ mod tests {
                 has_shared_library: false,
             },
             module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
             exports: vec![ModuleExport {
                 kind: ExportKind::Function,
                 name: "print".to_string(),
@@ -1062,6 +1084,7 @@ mod tests {
                 has_shared_library: false,
             },
             module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
             exports: vec![ModuleExport {
                 kind: ExportKind::Function,
                 name: "print".to_string(),

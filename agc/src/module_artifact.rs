@@ -5,6 +5,7 @@ use crate::lexer::{self, Span};
 use crate::parser;
 use crate::parser::ast;
 use crate::types::{parse_struct_attributes, struct_layout, Type, TypeContext, TypeLayout};
+use crate::attributes::function_link_name;
 
 const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x02";
 
@@ -18,6 +19,7 @@ pub struct ModuleArtifact {
     pub target_triple: String,
     pub code_artifacts: ModuleCodeArtifacts,
     pub module_deps: Vec<String>,
+    pub transitive_deps: Vec<String>,
     pub exports: Vec<ModuleExport>,
     pub native_libs: Vec<String>,
     pub artifact_path: Option<PathBuf>,
@@ -154,6 +156,7 @@ impl ModuleArtifact {
         target_triple: String,
         code_artifacts: ModuleCodeArtifacts,
         module_deps: Vec<String>,
+        transitive_deps: Vec<String>,
         native_libs: Vec<String>,
     ) -> Self {
         let exports = collect_exports(program);
@@ -166,6 +169,7 @@ impl ModuleArtifact {
             target_triple,
             code_artifacts,
             module_deps,
+            transitive_deps,
             exports,
             native_libs,
             artifact_path: None,
@@ -185,6 +189,10 @@ impl ModuleArtifact {
         out.push(self.code_artifacts.has_shared_library as u8);
         write_len(&mut out, self.module_deps.len())?;
         for dep in &self.module_deps {
+            write_string(&mut out, dep)?;
+        }
+        write_len(&mut out, self.transitive_deps.len())?;
+        for dep in &self.transitive_deps {
             write_string(&mut out, dep)?;
         }
         write_len(&mut out, self.exports.len())?;
@@ -250,6 +258,11 @@ impl ModuleArtifact {
         let mut module_deps = Vec::with_capacity(deps_len);
         for _ in 0..deps_len {
             module_deps.push(read_string(bytes, &mut cursor)?);
+        }
+        let transitive_len = read_len(bytes, &mut cursor)? as usize;
+        let mut transitive_deps = Vec::with_capacity(transitive_len);
+        for _ in 0..transitive_len {
+            transitive_deps.push(read_string(bytes, &mut cursor)?);
         }
         let exports_len = read_len(bytes, &mut cursor)? as usize;
         let mut exports = Vec::with_capacity(exports_len);
@@ -338,6 +351,7 @@ impl ModuleArtifact {
             target_triple,
             code_artifacts,
             module_deps,
+            transitive_deps,
             exports,
             native_libs,
             artifact_path: None,
@@ -384,6 +398,7 @@ impl ModuleArtifact {
             "unknown".to_string(),
             ModuleCodeArtifacts::default(),
             collect_module_dependencies(&ast),
+            Vec::new(), // transitive_deps: not computed from source-only build
             Vec::new(),
         ))
     }
@@ -477,6 +492,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
         if matches!(item.visibility, ast::Visibility::Private) {
             continue;
         }
+        let link_name_attr = function_link_name(&item.attributes);
         match &item.kind {
             ast::ItemKind::Function(func) => {
                 let params = func
@@ -509,7 +525,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     name: func.name.name.clone(),
                     signature: format!("fn({})->{ret}", params.join(",")),
                     type_params,
-                    link_name: Some(func.name.name.clone()),
+                    link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
                     abi: Some(ModuleAbi::Silver),
                     is_variadic: false,
                     type_key: None,
@@ -539,7 +555,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     name: func.name.name.clone(),
                     signature: format!("fn({})->{ret}", params.join(",")),
                     type_params: Vec::new(),
-                    link_name: Some(func.name.name.clone()),
+                    link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
                     abi: Some(ModuleAbi::from_linkage(&func.linkage)),
                     is_variadic: func.signature.is_variadic,
                     type_key: None,
@@ -1008,6 +1024,7 @@ mod tests {
                 has_shared_library: true,
             },
             module_deps: vec!["std.mem".to_string()],
+            transitive_deps: Vec::new(),
             exports: vec![
                 ModuleExport {
                     kind: ExportKind::Function,

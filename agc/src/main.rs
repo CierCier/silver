@@ -624,8 +624,34 @@ fn main() {
             let mut profiler = profiler::Profiler::new(plan.profile);
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
-            let mut native_libs = plan.libs.clone();
+            let mut exe_object_files: Vec<PathBuf> = Vec::new();
+            let exe_temp_dir = if plan.emit == EmitKind::Exe {
+                let pid = std::process::id();
+                let nonce = match SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                {
+                    Ok(d) => d.as_nanos(),
+                    Err(e) => {
+                        eprintln!("agc: {}: failed to compute temp dir nonce: {e}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                };
+                let dir = std::env::temp_dir().join(format!("agc-exe-{pid}-{nonce}"));
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    eprintln!(
+                        "agc: {}: failed to create temp dir {}: {e}",
+                        "error".red().bold(),
+                        dir.display()
+                    );
+                    std::process::exit(2);
+                }
+                Some(dir)
+            } else {
+                None
+            };
+             let mut native_libs = plan.libs.clone();
             let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
+            let mut dependency_artifact_set: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
             for input in &plan.inputs {
                 profiler.begin_phase("read source");
@@ -723,6 +749,7 @@ fn main() {
                 };
                 profiler.end_phase("import lowering");
                 let module_dependencies = import_lowering.module_dependencies;
+                let transitive_module_deps = import_lowering.transitive_module_deps;
                 let imported_modules = import_lowering.module_artifacts;
                 for module in &imported_modules {
                     if let Some(error) = artifact_compatibility_error(module, &plan) {
@@ -808,7 +835,7 @@ fn main() {
                 ) {
                     Ok(paths) => {
                         for path in paths {
-                            if !dependency_link_artifacts.contains(&path) {
+                            if dependency_artifact_set.insert(path.clone()) {
                                 dependency_link_artifacts.push(path);
                             }
                         }
@@ -847,6 +874,7 @@ fn main() {
                             has_shared_library: plan.shared,
                         },
                         module_dependencies,
+                        transitive_module_deps,
                         native_libs.clone(),
                     );
                     let bytes = match artifact.to_bytes() {
@@ -1011,7 +1039,7 @@ fn main() {
                             }
                             std::process::exit(2);
                         }
-                    } else {
+                    } else if matches!(plan.emit, EmitKind::LlvmIr) {
                         profiler.begin_phase("codegen");
                         let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source(
                             &ast,
@@ -1047,9 +1075,46 @@ fn main() {
                                 std::process::exit(2);
                             }
                         }
+                    } else if matches!(plan.emit, EmitKind::Exe) {
+                        profiler.begin_phase("codegen");
+                        let temp_dir = exe_temp_dir.as_ref().unwrap();
+                        let stem = input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("input");
+                        let temp_o = temp_dir.join(format!("{stem}.o"));
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
+                            &ast,
+                            &imported_modules,
+                            &temp_o,
+                            plan.target.as_deref(),
+                            plan.opt_level.as_deref(),
+                            &mut symbol_table,
+                            Some(input),
+                            Some(&src),
+                            plan.debug_info,
+                        );
+                        profiler.end_phase("codegen");
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        &src,
+                                        &input.display().to_string(),
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                        exe_object_files.push(temp_o);
                     }
                 }
-
                 if plan.verbose {
                     eprintln!(
                         "agc: symbol table [{}]: {}",
@@ -1082,10 +1147,14 @@ fn main() {
             }
 
             if matches!(plan.emit, EmitKind::Exe) {
+                if exe_object_files.is_empty() {
+                    eprintln!("agc: {}: no object files to link", "error".red().bold());
+                    std::process::exit(2);
+                }
                 profiler.begin_phase("link");
-                if let Err(e) = build_with_llvm_tools(
+                if let Err(e) = link_exe(
                     &plan,
-                    &llvm_units,
+                    &exe_object_files,
                     &dependency_link_artifacts,
                     &native_libs,
                 ) {
@@ -1093,6 +1162,10 @@ fn main() {
                     std::process::exit(2);
                 }
                 profiler.end_phase("link");
+                // Clean up temp dir
+                if let Some(dir) = &exe_temp_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
                 profiler.print_report();
                 return;
             }
@@ -1168,83 +1241,22 @@ fn run_tool(mut command: Command, label: &str) -> Result<(), String> {
     ))
 }
 
-fn map_llc_opt_level(level: Option<&str>) -> &'static str {
-    match level.unwrap_or("0") {
-        "0" => "0",
-        "1" => "1",
-        "2" | "s" | "z" => "2",
-        "3" | "fast" => "3",
-        _ => "2",
-    }
-}
-
-fn build_with_llvm_tools(
+fn link_exe(
     plan: &CompilePlan,
-    units: &[(PathBuf, String)],
+    object_paths: &[PathBuf],
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
-    if units.is_empty() {
-        return Err("no LLVM units generated".to_string());
+    if object_paths.is_empty() {
+        return Err("no object files to link".to_string());
     }
-
-    let pid = std::process::id();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("failed to compute temp dir nonce: {e}"))?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!("agc-llvm-{pid}-{nonce}"));
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("failed to create temp dir {}: {e}", temp_dir.display()))?;
-
-    let mut ll_paths = Vec::with_capacity(units.len());
-    for (index, (input, ir)) in units.iter().enumerate() {
-        let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("unit");
-        let ll_path = temp_dir.join(format!("{index:03}_{stem}.ll"));
-        std::fs::write(&ll_path, ir)
-            .map_err(|e| format!("failed to write {}: {e}", ll_path.display()))?;
-        ll_paths.push(ll_path);
-    }
-
-    let linked_ll = if ll_paths.len() == 1 {
-        ll_paths[0].clone()
-    } else {
-        let merged = temp_dir.join("linked.ll");
-        let mut llvm_link = Command::new("llvm-link");
-        llvm_link.arg("-o").arg(&merged);
-        for path in &ll_paths {
-            llvm_link.arg(path);
-        }
-        run_tool(llvm_link, "llvm-link")?;
-        merged
-    };
-
-    let object_path = temp_dir.join("linked.o");
-    let mut llc = Command::new("llc");
-    llc.arg("-filetype=obj")
-        .arg(format!(
-            "-O{}",
-            map_llc_opt_level(plan.opt_level.as_deref())
-        ))
-        .arg("-o")
-        .arg(&object_path);
-    if let Some(target) = &plan.target {
-        llc.arg("-mtriple").arg(target);
-    }
-    llc.arg(&linked_ll);
-    run_tool(llc, "llc")?;
-
-    let link_result =
-        link_with_ld_lld(plan, &object_path, dependency_paths, native_libs).or_else(|ld_err| {
-            // Keep a compatibility fallback for systems without lld installed.
-            link_with_cc(plan, &object_path, dependency_paths, native_libs).map_err(|cc_err| {
-                format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
-            })
-        });
-    link_result?;
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    Ok(())
+    link_exe_with_ld_lld(plan, object_paths, dependency_paths, native_libs)
+        .or_else(|ld_err| {
+            link_exe_with_cc(plan, object_paths, dependency_paths, native_libs)
+                .map_err(|cc_err| {
+                    format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
+                })
+        })
 }
 
 fn command_exists(name: &str) -> bool {
@@ -1312,9 +1324,9 @@ fn dependency_library_dirs(dependency_paths: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
-fn link_with_ld_lld(
+fn link_exe_with_ld_lld(
     plan: &CompilePlan,
-    object_path: &Path,
+    object_paths: &[PathBuf],
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
@@ -1351,7 +1363,9 @@ fn link_with_ld_lld(
         }
     }
 
-    link.arg(object_path);
+    for obj in object_paths {
+        link.arg(obj);
+    }
     for dep in dependency_paths {
         link.arg(dep);
     }
@@ -1383,14 +1397,17 @@ fn link_with_ld_lld(
     run_tool(link, "ld.lld")
 }
 
-fn link_with_cc(
+fn link_exe_with_cc(
     plan: &CompilePlan,
-    object_path: &Path,
+    object_paths: &[PathBuf],
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
     let mut link = Command::new("cc");
-    link.arg("-o").arg(&plan.output).arg(object_path);
+    link.arg("-o").arg(&plan.output);
+    for obj in object_paths {
+        link.arg(obj);
+    }
     for dep in dependency_paths {
         link.arg(dep);
     }
@@ -1549,6 +1566,7 @@ mod tests {
                 has_shared_library: false,
             },
             module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
             exports: Vec::new(),
             native_libs: Vec::new(),
             artifact_path: None,
