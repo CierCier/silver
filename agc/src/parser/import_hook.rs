@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use std::time::SystemTime;
@@ -76,8 +76,8 @@ impl<'a> FileImportResolverHook<'a> {
     pub fn new(loader: &'a ModuleLoader) -> Self {
         Self {
             loader,
-            seen_modules: HashSet::new(),
-            seen_files: HashSet::new(),
+            seen_modules: HashSet::default(),
+            seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: None,
             pending_stack: Vec::new(),
@@ -87,8 +87,8 @@ impl<'a> FileImportResolverHook<'a> {
     pub fn with_cache(loader: &'a ModuleLoader, file_cache: &'a Mutex<FileItemCache>) -> Self {
         Self {
             loader,
-            seen_modules: HashSet::new(),
-            seen_files: HashSet::new(),
+            seen_modules: HashSet::default(),
+            seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: Some(file_cache),
             pending_stack: Vec::new(),
@@ -280,16 +280,13 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     if errors.is_empty() {
         return Ok(program);
     }
-    Err(format!(
-        "{}",
-        crate::diagnostics::render(
+    Err(crate::diagnostics::render(
             &src,
             &path.display().to_string(),
             errors[0].span().clone(),
             &errors[0].format_with_help(),
             crate::diagnostics::Severity::Error,
-        )
-    ))
+        ).to_string())
 }
 
 fn public_importable_item_names(program: &ast::Program) -> Vec<String> {
@@ -386,7 +383,7 @@ impl<'a> ImportAliasRewriter<'a> {
     fn new(plan: &'a ImportAliasPlan) -> Self {
         Self {
             plan,
-            bound_names: HashMap::new(),
+            bound_names: HashMap::default(),
         }
     }
 
@@ -549,17 +546,16 @@ impl<'a> ImportAliasRewriter<'a> {
     fn rewrite_expr(&mut self, expr: &mut ast::Expression) {
         match expr.kind.as_mut() {
             ast::ExpressionKind::Identifier(ident) => {
-                if !self.is_value_bound(&ident.name) {
-                    if let Some(target) = self.plan.direct.get(&ident.name) {
+                if !self.is_value_bound(&ident.name)
+                    && let Some(target) = self.plan.direct.get(&ident.name) {
                         ident.name = target.clone();
                     }
-                }
             }
             ast::ExpressionKind::TypeName(ty) => self.rewrite_type(ty),
             ast::ExpressionKind::FieldAccess { object, field } => {
                 self.rewrite_expr(object);
-                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref() {
-                    if !self.is_value_bound(&owner.name) {
+                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
+                    && !self.is_value_bound(&owner.name) {
                         if let Some(target) = self.plan.direct.get(&owner.name) {
                             owner_to_expr(object, target, owner.span.clone());
                         } else if self
@@ -568,10 +564,9 @@ impl<'a> ImportAliasRewriter<'a> {
                             .get(&owner.name)
                             .is_some_and(|items| items.contains(&field.name))
                         {
-                            expr.kind = Box::new(ast::ExpressionKind::Identifier(field.clone()));
+                            *expr.kind = ast::ExpressionKind::Identifier(field.clone());
                         }
                     }
-                }
             }
             ast::ExpressionKind::Call {
                 function,
@@ -591,23 +586,22 @@ impl<'a> ImportAliasRewriter<'a> {
                 for arg in arguments.iter_mut() {
                     self.rewrite_expr(arg);
                 }
-                if let ast::ExpressionKind::Identifier(owner) = receiver.kind.as_ref() {
-                    if !self.is_value_bound(&owner.name)
+                if let ast::ExpressionKind::Identifier(owner) = receiver.kind.as_ref()
+                    && !self.is_value_bound(&owner.name)
                         && self
                             .plan
                             .namespaces
                             .get(&owner.name)
                             .is_some_and(|items| items.contains(&method.name))
                     {
-                        expr.kind = Box::new(ast::ExpressionKind::Call {
+                        *expr.kind = ast::ExpressionKind::Call {
                             function: Box::new(ast::Expression {
                                 kind: Box::new(ast::ExpressionKind::Identifier(method.clone())),
                                 span: method.span.clone(),
                             }),
                             arguments: arguments.clone(),
-                        });
+                        };
                     }
-                }
             }
             ast::ExpressionKind::Binary { left, right, .. } => {
                 self.rewrite_expr(left);
@@ -834,10 +828,10 @@ impl<'a> ImportAliasRewriter<'a> {
 }
 
 fn owner_to_expr(expr: &mut ast::Expression, name: &str, span: lexer::Span) {
-    expr.kind = Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+    *expr.kind = ast::ExpressionKind::Identifier(ast::Identifier {
         name: name.to_string(),
         span,
-    }));
+    });
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::module_artifact::{ExportKind, ModuleArtifact, ModuleExport};
@@ -40,12 +40,18 @@ use parking_lot::Mutex;
     module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
  }
 
+impl Default for ModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {
             search_dirs: Vec::new(),
             cwd: std::env::current_dir().ok(),
-            module_cache: Mutex::new(HashMap::new()),
+            module_cache: Mutex::new(HashMap::default()),
         }
     }
 
@@ -70,7 +76,7 @@ impl ModuleLoader {
     pub fn resolve_imports(&self, program: &ast::Program) -> Result<ModuleCatalog, String> {
         let mut modules = Vec::new();
         let mut native_libs = Vec::new();
-        let mut seen_modules = HashSet::new();
+        let mut seen_modules = HashSet::default();
         let mut loaded_paths = Vec::new();
         let mut import_entries: Vec<(String, ModuleArtifact)> = Vec::new();
 
@@ -117,7 +123,7 @@ impl ModuleLoader {
     ) -> Result<SourceImportCatalog, String> {
         let mut imports = Vec::new();
         let mut loaded_paths = Vec::new();
-        let mut seen_modules = HashSet::new();
+        let mut seen_modules = HashSet::default();
 
         for item in &program.items {
             let ast::ItemKind::Import(import_item) = &item.kind else {
@@ -167,7 +173,7 @@ impl ModuleLoader {
         roots: &[ModuleArtifact],
     ) -> Result<Vec<ModuleArtifact>, String> {
         let mut resolved = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut path = Vec::new(); // modules currently on the DFS path
 
         self.resolve_module_closure_dfs(roots, &mut seen, &mut path, &mut resolved)?;
@@ -223,26 +229,24 @@ impl ModuleLoader {
         let module_path = segments.join(".");
 
         // Priority 1: relative_path (relative to the currently compiled file)
-        if let Some(base) = base_dir {
-            if let Some((source_path, kind)) = resolve_source_in_root(base, &segments) {
+        if let Some(base) = base_dir
+            && let Some((source_path, kind)) = resolve_source_in_root(base, &segments) {
                 return Some(ResolvedSourceImport {
                     module_path: module_path.clone(),
                     source_path,
                     kind,
                 });
             }
-        }
 
         // Priority 2: cwd (current working directory of the process)
-        if let Some(cwd) = &self.cwd {
-            if let Some((source_path, kind)) = resolve_source_in_root(cwd, &segments) {
+        if let Some(cwd) = &self.cwd
+            && let Some((source_path, kind)) = resolve_source_in_root(cwd, &segments) {
                 return Some(ResolvedSourceImport {
                     module_path: module_path.clone(),
                     source_path,
                     kind,
                 });
             }
-        }
 
         // Priority 3+: include dirs then sysroot dirs as appended by build_module_loader.
         for root in &self.search_dirs {
@@ -322,13 +326,12 @@ pub fn module_loader_default_dirs(sysroot: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(root.join("include").join("silver"));
         dirs.push(root.join("lib").join("silver"));
     }
-    if let Ok(home) = std::env::var("SILVER_SYSROOT") {
-        if !home.is_empty() {
+    if let Ok(home) = std::env::var("SILVER_SYSROOT")
+        && !home.is_empty() {
             let root = PathBuf::from(home);
             dirs.push(root.join("include").join("silver"));
             dirs.push(root.join("lib").join("silver"));
         }
-    }
     dirs
 }
 
@@ -372,9 +375,9 @@ pub fn collect_imported_artifacts(
 pub fn validate_import_conflicts<'a>(
     imports: impl IntoIterator<Item = (&'a str, &'a ModuleArtifact)>,
 ) -> Result<(), String> {
-    let mut non_function_exports: HashMap<String, (String, ExportKind)> = HashMap::new();
-    let mut function_exports: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut function_owner: HashMap<String, String> = HashMap::new();
+    let mut non_function_exports: HashMap<String, (String, ExportKind)> = HashMap::default();
+    let mut function_exports: HashMap<String, HashMap<String, String>> = HashMap::default();
+    let mut function_owner: HashMap<String, String> = HashMap::default();
 
     for (module_path, module) in imports {
         for export in &module.exports {

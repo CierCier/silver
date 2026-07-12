@@ -4,7 +4,7 @@ pub mod import_hook;
 pub mod prt_parser;
 
 pub use ast::*;
-pub use error::{ParseError, ParseResult};
+pub use error::ParseError;
 pub use import_hook::FileImportResolverHook;
 
 use crate::lexer::{LexToken, Span};

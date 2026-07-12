@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 
 use crate::lexer::Span;
@@ -84,7 +84,7 @@ impl TypeContext {
         Self {
             pointer_size,
             pointer_align: pointer_size,
-            named_layouts: HashMap::new(),
+            named_layouts: HashMap::default(),
         }
     }
 
@@ -401,11 +401,10 @@ impl Type {
     pub fn substitute(&self, mapping: &HashMap<String, Type>) -> Type {
         match self {
             Type::Named { path, generics } => {
-                if path.len() == 1 {
-                    if let Some(mapped) = mapping.get(&path[0]) {
+                if path.len() == 1
+                    && let Some(mapped) = mapping.get(&path[0]) {
                         return mapped.clone();
                     }
-                }
                 Type::Named {
                     path: path.clone(),
                     generics: generics
@@ -771,11 +770,10 @@ impl<'a> TypeParser<'a> {
             generics = self.parse_type_list(b'>')?;
         }
 
-        if generics.is_empty() && path.len() == 1 {
-            if let Some(primitive) = parse_primitive_name(&path[0]) {
+        if generics.is_empty() && path.len() == 1
+            && let Some(primitive) = parse_primitive_name(&path[0]) {
                 return Ok(Type::Primitive(primitive));
             }
-        }
 
         Ok(Type::Named { path, generics })
     }

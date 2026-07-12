@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::Span;
 use crate::module_artifact::{ExportKind, ModuleArtifact};
@@ -37,16 +37,22 @@ pub struct Analyzer {
     imported_traits: HashSet<String>,
 }
 
+impl Default for Analyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Analyzer {
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
-            symbols: HashMap::new(),
+            symbols: HashMap::default(),
             type_params: Vec::new(),
             table_backend: CompilerSymbolTable::new(),
-            imported_symbols: HashMap::new(),
-            imported_types: HashSet::new(),
-            imported_traits: HashSet::new(),
+            imported_symbols: HashMap::default(),
+            imported_types: HashSet::default(),
+            imported_traits: HashSet::default(),
         }
     }
 
@@ -262,11 +268,10 @@ impl Analyzer {
                 self.check_generics_bounds(trait_item.generics.as_ref());
                 // Register associated type names so method signatures can reference them
                 for item in &trait_item.items {
-                    if let ast::TraitItemKind::AssociatedType(assoc) = item {
-                        if let Some(scope) = self.type_params.last_mut() {
+                    if let ast::TraitItemKind::AssociatedType(assoc) = item
+                        && let Some(scope) = self.type_params.last_mut() {
                             scope.insert(assoc.name.name.clone());
                         }
-                    }
                 }
                 for item in &trait_item.items {
                     match item {
@@ -319,22 +324,21 @@ impl Analyzer {
                 }
             }
             ast::ItemKind::Impl(impl_item) => {
-                let mut implicit = HashSet::new();
+                let mut implicit = HashSet::default();
                 if impl_item.generics.is_none() {
                     self.collect_implicit_type_params(&impl_item.self_type, &mut implicit);
                 }
                 self.push_type_params(impl_item.generics.as_ref());
-                if !implicit.is_empty() {
-                    if let Some(scope) = self.type_params.last_mut() {
+                if !implicit.is_empty()
+                    && let Some(scope) = self.type_params.last_mut() {
                         scope.extend(implicit);
                     }
-                }
                 if let Some(scope) = self.type_params.last_mut() {
                     scope.insert("Self".to_string());
                 }
                 self.check_generics_bounds(impl_item.generics.as_ref());
-                if let Some(trait_ref) = &impl_item.trait_ref {
-                    if trait_ref.path.len() == 1 {
+                if let Some(trait_ref) = &impl_item.trait_ref
+                    && trait_ref.path.len() == 1 {
                         let name = trait_ref.path[0].name.clone();
                         if self.has_symbol(&name).is_none() {
                             self.errors.push(SemanticError {
@@ -343,7 +347,6 @@ impl Analyzer {
                             });
                         }
                     }
-                }
                 self.check_type(&impl_item.self_type);
                 for item in &impl_item.items {
                     match item {
@@ -720,7 +723,7 @@ impl Analyzer {
     }
 
     fn push_type_params(&mut self, generics: Option<&ast::Generics>) {
-        let mut params = HashSet::new();
+        let mut params = HashSet::default();
         if let Some(generics) = generics {
             for param in &generics.params {
                 if let ast::GenericParam::Type(type_param) = param {

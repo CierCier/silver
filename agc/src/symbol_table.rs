@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -92,9 +92,9 @@ impl CompilerSymbolTable {
             .entries
             .entry(key.clone())
             .or_insert_with(|| SymbolEntry {
-                kinds: HashSet::new(),
+                kinds: HashSet::default(),
                 first_span: span.clone(),
-                touched_in: HashSet::new(),
+                touched_in: HashSet::default(),
                 touches: 0,
             });
 
@@ -153,9 +153,9 @@ impl CompilerSymbolTable {
                 .entries
                 .entry(key.clone())
                 .or_insert_with(|| SymbolEntry {
-                    kinds: HashSet::new(),
+                    kinds: HashSet::default(),
                     first_span: incoming.first_span.clone(),
-                    touched_in: HashSet::new(),
+                    touched_in: HashSet::default(),
                     touches: 0,
                 });
             entry.kinds.extend(incoming.kinds.iter().copied());
@@ -180,7 +180,7 @@ impl CompilerSymbolTable {
     }
 
     pub fn push_var_scope(&mut self) {
-        self.var_scopes.push(HashMap::new());
+        self.var_scopes.push(HashMap::default());
     }
 
     pub fn pop_var_scope(&mut self) {

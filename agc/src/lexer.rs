@@ -519,7 +519,7 @@ impl Lexer {
         // Check for decimal point
         if !self.is_at_end()
             && self.peek() == '.'
-            && self.peek_next().map_or(false, |c| c.is_ascii_digit())
+            && self.peek_next().is_some_and(|c| c.is_ascii_digit())
         {
             number_str.push(self.advance()); // consume '.'
             while !self.is_at_end() && self.peek().is_ascii_digit() {

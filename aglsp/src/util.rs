@@ -1,6 +1,6 @@
 use agc::lexer::Span;
 use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 use tower_lsp::lsp_types::*;
 

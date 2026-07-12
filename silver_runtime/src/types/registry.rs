@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 
 use super::error::TypeError;
@@ -44,10 +44,10 @@ impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             types: Vec::new(),
-            by_name: HashMap::new(),
-            vec_cache: HashMap::new(),
-            optional_cache: HashMap::new(),
-            fn_cache: HashMap::new(),
+            by_name: HashMap::default(),
+            vec_cache: HashMap::default(),
+            optional_cache: HashMap::default(),
+            fn_cache: HashMap::default(),
         };
         registry.add_builtin(TypeId::UNIT, "unit", TypeKind::Unit);
         registry.add_builtin(TypeId::BOOL, "bool", TypeKind::Bool);
@@ -229,7 +229,7 @@ impl TypeRegistry {
             });
         }
 
-        let mut seen = HashSet::<Arc<str>>::new();
+        let mut seen = HashSet::<Arc<str>>::default();
         let mut field_defs = Vec::with_capacity(fields.len());
         for (field_name, field_ty) in fields {
             let field_name: Arc<str> = field_name.into();
@@ -280,8 +280,8 @@ impl TypeRegistry {
             });
         }
 
-        let mut seen_names = HashSet::<Arc<str>>::new();
-        let mut seen_discriminants = HashSet::<i64>::new();
+        let mut seen_names = HashSet::<Arc<str>>::default();
+        let mut seen_discriminants = HashSet::<i64>::default();
         let mut variant_defs = Vec::with_capacity(variants.len());
         for (variant_name, discriminant, payload) in variants {
             let variant_name: Arc<str> = variant_name.into();

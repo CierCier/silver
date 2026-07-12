@@ -1,5 +1,5 @@
 use agc::parser::ast::{self};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 pub(crate) fn format_primitive_type(p: &ast::PrimitiveType) -> &'static str {
     match p {
