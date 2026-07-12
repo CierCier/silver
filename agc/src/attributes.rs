@@ -13,14 +13,10 @@ pub fn validate_global_attributes(attributes: &[ast::Attribute]) -> Vec<Attribut
         if !is_program_level_attribute(&attr.name.name) {
             continue;
         }
-        match attr.name.name.as_str() {
-            "link" => {
-                if let Err(error) = parse_link_attribute(attr) {
-                    errors.push(error);
-                }
+        if attr.name.name.as_str() == "link"
+            && let Err(error) = parse_link_attribute(attr) {
+                errors.push(error);
             }
-            _ => {}
-        }
     }
     errors
 }
@@ -171,15 +167,13 @@ mod tests {
 
 /// Extracts a `#[link_name("...")]` value from an attribute list, if present.
 /// Returns `None` if no valid `#[link_name]` attribute is found.
-pub fn function_link_name<'a>(attributes: &'a [ast::Attribute]) -> Option<&'a str> {
+pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
     for attr in attributes {
-        if attr.name.name == "link_name" {
-            if let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first() {
-                if !s.is_empty() {
+        if attr.name.name == "link_name"
+            && let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first()
+                && !s.is_empty() {
                     return Some(s);
                 }
-            }
-        }
     }
     None
 }

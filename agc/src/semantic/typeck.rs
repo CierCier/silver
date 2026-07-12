@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::attributes::validate_global_attributes;
 use crate::lexer::Span;
@@ -221,7 +221,7 @@ impl TypeChecker {
                 }
                 crate::module_artifact::ExportKind::Struct => {
                     self.imported_types.insert(export.name.clone());
-                    let mut fields = HashMap::new();
+                    let mut fields = HashMap::default();
                     for field in &export.fields {
                         if let Ok(field_ty) =
                             crate::types::Type::from_canonical_key(&field.type_key)
@@ -1650,7 +1650,7 @@ impl TypeChecker {
             }
             let mut ok = true;
             let mut score = 0usize;
-            let mut mapping = HashMap::new();
+            let mut mapping = HashMap::default();
             if !explicit_types.is_empty() {
                 if explicit_types.len() != candidate.type_params.len() {
                     continue;
@@ -1871,7 +1871,7 @@ impl TypeChecker {
 
             let mut ok = true;
             let mut score = 0usize;
-            let mut mapping = HashMap::new();
+            let mut mapping = HashMap::default();
 
             // Try owner type inference — but if the receiver type lacks generic args
             // that correspond to method type params, don't fail: those can be
@@ -2328,7 +2328,7 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::Function {
-            source: candidate.source.clone(),
+            source: Box::new(candidate.source.clone()),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
@@ -2348,8 +2348,8 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::ImplMethod {
-            impl_item: candidate.source_impl.clone(),
-            method: candidate.source_method.clone(),
+            impl_item: Box::new(candidate.source_impl.clone()),
+            method: Box::new(candidate.source_method.clone()),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
@@ -2365,7 +2365,7 @@ impl TypeChecker {
     }
 
     fn dedup_type_params(&self, params: Vec<String>) -> Vec<String> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut out = Vec::new();
         for param in params {
             if seen.insert(param.clone()) {
@@ -3220,7 +3220,7 @@ impl TypeChecker {
             return Some(field_ty.clone());
         }
 
-        let mut mapping = HashMap::new();
+        let mut mapping = HashMap::default();
         for (param, arg) in struct_def.type_params.iter().zip(generics.iter()) {
             mapping.insert(param.clone(), arg.clone());
         }
@@ -3550,7 +3550,7 @@ impl TypeChecker {
     }
 
     fn build_enum_def(&mut self, enum_item: &ast::EnumItem) -> Option<EnumDef> {
-        let mut variants = HashMap::new();
+        let mut variants = HashMap::default();
         let mut next_value = 0i128;
         let mut min_value = 0i128;
         let mut max_value = 0i128;
@@ -3641,8 +3641,8 @@ impl TypeChecker {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-        self.moved_locals.push(HashSet::new());
+        self.scopes.push(HashMap::default());
+        self.moved_locals.push(HashSet::default());
     }
 
     fn pop_scope(&mut self) {

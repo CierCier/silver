@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -56,7 +56,7 @@ impl TraitRegistry {
     pub fn collect(program: &ast::Program) -> (Self, Vec<TraitError>) {
         let mut registry = TraitRegistry::default();
         let mut errors = Vec::new();
-        let mut trait_names = HashSet::new();
+        let mut trait_names = HashSet::default();
 
         for item in &program.items {
             match &item.kind {
@@ -94,12 +94,12 @@ impl TraitRegistry {
 
             let mut def = TraitDef {
                 name: trait_item.name.name.clone(),
-                methods: HashMap::new(),
-                assoc_types: HashMap::new(),
-                assoc_fn_values: HashMap::new(),
+                methods: HashMap::default(),
+                assoc_types: HashMap::default(),
+                assoc_fn_values: HashMap::default(),
                 super_traits: Vec::new(),
                 type_params: Vec::new(),
-                type_param_bounds: HashMap::new(),
+                type_param_bounds: HashMap::default(),
                 span: trait_item.name.span.clone(),
             };
 
@@ -250,7 +250,7 @@ impl TraitRegistry {
 
     pub fn validate_impls(&self, program: &ast::Program) -> Vec<TraitError> {
         let mut errors = Vec::new();
-        let mut impl_keys = HashMap::new();
+        let mut impl_keys = HashMap::default();
 
         for item in &program.items {
             let ast::ItemKind::Impl(impl_item) = &item.kind else {
@@ -306,7 +306,7 @@ impl TraitRegistry {
                 &mut errors,
             );
 
-            let mut subst = HashMap::new();
+            let mut subst = HashMap::default();
             let expected_params = trait_def.type_params.len();
             let provided_params = trait_ref.generics.as_ref().map(|g| g.len()).unwrap_or(0);
             if expected_params != provided_params {
@@ -353,7 +353,7 @@ impl TraitRegistry {
                 }
             }
 
-            let mut subst = HashMap::new();
+            let mut subst = HashMap::default();
             let expected_params = trait_def.type_params.len();
             let provided_params = trait_ref.generics.as_ref().map(|g| g.len()).unwrap_or(0);
             if expected_params != provided_params {
@@ -370,8 +370,8 @@ impl TraitRegistry {
                 }
             }
 
-            let mut impl_methods: HashMap<String, ast::ImplFunction> = HashMap::new();
-            let mut impl_assoc: HashMap<String, ast::ImplAssociatedType> = HashMap::new();
+            let mut impl_methods: HashMap<String, ast::ImplFunction> = HashMap::default();
+            let mut impl_assoc: HashMap<String, ast::ImplAssociatedType> = HashMap::default();
 
             for impl_item in &impl_item.items {
                 match impl_item {
@@ -403,7 +403,7 @@ impl TraitRegistry {
                 }
             }
 
-            let mut impl_subst = HashMap::new();
+            let mut impl_subst = HashMap::default();
 
             for method in trait_def.methods.values() {
                 if method.has_default {
@@ -677,7 +677,7 @@ fn validate_impl_bounds(
 }
 
 fn impl_generic_names(generics: &Option<ast::Generics>) -> HashSet<String> {
-    let mut names = HashSet::new();
+    let mut names = HashSet::default();
     let Some(generics) = generics else {
         return names;
     };
@@ -702,8 +702,8 @@ fn unify_type(
 ) -> bool {
     let expected = substitute_type(expected, subst);
 
-    if let Type::Named { path, generics } = found {
-        if path.len() == 1 && impl_generics.contains(&path[0]) {
+    if let Type::Named { path, generics } = found
+        && path.len() == 1 && impl_generics.contains(&path[0]) {
             if !generics.is_empty() {
                 return false;
             }
@@ -714,7 +714,6 @@ fn unify_type(
             impl_subst.insert(name, expected.clone());
             return true;
         }
-    }
 
     match (&expected, found) {
         (Type::Unknown, _) => true,

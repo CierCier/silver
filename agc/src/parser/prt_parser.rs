@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::{LexToken, Span, Token};
 
@@ -65,10 +65,16 @@ pub struct GrammarSpec {
     pub rules: HashMap<String, GrammarRule>,
 }
 
+impl Default for GrammarSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GrammarSpec {
     pub fn new() -> Self {
         Self {
-            rules: HashMap::new(),
+            rules: HashMap::default(),
         }
     }
 
@@ -140,7 +146,7 @@ struct TransitionTable {
 
 impl TransitionTable {
     fn for_bootstrap(max_lookahead: usize) -> Self {
-        let mut rows = HashMap::new();
+        let mut rows = HashMap::default();
         rows.insert(
             (NonTerminal::Item, vec![TokenClass::Import]),
             ItemProduction::Import,
@@ -206,8 +212,8 @@ impl PRT_Parser {
             source_name,
             grammar: GrammarSpec::new(),
             transition_table: TransitionTable::for_bootstrap(Self::DEFAULT_LOOKAHEAD),
-            known_type_names: HashSet::new(),
-            known_ident_names: HashSet::new(),
+            known_type_names: HashSet::default(),
+            known_ident_names: HashSet::default(),
         };
         parser.install_bootstrap_grammar();
         parser
@@ -429,7 +435,7 @@ impl PRT_Parser {
         }
     }
 
-    fn rule_alternatives<'a>(expr: &'a GrammarExpr) -> Vec<&'a GrammarExpr> {
+    fn rule_alternatives(expr: &GrammarExpr) -> Vec<&GrammarExpr> {
         match expr {
             GrammarExpr::Choice(parts) => parts.iter().collect(),
             _ => vec![expr],
@@ -593,14 +599,13 @@ impl PRT_Parser {
         if matches!(
             tokens.get(index + 1).map(|next| &next.kind),
             Some(Token::Less)
-        ) {
-            if let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len()) {
+        )
+            && let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len()) {
                 return matches!(
                     tokens.get(after_type).map(|next| &next.kind),
                     Some(Token::Identifier(_))
                 );
             }
-        }
 
         if let Some(Token::Identifier(_)) = tokens.get(index + 1).map(|next| &next.kind) {
             if let Some(Token::Assign | Token::Semicolon | Token::Comma) =
@@ -2796,8 +2801,8 @@ impl PRT_Parser {
                     }
                     i += 1;
                 }
-                if i < cursor.end && i > cursor.pos + 1 {
-                    if let Some(target_type) =
+                if i < cursor.end && i > cursor.pos + 1
+                    && let Some(target_type) =
                         parse_type_in_parens(cursor.tokens, cursor.pos + 1, i)
                     {
                         cursor.pos = i + 1;
@@ -2813,7 +2818,6 @@ impl PRT_Parser {
                             },
                         });
                     }
-                }
             }
 
             parse_postfix(cursor)
@@ -3625,9 +3629,9 @@ impl PRT_Parser {
         }
 
         let mut alias = None;
-        if cursor < end {
-            if let Token::Identifier(keyword) = &tokens[cursor].kind {
-                if keyword == "as" {
+        if cursor < end
+            && let Token::Identifier(keyword) = &tokens[cursor].kind
+                && keyword == "as" {
                     cursor += 1;
                     let token = tokens
                         .get(cursor)
@@ -3647,8 +3651,6 @@ impl PRT_Parser {
                     });
                     cursor += 1;
                 }
-            }
-        }
 
         let mut items = None;
         if cursor < end && !matches!(tokens[cursor].kind, Token::Semicolon) {
@@ -3677,9 +3679,9 @@ impl PRT_Parser {
                     span: token.span.clone(),
                 };
                 cursor += 1;
-                if cursor < end {
-                    if let Token::Identifier(keyword) = &tokens[cursor].kind {
-                        if keyword == "as" {
+                if cursor < end
+                    && let Token::Identifier(keyword) = &tokens[cursor].kind
+                        && keyword == "as" {
                             cursor += 1;
                             let alias_token =
                                 tokens
@@ -3700,8 +3702,6 @@ impl PRT_Parser {
                             });
                             cursor += 1;
                         }
-                    }
-                }
                 imported_items.push(ast::ImportedItem {
                     name: item_name,
                     alias: item_alias,
@@ -4549,7 +4549,7 @@ impl PRT_Parser {
                         cursor += 1;
                     }
                 }
-                let Some(rparen) = tokens.get(cursor) else {
+                let Some(_rparen) = tokens.get(cursor) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated tuple variant".to_string(),
                         span: tokens[paren_open].span.clone(),
@@ -4595,7 +4595,7 @@ impl PRT_Parser {
                         cursor += 1;
                     }
                 }
-                let Some(rbrace) = tokens.get(cursor) else {
+                let Some(_rbrace) = tokens.get(cursor) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated struct variant".to_string(),
                         span: tokens[brace_open].span.clone(),
@@ -4753,8 +4753,8 @@ impl PRT_Parser {
                 cursor = next_cursor;
                 continue;
             }
-            if let Token::Identifier(_) = &tokens[cursor].kind {
-                if cursor + 1 < end
+            if let Token::Identifier(_) = &tokens[cursor].kind
+                && cursor + 1 < end
                     && matches!(tokens[cursor + 1].kind, Token::Colon)
                 {
                     let (item, next_cursor) =
@@ -4763,11 +4763,10 @@ impl PRT_Parser {
                     cursor = next_cursor;
                     continue;
                 }
-            }
             // Fallthrough: try return-type-first syntax (like impl methods).
             // <return_type> <name>(<params>) [; | { body }]
-            if let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, end - 1) {
-                if after_type < end - 1
+            if let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, end - 1)
+                && after_type < end - 1
                     && matches!(
                         tokens.get(after_type).map(|t| &t.kind),
                         Some(Token::Identifier(_))
@@ -4786,7 +4785,6 @@ impl PRT_Parser {
                     cursor = next_cursor;
                     continue;
                 }
-            }
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported trait item".to_string(),
                 span: tokens[cursor].span.clone(),

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
@@ -164,7 +164,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let source_path_str = source_path
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let source_map = source_text.map(|s| SourceMap::new(s));
+        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
@@ -179,21 +179,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             builder,
             current_fn: None,
             current_return_type: None,
-            variables: vec![HashMap::new()],
-            function_sigs: HashMap::new(),
-            function_name_to_symbol: HashMap::new(),
-            imported_function_links: HashMap::new(),
-            extern_globals: HashMap::new(),
-            global_variables: HashMap::new(),
-            struct_types: HashMap::new(),
-            struct_fields: HashMap::new(),
-            enum_backing_types: HashMap::new(),
-            enum_variants: HashMap::new(),
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variants: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::new(),
-            method_receivers: HashMap::new(),
-            string_constants: HashMap::new(),
-            struct_generics: HashMap::new(),
+            drop_flags: HashMap::default(),
+            method_receivers: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -237,7 +237,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let source_path_str = source_path
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let source_map = source_text.map(|s| SourceMap::new(s));
+        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
@@ -252,21 +252,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             builder,
             current_fn: None,
             current_return_type: None,
-            variables: vec![HashMap::new()],
-            function_sigs: HashMap::new(),
-            function_name_to_symbol: HashMap::new(),
-            imported_function_links: HashMap::new(),
-            extern_globals: HashMap::new(),
-            global_variables: HashMap::new(),
-            struct_types: HashMap::new(),
-            struct_fields: HashMap::new(),
-            enum_backing_types: HashMap::new(),
-            enum_variants: HashMap::new(),
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variants: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::new(),
-            method_receivers: HashMap::new(),
-            string_constants: HashMap::new(),
-            struct_generics: HashMap::new(),
+            drop_flags: HashMap::default(),
+            method_receivers: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -479,7 +479,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let source_path_str = source_path
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let source_map = source_text.map(|s| SourceMap::new(s));
+        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(p), Some(text)) => Some(DebugContext::new(&context, &module, p, text)),
@@ -494,21 +494,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             builder,
             current_fn: None,
             current_return_type: None,
-            variables: vec![HashMap::new()],
-            function_sigs: HashMap::new(),
-            function_name_to_symbol: HashMap::new(),
-            imported_function_links: HashMap::new(),
-            extern_globals: HashMap::new(),
-            global_variables: HashMap::new(),
-            struct_types: HashMap::new(),
-            struct_fields: HashMap::new(),
-            enum_backing_types: HashMap::new(),
-            enum_variants: HashMap::new(),
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variants: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::new(),
-            method_receivers: HashMap::new(),
-            string_constants: HashMap::new(),
-            struct_generics: HashMap::new(),
+            drop_flags: HashMap::default(),
+            method_receivers: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -776,7 +776,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         };
         let target_data = TargetData::create(
-            &self.module.get_data_layout().as_str().to_str().unwrap(),
+            self.module.get_data_layout().as_str().to_str().unwrap(),
         );
         let size = target_data.get_abi_size(&llvm_ty);
         Ok(self.context.i64_type().const_int(size, false).into())
@@ -797,7 +797,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let val = self.emit_expression_value(inner_expr)?;
         let llvm_ty = val.get_type();
         let target_data = TargetData::create(
-            &self.module.get_data_layout().as_str().to_str().unwrap(),
+            self.module.get_data_layout().as_str().to_str().unwrap(),
         );
         let size = target_data.get_abi_size(&llvm_ty);
 
@@ -935,7 +935,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
         result_phi.add_incoming(&result_incoming);
 
-        Ok(result_phi.as_basic_value().into())
+        Ok(result_phi.as_basic_value())
     }
 
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
@@ -1117,7 +1117,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         if let BasicTypeEnum::StructType(struct_ty) = lowered {
             let target_data =
-                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             let size = target_data.get_store_size(&struct_ty);
 
             match size {
@@ -1177,7 +1177,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else if abi_ty.is_struct_type() && value.get_type().is_struct_type() {
             // Struct-to-struct conversion: use memcpy
             let target_data =
-                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             let struct_ty = value.get_type().into_struct_type();
             let size = target_data.get_store_size(&struct_ty);
 
@@ -1232,7 +1232,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if native_ty.is_struct_type() && value.get_type().is_struct_type() {
             // Struct-to-struct conversion: use memcpy
             let target_data =
-                TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             let abi_struct_ty = value.get_type().into_struct_type();
             let size = target_data.get_store_size(&abi_struct_ty);
 
@@ -1283,9 +1283,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     fn build_memcpy(
         &self,
         dest: PointerValue<'ctx>,
-        dest_align: u32,
+        _dest_align: u32,
         src: PointerValue<'ctx>,
-        src_align: u32,
+        _src_align: u32,
         size: u64,
     ) -> CodegenResult<()> {
         // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
@@ -1336,12 +1336,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let target_data =
-            TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
 
         // Check if return type needs sret to calculate parameter offset
         let mut sret_offset: u32 = 0;
-        if let Some(ret_ty) = &sig.return_type {
-            if !Self::is_void_primitive(ret_ty) {
+        if let Some(ret_ty) = &sig.return_type
+            && !Self::is_void_primitive(ret_ty) {
                 let lowered_ret = self.lower_basic_type(ret_ty)?;
                 if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
                     let size = target_data.get_store_size(&struct_ty);
@@ -1362,7 +1362,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
-        }
 
         // Add byval attributes to user parameters (shifted by sret_offset)
         for (i, param_ty) in sig.params.iter().enumerate() {
@@ -1397,13 +1396,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         linkage: Option<ast::ExternLinkage>,
     ) -> CodegenResult<FunctionType<'ctx>> {
         let target_data =
-            TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
 
         // Check if return type needs sret (hidden pointer parameter)
         let mut needs_sret = false;
-        if let Some(ret) = return_type {
-            if !Self::is_void_primitive(ret) {
-                if let Some(link) = &linkage {
+        if let Some(ret) = return_type
+            && !Self::is_void_primitive(ret)
+                && let Some(_link) = &linkage {
                     let lowered_ret = self.lower_basic_type(ret)?;
                     if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
                         let size = target_data.get_store_size(&struct_ty);
@@ -1412,8 +1411,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 }
-            }
-        }
 
         let mut llvm_params = Vec::with_capacity(params.len() + if needs_sret { 1 } else { 0 });
 
@@ -1460,7 +1457,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     fn push_scope(&mut self) {
-        self.variables.push(HashMap::new());
+        self.variables.push(HashMap::default());
         self.defers.push(Vec::new());
     }
 
@@ -1552,11 +1549,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &self,
         name: &str,
     ) -> Option<(inkwell::values::GlobalValue<'ctx>, ast::Type)> {
-        if let Some(ty) = self.global_variables.get(name).cloned() {
-            if let Some(global) = self.module.get_global(name) {
+        if let Some(ty) = self.global_variables.get(name).cloned()
+            && let Some(global) = self.module.get_global(name) {
                 return Some((global, ty));
             }
-        }
         self.lookup_extern_global(name)
     }
 
@@ -1649,14 +1645,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map(|t| t.kind.clone())
                 .unwrap_or_else(|| ty.kind.clone()),
             ast::TypeKind::Named(named) => {
-                if named.path.len() == 1 && named.generics.is_none() {
-                    if let Some(mapped) = substitutions.get(&named.path[0].name) {
+                if named.path.len() == 1 && named.generics.is_none()
+                    && let Some(mapped) = substitutions.get(&named.path[0].name) {
                         return ast::Type {
                             kind: mapped.kind.clone(),
                             span: ty.span.clone(),
                         };
                     }
-                }
                 let generics = named.generics.as_ref().map(|args| {
                     args.iter()
                         .map(|arg| Self::substitute_generic_type(arg, substitutions))
@@ -1879,7 +1874,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 format!("cast_ptr_{}", Self::cast_method_name(&ptr.inner))
             }
             _ => {
-                format!("cast_custom")
+                "cast_custom".to_string()
             }
         }
     }
@@ -1919,7 +1914,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    fn extract_named_type<'a>(ty: &'a ast::Type) -> Option<&'a ast::NamedType> {
+    fn extract_named_type(ty: &ast::Type) -> Option<&ast::NamedType> {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => Some(named),
             ast::TypeKind::Reference(reference) => Self::extract_named_type(&reference.inner),
@@ -1938,7 +1933,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 target_type,
             } => {
                 Self::substitute_expression_types(expression, mapping);
-                *target_type = Box::new(Self::substitute_generic_type(target_type, mapping));
+                **target_type = Self::substitute_generic_type(target_type, mapping);
             }
             ast::ExpressionKind::TypeName(ty) => {
                 *ty = Self::substitute_generic_type(ty, mapping);
@@ -2144,7 +2139,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 continue;
             }
 
-            let mut mapping: HashMap<String, ast::Type> = HashMap::new();
+            let mut mapping: HashMap<String, ast::Type> = HashMap::default();
             let mut valid = true;
             for (template_arg, concrete_arg) in template_args.iter().zip(receiver_args.iter()) {
                 let ast::TypeKind::Named(named) = template_arg.kind.as_ref() else {
@@ -2213,7 +2208,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let saved_variables = std::mem::take(&mut self.variables);
 
                 self.defers.push(Vec::new());
-                self.variables.push(HashMap::new());
+                self.variables.push(HashMap::default());
 
                 self.emit_function_body(
                     function,
@@ -2498,9 +2493,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         if let Some(debug) = &mut self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(&fn_span);
+            let (line, _col, _, _) = debug.source_map.span_to_line_col(fn_span);
             let subroutine_type = debug.create_subroutine_type(
-                return_type.map(|_| debug.di_types.get("i32").copied()).flatten(),
+                return_type.and_then(|_| debug.di_types.get("i32").copied()),
                 &[],
             );
             let subprogram = debug.create_function(
@@ -2520,7 +2515,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.builder.position_at_end(entry);
 
         if let Some(debug) = &self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(&fn_span);
+            let (line, col, _, _) = debug.source_map.span_to_line_col(fn_span);
             let loc = debug.create_debug_location(self.context, line, col);
             self.builder.set_current_debug_location(loc);
         }
@@ -2872,7 +2867,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let mut values = Vec::with_capacity(declared_fields.len());
 
                 if named_mode {
-                    let mut by_name: HashMap<String, &ast::Expression> = HashMap::new();
+                    let mut by_name: HashMap<String, &ast::Expression> = HashMap::default();
                     for item in items {
                         match item {
                             ast::InitializerItem::Field { name, value } => {
@@ -3116,11 +3111,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
-                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref() {
-                    if let Some(value) = self.enum_member_constant(&owner.name, &field.name) {
+                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
+                    && let Some(value) = self.enum_member_constant(&owner.name, &field.name) {
                         return Ok(value);
                     }
-                }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
                 self.builder
@@ -3233,8 +3227,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Index { object, index } => {
                 // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
                 let object_ty = self.resolve_receiver_type(object);
-                if let Some(ty) = &object_ty {
-                    if matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
+                if let Some(ty) = &object_ty
+                    && matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
                         let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                         let llvm_ty = self.lower_basic_type(&ty)?;
                         return self.builder
@@ -3246,7 +3240,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 )
                             });
                     }
-                }
                 // For non-pointer types (struct, slice), use the trait path (__index_get)
                 let method_ident = ast::Identifier { name: "__index_get".to_string(), span: expr.span.clone() };
                 let result = self.emit_method_call_expression(object, &method_ident, &[*index.clone()], false, &expr.span)?;
@@ -3257,10 +3250,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(ptr.as_basic_value_enum())
             }
             ast::ExpressionKind::MacroCall { name, args } => {
-                match crate::builtin_macros::handle_codegen(&name.name, self, expr, args) {
-                    Some(result) => return result,
-                    None => {}
-                }
+                if let Some(result) = crate::builtin_macros::handle_codegen(&name.name, self, expr, args) { return result }
                 Err(CodegenError::with_span(
                     format!("unknown builtin macro '@{}'", name.name),
                     expr.span.clone(),
@@ -3272,14 +3262,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )),
             ast::ExpressionKind::Move(inner) => {
                 let value = self.emit_expression_value(inner)?;
-                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
-                    if let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
+                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref()
+                    && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
                         self.builder.build_store(
                             flag_ptr,
                             self.context.bool_type().const_int(0, false),
                         ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
                     }
-                }
                 Ok(value)
             }
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
@@ -3322,7 +3311,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )
             })?;
 
-        let mut provided_by_name: HashMap<String, &ast::FieldInit> = HashMap::new();
+        let mut provided_by_name: HashMap<String, &ast::FieldInit> = HashMap::default();
         for field in fields {
             if provided_by_name
                 .insert(field.name.name.clone(), field)
@@ -3543,7 +3532,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .any(|item| matches!(item, ast::InitializerItem::Field { .. }));
 
                 if named_mode {
-                    let mut by_name: HashMap<String, &ast::Expression> = HashMap::new();
+                    let mut by_name: HashMap<String, &ast::Expression> = HashMap::default();
                     for item in items {
                         match item {
                             ast::InitializerItem::Field { name, value } => {
@@ -4201,10 +4190,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
                 match object_ty.kind.as_ref() {
                     ast::TypeKind::Slice(_slice) => {
-                        return Err(CodegenError::with_span(
+                        Err(CodegenError::with_span(
                             "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
                             object.span.clone(),
-                        ));
+                        ))
                     }
                     ast::TypeKind::Pointer(pointer) => {
                         let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
@@ -4261,10 +4250,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         Ok((element_ptr, (*pointer.inner).clone()))
                     }
                     _ => {
-                        return Err(CodegenError::with_span(
+                        Err(CodegenError::with_span(
                             "index access currently supports only array and pointer values",
                             object.span.clone(),
-                        ));
+                        ))
                     }
                 }
             }
@@ -4338,7 +4327,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let llvm_name = if let Some(generics) = explicit_generics {
             if !generics.is_empty() {
-                let type_args: Vec<Type> = generics.iter().map(|t| Type::from_ast(t)).collect();
+                let type_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
                 let mangled = crate::semantic::monomorph::mangle_name(&fn_name, &type_args);
                 self.imported_function_links.get(&mangled).cloned().unwrap_or(mangled)
             } else {
@@ -4392,11 +4381,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
 
         // Add byval attributes to call site for large struct arguments
-        if let Some(sig) = &signature {
-            if let Some(linkage) = &sig.linkage {
-                if matches!(linkage, ast::ExternLinkage::C) {
+        if let Some(sig) = &signature
+            && let Some(linkage) = &sig.linkage
+                && matches!(linkage, ast::ExternLinkage::C) {
                     let target_data =
-                        TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                        TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
                     for (index, param_ty) in sig.params.iter().enumerate() {
                         let lowered = self.lower_basic_type(param_ty)?;
                         if let BasicTypeEnum::StructType(struct_ty) = lowered {
@@ -4417,16 +4406,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 }
-            }
-        }
         if let Some(value) = call.try_as_basic_value().basic() {
-            if let Some(signature) = &signature {
-                if let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
+            if let Some(signature) = &signature
+                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
                     return Ok(Some(
                         self.uncoerce_value_from_abi(value, ret_ty, linkage)?,
                     ));
                 }
-            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -4648,23 +4634,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
         // If this is an explicit drop() call, clear the drop flag so
         // the implicit destructor at scope exit doesn't double-free.
-        if method.name == "drop" {
-            if let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref() {
-                if let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
+        if method.name == "drop"
+            && let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref()
+                && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
                     self.builder.build_store(
                         flag_ptr,
                         self.context.bool_type().const_int(0, false),
                     ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
                 }
-            }
-        }
 
         // Add byval attributes to call site for large struct arguments
-        if let Some(sig) = &signature {
-            if let Some(linkage) = &sig.linkage {
-                if matches!(linkage, ast::ExternLinkage::C) {
+        if let Some(sig) = &signature
+            && let Some(linkage) = &sig.linkage
+                && matches!(linkage, ast::ExternLinkage::C) {
                     let target_data =
-                        TargetData::create(&self.module.get_data_layout().as_str().to_str().unwrap());
+                        TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
                     for (index, param_ty) in sig.params.iter().enumerate() {
                         let lowered = self.lower_basic_type(param_ty)?;
                         if let BasicTypeEnum::StructType(struct_ty) = lowered {
@@ -4685,15 +4669,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 }
-            }
-        }
 
         if let Some(value) = call.try_as_basic_value().basic() {
-            if let Some(signature) = &signature {
-                if let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
+            if let Some(signature) = &signature
+                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
                     return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
                 }
-            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -4753,8 +4734,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         // Check for operator overload on struct types
         let operand_val = self.emit_expression_value(operand)?;
-        if operand_val.get_type().is_struct_type() {
-            if let Some(method_name) = unary_operator_method_name(operator) {
+        if operand_val.get_type().is_struct_type()
+            && let Some(method_name) = unary_operator_method_name(operator) {
                 let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
                 let result = self.emit_method_call_expression(
                     operand, &method_ident, &[], false, &whole_expr.span
@@ -4763,7 +4744,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return Ok(val);
                 }
             }
-        }
         match operator {
             ast::UnaryOperator::Plus => self.emit_expression_value(operand),
             ast::UnaryOperator::Minus => {
@@ -4985,8 +4965,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 operand,
             } => {
                 // *ptr = val — check pointer/reference type mutability
-                if let ast::ExpressionKind::Identifier(ident) = operand.kind.as_ref() {
-                    if let Some(ty) = self.lookup_value_type(&ident.name) {
+                if let ast::ExpressionKind::Identifier(ident) = operand.kind.as_ref()
+                    && let Some(ty) = self.lookup_value_type(&ident.name) {
                         match ty.kind.as_ref() {
                             ast::TypeKind::Pointer(ptr) if !ptr.is_mutable => {
                                 return Err(CodegenError::with_span(
@@ -5003,7 +4983,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             _ => {}
                         }
                     }
-                }
                 Ok(())
             }
             _ => Ok(()),
@@ -5028,7 +5007,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For Index on a non-pointer type, emit __index_set instead of direct store
                 if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref() {
                     let object_ty = self.resolve_receiver_type(object);
-                    if !object_ty.map_or(false, |ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))) {
+                    if !object_ty.is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))) {
                         self.check_assignment_mutability(left)?;
                         let value = self.emit_expression_value(right)?;
                         let method_ident = ast::Identifier { name: "__index_set".to_string(), span: left.span.clone() };
@@ -5080,7 +5059,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if let Some(method_name) = operator_method_name(&bin_op) {
                         let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
                         let result = self.emit_method_call_expression(
-                            left, &method_ident, &[right.clone()], false, &whole_expr.span
+                            left, &method_ident, std::slice::from_ref(right), false, &whole_expr.span
                         )?;
                         if let Some(val) = result {
                             val
@@ -5104,27 +5083,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => {
                 // For str equality (==, !=), use strcmp instead of pointer comparison
-                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual) {
-                    if self.expression_is_str_type(left) || self.expression_is_str_type(right) {
+                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual)
+                    && (self.expression_is_str_type(left) || self.expression_is_str_type(right)) {
                         let lhs = self.emit_expression_value(left)?;
                         let rhs = self.emit_expression_value(right)?;
                         return self.emit_strcmp_comparison(lhs, operator, rhs, whole_expr);
                     }
-                }
 
                 let lhs = self.emit_expression_value(left)?;
                 // For struct types, use trait method call instead of inline IR
-                if lhs.get_type().is_struct_type() {
-                    if let Some(method_name) = operator_method_name(operator) {
+                if lhs.get_type().is_struct_type()
+                    && let Some(method_name) = operator_method_name(operator) {
                         let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
                         let result = self.emit_method_call_expression(
-                            left, &method_ident, &[right.clone()], false, &whole_expr.span
+                            left, &method_ident, std::slice::from_ref(right), false, &whole_expr.span
                         )?;
                         if let Some(val) = result {
                             return Ok(val);
                         }
                     }
-                }
                 let mut rhs = self.emit_expression_value(right)?;
                 if rhs.get_type() != lhs.get_type() {
                     rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
@@ -5143,7 +5120,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Literal(ast::Literal::String(_)) => true,
             ast::ExpressionKind::Identifier(ident) => self
                 .lookup_value_type(&ident.name)
-                .map_or(false, |ty| *ty.kind == str_ty),
+                .is_some_and(|ty| *ty.kind == str_ty),
             ast::ExpressionKind::Cast { target_type, .. } => *target_type.kind == str_ty,
             _ => false,
         }
@@ -5759,7 +5736,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         condition: &ast::Expression,
         then_branch: &ast::Block,
         else_branch: Option<&ast::Block>,
-        span: &Span,
+        _span: &Span,
     ) -> CodegenResult<()> {
         let function = self
             .current_fn
@@ -5931,7 +5908,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         is_mutable: bool,
         iterable: &ast::Expression,
         body: &ast::Block,
-        item_type: Option<&ast::Type>,
+        _item_type: Option<&ast::Type>,
         span: &Span,
     ) -> CodegenResult<()> {
         let function = self
@@ -6077,7 +6054,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let owners = self.receiver_owner_candidates(&iterable_expr);
                     let mut found = None;
                     for owner_name in &owners {
-                        let mangled = Self::mangle_method_name(&owner_name, &into_iter_ident.name);
+                        let mangled = Self::mangle_method_name(owner_name, &into_iter_ident.name);
                         if let Some(sig) = self.signature_for_name(&mangled) {
                             found = sig.return_type;
                             break;
@@ -6135,13 +6112,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
 
-                let item_llvm_ty = {
+                let _item_llvm_ty = {
                     let owners = self.receiver_owner_candidates(&iter_expr);
                     let mut found = None;
                     for owner_name in &owners {
                         let mangled = Self::mangle_method_name(owner_name, &next_ident.name);
-                        if let Some(sig) = self.signature_for_name(&mangled) {
-                            if let Some(return_type) = &sig.return_type {
+                        if let Some(sig) = self.signature_for_name(&mangled)
+                            && let Some(return_type) = &sig.return_type {
                                 let inner = match return_type.kind.as_ref() {
                                     ast::TypeKind::Optional(inner) => Some(inner.as_ref()),
                                     ast::TypeKind::Named(named) if named.path.last().map(|s| s.name.as_str()) == Some("Optional") => {
@@ -6154,7 +6131,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     break;
                                 }
                             }
-                        }
                     }
                     found.unwrap_or_else(|| self.context.i64_type().as_basic_type_enum())
                 };
@@ -6819,7 +6795,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         _visibility: &ast::Visibility,
         _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        let mut variants = HashMap::new();
+        let mut variants = HashMap::default();
         let mut next_value = 0i128;
         let mut min_value = 0i128;
         let mut max_value = 0i128;

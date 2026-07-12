@@ -13,3 +13,7 @@ runtime = { path = "silver_runtime" }
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[workspace.lints.clippy]
+disallowed_types = "deny"
+large_enum_variant = "deny"

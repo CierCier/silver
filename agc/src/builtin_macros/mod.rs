@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::CodegenResult;
@@ -27,10 +27,16 @@ pub struct MacroRegistry {
     handlers: HashMap<String, Box<dyn MacroHandler>>,
 }
 
+impl Default for MacroRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MacroRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
-            handlers: HashMap::new(),
+            handlers: HashMap::default(),
         };
         registry.register("size", Box::new(SizeHandler));
         registry.register("hash", Box::new(HashHandler));

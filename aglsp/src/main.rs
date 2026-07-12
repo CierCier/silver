@@ -6,7 +6,7 @@ mod util;
 
 use agc::parser::ast;
 use agc::module_loader::ModuleLoader;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result;
@@ -142,9 +142,9 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        cache: Mutex::new(HashMap::new()),
+        cache: Mutex::new(HashMap::default()),
         loader: build_lsp_loader(),
-        file_cache: Mutex::new(HashMap::new()),
+        file_cache: Mutex::new(HashMap::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

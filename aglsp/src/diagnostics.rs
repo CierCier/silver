@@ -4,7 +4,7 @@ use agc::parser::ast::{self, ItemKind};
 use agc::parser::{FileImportResolverHook, Parser};
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_table::CompilerSymbolTable;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::format::*;
@@ -27,7 +27,7 @@ impl Backend {
                     .collect();
                 self.cache.lock().insert(
                     uri.clone(),
-                    (text.to_string(), HashMap::new(), HashMap::new(), HashMap::new()),
+                    (text.to_string(), HashMap::default(), HashMap::default(), HashMap::default()),
                 );
                 self.client
                     .publish_diagnostics(uri.clone(), diags, None)
@@ -76,7 +76,7 @@ impl Backend {
 
         // Build struct size map for hover display.
         let struct_map: HashMap<String, usize> = {
-            let mut m = HashMap::new();
+            let mut m = HashMap::default();
             for item in &program.items {
                 if let ItemKind::Struct(s) = &item.kind {
                     let packed = is_repr_packed(&item.attributes);
@@ -166,7 +166,7 @@ impl Backend {
 
 /// Collect top‑level definition names and their spans (current file only).
 pub(crate) fn collect_definitions(program: &ast::Program, source_len: usize) -> HashMap<String, Span> {
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     for item in &program.items {
         let (name, span) = match &item.kind {
             ItemKind::Import(_) => continue,

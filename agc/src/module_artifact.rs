@@ -376,16 +376,13 @@ impl ModuleArtifact {
         let (ast, errors) = parser.parse_program();
 
         if !errors.is_empty() {
-            return Err(format!(
-                "{}",
-                diagnostics::render(
+            return Err(diagnostics::render(
                     &src,
                     &path.display().to_string(),
                     errors[0].span().clone(),
                     &errors[0].format_with_help(),
                     diagnostics::Severity::Error,
-                )
-            ));
+                ).to_string());
         }
 
         let module_path = module_path_from_path(path);

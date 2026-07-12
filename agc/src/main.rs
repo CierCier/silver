@@ -651,7 +651,7 @@ fn main() {
             };
              let mut native_libs = plan.libs.clone();
             let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
-            let mut dependency_artifact_set: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+            let mut dependency_artifact_set: rustc_hash::FxHashSet<PathBuf> = rustc_hash::FxHashSet::default();
 
             for input in &plan.inputs {
                 profiler.begin_phase("read source");

@@ -131,7 +131,7 @@ pub fn read_rss_kb() -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest.trim().split_whitespace().next()?.parse().ok();
+            return rest.split_whitespace().next()?.parse().ok();
         }
     }
     None

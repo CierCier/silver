@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -7,14 +7,14 @@ use crate::types::Type;
 #[derive(Debug, Clone)]
 pub enum MonomorphRequest {
     Function {
-        source: ast::FunctionItem,
+        source: Box<ast::FunctionItem>,
         type_params: Vec<String>,
         mapping: HashMap<String, Type>,
         call_span: Span,
     },
     ImplMethod {
-        impl_item: ast::ImplItem,
-        method: ast::ImplFunction,
+        impl_item: Box<ast::ImplItem>,
+        method: Box<ast::ImplFunction>,
         type_params: Vec<String>,
         mapping: HashMap<String, Type>,
         call_span: Span,
@@ -28,10 +28,10 @@ pub fn append_monomorphs(
     let generic_types = collect_generic_types(program);
     let generic_impls = collect_generic_impls(program);
     let generic_fns = collect_generic_fns(program);
-    let mut generated = HashSet::new();
+    let mut generated = HashSet::default();
     let mut all_new_items = Vec::new();
 
-    let mut instantiations = HashMap::new();
+    let mut instantiations = HashMap::default();
     collect_struct_instantiations(program, &generic_types, &mut instantiations);
 
     for (key, inst) in instantiations.iter() {
@@ -80,7 +80,7 @@ enum GenericTypeItem {
 }
 
 fn collect_generic_types(program: &ast::Program) -> HashMap<String, GenericTypeItem> {
-    let mut types = HashMap::new();
+    let mut types = HashMap::default();
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Struct(struct_item) => {
@@ -232,7 +232,7 @@ fn collect_item_instantiations(
         ast::ItemKind::Impl(impl_item) => {
             push_type_params(scopes, impl_item.generics.as_ref());
             if impl_item.generics.is_none() {
-                let mut implicit = HashSet::new();
+                let mut implicit = HashSet::default();
                 collect_implicit_type_params(&impl_item.self_type, &mut implicit);
                 if let Some(scope) = scopes.last_mut() {
                     scope.extend(implicit);
@@ -711,6 +711,7 @@ fn instantiate_requests(
                 mapping,
                 call_span,
             } => {
+                let source = source.as_ref();
                 let args = ordered_args(type_params, mapping);
 
                 // Compute parameter type signature to disambiguate overloaded generic functions
@@ -767,6 +768,8 @@ fn instantiate_requests(
                 mapping,
                 call_span,
             } => {
+                let impl_item = impl_item.as_ref();
+                let method = method.as_ref();
                 let args = ordered_args(type_params, mapping);
                 let base = impl_self_base_name(&impl_item.self_type).unwrap_or_default();
                 let mangled = mangle_name(&base, &args);
@@ -1546,7 +1549,7 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
 }
 
 fn push_type_params(scopes: &mut Vec<HashSet<String>>, generics: Option<&ast::Generics>) {
-    let mut params = HashSet::new();
+    let mut params = HashSet::default();
     if let Some(generics) = generics {
         for param in &generics.params {
             if let ast::GenericParam::Type(type_param) = param {
@@ -1655,7 +1658,7 @@ fn build_mapping_from_generics(
     generics: Option<&ast::Generics>,
     args: &[Type],
 ) -> HashMap<String, Type> {
-    let mut mapping = HashMap::new();
+    let mut mapping = HashMap::default();
     if let Some(generics) = generics {
         for (param, arg) in generics.params.iter().zip(args.iter()) {
             if let ast::GenericParam::Type(type_param) = param {
@@ -1714,7 +1717,7 @@ mod tests {
         let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
 
         let requests = vec![MonomorphRequest::Function {
-            source,
+            source: Box::new(source),
             type_params,
             mapping,
             call_span: Span { start: 0, end: 0 },
@@ -1739,7 +1742,7 @@ mod tests {
         ]);
 
         let requests = vec![MonomorphRequest::Function {
-            source,
+            source: Box::new(source),
             type_params,
             mapping,
             call_span: Span { start: 0, end: 0 },
@@ -1761,7 +1764,7 @@ mod tests {
         let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
 
         let request = MonomorphRequest::Function {
-            source,
+            source: Box::new(source),
             type_params,
             mapping,
             call_span: Span { start: 0, end: 0 },
@@ -1784,7 +1787,7 @@ mod tests {
         let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
 
         let requests = vec![MonomorphRequest::Function {
-            source,
+            source: Box::new(source),
             type_params,
             mapping,
             call_span: Span { start: 0, end: 0 },
@@ -1946,7 +1949,7 @@ fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<
 
 /// Collect names of all generic functions (functions with generic type parameters).
 fn collect_generic_fns(program: &ast::Program) -> HashSet<String> {
-    let mut fns = HashSet::new();
+    let mut fns = HashSet::default();
     for item in &program.items {
         if let ast::ItemKind::Function(func) = &item.kind {
             if func.generics.is_some() {
@@ -2224,7 +2227,7 @@ fn collect_remaining_function_requests(
                         .unwrap_or(0)
             {
                 requests.push(MonomorphRequest::Function {
-                    source: source.clone(),
+                    source: Box::new(source.clone()),
                     type_params,
                     mapping,
                     call_span,
