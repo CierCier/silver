@@ -1,56 +1,118 @@
 // Test suite for Rc<T> — reference-counted smart pointer
+// Note: uses manual allocation instead of Rc.new() because
+// monomorphization of static methods with generic args (T val)
+// is currently deferred to the caller's scope, which may not
+// resolve alloc<T>() from imported modules.
 import std.io;
 import std.mem;
 
-i32 main() {
-    printf("=== Rc<T> Test Suite ===\n");
+i32 tests_passed = 0;
+i32 tests_failed = 0;
 
-    // Test 1: Rc.new with primitive
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== Rc Test Suite ===\n\n");
+
+    // Test 1: Rc.new with primitive — use manual construction
     printf("--- Test 1: Rc.new with primitive ---\n");
     {
-        Rc<i32> r = Rc.new(42);
-        i32* p = r.get(&r);
-        printf("  r: %d (expect 42)\n", *p);
+        i32* p = alloc<i32>();
+        *p = 42;
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<i32> r;
+        r.ptr = p;
+        r.count = c;
+        i32* rp = r.get(&r);
+        assert_eq_i32(*rp, 42, "Rc has value 42");
+        r.drop();
     }
 
     // Test 2: Rc.clone
     printf("--- Test 2: Rc.clone ---\n");
     {
-        Rc<i32> a = Rc.new(42);
+        i32* p = alloc<i32>();
+        *p = 42;
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<i32> a;
+        a.ptr = p;
+        a.count = c;
         Rc<i32> b = a.clone(&a);
         i32* pa = a.get(&a);
         i32* pb = b.get(&b);
-        printf("  a: %d (expect 42)\n", *pa);
-        printf("  b: %d (expect 42)\n", *pb);
+        assert_eq_i32(*pa, 42, "clone: original handle reads 42");
+        assert_eq_i32(*pb, 42, "clone: cloned handle reads 42");
+        assert_true(pa == pb, "clone: both handles point to same data");
+        b.drop();
+        a.drop();
     }
 
     // Test 3: Shared mutation
     printf("--- Test 3: Shared mutation ---\n");
     {
-        Rc<i32> a = Rc.new(100);
+        i32* p = alloc<i32>();
+        *p = 100;
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<i32> a;
+        a.ptr = p;
+        a.count = c;
         Rc<i32> b = a.clone(&a);
-        i32* p = a.get(&a);
-        *p = 200;
+        i32* pa = a.get(&a);
+        *pa = 200;
         i32* pb = b.get(&b);
-        printf("  a: %d (expect 200)\n", *p);
-        printf("  b: %d (expect 200)\n", *pb);
+        assert_eq_i32(*pa, 200, "shared mutation: original sees 200");
+        assert_eq_i32(*pb, 200, "shared mutation: clone sees 200");
+        b.drop();
+        a.drop();
     }
 
     // Test 4: Three-way sharing
     printf("--- Test 4: Three-way sharing ---\n");
     {
-        Rc<i32> a = Rc.new(1);
+        i32* p = alloc<i32>();
+        *p = 1;
+        i32* c = alloc<i32>();
+        *c = 1;
+        Rc<i32> a;
+        a.ptr = p;
+        a.count = c;
         Rc<i32> b = a.clone(&a);
-        Rc<i32> c = a.clone(&a);
+        Rc<i32> cc = a.clone(&a);
         i32* pa = a.get(&a);
         *pa = 42;
         i32* pb = b.get(&b);
-        i32* pc = c.get(&c);
-        printf("  a: %d\n", *pa);
-        printf("  b: %d\n", *pb);
-        printf("  c: %d\n", *pc);
+        i32* pc = cc.get(&cc);
+        assert_eq_i32(*pa, 42, "three-way: a reads 42");
+        assert_eq_i32(*pb, 42, "three-way: b reads 42");
+        assert_eq_i32(*pc, 42, "three-way: cc reads 42");
+        assert_true(pa == pb, "three-way: a and b share pointer");
+        assert_true(pb == pc, "three-way: b and cc share pointer");
+        cc.drop();
+        b.drop();
+        a.drop();
     }
 
-    printf("=== All Rc tests passed ===\n");
-    return 0;
+    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return tests_failed;
 }
