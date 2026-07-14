@@ -28,44 +28,6 @@ impl CodegenError {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct TextEmitter {
-    output: String,
-    indent: usize,
-}
-
-impl TextEmitter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push_line(&mut self, line: &str) {
-        if !line.is_empty() {
-            let pad = " ".repeat(self.indent * 4);
-            self.output.push_str(&pad);
-        }
-        self.output.push_str(line);
-        self.output.push('\n');
-    }
-
-    pub fn push(&mut self, text: &str) {
-        self.output.push_str(text);
-    }
-
-    pub fn indent(&mut self) {
-        self.indent += 1;
-    }
-
-    pub fn dedent(&mut self) {
-        if self.indent > 0 {
-            self.indent -= 1;
-        }
-    }
-
-    pub fn finish(self) -> String {
-        self.output
-    }
-}
 
 pub trait SilverGenerator {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()>;

@@ -1028,67 +1028,6 @@ impl TypeChecker {
 
                     left_ty
                 }
-                ast::BinaryOperator::AddAssign
-                | ast::BinaryOperator::SubtractAssign
-                | ast::BinaryOperator::MultiplyAssign
-                | ast::BinaryOperator::DivideAssign
-                | ast::BinaryOperator::ModuloAssign => {
-                    let left_ty = self.check_expr(left, None);
-                    let right_ty = self.check_expr(right, None);
-                    if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
-                        self.error(
-                            format!(
-                                "assignment type mismatch: {} = {}",
-                                left_ty, right_ty
-                            ),
-                            expr.span.clone(),
-                        );
-                    }
-                    // Check mutability of assignment target
-                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref() {
-                        if let Some((_, is_mut)) = self.lookup(&ident.name) {
-                            if !is_mut {
-                                self.error(
-                                    format!("cannot assign to const variable '{}'", ident.name),
-                                    ident.span.clone(),
-                                );
-                            }
-                        }
-                    }
-                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref() {
-                        if let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref() {
-                            if let Some((_, is_mut)) = self.lookup(&ident.name) {
-                                if !is_mut {
-                                    self.error(
-                                        format!("cannot assign to field of const variable '{}'", ident.name),
-                                        ident.span.clone(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Try operator overload for compound assignment
-                    if !self.is_primitive_type(&left_ty)
-                        && matches!(operator,
-                            ast::BinaryOperator::AddAssign
-                            | ast::BinaryOperator::SubtractAssign
-                            | ast::BinaryOperator::MultiplyAssign
-                            | ast::BinaryOperator::DivideAssign
-                            | ast::BinaryOperator::ModuloAssign)
-                    {
-                        let bin_op = match operator {
-                            ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
-                            ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
-                            ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
-                            ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
-                            ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
-                            _ => unreachable!(),
-                        };
-                        self.resolve_operator_overload(&left_ty, &right_ty, &bin_op, expr);
-                    }
-
-                    left_ty
-                }
                 ast::BinaryOperator::Range => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
