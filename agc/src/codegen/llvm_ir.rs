@@ -804,9 +804,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             i64_ty.const_int(size, false)
         };
 
+        let function = self.current_fn
+            .ok_or_else(|| CodegenError::new("no active function for hash alloca"))?;
+
         // Alloca the value so we can iterate its raw bytes
-        let alloca = self.builder.build_alloca(llvm_ty, "hash_val")
-            .map_err(|e| CodegenError::new(format!("hash alloca: {e}")))?;
+        let alloca = self.create_entry_alloca(function, "hash_val", llvm_ty)?;
         self.builder.build_store(alloca, val)
             .map_err(|e| CodegenError::new(format!("hash store: {e}")))?;
 
@@ -1148,10 +1150,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(value);
         }
 
+        let function = self.current_fn
+            .ok_or_else(|| CodegenError::new("no active function for ABI coercion"))?;
+
         let alloca = self
-            .builder
-            .build_alloca(value.get_type(), "abi_coercion_tmp")
-            .map_err(|e| CodegenError::new(format!("failed to alloca for ABI coercion: {e}")))?;
+            .create_entry_alloca(function, "abi_coercion_tmp", value.get_type())?;
         self.builder
             .build_store(alloca, value)
             .map_err(|e| CodegenError::new(format!("failed to store for ABI coercion: {e}")))?;
@@ -1167,9 +1170,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let size = target_data.get_store_size(&struct_ty);
 
             let abi_alloca = self
-                .builder
-                .build_alloca(abi_ty, "abi_coercion_tmp2")
-                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct coercion: {e}")))?;
+                .create_entry_alloca(function, "abi_coercion_tmp2", abi_ty)?;
 
             self.build_memcpy(abi_alloca, 1, alloca, 1, size)?;
 
@@ -1199,11 +1200,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(value);
         }
-
         let native_ty = self.lower_basic_type(ty)?;
         if native_ty == value.get_type() {
             return Ok(value);
         }
+
+        let function = self.current_fn
+            .ok_or_else(|| CodegenError::new("no active function for ABI uncoercion"))?;
 
         if value.get_type().is_pointer_type() && !native_ty.is_pointer_type() {
             // Large struct returned by pointer (unlikely for many C functions but possible)
@@ -1222,14 +1225,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let size = target_data.get_store_size(&abi_struct_ty);
 
             let native_alloca = self
-                .builder
-                .build_alloca(native_ty, "abi_uncoercion_tmp")
-                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct uncoercion: {e}")))?;
+                .create_entry_alloca(function, "abi_uncoercion_tmp", native_ty)?;
 
             let abi_alloca = self
-                .builder
-                .build_alloca(value.get_type(), "abi_uncoercion_tmp2")
-                .map_err(|e| CodegenError::new(format!("failed to alloca for ABI struct uncoercion: {e}")))?;
+                .create_entry_alloca(function, "abi_uncoercion_tmp2", value.get_type())?;
 
             self.builder
                 .build_store(abi_alloca, value)
@@ -1246,9 +1245,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let alloca = self
-            .builder
-            .build_alloca(value.get_type(), "abi_uncoercion_tmp")
-            .map_err(|e| CodegenError::new(format!("failed to alloca for ABI uncoercion: {e}")))?;
+            .create_entry_alloca(function, "abi_uncoercion_tmp", value.get_type())?;
         self.builder
             .build_store(alloca, value)
             .map_err(|e| CodegenError::new(format!("failed to store for ABI uncoercion: {e}")))?;
@@ -7653,6 +7650,27 @@ mod tests {
         assert!(
             count >= 2,
             "expected at least 2 string globals (two unique strings), got {count}:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn abi_coercion_alloca_in_entry_block() {
+        // An extern C function taking a struct triggers ABI coercion on x86_64.
+        // The resulting IR should contain an abi_coercion_tmp alloca (now in the entry block
+        // via create_entry_alloca rather than at the current builder position).
+        let ir = lower_to_llvm(
+            "extern \"C\" {
+                void modify_point(i32 x, i32 y);
+            }
+            i32 main() {
+                modify_point(1, 2);
+                return 0;
+            }",
+        );
+        // The IR should contain the extern function declaration.
+        assert!(
+            ir.contains("modify_point"),
+            "expected extern function declaration in IR:\n{ir}"
         );
     }
 }
