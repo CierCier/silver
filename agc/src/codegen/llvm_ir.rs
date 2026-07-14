@@ -7625,4 +7625,53 @@ mod tests {
         );
         assert!(!ir.contains("__add"), "primitive add should not call __add:\n{ir}");
     }
+
+    #[test]
+    fn optimization_removes_trivial_alloca() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+
+        // Build a simple function: i32 test() { i32 x = 42; return x; }
+        let i32_type = context.i32_type();
+        let fn_type = i32_type.fn_type(&[], false);
+        let fn_val = module.add_function("test", fn_type, None);
+
+        let entry = context.append_basic_block(fn_val, "entry");
+        builder.position_at_end(entry);
+
+        // Create an alloca for the local variable, store and load
+        let alloca = builder.build_alloca(i32_type, "x").expect("alloca should succeed");
+        let const_42 = i32_type.const_int(42, false);
+        builder.build_store(alloca, const_42);
+        let loaded = builder.build_load(i32_type, alloca, "loaded").expect("load should succeed");
+        builder.build_return(Some(&loaded));
+
+        // Set up target machine
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple).expect("failed to create target");
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .expect("failed to create target machine");
+        module.set_data_layout(&machine.get_target_data().get_data_layout());
+
+        // Run optimization pipeline
+        run_module_optimization_passes(&module, &machine, Some("2"))
+            .expect("optimization should succeed");
+
+        let post = module.to_string();
+        assert!(
+            !post.contains("alloca"),
+            "expected no alloca after optimization:\n{post}"
+        );
+    }
 }
+
