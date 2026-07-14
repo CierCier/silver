@@ -235,6 +235,35 @@ i32 main() {
     }
     free(ptrs);
     
+    
+    // Test: Arena allocation alignment
+    printf("\n--- Arena Allocation Alignment ---\n");
+    
+    {
+        Arena arena = Arena.new(1024);
+        
+        // Allocate a u8 first (odd size, may offset from alignment)
+        u8* byte_ptr = arena_alloc<u8>(&arena);
+        *byte_ptr = 0;
+        
+        // Allocate an f64 — should be 8-byte aligned
+        f64* double_ptr = arena_alloc<f64>(&arena);
+        *double_ptr = 3.14;
+        assert_true(((i64)double_ptr % 8) == 0, "f64 after u8 is 8-byte aligned");
+        
+        // Allocate another u8 to create odd offset again
+        byte_ptr = arena_alloc<u8>(&arena);
+        *byte_ptr = 0;
+        
+        // arena_alloc_n<f64>(3) — should also be 8-byte aligned
+        f64* triple = arena_alloc_n<f64>(&arena, 3);
+        triple[0] = 1.0;
+        triple[1] = 2.0;
+        triple[2] = 3.0;
+        assert_true(((i64)triple % 8) == 0, "arena_alloc_n<f64>(3) after odd offset is 8-byte aligned");
+        
+        arena.drop();
+    }
     // Summary
     printf("\n=== Results ===\n");
     printf("Passed: %d\n", tests_passed);
