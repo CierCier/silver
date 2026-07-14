@@ -50,27 +50,44 @@ impl Arena {
     }
 }
 
+/// Align `value` up to the nearest multiple of `alignment`.
+/// Internal helper for arena alignment.
+i64 align_up(i64 value, i64 alignment) {
+    if (alignment <= 1) {
+        return value;
+    }
+    i64 remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    return value + alignment - remainder;
+}
+
 /// Allocate space for one `T` from arena `a`.
 /// Returns `(T*)0` if out of memory.
 pub T* arena_alloc<T>(Arena* a) {
+    i64 alignment = 16;
+    i64 aligned_offset = align_up((*a).offset, alignment);
     i64 needed = @size(T);
-    i64 new_offset = (*a).offset + needed;
+    i64 new_offset = aligned_offset + needed;
     if (new_offset > (*a).capacity) {
         return (T*)0;
     }
-    i64 addr = (i64)(*a).base + (*a).offset;
+    i64 addr = (i64)(*a).base + aligned_offset;
     (*a).offset = new_offset;
     return (T*)addr;
 }
 
 /// Allocate space for `count` elements of `T` from arena `a`.
 pub T* arena_alloc_n<T>(Arena* a, i64 count) {
+    i64 alignment = 16;
+    i64 aligned_offset = align_up((*a).offset, alignment);
     i64 needed = @size(T) * count;
-    i64 new_offset = (*a).offset + needed;
+    i64 new_offset = aligned_offset + needed;
     if (new_offset > (*a).capacity) {
         return (T*)0;
     }
-    i64 addr = (i64)(*a).base + (*a).offset;
+    i64 addr = (i64)(*a).base + aligned_offset;
     (*a).offset = new_offset;
     return (T*)addr;
 }
