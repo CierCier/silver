@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "inkwell",
+ "llvm-sys",
  "owo-colors",
  "parking_lot",
  "quickcheck",
