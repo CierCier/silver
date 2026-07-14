@@ -1,7 +1,242 @@
+// Test suite for Vec<T> — contiguous growable array
+import std.io;
+import std.mem;
 
+i32 tests_passed = 0;
+i32 tests_failed = 0;
 
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
 
-i32 main(){
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
 
-    return 0;
+void assert_eq_i32(i32 a, i32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== Vec Tests ===\n\n");
+
+    // --- Basic new ---
+    printf("--- Vec.new ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        assert_eq_i64(v.len(), 0, "new vec has len 0");
+        assert_eq_i64(v.capacity(), 0, "new vec has capacity 0");
+        assert_true(v.is_empty(), "new vec is empty");
+        v.drop();
+    }
+
+    // --- Push and grow ---
+    printf("\n--- Push and grow ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        i32 i = 0;
+        while (i < 20) {
+            v.push(i * 10);
+            i = i + 1;
+        }
+        assert_eq_i64(v.len(), 20, "len=20 after 20 pushes");
+        assert_true(v.capacity() >= 20, "capacity grew beyond 20");
+        assert_true(!v.is_empty(), "not empty after pushes");
+
+        // Verify via get
+        i = 0;
+        bool all_correct = true;
+        while (i < 20) {
+            if (v.get(i) != i * 10) {
+                all_correct = false;
+            }
+            i = i + 1;
+        }
+        assert_true(all_correct, "all values correct via get");
+
+        // Verify via get_ptr
+        i = 0;
+        bool ptr_correct = true;
+        while (i < 20) {
+            i32* ptr = v.get_ptr(i);
+            if (*ptr != i * 10) {
+                ptr_correct = false;
+            }
+            i = i + 1;
+        }
+        assert_true(ptr_correct, "all values correct via get_ptr");
+
+        // Verify via [] indexed access
+        i = 0;
+        bool index_correct = true;
+        while (i < 20) {
+            if (v[i] != i * 10) {
+                index_correct = false;
+            }
+            i = i + 1;
+        }
+        assert_true(index_correct, "all values correct via [] getter");
+
+        v.drop();
+    }
+
+    // --- Set and index_set ---
+    printf("\n--- Set and __index_set ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+
+        v.set(&v, 1, 99);
+        assert_eq_i32(v.get(1), 99, "set updates index 1 to 99");
+        assert_eq_i32(v.get(0), 1, "index 0 unchanged after set");
+        assert_eq_i32(v.get(2), 3, "index 2 unchanged after set");
+
+        v[1] = 200;
+        assert_eq_i32(v.get(1), 200, "__index_set updates index 1 to 200");
+        assert_eq_i32(v.get(0), 1, "index 0 unchanged after __index_set");
+        assert_eq_i32(v.get(2), 3, "index 2 unchanged after __index_set");
+
+        v.drop();
+    }
+
+    // --- Pop ---
+    printf("\n--- Pop ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        v.push(10);
+        v.push(20);
+        v.push(30);
+        assert_eq_i64(v.len(), 3, "len=3 before pop");
+        assert_eq_i32(v.pop(), 30, "pop returns 30");
+        assert_eq_i64(v.len(), 2, "len=2 after pop");
+        assert_eq_i32(v.pop(), 20, "pop returns 20");
+        assert_eq_i64(v.len(), 1, "len=1 after second pop");
+        assert_eq_i32(v.pop(), 10, "pop returns 10");
+        assert_eq_i64(v.len(), 0, "len=0 after third pop");
+
+        v.drop();
+    }
+
+    // --- Reserve ---
+    printf("\n--- Reserve ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        i64 old_len = v.len();
+
+        v.reserve(&v, 64);
+        assert_true(v.capacity() >= 64, "capacity >= 64 after reserve(64)");
+        assert_eq_i64(v.len(), old_len, "len unchanged after reserve");
+        assert_eq_i32(v.get(0), 1, "value at 0 preserved after reserve");
+        assert_eq_i32(v.get(2), 3, "value at 2 preserved after reserve");
+
+        v.drop();
+    }
+
+    // --- Clear ---
+    printf("\n--- Clear ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        v.push(10);
+        v.push(20);
+        v.push(30);
+        i64 old_cap = v.capacity();
+
+        v.clear();
+        assert_eq_i64(v.len(), 0, "len=0 after clear");
+        assert_eq_i64(v.capacity(), old_cap, "capacity unchanged after clear");
+        assert_true(v.is_empty(), "is_empty after clear");
+
+        // Can push again after clear
+        v.push(99);
+        assert_eq_i32(v.get(0), 99, "can push after clear");
+        assert_eq_i64(v.len(), 1, "len=1 after clear and push");
+
+        v.drop();
+    }
+
+    // --- Shrink to fit ---
+    printf("\n--- Shrink to fit ---\n");
+    {
+        Vec<i32> v = Vec<i32>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.clear();
+        v.shrink_to_fit(&v);
+        assert_eq_i64(v.capacity(), 0, "capacity=0 after clear + shrink_to_fit");
+        assert_eq_i64(v.len(), 0, "len=0 after clear + shrink_to_fit");
+
+        v.drop();
+    }
+
+    // --- Vec<i64> smoke test ---
+    printf("\n--- Vec<i64> ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(1000000000000);
+        v.push(2000000000000);
+        assert_eq_i64(v.len(), 2, "i64 vec len=2 after 2 pushes");
+        assert_eq_i64(v.get(0), 1000000000000, "i64 vec get(0)");
+        assert_eq_i64(v.get(1), 2000000000000, "i64 vec get(1)");
+
+        v.drop();
+    }
+
+    // --- Vec<f64> smoke test ---
+    printf("\n--- Vec<f64> ---\n");
+    {
+        Vec<f64> v = Vec<f64>.new();
+        v.push(3.14);
+        v.push(2.718);
+        assert_eq_i64(v.len(), 2, "f64 vec len=2 after 2 pushes");
+
+        v.drop();
+    }
+
+    // --- Vec<i32*> pointer storage ---
+    printf("\n--- Vec<i32*> pointer storage ---\n");
+    {
+        Vec<i32*> v = Vec<i32*>.new();
+        i32* p1 = alloc<i32>();
+        *p1 = 42;
+        i32* p2 = alloc<i32>();
+        *p2 = 99;
+        v.push(p1);
+        v.push(p2);
+
+        i32* r1 = v.get(0);
+        i32* r2 = v.get(1);
+        assert_eq_i32(*r1, 42, "pointer value 42 via get");
+        assert_eq_i32(*r2, 99, "pointer value 99 via get");
+
+        free(p1);
+        free(p2);
+        v.drop();
+    }
+
+    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return tests_failed;
 }
