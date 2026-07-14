@@ -2652,18 +2652,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     fn intern_string_literal(&mut self, value: &str) -> CodegenResult<PointerValue<'ctx>> {
-        if let Some(existing) = self.string_constants.get(value) {
-            return Ok(*existing);
-        }
-
-        let global_name = format!(".str.{}", self.string_constants.len());
-        let global = self
-            .builder
-            .build_global_string_ptr(value, &global_name)
-            .map_err(|e| CodegenError::new(format!("failed to lower string literal: {e}")))?;
-        let ptr = global.as_pointer_value();
-        self.string_constants.insert(value.to_string(), ptr);
-        Ok(ptr)
+        Ok(self.intern_const_string_global(value))
     }
 
     fn const_cast_value_to_basic_type(
@@ -7272,59 +7261,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     }
 
     fn generate_literal(&mut self, literal: &ast::Literal) -> CodegenResult<()> {
-        // Literals are typically generated within expression context.
-        // This standalone generation creates a private global constant.
+        // Scalar literals are emitted inline by emit_expression_value;
+        // standalone generation has no side effect for non-string types.
         match literal {
-            ast::Literal::Integer(value) => {
-                let global_name = format!(".lit.i64.{}", self.string_constants.len());
-                let global = self.module.add_global(self.context.i64_type(), None, &global_name);
-                global.set_initializer(&self.context.i64_type().const_int(*value as u64, true));
-                global.set_constant(true);
-                global.set_linkage(Linkage::Private);
-            }
-            ast::Literal::Float(value) => {
-                let global_name = format!(".lit.f64.{}", self.string_constants.len());
-                let global = self.module.add_global(self.context.f64_type(), None, &global_name);
-                global.set_initializer(&self.context.f64_type().const_float(*value));
-                global.set_constant(true);
-                global.set_linkage(Linkage::Private);
-            }
-            ast::Literal::Bool(value) => {
-                let global_name = format!(".lit.bool.{}", self.string_constants.len());
-                let global = self.module.add_global(self.context.bool_type(), None, &global_name);
-                global.set_initializer(&self.context.bool_type().const_int(u64::from(*value), false));
-                global.set_constant(true);
-                global.set_linkage(Linkage::Private);
-            }
-            ast::Literal::Char(value) => {
-                let global_name = format!(".lit.char.{}", self.string_constants.len());
-                let global = self.module.add_global(self.context.i32_type(), None, &global_name);
-                global.set_initializer(&self.context.i32_type().const_int(*value as u64, false));
-                global.set_constant(true);
-                global.set_linkage(Linkage::Private);
-            }
             ast::Literal::String(value) => {
                 let _ = self.intern_const_string_global(value);
             }
-            ast::Literal::Complex(re, im) => {
-                let complex_ty = self.context.struct_type(
-                    &[
-                        self.context.f64_type().as_basic_type_enum(),
-                        self.context.f64_type().as_basic_type_enum(),
-                    ],
-                    false,
-                );
-                let global_name = format!(".lit.c64.{}", self.string_constants.len());
-                let global = self.module.add_global(complex_ty, None, &global_name);
-                let real = self.context.f64_type().const_float(*re);
-                let imag = self.context.f64_type().const_float(*im);
-                global.set_initializer(&complex_ty.const_named_struct(&[
-                    real.as_basic_value_enum(),
-                    imag.as_basic_value_enum(),
-                ]));
-                global.set_constant(true);
-                global.set_linkage(Linkage::Private);
-            }
+            _ => {}
         }
         Ok(())
     }
@@ -7671,6 +7614,45 @@ mod tests {
         assert!(
             !post.contains("alloca"),
             "expected no alloca after optimization:\n{post}"
+        );
+    }
+
+
+    #[test]
+    fn no_scalar_literal_globals_in_ir() {
+        let ir = lower_to_llvm(
+            "i32 main() {
+                i32 a = 1;
+                f64 b = 2.5;
+                bool c = true;
+                char d = 'X';
+                i32 r = a;
+                return r;
+            }",
+        );
+        for suffix in &["i64", "f64", "bool", "char", "c64"] {
+            let pattern = format!(".lit.{suffix}");
+            assert!(
+                !ir.contains(&pattern),
+                "expected no `{pattern}` global in IR:\n{ir}"
+            );
+        }
+    }
+    #[test]
+    fn string_literals_deduplicated() {
+        let ir = lower_to_llvm(
+            "i32 main() {
+                str a = \"same\";
+                str b = \"same\";
+                str c = \"other\";
+                return 0;
+            }",
+        );
+        // Count the number of distinct `.str.` globals
+        let count = ir.matches(".str.").count();
+        assert!(
+            count >= 2,
+            "expected at least 2 string globals (two unique strings), got {count}:\n{ir}"
         );
     }
 }
