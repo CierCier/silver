@@ -1438,6 +1438,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    fn set_debug_location(&self, span: &Span) {
+        if let Some(debug) = &self.debug {
+            let (line, col, _, _) = debug.source_map.span_to_line_col(span);
+            let loc = debug.create_debug_location(self.context, line, col);
+            self.builder.set_current_debug_location(loc);
+        }
+    }
+
     fn push_scope(&mut self) {
         self.variables.push(HashMap::default());
         self.defers.push(Vec::new());
@@ -2496,11 +2504,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        if let Some(debug) = &self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(fn_span);
-            let loc = debug.create_debug_location(self.context, line, col);
-            self.builder.set_current_debug_location(loc);
-        }
+        self.set_debug_location(fn_span);
 
         let saved_return_type = self.current_return_type.clone();
         self.current_fn = Some(function);
@@ -3039,6 +3043,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         expr: &ast::Expression,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        self.set_debug_location(&expr.span);
         match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => Ok(self
                 .context
@@ -3686,6 +3691,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ));
         }
 
+        let has_debug_scope = if let Some(debug) = &mut self.debug {
+            let (line, col, _, _) = debug.source_map.span_to_line_col(&block.span);
+            debug.push_lexical_block(line, col);
+            true
+        } else {
+            false
+        };
+
         self.push_scope();
         for statement in &block.statements[..block.statements.len() - 1] {
             self.generate_statement(statement)?;
@@ -3696,6 +3709,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .is_some();
             if terminated {
                 self.pop_scope();
+                if has_debug_scope {
+                    if let Some(debug) = &mut self.debug {
+                        debug.pop_lexical_block();
+                    }
+                }
                 return Err(CodegenError::with_span(
                     "value-producing block terminated before final expression",
                     statement.span.clone(),
@@ -3708,6 +3726,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::StatementKind::Expression(expr) => self.emit_expression_value(expr)?,
             _ => {
                 self.pop_scope();
+                if has_debug_scope {
+                    if let Some(debug) = &mut self.debug {
+                        debug.pop_lexical_block();
+                    }
+                }
                 return Err(CodegenError::with_span(
                     "value-producing block must end with an expression",
                     last.span.clone(),
@@ -3715,6 +3738,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         };
         self.pop_scope();
+
+        if has_debug_scope {
+            if let Some(debug) = &mut self.debug {
+                debug.pop_lexical_block();
+            }
+        }
+
         Ok(value)
     }
 
@@ -7073,8 +7103,15 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         }
         Ok(())
     }
-
     fn generate_block(&mut self, block: &ast::Block) -> CodegenResult<()> {
+        let has_debug_scope = if let Some(debug) = &mut self.debug {
+            let (line, col, _, _) = debug.source_map.span_to_line_col(&block.span);
+            debug.push_lexical_block(line, col);
+            true
+        } else {
+            false
+        };
+
         self.push_scope();
         for statement in &block.statements {
             self.generate_statement(statement)?;
@@ -7099,10 +7136,18 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             self.emit_defers(1)?;
         }
         self.pop_scope();
+
+        if has_debug_scope {
+            if let Some(debug) = &mut self.debug {
+                debug.pop_lexical_block();
+            }
+        }
+
         Ok(())
     }
 
     fn generate_statement(&mut self, statement: &ast::Statement) -> CodegenResult<()> {
+        self.set_debug_location(&statement.span);
         match &statement.kind {
             ast::StatementKind::Block(block) => self.generate_block(block),
             ast::StatementKind::Expression(expr) => match expr.kind.as_ref() {
@@ -7671,6 +7716,31 @@ mod tests {
         assert!(
             ir.contains("modify_point"),
             "expected extern function declaration in IR:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn generates_debug_info_metadata() {
+        let source = "i32 main() { i32 a = 42; return a; }";
+        let program = parse_and_typecheck(source);
+        let mut table = CompilerSymbolTable::new();
+        let path = std::path::Path::new("test_debug.ag");
+        let ir = LlvmIrGenerator::generate_with_imports_and_table_and_source(
+            &program,
+            &[],
+            &mut table,
+            Some(path),
+            Some(source),
+            true,
+        ).expect("failed to generate debug info IR");
+
+        assert!(
+            ir.contains("!dbg"),
+            "expected !dbg annotations in IR:\n{ir}"
+        );
+        assert!(
+            ir.contains("DISubprogram"),
+            "expected DISubprogram metadata in IR:\n{ir}"
         );
     }
 }
