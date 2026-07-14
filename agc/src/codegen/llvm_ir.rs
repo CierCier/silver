@@ -1,3 +1,5 @@
+use std::ffi::CString;
+use inkwell::passes::PassBuilderOptions;
 use std::path::Path;
 
 use rustc_hash::FxHashMap as HashMap;
@@ -18,6 +20,7 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
+use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
 use crate::codegen::abi::{self, AbiHandler};
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
@@ -531,6 +534,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+        run_module_optimization_passes(&generator.module, &machine, opt_level)?;
+
         generator.finalize_debug();
         machine
             .write_to_file(&generator.module, file_type, path)
@@ -6484,6 +6489,44 @@ fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
         "3" => OptimizationLevel::Aggressive,
         _ => OptimizationLevel::Default,
     }
+}
+
+
+/// Run a lightweight LLVM optimization pipeline on a module before machine-code
+/// emission. Uses the new pass manager (LLVM 17+) via LLVMRunPasses.
+/// At opt-level 0 this is a no-op.
+fn run_module_optimization_passes(
+    module: &Module<'_>,
+    machine: &TargetMachine,
+    opt_level: Option<&str>,
+) -> CodegenResult<()> {
+    let level = opt_level.unwrap_or("0");
+    if level == "0" {
+        return Ok(());
+    }
+    // Build a lightweight pipeline matching the plan's original intent:
+    //   mem2reg, instcombine, reassociate, gvn, simplifycfg
+    // At higher opt levels also run an extra instcombine cleanup.
+    let pipeline = if matches!(level, "3" | "s" | "z" | "fast") {
+        CString::new("mem2reg,instcombine,reassociate,gvn,simplifycfg,instcombine")
+    } else {
+        CString::new("mem2reg,instcombine,reassociate,gvn,simplifycfg")
+    }
+    .expect("pipeline CString should not contain null bytes");
+
+    let options = PassBuilderOptions::create();
+    unsafe {
+        let err = LLVMRunPasses(
+            module.as_mut_ptr(),
+            pipeline.as_ptr(),
+            machine.as_mut_ptr(),
+            options.as_mut_ptr(),
+        );
+        if !err.is_null() {
+            return Err(CodegenError::new("LLVM optimization pipeline returned an error"));
+        }
+    }
+    Ok(())
 }
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
