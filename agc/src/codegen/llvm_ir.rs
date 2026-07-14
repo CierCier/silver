@@ -21,7 +21,7 @@ use inkwell::OptimizationLevel;
 
 use crate::codegen::abi::{self, AbiHandler};
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
-use crate::debug_info::{DebugContext, SourceMap};
+use crate::debug_info::DebugContext;
 use crate::lexer::Span;
 use crate::attributes::function_link_name;
 use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
@@ -110,8 +110,6 @@ pub struct LlvmIrGenerator<'ctx> {
     loop_defers_base: Vec<usize>,
     symbol_table: CompilerSymbolTable,
     debug: Option<DebugContext<'ctx>>,
-    source_map: Option<SourceMap>,
-    source_path: String,
     abi_handler: Box<dyn AbiHandler>,
 }
 
@@ -161,10 +159,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
-        let source_path_str = source_path
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
@@ -199,8 +193,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
-            source_map,
-            source_path: source_path_str,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
         };
         generator.generate_program(program)?;
@@ -234,10 +226,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
-        let source_path_str = source_path
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
@@ -272,8 +260,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
-            source_map,
-            source_path: source_path_str,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
         };
         generator.declare_imported_modules(imported_modules)?;
@@ -476,10 +462,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
-        let source_path_str = source_path
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let source_map = source_text.map(SourceMap::new);
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(p), Some(text)) => Some(DebugContext::new(&context, &module, p, text)),
@@ -514,8 +496,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
-            source_map,
-            source_path: source_path_str,
             abi_handler: abi::get_abi_handler(
                 target_triple.unwrap_or("x86_64-unknown-linux-gnu"),
             ),

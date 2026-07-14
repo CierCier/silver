@@ -3434,7 +3434,6 @@ impl PRT_Parser {
 
             if matches!(tokens[cursor].kind, Token::Break) {
                 let break_start = cursor;
-                cursor += 1;
                 let semicolon = self.find_statement_terminator(tokens, break_start, end).ok_or_else(|| ParseError::InvalidSyntax {
                     message: "missing ';' after break".to_string(),
                     span: tokens[break_start].span.clone(),
