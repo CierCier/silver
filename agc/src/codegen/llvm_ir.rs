@@ -31,6 +31,7 @@ use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
 use crate::parser::ast;
 use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
+use crate::semantic::monomorph::mangle_name;
 use crate::types::Type;
 
 #[derive(Clone)]
@@ -2100,6 +2101,164 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// After substituting generic types in a cloned body, rewrite any remaining
+    /// TypeName-style generic function calls (e.g. `alloc<i32>(4)`) to Identifier
+    /// calls (e.g. `alloc__i32_i64(4)`). Uses the LLVM module to look up whether
+    /// a monomorphized function with the expected mangled name was already declared.
+    fn rewrite_call_sites_in_block(
+        &self,
+        block: &mut ast::Block,
+    ) {
+        for stmt in &mut block.statements {
+            match &mut stmt.kind {
+                ast::StatementKind::Block(inner) => {
+                    self.rewrite_call_sites_in_block(inner);
+                }
+                ast::StatementKind::Let(let_stmt) => {
+                    if let Some(init) = &mut let_stmt.initializer {
+                        self.rewrite_call_sites_in_expression(init);
+                    }
+                }
+                ast::StatementKind::Expression(expr)
+                | ast::StatementKind::Return(Some(expr))
+                | ast::StatementKind::Break(Some(expr)) => {
+                    self.rewrite_call_sites_in_expression(expr);
+                }
+                ast::StatementKind::Return(None)
+                | ast::StatementKind::Break(None)
+                | ast::StatementKind::Continue => {}
+                ast::StatementKind::Defer(inner) => {
+                    match &mut inner.kind {
+                        ast::StatementKind::Block(inner_block) => {
+                            self.rewrite_call_sites_in_block(inner_block);
+                        }
+                        ast::StatementKind::Let(let_stmt) => {
+                            if let Some(init) = &mut let_stmt.initializer {
+                                self.rewrite_call_sites_in_expression(init);
+                            }
+                        }
+                        ast::StatementKind::Expression(expr)
+                        | ast::StatementKind::Return(Some(expr))
+                        | ast::StatementKind::Break(Some(expr)) => {
+                            self.rewrite_call_sites_in_expression(expr);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn rewrite_call_sites_in_expression(
+        &self,
+        expr: &mut ast::Expression,
+    ) {
+        match expr.kind.as_mut() {
+            ast::ExpressionKind::Call { function, arguments } => {
+                // Check if this is a TypeName call that should be rewritten.
+                if let ast::ExpressionKind::TypeName(ty) = function.kind.as_mut() {
+                    if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
+                        if let Some(generics) = &named.generics {
+                            if !generics.is_empty() && generics.iter().all(|g| !Self::type_has_type_param(g)) {
+                                // All concrete args -> this is a generic function call
+                                let fn_name = named.path.iter().map(|id| id.name.as_str()).collect::<Vec<_>>().join(".");
+                                let rhs_args: Vec<Type> = generics.iter().map(|g| Type::from_ast(g)).collect();
+                                let base_mangled = mangle_name(&fn_name, &rhs_args);
+                                // Check LLVM module: monomorphized functions are declared in Pass 1a
+                                if self.module.get_function(&base_mangled).is_some() {
+                                    *function = Box::new(ast::Expression {
+                                        kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                            name: base_mangled,
+                                            span: function.span.clone(),
+                                        })),
+                                        span: function.span.clone(),
+                                    });
+                                } else {
+                                    // Try with parameter suffix (e.g. alloc__i32 vs alloc__i32_i64)
+                                    for name in self.function_name_to_symbol.keys() {
+                                        if name.starts_with(&format!("{}_", base_mangled)) {
+                                            *function = Box::new(ast::Expression {
+                                                kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                                    name: name.clone(),
+                                                    span: function.span.clone(),
+                                                })),
+                                                span: function.span.clone(),
+                                            });
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for arg in arguments {
+                    self.rewrite_call_sites_in_expression(arg);
+                }
+            }
+            ast::ExpressionKind::Block(block) => {
+                self.rewrite_call_sites_in_block(block);
+            }
+            ast::ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.rewrite_call_sites_in_expression(condition);
+                self.rewrite_call_sites_in_block(then_branch);
+                if let Some(branch) = else_branch {
+                    self.rewrite_call_sites_in_block(branch);
+                }
+            }
+            ast::ExpressionKind::While { condition, body } => {
+                self.rewrite_call_sites_in_expression(condition);
+                self.rewrite_call_sites_in_block(body);
+            }
+            ast::ExpressionKind::Binary { left, right, .. } => {
+                self.rewrite_call_sites_in_expression(left);
+                self.rewrite_call_sites_in_expression(right);
+            }
+            ast::ExpressionKind::Unary { operand, .. }
+            | ast::ExpressionKind::Postfix { operand, .. } => {
+                self.rewrite_call_sites_in_expression(operand);
+            }
+            ast::ExpressionKind::Cast { expression, .. } => {
+                self.rewrite_call_sites_in_expression(expression);
+            }
+            ast::ExpressionKind::FieldAccess { object, .. }
+            | ast::ExpressionKind::Index { object, .. } => {
+                self.rewrite_call_sites_in_expression(object);
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if an AST type contains any unresolved type parameter (which would
+    /// mean it's still a generic type, not a concrete instantiation).
+    fn type_has_type_param(ty: &ast::Type) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Primitive(_) => false,
+            ast::TypeKind::Named(named) => {
+                // A singleton named type with no generics and uppercase first char
+                // is likely a type parameter
+                if named.path.len() == 1 && named.generics.is_none() {
+                    let first = named.path[0].name.chars().next();
+                    matches!(first, Some(c) if c.is_uppercase())
+                } else if let Some(generics) = &named.generics {
+                    generics.iter().any(|g| Self::type_has_type_param(g))
+                } else {
+                    false
+                }
+            }
+            ast::TypeKind::Pointer(ptr) => Self::type_has_type_param(&ptr.inner),
+            ast::TypeKind::Reference(inner) => Self::type_has_type_param(&inner.inner),
+            ast::TypeKind::Optional(inner) => Self::type_has_type_param(inner),
+            ast::TypeKind::Slice(slice) => Self::type_has_type_param(&slice.element_type),
+            ast::TypeKind::Array(arr) => Self::type_has_type_param(&arr.element_type),
+            _ => false,
+        }
+    }
+
     fn try_instantiate_generic_impl_method_for_type(
         &mut self,
         receiver_type: &ast::Type,
@@ -2167,6 +2326,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     *return_ty = Self::substitute_generic_type(return_ty, &mapping);
                 }
                 Self::substitute_block_types(&mut func.body, &mapping);
+                self.rewrite_call_sites_in_block(&mut func.body);
 
                 let fn_ty = self.lower_function_type(
                     &func

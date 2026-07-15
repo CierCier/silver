@@ -1,14 +1,14 @@
 #[link(c)]
 
-T* alloc<T>() {
+pub T* alloc<T>() {
     return (T*)(malloc(@size(T)));
 }
 
-T* alloc<T>(i64 count) {
+pub T* alloc<T>(i64 count) {
     return (T*)(calloc(count, @size(T)));
 }
 
-T* realloc<T>(T* ptr, i64 count) {
+pub T* realloc<T>(T* ptr, i64 count) {
     return (T*)(realloc(ptr, @size(T) * count));
 }
 

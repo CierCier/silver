@@ -65,7 +65,7 @@ impl String {
             if (new_cap < 16) {
                 new_cap = 16;
             }
-            (*self).data = (u8*)realloc((*self).data, new_cap);
+            (*self).data = realloc<u8>((*self).data, new_cap);
             (*self).capacity = new_cap;
         }
         (*self).data[(*self).len] = ch;
@@ -86,7 +86,7 @@ impl String {
             if (new_cap < (*self).len + text_len + 16) {
                 new_cap = (*self).len + text_len + 16;
             }
-            (*self).data = (u8*)realloc((*self).data, new_cap);
+            (*self).data = realloc<u8>((*self).data, new_cap);
             (*self).capacity = new_cap;
         }
         memcpy((void*)&(*self).data[(*self).len], (const void*)text, text_len);
@@ -111,7 +111,7 @@ impl String {
             return false;
         }
         if ((*self).data == (u8*)0) {
-            return false;
+            return strlen(other) == 0;
         }
         return strcmp((const char*)(*self).data, other) == 0;
     }
