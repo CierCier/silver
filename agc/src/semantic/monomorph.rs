@@ -43,15 +43,14 @@ pub fn append_monomorphs(
     }
 
     let impl_items = instantiate_impls(&generic_impls, &instantiations, &mut generated);
+    // Collect all newly generated items for remaining-call scanning
+    all_new_items.reserve(impl_items.len());
     for item in &impl_items {
         all_new_items.push(item.clone());
         program.items.push(item.clone());
     }
 
     // Process function/method monomorphization requests to fixpoint.
-    // This handles nested generic calls: e.g., alloc<T>() inside Rc.new<T> is deferred
-    // during type checking (non-concrete mapping), so we must detect it here and
-    // create the monomorphized callee in a second round.
     let mut current_requests: Vec<MonomorphRequest> = requests.to_vec();
     while !current_requests.is_empty() {
         let new_items = instantiate_requests(program, &current_requests, &mut generated);
@@ -60,8 +59,9 @@ pub fn append_monomorphs(
             program.items.push(item.clone());
         }
 
-        // Scan for remaining generic calls with concrete type args in the updated program
-        current_requests = collect_remaining_function_requests(program, &new_items, &generic_fns, &generated);
+        // Scan ALL new items (including newly generated impl items) for remaining
+        // generic calls with concrete type args.
+        current_requests = collect_remaining_function_requests(program, &all_new_items, &generic_fns, &generated);
     }
     all_new_items
 }
@@ -714,28 +714,13 @@ fn instantiate_requests(
                 let source = source.as_ref();
                 let args = ordered_args(type_params, mapping);
 
-                // Compute parameter type signature to disambiguate overloaded generic functions
-                // (e.g. alloc<i32>() vs alloc<i32>(i64))
-                let param_sig: String = source.parameters.iter()
-                    .map(|p| {
-                        let concrete = Type::from_ast(&p.param_type).substitute(mapping);
-                        sanitize(&concrete.canonical_key())
-                    })
-                    .collect::<Vec<_>>()
-                    .join("_");
-
-                let mangled_base = mangle_name(&source.name.name, &args);
-                let mangled = if param_sig.is_empty() {
-                    format!("{}__v", mangled_base)
-                } else {
-                    format!("{}_{}", mangled_base, param_sig)
-                };
+                let mangled = mangle_function_instance(source, &args, mapping);
                 let key = format!("fn::{mangled}");
 
                 // Always rewrite call sites, even if the function was already
                 // monomorphized from a different call site. The dedup below
                 // prevents generating duplicate function definitions.
-                rewrite_function_calls(program, &source.name.name, &args, &mangled, call_span);
+                rewrite_function_calls(program, &source.name.name, &args, &mangled, call_span, source.parameters.len());
 
                 if !generated.insert(key) {
                     continue;
@@ -989,9 +974,10 @@ fn rewrite_function_calls(
     args: &[Type],
     mangled: &str,
     span: &Span,
+    param_count: usize,
 ) {
     for item in &mut program.items {
-        rewrite_item_function_calls(item, name, args, mangled, span);
+        rewrite_item_function_calls(item, name, args, mangled, span, param_count);
     }
 }
 
@@ -1001,15 +987,16 @@ fn rewrite_item_function_calls(
     args: &[Type],
     mangled: &str,
     span: &Span,
+    param_count: usize,
 ) {
     match &mut item.kind {
         ast::ItemKind::Function(func) => {
-            rewrite_block_function_calls(&mut func.body, name, args, mangled, span)
+            rewrite_block_function_calls(&mut func.body, name, args, mangled, span, param_count)
         }
         ast::ItemKind::Impl(impl_item) => {
             for impl_item in &mut impl_item.items {
                 if let ast::ImplItemKind::Function(func) = impl_item {
-                    rewrite_block_function_calls(&mut func.body, name, args, mangled, span)
+                    rewrite_block_function_calls(&mut func.body, name, args, mangled, span, param_count)
                 }
             }
         }
@@ -1023,9 +1010,10 @@ fn rewrite_block_function_calls(
     args: &[Type],
     mangled: &str,
     span: &Span,
+    param_count: usize,
 ) {
     for stmt in &mut block.statements {
-        rewrite_statement_function_calls(stmt, name, args, mangled, span);
+        rewrite_statement_function_calls(stmt, name, args, mangled, span, param_count);
     }
 }
 
@@ -1035,25 +1023,26 @@ fn rewrite_statement_function_calls(
     args: &[Type],
     mangled: &str,
     span: &Span,
+    param_count: usize,
 ) {
     match &mut stmt.kind {
         ast::StatementKind::Block(block) => {
-            rewrite_block_function_calls(block, name, args, mangled, span)
+            rewrite_block_function_calls(block, name, args, mangled, span, param_count)
         }
         ast::StatementKind::Let(let_stmt) => {
             if let Some(init) = &mut let_stmt.initializer {
-                rewrite_expression_function_calls(init, name, args, mangled, span);
+                rewrite_expression_function_calls(init, name, args, mangled, span, param_count);
             }
         }
         ast::StatementKind::Expression(expr)
         | ast::StatementKind::Return(Some(expr))
         | ast::StatementKind::Break(Some(expr)) => {
-            rewrite_expression_function_calls(expr, name, args, mangled, span)
+            rewrite_expression_function_calls(expr, name, args, mangled, span, param_count)
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
         ast::StatementKind::Continue => {}
         ast::StatementKind::Defer(inner) => {
-            rewrite_statement_function_calls(inner, name, args, mangled, span)
+            rewrite_statement_function_calls(inner, name, args, mangled, span, param_count)
         }
     }
 }
@@ -1064,32 +1053,35 @@ fn rewrite_expression_function_calls(
     args: &[Type],
     mangled: &str,
     span: &Span,
+    param_count: usize,
 ) {
     match expr.kind.as_mut() {
         ast::ExpressionKind::Call {
             function,
             arguments,
         } => {
-                    // For TypeName-style calls, match by function name AND generic argument types
-                    // (not just span). This handles nested generic calls inside monomorphized
-                    // bodies where the span differs from the original request's call_span.
+                    // For TypeName-style calls, match by function name, generic argument types,
+                    // AND value parameter count. This handles nested generic calls inside
+                    // monomorphized bodies where the span differs from the original request's
+                    // call_span, and prevents one overload from rewriting another.
                     let should_rewrite = match function.kind.as_mut() {
                         ast::ExpressionKind::Identifier(ident) => {
                             ident.name == name && expr.span == *span
                         }
                         ast::ExpressionKind::TypeName(ty) => {
                             if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
-                                if named.path.len() == 1 && named.path[0].name == name {
-                                    if let Some(generics) = &named.generics {
+                                let name_ok = named.path.len() == 1 && named.path[0].name == name;
+                                let param_ok = arguments.len() == param_count;
+                                let generics_ok = match &named.generics {
+                                    Some(generics) => {
                                         let actual_args: Vec<Type> =
                                             generics.iter().map(|g| Type::from_ast(g)).collect();
-                                        actual_args == args
-                                    } else {
-                                        args.is_empty()
+                                        let ok = actual_args == args;
+                                        ok
                                     }
-                                } else {
-                                    false
-                                }
+                                    None => args.is_empty(),
+                                };
+                                name_ok && param_ok && generics_ok
                             } else {
                                 false
                             }
@@ -1106,7 +1098,7 @@ fn rewrite_expression_function_calls(
                         });
                     }
             for arg in arguments {
-                rewrite_expression_function_calls(arg, name, args, mangled, span);
+                rewrite_expression_function_calls(arg, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::MethodCall {
@@ -1114,43 +1106,43 @@ fn rewrite_expression_function_calls(
             arguments,
             ..
         } => {
-            rewrite_expression_function_calls(receiver, name, args, mangled, span);
+            rewrite_expression_function_calls(receiver, name, args, mangled, span, param_count);
             for arg in arguments {
-                rewrite_expression_function_calls(arg, name, args, mangled, span);
+                rewrite_expression_function_calls(arg, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
         | ast::ExpressionKind::Index { object, .. } => {
-            rewrite_expression_function_calls(object, name, args, mangled, span);
+            rewrite_expression_function_calls(object, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Cast {
             expression,
             ..
         } => {
-            rewrite_expression_function_calls(expression, name, args, mangled, span);
+            rewrite_expression_function_calls(expression, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Binary { left, right, .. } => {
-            rewrite_expression_function_calls(left, name, args, mangled, span);
-            rewrite_expression_function_calls(right, name, args, mangled, span);
+            rewrite_expression_function_calls(left, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(right, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Unary { operand, .. }
         | ast::ExpressionKind::Postfix { operand, .. } => {
-            rewrite_expression_function_calls(operand, name, args, mangled, span)
+            rewrite_expression_function_calls(operand, name, args, mangled, span, param_count)
         }
         ast::ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            rewrite_expression_function_calls(condition, name, args, mangled, span);
-            rewrite_block_function_calls(then_branch, name, args, mangled, span);
+            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
+            rewrite_block_function_calls(then_branch, name, args, mangled, span, param_count);
             if let Some(branch) = else_branch {
-                rewrite_block_function_calls(branch, name, args, mangled, span);
+                rewrite_block_function_calls(branch, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::While { condition, body } => {
-            rewrite_expression_function_calls(condition, name, args, mangled, span);
-            rewrite_block_function_calls(body, name, args, mangled, span);
+            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
+            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::For {
             init,
@@ -1159,60 +1151,60 @@ fn rewrite_expression_function_calls(
             body,
         } => {
             if let Some(init_expr) = &mut init.initializer {
-                rewrite_expression_function_calls(init_expr, name, args, mangled, span);
+                rewrite_expression_function_calls(init_expr, name, args, mangled, span, param_count);
             }
-            rewrite_expression_function_calls(condition, name, args, mangled, span);
-            rewrite_expression_function_calls(increment, name, args, mangled, span);
-            rewrite_block_function_calls(body, name, args, mangled, span);
+            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(increment, name, args, mangled, span, param_count);
+            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Match { expression, arms } => {
-            rewrite_expression_function_calls(expression, name, args, mangled, span);
+            rewrite_expression_function_calls(expression, name, args, mangled, span, param_count);
             for arm in arms {
-                rewrite_expression_function_calls(&mut arm.body, name, args, mangled, span);
+                rewrite_expression_function_calls(&mut arm.body, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::Block(block) => {
-            rewrite_block_function_calls(block, name, args, mangled, span)
+            rewrite_block_function_calls(block, name, args, mangled, span, param_count)
         }
         ast::ExpressionKind::Initializer { items } => {
             for item in items {
                 match item {
                     ast::InitializerItem::Positional(expr)
                     | ast::InitializerItem::Field { value: expr, .. } => {
-                        rewrite_expression_function_calls(expr, name, args, mangled, span)
+                        rewrite_expression_function_calls(expr, name, args, mangled, span, param_count)
                     }
                     ast::InitializerItem::Index { index, value } => {
-                        rewrite_expression_function_calls(index, name, args, mangled, span);
-                        rewrite_expression_function_calls(value, name, args, mangled, span);
+                        rewrite_expression_function_calls(index, name, args, mangled, span, param_count);
+                        rewrite_expression_function_calls(value, name, args, mangled, span, param_count);
                     }
                 }
             }
         }
         ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
             for item in items {
-                rewrite_expression_function_calls(item, name, args, mangled, span);
+                rewrite_expression_function_calls(item, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::StructLiteral { fields, .. } => {
             for field in fields {
-                rewrite_expression_function_calls(&mut field.value, name, args, mangled, span);
+                rewrite_expression_function_calls(&mut field.value, name, args, mangled, span, param_count);
             }
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
-        } => rewrite_expression_function_calls(inner, name, args, mangled, span),
+        } => rewrite_expression_function_calls(inner, name, args, mangled, span, param_count),
         ast::ExpressionKind::MacroCall { args: macro_args, .. } => {
             for arg in macro_args {
                 if let ast::MacroArg::Expression(expr) = arg {
-                    rewrite_expression_function_calls(expr, name, args, mangled, span);
+                    rewrite_expression_function_calls(expr, name, args, mangled, span, param_count);
                 }
             }
         }
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
-            rewrite_expression_function_calls(iterable, name, args, mangled, span);
-            rewrite_block_function_calls(body, name, args, mangled, span);
+            rewrite_expression_function_calls(iterable, name, args, mangled, span, param_count);
+            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
@@ -1881,6 +1873,208 @@ mod tests {
         });
         assert!(has_enum, "expected Option<i32> monomorph");
     }
+
+    /// Helper: check if any item contains a call expression with the given function name.
+    fn has_call_named(program: &ast::Program, name: &str) -> bool {
+        for item in &program.items {
+            let body = match &item.kind {
+                ast::ItemKind::Function(f) => Some(&f.body),
+                ast::ItemKind::Impl(impl_item) => {
+                    impl_item.items.iter().find_map(|m| {
+                        if let ast::ImplItemKind::Function(f) = m {
+                            Some(&f.body)
+                        } else {
+                            None
+                        }
+                    })
+                }
+                _ => None,
+            };
+            if let Some(body) = body {
+                if has_call_in_block(body, name) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_call_in_block(block: &ast::Block, name: &str) -> bool {
+        for stmt in &block.statements {
+            if has_call_in_statement(stmt, name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_call_in_statement(stmt: &ast::Statement, name: &str) -> bool {
+        match &stmt.kind {
+            ast::StatementKind::Block(block) => has_call_in_block(block, name),
+            ast::StatementKind::Let(let_stmt) => {
+                let_stmt.initializer.as_ref().is_some_and(|init| has_call_in_expression(init, name))
+            }
+            ast::StatementKind::Expression(expr)
+            | ast::StatementKind::Return(Some(expr))
+            | ast::StatementKind::Break(Some(expr)) => has_call_in_expression(expr, name),
+            _ => false,
+        }
+    }
+
+    fn has_call_in_expression(expr: &ast::Expression, name: &str) -> bool {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Call { function, arguments } => {
+                let matches = match function.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(ident) => ident.name == name,
+                    ast::ExpressionKind::TypeName(ty) => {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            named.path.last().is_some_and(|id| id.name == name)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                matches || arguments.iter().any(|arg| has_call_in_expression(arg, name))
+            }
+            ast::ExpressionKind::Identifier(_) => false,
+            ast::ExpressionKind::TypeName(_) => false,
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                args.iter().any(|arg| {
+                    if let ast::MacroArg::Expression(expr) = arg {
+                        has_call_in_expression(expr, name)
+                    } else {
+                        false
+                    }
+                })
+            }
+            ast::ExpressionKind::Block(block) => has_call_in_block(block, name),
+            ast::ExpressionKind::Cast { expression, .. } => {
+                has_call_in_expression(expression, name)
+            }
+            ast::ExpressionKind::Unary { operand, .. } => {
+                has_call_in_expression(operand, name)
+            }
+            ast::ExpressionKind::Postfix { operand, .. } => {
+                has_call_in_expression(operand, name)
+            }
+            ast::ExpressionKind::Binary { left, right, .. } => {
+                has_call_in_expression(left, name) || has_call_in_expression(right, name)
+            }
+            ast::ExpressionKind::Index { object, index, .. } => {
+                has_call_in_expression(object, name) || has_call_in_expression(index, name)
+            }
+            ast::ExpressionKind::FieldAccess { object, .. } => {
+                has_call_in_expression(object, name)
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                items.iter().any(|item| {
+                    let expr = match item {
+                        ast::InitializerItem::Positional(expr) => expr,
+                        ast::InitializerItem::Field { value, .. } => value,
+                        ast::InitializerItem::Index { value, .. } => value,
+                    };
+                    has_call_in_expression(expr, name)
+                })
+            }
+            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+                items.iter().any(|item| has_call_in_expression(item, name))
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                fields.iter().any(|f| has_call_in_expression(&f.value, name))
+            }
+            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
+                has_call_in_expression(inner, name)
+            }
+            ast::ExpressionKind::Reference { expression: inner, .. } => {
+                has_call_in_expression(inner, name)
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                has_call_in_expression(iterable, name) || has_call_in_block(body, name)
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn monomorphizes_nested_generic_function_call_in_impl_body() {
+        let mut program = parse(
+            "T* alloc<T>(i32 size) { return 0; } \
+             struct Holder<T> { T* ptr; i64 size; } \
+             impl<T> Holder<T> { \
+                 void grow(Holder<T>* self, i64 extra) { \
+                     T* next = alloc<T>(4); \
+                     self.ptr = next; \
+                     self.size = self.size + extra; \
+                 } \
+             } \
+             i32 main() { Holder<i32> h; return 0; }"
+        );
+        
+        // Find the generic impl and method to create an initial ImplMethod request
+        let impl_item = program.items.iter().find_map(|item| {
+            if let ast::ItemKind::Impl(impl_item) = &item.kind {
+                if impl_item.generics.is_some() {
+                    let has_grow = impl_item.items.iter().any(|m| {
+                        matches!(m, ast::ImplItemKind::Function(f) if f.name.name == "grow")
+                    });
+                    if has_grow {
+                        return Some(impl_item.clone());
+                    }
+                }
+            }
+            None
+        }).expect("expected generic impl Holder<T> with grow");
+        
+        let grow_method = impl_item.items.iter().find_map(|m| {
+            if let ast::ImplItemKind::Function(f) = m {
+                if f.name.name == "grow" {
+                    return Some(Box::new(f.clone()));
+                }
+            }
+            None
+        }).expect("expected grow method");
+        
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+        
+        let request = MonomorphRequest::ImplMethod {
+            impl_item: Box::new(impl_item),
+            method: grow_method,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        };
+        
+        let items = append_monomorphs(&mut program, &[request]);
+
+        // Verify Holder<i32> impl was created
+        let has_holder = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Impl(impl_item) => {
+                let is_holder = if let ast::TypeKind::Named(named) = &impl_item.self_type.kind.as_ref() {
+                    named.path.last().is_some_and(|id| id.name == "Holder__i32")
+                } else {
+                    false
+                };
+                is_holder || impl_item.items.iter().any(|m| {
+                    if let ast::ImplItemKind::Function(f) = m {
+                        f.name.name == "grow"
+                    } else {
+                        false
+                    }
+                })
+            }
+            _ => false,
+        });
+        assert!(has_holder, "expected monomorphized Holder__i32 impl");
+
+        // Verify that alloc<i32>(i32) was also monomorphized (nested call within Holder<i32>.grow)
+        let has_alloc = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "alloc__i32_i32",
+            _ => false,
+        });
+        assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");
+    }
 }
 
 fn mapping_covers_impl(mapping: &HashMap<String, Type>, generics: Option<&ast::Generics>) -> bool {
@@ -1947,7 +2141,36 @@ fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<
         .collect()
 }
 
+
+/// Compute the full mangled function name including parameter type signature,
+/// enabling disambiguation of overloaded generic functions with different
+/// value parameter counts (e.g. alloc<i32>() vs alloc<i32>(i64)).
+fn mangle_function_instance(
+    source: &ast::FunctionItem,
+    args: &[Type],
+    mapping: &HashMap<String, Type>,
+) -> String {
+    let param_sig = source
+        .parameters
+        .iter()
+        .map(|param| {
+            let concrete = Type::from_ast(&param.param_type).substitute(mapping);
+            sanitize(&concrete.canonical_key())
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    let mangled_base = mangle_name(&source.name.name, args);
+    if param_sig.is_empty() {
+        format!("{}__v", mangled_base)
+    } else {
+        format!("{}_{}", mangled_base, param_sig)
+    }
+}
+
 /// Collect names of all generic functions (functions with generic type parameters).
+/// Compute the full mangled function name including parameter type signature,
+/// enabling disambiguation of overloaded generic functions with different
+/// value parameter counts (e.g. alloc<i32>() vs alloc<i32>(i64)).
 fn collect_generic_fns(program: &ast::Program) -> HashSet<String> {
     let mut fns = HashSet::default();
     for item in &program.items {
@@ -2193,13 +2416,13 @@ fn collect_remaining_function_requests(
         }
     }
     for (fn_name, concrete_args, call_span, param_count) in found_calls {
-        let mangled_base = mangle_name(&fn_name, &concrete_args);
-        let key = format!("fn::{mangled_base}");
-        if generated.contains(&key) {
-            continue;
-        }
         if let Some(source) = find_generic_fn(program, &fn_name, param_count) {
             let mapping = build_mapping_from_generics(source.generics.as_ref(), &concrete_args);
+            let full_mangled = mangle_function_instance(source, &concrete_args, &mapping);
+            let key = format!("fn::{full_mangled}");
+            if generated.contains(&key) {
+                continue;
+            }
             // Use source's type param order for deterministic mangling
             let type_params: Vec<String> = source
                 .generics

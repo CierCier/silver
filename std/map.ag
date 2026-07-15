@@ -55,9 +55,9 @@ impl HashMap<K, V> {
             new_cap = new_cap * 2;
         }
 
-        K* new_keys = (K*)(malloc(@size(K) * new_cap));
-        V* new_vals = (V*)(malloc(@size(V) * new_cap));
-        i64* new_st = (i64*)(malloc(8 * new_cap));
+        K* new_keys = alloc<K>(new_cap);
+        V* new_vals = alloc<V>(new_cap);
+        i64* new_st = alloc<i64>(new_cap);
         // Initialize state to EMPTY
         i64 j = 0;
         while (j < new_cap) {
