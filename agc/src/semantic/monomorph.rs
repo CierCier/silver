@@ -1661,421 +1661,6 @@ fn build_mapping_from_generics(
     mapping
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::{lex, Span};
-    use crate::parser::Parser;
-
-    fn parse(source: &str) -> ast::Program {
-        let tokens = lex(source).expect("lex failed");
-        let mut parser = Parser::new(tokens);
-        let (program, errors) = parser.parse_program();
-        assert!(errors.is_empty(), "parse errors: {errors:?}");
-        program
-    }
-
-    fn find_function(program: &ast::Program, name: &str) -> ast::FunctionItem {
-        program
-            .items
-            .iter()
-            .find_map(|item| {
-                if let ast::ItemKind::Function(f) = &item.kind {
-                    if f.name.name == name {
-                        return Some(f.clone());
-                    }
-                }
-                None
-            })
-            .expect("function not found")
-    }
-
-    #[test]
-    fn monomorphizes_generic_structs() {
-        let mut program = parse("struct Box<T> { T value; } i32 main() { Box<i32> b; return 0; }");
-        let items = append_monomorphs(&mut program, &[]);
-        let has_struct = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Struct(struct_item) => struct_item.name.name.starts_with("Box__"),
-            _ => false,
-        });
-        assert!(has_struct, "expected monomorphized struct");
-    }
-
-    #[test]
-    fn monomorphizes_generic_function() {
-        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
-        let source = find_function(&program, "foo");
-        let type_params = vec!["T".to_string()];
-        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
-
-        let requests = vec![MonomorphRequest::Function {
-            source: Box::new(source),
-            type_params,
-            mapping,
-            call_span: Span { start: 0, end: 0 },
-        }];
-
-        let items = append_monomorphs(&mut program, &requests);
-        let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "foo__i32_i32",
-            _ => false,
-        });
-        assert!(has_fn, "expected monomorphized function foo__i32");
-    }
-
-    #[test]
-    fn monomorphizes_generic_function_with_multiple_type_params() {
-        let mut program = parse("T bar<T, U>(T x, U y) { return x; } i32 main() { return 0; }");
-        let source = find_function(&program, "bar");
-        let type_params = vec!["T".to_string(), "U".to_string()];
-        let mapping = HashMap::from_iter([
-            ("T".to_string(), Type::Primitive(ast::PrimitiveType::I32)),
-            ("U".to_string(), Type::Primitive(ast::PrimitiveType::F64)),
-        ]);
-
-        let requests = vec![MonomorphRequest::Function {
-            source: Box::new(source),
-            type_params,
-            mapping,
-            call_span: Span { start: 0, end: 0 },
-        }];
-
-        let items = append_monomorphs(&mut program, &requests);
-        let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64_i32_f64",
-            _ => false,
-        });
-        assert!(has_fn, "expected monomorphized function bar__i32_f64");
-    }
-
-    #[test]
-    fn monomorphizes_duplicate_request_only_once() {
-        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
-        let source = find_function(&program, "foo");
-        let type_params = vec!["T".to_string()];
-        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
-
-        let request = MonomorphRequest::Function {
-            source: Box::new(source),
-            type_params,
-            mapping,
-            call_span: Span { start: 0, end: 0 },
-        };
-
-        let items = append_monomorphs(&mut program, &[request.clone(), request]);
-        let count = items
-            .iter()
-            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32_i32"))
-            .count();
-        assert_eq!(count, 1, "duplicate request should only produce one monomorph");
-    }
-
-    #[test]
-    fn monomorphizes_struct_and_function_together() {
-        let mut program =
-            parse("struct Pair<T, U> { T first; U second; } T id<T>(T x) { return x; } i32 main() { return 0; }");
-        let source = find_function(&program, "id");
-        let type_params = vec!["T".to_string()];
-        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
-
-        let requests = vec![MonomorphRequest::Function {
-            source: Box::new(source),
-            type_params,
-            mapping,
-            call_span: Span { start: 0, end: 0 },
-        }];
-
-        let items = append_monomorphs(&mut program, &requests);
-        let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "id__i32_i32",
-            _ => false,
-        });
-        assert!(has_fn, "expected monomorphized function id__i32");
-    }
-
-    #[test]
-    fn mangle_name_empty_args() {
-        assert_eq!(mangle_name("foo", &[]), "foo");
-    }
-
-    #[test]
-    fn mangle_name_single_arg() {
-        assert_eq!(
-            mangle_name("foo", &[Type::Primitive(ast::PrimitiveType::I32)]),
-            "foo__i32"
-        );
-    }
-
-    #[test]
-    fn mangle_name_multiple_args() {
-        assert_eq!(
-            mangle_name(
-                "convert",
-                &[
-                    Type::Primitive(ast::PrimitiveType::I32),
-                    Type::Primitive(ast::PrimitiveType::F64)
-                ]
-            ),
-            "convert__i32_f64"
-        );
-    }
-
-    #[test]
-    fn mangle_name_pointer_type() {
-        let mangled = mangle_name(
-            "deref",
-            &[Type::Pointer {
-                is_mutable: false,
-                inner: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
-            }],
-        );
-        assert_eq!(mangled, "deref__ptr_i32");
-    }
-
-    #[test]
-    fn mangle_name_named_type() {
-        assert_eq!(
-            mangle_name(
-                "alloc",
-                &[Type::Named {
-                    path: vec!["Point".to_string()],
-                    generics: vec![]
-                }]
-            ),
-            "alloc__Point"
-        );
-    }
-
-    #[test]
-    fn monomorphizes_nested_generic_struct() {
-        let mut program = parse("struct Wrapper<T> { T inner; } struct Pair<T, U> { T first; U second; } i32 main() { Pair<Wrapper<i32>, i32> p; return 0; }");
-        let items = append_monomorphs(&mut program, &[]);
-        let has_wrapper = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Struct(s) => s.name.name.starts_with("Wrapper__"),
-            _ => false,
-        });
-        let pair_names: Vec<&str> = items.iter().filter_map(|item| match &item.kind {
-            ast::ItemKind::Struct(s) => Some(s.name.name.as_str()),
-            _ => None,
-        }).collect();
-        let has_pair = pair_names.iter().any(|n| n.starts_with("Pair__"));
-        assert!(has_wrapper, "expected Wrapper<i32> monomorph");
-        assert!(has_pair, "expected Pair<Wrapper<i32>, i32> monomorph, got: {:?}", pair_names);
-    }
-
-    #[test]
-    fn monomorphizes_generic_enum() {
-        let mut program = parse("enum Option<T> { Some(T); None; } i32 main() { Option<i32> x; return 0; }");
-        let items = append_monomorphs(&mut program, &[]);
-        let has_enum = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Enum(e) => e.name.name.starts_with("Option__"),
-            _ => false,
-        });
-        assert!(has_enum, "expected Option<i32> monomorph");
-    }
-
-    /// Helper: check if any item contains a call expression with the given function name.
-    fn has_call_named(program: &ast::Program, name: &str) -> bool {
-        for item in &program.items {
-            let body = match &item.kind {
-                ast::ItemKind::Function(f) => Some(&f.body),
-                ast::ItemKind::Impl(impl_item) => {
-                    impl_item.items.iter().find_map(|m| {
-                        if let ast::ImplItemKind::Function(f) = m {
-                            Some(&f.body)
-                        } else {
-                            None
-                        }
-                    })
-                }
-                _ => None,
-            };
-            if let Some(body) = body {
-                if has_call_in_block(body, name) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn has_call_in_block(block: &ast::Block, name: &str) -> bool {
-        for stmt in &block.statements {
-            if has_call_in_statement(stmt, name) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn has_call_in_statement(stmt: &ast::Statement, name: &str) -> bool {
-        match &stmt.kind {
-            ast::StatementKind::Block(block) => has_call_in_block(block, name),
-            ast::StatementKind::Let(let_stmt) => {
-                let_stmt.initializer.as_ref().is_some_and(|init| has_call_in_expression(init, name))
-            }
-            ast::StatementKind::Expression(expr)
-            | ast::StatementKind::Return(Some(expr))
-            | ast::StatementKind::Break(Some(expr)) => has_call_in_expression(expr, name),
-            _ => false,
-        }
-    }
-
-    fn has_call_in_expression(expr: &ast::Expression, name: &str) -> bool {
-        match expr.kind.as_ref() {
-            ast::ExpressionKind::Call { function, arguments } => {
-                let matches = match function.kind.as_ref() {
-                    ast::ExpressionKind::Identifier(ident) => ident.name == name,
-                    ast::ExpressionKind::TypeName(ty) => {
-                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                            named.path.last().is_some_and(|id| id.name == name)
-                        } else {
-                            false
-                        }
-                    }
-                    _ => false,
-                };
-                matches || arguments.iter().any(|arg| has_call_in_expression(arg, name))
-            }
-            ast::ExpressionKind::Identifier(_) => false,
-            ast::ExpressionKind::TypeName(_) => false,
-            ast::ExpressionKind::MacroCall { args, .. } => {
-                args.iter().any(|arg| {
-                    if let ast::MacroArg::Expression(expr) = arg {
-                        has_call_in_expression(expr, name)
-                    } else {
-                        false
-                    }
-                })
-            }
-            ast::ExpressionKind::Block(block) => has_call_in_block(block, name),
-            ast::ExpressionKind::Cast { expression, .. } => {
-                has_call_in_expression(expression, name)
-            }
-            ast::ExpressionKind::Unary { operand, .. } => {
-                has_call_in_expression(operand, name)
-            }
-            ast::ExpressionKind::Postfix { operand, .. } => {
-                has_call_in_expression(operand, name)
-            }
-            ast::ExpressionKind::Binary { left, right, .. } => {
-                has_call_in_expression(left, name) || has_call_in_expression(right, name)
-            }
-            ast::ExpressionKind::Index { object, index, .. } => {
-                has_call_in_expression(object, name) || has_call_in_expression(index, name)
-            }
-            ast::ExpressionKind::FieldAccess { object, .. } => {
-                has_call_in_expression(object, name)
-            }
-            ast::ExpressionKind::Initializer { items } => {
-                items.iter().any(|item| {
-                    let expr = match item {
-                        ast::InitializerItem::Positional(expr) => expr,
-                        ast::InitializerItem::Field { value, .. } => value,
-                        ast::InitializerItem::Index { value, .. } => value,
-                    };
-                    has_call_in_expression(expr, name)
-                })
-            }
-            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
-                items.iter().any(|item| has_call_in_expression(item, name))
-            }
-            ast::ExpressionKind::StructLiteral { fields, .. } => {
-                fields.iter().any(|f| has_call_in_expression(&f.value, name))
-            }
-            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
-                has_call_in_expression(inner, name)
-            }
-            ast::ExpressionKind::Reference { expression: inner, .. } => {
-                has_call_in_expression(inner, name)
-            }
-            ast::ExpressionKind::ForIn { iterable, body, .. } => {
-                has_call_in_expression(iterable, name) || has_call_in_block(body, name)
-            }
-            _ => false,
-        }
-    }
-
-    #[test]
-    fn monomorphizes_nested_generic_function_call_in_impl_body() {
-        let mut program = parse(
-            "T* alloc<T>(i32 size) { return 0; } \
-             struct Holder<T> { T* ptr; i64 size; } \
-             impl<T> Holder<T> { \
-                 void grow(Holder<T>* self, i64 extra) { \
-                     T* next = alloc<T>(4); \
-                     self.ptr = next; \
-                     self.size = self.size + extra; \
-                 } \
-             } \
-             i32 main() { Holder<i32> h; return 0; }"
-        );
-        
-        // Find the generic impl and method to create an initial ImplMethod request
-        let impl_item = program.items.iter().find_map(|item| {
-            if let ast::ItemKind::Impl(impl_item) = &item.kind {
-                if impl_item.generics.is_some() {
-                    let has_grow = impl_item.items.iter().any(|m| {
-                        matches!(m, ast::ImplItemKind::Function(f) if f.name.name == "grow")
-                    });
-                    if has_grow {
-                        return Some(impl_item.clone());
-                    }
-                }
-            }
-            None
-        }).expect("expected generic impl Holder<T> with grow");
-        
-        let grow_method = impl_item.items.iter().find_map(|m| {
-            if let ast::ImplItemKind::Function(f) = m {
-                if f.name.name == "grow" {
-                    return Some(Box::new(f.clone()));
-                }
-            }
-            None
-        }).expect("expected grow method");
-        
-        let type_params = vec!["T".to_string()];
-        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
-        
-        let request = MonomorphRequest::ImplMethod {
-            impl_item: Box::new(impl_item),
-            method: grow_method,
-            type_params,
-            mapping,
-            call_span: Span { start: 0, end: 0 },
-        };
-        
-        let items = append_monomorphs(&mut program, &[request]);
-
-        // Verify Holder<i32> impl was created
-        let has_holder = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Impl(impl_item) => {
-                let is_holder = if let ast::TypeKind::Named(named) = &impl_item.self_type.kind.as_ref() {
-                    named.path.last().is_some_and(|id| id.name == "Holder__i32")
-                } else {
-                    false
-                };
-                is_holder || impl_item.items.iter().any(|m| {
-                    if let ast::ImplItemKind::Function(f) = m {
-                        f.name.name == "grow"
-                    } else {
-                        false
-                    }
-                })
-            }
-            _ => false,
-        });
-        assert!(has_holder, "expected monomorphized Holder__i32 impl");
-
-        // Verify that alloc<i32>(i32) was also monomorphized (nested call within Holder<i32>.grow)
-        let has_alloc = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "alloc__i32_i32",
-            _ => false,
-        });
-        assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");
-    }
-}
 
 fn mapping_covers_impl(mapping: &HashMap<String, Type>, generics: Option<&ast::Generics>) -> bool {
     let Some(generics) = generics else {
@@ -2459,4 +2044,419 @@ fn collect_remaining_function_requests(
         }
     }
     requests
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::{lex, Span};
+    use crate::parser::Parser;
+
+    fn parse(source: &str) -> ast::Program {
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        program
+    }
+
+    fn find_function(program: &ast::Program, name: &str) -> ast::FunctionItem {
+        program
+            .items
+            .iter()
+            .find_map(|item| {
+                if let ast::ItemKind::Function(f) = &item.kind
+                    && f.name.name == name
+                {
+                    return Some(f.clone());
+                }
+                None
+            })
+            .expect("function not found")
+    }
+
+    #[test]
+    fn monomorphizes_generic_structs() {
+        let mut program = parse("struct Box<T> { T value; } i32 main() { Box<i32> b; return 0; }");
+        let items = append_monomorphs(&mut program, &[]);
+        let has_struct = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Struct(struct_item) => struct_item.name.name.starts_with("Box__"),
+            _ => false,
+        });
+        assert!(has_struct, "expected monomorphized struct");
+    }
+
+    #[test]
+    fn monomorphizes_generic_function() {
+        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "foo");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "foo__i32_i32",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function foo__i32");
+    }
+
+    #[test]
+    fn monomorphizes_generic_function_with_multiple_type_params() {
+        let mut program = parse("T bar<T, U>(T x, U y) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "bar");
+        let type_params = vec!["T".to_string(), "U".to_string()];
+        let mapping = HashMap::from_iter([
+            ("T".to_string(), Type::Primitive(ast::PrimitiveType::I32)),
+            ("U".to_string(), Type::Primitive(ast::PrimitiveType::F64)),
+        ]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64_i32_f64",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function bar__i32_f64");
+    }
+
+    #[test]
+    fn monomorphizes_duplicate_request_only_once() {
+        let mut program = parse("T foo<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "foo");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let request = MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        };
+
+        let items = append_monomorphs(&mut program, &[request.clone(), request]);
+        let count = items
+            .iter()
+            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32_i32"))
+            .count();
+        assert_eq!(count, 1, "duplicate request should only produce one monomorph");
+    }
+
+    #[test]
+    fn monomorphizes_struct_and_function_together() {
+        let mut program =
+            parse("struct Pair<T, U> { T first; U second; } T id<T>(T x) { return x; } i32 main() { return 0; }");
+        let source = find_function(&program, "id");
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+
+        let requests = vec![MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        }];
+
+        let items = append_monomorphs(&mut program, &requests);
+        let has_fn = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "id__i32_i32",
+            _ => false,
+        });
+        assert!(has_fn, "expected monomorphized function id__i32");
+    }
+
+    #[test]
+    fn mangle_name_empty_args() {
+        assert_eq!(mangle_name("foo", &[]), "foo");
+    }
+
+    #[test]
+    fn mangle_name_single_arg() {
+        assert_eq!(
+            mangle_name("foo", &[Type::Primitive(ast::PrimitiveType::I32)]),
+            "foo__i32"
+        );
+    }
+
+    #[test]
+    fn mangle_name_multiple_args() {
+        assert_eq!(
+            mangle_name(
+                "convert",
+                &[
+                    Type::Primitive(ast::PrimitiveType::I32),
+                    Type::Primitive(ast::PrimitiveType::F64)
+                ]
+            ),
+            "convert__i32_f64"
+        );
+    }
+
+    #[test]
+    fn mangle_name_pointer_type() {
+        let mangled = mangle_name(
+            "deref",
+            &[Type::Pointer {
+                is_mutable: false,
+                inner: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
+            }],
+        );
+        assert_eq!(mangled, "deref__ptr_i32");
+    }
+
+    #[test]
+    fn mangle_name_named_type() {
+        assert_eq!(
+            mangle_name(
+                "alloc",
+                &[Type::Named {
+                    path: vec!["Point".to_string()],
+                    generics: vec![]
+                }]
+            ),
+            "alloc__Point"
+        );
+    }
+
+    #[test]
+    fn monomorphizes_nested_generic_struct() {
+        let mut program = parse("struct Wrapper<T> { T inner; } struct Pair<T, U> { T first; U second; } i32 main() { Pair<Wrapper<i32>, i32> p; return 0; }");
+        let items = append_monomorphs(&mut program, &[]);
+        let has_wrapper = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Struct(s) => s.name.name.starts_with("Wrapper__"),
+            _ => false,
+        });
+        let pair_names: Vec<&str> = items.iter().filter_map(|item| match &item.kind {
+            ast::ItemKind::Struct(s) => Some(s.name.name.as_str()),
+            _ => None,
+        }).collect();
+        let has_pair = pair_names.iter().any(|n| n.starts_with("Pair__"));
+        assert!(has_wrapper, "expected Wrapper<i32> monomorph");
+        assert!(has_pair, "expected Pair<Wrapper<i32>, i32> monomorph, got: {:?}", pair_names);
+    }
+
+    #[test]
+    fn monomorphizes_generic_enum() {
+        let mut program = parse("enum Option<T> { Some(T); None; } i32 main() { Option<i32> x; return 0; }");
+        let items = append_monomorphs(&mut program, &[]);
+        let has_enum = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Enum(e) => e.name.name.starts_with("Option__"),
+            _ => false,
+        });
+        assert!(has_enum, "expected Option<i32> monomorph");
+    }
+
+    /// Helper: check if any item contains a call expression with the given function name.
+    fn has_call_named(program: &ast::Program, name: &str) -> bool {
+        for item in &program.items {
+            let body = match &item.kind {
+                ast::ItemKind::Function(f) => Some(&f.body),
+                ast::ItemKind::Impl(impl_item) => {
+                    impl_item.items.iter().find_map(|m| {
+                        if let ast::ImplItemKind::Function(f) = m {
+                            Some(&f.body)
+                        } else {
+                            None
+                        }
+                    })
+                }
+                _ => None,
+            };
+            if let Some(body) = body
+                && has_call_in_block(body, name)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_call_in_block(block: &ast::Block, name: &str) -> bool {
+        for stmt in &block.statements {
+            if has_call_in_statement(stmt, name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_call_in_statement(stmt: &ast::Statement, name: &str) -> bool {
+        match &stmt.kind {
+            ast::StatementKind::Block(block) => has_call_in_block(block, name),
+            ast::StatementKind::Let(let_stmt) => {
+                let_stmt.initializer.as_ref().is_some_and(|init| has_call_in_expression(init, name))
+            }
+            ast::StatementKind::Expression(expr)
+            | ast::StatementKind::Return(Some(expr))
+            | ast::StatementKind::Break(Some(expr)) => has_call_in_expression(expr, name),
+            _ => false,
+        }
+    }
+
+    fn has_call_in_expression(expr: &ast::Expression, name: &str) -> bool {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Call { function, arguments } => {
+                let matches = match function.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(ident) => ident.name == name,
+                    ast::ExpressionKind::TypeName(ty) => {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            named.path.last().is_some_and(|id| id.name == name)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                matches || arguments.iter().any(|arg| has_call_in_expression(arg, name))
+            }
+            ast::ExpressionKind::Identifier(_) => false,
+            ast::ExpressionKind::TypeName(_) => false,
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                args.iter().any(|arg| {
+                    if let ast::MacroArg::Expression(expr) = arg {
+                        has_call_in_expression(expr, name)
+                    } else {
+                        false
+                    }
+                })
+            }
+            ast::ExpressionKind::Block(block) => has_call_in_block(block, name),
+            ast::ExpressionKind::Cast { expression, .. } => {
+                has_call_in_expression(expression, name)
+            }
+            ast::ExpressionKind::Unary { operand, .. } => {
+                has_call_in_expression(operand, name)
+            }
+            ast::ExpressionKind::Postfix { operand, .. } => {
+                has_call_in_expression(operand, name)
+            }
+            ast::ExpressionKind::Binary { left, right, .. } => {
+                has_call_in_expression(left, name) || has_call_in_expression(right, name)
+            }
+            ast::ExpressionKind::Index { object, index, .. } => {
+                has_call_in_expression(object, name) || has_call_in_expression(index, name)
+            }
+            ast::ExpressionKind::FieldAccess { object, .. } => {
+                has_call_in_expression(object, name)
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                items.iter().any(|item| {
+                    let expr = match item {
+                        ast::InitializerItem::Positional(expr) => expr,
+                        ast::InitializerItem::Field { value, .. } => value,
+                        ast::InitializerItem::Index { value, .. } => value,
+                    };
+                    has_call_in_expression(expr, name)
+                })
+            }
+            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+                items.iter().any(|item| has_call_in_expression(item, name))
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                fields.iter().any(|f| has_call_in_expression(&f.value, name))
+            }
+            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
+                has_call_in_expression(inner, name)
+            }
+            ast::ExpressionKind::Reference { expression: inner, .. } => {
+                has_call_in_expression(inner, name)
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                has_call_in_expression(iterable, name) || has_call_in_block(body, name)
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn monomorphizes_nested_generic_function_call_in_impl_body() {
+        let mut program = parse(
+            "T* alloc<T>(i32 size) { return 0; } \
+             struct Holder<T> { T* ptr; i64 size; } \
+             impl<T> Holder<T> { \
+                 void grow(Holder<T>* self, i64 extra) { \
+                     T* next = alloc<T>(4); \
+                     self.ptr = next; \
+                     self.size = self.size + extra; \
+                 } \
+             } \
+             i32 main() { Holder<i32> h; return 0; }"
+        );
+        
+        // Find the generic impl and method to create an initial ImplMethod request
+        let impl_item = program.items.iter().find_map(|item| {
+            if let ast::ItemKind::Impl(impl_item) = &item.kind
+                && impl_item.generics.is_some()
+            {
+                let has_grow = impl_item.items.iter().any(|m| {
+                    matches!(m, ast::ImplItemKind::Function(f) if f.name.name == "grow")
+                });
+                if has_grow {
+                    return Some(impl_item.clone());
+                }
+            }
+            None
+        }).expect("expected generic impl Holder<T> with grow");
+        
+        let grow_method = impl_item.items.iter().find_map(|m| {
+            if let ast::ImplItemKind::Function(f) = m
+                && f.name.name == "grow"
+            {
+                return Some(Box::new(f.clone()));
+            }
+            None
+        }).expect("expected grow method");
+        
+        let type_params = vec!["T".to_string()];
+        let mapping = HashMap::from_iter([("T".to_string(), Type::Primitive(ast::PrimitiveType::I32))]);
+        
+        let request = MonomorphRequest::ImplMethod {
+            impl_item: Box::new(impl_item),
+            method: grow_method,
+            type_params,
+            mapping,
+            call_span: Span { start: 0, end: 0 },
+        };
+        
+        let items = append_monomorphs(&mut program, &[request]);
+
+        // Verify Holder<i32> impl was created
+        let has_holder = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Impl(impl_item) => {
+                let is_holder = if let ast::TypeKind::Named(named) = &impl_item.self_type.kind.as_ref() {
+                    named.path.last().is_some_and(|id| id.name == "Holder__i32")
+                } else {
+                    false
+                };
+                is_holder || impl_item.items.iter().any(|m| {
+                    if let ast::ImplItemKind::Function(f) = m {
+                        f.name.name == "grow"
+                    } else {
+                        false
+                    }
+                })
+            }
+            _ => false,
+        });
+        assert!(has_holder, "expected monomorphized Holder__i32 impl");
+
+        // Verify that alloc<i32>(i32) was also monomorphized (nested call within Holder<i32>.grow)
+        let has_alloc = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name == "alloc__i32_i32",
+            _ => false,
+        });
+        assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");
+    }
 }

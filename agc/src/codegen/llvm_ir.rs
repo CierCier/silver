@@ -7512,10 +7512,10 @@ mod tests {
         name: &str,
     ) -> &'a mut ast::FunctionItem {
         for item in &mut program.items {
-            if let ast::ItemKind::Function(func) = &mut item.kind {
-                if func.name.name == name {
-                    return func;
-                }
+            if let ast::ItemKind::Function(func) = &mut item.kind
+                && func.name.name == name
+            {
+                return func;
             }
         }
         panic!("function `{name}` not found");
@@ -7788,9 +7788,9 @@ mod tests {
         // Create an alloca for the local variable, store and load
         let alloca = builder.build_alloca(i32_type, "x").expect("alloca should succeed");
         let const_42 = i32_type.const_int(42, false);
-        builder.build_store(alloca, const_42);
+        let _ = builder.build_store(alloca, const_42);
         let loaded = builder.build_load(i32_type, alloca, "loaded").expect("load should succeed");
-        builder.build_return(Some(&loaded));
+        let _ = builder.build_return(Some(&loaded));
 
         // Set up target machine
         Target::initialize_all(&InitializationConfig::default());

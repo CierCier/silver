@@ -3743,12 +3743,12 @@ mod tests {
             .collect();
         // Also add files from std/mem/
         let mem_dir = std_dir.join("mem");
-        if mem_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&mem_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().extension().is_some_and(|ext| ext == "ag") {
-                        files.push(entry.path());
-                    }
+        if mem_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&mem_dir)
+        {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|ext| ext == "ag") {
+                    files.push(entry.path());
                 }
             }
         }

@@ -103,6 +103,19 @@ pub fn filter_program_attributes(
 fn is_program_level_attribute(name: &str) -> bool {
     matches!(name, "link")
 }
+
+/// Extracts a `#[link_name("...")]` value from an attribute list, if present.
+/// Returns `None` if no valid `#[link_name]` attribute is found.
+pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
+    for attr in attributes {
+        if attr.name.name == "link_name"
+            && let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first()
+                && !s.is_empty() {
+                    return Some(s);
+                }
+    }
+    None
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,17 +176,4 @@ mod tests {
             "link expects a library name identifier or string literal"
         );
     }
-}
-
-/// Extracts a `#[link_name("...")]` value from an attribute list, if present.
-/// Returns `None` if no valid `#[link_name]` attribute is found.
-pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
-    for attr in attributes {
-        if attr.name.name == "link_name"
-            && let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first()
-                && !s.is_empty() {
-                    return Some(s);
-                }
-    }
-    None
 }

@@ -319,7 +319,7 @@ impl Value {
                 expected: "known enum type".to_string(),
                 found: e.to_string(),
             })?
-            .ok_or_else(|| ValueError::UnknownEnumDiscriminant {
+            .ok_or(ValueError::UnknownEnumDiscriminant {
                 type_name,
                 discriminant,
             })?;

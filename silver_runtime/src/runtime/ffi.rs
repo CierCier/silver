@@ -43,7 +43,7 @@ pub extern "C" fn silver_rt_print_f64(v: f64) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_print_cstr(ptr: *const i8) {
+pub unsafe extern "C" fn silver_rt_print_cstr(ptr: *const i8) {
     if ptr.is_null() {
         println!("<null>");
         return;
@@ -58,7 +58,7 @@ pub extern "C" fn silver_rt_print_cstr(ptr: *const i8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_print_bytes(s: SilverSlice) {
+pub unsafe extern "C" fn silver_rt_print_bytes(s: SilverSlice) {
     if s.is_null() {
         println!("<null>");
         return;
@@ -78,7 +78,7 @@ pub extern "C" fn silver_rt_abort() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_abort_cstr(ptr: *const i8) {
+pub unsafe extern "C" fn silver_rt_abort_cstr(ptr: *const i8) {
     if !ptr.is_null() {
         // Safety: caller promises ptr is NUL-terminated.
         let s = unsafe { CStr::from_ptr(ptr) };
@@ -90,7 +90,7 @@ pub extern "C" fn silver_rt_abort_cstr(ptr: *const i8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_strlen(ptr: *const i8) -> usize {
+pub unsafe extern "C" fn silver_rt_strlen(ptr: *const i8) -> usize {
     if ptr.is_null() {
         return 0;
     }
@@ -128,7 +128,7 @@ pub extern "C" fn silver_rt_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_realloc(
+pub unsafe extern "C" fn silver_rt_realloc(
     ptr0: *mut u8,
     old_size: usize,
     new_size: usize,
@@ -152,7 +152,7 @@ pub extern "C" fn silver_rt_realloc(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_dealloc(ptr0: *mut u8, size: usize, align: usize) {
+pub unsafe extern "C" fn silver_rt_dealloc(ptr0: *mut u8, size: usize, align: usize) {
     if ptr0.is_null() || size == 0 {
         return;
     }
@@ -165,7 +165,7 @@ pub extern "C" fn silver_rt_dealloc(ptr0: *mut u8, size: usize, align: usize) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_memset(dst: *mut u8, value: u8, len: usize) -> *mut u8 {
+pub unsafe extern "C" fn silver_rt_memset(dst: *mut u8, value: u8, len: usize) -> *mut u8 {
     if dst.is_null() {
         return dst;
     }
@@ -175,7 +175,7 @@ pub extern "C" fn silver_rt_memset(dst: *mut u8, value: u8, len: usize) -> *mut 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_memcpy(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+pub unsafe extern "C" fn silver_rt_memcpy(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
     if dst.is_null() || src.is_null() {
         return dst;
     }
@@ -185,7 +185,7 @@ pub extern "C" fn silver_rt_memcpy(dst: *mut u8, src: *const u8, len: usize) -> 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn silver_rt_memmove(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+pub unsafe extern "C" fn silver_rt_memmove(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
     if dst.is_null() || src.is_null() {
         return dst;
     }
