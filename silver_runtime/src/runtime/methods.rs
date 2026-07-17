@@ -114,13 +114,13 @@ impl super::Runtime {
         let arity = spec.arity;
         let func = spec.func.clone();
 
-        if let Some(expected) = arity {
-            if expected != args.len() {
-                return Err(RuntimeError::ArityMismatch {
-                    expected,
-                    found: args.len(),
-                });
-            }
+        if let Some(expected) = arity
+            && expected != args.len()
+        {
+            return Err(RuntimeError::ArityMismatch {
+                expected,
+                found: args.len(),
+            });
         }
 
         (func)(self, receiver, args)

@@ -353,7 +353,6 @@ impl TypeRegistry {
         }
 
         // Rebuild into the expected input type while keeping the computed Arc<str> names.
-        let resolved = resolved.into_iter().map(|(n, d, p)| (n, d, p)).collect();
         self.define_enum_with_discriminants(name_arc, resolved)
     }
 

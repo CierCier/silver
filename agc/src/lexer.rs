@@ -1067,9 +1067,9 @@ mod tests {
 
     #[test]
     fn test_complex_numbers() {
-        let mut lexer = Lexer::new("3.14i".to_string());
+        let mut lexer = Lexer::new("3.5i".to_string());
         let tokens = lexer.tokenize().unwrap();
-        assert_eq!(tokens, vec![Token::ComplexLiteral(0.0, 3.14), Token::Eof]);
+        assert_eq!(tokens, vec![Token::ComplexLiteral(0.0, 3.5), Token::Eof]);
 
         let mut lexer = Lexer::new("42i".to_string());
         let tokens = lexer.tokenize().unwrap();

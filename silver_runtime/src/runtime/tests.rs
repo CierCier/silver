@@ -201,7 +201,7 @@ fn builtin_numeric_casts_work() {
         .cast_value(
             value::RtValue::Float {
                 ty: TypeId::F64,
-                value: 3.14,
+                value: std::f64::consts::PI,
             },
             TypeId::I32,
         )
