@@ -3,34 +3,22 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString};
 
-use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
-use crate::module_artifact::{
+use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
+use agc::module_artifact::{
     ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
 };
-use crate::module_loader::{ModuleLoader, module_loader_default_dirs};
+use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
+use agc::semantic::{
+    self,
+    analyzer::{Analyzer, SemanticAnalyzerHook},
+    comptime_cast_hook::ComptimeCastHook,
+    typeck::TypeChecker,
+};
+use agc::symbol_table::{CompilerPhase, CompilerSymbolTable};
+use agc::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
-use semantic::analyzer::{Analyzer, SemanticAnalyzerHook};
-use semantic::comptime_cast_hook::ComptimeCastHook;
-use semantic::typeck::TypeChecker;
-use symbol_table::{CompilerPhase, CompilerSymbolTable};
-
-mod ast_tree;
-mod attributes;
-mod builtin_macros;
-mod codegen;
-mod debug_info;
-mod diagnostics;
-mod lexer;
-mod module_artifact;
-mod module_loader;
-mod parser;
-mod profiler;
-mod semantic;
-mod symbol_table;
-mod traits;
-mod types;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
 enum EmitKind {
@@ -627,12 +615,13 @@ fn main() {
             let mut exe_object_files: Vec<PathBuf> = Vec::new();
             let exe_temp_dir = if plan.emit == EmitKind::Exe {
                 let pid = std::process::id();
-                let nonce = match SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                {
+                let nonce = match SystemTime::now().duration_since(UNIX_EPOCH) {
                     Ok(d) => d.as_nanos(),
                     Err(e) => {
-                        eprintln!("agc: {}: failed to compute temp dir nonce: {e}", "error".red().bold());
+                        eprintln!(
+                            "agc: {}: failed to compute temp dir nonce: {e}",
+                            "error".red().bold()
+                        );
                         std::process::exit(2);
                     }
                 };
@@ -649,9 +638,10 @@ fn main() {
             } else {
                 None
             };
-             let mut native_libs = plan.libs.clone();
+            let mut native_libs = plan.libs.clone();
             let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
-            let mut dependency_artifact_set: rustc_hash::FxHashSet<PathBuf> = rustc_hash::FxHashSet::default();
+            let mut dependency_artifact_set: rustc_hash::FxHashSet<PathBuf> =
+                rustc_hash::FxHashSet::default();
 
             for input in &plan.inputs {
                 profiler.begin_phase("read source");
@@ -1250,13 +1240,11 @@ fn link_exe(
     if object_paths.is_empty() {
         return Err("no object files to link".to_string());
     }
-    link_exe_with_ld_lld(plan, object_paths, dependency_paths, native_libs)
-        .or_else(|ld_err| {
-            link_exe_with_cc(plan, object_paths, dependency_paths, native_libs)
-                .map_err(|cc_err| {
-                    format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
-                })
+    link_exe_with_ld_lld(plan, object_paths, dependency_paths, native_libs).or_else(|ld_err| {
+        link_exe_with_cc(plan, object_paths, dependency_paths, native_libs).map_err(|cc_err| {
+            format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
         })
+    })
 }
 
 fn command_exists(name: &str) -> bool {
