@@ -12,6 +12,7 @@
 //       The heap memory for T is freed; if T holds owned resources
 //       those must be managed separately.
 import std.mem.alloc;
+import std.mem.drop;
 
 pub struct Rc<T> {
     T* ptr;
@@ -57,7 +58,9 @@ impl Rc<T> {
     pub T* get(Rc<T>* self) {
         return (*self).ptr;
     }
+}
 
+impl<T> Drop<Rc<T>> for Rc<T> {
     /// Drop one handle — decrements the reference count.
     /// Frees the value and count when it reaches zero.
     pub void drop(Rc<T>* self) {

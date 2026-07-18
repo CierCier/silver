@@ -17,6 +17,7 @@
 //   - No per-object free — individual allocations cannot be recycled.
 //   - Returns null (T*)0 on OOM.
 import std.mem.alloc;
+import std.mem.drop;
 
 pub struct Arena {
     u8* base;
@@ -38,7 +39,9 @@ impl Arena {
     pub void reset(Arena* self) {
         (*self).offset = 0;
     }
+}
 
+impl Drop<Arena> for Arena {
     /// Free the entire arena memory.
     pub void drop(Arena* self) {
         if ((*self).base != (u8*)0) {

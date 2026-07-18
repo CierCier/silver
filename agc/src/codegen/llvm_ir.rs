@@ -1,4 +1,5 @@
 use inkwell::passes::PassBuilderOptions;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::path::Path;
 
@@ -109,6 +110,7 @@ pub struct LlvmIrGenerator<'ctx> {
     string_constants: HashMap<String, PointerValue<'ctx>>,
     struct_generics: HashMap<String, Vec<String>>,
     generic_impl_templates: Vec<ast::ImplItem>,
+    drop_trait_impl_owners: HashSet<String>,
     loop_stack: Vec<(
         inkwell::basic_block::BasicBlock<'ctx>,
         inkwell::basic_block::BasicBlock<'ctx>,
@@ -194,6 +196,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             method_receivers: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
+            drop_trait_impl_owners: HashSet::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -262,6 +265,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
             generic_impl_templates: Vec::new(),
+            drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
@@ -498,6 +502,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
             generic_impl_templates: Vec::new(),
+            drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
@@ -1999,6 +2004,75 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    fn get_drop_function_name(&mut self, ty: &ast::Type) -> CodegenResult<Option<String>> {
+        // 1. Check concrete Drop-impl owners already registered
+        let drop_owners = Self::owner_name_candidates_from_type(ty);
+        for owner in &drop_owners {
+            if self.drop_trait_impl_owners.contains(owner.as_str()) {
+                let mangled = Self::mangle_method_name(owner, "drop");
+                if self.module.get_function(&mangled).is_some() {
+                    return Ok(Some(mangled));
+                }
+            }
+        }
+        // 2. Try generic Drop-impl instantiation
+        if let Some(mangled) =
+            self.try_instantiate_generic_impl_method_for_type_filtered(ty, "drop", Some("Drop"))?
+        {
+            return Ok(Some(mangled));
+        }
+        // 3. No Drop trait impl
+        Ok(None)
+    }
+
+    fn register_field_drops(
+        &mut self,
+        ty: &ast::Type,
+        struct_ptr: PointerValue<'ctx>,
+        flag: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        let Some(named) = Self::extract_named_type(ty).cloned() else {
+            return Ok(());
+        };
+        let _ = self.ensure_named_struct_type(&named)?;
+        let named_key = Self::named_type_key(&named);
+        // Clone fields and the struct type to avoid borrowing self while
+        // recursively calling self.register_field_drops / get_drop_function_name.
+        let fields: Vec<(String, ast::Type)> = match self.struct_fields.get(&named_key) {
+            Some(f) => f.clone(),
+            None => return Ok(()),
+        };
+        let struct_ty = match self.struct_types.get(&named_key) {
+            Some(ty) => *ty,
+            None => return Ok(()),
+        };
+        // Iterate in reverse so that declaration-order drops fire at runtime
+        // (defers are LIFO, so last-registered fires first).
+        for (field_index, (field_name, field_ty)) in fields.iter().enumerate().rev() {
+            let field_ptr = self
+                .builder
+                .build_struct_gep(struct_ty, struct_ptr, field_index as u32, field_name)
+                .map_err(|e| CodegenError::new(format!("cascade field GEP: {e}")))?;
+            // Only cascade drops into value-type fields — pointers/references are non-owning.
+            if !Self::is_pointer_or_reference(field_ty) {
+                // Recursively register drops for nested fields first
+                // (so the parent field's drop fires after its children).
+                self.register_field_drops(field_ty, field_ptr, flag)?;
+
+                // Register this field's own drop if it implements Drop.
+                if let Some(drop_fn) = self.get_drop_function_name(field_ty)? {
+                    if let Some(scope) = self.defers.last_mut() {
+                        scope.push(DeferredEntry {
+                            action: DeferAction::DropCall(drop_fn, field_ptr),
+                            flag: Some(flag),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn extract_named_type(ty: &ast::Type) -> Option<&ast::NamedType> {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => Some(named),
@@ -2006,6 +2080,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::TypeKind::Pointer(pointer) => Self::extract_named_type(&pointer.inner),
             _ => None,
         }
+    }
+
+    fn is_pointer_or_reference(ty: &ast::Type) -> bool {
+        matches!(
+            ty.kind.as_ref(),
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+        )
     }
 
     fn substitute_expression_types(
@@ -2365,6 +2446,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         receiver_type: &ast::Type,
         method_name: &str,
     ) -> CodegenResult<Option<String>> {
+        self.try_instantiate_generic_impl_method_for_type_filtered(receiver_type, method_name, None)
+    }
+
+    fn try_instantiate_generic_impl_method_for_type_filtered(
+        &mut self,
+        receiver_type: &ast::Type,
+        method_name: &str,
+        required_trait: Option<&str>,
+    ) -> CodegenResult<Option<String>> {
         let Some(receiver_named) = Self::extract_named_type(receiver_type) else {
             return Ok(None);
         };
@@ -2376,6 +2466,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let templates = self.generic_impl_templates.clone();
         for template in templates {
+            // Trait filter: skip if required_trait is set and doesn't match
+            if let Some(required_trait) = required_trait {
+                let Some(trait_ref) = &template.trait_ref else {
+                    continue;
+                };
+                let Some(trait_name) = trait_ref.path.last().map(|id| id.name.as_str()) else {
+                    continue;
+                };
+                if trait_name != required_trait {
+                    continue;
+                }
+            }
+
             let Some(template_named) = Self::extract_named_type(&template.self_type) else {
                 continue;
             };
@@ -2477,6 +2580,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(saved_block) = saved_block {
                     self.builder.position_at_end(saved_block);
                 }
+            }
+
+            // When a Drop-trait instantiation succeeds, record the owner
+            if required_trait == Some("Drop") {
+                self.drop_trait_impl_owners.insert(owner.clone());
             }
 
             return Ok(Some(mangled_name));
@@ -2606,6 +2714,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Pass-1 collection for impl methods.
     ///
     /// Registers receiver mode and declares mangled LLVM function signatures so
+    fn is_drop_trait_impl(item: &ast::ImplItem) -> bool {
+        item.trait_ref.as_ref().is_some_and(|trait_ref| {
+            trait_ref.path.last().map(|id| id.name.as_str()) == Some("Drop")
+        })
+    }
+
     /// method calls can resolve before bodies are emitted.
     fn collect_impl_method_signatures(
         &mut self,
@@ -2794,8 +2908,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
 
-        // Set up drop flags and defers for parameters with destructors.
-        // This mirrors the logic in emit_let_statement (lines 5883-5920).
+        // Set up drop flags and defers for parameters that implement Drop.
         for param in parameters {
             // Skip pointer/reference types: the caller owns the pointee,
             // so we must NOT call the pointee's drop on function exit.
@@ -2806,17 +2919,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 continue;
             }
             let ty_for_drop = param.param_type.clone();
-            let drop_owners = Self::owner_name_candidates_from_type(&ty_for_drop);
-            let needs_drop = drop_owners.iter().any(|owner| {
-                let drop_name = Self::mangle_method_name(owner, "drop");
-                self.module.get_function(&drop_name).is_some()
-                    || self
-                        .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
-                        .ok()
-                        .flatten()
-                        .is_some()
-            });
-            if needs_drop {
+            if let Some(drop_fn_name) = self.get_drop_function_name(&ty_for_drop)? {
                 let function = self.current_fn.ok_or_else(|| {
                     CodegenError::new("no active function for destructor".to_string())
                 })?;
@@ -2832,24 +2935,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     })?;
                 self.drop_flags.insert(param.name.name.clone(), flag_alloca);
 
-                let drop_fn_name = drop_owners
-                    .iter()
-                    .find_map(|owner| {
-                        let name = Self::mangle_method_name(owner, "drop");
-                        if self.module.get_function(&name).is_some()
-                            || self
-                                .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
-                                .ok()
-                                .flatten()
-                                .is_some()
-                        {
-                            Some(name)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
-
                 let alloca = self
                     .variables
                     .last()
@@ -2861,6 +2946,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             param.name.name
                         ))
                     })?;
+
+                // Register field drops before the parameter's own drop so the
+                // struct drop fires first (last-registered in LIFO).
+                self.register_field_drops(&ty_for_drop, alloca, flag_alloca)?;
 
                 if let Some(scope) = self.defers.last_mut() {
                     scope.push(DeferredEntry {
@@ -6683,19 +6772,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
-        // Check if this variable's type has a drop method (implicit destructor)
-        let drop_owners = Self::owner_name_candidates_from_type(&ty_for_drop);
-        let needs_drop = drop_owners.iter().any(|owner| {
-            let drop_name = Self::mangle_method_name(owner, "drop");
-            self.module.get_function(&drop_name).is_some()
-                || self
-                    .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
-                    .ok()
-                    .flatten()
-                    .is_some()
-        });
-
-        if needs_drop {
+        // Check if this variable's type implements Drop; if so, set up a
+        // drop flag and register the cascade (field drops, then own drop).
+        if let Some(drop_fn_name) = self.get_drop_function_name(&ty_for_drop)? {
             let function = self.current_fn.ok_or_else(|| {
                 CodegenError::new("no active function for destructor".to_string())
             })?;
@@ -6710,24 +6789,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
             self.drop_flags.insert(identifier.name.clone(), flag_alloca);
 
-            // Construct the drop function name from the first matching owner
-            let drop_fn_name = drop_owners
-                .iter()
-                .find_map(|owner| {
-                    let name = Self::mangle_method_name(owner, "drop");
-                    if self.module.get_function(&name).is_some()
-                        || self
-                            .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
+            // Register field drops BEFORE the struct's own drop, so they
+            // fire AFTER it in LIFO (struct drop is last-registered, fires first).
+            self.register_field_drops(&ty_for_drop, alloca, flag_alloca)?;
 
             if let Some(scope) = self.defers.last_mut() {
                 scope.push(DeferredEntry {
@@ -7103,6 +7167,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         self.generic_impl_templates.push(impl_item.clone());
                     }
                     self.collect_impl_method_signatures(impl_item, &item.visibility)?;
+                    if Self::is_drop_trait_impl(impl_item)
+                        && impl_item.generics.is_none()
+                        && !self.has_generic_placeholder_type(&impl_item.self_type)
+                        && let Some(owner) = Self::owner_name_from_type(&impl_item.self_type)
+                    {
+                        self.drop_trait_impl_owners.insert(owner);
+                    }
                 }
                 _ => {}
             }
