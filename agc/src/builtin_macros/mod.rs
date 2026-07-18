@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::CodegenResult;
+use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::parser::ast;
 use crate::semantic::typeck::TypeChecker;
 use crate::types::Type;
@@ -39,6 +39,7 @@ impl MacroRegistry {
             handlers: HashMap::default(),
         };
         registry.register("size", Box::new(SizeHandler));
+        registry.register("align", Box::new(AlignHandler));
         registry.register("hash", Box::new(HashHandler));
         registry
     }
@@ -62,8 +63,7 @@ impl MacroRegistry {
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Option<Type> {
-        self.get(name)
-            .map(|h| h.type_check(checker, expr, args))
+        self.get(name).map(|h| h.type_check(checker, expr, args))
     }
 
     pub fn codegen<'ctx>(
@@ -96,6 +96,27 @@ impl MacroHandler for SizeHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.size_codegen(expr, args)
+    }
+}
+pub struct AlignHandler;
+
+impl MacroHandler for AlignHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.align_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.align_codegen(expr, args)
     }
 }
 pub struct HashHandler;
@@ -143,7 +164,7 @@ pub fn handle_codegen<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::{lex, Span};
+    use crate::lexer::{Span, lex};
     use crate::parser::Parser;
     use crate::parser::ast::{Expression, ExpressionKind, Identifier};
 
@@ -180,7 +201,10 @@ mod tests {
     fn dummy_expr() -> Expression {
         Expression {
             kind: Box::new(ExpressionKind::MacroCall {
-                name: Identifier { name: String::new(), span: Span { start: 0, end: 0 } },
+                name: Identifier {
+                    name: String::new(),
+                    span: Span { start: 0, end: 0 },
+                },
                 args: vec![],
             }),
             span: Span { start: 0, end: 0 },
@@ -188,9 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_new_registers_size() {
+    fn registry_new_registers_builtin_macros() {
         let registry = MacroRegistry::new();
         assert!(registry.is_registered("size"));
+        assert!(registry.is_registered("align"));
         assert!(!registry.is_registered("unknown_name"));
     }
 
@@ -259,7 +284,38 @@ mod tests {
 
     #[test]
     fn size_handler_typeck_with_generic_type_param() {
-        let program = parse("u64 foo<T>() { return @size(T); } i32 main() { foo<i32>(); return 0; }");
+        let program =
+            parse("u64 foo<T>() { return @size(T); } i32 main() { foo<i32>(); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn align_handler_typeck_with_type_name() {
+        let program = parse("i32 main() { return @align(i32); }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn align_handler_typeck_with_expression() {
+        let program = parse("i32 main() { i32 x = 0; return @align(x); }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn align_handler_typeck_with_struct_type_name() {
+        let program =
+            parse("struct Point { i8 tag; i64 value; } i32 main() { return @align(Point); }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn align_handler_typeck_with_generic_type_param() {
+        let program =
+            parse("u64 foo<T>() { return @align(T); } i32 main() { foo<i32>(); return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "type errors: {errors:?}");
     }
@@ -269,7 +325,10 @@ mod tests {
         let mut checker = TypeChecker::new();
         let expr = dummy_expr();
         let result = handle_typeck("size", &mut checker, &expr, &[]);
-        assert!(result.is_some(), "handle_typeck should return Some for registered macro");
+        assert!(
+            result.is_some(),
+            "handle_typeck should return Some for registered macro"
+        );
     }
 
     #[test]

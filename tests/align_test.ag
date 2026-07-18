@@ -1,0 +1,33 @@
+struct AlignPair {
+    i8 tag;
+    i64 value;
+}
+
+u64 align_of<T>() {
+    return @align(T);
+}
+
+i32 main() {
+    i32 x = 0;
+
+    if (@align(i8) != 1) {
+        return 1;
+    }
+    if (@align(i32) != 4) {
+        return 2;
+    }
+    if (@align(i64) != 8) {
+        return 3;
+    }
+    if (@align(AlignPair) != 8) {
+        return 4;
+    }
+    if (@align(x) != 4) {
+        return 5;
+    }
+    if (align_of<i64>() != 8) {
+        return 6;
+    }
+
+    return 0;
+}
