@@ -2,15 +2,15 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::attributes::validate_global_attributes;
 use crate::lexer::Span;
-use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
+use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
 use crate::semantic::analyzer::Analyzer;
 use crate::semantic::monomorph::MonomorphRequest;
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::traits::validate_traits_with_imports;
 use crate::types::{
-    is_bool, is_integer, is_numeric, is_string, is_void, parse_struct_attributes, struct_layout,
-    StructAttrError, Type, TypeContext, TypeLayout,
+    StructAttrError, Type, TypeContext, TypeLayout, is_bool, is_integer, is_numeric, is_string,
+    is_void, parse_struct_attributes, struct_layout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +109,10 @@ impl TypeChecker {
         self
     }
 
-    pub fn check_program(mut self, program: &ast::Program) -> (Vec<TypeError>, Vec<MonomorphRequest>) {
+    pub fn check_program(
+        mut self,
+        program: &ast::Program,
+    ) -> (Vec<TypeError>, Vec<MonomorphRequest>) {
         let mut table = CompilerSymbolTable::new();
         self.check_program_with_table(program, &mut table)
     }
@@ -411,9 +414,9 @@ impl TypeChecker {
                         CompilerPhase::TypeCheck,
                     );
                     self.known_type_ids.insert(type_id);
-                    self.known_types
-                        .insert(alias.name.name.clone(), type_id);
-                    self.type_aliases.insert(alias.name.name.clone(), alias.type_def.clone());
+                    self.known_types.insert(alias.name.name.clone(), type_id);
+                    self.type_aliases
+                        .insert(alias.name.name.clone(), alias.type_def.clone());
                 }
                 _ => {}
             }
@@ -489,7 +492,12 @@ impl TypeChecker {
         for param in &func.parameters {
             let param_type = Type::from_ast(&param.param_type);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
+            self.bind(
+                &param.name.name,
+                param_type,
+                param.is_mutable,
+                param.span.clone(),
+            );
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -508,7 +516,12 @@ impl TypeChecker {
         for param in &func.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
+            self.bind(
+                &param.name.name,
+                param_type,
+                param.is_mutable,
+                param.span.clone(),
+            );
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -523,7 +536,12 @@ impl TypeChecker {
         for param in &cast.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
             self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(&param.name.name, param_type, param.is_mutable, param.span.clone());
+            self.bind(
+                &param.name.name,
+                param_type,
+                param.is_mutable,
+                param.span.clone(),
+            );
         }
         self.check_block(&cast.body);
         self.pop_scope();
@@ -559,10 +577,7 @@ impl TypeChecker {
                         && !self.is_implicitly_castable(&init_type, &declared)
                     {
                         self.error(
-                            format!(
-                                "type mismatch: expected {}, found {}",
-                                declared, init_type
-                            ),
+                            format!("type mismatch: expected {}, found {}", declared, init_type),
                             init.span.clone(),
                         );
                     }
@@ -570,7 +585,12 @@ impl TypeChecker {
 
                 match &let_stmt.pattern.kind {
                     ast::PatternKind::Identifier(ident) => {
-                        self.bind(&ident.name, declared.clone(), let_stmt.is_mutable, let_stmt.pattern.span.clone());
+                        self.bind(
+                            &ident.name,
+                            declared.clone(),
+                            let_stmt.is_mutable,
+                            let_stmt.pattern.span.clone(),
+                        );
                         // Record for hover: variable name gets its declared type
                         self.expr_types.insert(
                             (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
@@ -590,7 +610,10 @@ impl TypeChecker {
             }
             ast::StatementKind::Return(value) => {
                 if self.defer_depth > 0 {
-                    self.error("return statement is not allowed inside a defer block", stmt.span.clone());
+                    self.error(
+                        "return statement is not allowed inside a defer block",
+                        stmt.span.clone(),
+                    );
                 }
                 let expected = self.current_return.clone().unwrap_or(Type::Unit);
                 match value {
@@ -625,7 +648,10 @@ impl TypeChecker {
             }
             ast::StatementKind::Break(value) => {
                 if self.defer_depth > 0 {
-                    self.error("break statement is not allowed inside a defer block", stmt.span.clone());
+                    self.error(
+                        "break statement is not allowed inside a defer block",
+                        stmt.span.clone(),
+                    );
                 }
                 if let Some(expr) = value {
                     self.check_expr(expr, None);
@@ -633,7 +659,10 @@ impl TypeChecker {
             }
             ast::StatementKind::Continue => {
                 if self.defer_depth > 0 {
-                    self.error("continue statement is not allowed inside a defer block", stmt.span.clone());
+                    self.error(
+                        "continue statement is not allowed inside a defer block",
+                        stmt.span.clone(),
+                    );
                 }
             }
             ast::StatementKind::Defer(inner) => {
@@ -693,14 +722,20 @@ impl TypeChecker {
                                     result_ty
                                 } else {
                                     self.error(
-                                        format!("unary +/- requires numeric operand, found {}", operand_ty),
+                                        format!(
+                                            "unary +/- requires numeric operand, found {}",
+                                            operand_ty
+                                        ),
                                         expr.span.clone(),
                                     );
                                     operand_ty
                                 }
                             } else {
                                 self.error(
-                                    format!("unary +/- requires numeric operand, found {}", operand_ty),
+                                    format!(
+                                        "unary +/- requires numeric operand, found {}",
+                                        operand_ty
+                                    ),
                                     expr.span.clone(),
                                 );
                                 operand_ty
@@ -873,7 +908,10 @@ impl TypeChecker {
                     // The concrete type comparison is checked at monomorphization time.
                     if left_ty == right_ty {
                         if let Type::Named { path, generics } = &left_ty {
-                            if path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0]) {
+                            if path.len() == 1
+                                && generics.is_empty()
+                                && !self.known_types.contains_key(&path[0])
+                            {
                                 return Type::Primitive(ast::PrimitiveType::Bool);
                             }
                         }
@@ -885,10 +923,7 @@ impl TypeChecker {
                         let bool_ty = Type::Primitive(ast::PrimitiveType::Bool);
                         if !self.is_implicitly_castable(&ty, &bool_ty) {
                             self.error(
-                                format!(
-                                    "comparison operator must return bool, found {}",
-                                    ty
-                                ),
+                                format!("comparison operator must return bool, found {}", ty),
                                 expr.span.clone(),
                             );
                         }
@@ -912,10 +947,7 @@ impl TypeChecker {
                     let bool_ty = Type::Primitive(ast::PrimitiveType::Bool);
                     if !is_bool(&left_ty) && !self.is_implicitly_castable(&left_ty, &bool_ty) {
                         self.error(
-                            format!(
-                                "logical operator requires bool operands, found {}",
-                                left_ty
-                            ),
+                            format!("logical operator requires bool operands, found {}", left_ty),
                             expr.span.clone(),
                         );
                     }
@@ -957,9 +989,9 @@ impl TypeChecker {
                     }
                     // Try operator overload for non-primitive types
                     if !self.is_primitive_type(&left_ty) {
-                        if let Some(result_ty) = self.resolve_operator_overload(
-                            &left_ty, &right_ty, operator, expr,
-                        ) {
+                        if let Some(result_ty) =
+                            self.resolve_operator_overload(&left_ty, &right_ty, operator, expr)
+                        {
                             return result_ty;
                         }
                     }
@@ -976,10 +1008,7 @@ impl TypeChecker {
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
-                            format!(
-                                "assignment type mismatch: {} = {}",
-                                left_ty, right_ty
-                            ),
+                            format!("assignment type mismatch: {} = {}", left_ty, right_ty),
                             expr.span.clone(),
                         );
                     }
@@ -999,7 +1028,10 @@ impl TypeChecker {
                             if let Some((_, is_mut)) = self.lookup(&ident.name) {
                                 if !is_mut {
                                     self.error(
-                                        format!("cannot assign to field of const variable '{}'", ident.name),
+                                        format!(
+                                            "cannot assign to field of const variable '{}'",
+                                            ident.name
+                                        ),
                                         ident.span.clone(),
                                     );
                                 }
@@ -1008,12 +1040,14 @@ impl TypeChecker {
                     }
                     // Try operator overload for compound assignment
                     if !self.is_primitive_type(&left_ty)
-                        && matches!(operator,
+                        && matches!(
+                            operator,
                             ast::BinaryOperator::AddAssign
-                            | ast::BinaryOperator::SubtractAssign
-                            | ast::BinaryOperator::MultiplyAssign
-                            | ast::BinaryOperator::DivideAssign
-                            | ast::BinaryOperator::ModuloAssign)
+                                | ast::BinaryOperator::SubtractAssign
+                                | ast::BinaryOperator::MultiplyAssign
+                                | ast::BinaryOperator::DivideAssign
+                                | ast::BinaryOperator::ModuloAssign
+                        )
                     {
                         let bin_op = match operator {
                             ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
@@ -1161,18 +1195,19 @@ impl TypeChecker {
                 let inner = self.check_expr(expression, None);
                 // Constness of &expr depends on the source variable:
                 // if the source is const, the pointer is immutable regardless of syntax.
-                let source_is_mutable = if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
-                    self.lookup(&ident.name)
-                        .map(|(_, mutability)| mutability)
-                        .unwrap_or(true)  // unknown/global → assume mutable
-                } else {
-                    true  // non-identifier expression → assume mutable
-                };
+                let source_is_mutable =
+                    if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
+                        self.lookup(&ident.name)
+                            .map(|(_, mutability)| mutability)
+                            .unwrap_or(true) // unknown/global → assume mutable
+                    } else {
+                        true // non-identifier expression → assume mutable
+                    };
                 Type::Pointer {
                     is_mutable: source_is_mutable,
                     inner: Box::new(inner),
                 }
-            },
+            }
             ast::ExpressionKind::Move(inner) => {
                 let ty = self.check_expr(inner, None);
                 if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
@@ -1182,9 +1217,7 @@ impl TypeChecker {
                 }
                 ty
             }
-            ast::ExpressionKind::Comptime(inner) => {
-                self.check_expr(inner, None)
-            }
+            ast::ExpressionKind::Comptime(inner) => self.check_expr(inner, None),
             ast::ExpressionKind::Call {
                 function,
                 arguments,
@@ -1196,12 +1229,16 @@ impl TypeChecker {
                         if named.path.len() == 1 {
                             let ident = &named.path[0];
                             if self.functions.contains_key(&ident.name) {
-                                let explicit_types: Vec<Type> = named.generics
+                                let explicit_types: Vec<Type> = named
+                                    .generics
                                     .as_ref()
                                     .map(|gs| gs.iter().map(|t| Type::from_ast(t)).collect())
                                     .unwrap_or_default();
                                 self.resolve_overload_with_explicit(
-                                    ident, &explicit_types, arguments, expr.span.clone(),
+                                    ident,
+                                    &explicit_types,
+                                    arguments,
+                                    expr.span.clone(),
                                 )
                             } else {
                                 for arg in arguments {
@@ -1272,7 +1309,7 @@ impl TypeChecker {
                             );
                         }
                         (**element).clone()
-                    },
+                    }
                     Type::Pointer { inner, .. } => match &**inner {
                         Type::Slice { element } => {
                             if !is_integer(&index_ty) {
@@ -1282,7 +1319,7 @@ impl TypeChecker {
                                 );
                             }
                             (**element).clone()
-                        },
+                        }
                         _ => {
                             if !is_integer(&index_ty) {
                                 self.error(
@@ -1291,7 +1328,7 @@ impl TypeChecker {
                                 );
                             }
                             inner.as_ref().clone()
-                        },
+                        }
                     },
                     Type::Reference { inner, .. } => match &**inner {
                         Type::Slice { element } => {
@@ -1302,7 +1339,7 @@ impl TypeChecker {
                                 );
                             }
                             (**element).clone()
-                        },
+                        }
                         Type::Pointer { inner, .. } => match &**inner {
                             Type::Slice { element } => {
                                 if !is_integer(&index_ty) {
@@ -1312,16 +1349,19 @@ impl TypeChecker {
                                     );
                                 }
                                 (**element).clone()
-                            },
+                            }
                             _ => {
                                 if !is_integer(&index_ty) {
                                     self.error(
-                                        format!("pointer index must be integer, found {}", index_ty),
+                                        format!(
+                                            "pointer index must be integer, found {}",
+                                            index_ty
+                                        ),
                                         index.span.clone(),
                                     );
                                 }
                                 inner.as_ref().clone()
-                            },
+                            }
                         },
                         _ => {
                             if let Some(result_ty) = self.resolve_method_overload_types(
@@ -1393,8 +1433,7 @@ impl TypeChecker {
                     Type::Unknown
                 }
             }
-            ast::ExpressionKind::Match { .. }
-            | ast::ExpressionKind::StructLiteral { .. } => {
+            ast::ExpressionKind::Match { .. } | ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(
                     "type checking for this expression is not implemented",
                     expr.span.clone(),
@@ -1492,10 +1531,7 @@ impl TypeChecker {
                                 .unwrap_or(false);
                             if !has_iterator {
                                 self.error(
-                                    format!(
-                                        "type {} does not implement `Iterator`",
-                                        iterator_ty
-                                    ),
+                                    format!("type {} does not implement `Iterator`", iterator_ty),
                                     expr.span.clone(),
                                 );
                                 Type::Unknown
@@ -1508,7 +1544,9 @@ impl TypeChecker {
                                     expr.span.clone(),
                                 );
                                 match next_ret {
-                                    Some(Type::Named { path, generics }) if path.last().map(|s| s.as_str()) == Some("Optional") => {
+                                    Some(Type::Named { path, generics })
+                                        if path.last().map(|s| s.as_str()) == Some("Optional") =>
+                                    {
                                         generics.first().cloned().unwrap_or(Type::Unknown)
                                     }
                                     Some(Type::Optional { inner }) => *inner,
@@ -1544,7 +1582,8 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Asm(_) => Type::Unit,
         };
-        self.expr_types.insert((expr.span.start, expr.span.end), ty.to_string());
+        self.expr_types
+            .insert((expr.span.start, expr.span.end), ty.to_string());
         ty
     }
 
@@ -1662,8 +1701,7 @@ impl TypeChecker {
                 .iter()
                 .filter_map(|id| {
                     self.function_symbols.get(id).map(|c| {
-                        let params: Vec<String> =
-                            c.params.iter().map(|p| p.to_string()).collect();
+                        let params: Vec<String> = c.params.iter().map(|p| p.to_string()).collect();
                         format!("{}({})", ident.name, params.join(", "))
                     })
                 })
@@ -1687,8 +1725,7 @@ impl TypeChecker {
             let candidates: Vec<String> = best_matches
                 .iter()
                 .filter_map(|(_, _, _, c)| {
-                    let params: Vec<String> =
-                        c.params.iter().map(|p| p.to_string()).collect();
+                    let params: Vec<String> = c.params.iter().map(|p| p.to_string()).collect();
                     Some(format!("{}({})", ident.name, params.join(", ")))
                 })
                 .collect();
@@ -1712,7 +1749,11 @@ impl TypeChecker {
             Type::Named { generics, .. } => {
                 let mut out = Vec::new();
                 for g in generics {
-                    if let Type::Named { path, generics: inner_gs } = g {
+                    if let Type::Named {
+                        path,
+                        generics: inner_gs,
+                    } = g
+                    {
                         if path.len() == 1 && inner_gs.is_empty() {
                             out.push(path[0].clone());
                         }
@@ -1941,8 +1982,7 @@ impl TypeChecker {
             let candidates: Vec<String> = best_matches
                 .iter()
                 .filter_map(|(_, _, _, c)| {
-                    let params: Vec<String> =
-                        c.params.iter().map(|p| p.to_string()).collect();
+                    let params: Vec<String> = c.params.iter().map(|p| p.to_string()).collect();
                     Some(format!("{}({})", name, params.join(", ")))
                 })
                 .collect();
@@ -2431,9 +2471,12 @@ impl TypeChecker {
                 is_mutable == found_mut
                     && self.infer_type_params(inner, found_inner, type_params, mapping)
             }
-            (Type::Slice { element }, Type::Slice { element: found_elem }) => {
-                self.infer_type_params(element, found_elem, type_params, mapping)
-            }
+            (
+                Type::Slice { element },
+                Type::Slice {
+                    element: found_elem,
+                },
+            ) => self.infer_type_params(element, found_elem, type_params, mapping),
             (Type::Optional { inner }, Type::Optional { inner: found_inner }) => {
                 self.infer_type_params(inner, found_inner, type_params, mapping)
             }
@@ -2487,8 +2530,10 @@ impl TypeChecker {
         if Self::is_void_like(from) || Self::is_void_like(to) {
             return Self::void_compatible(from, to);
         }
-        let from_ok = self.is_primitive_type(from) || matches!(from, Type::Pointer { .. } | Type::Reference { .. });
-        let to_ok = self.is_primitive_type(to) || matches!(to, Type::Pointer { .. } | Type::Reference { .. });
+        let from_ok = self.is_primitive_type(from)
+            || matches!(from, Type::Pointer { .. } | Type::Reference { .. });
+        let to_ok = self.is_primitive_type(to)
+            || matches!(to, Type::Pointer { .. } | Type::Reference { .. });
         if from_ok && to_ok {
             return true;
         }
@@ -2503,7 +2548,8 @@ impl TypeChecker {
         if self.is_primitive_type(from) && self.is_primitive_type(to) {
             return true;
         }
-        self.casts.contains_key(&(self.method_key(from), self.method_key(to)))
+        self.casts
+            .contains_key(&(self.method_key(from), self.method_key(to)))
     }
 
     pub(crate) fn size_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
@@ -2543,6 +2589,49 @@ impl TypeChecker {
         } else {
             self.error(
                 format!("cannot determine size of type {}", sized_ty),
+                expr.span.clone(),
+            );
+            Type::Unknown
+        }
+    }
+
+    pub(crate) fn align_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 1 {
+            self.error("@align expects exactly one argument", expr.span.clone());
+            return Type::Unknown;
+        }
+        let inner_expr = match args.first() {
+            Some(ast::MacroArg::Expression(e)) => e,
+            _ => {
+                self.error("@align requires an expression argument", expr.span.clone());
+                return Type::Unknown;
+            }
+        };
+        let aligned_ty = self.resolve_type_name(inner_expr);
+        let aligned_ty = match aligned_ty {
+            Some(ty) => ty,
+            None => {
+                // Could be a generic type parameter — defer to codegen
+                if matches!(inner_expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
+                    return Type::Primitive(ast::PrimitiveType::U64);
+                }
+                self.error(
+                    "cannot determine alignment: argument is not a known type name or variable"
+                        .to_string(),
+                    expr.span.clone(),
+                );
+                return Type::Unknown;
+            }
+        };
+        let layout = self.type_ctx.layout_of(&aligned_ty);
+        if layout.align.is_some() {
+            Type::Primitive(ast::PrimitiveType::U64)
+        } else if matches!(&aligned_ty, Type::Named { .. }) {
+            // Generic type param like T — will be resolved during monomorphization
+            Type::Primitive(ast::PrimitiveType::U64)
+        } else {
+            self.error(
+                format!("cannot determine alignment of type {}", aligned_ty),
                 expr.span.clone(),
             );
             Type::Unknown
@@ -2604,9 +2693,7 @@ impl TypeChecker {
                 }
                 None
             }
-            ast::ExpressionKind::TypeName(ty) => {
-                Some(Type::from_ast(ty))
-            }
+            ast::ExpressionKind::TypeName(ty) => Some(Type::from_ast(ty)),
             _ => {
                 let inner_ty = self.check_expr(expr, None);
                 if inner_ty != Type::Unknown {
@@ -2647,7 +2734,10 @@ impl TypeChecker {
             }
         }
         // User-defined casts
-        if self.casts.contains_key(&(self.method_key(from), self.method_key(to))) {
+        if self
+            .casts
+            .contains_key(&(self.method_key(from), self.method_key(to)))
+        {
             return true;
         }
 
@@ -2931,8 +3021,12 @@ impl TypeChecker {
                             .as_ref()
                             .map(Type::from_ast)
                             .unwrap_or(Type::Unit);
-                        let symbol_key =
-                            self.method_symbol_key(&self_ty, &func.name.name, &params, &return_type);
+                        let symbol_key = self.method_symbol_key(
+                            &self_ty,
+                            &func.name.name,
+                            &params,
+                            &return_type,
+                        );
                         let symbol_id = table.intern_symbol(
                             symbol_key.clone(),
                             SymbolKind::ImplMethod,
@@ -3025,11 +3119,7 @@ impl TypeChecker {
     /// Collects implicit type parameters from a type AST, preserving insertion order.
     /// Uses Vec + contains() for dedup instead of HashSet, so that parameter order
     /// matches the order they appear in the source.
-    fn collect_implicit_type_params_ordered(
-        &self,
-        ty: &ast::Type,
-        params: &mut Vec<String>,
-    ) {
+    fn collect_implicit_type_params_ordered(&self, ty: &ast::Type, params: &mut Vec<String>) {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => {
                 if named.path.len() == 1 {
@@ -3290,7 +3380,10 @@ impl TypeChecker {
                             for param in &mut fv.fn_type.parameters {
                                 Self::resolve_type_aliases_in_type(param, aliases);
                             }
-                            Self::resolve_type_aliases_in_type(&mut fv.fn_type.return_type, aliases);
+                            Self::resolve_type_aliases_in_type(
+                                &mut fv.fn_type.return_type,
+                                aliases,
+                            );
                         }
                     }
                 }
@@ -3333,9 +3426,13 @@ impl TypeChecker {
                     }
                 }
             }
-            ast::TypeKind::Reference(r) => Self::resolve_type_aliases_in_type(&mut r.inner, aliases),
+            ast::TypeKind::Reference(r) => {
+                Self::resolve_type_aliases_in_type(&mut r.inner, aliases)
+            }
             ast::TypeKind::Pointer(p) => Self::resolve_type_aliases_in_type(&mut p.inner, aliases),
-            ast::TypeKind::Slice(s) => Self::resolve_type_aliases_in_type(&mut s.element_type, aliases),
+            ast::TypeKind::Slice(s) => {
+                Self::resolve_type_aliases_in_type(&mut s.element_type, aliases)
+            }
             ast::TypeKind::Optional(inner) => Self::resolve_type_aliases_in_type(inner, aliases),
             ast::TypeKind::Function(f) => {
                 for p in &mut f.parameters {
@@ -3358,7 +3455,10 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_type_aliases_in_statement(stmt: &mut ast::Statement, aliases: &HashMap<String, ast::Type>) {
+    fn resolve_type_aliases_in_statement(
+        stmt: &mut ast::Statement,
+        aliases: &HashMap<String, ast::Type>,
+    ) {
         match &mut stmt.kind {
             ast::StatementKind::Let(var) => {
                 if let Some(type_ann) = &mut var.type_annotation {
@@ -3386,7 +3486,10 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_type_aliases_in_expression(expr: &mut ast::Expression, aliases: &HashMap<String, ast::Type>) {
+    fn resolve_type_aliases_in_expression(
+        expr: &mut ast::Expression,
+        aliases: &HashMap<String, ast::Type>,
+    ) {
         use ast::ExpressionKind;
         match expr.kind.as_mut() {
             ExpressionKind::Binary { left, right, .. } => {
@@ -3396,13 +3499,20 @@ impl TypeChecker {
             ExpressionKind::Unary { operand, .. } | ExpressionKind::Postfix { operand, .. } => {
                 Self::resolve_type_aliases_in_expression(operand, aliases);
             }
-            ExpressionKind::Call { function, arguments } => {
+            ExpressionKind::Call {
+                function,
+                arguments,
+            } => {
                 Self::resolve_type_aliases_in_expression(function, aliases);
                 for arg in arguments.iter_mut() {
                     Self::resolve_type_aliases_in_expression(arg, aliases);
                 }
             }
-            ExpressionKind::MethodCall { receiver, arguments, .. } => {
+            ExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
                 Self::resolve_type_aliases_in_expression(receiver, aliases);
                 for arg in arguments.iter_mut() {
                     Self::resolve_type_aliases_in_expression(arg, aliases);
@@ -3418,7 +3528,11 @@ impl TypeChecker {
             ExpressionKind::Block(block) => {
                 Self::resolve_type_aliases_in_block(block, aliases);
             }
-            ExpressionKind::If { condition, then_branch, else_branch } => {
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 Self::resolve_type_aliases_in_expression(condition, aliases);
                 Self::resolve_type_aliases_in_block(then_branch, aliases);
                 if let Some(else_branch) = else_branch {
@@ -3429,14 +3543,24 @@ impl TypeChecker {
                 Self::resolve_type_aliases_in_expression(condition, aliases);
                 Self::resolve_type_aliases_in_block(body, aliases);
             }
-            ExpressionKind::ForIn { iterable, body, item_type, .. } => {
+            ExpressionKind::ForIn {
+                iterable,
+                body,
+                item_type,
+                ..
+            } => {
                 Self::resolve_type_aliases_in_expression(iterable, aliases);
                 if let Some(item_type) = item_type {
                     Self::resolve_type_aliases_in_type(item_type, aliases);
                 }
                 Self::resolve_type_aliases_in_block(body, aliases);
             }
-            ExpressionKind::For { init, condition, increment, body } => {
+            ExpressionKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
                 if let Some(type_ann) = &mut init.type_annotation {
                     Self::resolve_type_aliases_in_type(type_ann, aliases);
                 }
@@ -3456,7 +3580,10 @@ impl TypeChecker {
                     Self::resolve_type_aliases_in_expression(&mut arm.body, aliases);
                 }
             }
-            ExpressionKind::Cast { expression, target_type } => {
+            ExpressionKind::Cast {
+                expression,
+                target_type,
+            } => {
                 Self::resolve_type_aliases_in_type(target_type, aliases);
                 Self::resolve_type_aliases_in_expression(expression, aliases);
             }
@@ -3633,7 +3760,6 @@ impl TypeChecker {
         }
     }
 
-
     fn error(&mut self, message: impl Into<String>, span: Span) {
         self.errors.push(TypeError {
             message: message.into(),
@@ -3706,7 +3832,6 @@ pub(crate) fn operator_method_name(operator: &ast::BinaryOperator) -> Option<&'s
     }
 }
 
-
 pub(crate) fn unary_operator_method_name(operator: &ast::UnaryOperator) -> Option<&'static str> {
     match operator {
         ast::UnaryOperator::Minus => Some("__neg"),
@@ -3733,7 +3858,8 @@ mod tests {
     #[test]
     fn stdlib_source_files_parse_successfully() {
         let std_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
+            .parent()
+            .unwrap()
             .join("std");
         let mut files: Vec<_> = std::fs::read_dir(&std_dir)
             .expect("std dir not found")
@@ -3801,7 +3927,7 @@ mod tests {
         let (errors, _) = TypeChecker::new()
             .with_imported_modules(&[artifact])
             .check_program(&program);
-        
+
         let has_alloc_error = errors.iter().any(|e| {
             e.message.contains("no matching overload")
                 || e.message.contains("type count mismatch")
@@ -3941,9 +4067,7 @@ mod tests {
             "expected pointer type in diagnostics: {errors:?}"
         );
         assert!(
-            !errors
-                .iter()
-                .any(|error| error.message.contains("&")),
+            !errors.iter().any(|error| error.message.contains("&")),
             "did not expect reference type in diagnostics: {errors:?}"
         );
     }
@@ -4146,9 +4270,8 @@ mod tests {
 
     #[test]
     fn matches_concrete_f32_overload_with_f64_arg() {
-        let program = parse(
-            "void take_f32(f32 x) {} i32 main() { f64 a = 3.0; take_f32(a); return 0; }",
-        );
+        let program =
+            parse("void take_f32(f32 x) {} i32 main() { f64 a = 3.0; take_f32(a); return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
     }
@@ -4242,10 +4365,12 @@ mod tests {
         let mut table = CompilerSymbolTable::new();
         let (_errors, _) = tc.check_program_with_table(&program, &mut table);
         let types = std::mem::take(&mut tc.expr_types);
-        assert!(!types.is_empty(), "expected at least one expression type, got none");
+        assert!(
+            !types.is_empty(),
+            "expected at least one expression type, got none"
+        );
         for ((start, end), ty) in &types {
             eprintln!("  span({start},{end}) → {ty}");
         }
     }
 }
-

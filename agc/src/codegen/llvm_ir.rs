@@ -1,9 +1,13 @@
-use std::ffi::CString;
 use inkwell::passes::PassBuilderOptions;
+use std::ffi::CString;
 use std::path::Path;
 
 use rustc_hash::FxHashMap as HashMap;
 
+use inkwell::AddressSpace;
+use inkwell::FloatPredicate;
+use inkwell::IntPredicate;
+use inkwell::OptimizationLevel;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -12,26 +16,24 @@ use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
+use inkwell::types::{
+    AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType,
+};
 use inkwell::values::{
     ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
-use inkwell::AddressSpace;
-use inkwell::FloatPredicate;
-use inkwell::IntPredicate;
-use inkwell::OptimizationLevel;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
+use crate::attributes::function_link_name;
 use crate::codegen::abi::{self, AbiHandler};
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::debug_info::DebugContext;
 use crate::lexer::Span;
-use crate::attributes::function_link_name;
-use crate::module_artifact::{ast_type_from_canonical_key, ModuleArtifact};
+use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
+use crate::semantic::monomorph::mangle_name;
 use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
-use crate::semantic::monomorph::mangle_name;
 use crate::types::Type;
 
 #[derive(Clone)]
@@ -500,13 +502,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
-            abi_handler: abi::get_abi_handler(
-                target_triple.unwrap_or("x86_64-unknown-linux-gnu"),
-            ),
+            abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
         };
         generator.declare_imported_modules(imported_modules)?;
-        generator.generate_program(program)?;
-        table.absorb_from(&generator.symbol_table);
 
         Target::initialize_all(&InitializationConfig::default());
         let triple = target_triple
@@ -535,6 +533,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+
+        generator.generate_program(program)?;
+        table.absorb_from(&generator.symbol_table);
+
         run_module_optimization_passes(&generator.module, &machine, opt_level)?;
 
         generator.finalize_debug();
@@ -753,19 +755,63 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
-            ast::ExpressionKind::TypeName(ty) => {
-                self.lower_basic_type(ty)?.as_basic_type_enum()
-            }
+            ast::ExpressionKind::TypeName(ty) => self.lower_basic_type(ty)?.as_basic_type_enum(),
             _ => {
                 let inner_val = self.emit_expression_value(inner_expr)?;
                 inner_val.get_type()
             }
         };
-        let target_data = TargetData::create(
-            self.module.get_data_layout().as_str().to_str().unwrap(),
-        );
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         let size = target_data.get_abi_size(&llvm_ty);
         Ok(self.context.i64_type().const_int(size, false).into())
+    }
+
+    pub(crate) fn align_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@align requires an expression argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let llvm_ty = match &inner_expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                let ast_ty = self.type_name_to_ast_type(&ident.name);
+                match ast_ty {
+                    Some(ty) => self.lower_basic_type(&ty)?.as_basic_type_enum(),
+                    None => {
+                        let named_ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span.clone(),
+                        };
+                        let type_result = self.lower_basic_type(&named_ty);
+                        match type_result {
+                            Ok(ty) => ty.as_basic_type_enum(),
+                            Err(_) => {
+                                let inner_val = self.emit_expression_value(inner_expr)?;
+                                inner_val.get_type()
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ExpressionKind::TypeName(ty) => self.lower_basic_type(ty)?.as_basic_type_enum(),
+            _ => {
+                let inner_val = self.emit_expression_value(inner_expr)?;
+                inner_val.get_type()
+            }
+        };
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let align = u64::from(target_data.get_abi_alignment(&llvm_ty));
+        Ok(self.context.i64_type().const_int(align, false).into())
     }
 
     pub(crate) fn hash_codegen(
@@ -782,9 +828,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let val = self.emit_expression_value(inner_expr)?;
         let llvm_ty = val.get_type();
-        let target_data = TargetData::create(
-            self.module.get_data_layout().as_str().to_str().unwrap(),
-        );
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         let size = target_data.get_abi_size(&llvm_ty);
 
         let i64_ty = self.context.i64_type();
@@ -805,71 +850,94 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             i64_ty.const_int(size, false)
         };
 
-        let function = self.current_fn
+        let function = self
+            .current_fn
             .ok_or_else(|| CodegenError::new("no active function for hash alloca"))?;
 
         // Alloca the value so we can iterate its raw bytes
         let alloca = self.create_entry_alloca(function, "hash_val", llvm_ty)?;
-        self.builder.build_store(alloca, val)
+        self.builder
+            .build_store(alloca, val)
             .map_err(|e| CodegenError::new(format!("hash store: {e}")))?;
 
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
         let (data_ptr, strlen_len) = if is_str {
             // str is a pointer type — load the pointer value, then call strlen
             // to hash the string CONTENT rather than the pointer bytes.
-            let str_ptr = self.builder.build_load(llvm_ty, alloca, "hash_str_ptr")
+            let str_ptr = self
+                .builder
+                .build_load(llvm_ty, alloca, "hash_str_ptr")
                 .map_err(|e| CodegenError::new(format!("hash load str: {e}")))?;
             let str_ptr = str_ptr.into_pointer_value();
 
-            let strlen_fn = self.module.get_function("strlen")
-                .unwrap_or_else(|| {
-                    let i8_ptr_ty = self.context.ptr_type(AddressSpace::default());
-                    let strlen_ty = i64_ty.fn_type(&[i8_ptr_ty.into()], false);
-                    self.module.add_function("strlen", strlen_ty, None)
-                });
+            let strlen_fn = self.module.get_function("strlen").unwrap_or_else(|| {
+                let i8_ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let strlen_ty = i64_ty.fn_type(&[i8_ptr_ty.into()], false);
+                self.module.add_function("strlen", strlen_ty, None)
+            });
 
-            let call_len = self.builder.build_call(strlen_fn, &[str_ptr.into()], "hash_strlen")
+            let call_len = self
+                .builder
+                .build_call(strlen_fn, &[str_ptr.into()], "hash_strlen")
                 .map_err(|e| CodegenError::new(format!("hash strlen: {e}")))?;
-            let call_len = call_len.try_as_basic_value().basic()
+            let call_len = call_len
+                .try_as_basic_value()
+                .basic()
                 .ok_or_else(|| CodegenError::new("strlen returned void"))?;
             let call_len = call_len.into_int_value();
 
-            let data_ptr = self.builder.build_pointer_cast(str_ptr, ptr_ty, "hash_data_ptr")
+            let data_ptr = self
+                .builder
+                .build_pointer_cast(str_ptr, ptr_ty, "hash_data_ptr")
                 .map_err(|e| CodegenError::new(format!("hash data ptr: {e}")))?;
             (data_ptr, call_len)
         } else {
             // For non-str types, hash the raw byte representation
-            let ptr = self.builder.build_pointer_cast(alloca, ptr_ty, "hash_ptr")
+            let ptr = self
+                .builder
+                .build_pointer_cast(alloca, ptr_ty, "hash_ptr")
                 .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
             (ptr, len_val)
         };
 
         // Save current block (predecessor of the loop)
-        let curr_block = self.builder.get_insert_block()
+        let curr_block = self
+            .builder
+            .get_insert_block()
             .ok_or_else(|| CodegenError::new("no insert block for hash"))?;
-        let function = self.current_fn
+        let function = self
+            .current_fn
             .ok_or_else(|| CodegenError::new("no active function for hash"))?;
 
         let loop_block = self.context.append_basic_block(function, "hash_loop");
         let done_block = self.context.append_basic_block(function, "hash_done");
 
         // Branch from current block to loop
-        self.builder.build_unconditional_branch(loop_block)
+        self.builder
+            .build_unconditional_branch(loop_block)
             .map_err(|e| CodegenError::new(format!("hash branch to loop: {e}")))?;
 
         // Loop: PHIs for hash value and index
         self.builder.position_at_end(loop_block);
-        let hash_phi = self.builder.build_phi(i64_ty, "hash_phi")
+        let hash_phi = self
+            .builder
+            .build_phi(i64_ty, "hash_phi")
             .map_err(|e| CodegenError::new(format!("hash phi: {e}")))?;
-        let idx_phi = self.builder.build_phi(i64_ty, "idx_phi")
+        let idx_phi = self
+            .builder
+            .build_phi(i64_ty, "idx_phi")
             .map_err(|e| CodegenError::new(format!("idx phi: {e}")))?;
 
         // First iteration: from current block (predecessor)
-        let init_incoming: Vec<(&dyn BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            vec![(&fnv_offset as &dyn BasicValue<'ctx>, curr_block)];
+        let init_incoming: Vec<(
+            &dyn BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = vec![(&fnv_offset as &dyn BasicValue<'ctx>, curr_block)];
         hash_phi.add_incoming(&init_incoming);
-        let idx_init_incoming: Vec<(&dyn BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            vec![(&zero as &dyn BasicValue<'ctx>, curr_block)];
+        let idx_init_incoming: Vec<(
+            &dyn BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = vec![(&zero as &dyn BasicValue<'ctx>, curr_block)];
         idx_phi.add_incoming(&idx_init_incoming);
 
         let idx_val = idx_phi.as_basic_value().into_int_value();
@@ -877,50 +945,72 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Load byte at ptr[idx]
         let gep = unsafe {
-            self.builder.build_in_bounds_gep(i8_ty, data_ptr, &[idx_val], "hash_byte_gep")
+            self.builder
+                .build_in_bounds_gep(i8_ty, data_ptr, &[idx_val], "hash_byte_gep")
         }
         .map_err(|e| CodegenError::new(format!("hash gep: {e}")))?;
-        let byte = self.builder.build_load(i8_ty, gep, "hash_byte")
+        let byte = self
+            .builder
+            .build_load(i8_ty, gep, "hash_byte")
             .map_err(|e| CodegenError::new(format!("hash load: {e}")))?;
         let byte_int = byte.into_int_value();
-        let byte_ext = self.builder.build_int_z_extend(byte_int, i64_ty, "hash_byte_ext")
+        let byte_ext = self
+            .builder
+            .build_int_z_extend(byte_int, i64_ty, "hash_byte_ext")
             .map_err(|e| CodegenError::new(format!("hash zext: {e}")))?;
 
         // hash = (hash ^ byte) * prime
-        let xor_val = self.builder.build_xor(hash_val, byte_ext, "hash_xor")
+        let xor_val = self
+            .builder
+            .build_xor(hash_val, byte_ext, "hash_xor")
             .map_err(|e| CodegenError::new(format!("hash xor: {e}")))?;
-        let mul_val = self.builder.build_int_mul(xor_val, fnv_prime, "hash_mul")
+        let mul_val = self
+            .builder
+            .build_int_mul(xor_val, fnv_prime, "hash_mul")
             .map_err(|e| CodegenError::new(format!("hash mul: {e}")))?;
 
         // idx += 1
-        let next_idx = self.builder.build_int_add(idx_val, one, "hash_next_idx")
+        let next_idx = self
+            .builder
+            .build_int_add(idx_val, one, "hash_next_idx")
             .map_err(|e| CodegenError::new(format!("hash add: {e}")))?;
 
         // Subsequent iterations: from loop block itself (back edge)
-        let loop_incoming: Vec<(&dyn BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
+        let loop_incoming: Vec<(
+            &dyn BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
         hash_phi.add_incoming(&loop_incoming);
-        let idx_loop_incoming: Vec<(&dyn BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            vec![(&next_idx as &dyn BasicValue<'ctx>, loop_block)];
+        let idx_loop_incoming: Vec<(
+            &dyn BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = vec![(&next_idx as &dyn BasicValue<'ctx>, loop_block)];
         idx_phi.add_incoming(&idx_loop_incoming);
 
         // Branch back if next_idx < len
-        let cond = self.builder.build_int_compare(
-            inkwell::IntPredicate::ULT,
-            next_idx,
-            strlen_len,
-            "hash_cond",
-        )
-        .map_err(|e| CodegenError::new(format!("hash cmp: {e}")))?;
-        self.builder.build_conditional_branch(cond, loop_block, done_block)
+        let cond = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                next_idx,
+                strlen_len,
+                "hash_cond",
+            )
+            .map_err(|e| CodegenError::new(format!("hash cmp: {e}")))?;
+        self.builder
+            .build_conditional_branch(cond, loop_block, done_block)
             .map_err(|e| CodegenError::new(format!("hash branch: {e}")))?;
 
         // Done: result PHI
         self.builder.position_at_end(done_block);
-        let result_phi = self.builder.build_phi(i64_ty, "hash_result")
+        let result_phi = self
+            .builder
+            .build_phi(i64_ty, "hash_result")
             .map_err(|e| CodegenError::new(format!("hash result phi: {e}")))?;
-        let result_incoming: Vec<(&dyn BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
+        let result_incoming: Vec<(
+            &dyn BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
         result_phi.add_incoming(&result_incoming);
 
         Ok(result_phi.as_basic_value())
@@ -1049,10 +1139,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::TypeKind::Optional(inner) => {
                 let inner = self.lower_basic_type(inner)?;
-                Ok(self.context.struct_type(&[
-                    self.context.i8_type().as_basic_type_enum(),
-                    inner,
-                ], false).as_basic_type_enum())
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.i8_type().as_basic_type_enum(), inner], false)
+                    .as_basic_type_enum())
             }
             ast::TypeKind::Tuple(items) => {
                 let mut fields = Vec::with_capacity(items.len());
@@ -1123,11 +1213,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 9..=16 => {
                     // Use full ABI classification for 9-16 byte structs
-                    Ok(self.abi_handler.classify_argument(self.context, &target_data, struct_ty))
+                    Ok(self
+                        .abi_handler
+                        .classify_argument(self.context, &target_data, struct_ty))
                 }
                 s if s > 16 => {
                     // Large struct: pass by reference
-                    Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum())
+                    Ok(self
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .as_basic_type_enum())
                 }
                 _ => Ok(lowered),
             }
@@ -1151,11 +1246,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(value);
         }
 
-        let function = self.current_fn
+        let function = self
+            .current_fn
             .ok_or_else(|| CodegenError::new("no active function for ABI coercion"))?;
 
-        let alloca = self
-            .create_entry_alloca(function, "abi_coercion_tmp", value.get_type())?;
+        let alloca = self.create_entry_alloca(function, "abi_coercion_tmp", value.get_type())?;
         self.builder
             .build_store(alloca, value)
             .map_err(|e| CodegenError::new(format!("failed to store for ABI coercion: {e}")))?;
@@ -1170,15 +1265,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let struct_ty = value.get_type().into_struct_type();
             let size = target_data.get_store_size(&struct_ty);
 
-            let abi_alloca = self
-                .create_entry_alloca(function, "abi_coercion_tmp2", abi_ty)?;
+            let abi_alloca = self.create_entry_alloca(function, "abi_coercion_tmp2", abi_ty)?;
 
             self.build_memcpy(abi_alloca, 1, alloca, 1, size)?;
 
             let coerced = self
                 .builder
                 .build_load(abi_ty, abi_alloca, "abi_coerced")
-                .map_err(|e| CodegenError::new(format!("failed to load coerced struct value: {e}")))?;
+                .map_err(|e| {
+                    CodegenError::new(format!("failed to load coerced struct value: {e}"))
+                })?;
 
             Ok(coerced)
         } else {
@@ -1206,7 +1302,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(value);
         }
 
-        let function = self.current_fn
+        let function = self
+            .current_fn
             .ok_or_else(|| CodegenError::new("no active function for ABI uncoercion"))?;
 
         if value.get_type().is_pointer_type() && !native_ty.is_pointer_type() {
@@ -1225,28 +1322,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let abi_struct_ty = value.get_type().into_struct_type();
             let size = target_data.get_store_size(&abi_struct_ty);
 
-            let native_alloca = self
-                .create_entry_alloca(function, "abi_uncoercion_tmp", native_ty)?;
+            let native_alloca =
+                self.create_entry_alloca(function, "abi_uncoercion_tmp", native_ty)?;
 
-            let abi_alloca = self
-                .create_entry_alloca(function, "abi_uncoercion_tmp2", value.get_type())?;
+            let abi_alloca =
+                self.create_entry_alloca(function, "abi_uncoercion_tmp2", value.get_type())?;
 
-            self.builder
-                .build_store(abi_alloca, value)
-                .map_err(|e| CodegenError::new(format!("failed to store for ABI struct uncoercion: {e}")))?;
+            self.builder.build_store(abi_alloca, value).map_err(|e| {
+                CodegenError::new(format!("failed to store for ABI struct uncoercion: {e}"))
+            })?;
 
             self.build_memcpy(native_alloca, 1, abi_alloca, 1, size)?;
 
             let uncoerced = self
                 .builder
                 .build_load(native_ty, native_alloca, "abi_uncoerced")
-                .map_err(|e| CodegenError::new(format!("failed to load uncoerced struct value: {e}")))?;
+                .map_err(|e| {
+                    CodegenError::new(format!("failed to load uncoerced struct value: {e}"))
+                })?;
 
             return Ok(uncoerced);
         }
 
-        let alloca = self
-            .create_entry_alloca(function, "abi_uncoercion_tmp", value.get_type())?;
+        let alloca = self.create_entry_alloca(function, "abi_uncoercion_tmp", value.get_type())?;
         self.builder
             .build_store(alloca, value)
             .map_err(|e| CodegenError::new(format!("failed to store for ABI uncoercion: {e}")))?;
@@ -1272,21 +1370,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         size: u64,
     ) -> CodegenResult<()> {
         // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
-        let memcpy_fn = self.module.get_function("llvm.memcpy.p0.p0.i64")
+        let memcpy_fn = self
+            .module
+            .get_function("llvm.memcpy.p0.p0.i64")
             .unwrap_or_else(|| {
                 let i64 = self.context.i64_type();
                 let i1 = self.context.bool_type();
                 let ptr = self.context.ptr_type(AddressSpace::default());
-                let fn_type = self.context.void_type().fn_type(
-                    &[
-                        ptr.into(),
-                        ptr.into(),
-                        i64.into(),
-                        i1.into(),
-                    ],
-                    false,
-                );
-                self.module.add_function("llvm.memcpy.p0.p0.i64", fn_type, None)
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), ptr.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memcpy.p0.p0.i64", fn_type, None)
             });
 
         self.builder
@@ -1324,27 +1420,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Check if return type needs sret to calculate parameter offset
         let mut sret_offset: u32 = 0;
         if let Some(ret_ty) = &sig.return_type
-            && !Self::is_void_primitive(ret_ty) {
-                let lowered_ret = self.lower_basic_type(ret_ty)?;
-                if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                    let size = target_data.get_store_size(&struct_ty);
-                    if self.abi_handler.needs_sret(size) {
-                        sret_offset = 1;
-                        // Add sret attribute to the first parameter (implicit return pointer)
-                        let sret_kind = Attribute::get_named_enum_kind_id("sret");
-                        let attr = self.context.create_type_attribute(
-                            sret_kind,
-                            struct_ty.as_any_type_enum(),
-                        );
-                        function.add_attribute(AttributeLoc::Param(0), attr);
+            && !Self::is_void_primitive(ret_ty)
+        {
+            let lowered_ret = self.lower_basic_type(ret_ty)?;
+            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
+                let size = target_data.get_store_size(&struct_ty);
+                if self.abi_handler.needs_sret(size) {
+                    sret_offset = 1;
+                    // Add sret attribute to the first parameter (implicit return pointer)
+                    let sret_kind = Attribute::get_named_enum_kind_id("sret");
+                    let attr = self
+                        .context
+                        .create_type_attribute(sret_kind, struct_ty.as_any_type_enum());
+                    function.add_attribute(AttributeLoc::Param(0), attr);
 
-                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                        let align_kind = Attribute::get_named_enum_kind_id("align");
-                        let align_attr = self.context.create_enum_attribute(align_kind, align);
-                        function.add_attribute(AttributeLoc::Param(0), align_attr);
-                    }
+                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                    let align_kind = Attribute::get_named_enum_kind_id("align");
+                    let align_attr = self.context.create_enum_attribute(align_kind, align);
+                    function.add_attribute(AttributeLoc::Param(0), align_attr);
                 }
             }
+        }
 
         // Add byval attributes to user parameters (shifted by sret_offset)
         for (i, param_ty) in sig.params.iter().enumerate() {
@@ -1354,10 +1450,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if self.abi_handler.needs_byval(size) {
                     let param_idx = (i as u32) + sret_offset;
                     let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                    let attr = self.context.create_type_attribute(
-                        byval_kind,
-                        struct_ty.as_any_type_enum(),
-                    );
+                    let attr = self
+                        .context
+                        .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
                     function.add_attribute(AttributeLoc::Param(param_idx), attr);
 
                     let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
@@ -1385,15 +1480,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut needs_sret = false;
         if let Some(ret) = return_type
             && !Self::is_void_primitive(ret)
-                && let Some(_link) = &linkage {
-                    let lowered_ret = self.lower_basic_type(ret)?;
-                    if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                        let size = target_data.get_store_size(&struct_ty);
-                        if self.abi_handler.needs_sret(size) {
-                            needs_sret = true;
-                        }
-                    }
+            && let Some(_link) = &linkage
+        {
+            let lowered_ret = self.lower_basic_type(ret)?;
+            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
+                let size = target_data.get_store_size(&struct_ty);
+                if self.abi_handler.needs_sret(size) {
+                    needs_sret = true;
                 }
+            }
+        }
 
         let mut llvm_params = Vec::with_capacity(params.len() + if needs_sret { 1 } else { 0 });
 
@@ -1473,20 +1569,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 // Build conditional guard if drop flag is present
                 let after_bb = if let Some(flag_ptr) = entry.flag {
-                    let flag_val = self.builder.build_load(
-                        self.context.bool_type(),
-                        flag_ptr,
-                        "defer.flag",
-                    ).map_err(|e| CodegenError::new(format!("failed to load defer flag: {e}")))?;
+                    let flag_val = self
+                        .builder
+                        .build_load(self.context.bool_type(), flag_ptr, "defer.flag")
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to load defer flag: {e}"))
+                        })?;
 
                     let run_bb = self.context.append_basic_block(function, "defer.run");
                     let after_bb = self.context.append_basic_block(function, "defer.after");
 
-                    self.builder.build_conditional_branch(
-                        flag_val.into_int_value(),
-                        run_bb,
-                        after_bb,
-                    ).map_err(|e| CodegenError::new(format!("failed to branch defer: {e}")))?;
+                    self.builder
+                        .build_conditional_branch(flag_val.into_int_value(), run_bb, after_bb)
+                        .map_err(|e| CodegenError::new(format!("failed to branch defer: {e}")))?;
 
                     self.builder.position_at_end(run_bb);
                     Some(after_bb)
@@ -1511,15 +1606,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 // If we had a conditional guard, resume at after_bb
                 if let Some(after) = after_bb {
-                    self.builder.build_unconditional_branch(after)
-                        .map_err(|e| CodegenError::new(format!("failed to branch after defer: {e}")))?;
+                    self.builder
+                        .build_unconditional_branch(after)
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to branch after defer: {e}"))
+                        })?;
                     self.builder.position_at_end(after);
                 }
             }
         }
         Ok(())
     }
-
 
     fn lookup_variable(&self, name: &str) -> Option<VarInfo<'ctx>> {
         self.variables
@@ -1541,9 +1638,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         name: &str,
     ) -> Option<(inkwell::values::GlobalValue<'ctx>, ast::Type)> {
         if let Some(ty) = self.global_variables.get(name).cloned()
-            && let Some(global) = self.module.get_global(name) {
-                return Some((global, ty));
-            }
+            && let Some(global) = self.module.get_global(name)
+        {
+            return Some((global, ty));
+        }
         self.lookup_extern_global(name)
     }
 
@@ -1636,13 +1734,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map(|t| t.kind.clone())
                 .unwrap_or_else(|| ty.kind.clone()),
             ast::TypeKind::Named(named) => {
-                if named.path.len() == 1 && named.generics.is_none()
-                    && let Some(mapped) = substitutions.get(&named.path[0].name) {
-                        return ast::Type {
-                            kind: mapped.kind.clone(),
-                            span: ty.span.clone(),
-                        };
-                    }
+                if named.path.len() == 1
+                    && named.generics.is_none()
+                    && let Some(mapped) = substitutions.get(&named.path[0].name)
+                {
+                    return ast::Type {
+                        kind: mapped.kind.clone(),
+                        span: ty.span.clone(),
+                    };
+                }
                 let generics = named.generics.as_ref().map(|args| {
                     args.iter()
                         .map(|arg| Self::substitute_generic_type(arg, substitutions))
@@ -1827,11 +1927,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 last_underscore = true;
             }
         }
-        if out.is_empty() {
-            "_".to_string()
-        } else {
-            out
-        }
+        if out.is_empty() { "_".to_string() } else { out }
     }
 
     fn monomorph_owner_name_from_named(named: &ast::NamedType) -> String {
@@ -1864,9 +1960,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::TypeKind::Pointer(ptr) => {
                 format!("cast_ptr_{}", Self::cast_method_name(&ptr.inner))
             }
-            _ => {
-                "cast_custom".to_string()
-            }
+            _ => "cast_custom".to_string(),
         }
     }
 
@@ -2105,10 +2199,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// TypeName-style generic function calls (e.g. `alloc<i32>(4)`) to Identifier
     /// calls (e.g. `alloc__i32_i64(4)`). Uses the LLVM module to look up whether
     /// a monomorphized function with the expected mangled name was already declared.
-    fn rewrite_call_sites_in_block(
-        &self,
-        block: &mut ast::Block,
-    ) {
+    fn rewrite_call_sites_in_block(&self, block: &mut ast::Block) {
         for stmt in &mut block.statements {
             match &mut stmt.kind {
                 ast::StatementKind::Block(inner) => {
@@ -2127,50 +2218,58 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::StatementKind::Return(None)
                 | ast::StatementKind::Break(None)
                 | ast::StatementKind::Continue => {}
-                ast::StatementKind::Defer(inner) => {
-                    match &mut inner.kind {
-                        ast::StatementKind::Block(inner_block) => {
-                            self.rewrite_call_sites_in_block(inner_block);
-                        }
-                        ast::StatementKind::Let(let_stmt) => {
-                            if let Some(init) = &mut let_stmt.initializer {
-                                self.rewrite_call_sites_in_expression(init);
-                            }
-                        }
-                        ast::StatementKind::Expression(expr)
-                        | ast::StatementKind::Return(Some(expr))
-                        | ast::StatementKind::Break(Some(expr)) => {
-                            self.rewrite_call_sites_in_expression(expr);
-                        }
-                        _ => {}
+                ast::StatementKind::Defer(inner) => match &mut inner.kind {
+                    ast::StatementKind::Block(inner_block) => {
+                        self.rewrite_call_sites_in_block(inner_block);
                     }
-                }
+                    ast::StatementKind::Let(let_stmt) => {
+                        if let Some(init) = &mut let_stmt.initializer {
+                            self.rewrite_call_sites_in_expression(init);
+                        }
+                    }
+                    ast::StatementKind::Expression(expr)
+                    | ast::StatementKind::Return(Some(expr))
+                    | ast::StatementKind::Break(Some(expr)) => {
+                        self.rewrite_call_sites_in_expression(expr);
+                    }
+                    _ => {}
+                },
             }
         }
     }
 
-    fn rewrite_call_sites_in_expression(
-        &self,
-        expr: &mut ast::Expression,
-    ) {
+    fn rewrite_call_sites_in_expression(&self, expr: &mut ast::Expression) {
         match expr.kind.as_mut() {
-            ast::ExpressionKind::Call { function, arguments } => {
+            ast::ExpressionKind::Call {
+                function,
+                arguments,
+            } => {
                 // Check if this is a TypeName call that should be rewritten.
                 if let ast::ExpressionKind::TypeName(ty) = function.kind.as_mut() {
                     if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
                         if let Some(generics) = &named.generics {
-                            if !generics.is_empty() && generics.iter().all(|g| !Self::type_has_type_param(g)) {
+                            if !generics.is_empty()
+                                && generics.iter().all(|g| !Self::type_has_type_param(g))
+                            {
                                 // All concrete args -> this is a generic function call
-                                let fn_name = named.path.iter().map(|id| id.name.as_str()).collect::<Vec<_>>().join(".");
-                                let rhs_args: Vec<Type> = generics.iter().map(|g| Type::from_ast(g)).collect();
+                                let fn_name = named
+                                    .path
+                                    .iter()
+                                    .map(|id| id.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(".");
+                                let rhs_args: Vec<Type> =
+                                    generics.iter().map(|g| Type::from_ast(g)).collect();
                                 let base_mangled = mangle_name(&fn_name, &rhs_args);
                                 // Check LLVM module: monomorphized functions are declared in Pass 1a
                                 if self.module.get_function(&base_mangled).is_some() {
                                     *function = Box::new(ast::Expression {
-                                        kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                                            name: base_mangled,
-                                            span: function.span.clone(),
-                                        })),
+                                        kind: Box::new(ast::ExpressionKind::Identifier(
+                                            ast::Identifier {
+                                                name: base_mangled,
+                                                span: function.span.clone(),
+                                            },
+                                        )),
                                         span: function.span.clone(),
                                     });
                                 } else {
@@ -2178,10 +2277,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     for name in self.function_name_to_symbol.keys() {
                                         if name.starts_with(&format!("{}_", base_mangled)) {
                                             *function = Box::new(ast::Expression {
-                                                kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                                                    name: name.clone(),
-                                                    span: function.span.clone(),
-                                                })),
+                                                kind: Box::new(ast::ExpressionKind::Identifier(
+                                                    ast::Identifier {
+                                                        name: name.clone(),
+                                                        span: function.span.clone(),
+                                                    },
+                                                )),
                                                 span: function.span.clone(),
                                             });
                                             break;
@@ -2583,13 +2684,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
                 ast::ImplItemKind::Cast(cast) => {
-                    if self.has_generic_placeholder_signature(&cast.parameters, Some(&cast.target_type)) {
+                    if self.has_generic_placeholder_signature(
+                        &cast.parameters,
+                        Some(&cast.target_type),
+                    ) {
                         continue;
                     }
                     let cast_method_name = Self::cast_method_name(&cast.target_type);
                     let mangled_name = Self::mangle_method_name(&owner, &cast_method_name);
-                    let effective_visibility =
-                        Self::method_effective_visibility(impl_visibility, &ast::Visibility::Private);
+                    let effective_visibility = Self::method_effective_visibility(
+                        impl_visibility,
+                        &ast::Visibility::Private,
+                    );
                     self.register_function_signature(
                         &mangled_name,
                         FunctionSig {
@@ -2648,15 +2754,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return_type.and_then(|_| debug.di_types.get("i32").copied()),
                 &[],
             );
-            let subprogram = debug.create_function(
-                fn_name,
-                fn_name,
-                line,
-                subroutine_type,
-                false,
-                true,
-                line,
-            );
+            let subprogram =
+                debug.create_function(fn_name, fn_name, line, subroutine_type, false, true, line);
             function.set_subprogram(subprogram);
             debug.current_subprogram = Some(subprogram);
         }
@@ -2700,7 +2799,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         for param in parameters {
             // Skip pointer/reference types: the caller owns the pointee,
             // so we must NOT call the pointee's drop on function exit.
-            if matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+            if matches!(
+                param.param_type.kind.as_ref(),
+                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+            ) {
                 continue;
             }
             let ty_for_drop = param.param_type.clone();
@@ -2708,7 +2810,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let needs_drop = drop_owners.iter().any(|owner| {
                 let drop_name = Self::mangle_method_name(owner, "drop");
                 self.module.get_function(&drop_name).is_some()
-                    || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                    || self
+                        .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
                         .ok()
                         .flatten()
                         .is_some()
@@ -2722,30 +2825,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     &format!("{}.drop", param.name.name),
                     self.context.bool_type().as_basic_type_enum(),
                 )?;
-                self.builder.build_store(
-                    flag_alloca,
-                    self.context.bool_type().const_int(1, false),
-                ).map_err(|e| CodegenError::new(format!("failed to init param drop flag: {e}")))?;
+                self.builder
+                    .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+                    .map_err(|e| {
+                        CodegenError::new(format!("failed to init param drop flag: {e}"))
+                    })?;
                 self.drop_flags.insert(param.name.name.clone(), flag_alloca);
 
-                let drop_fn_name = drop_owners.iter().find_map(|owner| {
-                    let name = Self::mangle_method_name(owner, "drop");
-                    if self.module.get_function(&name).is_some()
-                        || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
-                            .ok().flatten().is_some()
-                    {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                }).unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
+                let drop_fn_name = drop_owners
+                    .iter()
+                    .find_map(|owner| {
+                        let name = Self::mangle_method_name(owner, "drop");
+                        if self.module.get_function(&name).is_some()
+                            || self
+                                .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
 
-                let alloca = self.variables.last()
+                let alloca = self
+                    .variables
+                    .last()
                     .and_then(|scope| scope.get(&param.name.name))
                     .map(|vi| vi.ptr)
-                    .ok_or_else(|| CodegenError::new(format!(
-                        "parameter alloca for `{}` not found", param.name.name
-                    )))?;
+                    .ok_or_else(|| {
+                        CodegenError::new(format!(
+                            "parameter alloca for `{}` not found",
+                            param.name.name
+                        ))
+                    })?;
 
                 if let Some(scope) = self.defers.last_mut() {
                     scope.push(DeferredEntry {
@@ -2761,13 +2876,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // registered in the function scope but not in the body scope).
         // This must happen before the terminator check so that the block
         // created by emit_defers is properly terminated.
-        if !self.builder.get_insert_block()
-            .and_then(|bb| bb.get_terminator()).is_some()
+        if !self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_some()
         {
             self.emit_defers(self.defers.len())?;
         }
 
-        let needs_terminator = self.builder.get_insert_block()
+        let needs_terminator = self
+            .builder
+            .get_insert_block()
             .and_then(|bb| bb.get_terminator())
             .is_none();
         if needs_terminator {
@@ -3248,9 +3368,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
-                    && let Some(value) = self.enum_member_constant(&owner.name, &field.name) {
-                        return Ok(value);
-                    }
+                    && let Some(value) = self.enum_member_constant(&owner.name, &field.name)
+                {
+                    return Ok(value);
+                }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
                 self.builder
@@ -3323,14 +3444,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 expr.span.clone(),
                             )
                         })?;
-                    call.try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| {
-                            CodegenError::with_span(
-                                "user-defined cast returned void".to_string(),
-                                expr.span.clone(),
-                            )
-                        })
+                    call.try_as_basic_value().basic().ok_or_else(|| {
+                        CodegenError::with_span(
+                            "user-defined cast returned void".to_string(),
+                            expr.span.clone(),
+                        )
+                    })
                 } else {
                     self.cast_value_to_ast_type(source, target_type, &expr.span)
                 }
@@ -3364,29 +3483,46 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
                 let object_ty = self.resolve_receiver_type(object);
                 if let Some(ty) = &object_ty
-                    && matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
-                        let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
-                        let llvm_ty = self.lower_basic_type(&ty)?;
-                        return self.builder
-                            .build_load(llvm_ty, ptr, "lvalue.load")
-                            .map_err(|e| {
-                                CodegenError::with_span(
-                                    format!("failed to load lvalue: {e}"),
-                                    expr.span.clone(),
-                                )
-                            });
-                    }
+                    && matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))
+                {
+                    let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
+                    let llvm_ty = self.lower_basic_type(&ty)?;
+                    return self
+                        .builder
+                        .build_load(llvm_ty, ptr, "lvalue.load")
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to load lvalue: {e}"),
+                                expr.span.clone(),
+                            )
+                        });
+                }
                 // For non-pointer types (struct, slice), use the trait path (__index_get)
-                let method_ident = ast::Identifier { name: "__index_get".to_string(), span: expr.span.clone() };
-                let result = self.emit_method_call_expression(object, &method_ident, &[*index.clone()], false, &expr.span)?;
-                result.ok_or_else(|| CodegenError::with_span("__index_get returned void", expr.span.clone()))
+                let method_ident = ast::Identifier {
+                    name: "__index_get".to_string(),
+                    span: expr.span.clone(),
+                };
+                let result = self.emit_method_call_expression(
+                    object,
+                    &method_ident,
+                    &[*index.clone()],
+                    false,
+                    &expr.span,
+                )?;
+                result.ok_or_else(|| {
+                    CodegenError::with_span("__index_get returned void", expr.span.clone())
+                })
             }
             ast::ExpressionKind::Reference { expression, .. } => {
                 let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
                 Ok(ptr.as_basic_value_enum())
             }
             ast::ExpressionKind::MacroCall { name, args } => {
-                if let Some(result) = crate::builtin_macros::handle_codegen(&name.name, self, expr, args) { return result }
+                if let Some(result) =
+                    crate::builtin_macros::handle_codegen(&name.name, self, expr, args)
+                {
+                    return result;
+                }
                 Err(CodegenError::with_span(
                     format!("unknown builtin macro '@{}'", name.name),
                     expr.span.clone(),
@@ -3399,12 +3535,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Move(inner) => {
                 let value = self.emit_expression_value(inner)?;
                 if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref()
-                    && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
-                        self.builder.build_store(
-                            flag_ptr,
-                            self.context.bool_type().const_int(0, false),
-                        ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
-                    }
+                    && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+                {
+                    self.builder
+                        .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to clear drop flag: {e}"))
+                        })?;
+                }
                 Ok(value)
             }
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
@@ -3532,7 +3670,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 span.clone(),
             ));
         }
-    
+
         let first = self.emit_expression_value(&items[0])?;
         let element_ty = first.get_type();
         let mut values = vec![first];
@@ -3546,16 +3684,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             values.push(value);
         }
-    
+
         // Emit as a Slice<T> struct: { T* data; i64 len; }
         let n = values.len() as u32;
-    
+
         // Allocate a stack buffer for the elements
         let array_llvm_ty = element_ty.array_type(n);
-        let alloca = self.builder.build_alloca(array_llvm_ty, "arr.lit.buf").map_err(|e| {
-            CodegenError::with_span(format!("failed to allocate array buffer: {e}"), span.clone())
-        })?;
-    
+        let alloca = self
+            .builder
+            .build_alloca(array_llvm_ty, "arr.lit.buf")
+            .map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to allocate array buffer: {e}"),
+                    span.clone(),
+                )
+            })?;
+
         // Store each element
         for (index, value) in values.iter().enumerate() {
             let indices = [
@@ -3579,27 +3723,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )
             })?;
         }
-    
+
         // Build the Slice struct value
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
         let i64_ty = self.context.i64_type();
-        let slice_ty = self.context.struct_type(&[ptr_ty.as_basic_type_enum(), i64_ty.as_basic_type_enum()], false);
+        let slice_ty = self.context.struct_type(
+            &[ptr_ty.as_basic_type_enum(), i64_ty.as_basic_type_enum()],
+            false,
+        );
         let mut slice = slice_ty.get_undef();
-    
+
         // Field 0: data pointer
         let data_ptr = alloca.as_basic_value_enum();
-        slice = self.builder
+        slice = self
+            .builder
             .build_insert_value(slice, data_ptr, 0, "slice.data")
-            .map_err(|e| CodegenError::with_span(format!("failed to build slice data field: {e}"), span.clone()))?
+            .map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to build slice data field: {e}"),
+                    span.clone(),
+                )
+            })?
             .into_struct_value();
-    
+
         // Field 1: length
         let len = i64_ty.const_int(values.len() as u64, false);
-        slice = self.builder
+        slice = self
+            .builder
             .build_insert_value(slice, len.as_basic_value_enum(), 1, "slice.len")
-            .map_err(|e| CodegenError::with_span(format!("failed to build slice len field: {e}"), span.clone()))?
+            .map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to build slice len field: {e}"),
+                    span.clone(),
+                )
+            })?
             .into_struct_value();
-    
+
         Ok(slice.as_basic_value_enum())
     }
 
@@ -4350,12 +4509,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Index { object, index } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
                 match object_ty.kind.as_ref() {
-                    ast::TypeKind::Slice(_slice) => {
-                        Err(CodegenError::with_span(
-                            "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
-                            object.span.clone(),
-                        ))
-                    }
+                    ast::TypeKind::Slice(_slice) => Err(CodegenError::with_span(
+                        "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
+                        object.span.clone(),
+                    )),
                     ast::TypeKind::Pointer(pointer) => {
                         let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
                         let loaded = self
@@ -4410,12 +4567,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         Ok((element_ptr, (*pointer.inner).clone()))
                     }
-                    _ => {
-                        Err(CodegenError::with_span(
-                            "index access currently supports only array and pointer values",
-                            object.span.clone(),
-                        ))
-                    }
+                    _ => Err(CodegenError::with_span(
+                        "index access currently supports only array and pointer values",
+                        object.span.clone(),
+                    )),
                 }
             }
             _ => Err(CodegenError::with_span(
@@ -4458,9 +4613,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         span: &Span,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let (fn_name, explicit_generics) = match function_expr.kind.as_ref() {
-            ast::ExpressionKind::Identifier(identifier) => {
-                (identifier.name.clone(), None)
-            }
+            ast::ExpressionKind::Identifier(identifier) => (identifier.name.clone(), None),
             ast::ExpressionKind::TypeName(ty) => {
                 if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
                     if named.path.len() == 1 {
@@ -4490,12 +4643,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if !generics.is_empty() {
                 let type_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
                 let mangled = crate::semantic::monomorph::mangle_name(&fn_name, &type_args);
-                self.imported_function_links.get(&mangled).cloned().unwrap_or(mangled)
+                self.imported_function_links
+                    .get(&mangled)
+                    .cloned()
+                    .unwrap_or(mangled)
             } else {
-                self.imported_function_links.get(&fn_name).cloned().unwrap_or_else(|| fn_name.clone())
+                self.imported_function_links
+                    .get(&fn_name)
+                    .cloned()
+                    .unwrap_or_else(|| fn_name.clone())
             }
         } else {
-            self.imported_function_links.get(&fn_name).cloned().unwrap_or_else(|| fn_name.clone())
+            self.imported_function_links
+                .get(&fn_name)
+                .cloned()
+                .unwrap_or_else(|| fn_name.clone())
         };
         let function = self.module.get_function(&llvm_name).ok_or_else(|| {
             CodegenError::with_span(
@@ -4527,7 +4689,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?;
 
                     if let Some(linkage) = &signature.linkage {
-                        value = self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
+                        value =
+                            self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
                     }
                 }
             } else if is_variadic {
@@ -4544,36 +4707,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Add byval attributes to call site for large struct arguments
         if let Some(sig) = &signature
             && let Some(linkage) = &sig.linkage
-                && matches!(linkage, ast::ExternLinkage::C) {
-                    let target_data =
-                        TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-                    for (index, param_ty) in sig.params.iter().enumerate() {
-                        let lowered = self.lower_basic_type(param_ty)?;
-                        if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                            let size = target_data.get_store_size(&struct_ty);
-                            if self.abi_handler.needs_byval(size) {
-                                let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                                let attr = self.context.create_type_attribute(
-                                    byval_kind,
-                                    struct_ty.as_any_type_enum(),
-                                );
-                                call.add_attribute(AttributeLoc::Param(index as u32), attr);
+            && matches!(linkage, ast::ExternLinkage::C)
+        {
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+            for (index, param_ty) in sig.params.iter().enumerate() {
+                let lowered = self.lower_basic_type(param_ty)?;
+                if let BasicTypeEnum::StructType(struct_ty) = lowered {
+                    let size = target_data.get_store_size(&struct_ty);
+                    if self.abi_handler.needs_byval(size) {
+                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                        let attr = self
+                            .context
+                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
+                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
 
-                                let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                                let align_kind = Attribute::get_named_enum_kind_id("align");
-                                let align_attr = self.context.create_enum_attribute(align_kind, align);
-                                call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                            }
-                        }
+                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                        let align_kind = Attribute::get_named_enum_kind_id("align");
+                        let align_attr = self.context.create_enum_attribute(align_kind, align);
+                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
                     }
                 }
+            }
+        }
         if let Some(value) = call.try_as_basic_value().basic() {
             if let Some(signature) = &signature
-                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
-                    return Ok(Some(
-                        self.uncoerce_value_from_abi(value, ret_ty, linkage)?,
-                    ));
-                }
+                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
+            {
+                return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
+            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -4752,7 +4914,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
             let receiver_arg = if let Some(signature) = &signature {
                 if let Some(first_param) = signature.params.first() {
-                    let cast_arg = self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?;
+                    let cast_arg =
+                        self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?;
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
                         self.coerce_value_to_abi(cast_arg, first_param, linkage)?
@@ -4780,7 +4943,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?;
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
-                        value = self.coerce_value_to_abi(value, &signature.params[param_index], linkage)?;
+                        value = self.coerce_value_to_abi(
+                            value,
+                            &signature.params[param_index],
+                            linkage,
+                        )?;
                     }
                 }
             } else if is_variadic {
@@ -4797,45 +4964,46 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop"
             && let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref()
-                && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied() {
-                    self.builder.build_store(
-                        flag_ptr,
-                        self.context.bool_type().const_int(0, false),
-                    ).map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
-                }
+            && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+        {
+            self.builder
+                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+        }
 
         // Add byval attributes to call site for large struct arguments
         if let Some(sig) = &signature
             && let Some(linkage) = &sig.linkage
-                && matches!(linkage, ast::ExternLinkage::C) {
-                    let target_data =
-                        TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-                    for (index, param_ty) in sig.params.iter().enumerate() {
-                        let lowered = self.lower_basic_type(param_ty)?;
-                        if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                            let size = target_data.get_store_size(&struct_ty);
-                            if self.abi_handler.needs_byval(size) {
-                                let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                                let attr = self.context.create_type_attribute(
-                                    byval_kind,
-                                    struct_ty.as_any_type_enum(),
-                                );
-                                call.add_attribute(AttributeLoc::Param(index as u32), attr);
+            && matches!(linkage, ast::ExternLinkage::C)
+        {
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+            for (index, param_ty) in sig.params.iter().enumerate() {
+                let lowered = self.lower_basic_type(param_ty)?;
+                if let BasicTypeEnum::StructType(struct_ty) = lowered {
+                    let size = target_data.get_store_size(&struct_ty);
+                    if self.abi_handler.needs_byval(size) {
+                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                        let attr = self
+                            .context
+                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
+                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
 
-                                let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                                let align_kind = Attribute::get_named_enum_kind_id("align");
-                                let align_attr = self.context.create_enum_attribute(align_kind, align);
-                                call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                            }
-                        }
+                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                        let align_kind = Attribute::get_named_enum_kind_id("align");
+                        let align_attr = self.context.create_enum_attribute(align_kind, align);
+                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
                     }
                 }
+            }
+        }
 
         if let Some(value) = call.try_as_basic_value().basic() {
             if let Some(signature) = &signature
-                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage) {
-                    return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
-                }
+                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
+            {
+                return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
+            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -4896,15 +5064,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Check for operator overload on struct types
         let operand_val = self.emit_expression_value(operand)?;
         if operand_val.get_type().is_struct_type()
-            && let Some(method_name) = unary_operator_method_name(operator) {
-                let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
-                let result = self.emit_method_call_expression(
-                    operand, &method_ident, &[], false, &whole_expr.span
-                )?;
-                if let Some(val) = result {
-                    return Ok(val);
-                }
+            && let Some(method_name) = unary_operator_method_name(operator)
+        {
+            let method_ident = ast::Identifier {
+                name: method_name.to_string(),
+                span: whole_expr.span.clone(),
+            };
+            let result = self.emit_method_call_expression(
+                operand,
+                &method_ident,
+                &[],
+                false,
+                &whole_expr.span,
+            )?;
+            if let Some(val) = result {
+                return Ok(val);
             }
+        }
         match operator {
             ast::UnaryOperator::Plus => self.emit_expression_value(operand),
             ast::UnaryOperator::Minus => {
@@ -5082,20 +5258,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
         })?;
 
-        if return_old {
-            Ok(current)
-        } else {
-            Ok(updated)
-        }
+        if return_old { Ok(current) } else { Ok(updated) }
     }
-
 
     /// Check that an assignment target is mutable. Returns Ok(()) or a CodegenError
     /// with a message like "cannot assign to const variable 'x'".
-    fn check_assignment_mutability(
-        &self,
-        target: &ast::Expression,
-    ) -> CodegenResult<()> {
+    fn check_assignment_mutability(&self, target: &ast::Expression) -> CodegenResult<()> {
         match target.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if let Some(info) = self.lookup_variable(&ident.name) {
@@ -5110,7 +5278,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     || self.extern_globals.contains_key(&ident.name)
                     || self.lookup_module_global(&ident.name).is_some()
                 {
-                    Ok(())  // globals are always mutable
+                    Ok(()) // globals are always mutable
                 } else {
                     Err(CodegenError::with_span(
                         format!("unknown variable `{}`", ident.name),
@@ -5127,23 +5295,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } => {
                 // *ptr = val — check pointer/reference type mutability
                 if let ast::ExpressionKind::Identifier(ident) = operand.kind.as_ref()
-                    && let Some(ty) = self.lookup_value_type(&ident.name) {
-                        match ty.kind.as_ref() {
-                            ast::TypeKind::Pointer(ptr) if !ptr.is_mutable => {
-                                return Err(CodegenError::with_span(
-                                    "cannot write through immutable pointer",
-                                    ident.span.clone(),
-                                ));
-                            }
-                            ast::TypeKind::Reference(r) if !r.is_mutable => {
-                                return Err(CodegenError::with_span(
-                                    "cannot write through immutable reference",
-                                    ident.span.clone(),
-                                ));
-                            }
-                            _ => {}
+                    && let Some(ty) = self.lookup_value_type(&ident.name)
+                {
+                    match ty.kind.as_ref() {
+                        ast::TypeKind::Pointer(ptr) if !ptr.is_mutable => {
+                            return Err(CodegenError::with_span(
+                                "cannot write through immutable pointer",
+                                ident.span.clone(),
+                            ));
                         }
+                        ast::TypeKind::Reference(r) if !r.is_mutable => {
+                            return Err(CodegenError::with_span(
+                                "cannot write through immutable reference",
+                                ident.span.clone(),
+                            ));
+                        }
+                        _ => {}
                     }
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -5168,11 +5337,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For Index on a non-pointer type, emit __index_set instead of direct store
                 if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref() {
                     let object_ty = self.resolve_receiver_type(object);
-                    if !object_ty.is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))) {
+                    if !object_ty
+                        .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)))
+                    {
                         self.check_assignment_mutability(left)?;
                         let value = self.emit_expression_value(right)?;
-                        let method_ident = ast::Identifier { name: "__index_set".to_string(), span: left.span.clone() };
-                        self.emit_method_call_expression(object, &method_ident, &[(**index).clone(), right.clone()], true, &whole_expr.span)?;
+                        let method_ident = ast::Identifier {
+                            name: "__index_set".to_string(),
+                            span: left.span.clone(),
+                        };
+                        self.emit_method_call_expression(
+                            object,
+                            &method_ident,
+                            &[(**index).clone(), right.clone()],
+                            true,
+                            &whole_expr.span,
+                        )?;
                         return Ok(value);
                     }
                 }
@@ -5218,17 +5398,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         _ => unreachable!(),
                     };
                     if let Some(method_name) = operator_method_name(&bin_op) {
-                        let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
+                        let method_ident = ast::Identifier {
+                            name: method_name.to_string(),
+                            span: whole_expr.span.clone(),
+                        };
                         let result = self.emit_method_call_expression(
-                            left, &method_ident, std::slice::from_ref(right), false, &whole_expr.span
+                            left,
+                            &method_ident,
+                            std::slice::from_ref(right),
+                            false,
+                            &whole_expr.span,
                         )?;
                         if let Some(val) = result {
                             val
                         } else {
-                            return Err(CodegenError::with_span("operator returned void", whole_expr.span.clone()));
+                            return Err(CodegenError::with_span(
+                                "operator returned void",
+                                whole_expr.span.clone(),
+                            ));
                         }
                     } else {
-                        return Err(CodegenError::with_span("operator not found for struct type", whole_expr.span.clone()));
+                        return Err(CodegenError::with_span(
+                            "operator not found for struct type",
+                            whole_expr.span.clone(),
+                        ));
                     }
                 } else {
                     let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
@@ -5244,25 +5437,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => {
                 // For str equality (==, !=), use strcmp instead of pointer comparison
-                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual)
-                    && (self.expression_is_str_type(left) || self.expression_is_str_type(right)) {
-                        let lhs = self.emit_expression_value(left)?;
-                        let rhs = self.emit_expression_value(right)?;
-                        return self.emit_strcmp_comparison(lhs, operator, rhs, whole_expr);
-                    }
+                if matches!(
+                    operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                ) && (self.expression_is_str_type(left) || self.expression_is_str_type(right))
+                {
+                    let lhs = self.emit_expression_value(left)?;
+                    let rhs = self.emit_expression_value(right)?;
+                    return self.emit_strcmp_comparison(lhs, operator, rhs, whole_expr);
+                }
 
                 let lhs = self.emit_expression_value(left)?;
                 // For struct types, use trait method call instead of inline IR
                 if lhs.get_type().is_struct_type()
-                    && let Some(method_name) = operator_method_name(operator) {
-                        let method_ident = ast::Identifier { name: method_name.to_string(), span: whole_expr.span.clone() };
-                        let result = self.emit_method_call_expression(
-                            left, &method_ident, std::slice::from_ref(right), false, &whole_expr.span
-                        )?;
-                        if let Some(val) = result {
-                            return Ok(val);
-                        }
+                    && let Some(method_name) = operator_method_name(operator)
+                {
+                    let method_ident = ast::Identifier {
+                        name: method_name.to_string(),
+                        span: whole_expr.span.clone(),
+                    };
+                    let result = self.emit_method_call_expression(
+                        left,
+                        &method_ident,
+                        std::slice::from_ref(right),
+                        false,
+                        &whole_expr.span,
+                    )?;
+                    if let Some(val) = result {
+                        return Ok(val);
                     }
+                }
                 let mut rhs = self.emit_expression_value(right)?;
                 if rhs.get_type() != lhs.get_type() {
                     rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
@@ -5306,7 +5510,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
                     whole_expr.span.clone(),
-                ))
+                ));
             }
         };
         let rhs_ptr = match rhs {
@@ -5315,7 +5519,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
                     whole_expr.span.clone(),
-                ))
+                ));
             }
         };
 
@@ -5333,7 +5537,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .module
             .get_function("strcmp")
             .unwrap_or_else(|| self.module.add_function("strcmp", strcmp_ty, None));
-
 
         // Check: if lhs_ptr == null || rhs_ptr == null → use pointer equality
         let lhs_is_null = self
@@ -5417,10 +5620,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_phi(i1_ty, "strcmp.result")
             .map_err(|e| CodegenError::new(format!("strcmp phi: {e}")))?;
-        phi.add_incoming(&[
-            (&ptr_result, ptr_result_bb),
-            (&cmp, strcmp_result_bb),
-        ]);
+        phi.add_incoming(&[(&ptr_result, ptr_result_bb), (&cmp, strcmp_result_bb)]);
         Ok(phi.as_basic_value().as_basic_value_enum())
     }
 
@@ -5945,7 +6145,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the parent's terminator check sees a terminated block.
         self.builder.position_at_end(cont_bb);
         if then_terminated && else_terminated {
-            self.builder.build_unreachable()
+            self.builder
+                .build_unreachable()
                 .map_err(|e| CodegenError::new(format!("failed to emit unreachable: {e}")))?;
         }
         Ok(())
@@ -6087,15 +6288,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let end_val = self.emit_expression_value(right)?;
 
                 let llvm_ty = start_val.get_type();
-                let i_ptr = self
-                    .create_entry_alloca(function, &binding.name, llvm_ty)?;
+                let i_ptr = self.create_entry_alloca(function, &binding.name, llvm_ty)?;
                 self.builder
                     .build_store(i_ptr, start_val)
                     .map_err(|e| CodegenError::new(format!("failed to init loop var: {e}")))?;
 
                 let ast_ty = self.infer_ast_type_from_value(&start_val, span);
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(binding.name.clone(), VarInfo { ptr: i_ptr, ty: ast_ty, is_mutable });
+                    scope.insert(
+                        binding.name.clone(),
+                        VarInfo {
+                            ptr: i_ptr,
+                            ty: ast_ty,
+                            is_mutable,
+                        },
+                    );
                 }
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
@@ -6118,11 +6325,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let iv_width = iv_ty.get_bit_width();
                         let ev_width = ev_ty.get_bit_width();
                         let ev = if iv_width > ev_width {
-                            self.builder.build_int_s_extend(ev, iv_ty, "forin.end.cast")
-                                .map_err(|e| CodegenError::new(format!("failed to extend end bound: {e}")))?
+                            self.builder
+                                .build_int_s_extend(ev, iv_ty, "forin.end.cast")
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to extend end bound: {e}"))
+                                })?
                         } else if iv_width < ev_width {
-                            self.builder.build_int_truncate(ev, iv_ty, "forin.end.cast")
-                                .map_err(|e| CodegenError::new(format!("failed to truncate end bound: {e}")))?
+                            self.builder
+                                .build_int_truncate(ev, iv_ty, "forin.end.cast")
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to truncate end bound: {e}"))
+                                })?
                         } else {
                             ev
                         };
@@ -6190,23 +6403,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let iterable_ast_ty = self
                     .resolve_receiver_type(iterable)
                     .unwrap_or_else(|| self.infer_ast_type_from_value(&iterable_val, span));
-                let iterable_ptr = self.create_entry_alloca(function, iterable_name, iterable_llvm_ty)?;
-                self.builder.build_store(iterable_ptr, iterable_val)
+                let iterable_ptr =
+                    self.create_entry_alloca(function, iterable_name, iterable_llvm_ty)?;
+                self.builder
+                    .build_store(iterable_ptr, iterable_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterable: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(iterable_name.to_string(), VarInfo { ptr: iterable_ptr, ty: iterable_ast_ty, is_mutable: true });
+                    scope.insert(
+                        iterable_name.to_string(),
+                        VarInfo {
+                            ptr: iterable_ptr,
+                            ty: iterable_ast_ty,
+                            is_mutable: true,
+                        },
+                    );
                 }
 
                 let iterable_expr = ast::Expression {
-                    kind: Box::new(ast::ExpressionKind::Identifier(
-                        ast::Identifier { name: iterable_name.to_string(), span: dummy_span.clone() }
-                    )),
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: iterable_name.to_string(),
+                        span: dummy_span.clone(),
+                    })),
                     span: dummy_span.clone(),
                 };
-                let into_iter_ident = ast::Identifier { name: "into_iter".to_string(), span: dummy_span.clone() };
-                let iterator_val = self.emit_method_call_expression(
-                    &iterable_expr, &into_iter_ident, &[], false, span
-                )?.ok_or_else(|| CodegenError::new("into_iter() must not return void"))?;
+                let into_iter_ident = ast::Identifier {
+                    name: "into_iter".to_string(),
+                    span: dummy_span.clone(),
+                };
+                let iterator_val = self
+                    .emit_method_call_expression(
+                        &iterable_expr,
+                        &into_iter_ident,
+                        &[],
+                        false,
+                        span,
+                    )?
+                    .ok_or_else(|| CodegenError::new("into_iter() must not return void"))?;
 
                 let iter_llvm_ty = iterator_val.get_type();
 
@@ -6224,38 +6456,54 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     found.unwrap_or_else(|| self.infer_ast_type_from_value(&iterator_val, span))
                 };
                 let iter_ptr = self.create_entry_alloca(function, iter_name, iter_llvm_ty)?;
-                self.builder.build_store(iter_ptr, iterator_val)
+                self.builder
+                    .build_store(iter_ptr, iterator_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterator: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(iter_name.to_string(), VarInfo { ptr: iter_ptr, ty: iter_ast_ty, is_mutable: true });
+                    scope.insert(
+                        iter_name.to_string(),
+                        VarInfo {
+                            ptr: iter_ptr,
+                            ty: iter_ast_ty,
+                            is_mutable: true,
+                        },
+                    );
                 }
 
-                let next_ident = ast::Identifier { name: "next".to_string(), span: dummy_span.clone() };
-                let iter_expr = ast::Expression {
-                    kind: Box::new(ast::ExpressionKind::Identifier(
-                        ast::Identifier { name: iter_name.to_string(), span: dummy_span.clone() }
-                    )),
+                let next_ident = ast::Identifier {
+                    name: "next".to_string(),
                     span: dummy_span.clone(),
                 };
-                let next_val = self.emit_method_call_expression(
-                    &iter_expr, &next_ident, &[], false, span
-                )?.ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
+                let iter_expr = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: iter_name.to_string(),
+                        span: dummy_span.clone(),
+                    })),
+                    span: dummy_span.clone(),
+                };
+                let next_val = self
+                    .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
+                    .ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
 
                 let next_llvm_ty = next_val.get_type();
                 let next_ptr = self.create_entry_alloca(function, next_name, next_llvm_ty)?;
-                self.builder.build_store(next_ptr, next_val)
+                self.builder
+                    .build_store(next_ptr, next_val)
                     .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
                 let body_bb = self.context.append_basic_block(function, "forin.body");
                 let end_bb = self.context.append_basic_block(function, "forin.end");
 
-                self.builder.build_unconditional_branch(cond_bb)
+                self.builder
+                    .build_unconditional_branch(cond_bb)
                     .map_err(|e| CodegenError::new(format!("failed to enter for-in cond: {e}")))?;
 
                 self.builder.position_at_end(cond_bb);
 
-                let opt_struct = self.builder.build_load(next_llvm_ty, next_ptr, "forin.opt")
+                let opt_struct = self
+                    .builder
+                    .build_load(next_llvm_ty, next_ptr, "forin.opt")
                     .map_err(|e| CodegenError::new(format!("failed to load optional: {e}")))?;
                 let opt_sv = match opt_struct {
                     BasicValueEnum::StructValue(sv) => sv,
@@ -6266,7 +6514,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_extract_value(opt_sv, 0, "forin.present")
                     .map_err(|e| CodegenError::new(format!("failed to extract present: {e}")))?;
 
-                self.builder.build_conditional_branch(is_present.into_int_value(), body_bb, end_bb)
+                self.builder
+                    .build_conditional_branch(is_present.into_int_value(), body_bb, end_bb)
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
                 self.loop_stack.push((end_bb, cond_bb));
@@ -6279,19 +6528,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     for owner_name in &owners {
                         let mangled = Self::mangle_method_name(owner_name, &next_ident.name);
                         if let Some(sig) = self.signature_for_name(&mangled)
-                            && let Some(return_type) = &sig.return_type {
-                                let inner = match return_type.kind.as_ref() {
-                                    ast::TypeKind::Optional(inner) => Some(inner.as_ref()),
-                                    ast::TypeKind::Named(named) if named.path.last().map(|s| s.name.as_str()) == Some("Optional") => {
-                                        named.generics.as_ref().and_then(|g| g.first())
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(inner_ty) = inner {
-                                    found = Some(self.lower_basic_type(inner_ty)?);
-                                    break;
+                            && let Some(return_type) = &sig.return_type
+                        {
+                            let inner = match return_type.kind.as_ref() {
+                                ast::TypeKind::Optional(inner) => Some(inner.as_ref()),
+                                ast::TypeKind::Named(named)
+                                    if named.path.last().map(|s| s.name.as_str())
+                                        == Some("Optional") =>
+                                {
+                                    named.generics.as_ref().and_then(|g| g.first())
                                 }
+                                _ => None,
+                            };
+                            if let Some(inner_ty) = inner {
+                                found = Some(self.lower_basic_type(inner_ty)?);
+                                break;
                             }
+                        }
                     }
                     found.unwrap_or_else(|| self.context.i64_type().as_basic_type_enum())
                 };
@@ -6301,25 +6554,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
                 let ast_ty = self.infer_ast_type_from_value(&thing_loaded, span);
-                let var_ptr = self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
-                self.builder.build_store(var_ptr, thing_loaded)
+                let var_ptr =
+                    self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
+                self.builder
+                    .build_store(var_ptr, thing_loaded)
                     .map_err(|e| CodegenError::new(format!("failed to store loop var: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
-                    scope.insert(binding.name.clone(), VarInfo { ptr: var_ptr, ty: ast_ty, is_mutable });
+                    scope.insert(
+                        binding.name.clone(),
+                        VarInfo {
+                            ptr: var_ptr,
+                            ty: ast_ty,
+                            is_mutable,
+                        },
+                    );
                 }
 
                 self.generate_block(body)?;
 
-                let next_val2 = self.emit_method_call_expression(
-                    &iter_expr, &next_ident, &[], false, span
-                )?.ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
-                self.builder.build_store(next_ptr, next_val2)
+                let next_val2 = self
+                    .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
+                    .ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
+                self.builder
+                    .build_store(next_ptr, next_val2)
                     .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
 
-                let body_terminated = self.builder.get_insert_block()
-                    .and_then(|bb| bb.get_terminator()).is_some();
+                let body_terminated = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|bb| bb.get_terminator())
+                    .is_some();
                 if !body_terminated {
-                    self.builder.build_unconditional_branch(cond_bb)
+                    self.builder
+                        .build_unconditional_branch(cond_bb)
                         .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
                 }
                 self.loop_defers_base.pop();
@@ -6397,12 +6664,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let ty = inferred_ty;
         let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
-            scope.insert(identifier.name.clone(), VarInfo { ptr: alloca, ty, is_mutable: let_stmt.is_mutable });
+            scope.insert(
+                identifier.name.clone(),
+                VarInfo {
+                    ptr: alloca,
+                    ty,
+                    is_mutable: let_stmt.is_mutable,
+                },
+            );
         }
 
         // Skip pointer/reference types: the variable is a borrowed view,
         // not an owner.  Only value-type variables get implicit destructors.
-        if matches!(ty_for_drop.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+        if matches!(
+            ty_for_drop.kind.as_ref(),
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+        ) {
             return Ok(());
         }
 
@@ -6411,7 +6688,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let needs_drop = drop_owners.iter().any(|owner| {
             let drop_name = Self::mangle_method_name(owner, "drop");
             self.module.get_function(&drop_name).is_some()
-                || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                || self
+                    .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
                     .ok()
                     .flatten()
                     .is_some()
@@ -6422,20 +6700,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 CodegenError::new("no active function for destructor".to_string())
             })?;
             // Create a drop flag (i1), initialized to true
-            let flag_alloca = self.create_entry_alloca(function, &format!("{}.drop", identifier.name), self.context.bool_type().as_basic_type_enum())?;
-            self.builder.build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+            let flag_alloca = self.create_entry_alloca(
+                function,
+                &format!("{}.drop", identifier.name),
+                self.context.bool_type().as_basic_type_enum(),
+            )?;
+            self.builder
+                .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
                 .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
             self.drop_flags.insert(identifier.name.clone(), flag_alloca);
 
             // Construct the drop function name from the first matching owner
-            let drop_fn_name = drop_owners.iter().find_map(|owner| {
-                let name = Self::mangle_method_name(owner, "drop");
-                if self.module.get_function(&name).is_some() || self.try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop").ok().flatten().is_some() {
-                    Some(name)
-                } else {
-                    None
-                }
-            }).unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
+            let drop_fn_name = drop_owners
+                .iter()
+                .find_map(|owner| {
+                    let name = Self::mangle_method_name(owner, "drop");
+                    if self.module.get_function(&name).is_some()
+                        || self
+                            .try_instantiate_generic_impl_method_for_type(&ty_for_drop, "drop")
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| format!("{}__drop", drop_owners[0]));
 
             if let Some(scope) = self.defers.last_mut() {
                 scope.push(DeferredEntry {
@@ -6667,7 +6959,6 @@ fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
     }
 }
 
-
 /// Run a lightweight LLVM optimization pipeline on a module before machine-code
 /// emission. Uses the new pass manager (LLVM 17+) via LLVMRunPasses.
 /// At opt-level 0 this is a no-op.
@@ -6699,7 +6990,9 @@ fn run_module_optimization_passes(
             options.as_mut_ptr(),
         );
         if !err.is_null() {
-            return Err(CodegenError::new("LLVM optimization pipeline returned an error"));
+            return Err(CodegenError::new(
+                "LLVM optimization pipeline returned an error",
+            ));
         }
     }
     Ok(())
@@ -6733,7 +7026,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 if function_item.generics.is_some() {
                     continue;
                 }
-                if self.has_generic_placeholder_signature(&function_item.parameters, function_item.return_type.as_ref()) {
+                if self.has_generic_placeholder_signature(
+                    &function_item.parameters,
+                    function_item.return_type.as_ref(),
+                ) {
                     continue;
                 }
                 if self.module.get_function(&function_item.name.name).is_some() {
@@ -6742,7 +7038,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.register_function_signature(
                     &function_item.name.name,
                     FunctionSig {
-                        params: function_item.parameters.iter().map(|param| param.param_type.clone()).collect(),
+                        params: function_item
+                            .parameters
+                            .iter()
+                            .map(|param| param.param_type.clone())
+                            .collect(),
                         return_type: function_item.return_type.clone(),
                         is_variadic: false,
                         linkage: None,
@@ -6751,12 +7051,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     SymbolKind::Function,
                 );
                 let fn_ty = self.lower_function_type(
-                    &function_item.parameters.iter().map(|param| param.param_type.clone()).collect::<Vec<_>>(),
+                    &function_item
+                        .parameters
+                        .iter()
+                        .map(|param| param.param_type.clone())
+                        .collect::<Vec<_>>(),
                     function_item.return_type.as_ref(),
                     false,
                     None,
                 )?;
-                self.module.add_function(&function_item.name.name, fn_ty, None);
+                self.module
+                    .add_function(&function_item.name.name, fn_ty, None);
             }
         }
 
@@ -7092,8 +7397,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 }
                 ast::ImplItemKind::Cast(cast) => {
                     let cast_method_name = Self::cast_method_name(&cast.target_type);
-                    let mangled_name =
-                        Self::mangle_method_name(&owner, &cast_method_name);
+                    let mangled_name = Self::mangle_method_name(&owner, &cast_method_name);
                     let effective_visibility =
                         Self::method_effective_visibility(visibility, &ast::Visibility::Private);
                     if self.module.get_function(&mangled_name).is_none() {
@@ -7340,7 +7644,14 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     iterable,
                     body,
                     item_type,
-                } => self.emit_for_in_statement(binding, *is_mutable, iterable, body, item_type.as_deref(), &statement.span),
+                } => self.emit_for_in_statement(
+                    binding,
+                    *is_mutable,
+                    iterable,
+                    body,
+                    item_type.as_deref(),
+                    &statement.span,
+                ),
                 _ => self.emit_expression_statement(expr),
             },
             ast::StatementKind::Let(let_stmt) => self.emit_let_statement(let_stmt, &statement.span),
@@ -7373,10 +7684,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 // Return the saved value
                 if let Some((value, span)) = saved_value {
                     self.builder.build_return(Some(&value)).map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to emit return value: {e}"),
-                            span,
-                        )
+                        CodegenError::with_span(format!("failed to emit return value: {e}"), span)
                     })?;
                 } else {
                     self.builder.build_return(None).map_err(|e| {
@@ -7695,80 +8003,90 @@ mod tests {
     #[test]
     fn lowers_operator_overload_add() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a + b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a + b; return 0; }",
         );
         assert!(ir.contains("@Vec2____add"), "expected __add call:\n{ir}");
     }
-    
+
     #[test]
     fn lowers_operator_overload_div() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __div(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x / other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a / b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __div(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x / other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a / b; return 0; }",
         );
         assert!(ir.contains("@Vec2____div"), "expected __div call:\n{ir}");
     }
-    
+
     #[test]
     fn lowers_operator_overload_sub() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __sub(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x - other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a - b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __sub(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x - other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a - b; return 0; }",
         );
         assert!(ir.contains("@Vec2____sub"), "expected __sub call:\n{ir}");
     }
-    
+
     #[test]
     fn lowers_operator_overload_mul() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __mul(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x * other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a * b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __mul(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x * other.x; return r; } } i32 main() { Vec2 a; Vec2 b; Vec2 c = a * b; return 0; }",
         );
         assert!(ir.contains("@Vec2____mul"), "expected __mul call:\n{ir}");
     }
-    
+
     #[test]
     fn lowers_operator_overload_compound_assign() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; a += b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __add(Vec2 self, Vec2 other) { Vec2 r; r.x = self.x + other.x; return r; } } i32 main() { Vec2 a; Vec2 b; a += b; return 0; }",
         );
-        assert!(ir.contains("@Vec2____add"), "expected __add call for compound assign:\n{ir}");
+        assert!(
+            ir.contains("@Vec2____add"),
+            "expected __add call for compound assign:\n{ir}"
+        );
     }
-    
+
     #[test]
     fn lowers_unary_operator_neg() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __neg(Vec2 self) { Vec2 r; r.x = -self.x; return r; } } i32 main() { Vec2 a; Vec2 b = -a; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { Vec2 __neg(Vec2 self) { Vec2 r; r.x = -self.x; return r; } } i32 main() { Vec2 a; Vec2 b = -a; return 0; }",
         );
         assert!(ir.contains("@Vec2____neg"), "expected __neg call:\n{ir}");
     }
     #[test]
     fn lowers_indexed_access_get() {
         let ir = lower_to_llvm(
-            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } } i32 main() { Buffer b; i32 x = b[0]; return x; }"
+            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } } i32 main() { Buffer b; i32 x = b[0]; return x; }",
         );
-        assert!(ir.contains("@Buffer____index_get"), "expected __index_get call:\n{ir}");
+        assert!(
+            ir.contains("@Buffer____index_get"),
+            "expected __index_get call:\n{ir}"
+        );
     }
-    
+
     #[test]
     fn lowers_index_assign() {
         let ir = lower_to_llvm(
-            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } void __index_set(Buffer* self, i64 index, i32 value) { (*self).data[index] = value; } } i32 main() { Buffer b; b[0] = 42; return 0; }"
+            "struct Buffer { i32* data; i64 len; } impl Buffer { i32 __index_get(Buffer* self, i64 index) { return (*self).data[index]; } void __index_set(Buffer* self, i64 index, i32 value) { (*self).data[index] = value; } } i32 main() { Buffer b; b[0] = 42; return 0; }",
         );
-        assert!(ir.contains("@Buffer____index_set"), "expected __index_set call:\n{ir}");
+        assert!(
+            ir.contains("@Buffer____index_set"),
+            "expected __index_set call:\n{ir}"
+        );
     }
-    
+
     #[test]
     fn lowers_comparison_eq() {
         let ir = lower_to_llvm(
-            "struct Vec2 { i32 x; } impl Vec2 { bool __eq(Vec2 self, Vec2 other) { return self.x == other.x; } } i32 main() { Vec2 a; Vec2 b; bool c = a == b; return 0; }"
+            "struct Vec2 { i32 x; } impl Vec2 { bool __eq(Vec2 self, Vec2 other) { return self.x == other.x; } } i32 main() { Vec2 a; Vec2 b; bool c = a == b; return 0; }",
         );
         assert!(ir.contains("@Vec2____eq"), "expected __eq call:\n{ir}");
     }
     #[test]
     fn lowers_primitive_arithmetic_stays_inline() {
         // Primitives should NOT go through the trait path
-        let ir = lower_to_llvm(
-            "i32 main() { i32 a = 1; i32 b = 2; i32 c = a + b; return c; }"
+        let ir = lower_to_llvm("i32 main() { i32 a = 1; i32 b = 2; i32 c = a + b; return c; }");
+        assert!(
+            !ir.contains("__add"),
+            "primitive add should not call __add:\n{ir}"
         );
-        assert!(!ir.contains("__add"), "primitive add should not call __add:\n{ir}");
     }
 
     #[test]
@@ -7786,10 +8104,14 @@ mod tests {
         builder.position_at_end(entry);
 
         // Create an alloca for the local variable, store and load
-        let alloca = builder.build_alloca(i32_type, "x").expect("alloca should succeed");
+        let alloca = builder
+            .build_alloca(i32_type, "x")
+            .expect("alloca should succeed");
         let const_42 = i32_type.const_int(42, false);
         let _ = builder.build_store(alloca, const_42);
-        let loaded = builder.build_load(i32_type, alloca, "loaded").expect("load should succeed");
+        let loaded = builder
+            .build_load(i32_type, alloca, "loaded")
+            .expect("load should succeed");
         let _ = builder.build_return(Some(&loaded));
 
         // Set up target machine
@@ -7818,7 +8140,6 @@ mod tests {
             "expected no alloca after optimization:\n{post}"
         );
     }
-
 
     #[test]
     fn no_scalar_literal_globals_in_ir() {
@@ -7892,7 +8213,8 @@ mod tests {
             Some(path),
             Some(source),
             true,
-        ).expect("failed to generate debug info IR");
+        )
+        .expect("failed to generate debug info IR");
 
         assert!(
             ir.contains("!dbg"),
@@ -7904,4 +8226,3 @@ mod tests {
         );
     }
 }
-
