@@ -4,6 +4,7 @@ extern "C" {
 
 import std.mem.alloc;
 import std.io;
+import std.mem.drop;
 
 // Internal entry state: 0=empty, 1=occupied, -1=tombstone.
 // Stored as parallel arrays to keep alignment simple.
@@ -55,9 +56,9 @@ impl HashMap<K, V> {
             new_cap = new_cap * 2;
         }
 
-        K* new_keys = (K*)(malloc(@size(K) * new_cap));
-        V* new_vals = (V*)(malloc(@size(V) * new_cap));
-        i64* new_st = (i64*)(malloc(8 * new_cap));
+        K* new_keys = alloc<K>(new_cap);
+        V* new_vals = alloc<V>(new_cap);
+        i64* new_st = alloc<i64>(new_cap);
         // Initialize state to EMPTY
         i64 j = 0;
         while (j < new_cap) {
@@ -239,7 +240,9 @@ impl HashMap<K, V> {
     pub void __index_set(HashMap<K, V>* self, K key, V value) {
         self.insert(key, value);
     }
+}
 
+impl<K, V> Drop<HashMap<K, V>> for HashMap<K, V> {
     /// Free all memory. Does NOT call per-element destructors.
     pub void drop(HashMap<K, V>* self) {
         if (self.state != (i64*)0) {

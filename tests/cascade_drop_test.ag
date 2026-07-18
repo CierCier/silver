@@ -1,0 +1,93 @@
+import std.mem;
+
+i32 outer_drop_count = 0;
+i32 inner_total = 0;
+i32 inherent_drop_count = 0;
+
+struct Inner {
+    i32 id;
+}
+
+impl Inner {
+    Inner new(i32 id) {
+        Inner t;
+        t.id = id;
+        return move t;
+    }
+}
+
+impl Drop<Inner> for Inner {
+    void drop(Inner* self) {
+        inner_total = inner_total + 1;
+    }
+}
+
+struct Outer {
+    Inner a;
+    Inner b;
+}
+
+impl Outer {
+    Outer new(i32 id_a, i32 id_b) {
+        Outer o;
+        o.a = Inner.new(id_a);
+        o.b = Inner.new(id_b);
+        return move o;
+    }
+}
+
+impl Drop<Outer> for Outer {
+    void drop(Outer* self) {
+        outer_drop_count = outer_drop_count + 1;
+        // No manual field drops — cascading handles them automatically.
+    }
+}
+
+struct InherentOnly {
+    i32 id;
+}
+
+impl InherentOnly {
+    InherentOnly new(i32 id) {
+        InherentOnly t;
+        t.id = id;
+        return move t;
+    }
+
+    void drop(InherentOnly* self) {
+        inherent_drop_count = inherent_drop_count + 1;
+    }
+}
+
+i32 main() {
+    {
+        outer_drop_count = 0;
+        inner_total = 0;
+        {
+            Outer o = Outer.new(1, 2);
+        }
+        if (outer_drop_count != 1) { return 1; }
+        if (inner_total != 2) { return 2; }
+    }
+
+    {
+        outer_drop_count = 0;
+        inner_total = 0;
+        {
+            Outer o = Outer.new(3, 4);
+            Outer p = move o;
+        }
+        if (outer_drop_count != 1) { return 3; }
+        if (inner_total != 2) { return 4; }
+    }
+
+    {
+        inherent_drop_count = 0;
+        {
+            InherentOnly x = InherentOnly.new(5);
+        }
+        if (inherent_drop_count != 0) { return 5; }
+    }
+
+    return 0;
+}

@@ -16,6 +16,7 @@ extern "C" {
 // the Vec goes out of scope.  POD types (i32, structs of i32, etc.)
 // are always safe.
 import std.mem.alloc;
+import std.mem.drop;
 import std.ops;
 pub struct Vec<T> {
     T* data;
@@ -140,9 +141,9 @@ impl Vec<T> {
             }
         }
     }
+}
 
-    // -- Destructor -----------------------------------------------------
-
+impl<T> Drop<Vec<T>> for Vec<T> {
     /// Frees the backing buffer.  Does NOT call per-element destructors
     /// (the type system currently does not iterate elements on drop).
     pub void drop(Vec<T>* self) {

@@ -17,7 +17,9 @@ impl Box<T> {
     pub T* get(Box<T>* self) {
         return (*self).ptr;
     }
+}
 
+impl<T> Drop<Box<T>> for Box<T> {
     pub void drop(Box<T>* self) {
         if ((*self).ptr != (T*)0) {
             free((*self).ptr);

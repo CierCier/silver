@@ -101,7 +101,9 @@ impl RawNode {
         }
         return true;
     }
+}
 
+impl Drop<RawNode> for RawNode {
     void drop(RawNode* self) {
         node_drop_count = node_drop_count + 1;
         if ((*self).owns_payload && (*self).payload != (i32*)0) {
@@ -150,7 +152,9 @@ impl OwnedLeaf {
     bool valid(OwnedLeaf* self) {
         return (*self).owns && (*self).bytes != (i8*)0 && (*self).len > 0;
     }
+}
 
+impl Drop<OwnedLeaf> for OwnedLeaf {
     void drop(OwnedLeaf* self) {
         leaf_drop_count = leaf_drop_count + 1;
         if ((*self).owns && (*self).bytes != (i8*)0) {
@@ -183,11 +187,12 @@ impl PairOwner {
     i32 sum(PairOwner* self) {
         return (*self).id + (*self).left.id + (*self).right.id;
     }
+}
 
+impl Drop<PairOwner> for PairOwner {
     void drop(PairOwner* self) {
         pair_drop_count = pair_drop_count + 1;
-        (*self).left.drop();
-        (*self).right.drop();
+        // left and right are dropped automatically via cascading.
         (*self).peer = (PairOwner*)0;
         (*self).id = -((*self).id);
     }
