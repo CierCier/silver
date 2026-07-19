@@ -2,3 +2,4 @@ bootstrap/bin/
 target/
 a.out
 *.o
+dist/
