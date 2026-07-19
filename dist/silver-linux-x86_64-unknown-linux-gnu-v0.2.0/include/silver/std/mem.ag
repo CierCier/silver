@@ -1,0 +1,7 @@
+pub import std.mem.alloc;
+// std/mem.box - Smart pointer (draft; requires full generic support)
+// pub import std.mem.box;
+pub import std.mem.drop;
+pub import std.mem.vec;
+pub import std.mem.arena;
+pub import std.mem.rc;

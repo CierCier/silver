@@ -1,0 +1,29 @@
+import std.mem;
+import std.mem.drop;
+
+pub struct Box<T> {
+    T* ptr;
+}
+
+impl Box<T> {
+    pub Box<T> new(T val) {
+        T* p = alloc<T>();
+        *p = val;
+        Box<T> b;
+        b.ptr = p;
+        return b;
+    }
+
+    pub T* get(Box<T>* self) {
+        return (*self).ptr;
+    }
+}
+
+impl<T> Drop<Box<T>> for Box<T> {
+    pub void drop(Box<T>* self) {
+        if ((*self).ptr != (T*)0) {
+            free((*self).ptr);
+            (*self).ptr = (T*)0;
+        }
+    }
+}

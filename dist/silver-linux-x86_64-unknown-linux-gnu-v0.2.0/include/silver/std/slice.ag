@@ -1,0 +1,36 @@
+import std.ops;
+import std.io;
+
+extern "C" {
+    void abort();
+}
+
+pub struct Slice<T> {
+    T* data;
+    i64 len;
+}
+
+impl<T> IndexedAccess<Slice<T>> for Slice<T> {
+    type Item = T;
+
+    T __index_get(Slice<T>* self, i64 index) {
+        if (index < 0 || index >= (*self).len) {
+            printf("Slice index out of bounds: %ld (len: %ld)\n", index, (*self).len);
+            abort();
+        }
+        return (*self).data[index];
+    }
+
+    void __index_set(Slice<T>* self, i64 index, T value) {
+        if (index < 0 || index >= (*self).len) {
+            printf("Slice index out of bounds: %ld (len: %ld)\n", index, (*self).len);
+            abort();
+        }
+        (*self).data[index] = move value;
+    }
+}
+
+impl<T> Slice<T> {
+    pub i64 len(Slice<T>* self) { return (*self).len; }
+    pub T* data(Slice<T>* self) { return (*self).data; }
+}
