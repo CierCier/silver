@@ -1,3 +1,0 @@
-pub trait Drop<Self> {
-    void drop(Self* self);
-}
