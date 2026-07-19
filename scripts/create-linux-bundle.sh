@@ -5,7 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_dir="$root_dir/dist"
 target_triple="${TARGET_TRIPLE:-x86_64-unknown-linux-gnu}"
 release_name="${1:-$(git -C "$root_dir" describe --tags --exact-match 2>/dev/null || git -C "$root_dir" rev-parse --short HEAD)}"
-bundle_name="silver-linux-${target_triple}-${release_name}"
+bundle_name="silver-linux-x86_64-${release_name}"
 stage_dir="$dist_dir/$bundle_name"
 archive_path="$dist_dir/$bundle_name.tar.gz"
 

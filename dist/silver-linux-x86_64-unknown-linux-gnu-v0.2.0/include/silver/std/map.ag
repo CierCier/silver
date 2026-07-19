@@ -1,0 +1,259 @@
+extern "C" {
+    void abort();
+}
+
+import std.mem.alloc;
+import std.io;
+import std.mem.drop;
+
+// Internal entry state: 0=empty, 1=occupied, -1=tombstone.
+// Stored as parallel arrays to keep alignment simple.
+struct HashMap<K, V> {
+    K* keys;
+    V* values;
+    i64* state;
+    i64 capacity;
+    i64 len;     // number of live entries (occupied)
+}
+
+const i64 INITIAL_CAPACITY = 16;
+const f64 LOAD_FACTOR = 0.75;
+const i64 EMPTY = 0;
+const i64 OCCUPIED = 1;
+const i64 TOMBSTONE = -1;
+
+impl HashMap<K, V> {
+    /// Create empty HashMap (no allocation until first insert).
+    pub HashMap<K, V> new() {
+        HashMap<K, V> m;
+        m.keys = (K*)0;
+        m.values = (V*)0;
+        m.state = (i64*)0;
+        m.capacity = 0;
+        m.len = 0;
+        return move m;
+    }
+
+    /// Number of live entries.
+    pub i64 len(HashMap<K, V>* self) {
+        return self.len;
+    }
+
+    /// True when no entries.
+    pub bool is_empty(HashMap<K, V>* self) {
+        return self.len == 0;
+    }
+
+    // -- Internal helpers ------------------------------------------------
+
+    /// Grow table to at least `min_capacity`, rehashing all entries.
+    void grow(HashMap<K, V>* self, i64 min_capacity) {
+        i64 new_cap = self.capacity;
+        if (new_cap == 0) {
+            new_cap = INITIAL_CAPACITY;
+        }
+        while (new_cap < min_capacity) {
+            new_cap = new_cap * 2;
+        }
+
+        K* new_keys = alloc<K>(new_cap);
+        V* new_vals = alloc<V>(new_cap);
+        i64* new_st = alloc<i64>(new_cap);
+        // Initialize state to EMPTY
+        i64 j = 0;
+        while (j < new_cap) {
+            new_st[j] = EMPTY;
+            j = j + 1;
+        }
+
+        // Rehash existing entries
+        if (self.state != (i64*)0) {
+            i64 i = 0;
+            while (i < self.capacity) {
+                if (self.state[i] == OCCUPIED) {
+                    K key = self.keys[i];
+                    V val = self.values[i];
+                    i64 h = @hash(key);
+                    if (h < 0) { h = -h; }
+                    i64 idx = h % new_cap;
+                    while (new_st[idx] == OCCUPIED) {
+                        idx = (idx + 1) % new_cap;
+                    }
+                    new_keys[idx] = move key;
+                    new_vals[idx] = move val;
+                    new_st[idx] = OCCUPIED;
+                }
+                i = i + 1;
+            }
+            free(self.keys);
+            free(self.values);
+            free(self.state);
+        }
+
+        self.keys = new_keys;
+        self.values = new_vals;
+        self.state = new_st;
+        self.capacity = new_cap;
+    }
+
+    /// Find slot index for `key`. Returns -1 if not found and no empty slot.
+    i64 find_slot(HashMap<K, V>* self, K key) {
+        if (self.capacity == 0) {
+            return -1;
+        }
+        i64 h = @hash(key);
+        if (h < 0) { h = -h; }
+        i64 idx = h % self.capacity;
+        i64 first_empty = -1;
+        i64 i = 0;
+        while (i < self.capacity) {
+            i64 st = self.state[idx];
+            if (st == EMPTY) {
+                if (first_empty == -1) {
+                    first_empty = idx;
+                }
+                // EMPTY means end of probe chain - not found
+                return first_empty;
+            }
+            if (st == OCCUPIED) {
+                if (self.keys[idx] == key) {
+                    return idx;
+                }
+            } else {
+                // TOMBSTONE - record first for insertion
+                if (first_empty == -1) {
+                    first_empty = idx;
+                }
+            }
+            idx = (idx + 1) % self.capacity;
+            i = i + 1;
+        }
+        // Table full (shouldn't happen with proper load factor)
+        return first_empty;
+    }
+
+    // -- Public API ------------------------------------------------------
+
+    /// Insert key-value pair. If key exists, value is replaced.
+    pub void insert(HashMap<K, V>* self, K key, V value) {
+        i64 cap = self.capacity;
+        if (cap == 0) {
+            self.grow(INITIAL_CAPACITY);
+            cap = self.capacity;
+        } else {
+            f64 load = (f64)(self.len + 1) / cap;
+            if (load > LOAD_FACTOR) {
+                self.grow(cap * 2);
+                cap = self.capacity;
+            }
+        }
+
+        i64 h = @hash(key);
+        if (h < 0) { h = -h; }
+        i64 idx = h % cap;
+        i64 first_tombstone = -1;
+
+        i64 i = 0;
+        while (i < cap) {
+            i64 st = self.state[idx];
+            if (st == EMPTY) {
+                i64 slot = idx;
+                if (first_tombstone != -1) {
+                    slot = first_tombstone;
+                }
+                self.keys[slot] = move key;
+                self.values[slot] = move value;
+                self.state[slot] = OCCUPIED;
+                self.len = self.len + 1;
+                return;
+            }
+            if (st == OCCUPIED) {
+                if (self.keys[idx] == key) {
+                    // Replace existing
+                    self.keys[idx] = move key;
+                    // Overwrite old value (same limitation as Vec<T> -
+                    // no per-element destructor call)
+                    self.values[idx] = move value;
+                    return;
+                }
+            } else {
+                if (first_tombstone == -1) {
+                    first_tombstone = idx;
+                }
+            }
+            idx = (idx + 1) % cap;
+            i = i + 1;
+        }
+
+        // Table full - force grow and retry
+        self.grow(cap * 2);
+        self.insert(key, value);
+    }
+
+    /// Get value for key. Aborts if key not found.
+    pub V get(HashMap<K, V>* self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
+            return self.values[idx];
+        }
+        printf("HashMap::get: key not found\n");
+        abort();
+        // unreachable - dummy return to satisfy return type
+        V dummy;
+        return move dummy;
+    }
+
+    /// Get pointer to value for key. Aborts if key not found.
+    pub V* get_ptr(HashMap<K, V>* self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
+            return &self.values[idx];
+        }
+        printf("HashMap::get_ptr: key not found\n");
+        abort();
+        return (V*)0;
+    }
+
+    /// Check if key exists.
+    pub bool contains_key(HashMap<K, V>* self, K key) {
+        i64 idx = self.find_slot(key);
+        return idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key;
+    }
+
+    /// Remove key. Returns true if key was present.
+    pub bool erase(HashMap<K, V>* self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
+            self.state[idx] = TOMBSTONE;
+            self.len = self.len - 1;
+            return true;
+        }
+        return false;
+    }
+
+    /// Indexed access: map[key] — returns value for key, aborts if not found.
+    pub V __index_get(HashMap<K, V>* self, K key) {
+        return self.get(key);
+    }
+
+    /// Indexed assignment: map[key] = value — inserts or updates entry.
+    pub void __index_set(HashMap<K, V>* self, K key, V value) {
+        self.insert(key, value);
+    }
+}
+
+impl<K, V> Drop<HashMap<K, V>> for HashMap<K, V> {
+    /// Free all memory. Does NOT call per-element destructors.
+    pub void drop(HashMap<K, V>* self) {
+        if (self.state != (i64*)0) {
+            free(self.keys);
+            free(self.values);
+            free(self.state);
+            self.keys = (K*)0;
+            self.values = (V*)0;
+            self.state = (i64*)0;
+        }
+        self.capacity = 0;
+        self.len = 0;
+    }
+}
