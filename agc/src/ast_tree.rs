@@ -677,7 +677,13 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children = items.iter().map(initializer_item_node).collect();
             n
         }
-        ast::ExpressionKind::Asm(code) => Node::new(format!("Expr::Asm \"{}\"", code)),
+ast::ExpressionKind::Asm { code, inputs } => {
+    let mut n = Node::new(format!("Expr::Asm \"{}\"", code));
+    if !inputs.is_empty() {
+        n.children.push(Node::new(format!("inputs: {} items", inputs.len())));
+    }
+    n
+}
         ast::ExpressionKind::Array(items) => {
             let mut n = Node::new("Expr::Array");
             n.children = items.iter().map(expression_node).collect();

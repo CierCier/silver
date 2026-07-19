@@ -65,8 +65,12 @@ fn rewrite_expression(expression: &mut ast::Expression) {
         ast::ExpressionKind::Literal(_)
         | ast::ExpressionKind::Identifier(_)
         | ast::ExpressionKind::TypeName(_)
-        | ast::ExpressionKind::Asm(_)
         | ast::ExpressionKind::MacroCall { .. } => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                rewrite_expression(input);
+            }
+        }
         ast::ExpressionKind::Binary { left, right, .. } => {
             rewrite_expression(left);
             rewrite_expression(right);

@@ -2263,6 +2263,51 @@ impl PRT_Parser {
                         });
                     };
                     cursor.bump();
+
+                    let mut inputs = Vec::new();
+                    // Optional input list: asm("code", [expr, expr, ...])
+                    if let Some(comma) = cursor.current()
+                        && matches!(comma.kind, Token::Comma)
+                    {
+                        cursor.bump();
+                        let Some(open_bracket) = cursor.current() else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected '[' after ',' in asm inputs".to_string(),
+                                span: comma.span.clone(),
+                            });
+                        };
+                        if !matches!(open_bracket.kind, Token::LeftBracket) {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected '[' after ',' in asm inputs".to_string(),
+                                span: open_bracket.span.clone(),
+                            });
+                        }
+                        cursor.bump();
+                        // Parse comma-separated expression list
+                        while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBracket)) {
+                            let expr = parse_assignment(cursor)?;
+                            inputs.push(expr);
+                            if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+                                cursor.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                        let Some(close_bracket) = cursor.current() else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "unterminated asm input list".to_string(),
+                                span: Span { start: asm_start, end: asm_start },
+                            });
+                        };
+                        if !matches!(close_bracket.kind, Token::RightBracket) {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected ']' after asm inputs".to_string(),
+                                span: close_bracket.span.clone(),
+                            });
+                        }
+                        cursor.bump();
+                    }
+
                     let Some(close) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected ')' after asm string".to_string(),
@@ -2281,7 +2326,7 @@ impl PRT_Parser {
                     };
                     cursor.bump();
                     return Ok(ast::Expression {
-                        kind: Box::new(ast::ExpressionKind::Asm(code.clone())),
+                        kind: Box::new(ast::ExpressionKind::Asm { code: code.clone(), inputs }),
                         span,
                     });
                 }

@@ -477,8 +477,12 @@ fn collect_expression_instantiations(
             collect_block_instantiations(body, generic_structs, instantiations, scopes);
         }
         ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_) => {}
+        | ast::ExpressionKind::Identifier(_) => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                collect_expression_instantiations(input, generic_structs, instantiations, scopes);
+            }
+        }
     }
 }
 
@@ -955,11 +959,16 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
                 }
             }
         }
+        ast::ExpressionKind::Literal(_) => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                substitute_expression_types(input, mapping);
+            }
+        }
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
             substitute_expression_types(iterable, mapping);
             substitute_block_types(body, mapping);
         }
-        ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Asm(_) => {}
     }
 }
 
@@ -1208,8 +1217,12 @@ fn rewrite_expression_function_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_) => {}
+        | ast::ExpressionKind::Identifier(_) => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                rewrite_expression_function_calls(input, name, args, mangled, span, param_count);
+            }
+        }
     }
 }
 
@@ -1457,9 +1470,13 @@ fn rewrite_expression_method_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_)
-        | ast::ExpressionKind::MacroCall { .. } => {}
+        | ast::ExpressionKind::Identifier(_) => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                rewrite_expression_method_calls(input, base, method, args, span);
+            }
+        }
+        ast::ExpressionKind::MacroCall { .. } => {}
     }
 }
 
@@ -1908,8 +1925,12 @@ fn collect_expression_remaining_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_)
-        | ast::ExpressionKind::Asm(_) => {}
+        | ast::ExpressionKind::Identifier(_) => {}
+        ast::ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                results.extend(collect_expression_remaining_calls(input, generic_fns));
+            }
+        }
     }
     results
 }

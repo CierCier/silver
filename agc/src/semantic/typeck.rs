@@ -1580,7 +1580,12 @@ impl TypeChecker {
                 self.pop_scope();
                 Type::Unit
             }
-            ast::ExpressionKind::Asm(_) => Type::Unit,
+            ast::ExpressionKind::Asm { inputs, .. } => {
+                for input in inputs {
+                    self.check_expr(input, None);
+                }
+                Type::Primitive(ast::PrimitiveType::I64)
+            }
         };
         self.expr_types
             .insert((expr.span.start, expr.span.end), ty.to_string());

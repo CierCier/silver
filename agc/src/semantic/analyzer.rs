@@ -648,7 +648,11 @@ impl Analyzer {
                 self.check_block(body);
                 self.pop_var_scope();
             }
-            ast::ExpressionKind::Asm(_) => {}
+            ast::ExpressionKind::Asm { inputs, .. } => {
+                for input in inputs {
+                    self.check_expression(input);
+                }
+            }
             ast::ExpressionKind::MacroCall { .. } => {}
         }
     }

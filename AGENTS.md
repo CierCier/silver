@@ -67,7 +67,9 @@ silver/
    ```bash
    bash ./update-bootstrap.sh
    ```
-   *Note: This script compiles `agc` in release mode, copies it to `bootstrap/bin/`, copies library files (`std/`) to `bootstrap/include/silver/`, and generates compiled module packages (`.agm` artifacts) in `bootstrap/lib/silver/`.*
+   *Note: This is the ONLY correct way to update bootstrap. The script compiles `agc` in release mode, copies it to `bootstrap/bin/`, copies library files (`std/`) to `bootstrap/include/silver/`, and generates compiled module packages (`.agm` artifacts) in `bootstrap/lib/silver/`. Manual `cp` commands will miss the module packaging step and produce inconsistent bootstrap artifacts. Always run this script after compiler changes or std lib changes.*
+   
+   **IMPORTANT**: Bootstrap updates MUST be committed as a **separate, dedicated commit** — never squash them into a feature commit. This keeps the bootstrap binary and module artifacts independently reviewable and revertable.
 4. **Compile a Silver file**:
    ```bash
    cargo run -p agc -- path/to/file.ag
@@ -250,3 +252,4 @@ When introducing a new syntax item or language capability, follow this checklist
 - **DO NOT** assume struct fields are recursively dropped. You must write explicit drops inside custom destructors.
 - **DO NOT** guess platform layout dimensions. Always use target data classification interfaces provided by System V AMD64 ABI specifications in `codegen/abi.rs`.
 - **DO NOT** modify the runtime (`silver_runtime/`) in a way that breaks compatibility with bootstrapped compiler modules. Always run `bash ./update-bootstrap.sh` to ensure consistency.
+- **DO NOT** squash bootstrap updates into feature commits. Bootstrap artifacts MUST be committed as a separate, dedicated commit — never mixed with source changes. This keeps the binary and module artifacts independently reviewable and revertable.
