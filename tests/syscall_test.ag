@@ -1,0 +1,7 @@
+// Test: inline asm expression with sys_exit(42)
+// SYS_exit = 60, rdi = 0 (EXIT_SUCCESS) normally, but use 42 to distinguish
+pub void main() {
+    // Direct inline asm: sys_exit(42)
+    // rax = 60 (SYS_exit), rdi = 42 (exit code)
+    asm("syscall", [60, (i64)(42)]);
+}

@@ -1,0 +1,7 @@
+// Test: use std syscall wrappers for sys_exit(42)
+import std.sys.syscall;
+
+pub void main() {
+    // SYS_exit = 60, rdi = 42 (exit code)
+    syscall1(60, 42);
+}

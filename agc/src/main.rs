@@ -106,7 +106,11 @@ impl CompilePlan {
 #[derive(Parser, Debug)]
 #[command(
     name = "agc",
-    version,
+    version = concat!(
+        env!("CARGO_PKG_VERSION"), "\n",
+        "version: ", env!("GIT_DESCRIBE"), "\n",
+        "commit: ", env!("GIT_SHA")
+    ),
     about = "Silver compiler (clang-like driver)",
     long_about = "A clang-like driver for the Silver compiler"
 )]

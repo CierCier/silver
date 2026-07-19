@@ -1,0 +1,163 @@
+// Syscall wrapper stress test
+//
+// Compilation: import std.sys.linux forces all 383 wrappers through
+//   parser, type checker, monomorphizer, and codegen.
+// Runtime: exercise a safe subset covering 0, 1, 2, and 6 arg wrappers.
+//
+// Returns 0 on success, non-zero = test number that failed.
+import std.sys.linux;
+import std.io;
+
+pub i32 main() {
+    printf("=== Syscall Wrapper Stress Test ===\n");
+    printf("(all 383 wrappers compiled via import std.sys.linux)\n\n");
+
+    // ============================================================
+    // 0-arg wrappers
+    // ============================================================
+    printf("--- 0-arg wrappers ---\n");
+
+    // Test 1: sys_getpid -- returns current PID (> 0)
+    {
+        i64 v = sys_getpid();
+        printf("  sys_getpid() = %ld\n", v);
+        if (v <= 0) { printf("  FAIL 1\n"); return 1; }
+        printf("  PASS\n");
+    }
+
+    // Test 2: sys_getuid -- returns current UID (>= 0)
+    {
+        i64 v = sys_getuid();
+        printf("  sys_getuid() = %ld\n", v);
+        if (v < 0) { printf("  FAIL 2\n"); return 2; }
+        printf("  PASS\n");
+    }
+
+    // Test 3: sys_getgid -- returns current GID (>= 0)
+    {
+        i64 v = sys_getgid();
+        printf("  sys_getgid() = %ld\n", v);
+        if (v < 0) { printf("  FAIL 3\n"); return 3; }
+        printf("  PASS\n");
+    }
+
+    // Test 4: sys_getppid -- returns parent PID (> 0)
+    {
+        i64 v = sys_getppid();
+        printf("  sys_getppid() = %ld\n", v);
+        if (v <= 0) { printf("  FAIL 4\n"); return 4; }
+        printf("  PASS\n");
+    }
+
+    // Test 5: sys_gettid -- returns thread ID (> 0)
+    {
+        i64 v = sys_gettid();
+        printf("  sys_gettid() = %ld\n", v);
+        if (v <= 0) { printf("  FAIL 5\n"); return 5; }
+        printf("  PASS\n");
+    }
+
+    // Test 6: sys_getpgrp -- returns process group (> 0)
+    {
+        i64 v = sys_getpgrp();
+        printf("  sys_getpgrp() = %ld\n", v);
+        if (v <= 0) { printf("  FAIL 6\n"); return 6; }
+        printf("  PASS\n");
+    }
+
+    // Test 7: sys_sched_yield -- returns 0 on success
+    {
+        i64 v = sys_sched_yield();
+        printf("  sys_sched_yield() = %ld\n", v);
+        if (v != 0) { printf("  FAIL 7\n"); return 7; }
+        printf("  PASS\n");
+    }
+
+    // ============================================================
+    // 1-arg wrappers
+    // ============================================================
+    printf("--- 1-arg wrappers ---\n");
+
+    // Test 8: sys_close(9999) -- invalid fd, returns -EBADF (-9)
+    {
+        i64 v = sys_close(9999);
+        printf("  sys_close(9999) = %ld (expected -9)\n", v);
+        if (v != -9) { printf("  FAIL 8\n"); return 8; }
+        printf("  PASS\n");
+    }
+
+    // Test 9: sys_dup(999) -- invalid fd, returns -EBADF (-9)
+    {
+        i64 v = sys_dup(999);
+        printf("  sys_dup(999) = %ld (expected -9)\n", v);
+        if (v != -9) { printf("  FAIL 9\n"); return 9; }
+        printf("  PASS\n");
+    }
+
+    // Test 10: sys_brk(0) -- returns current program break (> 0)
+    {
+        i64 brk = sys_brk(0);
+        printf("  sys_brk(0) = 0x%lx\n", brk);
+        if (brk <= 0) { printf("  FAIL 10\n"); return 10; }
+        printf("  PASS\n");
+    }
+
+    // ============================================================
+    // 2-arg wrappers
+    // ============================================================
+    printf("--- 2-arg wrappers ---\n");
+
+    // Test 11: sys_getpriority(0, 0) -- returns nice value
+    {
+        i64 v = sys_getpriority(0, 0);
+        printf("  sys_getpriority(0,0) = %ld (typically -20..19)\n", v);
+        printf("  PASS (no crash)\n");
+    }
+
+    // Test 12: sys_kill(0, 0) -- returns 0 (sanity check PID 0)
+    {
+        i64 v = sys_kill(0, 0);
+        printf("  sys_kill(0,0) = %ld (expected 0)\n", v);
+        if (v != 0) { printf("  FAIL 12\n"); return 12; }
+        printf("  PASS\n");
+    }
+
+    // ============================================================
+    // 6-arg + 2-arg wrappers (mmap + munmap)
+    // ============================================================
+    printf("--- 6-arg + 2-arg wrappers ---\n");
+
+    // Test 13: sys_mmap(0, 4096, 3, 34, -1, 0)
+    //   PROT_READ|PROT_WRITE = 3, MAP_PRIVATE|MAP_ANONYMOUS = 34
+    //   Returns a valid address (> 0) or negative errno.
+    i64 mapped_addr = 0;
+    {
+        i64 v = sys_mmap(0, 4096, 3, 34, -1, 0);
+        printf("  sys_mmap(0, 4096, 3, 34, -1, 0) = 0x%lx\n", v);
+        if (v <= 0 && v > -4096) {
+            printf("  FAIL 13: mmap failed: %ld\n", v);
+            return 13;
+        }
+        if (v <= 0) {
+            printf("  FAIL 13: invalid address\n");
+            return 13;
+        }
+        mapped_addr = v;
+        printf("  PASS\n");
+    }
+
+    // Test 14: sys_munmap(mapped_addr, 4096) -- returns 0 on success
+    {
+        i64 v = sys_munmap(mapped_addr, 4096);
+        printf("  sys_munmap(0x%lx, 4096) = %ld (expected 0)\n", mapped_addr, v);
+        if (v != 0) { printf("  FAIL 14\n"); return 14; }
+        printf("  PASS\n");
+    }
+
+    // ============================================================
+    // Summary
+    // ============================================================
+    printf("\n=== All 383 wrappers compiled ===\n");
+    printf("=== Runtime tests 1-14: all PASS ===\n");
+    return 0;
+}

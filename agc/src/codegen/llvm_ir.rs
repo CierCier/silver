@@ -2206,7 +2206,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
-            ast::ExpressionKind::Asm(_) => {}
+            ast::ExpressionKind::Asm { .. } => {}
             ast::ExpressionKind::MacroCall { args, .. } => {
                 for arg in args {
                     if let ast::MacroArg::Expression(expr) = arg {
@@ -3635,6 +3635,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(value)
             }
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
+            ast::ExpressionKind::Asm { code, inputs } => {
+                self.emit_asm_expression(&code, &inputs, &expr.span)
+            }
             _ => Err(CodegenError::with_span(
                 format!(
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
@@ -3643,6 +3646,88 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expr.span.clone(),
             )),
         }
+    }
+
+    fn emit_asm_expression(
+        &mut self,
+        code: &str,
+        inputs: &[ast::Expression],
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Validate: x86_64 syscall has 1 syscall number (rax) + 6 arg registers
+        if inputs.len() > 7 {
+            return Err(CodegenError::with_span(
+                format!(
+                    "inline asm with {} input(s) unsupported: x86_64 syscall ABI has 1 syscall number register (rax) and 6 argument registers at most",
+                    inputs.len()
+                ),
+                span.clone(),
+            ));
+        }
+
+        let i64_ty = self.context.i64_type();
+
+        // 1. Evaluate and cast all input expressions to i64
+        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let value = self.emit_expression_value(input)?;
+            let i64_ty_ast = ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
+                span: span.clone(),
+            };
+            let i64_val = self.cast_value_to_ast_type(value, &i64_ty_ast, span)?;
+            args.push(BasicMetadataValueEnum::from(i64_val));
+        }
+
+        // 2. Build constraint string
+        // Output: {rax} — syscall return value is always in %rax
+        // Inputs (in syscall order): {rax}, {rdi}, {rsi}, {rdx}, {r10}, {r8}, {r9}
+        // Clobbers: ~{rcx}, ~{r11} — always destroyed by Linux syscall
+        let regs = ["{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"];
+        let mut constraints = String::from("={rax}");
+        for i in 0..inputs.len() {
+            constraints.push(',');
+            constraints.push_str(regs[i]);
+        }
+        constraints.push_str(",~{rcx},~{r11}");
+
+        // 3. Build LLVM function type: i64(i64, i64, ...)
+        let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = (0..inputs.len())
+            .map(|_| BasicMetadataTypeEnum::from(i64_ty.as_basic_type_enum()))
+            .collect();
+        let fn_type = i64_ty.fn_type(&param_types, false);
+
+        // 4. Create inline asm pointer
+        let asm_fn = self.context.create_inline_asm(
+            fn_type,
+            code.to_string(),
+            constraints,
+            true,  // sideeffects: syscall has side effects
+            false, // alignstack: false (syscall ABI doesn't require aligned stack)
+            None,  // dialect: ATT (default)
+            false, // can_throw: false (syscalls don't throw C++ exceptions)
+        );
+
+        // 5. Call the inline asm via indirect call
+        let call = self
+            .builder
+            .build_indirect_call(fn_type, asm_fn, &args, "asm_result")
+            .map_err(|e| {
+                CodegenError::with_span(
+                    format!("inline asm call failed: {e}"),
+                    span.clone(),
+                )
+            })?;
+
+        // 6. Extract the i64 return value
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                CodegenError::with_span(
+                    "inline asm returned void, expected i64".to_string(),
+                    span.clone(),
+                )
+            })
     }
 
     fn emit_struct_literal_value(

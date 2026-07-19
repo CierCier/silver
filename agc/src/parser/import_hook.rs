@@ -698,8 +698,12 @@ impl<'a> ImportAliasRewriter<'a> {
                 self.rewrite_block(body);
             }
             ast::ExpressionKind::Literal(_)
-            | ast::ExpressionKind::Asm(_)
             | ast::ExpressionKind::MacroCall { .. } => {}
+            ast::ExpressionKind::Asm { inputs, .. } => {
+                for input in inputs {
+                    self.rewrite_expr(input);
+                }
+            }
         }
     }
 

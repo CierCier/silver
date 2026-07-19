@@ -1,6 +1,4 @@
+bootstrap/bin/
 target/
-*.out
+a.out
 *.o
-dist/
-
-changes.md
