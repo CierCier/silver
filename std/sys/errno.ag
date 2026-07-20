@@ -1,0 +1,124 @@
+// std/sys/errno.ag — Linux errno constants and helpers (x86_64).
+//
+// Raw syscalls (std/sys/linux.ag) return an i64 where values in the range
+// -4095..-1 encode a failed call: the errno is the negated return value.
+// This module provides the errno constants, a raw-return classifier, and
+// an errno -> symbolic-name helper. The typed SysResult front-ends built
+// on top of these live in std/sys/result.ag.
+
+// Classic errno range (asm-generic/errno-base.h), 1..34.
+pub const i64 EPERM = 1;            // Operation not permitted
+pub const i64 ENOENT = 2;           // No such file or directory
+pub const i64 ESRCH = 3;            // No such process
+pub const i64 EINTR = 4;            // Interrupted system call
+pub const i64 EIO = 5;              // I/O error
+pub const i64 ENXIO = 6;            // No such device or address
+pub const i64 E2BIG = 7;            // Argument list too long
+pub const i64 ENOEXEC = 8;          // Exec format error
+pub const i64 EBADF = 9;            // Bad file number
+pub const i64 ECHILD = 10;          // No child processes
+pub const i64 EAGAIN = 11;          // Try again (also EWOULDBLOCK)
+pub const i64 ENOMEM = 12;          // Out of memory
+pub const i64 EACCES = 13;          // Permission denied
+pub const i64 EFAULT = 14;          // Bad address
+pub const i64 ENOTBLK = 15;         // Block device required
+pub const i64 EBUSY = 16;           // Device or resource busy
+pub const i64 EEXIST = 17;          // File exists
+pub const i64 EXDEV = 18;           // Cross-device link
+pub const i64 ENODEV = 19;          // No such device
+pub const i64 ENOTDIR = 20;         // Not a directory
+pub const i64 EISDIR = 21;          // Is a directory
+pub const i64 EINVAL = 22;          // Invalid argument
+pub const i64 ENFILE = 23;          // File table overflow
+pub const i64 EMFILE = 24;          // Too many open files
+pub const i64 ENOTTY = 25;          // Not a typewriter
+pub const i64 ETXTBSY = 26;         // Text file busy
+pub const i64 EFBIG = 27;           // File too large
+pub const i64 ENOSPC = 28;          // No space left on device
+pub const i64 ESPIPE = 29;          // Illegal seek
+pub const i64 EROFS = 30;           // Read-only file system
+pub const i64 EMLINK = 31;          // Too many links
+pub const i64 EPIPE = 32;           // Broken pipe
+pub const i64 EDOM = 33;            // Math argument out of domain
+pub const i64 ERANGE = 34;          // Math result not representable
+
+// Common extended errno values (asm-generic/errno.h).
+pub const i64 EDEADLK = 35;         // Resource deadlock would occur
+pub const i64 ENAMETOOLONG = 36;    // File name too long
+pub const i64 ENOLCK = 37;          // No record locks available
+pub const i64 ENOSYS = 38;          // Invalid system call number
+pub const i64 ENOTEMPTY = 39;       // Directory not empty
+pub const i64 ELOOP = 40;           // Too many symbolic links encountered
+pub const i64 EOVERFLOW = 75;       // Value too large for defined data type
+pub const i64 ETIMEDOUT = 110;      // Connection timed out
+
+// Highest errno value the kernel encodes in a raw syscall return.
+pub const i64 ERRNO_MAX = 4095;
+
+// True when a raw syscall return value encodes a failure (-4095..-1).
+pub bool is_errno(i64 raw) {
+    return raw < 0 && raw >= -ERRNO_MAX;
+}
+
+// Extract the positive errno from a raw syscall return value.
+// Returns 0 when the raw value is not an error encoding.
+pub i64 errno_of(i64 raw) {
+    if (is_errno(raw)) {
+        return -raw;
+    }
+    return 0;
+}
+
+// Symbolic name of an errno value. Accepts either a positive errno or a
+// raw negative syscall return (which is normalized first). Unknown values
+// map to "EUNKNOWN"; zero maps to "EOK".
+pub str errno_name(i64 err) {
+    i64 e = err;
+    if (e < 0) {
+        e = -e;
+    }
+    if (e == 0) { return "EOK"; }
+    if (e == EPERM) { return "EPERM"; }
+    if (e == ENOENT) { return "ENOENT"; }
+    if (e == ESRCH) { return "ESRCH"; }
+    if (e == EINTR) { return "EINTR"; }
+    if (e == EIO) { return "EIO"; }
+    if (e == ENXIO) { return "ENXIO"; }
+    if (e == E2BIG) { return "E2BIG"; }
+    if (e == ENOEXEC) { return "ENOEXEC"; }
+    if (e == EBADF) { return "EBADF"; }
+    if (e == ECHILD) { return "ECHILD"; }
+    if (e == EAGAIN) { return "EAGAIN"; }
+    if (e == ENOMEM) { return "ENOMEM"; }
+    if (e == EACCES) { return "EACCES"; }
+    if (e == EFAULT) { return "EFAULT"; }
+    if (e == ENOTBLK) { return "ENOTBLK"; }
+    if (e == EBUSY) { return "EBUSY"; }
+    if (e == EEXIST) { return "EEXIST"; }
+    if (e == EXDEV) { return "EXDEV"; }
+    if (e == ENODEV) { return "ENODEV"; }
+    if (e == ENOTDIR) { return "ENOTDIR"; }
+    if (e == EISDIR) { return "EISDIR"; }
+    if (e == EINVAL) { return "EINVAL"; }
+    if (e == ENFILE) { return "ENFILE"; }
+    if (e == EMFILE) { return "EMFILE"; }
+    if (e == ENOTTY) { return "ENOTTY"; }
+    if (e == ETXTBSY) { return "ETXTBSY"; }
+    if (e == EFBIG) { return "EFBIG"; }
+    if (e == ENOSPC) { return "ENOSPC"; }
+    if (e == ESPIPE) { return "ESPIPE"; }
+    if (e == EROFS) { return "EROFS"; }
+    if (e == EMLINK) { return "EMLINK"; }
+    if (e == EPIPE) { return "EPIPE"; }
+    if (e == EDOM) { return "EDOM"; }
+    if (e == ERANGE) { return "ERANGE"; }
+    if (e == EDEADLK) { return "EDEADLK"; }
+    if (e == ENAMETOOLONG) { return "ENAMETOOLONG"; }
+    if (e == ENOLCK) { return "ENOLCK"; }
+    if (e == ENOSYS) { return "ENOSYS"; }
+    if (e == ENOTEMPTY) { return "ENOTEMPTY"; }
+    if (e == ELOOP) { return "ELOOP"; }
+    if (e == EOVERFLOW) { return "EOVERFLOW"; }
+    if (e == ETIMEDOUT) { return "ETIMEDOUT"; }
+    return "EUNKNOWN";
+}
