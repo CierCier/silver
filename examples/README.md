@@ -20,7 +20,6 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 | `casting.ag` | Numeric casts `(f64)x`, struct `cast` operators |
 | `array_init.ag` | Positional/designated array init, multi-dimensional arrays |
 | `struct_attributes.ag` | `#[packed]`, `#[align(n)]`, `#[repr(C)]`, `@size(T)` |
-| `const_inference.ag` | const vs mutable inference, pointer access |
 
 ## Standard Library
 
@@ -28,16 +27,16 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 |------|---------------|
 | `strings.ag` | `String` type — `push`, `push_str`, `clone`, `equals`, `clear` |
 | `file_io.ag` | `File` open/read/write/close, `file_delete`, error handling |
-| `math.ag` | `f64` trig, `M_PI`, `extern "C"` math library bindings |
 
 ## Advanced Features
 
 | File | What it shows |
 |------|---------------|
 | `iterators.ag` | `for i in 0..n` range loops, nested loops, accumulation |
-| `calculator.ag` | Interactive stdin, `scanf`/`printf`, `while`, `pow()` |
-| `macros.ag` | `@size(T)` builtin macro, Fibonacci recursion |
-| `comptime.ag` | Recursive `f64` factorial, no comptime keyword needed |
+| `ownership.ag` | `move` ownership transfer, `drop` destructors, scope-based teardown |
+| `defer_cleanup.ag` | `defer` blocks — LIFO release order, cleanup before early return |
+| `associated_fn_values.ag` | Function-typed trait members (`handler: (i32) -> i32`) with static dispatch |
+| `regression_demo.ag` | Larger program — linear/logistic regression with structs, impls, `std.math` |
 
 ## Graphics (requires raylib)
 
