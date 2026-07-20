@@ -85,6 +85,11 @@ u8* mem_dangling(i64 align) {
     if (align > 16) {
         a = align;
     }
+    // Cap the dangling sentinel value to ensure it lies safely below
+    // the MEM_MIN_VALID_ADDR boundary.
+    if (a >= MEM_MIN_VALID_ADDR) {
+        a = 16;
+    }
     return (u8*)a;
 }
 
