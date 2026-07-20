@@ -1,4 +1,315 @@
-#[link(c)]
+// Pure-Silver heap allocator — page-aligned free lists over mmap/munmap.
+//
+// Replaces the libc malloc/calloc/realloc/free externs with a self-contained
+// allocator built directly on the raw sys_mmap/sys_munmap syscall wrappers.
+//
+// Layout
+// ──────
+// Every allocation carries a 16-byte header immediately before the user
+// pointer, so user data is always 16-byte aligned:
+//     header[0] (i64): payload capacity in bytes
+//     header[1] (i64): tag
+//         0..8  → size-class index (block lives in a shared free-list chunk)
+//         < 0   → huge allocation with its own mmap;
+//                 tag = -1 - (offset from mmap base to the header)
+//
+// Small allocations (≤ 4096 bytes, alignment ≤ 16) come from per-class
+// free lists. Classes are powers of two from 16 to 4096 bytes. When a
+// list is empty a 64 KiB chunk is mmap'd and carved into blocks; chunks
+// are never returned to the OS (blocks recycle through the free list).
+//
+// Huge allocations (> 4096 bytes, or alignment > 16) get a dedicated mmap
+// and are munmap'd on free.
+//
+// Size-0 allocations return a dangling non-null pointer; freeing null or a
+// dangling pointer is a no-op.
+//
+// Allocator state is a single mmap'd page of free-list heads, lazily
+// initialized on first use (globals must be compile-time constants).
+
+import std.sys.linux;
+import std.mem.memory;
+
+// Lazily-initialized address of the free-list head table (i64[9], one page).
+i64 g_mem_heads_addr = 0;
+
+// Number of size classes: 16 << idx for idx in 0..=8 (16 .. 4096 bytes).
+const i64 MEM_NUM_CLASSES = 9;
+const i64 MEM_HEADER_SIZE = 16;
+const i64 MEM_PAGE_SIZE = 4096;
+const i64 MEM_MIN_VALID_ADDR = 33554432; // 32 MiB
+const i64 MEM_CHUNK_SIZE = 65536;
+const i64 MEM_MAX_CLASS_SIZE = 4096;
+
+// -- OS page primitives -----------------------------------------------------
+
+/// mmap `len` bytes of zeroed anonymous read/write memory.
+/// Returns null on failure.
+u8* mem_sys_alloc(i64 len) {
+    // PROT_READ|PROT_WRITE = 3, MAP_PRIVATE|MAP_ANONYMOUS = 34, fd = -1
+    i64 r = sys_mmap(0, len, 3, 34, -1, 0);
+    if (r < 0) {
+        return (u8*)0;
+    }
+    return (u8*)r;
+}
+
+/// Return a mapping to the OS.
+void mem_sys_free(u8* base, i64 len) {
+    if (base != (u8*)0) {
+        sys_munmap((i64)base, len);
+    }
+}
+
+// -- Internal helpers -------------------------------------------------------
+
+i64 mem_align_up(i64 value, i64 alignment) {
+    if (alignment <= 1) {
+        return value;
+    }
+    i64 remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    return value + alignment - remainder;
+}
+
+i64 mem_page_round(i64 n) {
+    return mem_align_up(n, MEM_PAGE_SIZE);
+}
+
+/// Dangling non-null pointer used for size-0 allocations.
+/// Lies inside the (never-mapped) zero page, so free() can detect it.
+u8* mem_dangling(i64 align) {
+    i64 a = 16;
+    if (align > 16) {
+        a = align;
+    }
+    return (u8*)a;
+}
+
+/// Free-list head table, lazily allocated. Null only if mmap fails.
+i64* mem_heads() {
+    if (g_mem_heads_addr == 0) {
+        u8* page = mem_sys_alloc(MEM_PAGE_SIZE);
+        if (page == (u8*)0) {
+            return (i64*)0;
+        }
+        // Fresh anonymous pages are zeroed: all heads start empty.
+        g_mem_heads_addr = (i64)page;
+    }
+    return (i64*)g_mem_heads_addr;
+}
+
+/// Smallest size class index whose payload holds `size` bytes.
+i64 mem_class_index(i64 size) {
+    i64 idx = 0;
+    i64 csize = 16;
+    while (csize < size) {
+        csize = csize * 2;
+        idx = idx + 1;
+    }
+    return idx;
+}
+
+i64 mem_class_size(i64 idx) {
+    i64 csize = 16;
+    for (i64 i = 0; i < idx; i = i + 1) {
+        csize = csize * 2;
+    }
+    return csize;
+}
+
+/// Carve a fresh chunk into blocks for class `idx` and push them on its list.
+void mem_refill(i64* heads, i64 idx) {
+    i64 csize = mem_class_size(idx);
+    i64 stride = csize + MEM_HEADER_SIZE;
+    u8* chunk = mem_sys_alloc(MEM_CHUNK_SIZE);
+    if (chunk == (u8*)0) {
+        return;
+    }
+    i64 count = MEM_CHUNK_SIZE / stride;
+    i64 head = heads[idx];
+    // Push blocks in reverse so the lowest address pops first.
+    for (i64 i = count - 1; i >= 0; i = i - 1) {
+        i64 h = (i64)chunk + i * stride;
+        i64* header = (i64*)h;
+        header[0] = csize;
+        header[1] = idx;
+        // While free, the first payload word is the next-free link.
+        i64* link = (i64*)(h + MEM_HEADER_SIZE);
+        link[0] = head;
+        head = h;
+    }
+    heads[idx] = head;
+}
+
+/// Core allocation: `size` bytes with at least `align` alignment.
+/// Returns dangling non-null for size <= 0, null on OOM.
+u8* mem_alloc_impl(i64 size, i64 align) {
+    if (size <= 0) {
+        return mem_dangling(align);
+    }
+    if (align <= 16 && size <= MEM_MAX_CLASS_SIZE) {
+        i64* heads = mem_heads();
+        if (heads == (i64*)0) {
+            return (u8*)0;
+        }
+        i64 idx = mem_class_index(size);
+        if (heads[idx] == 0) {
+            mem_refill(heads, idx);
+        }
+        i64 h = heads[idx];
+        if (h == 0) {
+            return (u8*)0;
+        }
+        i64* link = (i64*)(h + MEM_HEADER_SIZE);
+        heads[idx] = link[0];
+        return (u8*)(h + MEM_HEADER_SIZE);
+    }
+    // Huge (or over-aligned) allocation: dedicated mapping.
+    i64 extra = 0;
+    if (align > 16) {
+        extra = align;
+    }
+    i64 total = mem_page_round(size + MEM_HEADER_SIZE + extra);
+    u8* base = mem_sys_alloc(total);
+    if (base == (u8*)0) {
+        return (u8*)0;
+    }
+    i64 user = (i64)base + MEM_HEADER_SIZE;
+    if (align > 16) {
+        user = mem_align_up(user, align);
+    }
+    i64 h = user - MEM_HEADER_SIZE;
+    i64 offset = h - (i64)base;
+    i64* header = (i64*)h;
+    header[0] = total - offset - MEM_HEADER_SIZE;
+    header[1] = 0 - 1 - offset;
+    return (u8*)user;
+}
+
+/// Core free. Tolerates null and dangling pointers.
+void mem_free_impl(u8* ptr) {
+    i64 a = (i64)ptr;
+    if (a < MEM_MIN_VALID_ADDR) {
+        // Null or dangling (zero-page) pointer: no-op.
+        return;
+    }
+    i64* header = (i64*)(a - MEM_HEADER_SIZE);
+    i64 tag = header[1];
+    if (tag >= 0 && tag < MEM_NUM_CLASSES) {
+        i64* heads = mem_heads();
+        if (heads == (i64*)0) {
+            return;
+        }
+        i64* link = (i64*)a;
+        link[0] = heads[tag];
+        heads[tag] = a - MEM_HEADER_SIZE;
+        return;
+    }
+    if (tag < 0) {
+        i64 offset = 0 - 1 - tag;
+        i64 total = offset + MEM_HEADER_SIZE + header[0];
+        mem_sys_free((u8*)(a - MEM_HEADER_SIZE - offset), total);
+    }
+    // Unknown tag: defensive no-op.
+}
+
+/// Core realloc. Null/dangling input behaves like a fresh allocation;
+/// new_size <= 0 frees and returns a dangling pointer.
+u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
+    i64 a = (i64)ptr;
+    if (a < MEM_MIN_VALID_ADDR) {
+        return mem_alloc_impl(new_size, align);
+    }
+    if (new_size <= 0) {
+        mem_free_impl(ptr);
+        return mem_dangling(align);
+    }
+    i64* header = (i64*)(a - MEM_HEADER_SIZE);
+    i64 cap = header[0];
+    if (new_size <= cap) {
+        return ptr;
+    }
+    u8* fresh = mem_alloc_impl(new_size, align);
+    if (fresh == (u8*)0) {
+        return (u8*)0;
+    }
+    silver_rt_memcpy(fresh, ptr, cap);
+    mem_free_impl(ptr);
+    return fresh;
+}
+
+// -- Frozen C-ABI runtime surface (mirrors silver_runtime ffi.rs) -----------
+
+/// Allocate `size` bytes with `align` alignment.
+/// Size 0 returns a dangling non-null pointer; OOM returns null.
+pub u8* silver_rt_alloc(i64 size, i64 align) {
+    return mem_alloc_impl(size, align);
+}
+
+/// Allocate zeroed memory (same contract as silver_rt_alloc).
+pub u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
+    u8* ptr = mem_alloc_impl(size, align);
+    if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
+        i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
+        if (header[1] >= 0) {
+            // Recycled size-class block: may hold stale data.
+            // (Huge blocks are freshly mmap'd and already zeroed.)
+            silver_rt_memset(ptr, (u8)0, size);
+        }
+    }
+    return ptr;
+}
+
+/// Reallocate to `new_size`. new_size 0 deallocates and returns dangling;
+/// null input behaves like silver_rt_alloc.
+pub u8* silver_rt_realloc(u8* ptr0, i64 old_size, i64 new_size, i64 align) {
+    if (new_size <= 0) {
+        silver_rt_dealloc(ptr0, old_size, align);
+        return mem_dangling(align);
+    }
+    return mem_realloc_impl(ptr0, new_size, align);
+}
+
+/// Deallocate. Null pointer or size 0 is a no-op.
+pub void silver_rt_dealloc(u8* ptr0, i64 size, i64 align) {
+    if ((i64)ptr0 == 0 || size <= 0) {
+        return;
+    }
+    mem_free_impl(ptr0);
+}
+
+// -- libc-compatible shims --------------------------------------------------
+// Keep existing std/ call sites (malloc/calloc/realloc/free) compiling
+// unchanged, routed through the pure-Silver allocator.
+
+pub void* malloc(i64 size) {
+    return (void*)mem_alloc_impl(size, 16);
+}
+
+pub void* calloc(i64 count, i64 size) {
+    i64 total = count * size;
+    u8* ptr = mem_alloc_impl(total, 16);
+    if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
+        i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
+        if (header[1] >= 0) {
+            silver_rt_memset(ptr, (u8)0, total);
+        }
+    }
+    return (void*)ptr;
+}
+
+pub void* realloc(void* ptr, i64 new_size) {
+    return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
+}
+
+pub void free(void* ptr) {
+    mem_free_impl((u8*)ptr);
+}
+
+// -- Generic typed interface (unchanged signatures) -------------------------
 
 pub T* alloc<T>() {
     return (T*)(malloc(@size(T)));
@@ -10,14 +321,4 @@ pub T* alloc<T>(i64 count) {
 
 pub T* realloc<T>(T* ptr, i64 count) {
     return (T*)(realloc(ptr, @size(T) * count));
-}
-
-extern "C" {
-    void* malloc(i64 size);
-    void* calloc(i64 count, i64 size);
-    void free(void* ptr);
-    void* memset(void* ptr, i32 value, i64 num);
-    void* memcpy(void* dest, const void* src, i64 num);
-    void* memmove(void* dest, const void* src, i64 num);
-    void* realloc(void* ptr, i64 new_size);
 }
