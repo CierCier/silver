@@ -21,6 +21,7 @@ extern "C" {
 /// Terminates the process with SIGABRT, like C `abort()`.
 void __optional_abort() {
     raise(6); // 6 = SIGABRT
+    while (true) {}
 }
 
 struct Optional<T> {
