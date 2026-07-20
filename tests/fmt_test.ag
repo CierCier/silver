@@ -218,6 +218,18 @@ i32 main() {
         s.ptr = (u8*)msg;
         s.len = 4;
         silver_rt_print_bytes(s); // prints "cstr" with NO newline
+        
+        // Print non-UTF-8 sequence
+        CaseBuf bad_buf;
+        u8* bad = (u8*)&bad_buf;
+        bad[0] = (u8)255;
+        bad[1] = (u8)255;
+        SilverSlice s_bad;
+        s_bad.ptr = bad;
+        s_bad.len = 2;
+        silver_rt_print_bytes(s_bad); // prints "<non-utf8>" with NO newline
+        write_stdout((u8*)"\n", 1);
+
         s.ptr = (u8*)0;
         s.len = 0;
         silver_rt_print_bytes(s); // prints "<null>" WITH newline
