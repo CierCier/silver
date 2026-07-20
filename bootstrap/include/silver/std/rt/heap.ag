@@ -1,0 +1,496 @@
+// Generational mark-sweep GC heap for the Silver runtime.
+//
+// Port of silver_runtime/src/runtime/heap.rs, object.rs and value.rs.
+//
+// Silver has no payload-carrying enums, so RtValue and Object are tagged
+// structs: an integer `kind` field selects which of the flat payload fields
+// is active.  TypeIds are carried as bare u32 values; std/rt/types.ag owns
+// the canonical registry and the two representations are unified by a later
+// integration pass.
+//
+// Ownership notes:
+// - Object owns a String (string payload) and a Vec<RtValue> (vec items /
+//   struct fields / enum payload).  Vec<T> does not drop its elements, so
+//   Object internals are released explicitly on free/sweep via Object.drop().
+// - Heap owns every live Object stored in its slot vector.  Heap.drop()
+//   releases all occupied slots and then the backing vectors.
+
+import std.mem;
+import std.string;
+import std.mem.drop;
+
+// ---------------------------------------------------------------------------
+// Kind tags (RtValue)
+
+pub const i32 RT_KIND_UNIT = 0;
+pub const i32 RT_KIND_BOOL = 1;
+pub const i32 RT_KIND_INT = 2;
+pub const i32 RT_KIND_UINT = 3;
+pub const i32 RT_KIND_FLOAT = 4;
+pub const i32 RT_KIND_OBJ = 5;
+
+// Kind tags (Object)
+
+pub const i32 OBJ_KIND_STRING = 0;
+pub const i32 OBJ_KIND_VEC = 1;
+pub const i32 OBJ_KIND_STRUCT = 2;
+pub const i32 OBJ_KIND_ENUM = 3;
+
+// Builtin TypeIds mirrored from silver_runtime/src/types/registry.rs.
+// Only the ids RtValue.type_id() needs are declared here; the full registry
+// lives in std/rt/types.ag (owned by a sibling unit, unified later).
+
+pub const u32 RT_TYPE_UNIT = 0;
+pub const u32 RT_TYPE_BOOL = 1;
+pub const u32 RT_TYPE_STRING = 14;
+
+// ---------------------------------------------------------------------------
+// Handle — generational reference to a heap slot.
+
+pub struct Handle {
+    u32 index;
+    u32 generation;
+}
+
+impl Handle {
+    pub Handle new(u32 index, u32 generation) {
+        Handle h;
+        h.index = index;
+        h.generation = generation;
+        return move h;
+    }
+
+    pub u32 index(Handle* self) {
+        return self.index;
+    }
+
+    pub u32 generation(Handle* self) {
+        return self.generation;
+    }
+
+    pub bool equals(Handle* self, Handle other) {
+        return self.index == other.index && self.generation == other.generation;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RtValue — tagged runtime value.
+//
+// kind        payload field
+// UNIT        (none)
+// BOOL        bool_val
+// INT         int_val   (+ ty)
+// UINT        uint_val  (+ ty)
+// FLOAT       float_val (+ ty)
+// OBJ         handle    (+ ty)
+
+pub struct RtValue {
+    i32 kind;
+    u32 ty;
+    bool bool_val;
+    i128 int_val;
+    u128 uint_val;
+    f64 float_val;
+    Handle handle;
+}
+
+impl RtValue {
+    // Zero every payload field so any constructor yields a fully
+    // initialized value.
+    RtValue blank() {
+        RtValue v;
+        v.kind = RT_KIND_UNIT;
+        v.ty = RT_TYPE_UNIT;
+        v.bool_val = false;
+        v.int_val = (i128)0;
+        v.uint_val = (u128)0;
+        v.float_val = 0.0;
+        v.handle = Handle.new((u32)0, (u32)0);
+        return move v;
+    }
+
+    pub RtValue unit() {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_UNIT;
+        return move v;
+    }
+
+    pub RtValue from_bool(bool value) {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_BOOL;
+        v.ty = RT_TYPE_BOOL;
+        v.bool_val = value;
+        return move v;
+    }
+
+    pub RtValue from_int(u32 ty, i128 value) {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_INT;
+        v.ty = ty;
+        v.int_val = value;
+        return move v;
+    }
+
+    pub RtValue from_uint(u32 ty, u128 value) {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_UINT;
+        v.ty = ty;
+        v.uint_val = value;
+        return move v;
+    }
+
+    pub RtValue from_float(u32 ty, f64 value) {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_FLOAT;
+        v.ty = ty;
+        v.float_val = value;
+        return move v;
+    }
+
+    pub RtValue obj(u32 ty, Handle handle) {
+        RtValue v = RtValue.blank();
+        v.kind = RT_KIND_OBJ;
+        v.ty = ty;
+        v.handle = handle;
+        return move v;
+    }
+
+    /// TypeId of this value (RtValue::type_id in the Rust runtime).
+    pub u32 type_id(RtValue* self) {
+        if (self.kind == RT_KIND_UNIT) {
+            return RT_TYPE_UNIT;
+        }
+        if (self.kind == RT_KIND_BOOL) {
+            return RT_TYPE_BOOL;
+        }
+        return self.ty;
+    }
+
+    /// Append any object handle referenced by this value to `out`
+    /// (RtValue::push_handles in the Rust runtime).
+    pub void push_handles(RtValue* self, Vec<Handle>* out) {
+        if (self.kind == RT_KIND_OBJ) {
+            out.push(self.handle);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Object — tagged heap object.
+//
+// kind        active payload
+// STRING      text
+// VEC         ty + values (items)
+// STRUCT      ty + values (fields)
+// ENUM        ty + variant + values (payload fields)
+
+pub struct Object {
+    i32 kind;
+    u32 ty;
+    String text;
+    Vec<RtValue> values;
+    i64 variant;
+}
+
+impl Object {
+    // Internal: fully initialized object with no allocations.
+    Object blank() {
+        Object o;
+        o.kind = OBJ_KIND_STRING;
+        o.ty = (u32)0;
+        o.text = String.with_capacity(0);
+        o.values = Vec<RtValue>.new();
+        o.variant = 0;
+        return move o;
+    }
+
+    /// Placeholder object used for the error arm of FreeResult.
+    /// Owns no allocations, so overwriting or dropping it is free.
+    pub Object empty() {
+        Object o = Object.blank();
+        return move o;
+    }
+
+    /// Object::String — takes ownership of `text`.
+    /// String objects carry no TypeId in the Rust runtime; `ty` is set to
+    /// RT_TYPE_STRING for convenience.
+    pub Object new_string(String text) {
+        Object o = Object.blank();
+        o.kind = OBJ_KIND_STRING;
+        o.ty = RT_TYPE_STRING;
+        o.text = move text;
+        return move o;
+    }
+
+    /// Object::Vec { ty, items } — takes ownership of `items`.
+    pub Object new_vec(u32 ty, Vec<RtValue> items) {
+        Object o = Object.blank();
+        o.kind = OBJ_KIND_VEC;
+        o.ty = ty;
+        o.values = move items;
+        return move o;
+    }
+
+    /// Object::Struct { ty, fields } — takes ownership of `fields`.
+    pub Object new_struct(u32 ty, Vec<RtValue> fields) {
+        Object o = Object.blank();
+        o.kind = OBJ_KIND_STRUCT;
+        o.ty = ty;
+        o.values = move fields;
+        return move o;
+    }
+
+    /// Object::Enum { ty, variant, fields } — takes ownership of `fields`.
+    pub Object new_enum(u32 ty, i64 variant, Vec<RtValue> fields) {
+        Object o = Object.blank();
+        o.kind = OBJ_KIND_ENUM;
+        o.ty = ty;
+        o.variant = variant;
+        o.values = move fields;
+        return move o;
+    }
+
+    /// Append every object handle reachable from this object to `out`
+    /// (Object::push_handles in the Rust runtime).
+    pub void push_handles(Object* self, Vec<Handle>* out) {
+        if (self.kind == OBJ_KIND_STRING) {
+            return;
+        }
+        i64 i = 0;
+        i64 n = self.values.len();
+        while (i < n) {
+            RtValue* v = self.values.get_ptr(i);
+            v.push_handles(out);
+            i = i + 1;
+        }
+    }
+}
+
+impl Drop<Object> for Object {
+    /// Release owned payload (string buffer and value vector).
+    /// RtValue elements own no resources, so dropping the Vec buffer
+    /// is sufficient.
+    pub void drop(Object* self) {
+        self.text.drop();
+        self.values.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Result structs (Silver has no payload enums, so Result<T, E> is modeled
+// with an ok flag).
+
+/// Result of Heap.get / Heap.get_mut. `object` is null when `ok` is false.
+pub struct ObjectRef {
+    bool ok;
+    Object* object;
+}
+
+/// Result of Heap.free. `object` is Object.empty() when `ok` is false.
+/// The caller owns `object` and must drop it.
+pub struct FreeResult {
+    bool ok;
+    Object object;
+}
+
+// ---------------------------------------------------------------------------
+// Heap — generational slot heap with mark-sweep collection.
+//
+// Rust stores Vec<Option<Entry>>; here the slot vector is paired with a
+// parallel `occupied` flag vector, and Entry.marked lives in a parallel
+// `marked` vector.
+
+pub struct Heap {
+    Vec<Object> objects;
+    Vec<bool> occupied;
+    Vec<bool> marked;
+    Vec<u32> generations;
+    Vec<u32> free_list;
+}
+
+impl Heap {
+    pub Heap new() {
+        Heap h;
+        h.objects = Vec<Object>.new();
+        h.occupied = Vec<bool>.new();
+        h.marked = Vec<bool>.new();
+        h.generations = Vec<u32>.new();
+        h.free_list = Vec<u32>.new();
+        return move h;
+    }
+
+    /// Store `object` in a free slot (reusing the free list when possible)
+    /// and return a generational handle to it.
+    pub Handle alloc(Heap* self, Object object) {
+        if (self.free_list.len() > 0) {
+            u32 index = self.free_list.pop();
+            i64 idx = (i64)index;
+            // The slot was released by free()/sweep, which already dropped
+            // the old object's internals; plain overwrite is safe.
+            self.objects.set(idx, move object);
+            self.occupied.set(idx, true);
+            self.marked.set(idx, false);
+            u32 generation = self.generations.get(idx);
+            return Handle.new(index, generation);
+        }
+
+        u32 index = (u32)self.objects.len();
+        self.objects.push(move object);
+        self.occupied.push(true);
+        self.marked.push(false);
+        self.generations.push((u32)0);
+        return Handle.new(index, (u32)0);
+    }
+
+    // Shared validity check: slot exists, generation matches, slot occupied.
+    bool handle_is_valid(Heap* self, Handle handle) {
+        i64 idx = (i64)handle.index;
+        if (idx >= self.generations.len()) {
+            return false;
+        }
+        if (self.generations.get(idx) != handle.generation) {
+            return false;
+        }
+        return self.occupied.get(idx);
+    }
+
+    /// Borrow the object for `handle`. ok is false for stale/invalid handles.
+    pub ObjectRef get(Heap* self, Handle handle) {
+        ObjectRef r;
+        r.ok = false;
+        r.object = (Object*)0;
+        if (!self.handle_is_valid(handle)) {
+            return r;
+        }
+        r.ok = true;
+        r.object = self.objects.get_ptr((i64)handle.index);
+        return r;
+    }
+
+    /// Mutable borrow of the object for `handle`. Pointers are freely
+    /// mutable in Silver; this mirrors Heap::get_mut in the Rust runtime.
+    pub ObjectRef get_mut(Heap* self, Handle handle) {
+        return self.get(handle);
+    }
+
+    /// Remove the object for `handle` from the heap and return it.
+    /// Bumps the slot generation so stale handles are detected.
+    pub FreeResult free(Heap* self, Handle handle) {
+        FreeResult r;
+        r.ok = false;
+        r.object = Object.empty();
+        if (!self.handle_is_valid(handle)) {
+            return move r;
+        }
+
+        i64 idx = (i64)handle.index;
+        Object object = self.objects.take(idx);
+        self.occupied.set(idx, false);
+        // Invalidate all outstanding handles for this index (wrapping add).
+        self.generations.set(idx, self.generations.get(idx) + (u32)1);
+        self.free_list.push(handle.index);
+
+        // r.object currently holds Object.empty() which owns no
+        // allocations, so overwriting it leaks nothing.
+        r.object = move object;
+        r.ok = true;
+        return move r;
+    }
+
+    /// Mark-sweep collection. `roots` points at `roots_len` values that are
+    /// considered live. Returns the number of objects swept.
+    ///
+    /// Note: the Rust runtime takes `&[RtValue]`; Silver's builtin Slice<T>
+    /// has no length accessor, so the slice is passed as pointer + length.
+    pub i64 collect_garbage(Heap* self, RtValue* roots, i64 roots_len) {
+        i64 slot_count = self.objects.len();
+
+        // Clear marks.
+        i64 i = 0;
+        while (i < slot_count) {
+            self.marked.set(i, false);
+            i = i + 1;
+        }
+
+        // Mark phase: trace from the roots with an explicit work stack.
+        Vec<Handle> stack = Vec<Handle>.new();
+        i = 0;
+        while (i < roots_len) {
+            RtValue* root = &roots[i];
+            root.push_handles(&stack);
+            i = i + 1;
+        }
+
+        while (stack.len() > 0) {
+            Handle handle = stack.pop();
+            i64 idx = (i64)handle.index;
+            if (idx >= self.generations.len()) {
+                continue;
+            }
+            if (self.generations.get(idx) != handle.generation) {
+                continue;
+            }
+            if (!self.occupied.get(idx)) {
+                continue;
+            }
+            if (self.marked.get(idx)) {
+                continue;
+            }
+            self.marked.set(idx, true);
+            Object* object = self.objects.get_ptr(idx);
+            object.push_handles(&stack);
+        }
+        stack.drop();
+
+        // Sweep phase: release unmarked occupied slots.
+        i64 freed = 0;
+        i = 0;
+        while (i < slot_count) {
+            if (self.occupied.get(i) && !self.marked.get(i)) {
+                Object* object = self.objects.get_ptr(i);
+                object.drop();
+                self.occupied.set(i, false);
+                self.generations.set(i, self.generations.get(i) + (u32)1);
+                self.free_list.push((u32)i);
+                freed = freed + 1;
+            }
+            i = i + 1;
+        }
+
+        return freed;
+    }
+
+    /// Number of live (occupied) slots.
+    pub i64 allocated_count(Heap* self) {
+        i64 count = 0;
+        i64 i = 0;
+        i64 n = self.occupied.len();
+        while (i < n) {
+            if (self.occupied.get(i)) {
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+        return count;
+    }
+}
+
+impl Drop<Heap> for Heap {
+    /// Release every live object, then the backing vectors.
+    pub void drop(Heap* self) {
+        i64 i = 0;
+        i64 n = self.objects.len();
+        while (i < n) {
+            if (self.occupied.get(i)) {
+                Object* object = self.objects.get_ptr(i);
+                object.drop();
+            }
+            i = i + 1;
+        }
+        self.objects.drop();
+        self.occupied.drop();
+        self.marked.drop();
+        self.generations.drop();
+        self.free_list.drop();
+    }
+}

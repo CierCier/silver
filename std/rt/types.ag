@@ -1,0 +1,662 @@
+// std/rt/types.ag — the Silver runtime type registry.
+//
+// Port of silver_runtime/src/types/registry.rs (plus the TypeError half of
+// types/error.rs) to pure Silver.  See std/rt/type_info.ag for the data
+// model and the flattened TypeKind layout notes.
+//
+// The registry is a plain value constructed with `TypeRegistry.new()` — it is
+// NOT a global (Silver global initializers must be const).  Callers own it
+// and its drop() releases everything it interned.
+//
+// ERROR MODEL
+// ───────────
+// Silver has no payload enums, so fallible operations return a `TypeResult`
+// (Result-pattern struct, see std/optional.ag): an `ok` flag, the resulting
+// `TypeId`, a TYPE_ERR discriminant, and an optional owned message String
+// whose text mirrors the Rust TypeError Display strings.
+//
+// Deviations from the Rust API (documented):
+// - `get` returns Type* (null on unknown id) instead of Result<&Type>.
+// - `name_of` returns str ((str)0 on unknown id) instead of Result<&str>.
+// - `lookup` returns TypeId.none() when absent instead of Option<TypeId>.
+// - `enum_variant_index` / `enum_variant_by_discriminant` return -1 and
+//   `enum_variant` returns null when the id is unknown, the type is not an
+//   enum, or the variant is absent (Rust distinguishes Err(UnknownTypeId)
+//   from Ok(None); callers can use `get` to tell those cases apart).
+
+import std.io;
+import std.map;
+import std.mem.alloc;
+import std.mem.drop;
+import std.mem.vec;
+import std.rt.type_info;
+import std.string;
+
+// Largest i64 value; used for the C-style discriminant autofill overflow check.
+const i64 RT_I64_MAX = 9223372036854775807;
+
+// ---------------------------------------------------------------------------
+// TYPE_ERR — mirrors silver_runtime's TypeError variants
+// ---------------------------------------------------------------------------
+
+pub enum TYPE_ERR {
+    NONE = 0;
+    DUPLICATE_TYPE_NAME = 1;
+    DUPLICATE_FIELD_NAME = 2;
+    DUPLICATE_VARIANT_NAME = 3;
+    DUPLICATE_VARIANT_DISCRIMINANT = 4;
+    DISCRIMINANT_OVERFLOW = 5;
+    UNKNOWN_TYPE_ID = 6;
+}
+
+// ---------------------------------------------------------------------------
+// TypeResult — ok flag + TypeId value + TYPE_ERR code + owned message
+// ---------------------------------------------------------------------------
+
+pub struct TypeResult {
+    bool ok;
+    TypeId id;
+    i32 err;      // TYPE_ERR discriminant; NONE when ok
+    String msg;   // human-readable error text; empty when ok
+}
+
+impl TypeResult {
+    pub TypeResult ok_id(TypeId id) {
+        TypeResult r;
+        r.ok = true;
+        r.id = id;
+        r.err = (i32)TYPE_ERR.NONE;
+        r.msg = String.new();
+        return move r;
+    }
+
+    pub TypeResult error(i32 err, String msg) {
+        TypeResult r;
+        r.ok = false;
+        r.id = TypeId.none();
+        r.err = err;
+        r.msg = move msg;
+        return move r;
+    }
+
+    pub bool is_ok(TypeResult* self) {
+        return self.ok;
+    }
+
+    pub bool is_err(TypeResult* self) {
+        return !self.ok;
+    }
+
+    /// The TypeId on success; aborts (with the error message) on failure.
+    pub TypeId unwrap(TypeResult* self) {
+        if (!self.ok) {
+            printf("TypeResult.unwrap on error %d: %s\n", self.err, self.msg.to_str());
+            abort();
+        }
+        return self.id;
+    }
+}
+
+impl Drop<TypeResult> for TypeResult {
+    void drop(TypeResult* self) {
+        self.msg.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Definition inputs (Rust used tuples; Silver uses small POD-ish structs)
+// ---------------------------------------------------------------------------
+
+// One struct field definition: borrowed name + field type.
+// Owns nothing — the registry deep-copies the name.
+pub struct FieldDef {
+    str name;
+    TypeId ty;
+}
+
+impl FieldDef {
+    pub FieldDef new(str name, TypeId ty) {
+        FieldDef f;
+        f.name = name;
+        f.ty = ty;
+        return f;
+    }
+}
+
+// One enum variant definition: borrowed name, optional explicit discriminant
+// (has_discriminant == Option::is_some), and an OWNED payload Vec of TypeIds.
+// The define_enum* entry points consume the payload Vec (moving it into the
+// registry on success, freeing it on error).
+pub struct VariantDef {
+    str name;
+    i64 discriminant;
+    bool has_discriminant;
+    Vec<TypeId> payload;
+}
+
+impl VariantDef {
+    /// Variant without an explicit discriminant (autofilled / positional).
+    pub VariantDef new(str name, Vec<TypeId> payload) {
+        VariantDef v;
+        v.name = name;
+        v.discriminant = 0;
+        v.has_discriminant = false;
+        v.payload = move payload;
+        return move v;
+    }
+
+    /// Variant with an explicit discriminant.
+    pub VariantDef with_discriminant(str name, i64 discriminant, Vec<TypeId> payload) {
+        VariantDef v;
+        v.name = name;
+        v.discriminant = discriminant;
+        v.has_discriminant = true;
+        v.payload = move payload;
+        return move v;
+    }
+}
+
+// NOTE: VariantDef deliberately has NO Drop impl.  Payload ownership is
+// transferred by shallow copy inside define_enum_core (Vec buffers are never
+// element-dropped), and error paths free payloads exactly once via
+// rt_free_variant_defs.
+
+void rt_free_variant_defs(Vec<VariantDef>* defs) {
+    i64 i = 0;
+    while (i < defs.len()) {
+        VariantDef* d = defs.get_ptr(i);
+        d.payload.drop();
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TypeRegistry
+// ---------------------------------------------------------------------------
+
+pub struct TypeRegistry {
+    Vec<Type> types;               // id -> Type (index == TypeId.raw)
+    HashMap<str, u32> by_name;     // display name -> raw id (keys point into types[i].name)
+    HashMap<u32, u32> vec_cache;   // elem raw id -> vec type raw id
+    HashMap<u32, u32> optional_cache; // inner raw id -> optional type raw id
+    HashMap<str, u32> fn_cache;    // canonical "p0,p1->ret" raw-id key -> fn type raw id
+    Vec<String> fn_cache_keys;     // owns the fn_cache key strings
+}
+
+impl TypeRegistry {
+    pub TypeRegistry new() {
+        TypeRegistry r;
+        r.types = Vec<Type>.new();
+        r.by_name = HashMap<str, u32>.new();
+        r.vec_cache = HashMap<u32, u32>.new();
+        r.optional_cache = HashMap<u32, u32>.new();
+        r.fn_cache = HashMap<str, u32>.new();
+        r.fn_cache_keys = Vec<String>.new();
+
+        r.add_builtin("unit", (i32)TYPE_KIND.UNIT);
+        r.add_builtin("bool", (i32)TYPE_KIND.BOOL);
+        r.add_builtin_int("i8", (u16)8, true);
+        r.add_builtin_int("i16", (u16)16, true);
+        r.add_builtin_int("i32", (u16)32, true);
+        r.add_builtin_int("i64", (u16)64, true);
+        r.add_builtin_int("i128", (u16)128, true);
+        r.add_builtin_int("u8", (u16)8, false);
+        r.add_builtin_int("u16", (u16)16, false);
+        r.add_builtin_int("u32", (u16)32, false);
+        r.add_builtin_int("u64", (u16)64, false);
+        r.add_builtin_int("u128", (u16)128, false);
+        r.add_builtin_float("f32", (u16)32);
+        r.add_builtin_float("f64", (u16)64);
+        r.add_builtin("string", (i32)TYPE_KIND.STRING);
+        return move r;
+    }
+
+    // -- Internal helpers ------------------------------------------------
+
+    /// Push a fully-built Type, assign its id, and index it by name.
+    /// Callers must have verified the name is not taken.
+    u32 intern(TypeRegistry* self, Type ty) {
+        u32 raw = (u32)self.types.len();
+        ty.id = TypeId.from_raw(raw);
+        self.types.push(move ty);
+        // Key the name map by the String data now owned by the table entry;
+        // the heap buffer address is stable across Vec growth.
+        Type* stored = self.types.get_ptr((i64)raw);
+        self.by_name.insert((str)stored.name.to_str(), raw);
+        return raw;
+    }
+
+    void add_builtin(TypeRegistry* self, str name, i32 kind) {
+        Type ty = Type.new(rt_type_str_owned(name), kind);
+        self.intern(move ty);
+    }
+
+    void add_builtin_int(TypeRegistry* self, str name, u16 bits, bool is_signed) {
+        Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.INT);
+        ty.bits = bits;
+        ty.is_signed = is_signed;
+        self.intern(move ty);
+    }
+
+    void add_builtin_float(TypeRegistry* self, str name, u16 bits) {
+        Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.FLOAT);
+        ty.bits = bits;
+        self.intern(move ty);
+    }
+
+    /// Duplicate-name checked intern (Rust: alloc_type).  Consumes `ty`; on a
+    /// duplicate name the Type (and everything it owns) is freed via the
+    /// parameter's automatic drop.
+    TypeResult alloc_type(TypeRegistry* self, Type ty) {
+        if (self.by_name.contains_key((str)ty.name.to_str())) {
+            String m = rt_type_str_owned("type name already defined: ");
+            m.push_str((str)ty.name.to_str());
+            return TypeResult.error((i32)TYPE_ERR.DUPLICATE_TYPE_NAME, move m);
+        }
+        u32 raw = self.intern(move ty);
+        return TypeResult.ok_id(TypeId.from_raw(raw));
+    }
+
+    TypeResult unknown_type_id_error(TypeRegistry* self, u32 raw) {
+        String m = rt_type_str_owned("unknown type id: ");
+        rt_type_append_u32(&m, raw);
+        return TypeResult.error((i32)TYPE_ERR.UNKNOWN_TYPE_ID, move m);
+    }
+
+    // -- Introspection ---------------------------------------------------
+
+    /// Pointer to the interned Type, or null when the id is unknown.
+    /// The pointer is invalidated by the next type definition (table growth).
+    pub Type* get(TypeRegistry* self, TypeId id) {
+        i64 index = (i64)id.raw;
+        if (index < 0 || index >= self.types.len()) {
+            return (Type*)0;
+        }
+        return self.types.get_ptr(index);
+    }
+
+    /// Display name for `id`, or (str)0 when unknown.  The pointer is owned
+    /// by the registry and is stable for the registry's lifetime.
+    pub str name_of(TypeRegistry* self, TypeId id) {
+        Type* ty = self.get(id);
+        if (ty == (Type*)0) {
+            return (str)0;
+        }
+        return (str)ty.name.to_str();
+    }
+
+    /// TypeId registered under `name`, or TypeId.none() when absent.
+    pub TypeId lookup(TypeRegistry* self, str name) {
+        if (self.by_name.contains_key(name)) {
+            return TypeId.from_raw(self.by_name.get(name));
+        }
+        return TypeId.none();
+    }
+
+    // -- Interned constructors -------------------------------------------
+
+    /// vec<elem> — interned: repeated calls with the same element id return
+    /// the same TypeId.
+    pub TypeResult vec_of(TypeRegistry* self, TypeId elem) {
+        if (self.vec_cache.contains_key(elem.raw)) {
+            return TypeResult.ok_id(TypeId.from_raw(self.vec_cache.get(elem.raw)));
+        }
+        str elem_name = self.name_of(elem);
+        if (elem_name == (str)0) {
+            return self.unknown_type_id_error(elem.raw);
+        }
+        String name = rt_type_str_owned("vec<");
+        name.push_str(elem_name);
+        name.push_str(">");
+        Type ty = Type.new(move name, (i32)TYPE_KIND.VEC);
+        ty.elem = elem;
+        TypeResult result = self.alloc_type(move ty);
+        if (result.ok) {
+            self.vec_cache.insert(elem.raw, result.id.raw);
+        }
+        return move result;
+    }
+
+    /// optional<inner> — interned like vec_of.
+    pub TypeResult optional_of(TypeRegistry* self, TypeId inner) {
+        if (self.optional_cache.contains_key(inner.raw)) {
+            return TypeResult.ok_id(TypeId.from_raw(self.optional_cache.get(inner.raw)));
+        }
+        str inner_name = self.name_of(inner);
+        if (inner_name == (str)0) {
+            return self.unknown_type_id_error(inner.raw);
+        }
+        String name = rt_type_str_owned("optional<");
+        name.push_str(inner_name);
+        name.push_str(">");
+        Type ty = Type.new(move name, (i32)TYPE_KIND.OPTIONAL);
+        ty.elem = inner;
+        TypeResult result = self.alloc_type(move ty);
+        if (result.ok) {
+            self.optional_cache.insert(inner.raw, result.id.raw);
+        }
+        return move result;
+    }
+
+    /// fn(params...) -> ret — interned by a canonical serialized key of the
+    /// raw param ids + ret id ("p0,p1,...->ret").  Consumes `params`.
+    pub TypeResult function(TypeRegistry* self, Vec<TypeId> params, TypeId ret) {
+        // Canonical cache key from raw ids.
+        String key = String.new();
+        i64 i = 0;
+        while (i < params.len()) {
+            if (i > 0) {
+                key.push_str(",");
+            }
+            TypeId param_id = params.get(i);
+            rt_type_append_u32(&key, param_id.raw);
+            i = i + 1;
+        }
+        key.push_str("->");
+        rt_type_append_u32(&key, ret.raw);
+
+        if (self.fn_cache.contains_key((str)key.to_str())) {
+            u32 existing = self.fn_cache.get((str)key.to_str());
+            key.drop();
+            return TypeResult.ok_id(TypeId.from_raw(existing));
+        }
+
+        // Display name: "fn(i64, string) -> bool"
+        String name = rt_type_str_owned("fn(");
+        i = 0;
+        while (i < params.len()) {
+            if (i > 0) {
+                name.push_str(", ");
+            }
+            TypeId param_id = params.get(i);
+            str param_name = self.name_of(param_id);
+            if (param_name == (str)0) {
+                name.drop();
+                key.drop();
+                return self.unknown_type_id_error(param_id.raw);
+            }
+            name.push_str(param_name);
+            i = i + 1;
+        }
+        name.push_str(") -> ");
+        str ret_name = self.name_of(ret);
+        if (ret_name == (str)0) {
+            name.drop();
+            key.drop();
+            return self.unknown_type_id_error(ret.raw);
+        }
+        name.push_str(ret_name);
+
+        Type ty = Type.new(move name, (i32)TYPE_KIND.FUNCTION);
+        // Type.new left an empty params Vec (null buffer) — overwrite it
+        // with the caller's Vec; nothing is leaked.
+        ty.fn_data.params = move params;
+        ty.fn_data.ret = ret;
+
+        TypeResult result = self.alloc_type(move ty);
+        if (result.ok) {
+            self.fn_cache.insert((str)key.to_str(), result.id.raw);
+            self.fn_cache_keys.push(move key);
+        } else {
+            key.drop();
+        }
+        return move result;
+    }
+
+    // -- User-defined types ----------------------------------------------
+
+    /// Define a struct type.  Consumes `fields` (FieldDefs own nothing).
+    /// Errors: DUPLICATE_TYPE_NAME, DUPLICATE_FIELD_NAME, UNKNOWN_TYPE_ID.
+    pub TypeResult define_struct(TypeRegistry* self, str name, Vec<FieldDef> fields) {
+        if (self.by_name.contains_key(name)) {
+            String m = rt_type_str_owned("type name already defined: ");
+            m.push_str(name);
+            return TypeResult.error((i32)TYPE_ERR.DUPLICATE_TYPE_NAME, move m);
+        }
+
+        // Validate: duplicate field names, then referenced type existence
+        // (same per-field order as the Rust implementation).
+        i64 count = fields.len();
+        i64 i = 0;
+        while (i < count) {
+            FieldDef* fi = fields.get_ptr(i);
+            i64 j = 0;
+            while (j < i) {
+                FieldDef* fj = fields.get_ptr(j);
+                if (fj.name == fi.name) {
+                    String m = rt_type_str_owned("duplicate field '");
+                    m.push_str(fi.name);
+                    m.push_str("' in type '");
+                    m.push_str(name);
+                    m.push_str("'");
+                    return TypeResult.error((i32)TYPE_ERR.DUPLICATE_FIELD_NAME, move m);
+                }
+                j = j + 1;
+            }
+            if (self.get(fi.ty) == (Type*)0) {
+                return self.unknown_type_id_error(fi.ty.raw);
+            }
+            i = i + 1;
+        }
+
+        Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.STRUCT);
+        i = 0;
+        while (i < count) {
+            FieldDef* fd = fields.get_ptr(i);
+            Field field;
+            field.name = rt_type_str_owned(fd.name);
+            field.ty = fd.ty;
+            ty.struct_data.fields.push(move field);
+            i = i + 1;
+        }
+        return self.alloc_type(move ty);
+    }
+
+    /// Define an enum whose discriminants are the variant indices 0..n
+    /// (any explicit discriminants on the defs are ignored — Rust's
+    /// define_enum takes name+payload pairs only).  Consumes `variants`.
+    pub TypeResult define_enum(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+        i64 i = 0;
+        while (i < variants.len()) {
+            VariantDef* v = variants.get_ptr(i);
+            v.discriminant = i;
+            v.has_discriminant = true;
+            i = i + 1;
+        }
+        return self.define_enum_core(name, move variants);
+    }
+
+    /// Define an enum with explicit discriminants on every variant.
+    /// Consumes `variants`.
+    pub TypeResult define_enum_with_discriminants(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+        return self.define_enum_core(name, move variants);
+    }
+
+    /// Define an enum where variants may omit their discriminant
+    /// (VariantDef.new).  C-style autofill: the first unspecified
+    /// discriminant is 0; each one after an explicit X is X + 1.
+    /// Errors with DISCRIMINANT_OVERFLOW when the successor of the last
+    /// discriminant does not fit in i64.  Consumes `variants`.
+    pub TypeResult define_enum_autofill_discriminants(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+        i64 next = 0;
+        i64 i = 0;
+        while (i < variants.len()) {
+            VariantDef* v = variants.get_ptr(i);
+            i64 disc = next;
+            if (v.has_discriminant) {
+                disc = v.discriminant;
+            }
+            if (disc == RT_I64_MAX) {
+                rt_free_variant_defs(&variants);
+                String m = rt_type_str_owned("enum discriminant overflow in type '");
+                m.push_str(name);
+                m.push_str("' after ");
+                rt_type_append_i64(&m, disc);
+                return TypeResult.error((i32)TYPE_ERR.DISCRIMINANT_OVERFLOW, move m);
+            }
+            next = disc + 1;
+            v.discriminant = disc;
+            v.has_discriminant = true;
+            i = i + 1;
+        }
+        return self.define_enum_core(name, move variants);
+    }
+
+    // Shared define_enum tail: validates, then transfers payload ownership.
+    TypeResult define_enum_core(TypeRegistry* self, str name, Vec<VariantDef> defs) {
+        if (self.by_name.contains_key(name)) {
+            rt_free_variant_defs(&defs);
+            String m = rt_type_str_owned("type name already defined: ");
+            m.push_str(name);
+            return TypeResult.error((i32)TYPE_ERR.DUPLICATE_TYPE_NAME, move m);
+        }
+
+        // Validate everything BEFORE transferring any payload, so error
+        // cleanup is a single rt_free_variant_defs call.  Per-variant check
+        // order matches Rust: duplicate name, duplicate discriminant,
+        // payload type existence.
+        i64 count = defs.len();
+        i64 i = 0;
+        while (i < count) {
+            VariantDef* vi = defs.get_ptr(i);
+            i64 j = 0;
+            while (j < i) {
+                VariantDef* vj = defs.get_ptr(j);
+                if (vj.name == vi.name) {
+                    rt_free_variant_defs(&defs);
+                    String m = rt_type_str_owned("duplicate variant '");
+                    m.push_str(vi.name);
+                    m.push_str("' in type '");
+                    m.push_str(name);
+                    m.push_str("'");
+                    return TypeResult.error((i32)TYPE_ERR.DUPLICATE_VARIANT_NAME, move m);
+                }
+                j = j + 1;
+            }
+            j = 0;
+            while (j < i) {
+                VariantDef* vj = defs.get_ptr(j);
+                if (vj.discriminant == vi.discriminant) {
+                    rt_free_variant_defs(&defs);
+                    String m = rt_type_str_owned("duplicate enum discriminant ");
+                    rt_type_append_i64(&m, vi.discriminant);
+                    m.push_str(" in type '");
+                    m.push_str(name);
+                    m.push_str("'");
+                    return TypeResult.error((i32)TYPE_ERR.DUPLICATE_VARIANT_DISCRIMINANT, move m);
+                }
+                j = j + 1;
+            }
+            i64 p = 0;
+            while (p < vi.payload.len()) {
+                TypeId payload_ty = vi.payload.get(p);
+                if (self.get(payload_ty) == (Type*)0) {
+                    rt_free_variant_defs(&defs);
+                    return self.unknown_type_id_error(payload_ty.raw);
+                }
+                p = p + 1;
+            }
+            i = i + 1;
+        }
+
+        // Build the Type, transferring each payload Vec by shallow copy.
+        // The defs buffer is freed by the parameter's automatic drop; Vec
+        // never drops elements, so each payload buffer has exactly one owner.
+        Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.ENUM);
+        i = 0;
+        while (i < count) {
+            VariantDef* vd = defs.get_ptr(i);
+            EnumVariant variant;
+            variant.name = rt_type_str_owned(vd.name);
+            variant.discriminant = vd.discriminant;
+            variant.payload = vd.payload;
+            ty.enum_data.variants.push(move variant);
+            i = i + 1;
+        }
+        return self.alloc_type(move ty);
+    }
+
+    // -- Enum queries ------------------------------------------------------
+
+    /// Index of the variant called `name`, or -1 (unknown id / not an enum /
+    /// no such variant).
+    pub i64 enum_variant_index(TypeRegistry* self, TypeId enum_ty, str name) {
+        Type* ty = self.get(enum_ty);
+        if (ty == (Type*)0) {
+            return -1;
+        }
+        if (ty.kind != (i32)TYPE_KIND.ENUM) {
+            return -1;
+        }
+        i64 i = 0;
+        while (i < ty.enum_data.variants.len()) {
+            EnumVariant* v = ty.enum_data.variants.get_ptr(i);
+            if (v.name.equals(name)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /// Variant at `index`, or null (unknown id / not an enum / out of range).
+    /// The pointer is invalidated by the next type definition.
+    pub EnumVariant* enum_variant(TypeRegistry* self, TypeId enum_ty, i64 index) {
+        Type* ty = self.get(enum_ty);
+        if (ty == (Type*)0) {
+            return (EnumVariant*)0;
+        }
+        if (ty.kind != (i32)TYPE_KIND.ENUM) {
+            return (EnumVariant*)0;
+        }
+        if (index < 0 || index >= ty.enum_data.variants.len()) {
+            return (EnumVariant*)0;
+        }
+        return ty.enum_data.variants.get_ptr(index);
+    }
+
+    /// Index of the variant with `discriminant`, or -1.
+    pub i64 enum_variant_by_discriminant(TypeRegistry* self, TypeId enum_ty, i64 discriminant) {
+        Type* ty = self.get(enum_ty);
+        if (ty == (Type*)0) {
+            return -1;
+        }
+        if (ty.kind != (i32)TYPE_KIND.ENUM) {
+            return -1;
+        }
+        i64 i = 0;
+        while (i < ty.enum_data.variants.len()) {
+            EnumVariant* v = ty.enum_data.variants.get_ptr(i);
+            if (v.discriminant == discriminant) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+}
+
+impl Drop<TypeRegistry> for TypeRegistry {
+    /// Frees every interned Type (names, fields, variants, payloads), the
+    /// name/interning maps, and the owned fn-cache key strings.  Idempotent.
+    void drop(TypeRegistry* self) {
+        i64 i = 0;
+        while (i < self.types.len()) {
+            Type* ty = self.types.get_ptr(i);
+            ty.drop();
+            i = i + 1;
+        }
+        self.types.drop();
+        self.by_name.drop();
+        self.vec_cache.drop();
+        self.optional_cache.drop();
+        self.fn_cache.drop();
+        i = 0;
+        while (i < self.fn_cache_keys.len()) {
+            String* key = self.fn_cache_keys.get_ptr(i);
+            key.drop();
+            i = i + 1;
+        }
+        self.fn_cache_keys.drop();
+    }
+}

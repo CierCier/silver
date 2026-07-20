@@ -1,0 +1,208 @@
+// std/sys/result.ag — typed, Result-style front-ends for raw Linux syscalls.
+//
+// Raw sys_* wrappers (std/sys/linux.ag) traffic exclusively in i64 and
+// encode failure as a return value in -4095..-1 (negated errno). SysResult
+// decodes that convention once, in a single place, following the tagged
+// Optional/Result struct pattern from std/optional.ag (Silver has no
+// payload enums).
+//
+// The typed wrappers are prefixed `try_` (try_read, try_write, ...) rather
+// than using the bare POSIX names: Silver `pub` functions emit unmangled
+// C-ABI symbols, and defining `read`/`write`/`open`/... would interpose on
+// libc symbols with an incompatible (sret struct return) ABI while the
+// toolchain still links against libc.
+
+import std.sys.errno;
+import std.sys.linux;
+
+// --- Flag constants used by the typed wrappers ---
+
+// mmap protection bits (asm-generic/mman-common.h).
+pub const i64 PROT_NONE = 0;
+pub const i64 PROT_READ = 1;
+pub const i64 PROT_WRITE = 2;
+pub const i64 PROT_EXEC = 4;
+
+// mmap flag bits (x86_64).
+pub const i64 MAP_SHARED = 1;
+pub const i64 MAP_PRIVATE = 2;
+pub const i64 MAP_FIXED = 16;
+pub const i64 MAP_ANONYMOUS = 32;
+
+// mremap flag bits. (MREMAP_FIXED is not supported by try_mremap, which
+// does not take a new_address argument.)
+pub const i64 MREMAP_MAYMOVE = 1;
+
+// open(2) flag bits (x86_64, octal values in C headers).
+pub const i64 O_RDONLY = 0;
+pub const i64 O_WRONLY = 1;
+pub const i64 O_RDWR = 2;
+pub const i64 O_CREAT = 64;        // 0o100
+pub const i64 O_EXCL = 128;        // 0o200
+pub const i64 O_TRUNC = 512;       // 0o1000
+pub const i64 O_APPEND = 1024;     // 0o2000
+pub const i64 O_NONBLOCK = 2048;   // 0o4000
+pub const i64 O_DIRECTORY = 65536; // 0o200000
+pub const i64 O_CLOEXEC = 524288;  // 0o2000000
+
+// openat(2) special dirfd: resolve relative paths against the CWD.
+pub const i64 AT_FDCWD = -100;
+
+// lseek(2) whence values.
+pub const i64 SEEK_SET = 0;
+pub const i64 SEEK_CUR = 1;
+pub const i64 SEEK_END = 2;
+
+// Well-known file descriptors.
+pub const i32 STDIN_FD = 0;
+pub const i32 STDOUT_FD = 1;
+pub const i32 STDERR_FD = 2;
+
+// --- SysResult ---
+
+// Decoded syscall outcome. Exactly one of the two states holds:
+//   ok == true  -> value is the successful return, errno == 0
+//   ok == false -> errno is the positive errno,   value == 0
+pub struct SysResult {
+    bool ok;
+    i64 value;
+    i64 errno;
+}
+
+impl SysResult {
+    // Decode a raw syscall return value (-4095..-1 => error).
+    SysResult from_raw(i64 raw) {
+        SysResult r;
+        if (is_errno(raw)) {
+            r.ok = false;
+            r.value = 0;
+            r.errno = -raw;
+        } else {
+            r.ok = true;
+            r.value = raw;
+            r.errno = 0;
+        }
+        return move r;
+    }
+
+    // Construct a success carrying `value`.
+    SysResult success(i64 value) {
+        SysResult r;
+        r.ok = true;
+        r.value = value;
+        r.errno = 0;
+        return move r;
+    }
+
+    // Construct a failure carrying positive errno `err`.
+    SysResult failure(i64 err) {
+        SysResult r;
+        r.ok = false;
+        r.value = 0;
+        r.errno = err;
+        return move r;
+    }
+
+    bool is_ok(SysResult* self) {
+        return (*self).ok;
+    }
+
+    bool is_err(SysResult* self) {
+        return !(*self).ok;
+    }
+
+    // True when this result failed with exactly errno `err`.
+    bool err_is(SysResult* self, i64 err) {
+        return !(*self).ok && (*self).errno == err;
+    }
+
+    // Successful value, or `fallback` on error.
+    i64 unwrap_or(SysResult* self, i64 fallback) {
+        if ((*self).ok) {
+            return (*self).value;
+        }
+        return fallback;
+    }
+
+    // Symbolic errno name ("EOK" when the call succeeded).
+    str err_name(SysResult* self) {
+        if ((*self).ok) {
+            return "EOK";
+        }
+        return errno_name((*self).errno);
+    }
+}
+
+// --- Typed syscall front-ends ---
+
+// read(2): read up to `count` bytes from `fd` into `buf`.
+// Ok value: number of bytes read (0 = EOF).
+pub SysResult try_read(i32 fd, u8* buf, i64 count) {
+    return SysResult.from_raw(sys_read((i64)fd, (i64)buf, count));
+}
+
+// write(2): write `count` bytes from `buf` to `fd`.
+// Ok value: number of bytes written.
+pub SysResult try_write(i32 fd, u8* buf, i64 count) {
+    return SysResult.from_raw(sys_write((i64)fd, (i64)buf, count));
+}
+
+// open(2): open `path` with O_* `flags`; `mode` is the creation mode
+// (only consulted when flags contain O_CREAT). Ok value: new fd.
+pub SysResult try_open(str path, i64 flags, i64 mode) {
+    return SysResult.from_raw(sys_open((i64)path, flags, mode));
+}
+
+// openat(2): like open, resolving relative paths against `dirfd`
+// (pass AT_FDCWD for the current working directory). Ok value: new fd.
+pub SysResult try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
+    return SysResult.from_raw(sys_openat((i64)dirfd, (i64)path, flags, mode));
+}
+
+// close(2): close `fd`. Ok value: 0.
+pub SysResult try_close(i32 fd) {
+    return SysResult.from_raw(sys_close((i64)fd));
+}
+
+// mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let
+// the kernel choose, fd = -1 with MAP_ANONYMOUS. Ok value: mapping address.
+pub SysResult try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
+    return SysResult.from_raw(sys_mmap((i64)addr, length, prot, flags, (i64)fd, offset));
+}
+
+// munmap(2): unmap `length` bytes at page-aligned `addr`. Ok value: 0.
+pub SysResult try_munmap(void* addr, i64 length) {
+    return SysResult.from_raw(sys_munmap((i64)addr, length));
+}
+
+// mremap(2): resize the mapping at `old_addr` from `old_size` to `new_size`.
+// Pass MREMAP_MAYMOVE to allow relocation. Ok value: new mapping address.
+// MREMAP_FIXED is intentionally unsupported (no new_address parameter);
+// the kernel receives 0 for it.
+pub SysResult try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
+    return SysResult.from_raw(sys_mremap((i64)old_addr, old_size, new_size, flags, 0));
+}
+
+// lseek(2): reposition `fd` to `offset` relative to SEEK_*. Ok value: the
+// resulting absolute offset.
+pub SysResult try_lseek(i32 fd, i64 offset, i64 whence) {
+    return SysResult.from_raw(sys_lseek((i64)fd, offset, whence));
+}
+
+// kill(2): send signal `sig` to `pid` (sig 0 probes existence). Ok value: 0.
+pub SysResult try_kill(i32 pid, i32 sig) {
+    return SysResult.from_raw(sys_kill((i64)pid, (i64)sig));
+}
+
+// getpid(2): never fails. Ok value: the calling process id.
+pub SysResult try_getpid() {
+    return SysResult.from_raw(sys_getpid());
+}
+
+// exit_group(2): terminate every thread in the process with `code`.
+// Does not return.
+pub void exit_group(i64 code) {
+    sys_exit_group(code);
+    sys_exit(code);
+    while (true) {}
+}
