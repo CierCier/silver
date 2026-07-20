@@ -42,11 +42,16 @@ cd "$ROOT" || exit 1
 AGC="$ROOT/target/debug/agc"
 
 is_skipped() {
-    for skip in $SKIP_TESTS; do
-        if [ "$skip" = "$1" ]; then
+    while IFS= read -r line; do
+        # Strip inline comments starting with '#'
+        local clean="${line%%#*}"
+        # Trim leading and trailing whitespace
+        clean="${clean#"${clean%%[![:space:]]*}"}"
+        clean="${clean%"${clean##*[![:space:]]}"}"
+        if [ -n "$clean" ] && [ "$clean" = "$1" ]; then
             return 0
         fi
-    done
+    done <<< "$SKIP_TESTS"
     return 1
 }
 
