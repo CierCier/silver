@@ -68,7 +68,7 @@ pub unsafe extern "C" fn silver_rt_print_bytes(s: SilverSlice) {
     let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
     match std::str::from_utf8(bytes) {
         Ok(text) => print!("{text}"),
-        Err(_) => print!("<non-utf8>"),
+        Err(_) => println!("<non-utf8>"),
     }
 }
 
