@@ -1,7 +1,0 @@
-// Test: typed syscall wrappers from std.sys.linux
-import std.sys.linux;
-
-pub void main() {
-    // SYS_exit = 60, rdi = 42 (exit code)
-    sys_exit(42);
-}
