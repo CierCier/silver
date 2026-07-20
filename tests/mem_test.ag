@@ -236,6 +236,151 @@ i32 main() {
     free(ptrs);
     
     
+    // Test: zeroed allocation (calloc path) with recycled blocks
+    printf("\n--- Zeroed Allocation ---\n");
+
+    u8* dirty = alloc<u8>(256);
+    memset(dirty, 170, 256);  // 0xAA pattern
+    free(dirty);
+
+    // LIFO free list: this should hand back the same (dirty) block.
+    u8* zeroed = alloc<u8>(256);
+    bool zero_ok = true;
+    for (i32 i = 0; i < 256; i = i + 1) {
+        if (zeroed[i] != (u8)0) {
+            zero_ok = false;
+        }
+    }
+    assert_true(zero_ok, "alloc<T>(count) returns zeroed memory even for recycled blocks");
+    free(zeroed);
+
+    u8* rt_zeroed = silver_rt_alloc_zeroed(512, 16);
+    memset(rt_zeroed, 187, 512);
+    silver_rt_dealloc(rt_zeroed, 512, 16);
+    rt_zeroed = silver_rt_alloc_zeroed(512, 16);
+    bool rt_zero_ok = true;
+    for (i32 i = 0; i < 512; i = i + 1) {
+        if (rt_zeroed[i] != (u8)0) {
+            rt_zero_ok = false;
+        }
+    }
+    assert_true(rt_zero_ok, "silver_rt_alloc_zeroed zeroes recycled blocks");
+    silver_rt_dealloc(rt_zeroed, 512, 16);
+
+    // Test: free-list exercise — many small allocs, free, then reuse
+    printf("\n--- Free-List Reuse ---\n");
+
+    i64* old_addrs = alloc<i64>(100);
+    u8** small_ptrs = alloc<u8*>(100);
+
+    for (i32 i = 0; i < 100; i = i + 1) {
+        small_ptrs[i] = alloc<u8>(48);
+        small_ptrs[i][0] = (u8)i;
+        small_ptrs[i][47] = (u8)(99 - i);
+        old_addrs[i] = (i64)small_ptrs[i];
+    }
+
+    bool small_ok = true;
+    for (i32 i = 0; i < 100; i = i + 1) {
+        if (small_ptrs[i][0] != (u8)i || small_ptrs[i][47] != (u8)(99 - i)) {
+            small_ok = false;
+        }
+    }
+    assert_true(small_ok, "100 small allocations hold distinct data");
+
+    for (i32 i = 0; i < 100; i = i + 1) {
+        free(small_ptrs[i]);
+    }
+
+    // Reallocate the same sizes: every block should come from the freed set.
+    i32 reused = 0;
+    for (i32 i = 0; i < 100; i = i + 1) {
+        small_ptrs[i] = alloc<u8>(48);
+        i64 addr = (i64)small_ptrs[i];
+        for (i32 j = 0; j < 100; j = j + 1) {
+            if (old_addrs[j] == addr) {
+                reused = reused + 1;
+                old_addrs[j] = 0;  // consume the match
+            }
+        }
+    }
+    assert_eq_i32(reused, 100, "free-list recycles all 100 freed blocks");
+
+    for (i32 i = 0; i < 100; i = i + 1) {
+        free(small_ptrs[i]);
+    }
+    free(small_ptrs);
+    free(old_addrs);
+
+    // Test: huge allocation (> 1 MiB, dedicated mmap path)
+    printf("\n--- Huge Allocation (>1MB) ---\n");
+
+    i64 huge_size = 2 * 1024 * 1024 + 123;  // > 2 MiB, not page-rounded
+    u8* huge = alloc<u8>(huge_size);
+    assert_true(huge != (u8*)0, "2MB+ allocation returned non-null");
+    huge[0] = 11;
+    huge[huge_size - 1] = 22;
+    assert_true(huge[0] == 11, "first byte of huge alloc writable");
+    assert_true(huge[huge_size - 1] == 22, "last byte of huge alloc writable");
+
+    huge = realloc<u8>(huge, 3 * 1024 * 1024);
+    assert_true(huge != (u8*)0, "realloc of huge block returned non-null");
+    assert_true(huge[0] == 11, "realloc preserves huge head byte");
+    assert_true(huge[huge_size - 1] == 22, "realloc preserves huge tail byte");
+    free(huge);
+
+    // Test: frozen silver_rt_* surface semantics
+    printf("\n--- silver_rt_* Frozen Surface ---\n");
+
+    u8* dangling = silver_rt_alloc(0, 8);
+    assert_true(dangling != (u8*)0, "silver_rt_alloc(0) returns non-null dangling pointer");
+    silver_rt_dealloc(dangling, 0, 8);  // size-0 dealloc: no-op
+    printf("  [PASS] size-0 dealloc is a no-op\n");
+    tests_passed = tests_passed + 1;
+
+    silver_rt_dealloc((u8*)0, 64, 8);  // null dealloc: no-op
+    printf("  [PASS] null dealloc is a no-op\n");
+    tests_passed = tests_passed + 1;
+
+    u8* rt_buf = silver_rt_alloc(100, 16);
+    assert_true(rt_buf != (u8*)0, "silver_rt_alloc(100) returns non-null");
+    assert_true(((i64)rt_buf % 16) == 0, "silver_rt_alloc respects 16-byte alignment");
+    rt_buf[0] = 7;
+    rt_buf[99] = 8;
+
+    u8* rt_grown = silver_rt_realloc(rt_buf, 100, 10000, 16);
+    assert_true(rt_grown != (u8*)0, "silver_rt_realloc grow returns non-null");
+    assert_true(rt_grown[0] == 7 && rt_grown[99] == 8, "silver_rt_realloc preserves data");
+
+    u8* rt_gone = silver_rt_realloc(rt_grown, 10000, 0, 16);
+    assert_true(rt_gone != (u8*)0, "silver_rt_realloc(new_size=0) returns dangling non-null");
+
+    u8* from_null = silver_rt_realloc((u8*)0, 0, 64, 16);
+    assert_true(from_null != (u8*)0, "silver_rt_realloc(null) behaves like alloc");
+    silver_rt_dealloc(from_null, 64, 16);
+
+    // Byte ops: null tolerance and dst return value.
+    u8* rt_ret = silver_rt_memset((u8*)0, (u8)1, 8);
+    assert_true(rt_ret == (u8*)0, "silver_rt_memset tolerates null and returns dst");
+    rt_ret = silver_rt_memcpy((u8*)0, (u8*)0, 8);
+    assert_true(rt_ret == (u8*)0, "silver_rt_memcpy tolerates null and returns dst");
+    rt_ret = silver_rt_memmove((u8*)0, (u8*)0, 8);
+    assert_true(rt_ret == (u8*)0, "silver_rt_memmove tolerates null and returns dst");
+
+    u8* mv = alloc<u8>(32);
+    for (i32 i = 0; i < 16; i = i + 1) {
+        mv[i + 8] = (u8)(i + 1);
+    }
+    // Overlapping move toward lower addresses (dst < src).
+    u8* mv_ret = silver_rt_memmove(mv, &mv[8], 16);
+    assert_true(mv_ret == mv, "silver_rt_memmove returns dst");
+    assert_true(mv[0] == (u8)1 && mv[15] == (u8)16, "overlapping memmove (dst < src) copies correctly");
+    free(mv);
+
+    assert_eq_i64(silver_rt_strlen("hello"), 5, "silver_rt_strlen counts bytes");
+    assert_eq_i64(silver_rt_strlen((const char*)0), 0, "silver_rt_strlen(null) is 0");
+    assert_eq_i64(strlen(""), 0, "strlen of empty string is 0");
+
     // Test: Arena allocation alignment
     printf("\n--- Arena Allocation Alignment ---\n");
     
@@ -264,6 +409,32 @@ i32 main() {
         
         arena.drop();
     }
+
+    // Test: Aligned zero-sized allocation freed through libc free shim (PR 7 fix verification)
+    printf("\n--- Aligned Zero-Sized Free (PR 7 fix check) ---\n");
+    {
+        // Try page size (4096) and larger (8192) alignments with size 0
+        u8* ptr_4096 = silver_rt_alloc(0, 4096);
+        assert_true(ptr_4096 != (u8*)0, "silver_rt_alloc(0, 4096) returns non-null");
+        assert_true(((i64)ptr_4096 % 4096) == 0, "silver_rt_alloc(0, 4096) is aligned");
+        
+        u8* ptr_8192 = silver_rt_alloc(0, 8192);
+        assert_true(ptr_8192 != (u8*)0, "silver_rt_alloc(0, 8192) returns non-null");
+        assert_true(((i64)ptr_8192 % 8192) == 0, "silver_rt_alloc(0, 8192) is aligned");
+
+        // Try alignment larger than MEM_MIN_VALID_ADDR (e.g. 33554432)
+        u8* ptr_huge = silver_rt_alloc(0, 33554432);
+        assert_true(ptr_huge != (u8*)0, "silver_rt_alloc(0, 33554432) returns non-null");
+        assert_true((i64)ptr_huge < 33554432, "silver_rt_alloc(0, 33554432) returns sentinel below threshold");
+        
+        // Free using the libc-compatible free shim
+        free(ptr_4096);
+        free(ptr_8192);
+        free(ptr_huge);
+        printf("  [PASS] Freeing page-aligned and large-aligned zero-sized allocations is successful\n");
+        tests_passed = tests_passed + 1;
+    }
+
     // Summary
     printf("\n=== Results ===\n");
     printf("Passed: %d\n", tests_passed);
