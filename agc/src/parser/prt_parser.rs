@@ -628,6 +628,29 @@ impl PRT_Parser {
             }
         }
 
+        // `Name *+ ident (= | ; | ,)` — pointer declaration whose base type
+        // is not in known_type_names (e.g. a struct inlined from an import).
+        // A bare product expression statement (`a * b;`) has no effect in
+        // Silver, so treating this shape as a declaration is safe.
+        if matches!(
+            tokens.get(index + 1).map(|next| &next.kind),
+            Some(Token::Star)
+        ) {
+            let mut cursor = index + 1;
+            while matches!(tokens.get(cursor).map(|next| &next.kind), Some(Token::Star)) {
+                cursor += 1;
+            }
+            if matches!(
+                tokens.get(cursor).map(|next| &next.kind),
+                Some(Token::Identifier(_))
+            ) && matches!(
+                tokens.get(cursor + 1).map(|next| &next.kind),
+                Some(Token::Assign | Token::Semicolon | Token::Comma)
+            ) {
+                return true;
+            }
+        }
+
         false
     }
 

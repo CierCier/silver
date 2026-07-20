@@ -13,6 +13,7 @@ pub T* realloc<T>(T* ptr, i64 count) {
 }
 
 extern "C" {
+    void abort();
     void* malloc(i64 size);
     void* calloc(i64 count, i64 size);
     void free(void* ptr);

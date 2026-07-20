@@ -1,0 +1,367 @@
+// Tests for std/rt/types.ag — port of the registry cases from
+// silver_runtime/src/types/tests.rs.
+import std.io;
+import std.rt.types;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+void assert_eq_str(str a, str b, str msg) {
+    if (a != (str)0 && a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected \"%s\", got \"%s\")\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== TypeRegistry Tests ===\n\n");
+
+    // --- registry_has_builtins -----------------------------------------
+    printf("--- Builtin names ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        assert_eq_str(reg.name_of(TypeId.UNIT()), "unit", "name_of(UNIT) == unit");
+        assert_eq_str(reg.name_of(TypeId.BOOL()), "bool", "name_of(BOOL) == bool");
+        assert_eq_str(reg.name_of(TypeId.I8()), "i8", "name_of(I8) == i8");
+        assert_eq_str(reg.name_of(TypeId.I16()), "i16", "name_of(I16) == i16");
+        assert_eq_str(reg.name_of(TypeId.I32()), "i32", "name_of(I32) == i32");
+        assert_eq_str(reg.name_of(TypeId.I64()), "i64", "name_of(I64) == i64");
+        assert_eq_str(reg.name_of(TypeId.I128()), "i128", "name_of(I128) == i128");
+        assert_eq_str(reg.name_of(TypeId.U8()), "u8", "name_of(U8) == u8");
+        assert_eq_str(reg.name_of(TypeId.U16()), "u16", "name_of(U16) == u16");
+        assert_eq_str(reg.name_of(TypeId.U32()), "u32", "name_of(U32) == u32");
+        assert_eq_str(reg.name_of(TypeId.U64()), "u64", "name_of(U64) == u64");
+        assert_eq_str(reg.name_of(TypeId.U128()), "u128", "name_of(U128) == u128");
+        assert_eq_str(reg.name_of(TypeId.F32()), "f32", "name_of(F32) == f32");
+        assert_eq_str(reg.name_of(TypeId.F64()), "f64", "name_of(F64) == f64");
+        assert_eq_str(reg.name_of(TypeId.STRING()), "string", "name_of(STRING) == string");
+
+        // lookup round-trips
+        TypeId lk_i64 = reg.lookup("i64");
+        assert_true(lk_i64.eq(TypeId.I64()), "lookup(i64) == I64");
+        TypeId lk_string = reg.lookup("string");
+        assert_true(lk_string.eq(TypeId.STRING()), "lookup(string) == STRING");
+        TypeId lk_missing = reg.lookup("no_such_type");
+        assert_true(lk_missing.is_none(), "lookup(no_such_type) is none");
+
+        // builtin metadata
+        Type* i64_ty = reg.get(TypeId.I64());
+        assert_true(i64_ty != (Type*)0, "get(I64) non-null");
+        assert_true(i64_ty.kind == (i32)TYPE_KIND.INT, "I64 kind is INT");
+        assert_eq_i64((i64)i64_ty.bits, 64, "I64 bits == 64");
+        assert_true(i64_ty.is_signed, "I64 is signed");
+        Type* u32_ty = reg.get(TypeId.U32());
+        assert_true(!u32_ty.is_signed, "U32 is unsigned");
+        Type* f32_ty = reg.get(TypeId.F32());
+        assert_true(f32_ty.kind == (i32)TYPE_KIND.FLOAT, "F32 kind is FLOAT");
+        assert_eq_i64((i64)f32_ty.bits, 32, "F32 bits == 32");
+
+        // unknown ids
+        assert_true(reg.get(TypeId.from_raw((u32)9999)) == (Type*)0, "get(9999) is null");
+        assert_true(reg.name_of(TypeId.from_raw((u32)9999)) == (str)0, "name_of(9999) is null");
+
+        reg.drop();
+    }
+
+    // --- vec_and_optional_are_cached -----------------------------------
+    printf("\n--- Vec/optional interning ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        TypeResult v1 = reg.vec_of(TypeId.I64());
+        TypeResult v2 = reg.vec_of(TypeId.I64());
+        assert_true(v1.is_ok(), "vec_of(I64) ok");
+        assert_true(v2.is_ok(), "vec_of(I64) again ok");
+        assert_true(v1.id.eq(v2.id), "vec_of(I64) interned: same id");
+        assert_eq_str(reg.name_of(v1.id), "vec<i64>", "vec display name is vec<i64>");
+
+        TypeResult o1 = reg.optional_of(TypeId.STRING());
+        TypeResult o2 = reg.optional_of(TypeId.STRING());
+        assert_true(o1.is_ok(), "optional_of(STRING) ok");
+        assert_true(o1.id.eq(o2.id), "optional_of(STRING) interned: same id");
+        assert_eq_str(reg.name_of(o1.id), "optional<string>", "optional display name");
+
+        TypeResult ob = reg.optional_of(TypeId.BOOL());
+        assert_eq_str(reg.name_of(ob.id), "optional<bool>", "optional<bool> display name");
+
+        // vec/optional of the same element are distinct types
+        assert_true(!v1.id.eq(o1.id), "vec and optional ids differ");
+
+        // payload metadata
+        Type* vec_ty = reg.get(v1.id);
+        assert_true(vec_ty.kind == (i32)TYPE_KIND.VEC, "vec kind is VEC");
+        assert_true(vec_ty.elem.eq(TypeId.I64()), "vec elem is I64");
+        Type* opt_ty = reg.get(o1.id);
+        assert_true(opt_ty.kind == (i32)TYPE_KIND.OPTIONAL, "optional kind is OPTIONAL");
+        assert_true(opt_ty.elem.eq(TypeId.STRING()), "optional inner is STRING");
+
+        // nested interning: vec<vec<i64>>
+        TypeResult vv1 = reg.vec_of(v1.id);
+        TypeResult vv2 = reg.vec_of(v2.id);
+        assert_true(vv1.id.eq(vv2.id), "vec<vec<i64>> interned");
+        assert_eq_str(reg.name_of(vv1.id), "vec<vec<i64>>", "nested vec display name");
+
+        // unknown element id is an error
+        TypeResult bad = reg.vec_of(TypeId.from_raw((u32)4242));
+        assert_true(bad.is_err(), "vec_of(unknown) errors");
+        assert_true(bad.err == (i32)TYPE_ERR.UNKNOWN_TYPE_ID, "vec_of(unknown) UNKNOWN_TYPE_ID");
+        assert_eq_str((str)bad.msg.to_str(), "unknown type id: 4242", "unknown id message");
+
+        reg.drop();
+    }
+
+    // --- struct_definition (+ duplicate rejection) ----------------------
+    printf("\n--- Struct definition ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<FieldDef> fields = Vec<FieldDef>.new();
+        fields.push(FieldDef.new("name", TypeId.STRING()));
+        fields.push(FieldDef.new("age", TypeId.I64()));
+        TypeResult person = reg.define_struct("Person", move fields);
+        assert_true(person.is_ok(), "define_struct(Person) ok");
+        assert_eq_str(reg.name_of(person.id), "Person", "Person display name");
+        TypeId lk_person = reg.lookup("Person");
+        assert_true(lk_person.eq(person.id), "lookup(Person) round-trips");
+
+        Type* person_ty = reg.get(person.id);
+        assert_true(person_ty.kind == (i32)TYPE_KIND.STRUCT, "Person kind is STRUCT");
+        assert_eq_i64(person_ty.struct_data.fields.len(), 2, "Person has 2 fields");
+        Field* f0 = person_ty.struct_data.fields.get_ptr(0);
+        assert_true(f0.name.equals("name"), "field 0 is 'name'");
+        assert_true(f0.ty.eq(TypeId.STRING()), "field 0 type is string");
+        Field* f1 = person_ty.struct_data.fields.get_ptr(1);
+        assert_true(f1.name.equals("age"), "field 1 is 'age'");
+        assert_true(f1.ty.eq(TypeId.I64()), "field 1 type is i64");
+
+        // duplicate type name is rejected
+        Vec<FieldDef> fields2 = Vec<FieldDef>.new();
+        fields2.push(FieldDef.new("x", TypeId.I64()));
+        TypeResult dup = reg.define_struct("Person", move fields2);
+        assert_true(dup.is_err(), "duplicate struct name rejected");
+        assert_true(dup.err == (i32)TYPE_ERR.DUPLICATE_TYPE_NAME, "err is DUPLICATE_TYPE_NAME");
+        assert_eq_str((str)dup.msg.to_str(), "type name already defined: Person", "dup name message");
+
+        // duplicate field name is rejected
+        Vec<FieldDef> fields3 = Vec<FieldDef>.new();
+        fields3.push(FieldDef.new("x", TypeId.I64()));
+        fields3.push(FieldDef.new("x", TypeId.BOOL()));
+        TypeResult dupf = reg.define_struct("Point", move fields3);
+        assert_true(dupf.is_err(), "duplicate field name rejected");
+        assert_true(dupf.err == (i32)TYPE_ERR.DUPLICATE_FIELD_NAME, "err is DUPLICATE_FIELD_NAME");
+        assert_eq_str((str)dupf.msg.to_str(), "duplicate field 'x' in type 'Point'", "dup field message");
+        TypeId lk_point = reg.lookup("Point");
+        assert_true(lk_point.is_none(), "Point was not registered");
+
+        // unknown field type is rejected
+        Vec<FieldDef> fields4 = Vec<FieldDef>.new();
+        fields4.push(FieldDef.new("y", TypeId.from_raw((u32)777)));
+        TypeResult badf = reg.define_struct("Bad", move fields4);
+        assert_true(badf.is_err() && badf.err == (i32)TYPE_ERR.UNKNOWN_TYPE_ID,
+                    "unknown field type rejected");
+
+        reg.drop();
+    }
+
+    // --- enum_definition (auto discriminants 0..n) ----------------------
+    printf("\n--- Enum definition (auto) ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<VariantDef> variants = Vec<VariantDef>.new();
+        Vec<TypeId> ok_payload = Vec<TypeId>.new();
+        ok_payload.push(TypeId.I64());
+        variants.push(VariantDef.new("Ok", move ok_payload));
+        Vec<TypeId> err_payload = Vec<TypeId>.new();
+        err_payload.push(TypeId.STRING());
+        variants.push(VariantDef.new("Err", move err_payload));
+        TypeResult result_ty = reg.define_enum("ResultI64", move variants);
+        assert_true(result_ty.is_ok(), "define_enum(ResultI64) ok");
+
+        i64 ok_idx = reg.enum_variant_index(result_ty.id, "Ok");
+        assert_eq_i64(ok_idx, 0, "Ok variant index 0");
+        EnumVariant* ok_var = reg.enum_variant(result_ty.id, ok_idx);
+        assert_true(ok_var != (EnumVariant*)0, "enum_variant(Ok) non-null");
+        assert_eq_i64(ok_var.discriminant, 0, "Ok discriminant 0");
+        assert_eq_i64(ok_var.payload.len(), 1, "Ok payload count 1");
+        TypeId ok_payload_ty = ok_var.payload.get(0);
+        assert_true(ok_payload_ty.eq(TypeId.I64()), "Ok payload is i64");
+
+        i64 err_idx = reg.enum_variant_index(result_ty.id, "Err");
+        assert_eq_i64(err_idx, 1, "Err variant index 1");
+        EnumVariant* err_var = reg.enum_variant(result_ty.id, err_idx);
+        assert_eq_i64(err_var.discriminant, 1, "Err discriminant 1");
+        TypeId err_payload_ty = err_var.payload.get(0);
+        assert_true(err_payload_ty.eq(TypeId.STRING()), "Err payload is string");
+
+        assert_eq_i64(reg.enum_variant_index(result_ty.id, "Missing"), -1,
+                      "unknown variant index -1");
+        assert_true(reg.enum_variant(result_ty.id, 5) == (EnumVariant*)0,
+                    "out-of-range variant is null");
+        assert_eq_i64(reg.enum_variant_index(TypeId.I64(), "Ok"), -1,
+                      "variant index on non-enum -1");
+
+        reg.drop();
+    }
+
+    // --- enum_discriminants_can_be_explicit -----------------------------
+    printf("\n--- Enum explicit discriminants ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<VariantDef> variants = Vec<VariantDef>.new();
+        variants.push(VariantDef.with_discriminant("Plus", 43, Vec<TypeId>.new()));
+        Vec<TypeId> int_payload = Vec<TypeId>.new();
+        int_payload.push(TypeId.I64());
+        variants.push(VariantDef.with_discriminant("Int", 1, move int_payload));
+        Vec<TypeId> ident_payload = Vec<TypeId>.new();
+        ident_payload.push(TypeId.STRING());
+        variants.push(VariantDef.with_discriminant("Ident", 2, move ident_payload));
+        TypeResult tokens = reg.define_enum_with_discriminants("Tokens", move variants);
+        assert_true(tokens.is_ok(), "define_enum_with_discriminants(Tokens) ok");
+
+        EnumVariant* plus = reg.enum_variant(tokens.id, 0);
+        assert_eq_i64(plus.discriminant, 43, "Plus discriminant 43");
+        assert_eq_i64(plus.payload.len(), 0, "Plus payload empty");
+        assert_eq_i64(reg.enum_variant_by_discriminant(tokens.id, 1), 1,
+                      "discriminant 1 -> index 1 (Int)");
+        assert_eq_i64(reg.enum_variant_by_discriminant(tokens.id, 43), 0,
+                      "discriminant 43 -> index 0 (Plus)");
+        assert_eq_i64(reg.enum_variant_by_discriminant(tokens.id, 99), -1,
+                      "unknown discriminant -> -1");
+
+        // duplicate discriminant is rejected
+        Vec<VariantDef> bad_variants = Vec<VariantDef>.new();
+        bad_variants.push(VariantDef.with_discriminant("A", 1, Vec<TypeId>.new()));
+        bad_variants.push(VariantDef.with_discriminant("B", 1, Vec<TypeId>.new()));
+        TypeResult bad = reg.define_enum_with_discriminants("Bad", move bad_variants);
+        assert_true(bad.is_err(), "duplicate discriminant rejected");
+        assert_true(bad.err == (i32)TYPE_ERR.DUPLICATE_VARIANT_DISCRIMINANT,
+                    "err is DUPLICATE_VARIANT_DISCRIMINANT");
+        assert_eq_str((str)bad.msg.to_str(), "duplicate enum discriminant 1 in type 'Bad'",
+                      "dup discriminant message");
+
+        // duplicate variant name is rejected
+        Vec<VariantDef> dup_names = Vec<VariantDef>.new();
+        dup_names.push(VariantDef.with_discriminant("A", 1, Vec<TypeId>.new()));
+        dup_names.push(VariantDef.with_discriminant("A", 2, Vec<TypeId>.new()));
+        TypeResult badn = reg.define_enum_with_discriminants("Bad2", move dup_names);
+        assert_true(badn.is_err() && badn.err == (i32)TYPE_ERR.DUPLICATE_VARIANT_NAME,
+                    "duplicate variant name rejected");
+
+        reg.drop();
+    }
+
+    // --- enum_discriminants_auto_fill_mixed -----------------------------
+    printf("\n--- Enum autofill (mixed) ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<VariantDef> variants = Vec<VariantDef>.new();
+        variants.push(VariantDef.with_discriminant("A", 5, Vec<TypeId>.new()));
+        variants.push(VariantDef.new("B", Vec<TypeId>.new()));
+        variants.push(VariantDef.with_discriminant("C", 9, Vec<TypeId>.new()));
+        variants.push(VariantDef.new("D", Vec<TypeId>.new()));
+        TypeResult mixed = reg.define_enum_autofill_discriminants("Mixed", move variants);
+        assert_true(mixed.is_ok(), "autofill(Mixed) ok");
+
+        i64 a = reg.enum_variant_index(mixed.id, "A");
+        i64 b = reg.enum_variant_index(mixed.id, "B");
+        i64 c = reg.enum_variant_index(mixed.id, "C");
+        i64 d = reg.enum_variant_index(mixed.id, "D");
+        // Method-call results are temporaries; field access needs a named local.
+        EnumVariant* va = reg.enum_variant(mixed.id, a);
+        EnumVariant* vb = reg.enum_variant(mixed.id, b);
+        EnumVariant* vc = reg.enum_variant(mixed.id, c);
+        EnumVariant* vd = reg.enum_variant(mixed.id, d);
+        assert_eq_i64(va.discriminant, 5, "A discriminant 5");
+        assert_eq_i64(vb.discriminant, 6, "B discriminant 6");
+        assert_eq_i64(vc.discriminant, 9, "C discriminant 9");
+        assert_eq_i64(vd.discriminant, 10, "D discriminant 10");
+
+        reg.drop();
+    }
+
+    // --- enum_discriminant_autofill_overflow_is_error -------------------
+    printf("\n--- Enum autofill overflow ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<VariantDef> variants = Vec<VariantDef>.new();
+        variants.push(VariantDef.with_discriminant("A", 9223372036854775807, Vec<TypeId>.new()));
+        variants.push(VariantDef.new("B", Vec<TypeId>.new()));
+        TypeResult overflow = reg.define_enum_autofill_discriminants("Overflow", move variants);
+        assert_true(overflow.is_err(), "autofill overflow errors");
+        assert_true(overflow.err == (i32)TYPE_ERR.DISCRIMINANT_OVERFLOW,
+                    "err is DISCRIMINANT_OVERFLOW");
+        assert_eq_str((str)overflow.msg.to_str(),
+                      "enum discriminant overflow in type 'Overflow' after 9223372036854775807",
+                      "overflow message");
+        TypeId lk_overflow = reg.lookup("Overflow");
+        assert_true(lk_overflow.is_none(), "Overflow was not registered");
+
+        reg.drop();
+    }
+
+    // --- function type display name + interning -------------------------
+    printf("\n--- Function types ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Vec<TypeId> params = Vec<TypeId>.new();
+        params.push(TypeId.I64());
+        TypeResult f1 = reg.function(move params, TypeId.BOOL());
+        assert_true(f1.is_ok(), "function(i64 -> bool) ok");
+        assert_eq_str(reg.name_of(f1.id), "fn(i64) -> bool", "fn display name");
+
+        Type* fn_ty = reg.get(f1.id);
+        assert_true(fn_ty.kind == (i32)TYPE_KIND.FUNCTION, "fn kind is FUNCTION");
+        assert_eq_i64(fn_ty.fn_data.params.len(), 1, "fn has 1 param");
+        TypeId fn_param0 = fn_ty.fn_data.params.get(0);
+        assert_true(fn_param0.eq(TypeId.I64()), "fn param is i64");
+        assert_true(fn_ty.fn_data.ret.eq(TypeId.BOOL()), "fn ret is bool");
+
+        // interned: same signature returns the same id
+        Vec<TypeId> params2 = Vec<TypeId>.new();
+        params2.push(TypeId.I64());
+        TypeResult f2 = reg.function(move params2, TypeId.BOOL());
+        assert_true(f1.id.eq(f2.id), "fn type interned: same id");
+
+        // different signatures get different ids
+        Vec<TypeId> params3 = Vec<TypeId>.new();
+        params3.push(TypeId.I64());
+        TypeResult f3 = reg.function(move params3, TypeId.I64());
+        assert_true(!f1.id.eq(f3.id), "different ret -> different id");
+
+        // multi-param and zero-param display names
+        Vec<TypeId> params4 = Vec<TypeId>.new();
+        params4.push(TypeId.I64());
+        params4.push(TypeId.STRING());
+        TypeResult f4 = reg.function(move params4, TypeId.UNIT());
+        assert_eq_str(reg.name_of(f4.id), "fn(i64, string) -> unit",
+                      "multi-param fn display name");
+        TypeResult f5 = reg.function(Vec<TypeId>.new(), TypeId.UNIT());
+        assert_eq_str(reg.name_of(f5.id), "fn() -> unit", "zero-param fn display name");
+
+        reg.drop();
+    }
+
+    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
+    return tests_failed;
+}
