@@ -10,1935 +10,1935 @@
 import std.sys.syscall;
 
 // Syscall number constants
-pub enum SyscallNum {
-    Read = 0;
-    Write = 1;
-    Open = 2;
-    Close = 3;
-    Stat = 4;
-    Fstat = 5;
-    Lstat = 6;
-    Poll = 7;
-    Lseek = 8;
-    Mmap = 9;
-    Mprotect = 10;
-    Munmap = 11;
-    Brk = 12;
-    RtSigaction = 13;
-    RtSigprocmask = 14;
-    RtSigreturn = 15;
-    Ioctl = 16;
-    Pread64 = 17;
-    Pwrite64 = 18;
-    Readv = 19;
-    Writev = 20;
-    Access = 21;
-    Pipe = 22;
-    Select = 23;
-    SchedYield = 24;
-    Mremap = 25;
-    Msync = 26;
-    Mincore = 27;
-    Madvise = 28;
-    Shmget = 29;
-    Shmat = 30;
-    Shmctl = 31;
-    Dup = 32;
-    Dup2 = 33;
-    Pause = 34;
-    Nanosleep = 35;
-    Getitimer = 36;
-    Alarm = 37;
-    Setitimer = 38;
-    Getpid = 39;
-    Sendfile = 40;
-    Socket = 41;
-    Connect = 42;
-    Accept = 43;
-    Sendto = 44;
-    Recvfrom = 45;
-    Sendmsg = 46;
-    Recvmsg = 47;
-    Shutdown = 48;
-    Bind = 49;
-    Listen = 50;
-    Getsockname = 51;
-    Getpeername = 52;
-    Socketpair = 53;
-    Setsockopt = 54;
-    Getsockopt = 55;
-    Clone = 56;
-    Fork = 57;
-    Vfork = 58;
-    Execve = 59;
-    Exit = 60;
-    Wait4 = 61;
-    Kill = 62;
-    Uname = 63;
-    Semget = 64;
-    Semop = 65;
-    Semctl = 66;
-    Shmdt = 67;
-    Msgget = 68;
-    Msgsnd = 69;
-    Msgrcv = 70;
-    Msgctl = 71;
-    Fcntl = 72;
-    Flock = 73;
-    Fsync = 74;
-    Fdatasync = 75;
-    Truncate = 76;
-    Ftruncate = 77;
-    Getdents = 78;
-    Getcwd = 79;
-    Chdir = 80;
-    Fchdir = 81;
-    Rename = 82;
-    Mkdir = 83;
-    Rmdir = 84;
-    Creat = 85;
-    Link = 86;
-    Unlink = 87;
-    Symlink = 88;
-    Readlink = 89;
-    Chmod = 90;
-    Fchmod = 91;
-    Chown = 92;
-    Fchown = 93;
-    Lchown = 94;
-    Umask = 95;
-    Gettimeofday = 96;
-    Getrlimit = 97;
-    Getrusage = 98;
-    Sysinfo = 99;
-    Times = 100;
-    Ptrace = 101;
-    Getuid = 102;
-    Syslog = 103;
-    Getgid = 104;
-    Setuid = 105;
-    Setgid = 106;
-    Geteuid = 107;
-    Getegid = 108;
-    Setpgid = 109;
-    Getppid = 110;
-    Getpgrp = 111;
-    Setsid = 112;
-    Setreuid = 113;
-    Setregid = 114;
-    Getgroups = 115;
-    Setgroups = 116;
-    Setresuid = 117;
-    Getresuid = 118;
-    Setresgid = 119;
-    Getresgid = 120;
-    Getpgid = 121;
-    Setfsuid = 122;
-    Setfsgid = 123;
-    Getsid = 124;
-    Capget = 125;
-    Capset = 126;
-    RtSigpending = 127;
-    RtSigtimedwait = 128;
-    RtSigqueueinfo = 129;
-    RtSigsuspend = 130;
-    Sigaltstack = 131;
-    Utime = 132;
-    Mknod = 133;
-    Uselib = 134;
-    Personality = 135;
-    Ustat = 136;
-    Statfs = 137;
-    Fstatfs = 138;
-    Sysfs = 139;
-    Getpriority = 140;
-    Setpriority = 141;
-    SchedSetparam = 142;
-    SchedGetparam = 143;
-    SchedSetscheduler = 144;
-    SchedGetscheduler = 145;
-    SchedGetPriorityMax = 146;
-    SchedGetPriorityMin = 147;
-    SchedRrGetInterval = 148;
-    Mlock = 149;
-    Munlock = 150;
-    Mlockall = 151;
-    Munlockall = 152;
-    Vhangup = 153;
-    ModifyLdt = 154;
-    PivotRoot = 155;
-    Sysctl = 156;
-    Prctl = 157;
-    ArchPrctl = 158;
-    Adjtimex = 159;
-    Setrlimit = 160;
-    Chroot = 161;
-    Sync = 162;
-    Acct = 163;
-    Settimeofday = 164;
-    Mount = 165;
-    Umount2 = 166;
-    Swapon = 167;
-    Swapoff = 168;
-    Reboot = 169;
-    Sethostname = 170;
-    Setdomainname = 171;
-    Iopl = 172;
-    Ioperm = 173;
-    CreateModule = 174;
-    InitModule = 175;
-    DeleteModule = 176;
-    GetKernelSyms = 177;
-    QueryModule = 178;
-    Quotactl = 179;
-    Nfsservctl = 180;
-    Getpmsg = 181;
-    Putpmsg = 182;
-    AfsSyscall = 183;
-    Tuxcall = 184;
-    Security = 185;
-    Gettid = 186;
-    Readahead = 187;
-    Setxattr = 188;
-    Lsetxattr = 189;
-    Fsetxattr = 190;
-    Getxattr = 191;
-    Lgetxattr = 192;
-    Fgetxattr = 193;
-    Listxattr = 194;
-    Llistxattr = 195;
-    Flistxattr = 196;
-    Removexattr = 197;
-    Lremovexattr = 198;
-    Fremovexattr = 199;
-    Tkill = 200;
-    Time = 201;
-    Futex = 202;
-    SchedSetaffinity = 203;
-    SchedGetaffinity = 204;
-    SetThreadArea = 205;
-    IoSetup = 206;
-    IoDestroy = 207;
-    IoGetevents = 208;
-    IoSubmit = 209;
-    IoCancel = 210;
-    GetThreadArea = 211;
-    LookupDcookie = 212;
-    EpollCreate = 213;
-    EpollCtlOld = 214;
-    EpollWaitOld = 215;
-    RemapFilePages = 216;
-    Getdents64 = 217;
-    SetTidAddress = 218;
-    RestartSyscall = 219;
-    Semtimedop = 220;
-    Fadvise64 = 221;
-    TimerCreate = 222;
-    TimerSettime = 223;
-    TimerGettime = 224;
-    TimerGetoverrun = 225;
-    TimerDelete = 226;
-    ClockSettime = 227;
-    ClockGettime = 228;
-    ClockGetres = 229;
-    ClockNanosleep = 230;
-    ExitGroup = 231;
-    EpollWait = 232;
-    EpollCtl = 233;
-    Tgkill = 234;
-    Utimes = 235;
-    Vserver = 236;
-    Mbind = 237;
-    SetMempolicy = 238;
-    GetMempolicy = 239;
-    MqOpen = 240;
-    MqUnlink = 241;
-    MqTimedsend = 242;
-    MqTimedreceive = 243;
-    MqNotify = 244;
-    MqGetsetattr = 245;
-    KexecLoad = 246;
-    Waitid = 247;
-    AddKey = 248;
-    RequestKey = 249;
-    Keyctl = 250;
-    IoprioSet = 251;
-    IoprioGet = 252;
-    InotifyInit = 253;
-    InotifyAddWatch = 254;
-    InotifyRmWatch = 255;
-    MigratePages = 256;
-    Openat = 257;
-    Mkdirat = 258;
-    Mknodat = 259;
-    Fchownat = 260;
-    Futimesat = 261;
-    Newfstatat = 262;
-    Unlinkat = 263;
-    Renameat = 264;
-    Linkat = 265;
-    Symlinkat = 266;
-    Readlinkat = 267;
-    Fchmodat = 268;
-    Faccessat = 269;
-    Pselect6 = 270;
-    Ppoll = 271;
-    Unshare = 272;
-    SetRobustList = 273;
-    GetRobustList = 274;
-    Splice = 275;
-    Tee = 276;
-    SyncFileRange = 277;
-    Vmsplice = 278;
-    MovePages = 279;
-    Utimensat = 280;
-    EpollPwait = 281;
-    Signalfd = 282;
-    TimerfdCreate = 283;
-    Eventfd = 284;
-    Fallocate = 285;
-    TimerfdSettime = 286;
-    TimerfdGettime = 287;
-    Accept4 = 288;
-    Signalfd4 = 289;
-    Eventfd2 = 290;
-    EpollCreate1 = 291;
-    Dup3 = 292;
-    Pipe2 = 293;
-    InotifyInit1 = 294;
-    Preadv = 295;
-    Pwritev = 296;
-    RtTgsigqueueinfo = 297;
-    PerfEventOpen = 298;
-    Recvmmsg = 299;
-    FanotifyInit = 300;
-    FanotifyMark = 301;
-    Prlimit64 = 302;
-    NameToHandleAt = 303;
-    OpenByHandleAt = 304;
-    ClockAdjtime = 305;
-    Syncfs = 306;
-    Sendmmsg = 307;
-    Setns = 308;
-    Getcpu = 309;
-    ProcessVmReadv = 310;
-    ProcessVmWritev = 311;
-    Kcmp = 312;
-    FinitModule = 313;
-    SchedSetattr = 314;
-    SchedGetattr = 315;
-    Renameat2 = 316;
-    Seccomp = 317;
-    Getrandom = 318;
-    MemfdCreate = 319;
-    KexecFileLoad = 320;
-    Bpf = 321;
-    Execveat = 322;
-    Userfaultfd = 323;
-    Membarrier = 324;
-    Mlock2 = 325;
-    CopyFileRange = 326;
-    Preadv2 = 327;
-    Pwritev2 = 328;
-    PkeyMprotect = 329;
-    PkeyAlloc = 330;
-    PkeyFree = 331;
-    Statx = 332;
-    IoPgetevents = 333;
-    Rseq = 334;
-    Uretprobe = 335;
-    Uprobe = 336;
-    PidfdSendSignal = 424;
-    IoUringSetup = 425;
-    IoUringEnter = 426;
-    IoUringRegister = 427;
-    OpenTree = 428;
-    MoveMount = 429;
-    Fsopen = 430;
-    Fsconfig = 431;
-    Fsmount = 432;
-    Fspick = 433;
-    PidfdOpen = 434;
-    Clone3 = 435;
-    CloseRange = 436;
-    Openat2 = 437;
-    PidfdGetfd = 438;
-    Faccessat2 = 439;
-    ProcessMadvise = 440;
-    EpollPwait2 = 441;
-    MountSetattr = 442;
-    QuotactlFd = 443;
-    LandlockCreateRuleset = 444;
-    LandlockAddRule = 445;
-    LandlockRestrictSelf = 446;
-    MemfdSecret = 447;
-    ProcessMrelease = 448;
-    FutexWaitv = 449;
-    SetMempolicyHomeNode = 450;
-    Cachestat = 451;
-    Fchmodat2 = 452;
-    MapShadowStack = 453;
-    FutexWake = 454;
-    FutexWait = 455;
-    FutexRequeue = 456;
-    Statmount = 457;
-    Listmount = 458;
-    LsmGetSelfAttr = 459;
-    LsmSetSelfAttr = 460;
-    LsmListModules = 461;
-    Mseal = 462;
-    Setxattrat = 463;
-    Getxattrat = 464;
-    Listxattrat = 465;
-    Removexattrat = 466;
-    OpenTreeAttr = 467;
-    FileGetattr = 468;
-    FileSetattr = 469;
-    Listns = 470;
-    RseqSliceYield = 471;
-    Syscalls = 472;
+pub enum SYSCALL {
+    READ = 0;
+    WRITE = 1;
+    OPEN = 2;
+    CLOSE = 3;
+    STAT = 4;
+    FSTAT = 5;
+    LSTAT = 6;
+    POLL = 7;
+    LSEEK = 8;
+    MMAP = 9;
+    MPROTECT = 10;
+    MUNMAP = 11;
+    BRK = 12;
+    RT_SIGACTION = 13;
+    RT_SIGPROCMASK = 14;
+    RT_SIGRETURN = 15;
+    IOCTL = 16;
+    PREAD64 = 17;
+    PWRITE64 = 18;
+    READV = 19;
+    WRITEV = 20;
+    ACCESS = 21;
+    PIPE = 22;
+    SELECT = 23;
+    SCHED_YIELD = 24;
+    MREMAP = 25;
+    MSYNC = 26;
+    MINCORE = 27;
+    MADVISE = 28;
+    SHMGET = 29;
+    SHMAT = 30;
+    SHMCTL = 31;
+    DUP = 32;
+    DUP2 = 33;
+    PAUSE = 34;
+    NANOSLEEP = 35;
+    GETITIMER = 36;
+    ALARM = 37;
+    SETITIMER = 38;
+    GETPID = 39;
+    SENDFILE = 40;
+    SOCKET = 41;
+    CONNECT = 42;
+    ACCEPT = 43;
+    SENDTO = 44;
+    RECVFROM = 45;
+    SENDMSG = 46;
+    RECVMSG = 47;
+    SHUTDOWN = 48;
+    BIND = 49;
+    LISTEN = 50;
+    GETSOCKNAME = 51;
+    GETPEERNAME = 52;
+    SOCKETPAIR = 53;
+    SETSOCKOPT = 54;
+    GETSOCKOPT = 55;
+    CLONE = 56;
+    FORK = 57;
+    VFORK = 58;
+    EXECVE = 59;
+    EXIT = 60;
+    WAIT4 = 61;
+    KILL = 62;
+    UNAME = 63;
+    SEMGET = 64;
+    SEMOP = 65;
+    SEMCTL = 66;
+    SHMDT = 67;
+    MSGGET = 68;
+    MSGSND = 69;
+    MSGRCV = 70;
+    MSGCTL = 71;
+    FCNTL = 72;
+    FLOCK = 73;
+    FSYNC = 74;
+    FDATASYNC = 75;
+    TRUNCATE = 76;
+    FTRUNCATE = 77;
+    GETDENTS = 78;
+    GETCWD = 79;
+    CHDIR = 80;
+    FCHDIR = 81;
+    RENAME = 82;
+    MKDIR = 83;
+    RMDIR = 84;
+    CREAT = 85;
+    LINK = 86;
+    UNLINK = 87;
+    SYMLINK = 88;
+    READLINK = 89;
+    CHMOD = 90;
+    FCHMOD = 91;
+    CHOWN = 92;
+    FCHOWN = 93;
+    LCHOWN = 94;
+    UMASK = 95;
+    GETTIMEOFDAY = 96;
+    GETRLIMIT = 97;
+    GETRUSAGE = 98;
+    SYSINFO = 99;
+    TIMES = 100;
+    PTRACE = 101;
+    GETUID = 102;
+    SYSLOG = 103;
+    GETGID = 104;
+    SETUID = 105;
+    SETGID = 106;
+    GETEUID = 107;
+    GETEGID = 108;
+    SETPGID = 109;
+    GETPPID = 110;
+    GETPGRP = 111;
+    SETSID = 112;
+    SETREUID = 113;
+    SETREGID = 114;
+    GETGROUPS = 115;
+    SETGROUPS = 116;
+    SETRESUID = 117;
+    GETRESUID = 118;
+    SETRESGID = 119;
+    GETRESGID = 120;
+    GETPGID = 121;
+    SETFSUID = 122;
+    SETFSGID = 123;
+    GETSID = 124;
+    CAPGET = 125;
+    CAPSET = 126;
+    RT_SIGPENDING = 127;
+    RT_SIGTIMEDWAIT = 128;
+    RT_SIGQUEUEINFO = 129;
+    RT_SIGSUSPEND = 130;
+    SIGALTSTACK = 131;
+    UTIME = 132;
+    MKNOD = 133;
+    USELIB = 134;
+    PERSONALITY = 135;
+    USTAT = 136;
+    STATFS = 137;
+    FSTATFS = 138;
+    SYSFS = 139;
+    GETPRIORITY = 140;
+    SETPRIORITY = 141;
+    SCHED_SETPARAM = 142;
+    SCHED_GETPARAM = 143;
+    SCHED_SETSCHEDULER = 144;
+    SCHED_GETSCHEDULER = 145;
+    SCHED_GET_PRIORITY_MAX = 146;
+    SCHED_GET_PRIORITY_MIN = 147;
+    SCHED_RR_GET_INTERVAL = 148;
+    MLOCK = 149;
+    MUNLOCK = 150;
+    MLOCKALL = 151;
+    MUNLOCKALL = 152;
+    VHANGUP = 153;
+    MODIFY_LDT = 154;
+    PIVOT_ROOT = 155;
+    _SYSCTL = 156;
+    PRCTL = 157;
+    ARCH_PRCTL = 158;
+    ADJTIMEX = 159;
+    SETRLIMIT = 160;
+    CHROOT = 161;
+    SYNC = 162;
+    ACCT = 163;
+    SETTIMEOFDAY = 164;
+    MOUNT = 165;
+    UMOUNT2 = 166;
+    SWAPON = 167;
+    SWAPOFF = 168;
+    REBOOT = 169;
+    SETHOSTNAME = 170;
+    SETDOMAINNAME = 171;
+    IOPL = 172;
+    IOPERM = 173;
+    CREATE_MODULE = 174;
+    INIT_MODULE = 175;
+    DELETE_MODULE = 176;
+    GET_KERNEL_SYMS = 177;
+    QUERY_MODULE = 178;
+    QUOTACTL = 179;
+    NFSSERVCTL = 180;
+    GETPMSG = 181;
+    PUTPMSG = 182;
+    AFS_SYSCALL = 183;
+    TUXCALL = 184;
+    SECURITY = 185;
+    GETTID = 186;
+    READAHEAD = 187;
+    SETXATTR = 188;
+    LSETXATTR = 189;
+    FSETXATTR = 190;
+    GETXATTR = 191;
+    LGETXATTR = 192;
+    FGETXATTR = 193;
+    LISTXATTR = 194;
+    LLISTXATTR = 195;
+    FLISTXATTR = 196;
+    REMOVEXATTR = 197;
+    LREMOVEXATTR = 198;
+    FREMOVEXATTR = 199;
+    TKILL = 200;
+    TIME = 201;
+    FUTEX = 202;
+    SCHED_SETAFFINITY = 203;
+    SCHED_GETAFFINITY = 204;
+    SET_THREAD_AREA = 205;
+    IO_SETUP = 206;
+    IO_DESTROY = 207;
+    IO_GETEVENTS = 208;
+    IO_SUBMIT = 209;
+    IO_CANCEL = 210;
+    GET_THREAD_AREA = 211;
+    LOOKUP_DCOOKIE = 212;
+    EPOLL_CREATE = 213;
+    EPOLL_CTL_OLD = 214;
+    EPOLL_WAIT_OLD = 215;
+    REMAP_FILE_PAGES = 216;
+    GETDENTS64 = 217;
+    SET_TID_ADDRESS = 218;
+    RESTART_SYSCALL = 219;
+    SEMTIMEDOP = 220;
+    FADVISE64 = 221;
+    TIMER_CREATE = 222;
+    TIMER_SETTIME = 223;
+    TIMER_GETTIME = 224;
+    TIMER_GETOVERRUN = 225;
+    TIMER_DELETE = 226;
+    CLOCK_SETTIME = 227;
+    CLOCK_GETTIME = 228;
+    CLOCK_GETRES = 229;
+    CLOCK_NANOSLEEP = 230;
+    EXIT_GROUP = 231;
+    EPOLL_WAIT = 232;
+    EPOLL_CTL = 233;
+    TGKILL = 234;
+    UTIMES = 235;
+    VSERVER = 236;
+    MBIND = 237;
+    SET_MEMPOLICY = 238;
+    GET_MEMPOLICY = 239;
+    MQ_OPEN = 240;
+    MQ_UNLINK = 241;
+    MQ_TIMEDSEND = 242;
+    MQ_TIMEDRECEIVE = 243;
+    MQ_NOTIFY = 244;
+    MQ_GETSETATTR = 245;
+    KEXEC_LOAD = 246;
+    WAITID = 247;
+    ADD_KEY = 248;
+    REQUEST_KEY = 249;
+    KEYCTL = 250;
+    IOPRIO_SET = 251;
+    IOPRIO_GET = 252;
+    INOTIFY_INIT = 253;
+    INOTIFY_ADD_WATCH = 254;
+    INOTIFY_RM_WATCH = 255;
+    MIGRATE_PAGES = 256;
+    OPENAT = 257;
+    MKDIRAT = 258;
+    MKNODAT = 259;
+    FCHOWNAT = 260;
+    FUTIMESAT = 261;
+    NEWFSTATAT = 262;
+    UNLINKAT = 263;
+    RENAMEAT = 264;
+    LINKAT = 265;
+    SYMLINKAT = 266;
+    READLINKAT = 267;
+    FCHMODAT = 268;
+    FACCESSAT = 269;
+    PSELECT6 = 270;
+    PPOLL = 271;
+    UNSHARE = 272;
+    SET_ROBUST_LIST = 273;
+    GET_ROBUST_LIST = 274;
+    SPLICE = 275;
+    TEE = 276;
+    SYNC_FILE_RANGE = 277;
+    VMSPLICE = 278;
+    MOVE_PAGES = 279;
+    UTIMENSAT = 280;
+    EPOLL_PWAIT = 281;
+    SIGNALFD = 282;
+    TIMERFD_CREATE = 283;
+    EVENTFD = 284;
+    FALLOCATE = 285;
+    TIMERFD_SETTIME = 286;
+    TIMERFD_GETTIME = 287;
+    ACCEPT4 = 288;
+    SIGNALFD4 = 289;
+    EVENTFD2 = 290;
+    EPOLL_CREATE1 = 291;
+    DUP3 = 292;
+    PIPE2 = 293;
+    INOTIFY_INIT1 = 294;
+    PREADV = 295;
+    PWRITEV = 296;
+    RT_TGSIGQUEUEINFO = 297;
+    PERF_EVENT_OPEN = 298;
+    RECVMMSG = 299;
+    FANOTIFY_INIT = 300;
+    FANOTIFY_MARK = 301;
+    PRLIMIT64 = 302;
+    NAME_TO_HANDLE_AT = 303;
+    OPEN_BY_HANDLE_AT = 304;
+    CLOCK_ADJTIME = 305;
+    SYNCFS = 306;
+    SENDMMSG = 307;
+    SETNS = 308;
+    GETCPU = 309;
+    PROCESS_VM_READV = 310;
+    PROCESS_VM_WRITEV = 311;
+    KCMP = 312;
+    FINIT_MODULE = 313;
+    SCHED_SETATTR = 314;
+    SCHED_GETATTR = 315;
+    RENAMEAT2 = 316;
+    SECCOMP = 317;
+    GETRANDOM = 318;
+    MEMFD_CREATE = 319;
+    KEXEC_FILE_LOAD = 320;
+    BPF = 321;
+    EXECVEAT = 322;
+    USERFAULTFD = 323;
+    MEMBARRIER = 324;
+    MLOCK2 = 325;
+    COPY_FILE_RANGE = 326;
+    PREADV2 = 327;
+    PWRITEV2 = 328;
+    PKEY_MPROTECT = 329;
+    PKEY_ALLOC = 330;
+    PKEY_FREE = 331;
+    STATX = 332;
+    IO_PGETEVENTS = 333;
+    RSEQ = 334;
+    URETPROBE = 335;
+    UPROBE = 336;
+    PIDFD_SEND_SIGNAL = 424;
+    IO_URING_SETUP = 425;
+    IO_URING_ENTER = 426;
+    IO_URING_REGISTER = 427;
+    OPEN_TREE = 428;
+    MOVE_MOUNT = 429;
+    FSOPEN = 430;
+    FSCONFIG = 431;
+    FSMOUNT = 432;
+    FSPICK = 433;
+    PIDFD_OPEN = 434;
+    CLONE3 = 435;
+    CLOSE_RANGE = 436;
+    OPENAT2 = 437;
+    PIDFD_GETFD = 438;
+    FACCESSAT2 = 439;
+    PROCESS_MADVISE = 440;
+    EPOLL_PWAIT2 = 441;
+    MOUNT_SETATTR = 442;
+    QUOTACTL_FD = 443;
+    LANDLOCK_CREATE_RULESET = 444;
+    LANDLOCK_ADD_RULE = 445;
+    LANDLOCK_RESTRICT_SELF = 446;
+    MEMFD_SECRET = 447;
+    PROCESS_MRELEASE = 448;
+    FUTEX_WAITV = 449;
+    SET_MEMPOLICY_HOME_NODE = 450;
+    CACHESTAT = 451;
+    FCHMODAT2 = 452;
+    MAP_SHADOW_STACK = 453;
+    FUTEX_WAKE = 454;
+    FUTEX_WAIT = 455;
+    FUTEX_REQUEUE = 456;
+    STATMOUNT = 457;
+    LISTMOUNT = 458;
+    LSM_GET_SELF_ATTR = 459;
+    LSM_SET_SELF_ATTR = 460;
+    LSM_LIST_MODULES = 461;
+    MSEAL = 462;
+    SETXATTRAT = 463;
+    GETXATTRAT = 464;
+    LISTXATTRAT = 465;
+    REMOVEXATTRAT = 466;
+    OPEN_TREE_ATTR = 467;
+    FILE_GETATTR = 468;
+    FILE_SETATTR = 469;
+    LISTNS = 470;
+    RSEQ_SLICE_YIELD = 471;
+    SYSCALLS = 472;
 }
 
 pub i64 sys_read(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Read, a1, a2, a3);
+    return syscall3((i64)SYSCALL.READ, a1, a2, a3);
 }
 
 pub i64 sys_write(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Write, a1, a2, a3);
+    return syscall3((i64)SYSCALL.WRITE, a1, a2, a3);
 }
 
 pub i64 sys_open(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Open, a1, a2, a3);
+    return syscall3((i64)SYSCALL.OPEN, a1, a2, a3);
 }
 
 pub i64 sys_close(i64 a1) {
-    return syscall1((i64)SyscallNum.Close, a1);
+    return syscall1((i64)SYSCALL.CLOSE, a1);
 }
 
 pub i64 sys_stat(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Stat, a1, a2);
+    return syscall2((i64)SYSCALL.STAT, a1, a2);
 }
 
 pub i64 sys_fstat(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Fstat, a1, a2);
+    return syscall2((i64)SYSCALL.FSTAT, a1, a2);
 }
 
 pub i64 sys_lstat(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Lstat, a1, a2);
+    return syscall2((i64)SYSCALL.LSTAT, a1, a2);
 }
 
 pub i64 sys_poll(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Poll, a1, a2, a3);
+    return syscall3((i64)SYSCALL.POLL, a1, a2, a3);
 }
 
 pub i64 sys_lseek(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Lseek, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LSEEK, a1, a2, a3);
 }
 
 pub i64 sys_mmap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Mmap, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.MMAP, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_mprotect(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mprotect, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MPROTECT, a1, a2, a3);
 }
 
 pub i64 sys_munmap(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Munmap, a1, a2);
+    return syscall2((i64)SYSCALL.MUNMAP, a1, a2);
 }
 
 pub i64 sys_brk(i64 a1) {
-    return syscall1((i64)SyscallNum.Brk, a1);
+    return syscall1((i64)SYSCALL.BRK, a1);
 }
 
 pub i64 sys_rt_sigaction(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.RtSigaction, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.RT_SIGACTION, a1, a2, a3, a4);
 }
 
 pub i64 sys_rt_sigprocmask(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.RtSigprocmask, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.RT_SIGPROCMASK, a1, a2, a3, a4);
 }
 
 pub i64 sys_rt_sigreturn() {
-    return syscall0((i64)SyscallNum.RtSigreturn);
+    return syscall0((i64)SYSCALL.RT_SIGRETURN);
 }
 
 pub i64 sys_ioctl(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Ioctl, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IOCTL, a1, a2, a3);
 }
 
 pub i64 sys_pread64(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Pread64, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PREAD64, a1, a2, a3, a4);
 }
 
 pub i64 sys_pwrite64(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Pwrite64, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PWRITE64, a1, a2, a3, a4);
 }
 
 pub i64 sys_readv(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Readv, a1, a2, a3);
+    return syscall3((i64)SYSCALL.READV, a1, a2, a3);
 }
 
 pub i64 sys_writev(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Writev, a1, a2, a3);
+    return syscall3((i64)SYSCALL.WRITEV, a1, a2, a3);
 }
 
 pub i64 sys_access(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Access, a1, a2);
+    return syscall2((i64)SYSCALL.ACCESS, a1, a2);
 }
 
 pub i64 sys_pipe(i64 a1) {
-    return syscall1((i64)SyscallNum.Pipe, a1);
+    return syscall1((i64)SYSCALL.PIPE, a1);
 }
 
 pub i64 sys_select(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Select, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.SELECT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_sched_yield() {
-    return syscall0((i64)SyscallNum.SchedYield);
+    return syscall0((i64)SYSCALL.SCHED_YIELD);
 }
 
 pub i64 sys_mremap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Mremap, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MREMAP, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_msync(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Msync, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MSYNC, a1, a2, a3);
 }
 
 pub i64 sys_mincore(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mincore, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MINCORE, a1, a2, a3);
 }
 
 pub i64 sys_madvise(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Madvise, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MADVISE, a1, a2, a3);
 }
 
 pub i64 sys_shmget(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Shmget, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SHMGET, a1, a2, a3);
 }
 
 pub i64 sys_shmat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Shmat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SHMAT, a1, a2, a3);
 }
 
 pub i64 sys_shmctl(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Shmctl, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SHMCTL, a1, a2, a3);
 }
 
 pub i64 sys_dup(i64 a1) {
-    return syscall1((i64)SyscallNum.Dup, a1);
+    return syscall1((i64)SYSCALL.DUP, a1);
 }
 
 pub i64 sys_dup2(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Dup2, a1, a2);
+    return syscall2((i64)SYSCALL.DUP2, a1, a2);
 }
 
 pub i64 sys_pause() {
-    return syscall0((i64)SyscallNum.Pause);
+    return syscall0((i64)SYSCALL.PAUSE);
 }
 
 pub i64 sys_nanosleep(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Nanosleep, a1, a2);
+    return syscall2((i64)SYSCALL.NANOSLEEP, a1, a2);
 }
 
 pub i64 sys_getitimer(i64 a1) {
-    return syscall1((i64)SyscallNum.Getitimer, a1);
+    return syscall1((i64)SYSCALL.GETITIMER, a1);
 }
 
 pub i64 sys_alarm(i64 a1) {
-    return syscall1((i64)SyscallNum.Alarm, a1);
+    return syscall1((i64)SYSCALL.ALARM, a1);
 }
 
 pub i64 sys_setitimer(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setitimer, a1, a2);
+    return syscall2((i64)SYSCALL.SETITIMER, a1, a2);
 }
 
 pub i64 sys_getpid() {
-    return syscall0((i64)SyscallNum.Getpid);
+    return syscall0((i64)SYSCALL.GETPID);
 }
 
 pub i64 sys_sendfile(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Sendfile, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SENDFILE, a1, a2, a3, a4);
 }
 
 pub i64 sys_socket(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Socket, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SOCKET, a1, a2, a3);
 }
 
 pub i64 sys_connect(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Connect, a1, a2, a3);
+    return syscall3((i64)SYSCALL.CONNECT, a1, a2, a3);
 }
 
 pub i64 sys_accept(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Accept, a1, a2, a3);
+    return syscall3((i64)SYSCALL.ACCEPT, a1, a2, a3);
 }
 
 pub i64 sys_sendto(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Sendto, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.SENDTO, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_recvfrom(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Recvfrom, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.RECVFROM, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_sendmsg(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Sendmsg, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SENDMSG, a1, a2, a3);
 }
 
 pub i64 sys_recvmsg(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Recvmsg, a1, a2, a3);
+    return syscall3((i64)SYSCALL.RECVMSG, a1, a2, a3);
 }
 
 pub i64 sys_shutdown(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Shutdown, a1, a2);
+    return syscall2((i64)SYSCALL.SHUTDOWN, a1, a2);
 }
 
 pub i64 sys_bind(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Bind, a1, a2, a3);
+    return syscall3((i64)SYSCALL.BIND, a1, a2, a3);
 }
 
 pub i64 sys_listen(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Listen, a1, a2);
+    return syscall2((i64)SYSCALL.LISTEN, a1, a2);
 }
 
 pub i64 sys_getsockname(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getsockname, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETSOCKNAME, a1, a2, a3);
 }
 
 pub i64 sys_getpeername(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getpeername, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETPEERNAME, a1, a2, a3);
 }
 
 pub i64 sys_socketpair(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Socketpair, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SOCKETPAIR, a1, a2, a3, a4);
 }
 
 pub i64 sys_setsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Setsockopt, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.SETSOCKOPT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_getsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Getsockopt, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.GETSOCKOPT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_clone(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Clone, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.CLONE, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_fork() {
-    return syscall0((i64)SyscallNum.Fork);
+    return syscall0((i64)SYSCALL.FORK);
 }
 
 pub i64 sys_vfork() {
-    return syscall0((i64)SyscallNum.Vfork);
+    return syscall0((i64)SYSCALL.VFORK);
 }
 
 pub i64 sys_execve(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Execve, a1, a2, a3);
+    return syscall3((i64)SYSCALL.EXECVE, a1, a2, a3);
 }
 
 pub i64 sys_exit(i64 a1) {
-    return syscall1((i64)SyscallNum.Exit, a1);
+    return syscall1((i64)SYSCALL.EXIT, a1);
 }
 
 pub i64 sys_wait4(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Wait4, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.WAIT4, a1, a2, a3, a4);
 }
 
 pub i64 sys_kill(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Kill, a1, a2);
+    return syscall2((i64)SYSCALL.KILL, a1, a2);
 }
 
 pub i64 sys_uname(i64 a1) {
-    return syscall1((i64)SyscallNum.Uname, a1);
+    return syscall1((i64)SYSCALL.UNAME, a1);
 }
 
 pub i64 sys_semget(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Semget, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SEMGET, a1, a2, a3);
 }
 
 pub i64 sys_semop(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Semop, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SEMOP, a1, a2, a3);
 }
 
 pub i64 sys_semctl(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Semctl, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SEMCTL, a1, a2, a3, a4);
 }
 
 pub i64 sys_shmdt(i64 a1) {
-    return syscall1((i64)SyscallNum.Shmdt, a1);
+    return syscall1((i64)SYSCALL.SHMDT, a1);
 }
 
 pub i64 sys_msgget(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Msgget, a1, a2);
+    return syscall2((i64)SYSCALL.MSGGET, a1, a2);
 }
 
 pub i64 sys_msgsnd(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Msgsnd, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.MSGSND, a1, a2, a3, a4);
 }
 
 pub i64 sys_msgrcv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Msgrcv, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MSGRCV, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_msgctl(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Msgctl, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MSGCTL, a1, a2, a3);
 }
 
 pub i64 sys_fcntl(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Fcntl, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FCNTL, a1, a2, a3);
 }
 
 pub i64 sys_flock(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Flock, a1, a2);
+    return syscall2((i64)SYSCALL.FLOCK, a1, a2);
 }
 
 pub i64 sys_fsync(i64 a1) {
-    return syscall1((i64)SyscallNum.Fsync, a1);
+    return syscall1((i64)SYSCALL.FSYNC, a1);
 }
 
 pub i64 sys_fdatasync(i64 a1) {
-    return syscall1((i64)SyscallNum.Fdatasync, a1);
+    return syscall1((i64)SYSCALL.FDATASYNC, a1);
 }
 
 pub i64 sys_truncate(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Truncate, a1, a2);
+    return syscall2((i64)SYSCALL.TRUNCATE, a1, a2);
 }
 
 pub i64 sys_ftruncate(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Ftruncate, a1, a2);
+    return syscall2((i64)SYSCALL.FTRUNCATE, a1, a2);
 }
 
 pub i64 sys_getdents(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getdents, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETDENTS, a1, a2, a3);
 }
 
 pub i64 sys_getcwd(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Getcwd, a1, a2);
+    return syscall2((i64)SYSCALL.GETCWD, a1, a2);
 }
 
 pub i64 sys_chdir(i64 a1) {
-    return syscall1((i64)SyscallNum.Chdir, a1);
+    return syscall1((i64)SYSCALL.CHDIR, a1);
 }
 
 pub i64 sys_fchdir(i64 a1) {
-    return syscall1((i64)SyscallNum.Fchdir, a1);
+    return syscall1((i64)SYSCALL.FCHDIR, a1);
 }
 
 pub i64 sys_rename(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Rename, a1, a2);
+    return syscall2((i64)SYSCALL.RENAME, a1, a2);
 }
 
 pub i64 sys_mkdir(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Mkdir, a1, a2);
+    return syscall2((i64)SYSCALL.MKDIR, a1, a2);
 }
 
 pub i64 sys_rmdir(i64 a1) {
-    return syscall1((i64)SyscallNum.Rmdir, a1);
+    return syscall1((i64)SYSCALL.RMDIR, a1);
 }
 
 pub i64 sys_creat(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Creat, a1, a2);
+    return syscall2((i64)SYSCALL.CREAT, a1, a2);
 }
 
 pub i64 sys_link(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Link, a1, a2);
+    return syscall2((i64)SYSCALL.LINK, a1, a2);
 }
 
 pub i64 sys_unlink(i64 a1) {
-    return syscall1((i64)SyscallNum.Unlink, a1);
+    return syscall1((i64)SYSCALL.UNLINK, a1);
 }
 
 pub i64 sys_symlink(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Symlink, a1, a2);
+    return syscall2((i64)SYSCALL.SYMLINK, a1, a2);
 }
 
 pub i64 sys_readlink(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Readlink, a1, a2, a3);
+    return syscall3((i64)SYSCALL.READLINK, a1, a2, a3);
 }
 
 pub i64 sys_chmod(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Chmod, a1, a2);
+    return syscall2((i64)SYSCALL.CHMOD, a1, a2);
 }
 
 pub i64 sys_fchmod(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Fchmod, a1, a2);
+    return syscall2((i64)SYSCALL.FCHMOD, a1, a2);
 }
 
 pub i64 sys_chown(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Chown, a1, a2, a3);
+    return syscall3((i64)SYSCALL.CHOWN, a1, a2, a3);
 }
 
 pub i64 sys_fchown(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Fchown, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FCHOWN, a1, a2, a3);
 }
 
 pub i64 sys_lchown(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Lchown, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LCHOWN, a1, a2, a3);
 }
 
 pub i64 sys_umask(i64 a1) {
-    return syscall1((i64)SyscallNum.Umask, a1);
+    return syscall1((i64)SYSCALL.UMASK, a1);
 }
 
 pub i64 sys_gettimeofday(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Gettimeofday, a1, a2);
+    return syscall2((i64)SYSCALL.GETTIMEOFDAY, a1, a2);
 }
 
 pub i64 sys_getrlimit(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Getrlimit, a1, a2);
+    return syscall2((i64)SYSCALL.GETRLIMIT, a1, a2);
 }
 
 pub i64 sys_getrusage(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Getrusage, a1, a2);
+    return syscall2((i64)SYSCALL.GETRUSAGE, a1, a2);
 }
 
 pub i64 sys_sysinfo(i64 a1) {
-    return syscall1((i64)SyscallNum.Sysinfo, a1);
+    return syscall1((i64)SYSCALL.SYSINFO, a1);
 }
 
 pub i64 sys_times(i64 a1) {
-    return syscall1((i64)SyscallNum.Times, a1);
+    return syscall1((i64)SYSCALL.TIMES, a1);
 }
 
 pub i64 sys_ptrace(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Ptrace, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PTRACE, a1, a2, a3, a4);
 }
 
 pub i64 sys_getuid() {
-    return syscall0((i64)SyscallNum.Getuid);
+    return syscall0((i64)SYSCALL.GETUID);
 }
 
 pub i64 sys_syslog(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Syslog, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SYSLOG, a1, a2, a3);
 }
 
 pub i64 sys_getgid() {
-    return syscall0((i64)SyscallNum.Getgid);
+    return syscall0((i64)SYSCALL.GETGID);
 }
 
 pub i64 sys_setuid(i64 a1) {
-    return syscall1((i64)SyscallNum.Setuid, a1);
+    return syscall1((i64)SYSCALL.SETUID, a1);
 }
 
 pub i64 sys_setgid(i64 a1) {
-    return syscall1((i64)SyscallNum.Setgid, a1);
+    return syscall1((i64)SYSCALL.SETGID, a1);
 }
 
 pub i64 sys_geteuid() {
-    return syscall0((i64)SyscallNum.Geteuid);
+    return syscall0((i64)SYSCALL.GETEUID);
 }
 
 pub i64 sys_getegid() {
-    return syscall0((i64)SyscallNum.Getegid);
+    return syscall0((i64)SYSCALL.GETEGID);
 }
 
 pub i64 sys_setpgid(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setpgid, a1, a2);
+    return syscall2((i64)SYSCALL.SETPGID, a1, a2);
 }
 
 pub i64 sys_getppid() {
-    return syscall0((i64)SyscallNum.Getppid);
+    return syscall0((i64)SYSCALL.GETPPID);
 }
 
 pub i64 sys_getpgrp() {
-    return syscall0((i64)SyscallNum.Getpgrp);
+    return syscall0((i64)SYSCALL.GETPGRP);
 }
 
 pub i64 sys_setsid() {
-    return syscall0((i64)SyscallNum.Setsid);
+    return syscall0((i64)SYSCALL.SETSID);
 }
 
 pub i64 sys_setreuid(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setreuid, a1, a2);
+    return syscall2((i64)SYSCALL.SETREUID, a1, a2);
 }
 
 pub i64 sys_setregid(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setregid, a1, a2);
+    return syscall2((i64)SYSCALL.SETREGID, a1, a2);
 }
 
 pub i64 sys_getgroups(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Getgroups, a1, a2);
+    return syscall2((i64)SYSCALL.GETGROUPS, a1, a2);
 }
 
 pub i64 sys_setgroups(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setgroups, a1, a2);
+    return syscall2((i64)SYSCALL.SETGROUPS, a1, a2);
 }
 
 pub i64 sys_setresuid(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Setresuid, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SETRESUID, a1, a2, a3);
 }
 
 pub i64 sys_getresuid(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getresuid, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETRESUID, a1, a2, a3);
 }
 
 pub i64 sys_setresgid(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Setresgid, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SETRESGID, a1, a2, a3);
 }
 
 pub i64 sys_getresgid(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getresgid, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETRESGID, a1, a2, a3);
 }
 
 pub i64 sys_getpgid() {
-    return syscall0((i64)SyscallNum.Getpgid);
+    return syscall0((i64)SYSCALL.GETPGID);
 }
 
 pub i64 sys_setfsuid(i64 a1) {
-    return syscall1((i64)SyscallNum.Setfsuid, a1);
+    return syscall1((i64)SYSCALL.SETFSUID, a1);
 }
 
 pub i64 sys_setfsgid(i64 a1) {
-    return syscall1((i64)SyscallNum.Setfsgid, a1);
+    return syscall1((i64)SYSCALL.SETFSGID, a1);
 }
 
 pub i64 sys_getsid() {
-    return syscall0((i64)SyscallNum.Getsid);
+    return syscall0((i64)SYSCALL.GETSID);
 }
 
 pub i64 sys_capget(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Capget, a1, a2);
+    return syscall2((i64)SYSCALL.CAPGET, a1, a2);
 }
 
 pub i64 sys_capset(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Capset, a1, a2);
+    return syscall2((i64)SYSCALL.CAPSET, a1, a2);
 }
 
 pub i64 sys_rt_sigpending(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.RtSigpending, a1, a2);
+    return syscall2((i64)SYSCALL.RT_SIGPENDING, a1, a2);
 }
 
 pub i64 sys_rt_sigtimedwait(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.RtSigtimedwait, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.RT_SIGTIMEDWAIT, a1, a2, a3, a4);
 }
 
 pub i64 sys_rt_sigqueueinfo(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.RtSigqueueinfo, a1, a2, a3);
+    return syscall3((i64)SYSCALL.RT_SIGQUEUEINFO, a1, a2, a3);
 }
 
 pub i64 sys_rt_sigsuspend(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.RtSigsuspend, a1, a2);
+    return syscall2((i64)SYSCALL.RT_SIGSUSPEND, a1, a2);
 }
 
 pub i64 sys_sigaltstack(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Sigaltstack, a1, a2);
+    return syscall2((i64)SYSCALL.SIGALTSTACK, a1, a2);
 }
 
 pub i64 sys_utime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Utime, a1, a2);
+    return syscall2((i64)SYSCALL.UTIME, a1, a2);
 }
 
 pub i64 sys_mknod(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mknod, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MKNOD, a1, a2, a3);
 }
 
 pub i64 sys_uselib(i64 a1) {
-    return syscall1((i64)SyscallNum.Uselib, a1);
+    return syscall1((i64)SYSCALL.USELIB, a1);
 }
 
 pub i64 sys_personality(i64 a1) {
-    return syscall1((i64)SyscallNum.Personality, a1);
+    return syscall1((i64)SYSCALL.PERSONALITY, a1);
 }
 
 pub i64 sys_ustat(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Ustat, a1, a2);
+    return syscall2((i64)SYSCALL.USTAT, a1, a2);
 }
 
 pub i64 sys_statfs(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Statfs, a1, a2);
+    return syscall2((i64)SYSCALL.STATFS, a1, a2);
 }
 
 pub i64 sys_fstatfs(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Fstatfs, a1, a2);
+    return syscall2((i64)SYSCALL.FSTATFS, a1, a2);
 }
 
 pub i64 sys_sysfs(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Sysfs, a1, a2);
+    return syscall2((i64)SYSCALL.SYSFS, a1, a2);
 }
 
 pub i64 sys_getpriority(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Getpriority, a1, a2);
+    return syscall2((i64)SYSCALL.GETPRIORITY, a1, a2);
 }
 
 pub i64 sys_setpriority(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Setpriority, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SETPRIORITY, a1, a2, a3);
 }
 
 pub i64 sys_sched_setparam(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.SchedSetparam, a1, a2);
+    return syscall2((i64)SYSCALL.SCHED_SETPARAM, a1, a2);
 }
 
 pub i64 sys_sched_getparam(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.SchedGetparam, a1, a2);
+    return syscall2((i64)SYSCALL.SCHED_GETPARAM, a1, a2);
 }
 
 pub i64 sys_sched_setscheduler(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SchedSetscheduler, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SCHED_SETSCHEDULER, a1, a2, a3);
 }
 
 pub i64 sys_sched_getscheduler(i64 a1) {
-    return syscall1((i64)SyscallNum.SchedGetscheduler, a1);
+    return syscall1((i64)SYSCALL.SCHED_GETSCHEDULER, a1);
 }
 
 pub i64 sys_sched_get_priority_max(i64 a1) {
-    return syscall1((i64)SyscallNum.SchedGetPriorityMax, a1);
+    return syscall1((i64)SYSCALL.SCHED_GET_PRIORITY_MAX, a1);
 }
 
 pub i64 sys_sched_get_priority_min(i64 a1) {
-    return syscall1((i64)SyscallNum.SchedGetPriorityMin, a1);
+    return syscall1((i64)SYSCALL.SCHED_GET_PRIORITY_MIN, a1);
 }
 
 pub i64 sys_sched_rr_get_interval(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.SchedRrGetInterval, a1, a2);
+    return syscall2((i64)SYSCALL.SCHED_RR_GET_INTERVAL, a1, a2);
 }
 
 pub i64 sys_mlock(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Mlock, a1, a2);
+    return syscall2((i64)SYSCALL.MLOCK, a1, a2);
 }
 
 pub i64 sys_munlock(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Munlock, a1, a2);
+    return syscall2((i64)SYSCALL.MUNLOCK, a1, a2);
 }
 
 pub i64 sys_mlockall(i64 a1) {
-    return syscall1((i64)SyscallNum.Mlockall, a1);
+    return syscall1((i64)SYSCALL.MLOCKALL, a1);
 }
 
 pub i64 sys_munlockall() {
-    return syscall0((i64)SyscallNum.Munlockall);
+    return syscall0((i64)SYSCALL.MUNLOCKALL);
 }
 
 pub i64 sys_vhangup() {
-    return syscall0((i64)SyscallNum.Vhangup);
+    return syscall0((i64)SYSCALL.VHANGUP);
 }
 
 pub i64 sys_modify_ldt(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.ModifyLdt, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MODIFY_LDT, a1, a2, a3);
 }
 
 pub i64 sys_pivot_root(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.PivotRoot, a1, a2);
+    return syscall2((i64)SYSCALL.PIVOT_ROOT, a1, a2);
 }
 
 pub i64 sys__sysctl(i64 a1) {
-    return syscall1((i64)SyscallNum.Sysctl, a1);
+    return syscall1((i64)SYSCALL._SYSCTL, a1);
 }
 
 pub i64 sys_prctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Prctl, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PRCTL, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_arch_prctl(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ArchPrctl, a1, a2);
+    return syscall2((i64)SYSCALL.ARCH_PRCTL, a1, a2);
 }
 
 pub i64 sys_adjtimex(i64 a1) {
-    return syscall1((i64)SyscallNum.Adjtimex, a1);
+    return syscall1((i64)SYSCALL.ADJTIMEX, a1);
 }
 
 pub i64 sys_setrlimit(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setrlimit, a1, a2);
+    return syscall2((i64)SYSCALL.SETRLIMIT, a1, a2);
 }
 
 pub i64 sys_chroot(i64 a1) {
-    return syscall1((i64)SyscallNum.Chroot, a1);
+    return syscall1((i64)SYSCALL.CHROOT, a1);
 }
 
 pub i64 sys_sync() {
-    return syscall0((i64)SyscallNum.Sync);
+    return syscall0((i64)SYSCALL.SYNC);
 }
 
 pub i64 sys_acct(i64 a1) {
-    return syscall1((i64)SyscallNum.Acct, a1);
+    return syscall1((i64)SYSCALL.ACCT, a1);
 }
 
 pub i64 sys_settimeofday(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Settimeofday, a1, a2);
+    return syscall2((i64)SYSCALL.SETTIMEOFDAY, a1, a2);
 }
 
 pub i64 sys_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Mount, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MOUNT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_umount2(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Umount2, a1, a2);
+    return syscall2((i64)SYSCALL.UMOUNT2, a1, a2);
 }
 
 pub i64 sys_swapon(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Swapon, a1, a2);
+    return syscall2((i64)SYSCALL.SWAPON, a1, a2);
 }
 
 pub i64 sys_swapoff(i64 a1) {
-    return syscall1((i64)SyscallNum.Swapoff, a1);
+    return syscall1((i64)SYSCALL.SWAPOFF, a1);
 }
 
 pub i64 sys_reboot(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Reboot, a1, a2, a3);
+    return syscall3((i64)SYSCALL.REBOOT, a1, a2, a3);
 }
 
 pub i64 sys_sethostname(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Sethostname, a1, a2);
+    return syscall2((i64)SYSCALL.SETHOSTNAME, a1, a2);
 }
 
 pub i64 sys_setdomainname(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setdomainname, a1, a2);
+    return syscall2((i64)SYSCALL.SETDOMAINNAME, a1, a2);
 }
 
 pub i64 sys_iopl(i64 a1) {
-    return syscall1((i64)SyscallNum.Iopl, a1);
+    return syscall1((i64)SYSCALL.IOPL, a1);
 }
 
 pub i64 sys_ioperm(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Ioperm, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IOPERM, a1, a2, a3);
 }
 
 pub i64 sys_create_module(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.CreateModule, a1, a2);
+    return syscall2((i64)SYSCALL.CREATE_MODULE, a1, a2);
 }
 
 pub i64 sys_init_module(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.InitModule, a1, a2, a3);
+    return syscall3((i64)SYSCALL.INIT_MODULE, a1, a2, a3);
 }
 
 pub i64 sys_delete_module(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.DeleteModule, a1, a2);
+    return syscall2((i64)SYSCALL.DELETE_MODULE, a1, a2);
 }
 
 pub i64 sys_get_kernel_syms(i64 a1) {
-    return syscall1((i64)SyscallNum.GetKernelSyms, a1);
+    return syscall1((i64)SYSCALL.GET_KERNEL_SYMS, a1);
 }
 
 pub i64 sys_query_module(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.QueryModule, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.QUERY_MODULE, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_quotactl(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Quotactl, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.QUOTACTL, a1, a2, a3, a4);
 }
 
 pub i64 sys_nfsservctl(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Nfsservctl, a1, a2, a3);
+    return syscall3((i64)SYSCALL.NFSSERVCTL, a1, a2, a3);
 }
 
 pub i64 sys_getpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Getpmsg, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.GETPMSG, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_putpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Putpmsg, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PUTPMSG, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_afs_syscall() {
-    return syscall0((i64)SyscallNum.AfsSyscall);
+    return syscall0((i64)SYSCALL.AFS_SYSCALL);
 }
 
 pub i64 sys_tuxcall() {
-    return syscall0((i64)SyscallNum.Tuxcall);
+    return syscall0((i64)SYSCALL.TUXCALL);
 }
 
 pub i64 sys_security() {
-    return syscall0((i64)SyscallNum.Security);
+    return syscall0((i64)SYSCALL.SECURITY);
 }
 
 pub i64 sys_gettid() {
-    return syscall0((i64)SyscallNum.Gettid);
+    return syscall0((i64)SYSCALL.GETTID);
 }
 
 pub i64 sys_readahead(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Readahead, a1, a2, a3);
+    return syscall3((i64)SYSCALL.READAHEAD, a1, a2, a3);
 }
 
 pub i64 sys_setxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Setxattr, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.SETXATTR, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_lsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Lsetxattr, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.LSETXATTR, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_fsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Fsetxattr, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FSETXATTR, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_getxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Getxattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.GETXATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_lgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Lgetxattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LGETXATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_fgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Fgetxattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FGETXATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_listxattr(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Listxattr, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LISTXATTR, a1, a2, a3);
 }
 
 pub i64 sys_llistxattr(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Llistxattr, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LLISTXATTR, a1, a2, a3);
 }
 
 pub i64 sys_flistxattr(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Flistxattr, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FLISTXATTR, a1, a2, a3);
 }
 
 pub i64 sys_removexattr(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Removexattr, a1, a2);
+    return syscall2((i64)SYSCALL.REMOVEXATTR, a1, a2);
 }
 
 pub i64 sys_lremovexattr(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Lremovexattr, a1, a2);
+    return syscall2((i64)SYSCALL.LREMOVEXATTR, a1, a2);
 }
 
 pub i64 sys_fremovexattr(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Fremovexattr, a1, a2);
+    return syscall2((i64)SYSCALL.FREMOVEXATTR, a1, a2);
 }
 
 pub i64 sys_tkill(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Tkill, a1, a2);
+    return syscall2((i64)SYSCALL.TKILL, a1, a2);
 }
 
 pub i64 sys_time(i64 a1) {
-    return syscall1((i64)SyscallNum.Time, a1);
+    return syscall1((i64)SYSCALL.TIME, a1);
 }
 
 pub i64 sys_futex(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Futex, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.FUTEX, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_sched_setaffinity(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SchedSetaffinity, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SCHED_SETAFFINITY, a1, a2, a3);
 }
 
 pub i64 sys_sched_getaffinity(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SchedGetaffinity, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SCHED_GETAFFINITY, a1, a2, a3);
 }
 
 pub i64 sys_set_thread_area(i64 a1) {
-    return syscall1((i64)SyscallNum.SetThreadArea, a1);
+    return syscall1((i64)SYSCALL.SET_THREAD_AREA, a1);
 }
 
 pub i64 sys_io_setup(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.IoSetup, a1, a2);
+    return syscall2((i64)SYSCALL.IO_SETUP, a1, a2);
 }
 
 pub i64 sys_io_destroy(i64 a1) {
-    return syscall1((i64)SyscallNum.IoDestroy, a1);
+    return syscall1((i64)SYSCALL.IO_DESTROY, a1);
 }
 
 pub i64 sys_io_getevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.IoGetevents, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.IO_GETEVENTS, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_io_submit(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.IoSubmit, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IO_SUBMIT, a1, a2, a3);
 }
 
 pub i64 sys_io_cancel(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.IoCancel, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IO_CANCEL, a1, a2, a3);
 }
 
 pub i64 sys_get_thread_area(i64 a1) {
-    return syscall1((i64)SyscallNum.GetThreadArea, a1);
+    return syscall1((i64)SYSCALL.GET_THREAD_AREA, a1);
 }
 
 pub i64 sys_lookup_dcookie(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.LookupDcookie, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LOOKUP_DCOOKIE, a1, a2, a3);
 }
 
 pub i64 sys_epoll_create(i64 a1) {
-    return syscall1((i64)SyscallNum.EpollCreate, a1);
+    return syscall1((i64)SYSCALL.EPOLL_CREATE, a1);
 }
 
 pub i64 sys_epoll_ctl_old(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.EpollCtlOld, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.EPOLL_CTL_OLD, a1, a2, a3, a4);
 }
 
 pub i64 sys_epoll_wait_old(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.EpollWaitOld, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.EPOLL_WAIT_OLD, a1, a2, a3, a4);
 }
 
 pub i64 sys_remap_file_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.RemapFilePages, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.REMAP_FILE_PAGES, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_getdents64(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getdents64, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETDENTS64, a1, a2, a3);
 }
 
 pub i64 sys_set_tid_address(i64 a1) {
-    return syscall1((i64)SyscallNum.SetTidAddress, a1);
+    return syscall1((i64)SYSCALL.SET_TID_ADDRESS, a1);
 }
 
 pub i64 sys_restart_syscall() {
-    return syscall0((i64)SyscallNum.RestartSyscall);
+    return syscall0((i64)SYSCALL.RESTART_SYSCALL);
 }
 
 pub i64 sys_semtimedop(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Semtimedop, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SEMTIMEDOP, a1, a2, a3, a4);
 }
 
 pub i64 sys_fadvise64(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Fadvise64, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FADVISE64, a1, a2, a3, a4);
 }
 
 pub i64 sys_timer_create(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.TimerCreate, a1, a2, a3);
+    return syscall3((i64)SYSCALL.TIMER_CREATE, a1, a2, a3);
 }
 
 pub i64 sys_timer_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.TimerSettime, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.TIMER_SETTIME, a1, a2, a3, a4);
 }
 
 pub i64 sys_timer_gettime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.TimerGettime, a1, a2);
+    return syscall2((i64)SYSCALL.TIMER_GETTIME, a1, a2);
 }
 
 pub i64 sys_timer_getoverrun(i64 a1) {
-    return syscall1((i64)SyscallNum.TimerGetoverrun, a1);
+    return syscall1((i64)SYSCALL.TIMER_GETOVERRUN, a1);
 }
 
 pub i64 sys_timer_delete(i64 a1) {
-    return syscall1((i64)SyscallNum.TimerDelete, a1);
+    return syscall1((i64)SYSCALL.TIMER_DELETE, a1);
 }
 
 pub i64 sys_clock_settime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ClockSettime, a1, a2);
+    return syscall2((i64)SYSCALL.CLOCK_SETTIME, a1, a2);
 }
 
 pub i64 sys_clock_gettime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ClockGettime, a1, a2);
+    return syscall2((i64)SYSCALL.CLOCK_GETTIME, a1, a2);
 }
 
 pub i64 sys_clock_getres(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ClockGetres, a1, a2);
+    return syscall2((i64)SYSCALL.CLOCK_GETRES, a1, a2);
 }
 
 pub i64 sys_clock_nanosleep(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.ClockNanosleep, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.CLOCK_NANOSLEEP, a1, a2, a3, a4);
 }
 
 pub i64 sys_exit_group(i64 a1) {
-    return syscall1((i64)SyscallNum.ExitGroup, a1);
+    return syscall1((i64)SYSCALL.EXIT_GROUP, a1);
 }
 
 pub i64 sys_epoll_wait(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.EpollWait, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.EPOLL_WAIT, a1, a2, a3, a4);
 }
 
 pub i64 sys_epoll_ctl(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.EpollCtl, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.EPOLL_CTL, a1, a2, a3, a4);
 }
 
 pub i64 sys_tgkill(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Tgkill, a1, a2, a3);
+    return syscall3((i64)SYSCALL.TGKILL, a1, a2, a3);
 }
 
 pub i64 sys_utimes(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Utimes, a1, a2);
+    return syscall2((i64)SYSCALL.UTIMES, a1, a2);
 }
 
 pub i64 sys_vserver() {
-    return syscall0((i64)SyscallNum.Vserver);
+    return syscall0((i64)SYSCALL.VSERVER);
 }
 
 pub i64 sys_mbind(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Mbind, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.MBIND, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_set_mempolicy(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SetMempolicy, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SET_MEMPOLICY, a1, a2, a3);
 }
 
 pub i64 sys_get_mempolicy(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.GetMempolicy, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.GET_MEMPOLICY, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_mq_open(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.MqOpen, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.MQ_OPEN, a1, a2, a3, a4);
 }
 
 pub i64 sys_mq_unlink(i64 a1) {
-    return syscall1((i64)SyscallNum.MqUnlink, a1);
+    return syscall1((i64)SYSCALL.MQ_UNLINK, a1);
 }
 
 pub i64 sys_mq_timedsend(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.MqTimedsend, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MQ_TIMEDSEND, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_mq_timedreceive(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.MqTimedreceive, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MQ_TIMEDRECEIVE, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_mq_notify(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.MqNotify, a1, a2);
+    return syscall2((i64)SYSCALL.MQ_NOTIFY, a1, a2);
 }
 
 pub i64 sys_mq_getsetattr(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.MqGetsetattr, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MQ_GETSETATTR, a1, a2, a3);
 }
 
 pub i64 sys_kexec_load(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.KexecLoad, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.KEXEC_LOAD, a1, a2, a3, a4);
 }
 
 pub i64 sys_waitid(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Waitid, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.WAITID, a1, a2, a3, a4);
 }
 
 pub i64 sys_add_key(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.AddKey, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.ADD_KEY, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_request_key(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.RequestKey, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.REQUEST_KEY, a1, a2, a3, a4);
 }
 
 pub i64 sys_keyctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Keyctl, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.KEYCTL, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_ioprio_set(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.IoprioSet, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IOPRIO_SET, a1, a2, a3);
 }
 
 pub i64 sys_ioprio_get(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.IoprioGet, a1, a2);
+    return syscall2((i64)SYSCALL.IOPRIO_GET, a1, a2);
 }
 
 pub i64 sys_inotify_init() {
-    return syscall0((i64)SyscallNum.InotifyInit);
+    return syscall0((i64)SYSCALL.INOTIFY_INIT);
 }
 
 pub i64 sys_inotify_add_watch(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.InotifyAddWatch, a1, a2, a3);
+    return syscall3((i64)SYSCALL.INOTIFY_ADD_WATCH, a1, a2, a3);
 }
 
 pub i64 sys_inotify_rm_watch(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.InotifyRmWatch, a1, a2);
+    return syscall2((i64)SYSCALL.INOTIFY_RM_WATCH, a1, a2);
 }
 
 pub i64 sys_migrate_pages(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.MigratePages, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.MIGRATE_PAGES, a1, a2, a3, a4);
 }
 
 pub i64 sys_openat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Openat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.OPENAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_mkdirat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mkdirat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MKDIRAT, a1, a2, a3);
 }
 
 pub i64 sys_mknodat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Mknodat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.MKNODAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_fchownat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Fchownat, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FCHOWNAT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_futimesat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Futimesat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FUTIMESAT, a1, a2, a3);
 }
 
 pub i64 sys_newfstatat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Newfstatat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.NEWFSTATAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_unlinkat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Unlinkat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.UNLINKAT, a1, a2, a3);
 }
 
 pub i64 sys_renameat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Renameat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.RENAMEAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_linkat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Linkat, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.LINKAT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_symlinkat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Symlinkat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SYMLINKAT, a1, a2, a3);
 }
 
 pub i64 sys_readlinkat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Readlinkat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.READLINKAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_fchmodat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Fchmodat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FCHMODAT, a1, a2, a3);
 }
 
 pub i64 sys_faccessat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Faccessat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FACCESSAT, a1, a2, a3);
 }
 
 pub i64 sys_pselect6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Pselect6, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.PSELECT6, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_ppoll(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Ppoll, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PPOLL, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_unshare(i64 a1) {
-    return syscall1((i64)SyscallNum.Unshare, a1);
+    return syscall1((i64)SYSCALL.UNSHARE, a1);
 }
 
 pub i64 sys_set_robust_list(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.SetRobustList, a1, a2);
+    return syscall2((i64)SYSCALL.SET_ROBUST_LIST, a1, a2);
 }
 
 pub i64 sys_get_robust_list(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.GetRobustList, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GET_ROBUST_LIST, a1, a2, a3);
 }
 
 pub i64 sys_splice(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Splice, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SPLICE, a1, a2, a3, a4);
 }
 
 pub i64 sys_tee(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Tee, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.TEE, a1, a2, a3, a4);
 }
 
 pub i64 sys_sync_file_range(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.SyncFileRange, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SYNC_FILE_RANGE, a1, a2, a3, a4);
 }
 
 pub i64 sys_vmsplice(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Vmsplice, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.VMSPLICE, a1, a2, a3, a4);
 }
 
 pub i64 sys_move_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.MovePages, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.MOVE_PAGES, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_utimensat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Utimensat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.UTIMENSAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_epoll_pwait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.EpollPwait, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.EPOLL_PWAIT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_signalfd(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Signalfd, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SIGNALFD, a1, a2, a3);
 }
 
 pub i64 sys_timerfd_create(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.TimerfdCreate, a1, a2);
+    return syscall2((i64)SYSCALL.TIMERFD_CREATE, a1, a2);
 }
 
 pub i64 sys_eventfd(i64 a1) {
-    return syscall1((i64)SyscallNum.Eventfd, a1);
+    return syscall1((i64)SYSCALL.EVENTFD, a1);
 }
 
 pub i64 sys_fallocate(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Fallocate, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FALLOCATE, a1, a2, a3, a4);
 }
 
 pub i64 sys_timerfd_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.TimerfdSettime, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.TIMERFD_SETTIME, a1, a2, a3, a4);
 }
 
 pub i64 sys_timerfd_gettime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.TimerfdGettime, a1, a2);
+    return syscall2((i64)SYSCALL.TIMERFD_GETTIME, a1, a2);
 }
 
 pub i64 sys_accept4(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Accept4, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.ACCEPT4, a1, a2, a3, a4);
 }
 
 pub i64 sys_signalfd4(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Signalfd4, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SIGNALFD4, a1, a2, a3, a4);
 }
 
 pub i64 sys_eventfd2(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Eventfd2, a1, a2);
+    return syscall2((i64)SYSCALL.EVENTFD2, a1, a2);
 }
 
 pub i64 sys_epoll_create1(i64 a1) {
-    return syscall1((i64)SyscallNum.EpollCreate1, a1);
+    return syscall1((i64)SYSCALL.EPOLL_CREATE1, a1);
 }
 
 pub i64 sys_dup3(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Dup3, a1, a2, a3);
+    return syscall3((i64)SYSCALL.DUP3, a1, a2, a3);
 }
 
 pub i64 sys_pipe2(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Pipe2, a1, a2);
+    return syscall2((i64)SYSCALL.PIPE2, a1, a2);
 }
 
 pub i64 sys_inotify_init1(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.InotifyInit1, a1, a2);
+    return syscall2((i64)SYSCALL.INOTIFY_INIT1, a1, a2);
 }
 
 pub i64 sys_preadv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Preadv, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PREADV, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_pwritev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Pwritev, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PWRITEV, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_rt_tgsigqueueinfo(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.RtTgsigqueueinfo, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.RT_TGSIGQUEUEINFO, a1, a2, a3, a4);
 }
 
 pub i64 sys_perf_event_open(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.PerfEventOpen, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.PERF_EVENT_OPEN, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_recvmmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Recvmmsg, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.RECVMMSG, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_fanotify_init(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.FanotifyInit, a1, a2);
+    return syscall2((i64)SYSCALL.FANOTIFY_INIT, a1, a2);
 }
 
 pub i64 sys_fanotify_mark(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.FanotifyMark, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FANOTIFY_MARK, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_prlimit64(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Prlimit64, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PRLIMIT64, a1, a2, a3, a4);
 }
 
 pub i64 sys_name_to_handle_at(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.NameToHandleAt, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.NAME_TO_HANDLE_AT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_open_by_handle_at(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.OpenByHandleAt, a1, a2, a3);
+    return syscall3((i64)SYSCALL.OPEN_BY_HANDLE_AT, a1, a2, a3);
 }
 
 pub i64 sys_clock_adjtime(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ClockAdjtime, a1, a2);
+    return syscall2((i64)SYSCALL.CLOCK_ADJTIME, a1, a2);
 }
 
 pub i64 sys_syncfs(i64 a1) {
-    return syscall1((i64)SyscallNum.Syncfs, a1);
+    return syscall1((i64)SYSCALL.SYNCFS, a1);
 }
 
 pub i64 sys_sendmmsg(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Sendmmsg, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SENDMMSG, a1, a2, a3, a4);
 }
 
 pub i64 sys_setns(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.Setns, a1, a2);
+    return syscall2((i64)SYSCALL.SETNS, a1, a2);
 }
 
 pub i64 sys_getcpu(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getcpu, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETCPU, a1, a2, a3);
 }
 
 pub i64 sys_process_vm_readv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.ProcessVmReadv, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.PROCESS_VM_READV, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_process_vm_writev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.ProcessVmWritev, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.PROCESS_VM_WRITEV, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_kcmp(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Kcmp, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.KCMP, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_finit_module(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.FinitModule, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FINIT_MODULE, a1, a2, a3);
 }
 
 pub i64 sys_sched_setattr(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SchedSetattr, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SCHED_SETATTR, a1, a2, a3);
 }
 
 pub i64 sys_sched_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.SchedGetattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.SCHED_GETATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_renameat2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Renameat2, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.RENAMEAT2, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_seccomp(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Seccomp, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SECCOMP, a1, a2, a3);
 }
 
 pub i64 sys_getrandom(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Getrandom, a1, a2, a3);
+    return syscall3((i64)SYSCALL.GETRANDOM, a1, a2, a3);
 }
 
 pub i64 sys_memfd_create(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.MemfdCreate, a1, a2);
+    return syscall2((i64)SYSCALL.MEMFD_CREATE, a1, a2);
 }
 
 pub i64 sys_kexec_file_load(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.KexecFileLoad, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.KEXEC_FILE_LOAD, a1, a2, a3, a4);
 }
 
 pub i64 sys_bpf(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Bpf, a1, a2, a3);
+    return syscall3((i64)SYSCALL.BPF, a1, a2, a3);
 }
 
 pub i64 sys_execveat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Execveat, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.EXECVEAT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_userfaultfd(i64 a1) {
-    return syscall1((i64)SyscallNum.Userfaultfd, a1);
+    return syscall1((i64)SYSCALL.USERFAULTFD, a1);
 }
 
 pub i64 sys_membarrier(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Membarrier, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MEMBARRIER, a1, a2, a3);
 }
 
 pub i64 sys_mlock2(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mlock2, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MLOCK2, a1, a2, a3);
 }
 
 pub i64 sys_copy_file_range(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.CopyFileRange, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.COPY_FILE_RANGE, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_preadv2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Preadv2, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.PREADV2, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_pwritev2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Pwritev2, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.PWRITEV2, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_pkey_mprotect(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.PkeyMprotect, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PKEY_MPROTECT, a1, a2, a3, a4);
 }
 
 pub i64 sys_pkey_alloc(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.PkeyAlloc, a1, a2);
+    return syscall2((i64)SYSCALL.PKEY_ALLOC, a1, a2);
 }
 
 pub i64 sys_pkey_free(i64 a1) {
-    return syscall1((i64)SyscallNum.PkeyFree, a1);
+    return syscall1((i64)SYSCALL.PKEY_FREE, a1);
 }
 
 pub i64 sys_statx(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Statx, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.STATX, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_io_pgetevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.IoPgetevents, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.IO_PGETEVENTS, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_rseq(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Rseq, a1, a2, a3);
+    return syscall3((i64)SYSCALL.RSEQ, a1, a2, a3);
 }
 
 pub i64 sys_uretprobe() {
-    return syscall0((i64)SyscallNum.Uretprobe);
+    return syscall0((i64)SYSCALL.URETPROBE);
 }
 
 pub i64 sys_uprobe() {
-    return syscall0((i64)SyscallNum.Uprobe);
+    return syscall0((i64)SYSCALL.UPROBE);
 }
 
 pub i64 sys_pidfd_send_signal(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.PidfdSendSignal, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PIDFD_SEND_SIGNAL, a1, a2, a3, a4);
 }
 
 pub i64 sys_io_uring_setup(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.IoUringSetup, a1, a2);
+    return syscall2((i64)SYSCALL.IO_URING_SETUP, a1, a2);
 }
 
 pub i64 sys_io_uring_enter(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.IoUringEnter, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.IO_URING_ENTER, a1, a2, a3, a4);
 }
 
 pub i64 sys_io_uring_register(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.IoUringRegister, a1, a2, a3);
+    return syscall3((i64)SYSCALL.IO_URING_REGISTER, a1, a2, a3);
 }
 
 pub i64 sys_open_tree(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.OpenTree, a1, a2, a3);
+    return syscall3((i64)SYSCALL.OPEN_TREE, a1, a2, a3);
 }
 
 pub i64 sys_move_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.MoveMount, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MOVE_MOUNT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_fsopen(i64 a1) {
-    return syscall1((i64)SyscallNum.Fsopen, a1);
+    return syscall1((i64)SYSCALL.FSOPEN, a1);
 }
 
 pub i64 sys_fsconfig(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Fsconfig, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FSCONFIG, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_fsmount(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Fsmount, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FSMOUNT, a1, a2, a3);
 }
 
 pub i64 sys_fspick(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Fspick, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FSPICK, a1, a2, a3);
 }
 
 pub i64 sys_pidfd_open(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.PidfdOpen, a1, a2);
+    return syscall2((i64)SYSCALL.PIDFD_OPEN, a1, a2);
 }
 
 pub i64 sys_clone3(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Clone3, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.CLONE3, a1, a2, a3, a4);
 }
 
 pub i64 sys_close_range(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.CloseRange, a1, a2, a3);
+    return syscall3((i64)SYSCALL.CLOSE_RANGE, a1, a2, a3);
 }
 
 pub i64 sys_openat2(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Openat2, a1, a2, a3);
+    return syscall3((i64)SYSCALL.OPENAT2, a1, a2, a3);
 }
 
 pub i64 sys_pidfd_getfd(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.PidfdGetfd, a1, a2, a3);
+    return syscall3((i64)SYSCALL.PIDFD_GETFD, a1, a2, a3);
 }
 
 pub i64 sys_faccessat2(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Faccessat2, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FACCESSAT2, a1, a2, a3);
 }
 
 pub i64 sys_process_madvise(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.ProcessMadvise, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.PROCESS_MADVISE, a1, a2, a3, a4);
 }
 
 pub i64 sys_epoll_pwait2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.EpollPwait2, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.EPOLL_PWAIT2, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_mount_setattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.MountSetattr, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.MOUNT_SETATTR, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_quotactl_fd(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.QuotactlFd, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.QUOTACTL_FD, a1, a2, a3, a4);
 }
 
 pub i64 sys_landlock_create_ruleset(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.LandlockCreateRuleset, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LANDLOCK_CREATE_RULESET, a1, a2, a3);
 }
 
 pub i64 sys_landlock_add_rule(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.LandlockAddRule, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LANDLOCK_ADD_RULE, a1, a2, a3, a4);
 }
 
 pub i64 sys_landlock_restrict_self(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.LandlockRestrictSelf, a1, a2);
+    return syscall2((i64)SYSCALL.LANDLOCK_RESTRICT_SELF, a1, a2);
 }
 
 pub i64 sys_memfd_secret(i64 a1) {
-    return syscall1((i64)SyscallNum.MemfdSecret, a1);
+    return syscall1((i64)SYSCALL.MEMFD_SECRET, a1);
 }
 
 pub i64 sys_process_mrelease(i64 a1, i64 a2) {
-    return syscall2((i64)SyscallNum.ProcessMrelease, a1, a2);
+    return syscall2((i64)SYSCALL.PROCESS_MRELEASE, a1, a2);
 }
 
 pub i64 sys_futex_waitv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.FutexWaitv, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FUTEX_WAITV, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_set_mempolicy_home_node(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.SetMempolicyHomeNode, a1, a2, a3);
+    return syscall3((i64)SYSCALL.SET_MEMPOLICY_HOME_NODE, a1, a2, a3);
 }
 
 pub i64 sys_cachestat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Cachestat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.CACHESTAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_fchmodat2(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Fchmodat2, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FCHMODAT2, a1, a2, a3, a4);
 }
 
 pub i64 sys_map_shadow_stack(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.MapShadowStack, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MAP_SHADOW_STACK, a1, a2, a3);
 }
 
 pub i64 sys_futex_wake(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.FutexWake, a1, a2, a3);
+    return syscall3((i64)SYSCALL.FUTEX_WAKE, a1, a2, a3);
 }
 
 pub i64 sys_futex_wait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.FutexWait, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.FUTEX_WAIT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_futex_requeue(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.FutexRequeue, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.FUTEX_REQUEUE, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_statmount(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Statmount, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.STATMOUNT, a1, a2, a3, a4);
 }
 
 pub i64 sys_listmount(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Listmount, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LISTMOUNT, a1, a2, a3, a4);
 }
 
 pub i64 sys_lsm_get_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.LsmGetSelfAttr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LSM_GET_SELF_ATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_lsm_set_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.LsmSetSelfAttr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LSM_SET_SELF_ATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_lsm_list_modules(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.LsmListModules, a1, a2, a3);
+    return syscall3((i64)SYSCALL.LSM_LIST_MODULES, a1, a2, a3);
 }
 
 pub i64 sys_mseal(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Mseal, a1, a2, a3);
+    return syscall3((i64)SYSCALL.MSEAL, a1, a2, a3);
 }
 
 pub i64 sys_setxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Setxattrat, a1, a2, a3, a4, a5, a6);
+    return syscall6((i64)SYSCALL.SETXATTRAT, a1, a2, a3, a4, a5, a6);
 }
 
 pub i64 sys_getxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.Getxattrat, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.GETXATTRAT, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_listxattrat(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.Listxattrat, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.LISTXATTRAT, a1, a2, a3, a4);
 }
 
 pub i64 sys_removexattrat(i64 a1, i64 a2, i64 a3) {
-    return syscall3((i64)SyscallNum.Removexattrat, a1, a2, a3);
+    return syscall3((i64)SYSCALL.REMOVEXATTRAT, a1, a2, a3);
 }
 
 pub i64 sys_open_tree_attr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
-    return syscall5((i64)SyscallNum.OpenTreeAttr, a1, a2, a3, a4, a5);
+    return syscall5((i64)SYSCALL.OPEN_TREE_ATTR, a1, a2, a3, a4, a5);
 }
 
 pub i64 sys_file_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.FileGetattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FILE_GETATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_file_setattr(i64 a1, i64 a2, i64 a3, i64 a4) {
-    return syscall4((i64)SyscallNum.FileSetattr, a1, a2, a3, a4);
+    return syscall4((i64)SYSCALL.FILE_SETATTR, a1, a2, a3, a4);
 }
 
 pub i64 sys_listns(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Listns, a1, a2, a3, a4, a5, a6);  // arg count guessed
+    return syscall6((i64)SYSCALL.LISTNS, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
 
 pub i64 sys_rseq_slice_yield(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.RseqSliceYield, a1, a2, a3, a4, a5, a6);  // arg count guessed
+    return syscall6((i64)SYSCALL.RSEQ_SLICE_YIELD, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
 
 pub i64 sys_syscalls(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
-    return syscall6((i64)SyscallNum.Syscalls, a1, a2, a3, a4, a5, a6);  // arg count guessed
+    return syscall6((i64)SYSCALL.SYSCALLS, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
