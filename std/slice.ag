@@ -1,9 +1,6 @@
 import std.ops;
 import std.io;
-
-extern "C" {
-    void abort();
-}
+import std.mem.alloc;
 
 pub struct Slice<T> {
     T* data;

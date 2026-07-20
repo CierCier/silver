@@ -1,4 +1,11 @@
 // Test suite for std.optional - Optional and Result types
+//
+// LIMITATION: the aborting paths (Optional.unwrap on none, Result.unwrap
+// on err, Result.get_error on ok) are intentionally NOT exercised here.
+// They terminate the process via abort(), and this harness runs in-process
+// (no child-process spawning), so asserting an abort would kill the test
+// runner itself.  This suite must exit 0; only the non-aborting paths are
+// covered.
 import std.io;
 import std.optional;
 import std.mem.alloc;
@@ -121,7 +128,8 @@ i32 main() {
     assert_true(ok_result.success(), "ok() creates successful result");
     assert_true(!ok_result.failed(), "ok() result is not failed");
     assert_eq_i32(ok_result.unwrap(), 100, "ok() unwrap returns value");
-    assert_eq_i32(ok_result.get_error(), 0, "ok() has no error");
+    // NOTE: get_error() on an ok result now aborts (it previously returned
+    // uninitialized memory), so it is only called on err results below.
     
     // Test: Err creation
     printf("\n--- Err Creation ---\n");
