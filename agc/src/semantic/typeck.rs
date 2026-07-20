@@ -2162,8 +2162,7 @@ impl TypeChecker {
         );
         debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
         debug_assert_eq!(table.symbol_key(symbol_id), Some(symbol_key.as_str()));
-        self.function_symbols.insert(
-            symbol_id,
+        self.function_symbols.entry(symbol_id).or_insert_with(|| {
             FunctionSig {
                 params,
                 return_type,
@@ -2172,8 +2171,8 @@ impl TypeChecker {
                 bounds,
                 source: func.clone(),
                 is_variadic,
-            },
-        );
+            }
+        });
         let overloads = self.functions.entry(func.name.name.clone()).or_default();
         // Identical redeclarations (e.g. the same `extern "C"` prototype
         // inlined from multiple imported files) intern to the same symbol id;
