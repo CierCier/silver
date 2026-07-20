@@ -203,4 +203,6 @@ pub SysResult try_getpid() {
 // Does not return.
 pub void exit_group(i64 code) {
     sys_exit_group(code);
+    sys_exit(code);
+    while (true) {}
 }
