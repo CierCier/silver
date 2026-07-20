@@ -781,7 +781,7 @@ pub void silver_rt_print_bytes(SilverSlice s) {
     if (is_valid_utf8(s.ptr, s.len)) {
         write_stdout(s.ptr, s.len);
     } else {
-        write_stdout((u8*)"<non-utf8>", 10);
+        write_stdout((u8*)"<non-utf8>\n", 11);
     }
 }
 
