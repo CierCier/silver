@@ -227,8 +227,7 @@ i32 main() {
         SilverSlice s_bad;
         s_bad.ptr = bad;
         s_bad.len = 2;
-        silver_rt_print_bytes(s_bad); // prints "<non-utf8>" with NO newline
-        write_stdout((u8*)"\n", 1);
+        silver_rt_print_bytes(s_bad); // prints "<non-utf8>" WITH newline
 
         s.ptr = (u8*)0;
         s.len = 0;
