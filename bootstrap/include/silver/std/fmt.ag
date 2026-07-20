@@ -1,0 +1,808 @@
+// std/fmt.ag — pure-Silver number->text formatting and raw print I/O.
+//
+// This module ports the frozen print surface of silver_runtime/src/runtime/ffi.rs
+// to pure Silver. Output goes straight to the write(2) syscall via std.sys.linux;
+// no libc printf/puts is used on any code path in this file.
+//
+// f64 formatting uses the Grisu2 algorithm (Loitsch 2010), ported from the
+// rapidjson reference implementation (MIT), with digits rendered in positional
+// decimal notation to match Rust's `{}` Display for f64 (which never uses
+// scientific notation: 1e21 prints as "1000000000000000000000").
+//
+// NOTE on unsigned arithmetic: the current codegen lowers all integer division,
+// remainder, comparison and right-shift as SIGNED operations regardless of the
+// declared type, so this file implements logical-shift-right, unsigned compare
+// and unsigned divide-by-10 manually on top of two's-complement i64 semantics.
+
+import std.sys.linux;
+
+// ---------------------------------------------------------------------------
+// Raw fd writers (b): write the full buffer, retrying on EINTR/short writes.
+// Returns the number of bytes written, or a negative errno on failure.
+// ---------------------------------------------------------------------------
+
+i64 __fmt_write_fd(i64 fd, u8* p, i64 len) {
+    i64 written = 0;
+    while (written < len) {
+        i64 r = sys_write(fd, (i64)&p[written], len - written);
+        if (r >= 0) {
+            if (r == 0) {
+                return written;
+            }
+            written = written + r;
+        } else {
+            if (r != -4) { // EINTR = 4
+                return r;
+            }
+        }
+    }
+    return written;
+}
+
+pub i64 write_stdout(u8* p, i64 len) {
+    return __fmt_write_fd(1, p, len);
+}
+
+pub i64 write_stderr(u8* p, i64 len) {
+    return __fmt_write_fd(2, p, len);
+}
+
+// ---------------------------------------------------------------------------
+// Unsigned helpers (codegen emits signed ops for u64, see note above).
+// ---------------------------------------------------------------------------
+
+// Logical (zero-filling) shift right.
+u64 __fmt_lshr(u64 x, i64 n) {
+    if (n <= 0) {
+        return x;
+    }
+    if (n >= 64) {
+        return (u64)0;
+    }
+    // Arithmetic shift by one, clear the smeared sign bit, then the remaining
+    // shift is safe because the top bit is now zero.
+    u64 h = (x >> (u64)1) & (u64)9223372036854775807;
+    return h >> (u64)(n - 1);
+}
+
+// Unsigned a < b.
+bool __fmt_ult(u64 a, u64 b) {
+    i64 sa = (i64)(a ^ (u64)9223372036854775808);
+    i64 sb = (i64)(b ^ (u64)9223372036854775808);
+    return sa < sb;
+}
+
+// Unsigned x / 10. floor(x/10) == floor((x >> 1) / 5) and (x >> 1) always
+// fits in a non-negative i64, so signed division is safe.
+u64 __fmt_udiv10(u64 x) {
+    u64 half = __fmt_lshr(x, 1);
+    return (u64)((i64)half / 5);
+}
+
+// Count leading zeros of a nonzero u64 (returns 64 for 0).
+i64 __fmt_clz64(u64 x) {
+    if (x == (u64)0) {
+        return 64;
+    }
+    i64 n = 0;
+    while ((x & (u64)9223372036854775808) == (u64)0) {
+        x = x << (u64)1;
+        n = n + 1;
+    }
+    return n;
+}
+
+// 10^i as u64 for i in [0, 19]; 0 for i >= 20 (mirrors the rapidjson guard).
+u64 __fmt_pow10(i64 i) {
+    if (i <= 0) { return (u64)1; }
+    if (i == 1) { return (u64)10; }
+    if (i == 2) { return (u64)100; }
+    if (i == 3) { return (u64)1000; }
+    if (i == 4) { return (u64)10000; }
+    if (i == 5) { return (u64)100000; }
+    if (i == 6) { return (u64)1000000; }
+    if (i == 7) { return (u64)10000000; }
+    if (i == 8) { return (u64)100000000; }
+    if (i == 9) { return (u64)1000000000; }
+    if (i == 10) { return (u64)10000000000; }
+    if (i == 11) { return (u64)100000000000; }
+    if (i == 12) { return (u64)1000000000000; }
+    if (i == 13) { return (u64)10000000000000; }
+    if (i == 14) { return (u64)100000000000000; }
+    if (i == 15) { return (u64)1000000000000000; }
+    if (i == 16) { return (u64)10000000000000000; }
+    if (i == 17) { return (u64)100000000000000000; }
+    if (i == 18) { return (u64)1000000000000000000; }
+    if (i == 19) { return (u64)10000000000000000000; }
+    return (u64)0;
+}
+
+// ---------------------------------------------------------------------------
+// Integer / bool formatting (a).
+// All formatters write into a caller-provided buffer and return the length.
+// Buffer requirements: itoa <= 20 bytes, utoa <= 20 bytes, btoa <= 5 bytes.
+// ---------------------------------------------------------------------------
+
+pub i64 utoa(u64 v, u8* buf) {
+    if (v == (u64)0) {
+        buf[0] = (u8)48; // '0'
+        return 1;
+    }
+    i64 n = 0;
+    while (v != (u64)0) {
+        u64 q = __fmt_udiv10(v);
+        i64 digit = (i64)(v - q * (u64)10);
+        buf[n] = (u8)(48 + digit);
+        n = n + 1;
+        v = q;
+    }
+    // Digits were produced least-significant first; reverse in place.
+    i64 lo = 0;
+    i64 hi = n - 1;
+    while (lo < hi) {
+        u8 t = buf[lo];
+        buf[lo] = buf[hi];
+        buf[hi] = t;
+        lo = lo + 1;
+        hi = hi - 1;
+    }
+    return n;
+}
+
+pub i64 itoa(i64 v, u8* buf) {
+    if (v < 0) {
+        buf[0] = (u8)45; // '-'
+        // Two's-complement negation in u64 handles i64::MIN correctly.
+        u64 mag = (u64)0 - (u64)v;
+        return 1 + utoa(mag, &buf[1]);
+    }
+    return utoa((u64)v, buf);
+}
+
+pub i64 btoa(bool v, u8* buf) {
+    if (v) {
+        buf[0] = (u8)116; // 't'
+        buf[1] = (u8)114; // 'r'
+        buf[2] = (u8)117; // 'u'
+        buf[3] = (u8)101; // 'e'
+        return 4;
+    }
+    buf[0] = (u8)102; // 'f'
+    buf[1] = (u8)97;  // 'a'
+    buf[2] = (u8)108; // 'l'
+    buf[3] = (u8)115; // 's'
+    buf[4] = (u8)101; // 'e'
+    return 5;
+}
+
+// ---------------------------------------------------------------------------
+// f64 formatting: Grisu2 core (ported from rapidjson internal/dtoa.h,diyfp.h).
+// ---------------------------------------------------------------------------
+
+struct FmtDiyFp {
+    u64 f;
+    i64 e;
+}
+
+// Cached powers of ten: 10^-348, 10^-340, ..., 10^340 (step 8), normalized to
+// 64-bit significands. Values match rapidjson's kCachedPowers_F/_E tables and
+// were generated with exact big-integer arithmetic (scripts kept in PR notes).
+u64 __fmt_cpow_f(i64 i) {
+    if (i == 0) { return (u64)18054884314459144840; }
+    if (i == 1) { return (u64)13451937075301367670; }
+    if (i == 2) { return (u64)10022474136428063862; }
+    if (i == 3) { return (u64)14934650266808366570; }
+    if (i == 4) { return (u64)11127181549972568877; }
+    if (i == 5) { return (u64)16580792590934885855; }
+    if (i == 6) { return (u64)12353653155963782858; }
+    if (i == 7) { return (u64)18408377700990114895; }
+    if (i == 8) { return (u64)13715310171984221708; }
+    if (i == 9) { return (u64)10218702384817765436; }
+    if (i == 10) { return (u64)15227053142812498563; }
+    if (i == 11) { return (u64)11345038669416679861; }
+    if (i == 12) { return (u64)16905424996341287883; }
+    if (i == 13) { return (u64)12595523146049147757; }
+    if (i == 14) { return (u64)9384396036005875287; }
+    if (i == 15) { return (u64)13983839803942852151; }
+    if (i == 16) { return (u64)10418772551374772303; }
+    if (i == 17) { return (u64)15525180923007089351; }
+    if (i == 18) { return (u64)11567161174868858868; }
+    if (i == 19) { return (u64)17236413322193710309; }
+    if (i == 20) { return (u64)12842128665889583758; }
+    if (i == 21) { return (u64)9568131466127621947; }
+    if (i == 22) { return (u64)14257626930069360058; }
+    if (i == 23) { return (u64)10622759856335341974; }
+    if (i == 24) { return (u64)15829145694278690180; }
+    if (i == 25) { return (u64)11793632577567316726; }
+    if (i == 26) { return (u64)17573882009934360870; }
+    if (i == 27) { return (u64)13093562431584567480; }
+    if (i == 28) { return (u64)9755464219737475723; }
+    if (i == 29) { return (u64)14536774485912137811; }
+    if (i == 30) { return (u64)10830740992659433045; }
+    if (i == 31) { return (u64)16139061738043178685; }
+    if (i == 32) { return (u64)12024538023802026127; }
+    if (i == 33) { return (u64)17917957937422433684; }
+    if (i == 34) { return (u64)13349918974505688015; }
+    if (i == 35) { return (u64)9946464728195732843; }
+    if (i == 36) { return (u64)14821387422376473014; }
+    if (i == 37) { return (u64)11042794154864902060; }
+    if (i == 38) { return (u64)16455045573212060422; }
+    if (i == 39) { return (u64)12259964326927110867; }
+    if (i == 40) { return (u64)18268770466636286478; }
+    if (i == 41) { return (u64)13611294676837538539; }
+    if (i == 42) { return (u64)10141204801825835212; }
+    if (i == 43) { return (u64)15111572745182864684; }
+    if (i == 44) { return (u64)11258999068426240000; }
+    if (i == 45) { return (u64)16777216000000000000; }
+    if (i == 46) { return (u64)12500000000000000000; }
+    if (i == 47) { return (u64)9313225746154785156; }
+    if (i == 48) { return (u64)13877787807814456755; }
+    if (i == 49) { return (u64)10339757656912845936; }
+    if (i == 50) { return (u64)15407439555097886824; }
+    if (i == 51) { return (u64)11479437019748901445; }
+    if (i == 52) { return (u64)17105694144590052135; }
+    if (i == 53) { return (u64)12744735289059618216; }
+    if (i == 54) { return (u64)9495567745759798747; }
+    if (i == 55) { return (u64)14149498560666738074; }
+    if (i == 56) { return (u64)10542197943230523224; }
+    if (i == 57) { return (u64)15709099088952724970; }
+    if (i == 58) { return (u64)11704190886730495818; }
+    if (i == 59) { return (u64)17440603504673385349; }
+    if (i == 60) { return (u64)12994262207056124023; }
+    if (i == 61) { return (u64)9681479787123295682; }
+    if (i == 62) { return (u64)14426529090290212157; }
+    if (i == 63) { return (u64)10748601772107342003; }
+    if (i == 64) { return (u64)16016664761464807395; }
+    if (i == 65) { return (u64)11933345169920330789; }
+    if (i == 66) { return (u64)17782069995880619868; }
+    if (i == 67) { return (u64)13248674568444952270; }
+    if (i == 68) { return (u64)9871031767461413346; }
+    if (i == 69) { return (u64)14708983551653345445; }
+    if (i == 70) { return (u64)10959046745042015199; }
+    if (i == 71) { return (u64)16330252207878254650; }
+    if (i == 72) { return (u64)12166986024289022870; }
+    if (i == 73) { return (u64)18130221999122236476; }
+    if (i == 74) { return (u64)13508068024458167312; }
+    if (i == 75) { return (u64)10064294952495520794; }
+    if (i == 76) { return (u64)14996968138956309548; }
+    if (i == 77) { return (u64)11173611982879273257; }
+    if (i == 78) { return (u64)16649979327439178909; }
+    if (i == 79) { return (u64)12405201291620119593; }
+    if (i == 80) { return (u64)9242595204427927429; }
+    if (i == 81) { return (u64)13772540099066387757; }
+    if (i == 82) { return (u64)10261342003245940623; }
+    if (i == 83) { return (u64)15290591125556738113; }
+    if (i == 84) { return (u64)11392378155556871081; }
+    if (i == 85) { return (u64)16975966327722178521; }
+    if (i == 86) { return (u64)12648080533535911531; }
+    return (u64)0;
+}
+
+i64 __fmt_cpow_e(i64 i) {
+    if (i == 0) { return -1220; }
+    if (i == 1) { return -1193; }
+    if (i == 2) { return -1166; }
+    if (i == 3) { return -1140; }
+    if (i == 4) { return -1113; }
+    if (i == 5) { return -1087; }
+    if (i == 6) { return -1060; }
+    if (i == 7) { return -1034; }
+    if (i == 8) { return -1007; }
+    if (i == 9) { return -980; }
+    if (i == 10) { return -954; }
+    if (i == 11) { return -927; }
+    if (i == 12) { return -901; }
+    if (i == 13) { return -874; }
+    if (i == 14) { return -847; }
+    if (i == 15) { return -821; }
+    if (i == 16) { return -794; }
+    if (i == 17) { return -768; }
+    if (i == 18) { return -741; }
+    if (i == 19) { return -715; }
+    if (i == 20) { return -688; }
+    if (i == 21) { return -661; }
+    if (i == 22) { return -635; }
+    if (i == 23) { return -608; }
+    if (i == 24) { return -582; }
+    if (i == 25) { return -555; }
+    if (i == 26) { return -529; }
+    if (i == 27) { return -502; }
+    if (i == 28) { return -475; }
+    if (i == 29) { return -449; }
+    if (i == 30) { return -422; }
+    if (i == 31) { return -396; }
+    if (i == 32) { return -369; }
+    if (i == 33) { return -343; }
+    if (i == 34) { return -316; }
+    if (i == 35) { return -289; }
+    if (i == 36) { return -263; }
+    if (i == 37) { return -236; }
+    if (i == 38) { return -210; }
+    if (i == 39) { return -183; }
+    if (i == 40) { return -157; }
+    if (i == 41) { return -130; }
+    if (i == 42) { return -103; }
+    if (i == 43) { return -77; }
+    if (i == 44) { return -50; }
+    if (i == 45) { return -24; }
+    if (i == 46) { return 3; }
+    if (i == 47) { return 30; }
+    if (i == 48) { return 56; }
+    if (i == 49) { return 83; }
+    if (i == 50) { return 109; }
+    if (i == 51) { return 136; }
+    if (i == 52) { return 162; }
+    if (i == 53) { return 189; }
+    if (i == 54) { return 216; }
+    if (i == 55) { return 242; }
+    if (i == 56) { return 269; }
+    if (i == 57) { return 295; }
+    if (i == 58) { return 322; }
+    if (i == 59) { return 348; }
+    if (i == 60) { return 375; }
+    if (i == 61) { return 402; }
+    if (i == 62) { return 428; }
+    if (i == 63) { return 455; }
+    if (i == 64) { return 481; }
+    if (i == 65) { return 508; }
+    if (i == 66) { return 534; }
+    if (i == 67) { return 561; }
+    if (i == 68) { return 588; }
+    if (i == 69) { return 614; }
+    if (i == 70) { return 641; }
+    if (i == 71) { return 667; }
+    if (i == 72) { return 694; }
+    if (i == 73) { return 720; }
+    if (i == 74) { return 747; }
+    if (i == 75) { return 774; }
+    if (i == 76) { return 800; }
+    if (i == 77) { return 827; }
+    if (i == 78) { return 853; }
+    if (i == 79) { return 880; }
+    if (i == 80) { return 907; }
+    if (i == 81) { return 933; }
+    if (i == 82) { return 960; }
+    if (i == 83) { return 986; }
+    if (i == 84) { return 1013; }
+    if (i == 85) { return 1039; }
+    if (i == 86) { return 1066; }
+    return 0;
+}
+
+// 64x64 -> high-64 multiply with rounding (DiyFp multiplication).
+FmtDiyFp __fmt_mul(FmtDiyFp x, FmtDiyFp y) {
+    u64 M32 = (u64)4294967295;
+    u64 a = __fmt_lshr(x.f, 32);
+    u64 b = x.f & M32;
+    u64 c = __fmt_lshr(y.f, 32);
+    u64 d = y.f & M32;
+    u64 ac = a * c;
+    u64 bc = b * c;
+    u64 ad = a * d;
+    u64 bd = b * d;
+    u64 tmp = __fmt_lshr(bd, 32) + (ad & M32) + (bc & M32);
+    tmp = tmp + (u64)2147483648; // round
+    FmtDiyFp r;
+    r.f = ac + __fmt_lshr(ad, 32) + __fmt_lshr(bc, 32) + __fmt_lshr(tmp, 32);
+    r.e = x.e + y.e + 64;
+    return r;
+}
+
+// Decimal digit count of a value in [0, 10^9) (rapidjson CountDecimalDigit32).
+i64 __fmt_count_digits(i64 n) {
+    if (n < 10) { return 1; }
+    if (n < 100) { return 2; }
+    if (n < 1000) { return 3; }
+    if (n < 10000) { return 4; }
+    if (n < 100000) { return 5; }
+    if (n < 1000000) { return 6; }
+    if (n < 10000000) { return 7; }
+    if (n < 100000000) { return 8; }
+    return 9;
+}
+
+// Weed out the last digit while the shorter form still lies within the
+// rounding interval (rapidjson GrisuRound).
+void __fmt_grisu_round(u8* buf, i64 len, u64 delta, u64 rest, u64 ten_kappa, u64 wpw) {
+    while (__fmt_ult(rest, wpw)
+        && !__fmt_ult(delta - rest, ten_kappa)
+        && (__fmt_ult(rest + ten_kappa, wpw)
+            || __fmt_ult(rest + ten_kappa - wpw, wpw - rest))) {
+        buf[len - 1] = buf[len - 1] - (u8)1;
+        rest = rest + ten_kappa;
+    }
+}
+
+// Digit generation (rapidjson DigitGen). W ~ value, Mp ~ upper boundary,
+// delta = Mp - Mm. Writes digits to buf, sets *out_len, adjusts *inout_k.
+void __fmt_digit_gen(FmtDiyFp w, FmtDiyFp mp, u64 delta, u8* buf, i64* out_len, i64* inout_k) {
+    i64 neg_e = 0 - mp.e; // in [32, 63]
+    u64 onef = (u64)1 << (u64)neg_e;
+    u64 wpwf = mp.f - w.f;
+    i64 p1 = (i64)__fmt_lshr(mp.f, neg_e); // < 10^9, so signed math is safe
+    u64 p2 = mp.f & (onef - (u64)1);
+    i64 kappa = __fmt_count_digits(p1);
+    i64 len = 0;
+    i64 k = *inout_k;
+
+    while (kappa > 0) {
+        i64 pw = (i64)__fmt_pow10(kappa - 1);
+        i64 d = p1 / pw;
+        p1 = p1 % pw;
+        if (d != 0 || len != 0) {
+            buf[len] = (u8)(48 + d);
+            len = len + 1;
+        }
+        kappa = kappa - 1;
+        u64 tmp = ((u64)p1 << (u64)neg_e) + p2;
+        if (!__fmt_ult(delta, tmp)) { // tmp <= delta
+            *inout_k = k + kappa;
+            *out_len = len;
+            __fmt_grisu_round(buf, len, delta, tmp, __fmt_pow10(kappa) << (u64)neg_e, wpwf);
+            return;
+        }
+    }
+
+    // kappa == 0: generate fractional digits.
+    while (true) {
+        p2 = p2 * (u64)10;
+        delta = delta * (u64)10;
+        i64 d = (i64)__fmt_lshr(p2, neg_e);
+        if (d != 0 || len != 0) {
+            buf[len] = (u8)(48 + d);
+            len = len + 1;
+        }
+        p2 = p2 & (onef - (u64)1);
+        kappa = kappa - 1;
+        if (__fmt_ult(p2, delta)) {
+            *inout_k = k + kappa;
+            *out_len = len;
+            __fmt_grisu_round(buf, len, delta, p2, onef, wpwf * __fmt_pow10(0 - kappa));
+            return;
+        }
+    }
+}
+
+// Grisu2 driver: mbits is the IEEE-754 bit pattern of a positive, finite,
+// nonzero f64. Produces the digit string (no leading/trailing formatting) and
+// the decimal exponent K such that value ~= digits * 10^K.
+void __fmt_grisu2(u64 mbits, u8* digits, i64* out_len, i64* out_k) {
+    u64 FRAC_MASK = (u64)4503599627370495;  // 2^52 - 1
+    u64 HIDDEN = (u64)4503599627370496;     // 2^52
+    i64 biased = (i64)(__fmt_lshr(mbits, 52) & (u64)2047);
+    u64 vf = mbits & FRAC_MASK;
+    i64 ve = -1074;
+    if (biased != 0) {
+        vf = vf + HIDDEN;
+        ve = biased - 1075;
+    }
+
+    // Upper boundary: ((f << 1) + 1, e - 1), normalized (NormalizeBoundary).
+    u64 plf = (vf << (u64)1) + (u64)1;
+    i64 ple = ve - 1;
+    while ((plf & (u64)9007199254740992) == (u64)0) { // hidden << 1 = 2^53
+        plf = plf << (u64)1;
+        ple = ple - 1;
+    }
+    plf = plf << (u64)10;
+    ple = ple - 10;
+
+    // Lower boundary. A power-of-two significand has a half-size gap below it,
+    // except at the smallest normal exponent where the subnormal gap is equal
+    // (rapidjson omits the biased > 1 refinement; Loitsch includes it).
+    u64 mif = (vf << (u64)1) - (u64)1;
+    i64 mie = ve - 1;
+    if (vf == HIDDEN && biased > 1) {
+        mif = (vf << (u64)2) - (u64)1;
+        mie = ve - 2;
+    }
+    mif = mif << (u64)(mie - ple);
+    mie = ple;
+
+    // Normalize the value itself.
+    i64 shift = __fmt_clz64(vf);
+    FmtDiyFp w;
+    w.f = vf << (u64)shift;
+    w.e = ve - shift;
+
+    // Cached power selection (rapidjson GetCachedPower).
+    f64 dk = ((f64)(0 - 61 - ple)) * 0.30102999566398114 + 347.0;
+    i64 k = (i64)dk;
+    if (dk - (f64)k > 0.0) {
+        k = k + 1;
+    }
+    i64 index = k / 8 + 1; // k >= 0 here, so / matches >>
+    i64 bigk = 0 - (-348 + index * 8);
+
+    FmtDiyFp cmk;
+    cmk.f = __fmt_cpow_f(index);
+    cmk.e = __fmt_cpow_e(index);
+
+    FmtDiyFp wq = __fmt_mul(w, cmk);
+    FmtDiyFp pl;
+    pl.f = plf;
+    pl.e = ple;
+    FmtDiyFp wp = __fmt_mul(pl, cmk);
+    FmtDiyFp mi;
+    mi.f = mif;
+    mi.e = mie;
+    FmtDiyFp wm = __fmt_mul(mi, cmk);
+    wm.f = wm.f + (u64)1;
+    wp.f = wp.f - (u64)1;
+    __fmt_digit_gen(wq, wp, wp.f - wm.f, digits, out_len, &bigk);
+    *out_k = bigk;
+}
+
+// Scratch space for Grisu digits (never more than ~18 digits).
+struct FmtDigitsBuf {
+    u8 data[32];
+}
+
+// f64 -> text. Matches Rust `{}` Display for f64: shortest round-trip digits,
+// always positional notation, "NaN"/"inf"/"-inf" for specials, "-0" for
+// negative zero. Worst-case output length is 326 bytes (5e-324): size buffers
+// with FTOA_MAX_LEN.
+pub const i64 FTOA_MAX_LEN = 344;
+
+pub i64 ftoa(f64 v, u8* buf) {
+    f64 local = v;
+    u64* bp = (u64*)&local;
+    u64 bits = *bp;
+    u64 SIGN_BIT = (u64)9223372036854775808;
+    u64 MAG_MASK = (u64)9223372036854775807;
+    u64 FRAC_MASK = (u64)4503599627370495;
+    bool neg = (bits & SIGN_BIT) != (u64)0;
+    u64 mbits = bits & MAG_MASK;
+    i64 biased = (i64)__fmt_lshr(mbits, 52);
+    u64 frac = mbits & FRAC_MASK;
+
+    if (biased == 2047) {
+        if (frac != (u64)0) {
+            // Rust prints "NaN" regardless of sign.
+            buf[0] = (u8)78;  // 'N'
+            buf[1] = (u8)97;  // 'a'
+            buf[2] = (u8)78;  // 'N'
+            return 3;
+        }
+        i64 n = 0;
+        if (neg) {
+            buf[0] = (u8)45; // '-'
+            n = 1;
+        }
+        buf[n] = (u8)105;     // 'i'
+        buf[n + 1] = (u8)110; // 'n'
+        buf[n + 2] = (u8)102; // 'f'
+        return n + 3;
+    }
+
+    i64 n = 0;
+    if (neg) {
+        buf[0] = (u8)45; // '-'
+        n = 1;
+    }
+    if (mbits == (u64)0) {
+        buf[n] = (u8)48; // '0'
+        return n + 1;
+    }
+
+    FmtDigitsBuf db;
+    u8* digits = (u8*)&db;
+    i64 dlen = 0;
+    i64 kexp = 0;
+    __fmt_grisu2(mbits, digits, &dlen, &kexp);
+
+    // Canonicalize: drop trailing zero digits that belong to the fraction.
+    while (dlen > 1 && kexp < 0 && digits[dlen - 1] == (u8)48) {
+        dlen = dlen - 1;
+        kexp = kexp + 1;
+    }
+
+    if (kexp >= 0) {
+        // digits followed by kexp zeros: an integer value.
+        i64 i = 0;
+        while (i < dlen) {
+            buf[n] = digits[i];
+            n = n + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < kexp) {
+            buf[n] = (u8)48;
+            n = n + 1;
+            i = i + 1;
+        }
+        return n;
+    }
+
+    i64 point = dlen + kexp; // decimal point position within the digit string
+    if (point > 0) {
+        // dddd.dddd
+        i64 i = 0;
+        while (i < point) {
+            buf[n] = digits[i];
+            n = n + 1;
+            i = i + 1;
+        }
+        buf[n] = (u8)46; // '.'
+        n = n + 1;
+        while (i < dlen) {
+            buf[n] = digits[i];
+            n = n + 1;
+            i = i + 1;
+        }
+        return n;
+    }
+
+    // 0.000dddd
+    buf[n] = (u8)48;     // '0'
+    buf[n + 1] = (u8)46; // '.'
+    n = n + 2;
+    i64 zeros = 0 - point;
+    i64 i = 0;
+    while (i < zeros) {
+        buf[n] = (u8)48;
+        n = n + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < dlen) {
+        buf[n] = digits[i];
+        n = n + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// UTF-8 validation (exact, rejects overlongs/surrogates/out-of-range).
+// ---------------------------------------------------------------------------
+
+pub bool is_valid_utf8(u8* p, i64 len) {
+    i64 i = 0;
+    while (i < len) {
+        i64 c = (i64)p[i] & (i64)255;
+        if (c < 128) {
+            i = i + 1;
+        } else {
+            i64 need = -1;
+            i64 lo = 128;
+            i64 hi = 191;
+            if (c >= 194 && c <= 223) { need = 1; }
+            if (c == 224) { need = 2; lo = 160; }
+            if (c >= 225 && c <= 236) { need = 2; }
+            if (c == 237) { need = 2; hi = 159; }
+            if (c == 238 || c == 239) { need = 2; }
+            if (c == 240) { need = 3; lo = 144; }
+            if (c >= 241 && c <= 243) { need = 3; }
+            if (c == 244) { need = 3; hi = 143; }
+            if (need < 0) {
+                return false;
+            }
+            if (i + need >= len) {
+                return false;
+            }
+            i64 c1 = (i64)p[i + 1] & (i64)255;
+            if (c1 < lo || c1 > hi) {
+                return false;
+            }
+            i64 j = 2;
+            while (j <= need) {
+                i64 cj = (i64)p[i + j] & (i64)255;
+                if (cj < 128 || cj > 191) {
+                    return false;
+                }
+                j = j + 1;
+            }
+            i = i + need + 1;
+        }
+    }
+    return true;
+}
+
+// Length of a NUL-terminated C string (pure Silver, no libc).
+pub i64 cstr_len(u8* p) {
+    i64 n = 0;
+    while (((i64)p[n] & (i64)255) != 0) {
+        n = n + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// Frozen C-ABI print surface (c). Names and semantics mirror
+// silver_runtime/src/runtime/ffi.rs exactly.
+// ---------------------------------------------------------------------------
+
+// Scratch buffer big enough for the longest positional f64 plus '\n'.
+struct FmtPrintBuf {
+    u8 data[352];
+}
+
+pub void silver_rt_print_i64(i64 v) {
+    FmtPrintBuf b;
+    u8* p = (u8*)&b;
+    i64 n = itoa(v, p);
+    p[n] = (u8)10; // '\n'
+    write_stdout(p, n + 1);
+}
+
+pub void silver_rt_print_u64(u64 v) {
+    FmtPrintBuf b;
+    u8* p = (u8*)&b;
+    i64 n = utoa(v, p);
+    p[n] = (u8)10;
+    write_stdout(p, n + 1);
+}
+
+pub void silver_rt_print_bool(u8 v) {
+    FmtPrintBuf b;
+    u8* p = (u8*)&b;
+    i64 n = btoa(((i64)v & (i64)255) != 0, p);
+    p[n] = (u8)10;
+    write_stdout(p, n + 1);
+}
+
+pub void silver_rt_print_f64(f64 v) {
+    FmtPrintBuf b;
+    u8* p = (u8*)&b;
+    i64 n = ftoa(v, p);
+    p[n] = (u8)10;
+    write_stdout(p, n + 1);
+}
+
+pub void silver_rt_print_cstr(char* ptr) {
+    if (ptr == (char*)0) {
+        write_stdout((u8*)"<null>\n", 7);
+        return;
+    }
+    u8* p = (u8*)ptr;
+    i64 len = cstr_len(p);
+    if (is_valid_utf8(p, len)) {
+        write_stdout(p, len);
+        write_stdout((u8*)"\n", 1);
+    } else {
+        write_stdout((u8*)"<non-utf8>\n", 11);
+    }
+}
+
+// C-friendly borrowed slice; layout matches SilverSlice in ffi.rs.
+struct SilverSlice {
+    u8* ptr;
+    i64 len;
+}
+
+// NB: unlike the other print functions this does NOT append a newline for
+// valid payloads (print! not println! in ffi.rs); the null case does.
+pub void silver_rt_print_bytes(SilverSlice s) {
+    if (s.ptr == (u8*)0) {
+        write_stdout((u8*)"<null>\n", 7);
+        return;
+    }
+    if (is_valid_utf8(s.ptr, s.len)) {
+        write_stdout(s.ptr, s.len);
+    } else {
+        write_stdout((u8*)"<non-utf8>\n", 11);
+    }
+}
+
+// Abort the process with SIGABRT, mirroring std::process::abort() as closely
+// as raw syscalls allow. If SIGABRT is blocked or handled and returns, fall
+// back to the default-SIGABRT exit status (128 + 6).
+pub void silver_rt_abort() {
+    i64 pid = sys_getpid();
+    sys_kill(pid, 6); // SIGABRT
+    sys_exit_group(134);
+}
+
+pub void silver_rt_abort_cstr(char* ptr) {
+    if (ptr != (char*)0) {
+        u8* p = (u8*)ptr;
+        i64 len = cstr_len(p);
+        // ffi.rs prints the message only when it is valid UTF-8.
+        if (is_valid_utf8(p, len)) {
+            write_stderr(p, len);
+            write_stderr((u8*)"\n", 1);
+        }
+    }
+    silver_rt_abort();
+}

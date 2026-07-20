@@ -1,6 +1,11 @@
 // Zero-cost stdio.h wrapper for Silver.
 //
 // The raw C entry points remain available where variadic formatting is useful,
+// The plain print path (println/eprintln) now writes through raw sys_write via
+// std.fmt (pure Silver, no printf/puts); the File API and variadic printf
+// externs below are unchanged for now.
+
+import std.fmt;
 
 struct FILE {
     i32 _opaque;
@@ -299,21 +304,36 @@ File temp_file() {
     return File.from_raw(tmpfile());
 }
 
-// High-level helpers.
+// High-level helpers. These write straight through the write(2) syscall
+// (std.fmt), bypassing libc stdio buffering entirely.
 i32 println(str text) {
-    return puts(text);
+    if (text == (str)0) {
+        return EOF;
+    }
+    u8* p = (u8*)text;
+    i64 len = cstr_len(p);
+    if (write_stdout(p, len) < 0) {
+        return EOF;
+    }
+    if (write_stdout((u8*)"\n", 1) < 0) {
+        return EOF;
+    }
+    return (i32)(len + 1);
 }
 
 i32 eprintln(str text) {
-    File err = stderr_file();
-    if (!err.valid()) {
+    if (text == (str)0) {
         return EOF;
     }
-    i32 result = err.write_str(text);
-    if (result < 0) {
-        return result;
+    u8* p = (u8*)text;
+    i64 len = cstr_len(p);
+    if (write_stderr(p, len) < 0) {
+        return EOF;
     }
-    return err.write_char(10);
+    if (write_stderr((u8*)"\n", 1) < 0) {
+        return EOF;
+    }
+    return (i32)(len + 1);
 }
 
 bool file_exists(str path) {
