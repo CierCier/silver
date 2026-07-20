@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      # llvm-sys 221.x (inkwell feature "llvm22-1") looks for LLVM 22.1 here.
+      LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 22
+        run: |
+          # Securely import GPG key and register official LLVM noble repository
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          # Install the clang/lld toolchain and LLVM development packages
+          sudo apt-get install -y llvm-22-dev libpolly-22-dev libzstd-dev zlib1g-dev
+          /usr/lib/llvm-22/bin/llvm-config --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-llvm-22-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-llvm-22-cargo-
+
+      - name: Run compiler unit tests
+        run: cargo test -p agc
+
+      - name: Run integration tests
+        run: bash tests/run_tests.sh
