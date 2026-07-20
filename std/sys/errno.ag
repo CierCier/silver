@@ -75,7 +75,15 @@ pub i64 errno_of(i64 raw) {
 pub str errno_name(i64 err) {
     i64 e = err;
     if (e < 0) {
-        e = -e;
+        if (is_errno(e)) {
+            e = -e;
+        } else {
+            return "EUNKNOWN";
+        }
+    } else {
+        if (e > ERRNO_MAX) {
+            return "EUNKNOWN";
+        }
     }
     if (e == 0) { return "EOK"; }
     if (e == EPERM) { return "EPERM"; }

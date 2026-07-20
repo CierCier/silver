@@ -39,6 +39,15 @@ void assert_str_eq(str a, str b, str msg) {
     }
 }
 
+i64 str_len(str s) {
+    u8* p = (u8*)s;
+    i64 len = 0;
+    while (p[len] != (u8)0) {
+        len = len + 1;
+    }
+    return len;
+}
+
 i32 main() {
     printf("=== errno / SysResult Tests ===\n\n");
 
@@ -58,6 +67,8 @@ i32 main() {
         assert_str_eq(errno_name(-2), "ENOENT", "errno_name normalizes raw negative returns");
         assert_str_eq(errno_name(0), "EOK", "errno_name(0) == EOK");
         assert_str_eq(errno_name(9999), "EUNKNOWN", "errno_name of unknown value");
+        assert_str_eq(errno_name(-9999), "EUNKNOWN", "errno_name of out-of-range negative value");
+        assert_str_eq(errno_name(ERRNO_MAX + 1), "EUNKNOWN", "errno_name of out-of-range positive value");
     }
 
     // --- raw return classification ---
@@ -100,7 +111,7 @@ i32 main() {
     printf("\n--- try_write ---\n");
     {
         str msg = "  [info] hello from try_write\n";
-        SysResult w = try_write(STDOUT_FD, (u8*)msg, 30);
+        SysResult w = try_write(STDOUT_FD, (u8*)msg, str_len(msg));
         assert_true(w.is_ok(), "write to stdout succeeds");
         assert_eq_i64(w.value, 30, "write returns byte count");
         assert_str_eq(w.err_name(), "EOK", "err_name on success is EOK");
@@ -201,7 +212,7 @@ i32 main() {
 
         // write on a bad fd -> EBADF
         str msg = "x";
-        SysResult w = try_write(-1, (u8*)msg, 1);
+        SysResult w = try_write(-1, (u8*)msg, str_len(msg));
         assert_true(w.err_is(EBADF), "write on bad fd errno == EBADF");
 
         // open of a missing path -> ENOENT
