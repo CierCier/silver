@@ -1,3 +1,28 @@
+// Optional<T> and Result<T, E> — tagged value-or-absence containers.
+//
+// Both types abort the process (with a message on stderr) when a value
+// is extracted from the wrong variant: `unwrap()` on a none/err value
+// and `get_error()` on an ok value.  Use `is_some`/`is_none` (Optional)
+// or `success`/`failed` (Result) to test first, or `unwrap_or` for a
+// non-aborting fallback.
+import std.io;
+
+// NOTE: this module deliberately does NOT declare the `abort()` extern.
+// Several std modules (vec/map/string/slice) already declare their own
+// `abort()` extern, and the type checker reports any call as ambiguous
+// when more than one identical declaration is visible — so adding one
+// here would break every program importing std.optional alongside
+// std.mem or std.map.  `raise(SIGABRT)` delivers the same abort signal
+// without redeclaring `abort`.
+extern "C" {
+    i32 raise(i32 sig);
+}
+
+/// Terminates the process with SIGABRT, like C `abort()`.
+void __optional_abort() {
+    raise(6); // 6 = SIGABRT
+}
+
 struct Optional<T> {
     bool present;
     T thing;
@@ -25,8 +50,16 @@ impl Optional<T> {
         return !self.present;
     }
 
+    /// Extract the contained value.  Aborts if the optional is none.
     T unwrap(Optional<T> self) {
-        return self.thing;
+        if (self.present) {
+            return self.thing;
+        }
+        fprintf(stderr, "Optional::unwrap: called on a none value\n");
+        __optional_abort();
+        // unreachable - dummy return to satisfy return type
+        T dummy;
+        return move dummy;
     }
 
     T unwrap_or(Optional<T> self, T fallback) {
@@ -66,8 +99,16 @@ impl Result<T, E> {
         return !self.ok;
     }
 
+    /// Extract the success value.  Aborts if the result is an error.
     T unwrap(Result<T, E> self) {
-        return self.value;
+        if (self.ok) {
+            return self.value;
+        }
+        fprintf(stderr, "Result::unwrap: called on an err value\n");
+        __optional_abort();
+        // unreachable - dummy return to satisfy return type
+        T dummy;
+        return move dummy;
     }
 
     T unwrap_or(Result<T, E> self, T fallback) {
@@ -77,7 +118,15 @@ impl Result<T, E> {
         return fallback;
     }
 
+    /// Extract the error value.  Aborts if the result is ok.
     E get_error(Result<T, E> self) {
-        return self.error;
+        if (!self.ok) {
+            return self.error;
+        }
+        fprintf(stderr, "Result::get_error: called on an ok value\n");
+        __optional_abort();
+        // unreachable - dummy return to satisfy return type
+        E dummy;
+        return move dummy;
     }
 }
