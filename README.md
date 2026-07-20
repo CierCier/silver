@@ -43,7 +43,7 @@ Silver is still under active development. Expect sharp edges, incomplete feature
 - `bootstrap/` - generated bootstrap compiler and stdlib outputs
 - `examples/` - sample Silver programs
 - `tests/` - project test inputs and supporting material
-- `docs/` - design notes and related documentation
+- `docs/` - project documentation, currently the runtime migration plan (`docs/runtime-migration.md`)
 
 ## Getting Started
 
