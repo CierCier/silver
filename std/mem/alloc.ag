@@ -290,6 +290,11 @@ pub void* malloc(i64 size) {
 }
 
 pub void* calloc(i64 count, i64 size) {
+    if (count > 0) {
+        if (size > 9223372036854775807 / count) {
+            return (void*)0;
+        }
+    }
     i64 total = count * size;
     u8* ptr = mem_alloc_impl(total, 16);
     if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
