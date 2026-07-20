@@ -1,0 +1,95 @@
+// Pure-Silver memory intrinsics — memset/memcpy/memmove/strlen.
+//
+// No libc dependence: every routine is a plain byte loop over raw pointers.
+// The silver_rt_* entry points form part of the frozen C-ABI runtime surface
+// (mirroring silver_runtime/src/runtime/ffi.rs) and are exported unmangled.
+//
+// Semantics (frozen):
+//   - memset/memcpy/memmove return dst and tolerate null pointers (no-op).
+//   - memmove handles overlapping regions in either direction.
+//   - strlen(null) returns 0.
+
+/// Fill `len` bytes at `dst` with `value`. Returns `dst`. Null-tolerant.
+pub u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
+    if (dst == (u8*)0) {
+        return dst;
+    }
+    for (i64 i = 0; i < len; i = i + 1) {
+        dst[i] = value;
+    }
+    return dst;
+}
+
+/// Copy `len` bytes from `src` to `dst` (regions must not overlap).
+/// Returns `dst`. Null-tolerant.
+pub u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
+    if (dst == (u8*)0 || src == (u8*)0) {
+        return dst;
+    }
+    for (i64 i = 0; i < len; i = i + 1) {
+        dst[i] = src[i];
+    }
+    return dst;
+}
+
+/// Copy `len` bytes from `src` to `dst`; overlap is allowed.
+/// Returns `dst`. Null-tolerant.
+pub u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
+    if (dst == (u8*)0 || src == (u8*)0) {
+        return dst;
+    }
+    i64 d = (i64)dst;
+    i64 s = (i64)src;
+    if (d < s) {
+        // Copy forward: dst starts below src, so reads stay ahead of writes.
+        for (i64 i = 0; i < len; i = i + 1) {
+            dst[i] = src[i];
+        }
+    } else {
+        if (d > s) {
+            // Copy backward: dst starts above src.
+            for (i64 i = len - 1; i >= 0; i = i - 1) {
+                dst[i] = src[i];
+            }
+        }
+        // d == s: nothing to do.
+    }
+    return dst;
+}
+
+/// Length of a NUL-terminated string. Returns 0 for null.
+pub i64 silver_rt_strlen(const char* s) {
+    u8* p = (u8*)s;
+    if (p == (u8*)0) {
+        return 0;
+    }
+    i64 n = 0;
+    while (p[n] != (u8)0) {
+        n = n + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// libc-compatible shims.
+//
+// These keep existing std/ call sites (memset/memcpy/memmove/strlen with the
+// classic C signatures) compiling unchanged, routed through the pure-Silver
+// implementations above.
+// ---------------------------------------------------------------------------
+
+pub void* memset(void* ptr, i32 value, i64 num) {
+    return (void*)silver_rt_memset((u8*)ptr, (u8)value, num);
+}
+
+pub void* memcpy(void* dest, const void* src, i64 num) {
+    return (void*)silver_rt_memcpy((u8*)dest, (u8*)src, num);
+}
+
+pub void* memmove(void* dest, const void* src, i64 num) {
+    return (void*)silver_rt_memmove((u8*)dest, (u8*)src, num);
+}
+
+pub i64 strlen(const char* s) {
+    return silver_rt_strlen(s);
+}

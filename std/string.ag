@@ -6,10 +6,10 @@ import std.ops;
 import std.mem.drop;
 
 extern "C" {
-    i64 strlen(const char* s);
     i32 memcmp(const void* s1, const void* s2, i64 n);
     i32 strcmp(const char* s1, const char* s2);
 }
+// strlen comes from std.mem.memory (pure Silver).
 
 struct String {
     u8* data;
