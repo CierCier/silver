@@ -421,10 +421,16 @@ i32 main() {
         u8* ptr_8192 = silver_rt_alloc(0, 8192);
         assert_true(ptr_8192 != (u8*)0, "silver_rt_alloc(0, 8192) returns non-null");
         assert_true(((i64)ptr_8192 % 8192) == 0, "silver_rt_alloc(0, 8192) is aligned");
+
+        // Try alignment larger than MEM_MIN_VALID_ADDR (e.g. 33554432)
+        u8* ptr_huge = silver_rt_alloc(0, 33554432);
+        assert_true(ptr_huge != (u8*)0, "silver_rt_alloc(0, 33554432) returns non-null");
+        assert_true((i64)ptr_huge < 33554432, "silver_rt_alloc(0, 33554432) returns sentinel below threshold");
         
         // Free using the libc-compatible free shim
         free(ptr_4096);
         free(ptr_8192);
+        free(ptr_huge);
         printf("  [PASS] Freeing page-aligned and large-aligned zero-sized allocations is successful\n");
         tests_passed = tests_passed + 1;
     }
