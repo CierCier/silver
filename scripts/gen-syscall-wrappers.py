@@ -28,9 +28,6 @@ def parse_kernel_header(path: str) -> dict[str, int]:
     return syscalls
 
 
-def to_pascal_case(name: str) -> str:
-    """Convert snake_case syscall name to PascalCase enum variant."""
-    return "".join(word.capitalize() for word in name.split("_"))
 
 
 def generate_header(syscall_count: int) -> list[str]:
@@ -51,15 +48,15 @@ def generate_header(syscall_count: int) -> list[str]:
 
 
 def generate_enum(syscalls: dict[str, int]) -> list[str]:
-    """Generate the SyscallNum enum definition."""
+    """Generate the SYSCALL enum definition."""
     lines = [
         "// Syscall number constants",
-        "pub enum SyscallNum {",
+        "pub enum SYSCALL {",
     ]
     names = sorted(syscalls.keys(), key=lambda n: syscalls[n])
     for name in names:
         number = syscalls[name]
-        variant = to_pascal_case(name)
+        variant = name.upper()
         lines.append(f"    {variant} = {number};")
     lines.append("}")
     lines.append("")
@@ -77,25 +74,25 @@ def generate_wrappers(
 
     for name in names:
         number = syscalls[name]
-        variant = to_pascal_case(name)
+        variant = name.upper()
         arg_count = arg_counts.get(name)
 
         if arg_count is None:
             n = 6
             args = [f"a{i}" for i in range(1, n + 1)]
             params = ", ".join(f"i64 a{i}" for i in range(1, n + 1))
-            call_args = ", ".join([f"(i64)SyscallNum.{variant}"] + args)
+            call_args = ", ".join([f"(i64)SYSCALL.{variant}"] + args)
             comment = "  // arg count guessed"
         else:
             n = arg_count
             if n > 0:
                 params = ", ".join(f"i64 a{i}" for i in range(1, n + 1))
                 call_args = ", ".join(
-                    [f"(i64)SyscallNum.{variant}"] + [f"a{i}" for i in range(1, n + 1)]
+                    [f"(i64)SYSCALL.{variant}"] + [f"a{i}" for i in range(1, n + 1)]
                 )
             else:
                 params = ""
-                call_args = f"(i64)SyscallNum.{variant}"
+                call_args = f"(i64)SYSCALL.{variant}"
             comment = ""
 
         wrapper_name = f"sys_{name}"
