@@ -90,7 +90,7 @@ i32 main() {
 }
 ```
 
-Tests return exit code 0 on success, 1 on failure.
+By default, tests return exit code 0 on success and 1 on failure. However, some special test cases (like syscall tests) may intentionally exit with a different status if configured in the harness's `expected_exit` function.
 
 ## Adding New Tests
 
