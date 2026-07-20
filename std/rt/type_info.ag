@@ -1,0 +1,287 @@
+// std/rt/type_info.ag — runtime type descriptors for the Silver type registry.
+//
+// Port of silver_runtime/src/types/type_info.rs (and the TypeId half of
+// registry.rs) to pure Silver.
+//
+// LAYOUT NOTES
+// ────────────
+// Silver enums are C-style integers, so the Rust `TypeKind` payload variants
+// are flattened onto a single `Type` struct:
+//
+//   kind == TYPE_KIND.INT      -> `bits` (width) and `is_signed` are valid
+//   kind == TYPE_KIND.FLOAT    -> `bits` is valid
+//   kind == TYPE_KIND.VEC      -> `elem` is the element TypeId
+//   kind == TYPE_KIND.OPTIONAL -> `elem` is the inner TypeId
+//   kind == TYPE_KIND.STRUCT   -> `struct_data.fields` is valid
+//   kind == TYPE_KIND.ENUM     -> `enum_data.variants` is valid
+//   kind == TYPE_KIND.FUNCTION -> `fn_data.params` / `fn_data.ret` are valid
+//
+// All unused payload fields are kept in a well-defined empty state:
+// `bits` = 0, `is_signed` = false, `elem`/`fn_data.ret` = TypeId.none()
+// (sentinel raw value RT_NO_TYPE_ID = 0xFFFFFFFF), and the struct/enum/fn
+// payload containers hold empty Vecs.
+//
+// DROP DISCIPLINE
+// ───────────────
+// The compiler cascades drops into value-type fields only for variables it
+// tracks (locals/params of Drop-implementing types).  Elements stored inside
+// Vec buffers are NEVER dropped automatically, so every drop() below frees
+// owned members manually (idempotently — null checks live in String/Vec) and
+// container types iterate their elements before releasing the buffer.
+
+import std.io;
+import std.mem.alloc;
+import std.mem.drop;
+import std.mem.vec;
+import std.string;
+
+// Sentinel raw value for "no type" (u32 max).
+const i64 RT_NO_TYPE_ID = 4294967295;
+
+// ---------------------------------------------------------------------------
+// TypeId
+// ---------------------------------------------------------------------------
+
+// Newtype wrapper over the raw u32 index into the registry's type table.
+pub struct TypeId {
+    u32 raw;
+}
+
+impl TypeId {
+    pub TypeId from_raw(u32 raw) {
+        TypeId t;
+        t.raw = raw;
+        return t;
+    }
+
+    /// Sentinel "no type" value (raw == RT_NO_TYPE_ID).
+    pub TypeId none() {
+        return TypeId.from_raw((u32)RT_NO_TYPE_ID);
+    }
+
+    pub bool is_none(TypeId self) {
+        return self.raw == (u32)RT_NO_TYPE_ID;
+    }
+
+    pub bool is_some(TypeId self) {
+        return self.raw != (u32)RT_NO_TYPE_ID;
+    }
+
+    pub bool eq(TypeId self, TypeId other) {
+        return self.raw == other.raw;
+    }
+
+    // The 15 builtin type ids (fixed indices in every registry).
+    pub TypeId UNIT() { return TypeId.from_raw((u32)0); }
+    pub TypeId BOOL() { return TypeId.from_raw((u32)1); }
+    pub TypeId I8() { return TypeId.from_raw((u32)2); }
+    pub TypeId I16() { return TypeId.from_raw((u32)3); }
+    pub TypeId I32() { return TypeId.from_raw((u32)4); }
+    pub TypeId I64() { return TypeId.from_raw((u32)5); }
+    pub TypeId I128() { return TypeId.from_raw((u32)6); }
+    pub TypeId U8() { return TypeId.from_raw((u32)7); }
+    pub TypeId U16() { return TypeId.from_raw((u32)8); }
+    pub TypeId U32() { return TypeId.from_raw((u32)9); }
+    pub TypeId U64() { return TypeId.from_raw((u32)10); }
+    pub TypeId U128() { return TypeId.from_raw((u32)11); }
+    pub TypeId F32() { return TypeId.from_raw((u32)12); }
+    pub TypeId F64() { return TypeId.from_raw((u32)13); }
+    pub TypeId STRING() { return TypeId.from_raw((u32)14); }
+}
+
+// ---------------------------------------------------------------------------
+// TypeKind discriminants (C-style; payload lives on Type — see LAYOUT NOTES)
+// ---------------------------------------------------------------------------
+
+pub enum TYPE_KIND {
+    UNIT = 0;
+    BOOL = 1;
+    INT = 2;
+    FLOAT = 3;
+    STRING = 4;
+    VEC = 5;
+    OPTIONAL = 6;
+    STRUCT = 7;
+    ENUM = 8;
+    FUNCTION = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate payloads
+// ---------------------------------------------------------------------------
+
+pub struct Field {
+    String name;
+    TypeId ty;
+}
+
+impl Drop<Field> for Field {
+    void drop(Field* self) {
+        self.name.drop();
+    }
+}
+
+pub struct StructType {
+    Vec<Field> fields;
+}
+
+impl StructType {
+    pub StructType new() {
+        StructType s;
+        s.fields = Vec<Field>.new();
+        return move s;
+    }
+}
+
+impl Drop<StructType> for StructType {
+    void drop(StructType* self) {
+        i64 i = 0;
+        while (i < self.fields.len()) {
+            Field* f = self.fields.get_ptr(i);
+            f.drop();
+            i = i + 1;
+        }
+        self.fields.drop();
+    }
+}
+
+pub struct EnumVariant {
+    String name;
+    i64 discriminant;
+    Vec<TypeId> payload;
+}
+
+impl Drop<EnumVariant> for EnumVariant {
+    void drop(EnumVariant* self) {
+        self.name.drop();
+        self.payload.drop();
+    }
+}
+
+pub struct EnumType {
+    Vec<EnumVariant> variants;
+}
+
+impl EnumType {
+    pub EnumType new() {
+        EnumType e;
+        e.variants = Vec<EnumVariant>.new();
+        return move e;
+    }
+}
+
+impl Drop<EnumType> for EnumType {
+    void drop(EnumType* self) {
+        i64 i = 0;
+        while (i < self.variants.len()) {
+            EnumVariant* v = self.variants.get_ptr(i);
+            v.drop();
+            i = i + 1;
+        }
+        self.variants.drop();
+    }
+}
+
+pub struct FunctionType {
+    Vec<TypeId> params;
+    TypeId ret;
+}
+
+impl FunctionType {
+    pub FunctionType new() {
+        FunctionType f;
+        f.params = Vec<TypeId>.new();
+        f.ret = TypeId.none();
+        return move f;
+    }
+}
+
+impl Drop<FunctionType> for FunctionType {
+    void drop(FunctionType* self) {
+        self.params.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type — one entry in the registry's type table (flattened TypeKind payload)
+// ---------------------------------------------------------------------------
+
+pub struct Type {
+    TypeId id;
+    String name;
+    i32 kind;              // TYPE_KIND discriminant
+    u16 bits;              // INT / FLOAT width; 0 otherwise
+    bool is_signed;        // INT signedness; false otherwise
+    TypeId elem;           // VEC element / OPTIONAL inner; TypeId.none() otherwise
+    StructType struct_data; // STRUCT fields; empty otherwise
+    EnumType enum_data;     // ENUM variants; empty otherwise
+    FunctionType fn_data;   // FUNCTION params/ret; empty otherwise
+}
+
+impl Type {
+    /// Fresh Type with the given owned name and kind; every payload field is
+    /// initialized to its documented empty state.
+    pub Type new(String name, i32 kind) {
+        Type t;
+        t.id = TypeId.none();
+        t.name = move name;
+        t.kind = kind;
+        t.bits = (u16)0;
+        t.is_signed = false;
+        t.elem = TypeId.none();
+        t.struct_data = StructType.new();
+        t.enum_data = EnumType.new();
+        t.fn_data = FunctionType.new();
+        return move t;
+    }
+}
+
+impl Drop<Type> for Type {
+    void drop(Type* self) {
+        self.name.drop();
+        self.struct_data.drop();
+        self.enum_data.drop();
+        self.fn_data.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small shared helpers (prefixed to avoid collisions across std.rt modules)
+// ---------------------------------------------------------------------------
+
+/// Owned deep copy of a borrowed str.
+pub String rt_type_str_owned(str text) {
+    String s = String.new();
+    s.push_str(text);
+    return move s;
+}
+
+/// Append the decimal representation of an unsigned 32-bit value.
+pub void rt_type_append_u32(String* out, u32 value) {
+    if (value >= (u32)10) {
+        rt_type_append_u32(out, value / (u32)10);
+    }
+    out.push((u8)(48 + (i32)(value % (u32)10)));
+}
+
+// Digits of a non-positive value (avoids overflow on i64 min).
+void rt_type_append_i64_neg(String* out, i64 value) {
+    if (value <= -10) {
+        rt_type_append_i64_neg(out, value / 10);
+    }
+    i64 digit = -(value % 10);
+    out.push((u8)(48 + (i32)digit));
+}
+
+/// Append the decimal representation of a signed 64-bit value.
+pub void rt_type_append_i64(String* out, i64 value) {
+    if (value < 0) {
+        out.push((u8)45); // '-'
+        rt_type_append_i64_neg(out, value);
+        return;
+    }
+    if (value >= 10) {
+        rt_type_append_i64(out, value / 10);
+    }
+    out.push((u8)(48 + (i32)(value % 10)));
+}
