@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [ main ]
   pull_request:
 
 jobs:
@@ -15,11 +16,11 @@ jobs:
 
       - name: Install LLVM 22
         run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 22
-          # llvm.sh installs the clang/lld toolchain; llvm-sys additionally
-          # needs the LLVM development files (llvm-config, headers, libs).
+          # Securely import GPG key and register official LLVM noble repository
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          # Install the clang/lld toolchain and LLVM development packages
           sudo apt-get install -y llvm-22-dev libpolly-22-dev libzstd-dev zlib1g-dev
           /usr/lib/llvm-22/bin/llvm-config --version
 
@@ -31,9 +32,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-llvm-22-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-llvm-22-cargo-
 
       - name: Run compiler unit tests
         run: cargo test -p agc
