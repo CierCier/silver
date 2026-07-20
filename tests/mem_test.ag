@@ -409,6 +409,26 @@ i32 main() {
         
         arena.drop();
     }
+
+    // Test: Aligned zero-sized allocation freed through libc free shim (PR 7 fix verification)
+    printf("\n--- Aligned Zero-Sized Free (PR 7 fix check) ---\n");
+    {
+        // Try page size (4096) and larger (8192) alignments with size 0
+        u8* ptr_4096 = silver_rt_alloc(0, 4096);
+        assert_true(ptr_4096 != (u8*)0, "silver_rt_alloc(0, 4096) returns non-null");
+        assert_true(((i64)ptr_4096 % 4096) == 0, "silver_rt_alloc(0, 4096) is aligned");
+        
+        u8* ptr_8192 = silver_rt_alloc(0, 8192);
+        assert_true(ptr_8192 != (u8*)0, "silver_rt_alloc(0, 8192) returns non-null");
+        assert_true(((i64)ptr_8192 % 8192) == 0, "silver_rt_alloc(0, 8192) is aligned");
+        
+        // Free using the libc-compatible free shim
+        free(ptr_4096);
+        free(ptr_8192);
+        printf("  [PASS] Freeing page-aligned and large-aligned zero-sized allocations is successful\n");
+        tests_passed = tests_passed + 1;
+    }
+
     // Summary
     printf("\n=== Results ===\n");
     printf("Passed: %d\n", tests_passed);

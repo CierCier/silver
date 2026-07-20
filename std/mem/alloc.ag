@@ -37,6 +37,7 @@ i64 g_mem_heads_addr = 0;
 const i64 MEM_NUM_CLASSES = 9;
 const i64 MEM_HEADER_SIZE = 16;
 const i64 MEM_PAGE_SIZE = 4096;
+const i64 MEM_MIN_VALID_ADDR = 33554432; // 32 MiB
 const i64 MEM_CHUNK_SIZE = 65536;
 const i64 MEM_MAX_CLASS_SIZE = 4096;
 
@@ -191,7 +192,7 @@ u8* mem_alloc_impl(i64 size, i64 align) {
 /// Core free. Tolerates null and dangling pointers.
 void mem_free_impl(u8* ptr) {
     i64 a = (i64)ptr;
-    if (a < MEM_PAGE_SIZE) {
+    if (a < MEM_MIN_VALID_ADDR) {
         // Null or dangling (zero-page) pointer: no-op.
         return;
     }
@@ -219,7 +220,7 @@ void mem_free_impl(u8* ptr) {
 /// new_size <= 0 frees and returns a dangling pointer.
 u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
     i64 a = (i64)ptr;
-    if (a < MEM_PAGE_SIZE) {
+    if (a < MEM_MIN_VALID_ADDR) {
         return mem_alloc_impl(new_size, align);
     }
     if (new_size <= 0) {
@@ -251,7 +252,7 @@ pub u8* silver_rt_alloc(i64 size, i64 align) {
 /// Allocate zeroed memory (same contract as silver_rt_alloc).
 pub u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
     u8* ptr = mem_alloc_impl(size, align);
-    if ((i64)ptr >= MEM_PAGE_SIZE) {
+    if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
         i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
         if (header[1] >= 0) {
             // Recycled size-class block: may hold stale data.
@@ -291,7 +292,7 @@ pub void* malloc(i64 size) {
 pub void* calloc(i64 count, i64 size) {
     i64 total = count * size;
     u8* ptr = mem_alloc_impl(total, 16);
-    if ((i64)ptr >= MEM_PAGE_SIZE) {
+    if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
         i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
         if (header[1] >= 0) {
             silver_rt_memset(ptr, (u8)0, total);
