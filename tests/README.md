@@ -1,42 +1,62 @@
-# Silver Standard Library Tests
+# Silver Integration Tests
 
-This directory contains integration tests for the Silver standard library modules.
+This directory contains integration tests for the Silver compiler (`agc`) and
+the standard library. Each `tests/*.ag` file is a standalone program that is
+compiled and executed by the test harness.
 
 ## Test Files
 
 | File | Description |
 |------|-------------|
-| `io_test.ag` | Tests for `std.io` (printf, puts, putchar, etc.) |
-| `mem_test.ag` | Tests for `std.mem` (alloc, free, memset, memcpy, memmove, realloc) |
-| `string_test.ag` | Tests for `std.string` (String object with dynamic memory) |
-| `vec_test.ag` | Tests for `std.vec` (Vec_i32, Vec_i64, Vec_f64, Vec_ptr) |
+| `align_test.ag` | Struct layout and alignment checks |
+| `box_test.ag` | Tests for `std.mem` Box smart pointer |
+| `cascade_drop_test.ag` | Nested/cascading `Drop` behavior |
+| `defer_test.ag` | `defer` block execution order |
 | `file_test.ag` | Tests for `std.file` (File handle, read/write, seek, utilities) |
+| `io_test.ag` | Tests for `std.io` (printf, puts, putchar, etc.) |
+| `map_test.ag` | Tests for `std.map` HashMap |
+| `mem_test.ag` | Tests for `std.mem` (alloc, free, memset, memcpy, memmove, realloc) |
+| `memory_pentest.ag` | Definitive RAII/move/drop-flag regression suite |
+| `memory_stress.ag` | Allocation-heavy stress test |
 | `optional_test.ag` | Tests for `std.optional` (Optional and Result types) |
-
-## Building Tests
-
-From the build directory:
-
-```bash
-# Build all stdlib tests
-make stdlib_tests
-
-# Build a specific test
-make stdlib_string_test
-```
+| `rc_test.ag` | Tests for `std.mem` Rc smart pointer |
+| `str_eq_test.ag` | String equality semantics |
+| `str_key_map_test.ag` | HashMap with string keys |
+| `string_test.ag` | Tests for `std.string` (String object with dynamic memory) |
+| `syscall_test.ag` | Raw inline-asm syscall (`sys_exit(42)`) |
+| `syscall_wrapper_test.ag` | `std.sys.syscall` wrappers (`sys_exit(42)`) |
+| `vec_test.ag` | Tests for `std.vec` (Vec_i32, Vec_i64, Vec_f64, Vec_ptr) |
 
 ## Running Tests
 
+The harness is `tests/run_tests.sh`. It builds `agc` (debug profile), then
+compiles every `tests/*.ag` into a temporary directory and executes it,
+printing a `PASS`/`FAIL` line per test and a final summary. It exits nonzero
+if any test fails.
+
 ```bash
-# Run all stdlib tests via CTest
-ctest -R "^stdlib_" --output-on-failure
+# Run all integration tests (from the repo root, or anywhere)
+bash tests/run_tests.sh
 
-# Or use the convenience target
-make run_stdlib_tests
-
-# Run a specific test directly
-./tests/stdlib_string_test
+# Run a single test by name (the .ag suffix is optional)
+bash tests/run_tests.sh vec_test
 ```
+
+A test fails when it does not compile, or when the produced binary exits with
+an unexpected status. Most tests are expected to exit `0`; per-test expected
+exit codes are declared in `expected_exit` at the top of `run_tests.sh`
+(e.g. the syscall tests intentionally exit `42` via `sys_exit`). Tests that
+must be skipped entirely can be listed in `SKIP_TESTS`, with a comment
+explaining why; the list is currently empty.
+
+Compiler unit tests live in the `agc` crate and are run separately:
+
+```bash
+cargo test -p agc
+```
+
+Both suites run in CI on every push and pull request
+(`.github/workflows/ci.yml`).
 
 ## Test Structure
 
@@ -61,20 +81,21 @@ void assert_true(bool cond, str msg) {
 
 i32 main() {
     // Test cases...
-    
+
     printf("\n=== Results ===\n");
     printf("Passed: %d\n", tests_passed);
     printf("Failed: %d\n", tests_failed);
-    
+
     return tests_failed > 0 ? 1 : 0;
 }
 ```
 
-Tests return exit code 0 on success, 1 on failure, making them compatible with CTest.
+Tests return exit code 0 on success, 1 on failure.
 
 ## Adding New Tests
 
-1. Create a new `.ag` file in this directory
-2. Follow the test structure pattern above
-3. The CMake configuration will automatically discover and add the test
-4. Rebuild to include the new test: `make stdlib_tests`
+1. Create a new `.ag` file in this directory following the pattern above.
+2. The harness discovers `tests/*.ag` automatically; no registration needed.
+3. If the test intentionally exits with a nonzero status, add its expected
+   exit code to `expected_exit` in `run_tests.sh` with a comment.
+4. Run `bash tests/run_tests.sh <name>` to verify it passes.
