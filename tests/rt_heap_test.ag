@@ -1,0 +1,218 @@
+// Test suite for std.rt.heap — generational mark-sweep GC heap.
+// Ports the heap/GC cases from silver_runtime/src/runtime/tests.rs.
+import std.io;
+import std.rt.heap;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+void assert_eq_u32(u32 a, u32 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %u, got %u)\n", msg, b, a);
+    }
+}
+
+Object make_string_object(str text) {
+    String s = String.new();
+    s.push_str(text);
+    return Object.new_string(move s);
+}
+
+i32 main() {
+    printf("=== rt heap tests ===\n\n");
+
+    // --- heap_alloc_and_free_are_safe -----------------------------------
+    printf("--- Alloc and free are generationally safe ---\n");
+    {
+        Heap heap = Heap.new();
+
+        Handle h = heap.alloc(make_string_object("hello"));
+        assert_eq_i64(heap.allocated_count(), 1, "allocated_count=1 after alloc");
+
+        FreeResult fr = heap.free(h);
+        assert_true(fr.ok, "free succeeds for a live handle");
+        assert_true(fr.object.kind == OBJ_KIND_STRING, "freed object is a string");
+        assert_true(fr.object.text.equals("hello"), "freed object kept its payload");
+        assert_eq_i64(heap.allocated_count(), 0, "allocated_count=0 after free");
+
+        // Old handle should be invalid after free (generational).
+        ObjectRef gr = heap.get(h);
+        assert_true(!gr.ok, "stale handle get fails after free");
+
+        // Double free must fail too.
+        FreeResult fr2 = heap.free(h);
+        assert_true(!fr2.ok, "double free fails");
+
+        fr.object.drop();
+        fr2.object.drop();
+        heap.drop();
+    }
+
+    // --- gc_collects_unreachable_objects --------------------------------
+    printf("\n--- GC collects unreachable objects ---\n");
+    {
+        Heap heap = Heap.new();
+
+        Handle s1 = heap.alloc(make_string_object("root"));
+        Handle s2 = heap.alloc(make_string_object("garbage"));
+
+        Vec<RtValue> roots = Vec<RtValue>.new();
+        roots.push(RtValue.obj(RT_TYPE_STRING, s1));
+
+        i64 freed = heap.collect_garbage(roots.get_ptr(0), roots.len());
+        assert_eq_i64(freed, 1, "GC sweeps exactly one object");
+        assert_eq_i64(heap.allocated_count(), 1, "allocated_count=1 after GC");
+
+        ObjectRef g1 = heap.get(s1);
+        assert_true(g1.ok, "rooted object survives GC");
+        assert_true(g1.object.text.equals("root"), "rooted object payload intact");
+        ObjectRef g2 = heap.get(s2);
+        assert_true(!g2.ok, "unrooted object handle is invalid after GC");
+
+        roots.drop();
+        heap.drop();
+    }
+
+    // --- gc_traces_through_composite_objects ----------------------------
+    printf("\n--- GC traces through composite objects ---\n");
+    {
+        Heap heap = Heap.new();
+
+        Handle inner = heap.alloc(make_string_object("inner"));
+
+        // A vec object holding a reference to `inner`.
+        u32 vec_ty = (u32)100;
+        Vec<RtValue> items = Vec<RtValue>.new();
+        items.push(RtValue.obj(RT_TYPE_STRING, inner));
+        Handle outer = heap.alloc(Object.new_vec(vec_ty, move items));
+
+        Vec<RtValue> roots = Vec<RtValue>.new();
+        roots.push(RtValue.obj(vec_ty, outer));
+
+        i64 freed = heap.collect_garbage(roots.get_ptr(0), roots.len());
+        assert_eq_i64(freed, 0, "nothing swept when chain is rooted");
+        ObjectRef gi = heap.get(inner);
+        assert_true(gi.ok, "inner object survives via outer root");
+        ObjectRef go = heap.get(outer);
+        assert_true(go.ok, "outer object survives as root");
+
+        // Now drop the root set entirely: the whole chain must be swept.
+        i64 freed2 = heap.collect_garbage((RtValue*)0, 0);
+        assert_eq_i64(freed2, 2, "unrooted chain is fully swept");
+        assert_eq_i64(heap.allocated_count(), 0, "allocated_count=0 after full sweep");
+        ObjectRef gi2 = heap.get(inner);
+        assert_true(!gi2.ok, "inner handle invalid after sweep");
+        ObjectRef go2 = heap.get(outer);
+        assert_true(!go2.ok, "outer handle invalid after sweep");
+
+        roots.drop();
+        heap.drop();
+    }
+
+    // --- get_mut allows in-place mutation -------------------------------
+    printf("\n--- get_mut mutates in place ---\n");
+    {
+        Heap heap = Heap.new();
+
+        Vec<RtValue> items = Vec<RtValue>.new();
+        Handle h = heap.alloc(Object.new_vec((u32)100, move items));
+        ObjectRef mr = heap.get_mut(h);
+        assert_true(mr.ok, "get_mut succeeds for live handle");
+        mr.object.values.push(RtValue.from_int((u32)5, (i128)123));
+        mr.object.values.push(RtValue.from_bool(true));
+
+        ObjectRef rr = heap.get(h);
+        assert_eq_i64(rr.object.values.len(), 2, "mutations visible through get");
+        // RtValue owns no resources, so reading copies out of the vec is safe.
+        RtValue v0 = rr.object.values.get(0);
+        assert_true(v0.kind == RT_KIND_INT, "first pushed value is an int");
+        assert_true(v0.int_val == (i128)123, "int payload preserved");
+        assert_eq_u32(v0.type_id(), (u32)5, "type_id reads the ty field");
+        RtValue v1 = rr.object.values.get(1);
+        assert_eq_u32(v1.type_id(), RT_TYPE_BOOL, "bool type_id is RT_TYPE_BOOL");
+
+        heap.drop();
+    }
+
+    // --- allocated_count bookkeeping ------------------------------------
+    printf("\n--- allocated_count bookkeeping ---\n");
+    {
+        Heap heap = Heap.new();
+        assert_eq_i64(heap.allocated_count(), 0, "fresh heap is empty");
+
+        Handle a = heap.alloc(make_string_object("a"));
+        Handle b = heap.alloc(make_string_object("b"));
+        Handle c = heap.alloc(make_string_object("c"));
+        assert_eq_i64(heap.allocated_count(), 3, "count=3 after three allocs");
+
+        FreeResult fb = heap.free(b);
+        fb.object.drop();
+        assert_eq_i64(heap.allocated_count(), 2, "count=2 after freeing one");
+
+        Handle d = heap.alloc(make_string_object("d"));
+        assert_eq_i64(heap.allocated_count(), 3, "count=3 after slot reuse");
+        ObjectRef ga = heap.get(a);
+        assert_true(ga.ok, "a still live");
+        ObjectRef gc = heap.get(c);
+        assert_true(gc.ok, "c still live");
+        ObjectRef gd = heap.get(d);
+        assert_true(gd.ok, "d live in reused slot");
+
+        heap.drop();
+    }
+
+    // --- free-list slot reuse bumps generation --------------------------
+    printf("\n--- Slot reuse bumps generation ---\n");
+    {
+        Heap heap = Heap.new();
+
+        Handle a = heap.alloc(make_string_object("first"));
+        u32 a_index = a.index();
+        u32 a_generation = a.generation();
+        assert_eq_u32(a_generation, (u32)0, "first allocation starts at generation 0");
+
+        FreeResult fa = heap.free(a);
+        fa.object.drop();
+
+        Handle b = heap.alloc(make_string_object("second"));
+        assert_eq_u32(b.index(), a_index, "freed slot index is reused");
+        assert_eq_u32(b.generation(), a_generation + (u32)1, "reused slot generation bumped");
+
+        // The stale handle points at the reused slot but must not resolve.
+        ObjectRef ga = heap.get(a);
+        assert_true(!ga.ok, "stale handle to reused slot fails");
+        ObjectRef gb = heap.get(b);
+        assert_true(gb.ok, "new handle to reused slot works");
+        assert_true(gb.object.text.equals("second"), "reused slot holds the new object");
+        assert_true(!a.equals(b), "old and new handles differ");
+
+        heap.drop();
+    }
+
+    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return tests_failed;
+}

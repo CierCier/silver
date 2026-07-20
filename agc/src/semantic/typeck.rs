@@ -2174,10 +2174,14 @@ impl TypeChecker {
                 is_variadic,
             },
         );
-        self.functions
-            .entry(func.name.name.clone())
-            .or_default()
-            .push(symbol_id);
+        let overloads = self.functions.entry(func.name.name.clone()).or_default();
+        // Identical redeclarations (e.g. the same `extern "C"` prototype
+        // inlined from multiple imported files) intern to the same symbol id;
+        // registering the id twice would make overload resolution report a
+        // phantom ambiguity between a candidate and itself.
+        if !overloads.contains(&symbol_id) {
+            overloads.push(symbol_id);
+        }
     }
 
     fn literal_type(&mut self, literal: &ast::Literal, expected: Option<&Type>) -> Type {
