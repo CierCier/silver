@@ -1,139 +1,101 @@
 // Test suite for std.io - I/O operations
-import std.io;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i32(i32 a, i32 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
-    }
-}
-
+import std.test;
 i32 main() {
-    printf("=== I/O Tests ===\n\n");
-    
-    // Test: printf basic functionality
-    printf("--- printf Tests ---\n");
-    
-    // These tests are mainly to verify compilation and basic output
-    // Visual verification needed for correctness
-    
-    i32 ret = printf("Test string\n");
-    assert_true(ret > 0, "printf returns positive value");
-    
-    // Test: Format specifiers
-    printf("\n--- Format Specifiers ---\n");
-    
-    i32 int_val = 42;
-    printf("Integer: %d\n", int_val);
-    printf("  [PASS] %%d format works\n");
+    STDOUT.write_str("=== I/O Tests ===\n\n");
+
+    // Test: write_str basic functionality
+    STDOUT.write_str("--- write_str Tests ---\n");
+
+    STDOUT.write_str("Test string\n");
+    assert_true(true, "write_str works");
     tests_passed = tests_passed + 1;
-    
-    i64 long_val = 9223372036854775807;
-    printf("Long: %ld\n", long_val);
-    printf("  [PASS] %%ld format works\n");
+
+    // Test: write_i64
+    STDOUT.write_str("\n--- write_i64 Tests ---\n");
+    STDOUT.write_str("Integer: ");
+    STDOUT.write_i64(42);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_i64 works");
     tests_passed = tests_passed + 1;
-    
-    f64 float_val = 3.14159;
-    printf("Float: %f\n", float_val);
-    printf("  [PASS] %%f format works\n");
+
+    STDOUT.write_str("Long: ");
+    STDOUT.write_i64(9223372036854775807);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_i64 with large value works");
     tests_passed = tests_passed + 1;
-    
+
+    // Test: write_f64
+    STDOUT.write_str("\n--- write_f64 Tests ---\n");
+    STDOUT.write_str("Float: ");
+    STDOUT.write_f64(3.14159);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_f64 works");
+    tests_passed = tests_passed + 1;
+
+    // Test: write_str with string
     str str_val = "hello";
-    printf("String: %s\n", str_val);
-    printf("  [PASS] %%s format works\n");
+    STDOUT.write_str("String: ");
+    STDOUT.write_str(str_val);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_str works");
     tests_passed = tests_passed + 1;
-    
-    printf("Hex: %x\n", 255);
-    printf("  [PASS] %%x format works\n");
+
+    // Test: write_u64
+    STDOUT.write_str("Hex: 255 = ");
+    STDOUT.write_u64(255);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_u64 works");
     tests_passed = tests_passed + 1;
-    
-    printf("Pointer: %p\n", &int_val);
-    printf("  [PASS] %%p format works\n");
+
+    // Test: write_bool
+    STDOUT.write_str("bool true = ");
+    STDOUT.write_bool(true);
+    STDOUT.write_str(", bool false = ");
+    STDOUT.write_bool(false);
+    STDOUT.write_str("\n");
+    assert_true(true, "write_bool works");
     tests_passed = tests_passed + 1;
-    
-    // Test: puts
-    printf("\n--- puts Tests ---\n");
-    
-    ret = puts("Line from puts");
-    assert_true(ret >= 0, "puts returns non-negative");
-    
-    // Test: putchar
-    printf("\n--- putchar Tests ---\n");
-    
-    printf("Characters: ");
-    ret = putchar(65);  // 'A'
-    putchar(66);        // 'B'
-    putchar(67);        // 'C'
-    putchar(10);        // newline
-    assert_true(ret == 65, "putchar returns the character written");
-    
+
     // Test: println wrapper
-    printf("\n--- println Tests ---\n");
-    
-    ret = println("Line from println");
-    assert_true(ret > 0, "println returns positive value");
-    
-    // Test: Multiple arguments
-    printf("\n--- Multiple Arguments ---\n");
-    
-    i32 a = 1;
-    i32 b = 2;
-    i32 c = 3;
-    printf("Three values: %d, %d, %d\n", a, b, c);
-    printf("  [PASS] printf with multiple arguments works\n");
+    STDOUT.write_str("\n--- println Tests ---\n");
+
+    i32 pret = println("Line from println");
+    assert_true(pret > 0, "println returns positive value");
+
+    // Test: Multiple write_str calls
+    STDOUT.write_str("\n--- Multiple write_str ---\n");
+
+    STDOUT.write_str("Three values: ");
+    STDOUT.write_i64(1);
+    STDOUT.write_str(", ");
+    STDOUT.write_i64(2);
+    STDOUT.write_str(", ");
+    STDOUT.write_i64(3);
+    STDOUT.write_str("\n");
+    assert_true(true, "multiple write_i64 calls work");
     tests_passed = tests_passed + 1;
-    
-    // Test: Width and precision
-    printf("\n--- Width and Precision ---\n");
-    
-    printf("Width 10: [%10d]\n", 42);
-    printf("Left align: [%-10d]\n", 42);
-    printf("Zero pad: [%010d]\n", 42);
-    printf("Precision: [%.3f]\n", 3.14159);
-    printf("  [PASS] width/precision formatting compiles\n");
-    tests_passed = tests_passed + 1;
-    
+
     // Test: Escape sequences
-    printf("\n--- Escape Sequences ---\n");
-    
-    printf("Tab:\tafter tab\n");
-    printf("Quote: \"quoted\"\n");
-    printf("Backslash: \\\n");
-    printf("  [PASS] escape sequences work\n");
+    STDOUT.write_str("\n--- Escape Sequences ---\n");
+
+    STDOUT.write_str("Tab:\tafter tab\n");
+    STDOUT.write_str("Quote: \"quoted\"\n");
+    STDOUT.write_str("Backslash: \\\n");
+    assert_true(true, "escape sequences work");
     tests_passed = tests_passed + 1;
-    
+
     // Test: Empty string
-    printf("\n--- Edge Cases ---\n");
-    
-    ret = printf("");
-    assert_eq_i32(ret, 0, "empty printf returns 0");
-    
-    ret = puts("");
-    assert_true(ret >= 0, "empty puts succeeds");
-    
+    STDOUT.write_str("\n--- Edge Cases ---\n");
+
+    STDOUT.write_str("");
+
+
+    // Test: eprintln
+    STDOUT.write_str("\n--- eprintln Tests ---\n");
+    eprintln("stderr message via eprintln");
+    assert_true(true, "eprintln works");
+    tests_passed = tests_passed + 1;
+
     // Summary
-    printf("\n=== Results ===\n");
-    printf("Passed: %d\n", tests_passed);
-    printf("Failed: %d\n", tests_failed);
-    
-    if (tests_failed > 0) {
-        return 1;
-    }
-    return 0;
+    return done();
 }

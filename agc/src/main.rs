@@ -183,10 +183,10 @@ struct Cli {
     #[arg(long = "no-std", action = ArgAction::SetTrue)]
     no_std: bool,
 
-    /// Produce a fully static binary (implies --no-std: no crt, no -lc/-lgcc).
-    /// The program must import std.sys.entry to supply a _start symbol.
-    #[arg(long = "static-runtime", action = ArgAction::SetTrue)]
-    static_runtime: bool,
+    /// Link dynamically (with libc runtime support) instead of producing a
+    /// fully static binary.  Default is static (no libc needed).
+    #[arg(long = "dynamic-runtime", action = ArgAction::SetTrue)]
+    dynamic_runtime: bool,
 
     /// Prefer shared module artifacts and emit shared libraries for module packaging
     #[arg(long = "shared", action = ArgAction::SetTrue)]
@@ -307,8 +307,8 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         debug_info: cli.debug_info,
         target: cli.target,
         sysroot: cli.sysroot,
-        no_std: cli.no_std || cli.static_runtime,
-        static_runtime: cli.static_runtime,
+        no_std: cli.no_std || !cli.dynamic_runtime,
+        static_runtime: !cli.dynamic_runtime,
         shared: cli.shared,
         verbose: cli.verbose,
         dry_run: cli.dry_run,
@@ -1545,7 +1545,7 @@ mod tests {
             target: None,
             sysroot: None,
             no_std: false,
-            static_runtime: false,
+            static_runtime: true,
             shared: false,
             verbose: false,
             dry_run: false,

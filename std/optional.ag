@@ -7,20 +7,10 @@
 // non-aborting fallback.
 import std.io;
 
-// NOTE: this module deliberately does NOT declare the `abort()` extern.
-// Several std modules (vec/map/string/slice) already declare their own
-// `abort()` extern, and the type checker reports any call as ambiguous
-// when more than one identical declaration is visible — so adding one
-// here would break every program importing std.optional alongside
-// std.mem or std.map.  `raise(SIGABRT)` delivers the same abort signal
-// without redeclaring `abort`.
-extern "C" {
-    i32 raise(i32 sig);
-}
-
 /// Terminates the process with SIGABRT, like C `abort()`.
+// Uses the pure-Silver abort() from std.mem.memory (transitively via std.io).
 void __optional_abort() {
-    raise(6); // 6 = SIGABRT
+    abort();
     while (true) {}
 }
 
@@ -56,7 +46,7 @@ impl Optional<T> {
         if (self.present) {
             return self.thing;
         }
-        fprintf(stderr, "Optional::unwrap: called on a none value\n");
+        STDERR.write_str("Optional::unwrap: called on a none value\n");
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         T dummy;
@@ -105,7 +95,7 @@ impl Result<T, E> {
         if (self.ok) {
             return self.value;
         }
-        fprintf(stderr, "Result::unwrap: called on an err value\n");
+        STDERR.write_str("Result::unwrap: called on an err value\n");
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         T dummy;
@@ -124,7 +114,7 @@ impl Result<T, E> {
         if (!self.ok) {
             return self.error;
         }
-        fprintf(stderr, "Result::get_error: called on an ok value\n");
+        STDERR.write_str("Result::get_error: called on an ok value\n");
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         E dummy;

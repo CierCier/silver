@@ -4,42 +4,18 @@
 // dispatch, arity checks, method resolution order) and silver_runtime's
 // Value constructors/accessors/display.
 import std.fmt;
-import std.io;
+import std.test;
 import std.mem.vec;
 import std.rt.heap;
 import std.rt.methods;
 import std.rt.type_info;
 import std.rt.types;
 import std.rt.value;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== Value & MethodRegistry Tests ===\n\n");
+    STDOUT.write_str("=== Value & MethodRegistry Tests ===\n\n");
 
     // --- Value constructors & accessors -----------------------------------
-    printf("--- Value constructors & accessors ---\n");
+    STDOUT.write_str("--- Value constructors & accessors ---\n");
     {
         Value v_i64 = Value.i64_val(42);
         TypeId tid_i64 = v_i64.type_id();
@@ -75,7 +51,7 @@ i32 main() {
     }
 
     // --- Value display ---------------------------------------------------
-    printf("--- Value display ---\n");
+    STDOUT.write_str("--- Value display ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
 
@@ -101,7 +77,7 @@ i32 main() {
     }
 
     // --- MethodRegistry: type_name ---------------------------------------
-    printf("--- MethodRegistry: type_name ---\n");
+    STDOUT.write_str("--- MethodRegistry: type_name ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Heap heap = Heap.new();
@@ -125,7 +101,7 @@ i32 main() {
     }
 
     // --- MethodRegistry: string.len ---------------------------------------
-    printf("--- MethodRegistry: string.len ---\n");
+    STDOUT.write_str("--- MethodRegistry: string.len ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Heap heap = Heap.new();
@@ -148,7 +124,7 @@ i32 main() {
     }
 
     // --- MethodRegistry: vec.len & vec.push ------------------------------
-    printf("--- MethodRegistry: vec.len & vec.push ---\n");
+    STDOUT.write_str("--- MethodRegistry: vec.len & vec.push ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Heap heap = Heap.new();
@@ -197,7 +173,7 @@ i32 main() {
     }
 
     // --- MethodRegistry: arity & method not found errors -----------------
-    printf("--- MethodRegistry: errors ---\n");
+    STDOUT.write_str("--- MethodRegistry: errors ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Heap heap = Heap.new();
@@ -225,6 +201,6 @@ i32 main() {
         reg.drop();
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
+    return done();
 }

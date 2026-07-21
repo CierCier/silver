@@ -1021,6 +1021,190 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(result_phi.as_basic_value())
     }
 
+    pub(crate) fn print_codegen(
+        &mut self,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Determine writer and format-string arg index
+        let (fmt_arg_idx, writer_expr) = match name {
+            "fprint" => {
+                let Some(ast::MacroArg::Expression(w)) = args.first() else {
+                    return Err(CodegenError::with_span(
+                        "@fprint expects a BufWriter* as first argument".to_string(),
+                        expr.span.clone(),
+                    ));
+                };
+                (1, w.clone())
+            }
+            "sprint" => {
+                return self.sprint_codegen(expr, args);
+            }
+            _ => {
+                // @print, @println, @eprint, @eprintln
+                let writer_name = if name.starts_with("e") { "STDERR" } else { "STDOUT" };
+                let w = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: writer_name.to_string(),
+                        span: expr.span.clone(),
+                    })),
+                    span: expr.span.clone(),
+                };
+                (0, w)
+            }
+        };
+
+        // Extract format string (must be a literal — validated by typeck)
+        let fmt_str = match &args[fmt_arg_idx] {
+            ast::MacroArg::Expression(e) => match &e.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::String(s)) => s.clone(),
+                _ => return Err(CodegenError::with_span(
+                    "format string must be a literal".to_string(),
+                    e.span.clone(),
+                )),
+            },
+            _ => return Err(CodegenError::with_span(
+                "format string must be a literal".to_string(),
+                expr.span.clone(),
+            )),
+        };
+
+        let segments = crate::builtin_macros::parse_format(&fmt_str);
+
+        // Collect value arguments for placeholders
+        let value_start = fmt_arg_idx + 1;
+        let value_args: Vec<&ast::Expression> = args[value_start..]
+            .iter()
+            .map(|a| match a {
+                ast::MacroArg::Expression(e) => e,
+                _ => unreachable!("typeck verified all value args are expressions"),
+            })
+            .collect();
+
+        // Emit method calls for each format segment
+        let mut placeholder_idx = 0;
+        for segment in &segments {
+            match segment {
+                crate::builtin_macros::FormatSegment::Literal(text) => {
+                    let method = ast::Identifier {
+                        name: "write_str".to_string(),
+                        span: expr.span.clone(),
+                    };
+                    let lit_expr = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Literal(
+                            ast::Literal::String(text.clone()),
+                        )),
+                        span: expr.span.clone(),
+                    };
+                    self.emit_method_call_expression(
+                        &writer_expr,
+                        &method,
+                        &[lit_expr],
+                        true, // allow_void
+                        &expr.span,
+                    )?;
+                }
+                crate::builtin_macros::FormatSegment::Placeholder => {
+                    let val_expr = value_args[placeholder_idx];
+                    placeholder_idx += 1;
+
+                    // Determine the write method based on the value's type
+                    let method_name = self
+                        .value_write_method_name(val_expr)
+                        .map_err(|e| {
+                            CodegenError::with_span(e, val_expr.span.clone())
+                        })?;
+
+                    let method = ast::Identifier {
+                        name: method_name,
+                        span: expr.span.clone(),
+                    };
+                    self.emit_method_call_expression(
+                        &writer_expr,
+                        &method,
+                        &[val_expr.clone()],
+                        true,
+                        &expr.span,
+                    )?;
+                }
+            }
+        }
+
+        // For println/eprintln, append a newline
+        if name == "println" || name == "eprintln" {
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: expr.span.clone(),
+            };
+            let nl_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                    "\n".to_string(),
+                ))),
+                span: expr.span.clone(),
+            };
+            self.emit_method_call_expression(
+                &writer_expr,
+                &method,
+                &[nl_expr],
+                true,
+                &expr.span,
+            )?;
+        }
+
+        // All non-sprint variants return void
+        Ok(self.context.i8_type().const_zero().into())
+    }
+
+    /// Returns the BufWriter write method name appropriate for a value expression.
+    fn value_write_method_name(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> Result<String, String> {
+        use crate::parser::ast::TypeKind;
+        let val_type = self.resolve_receiver_type(expr);
+        match val_type {
+            Some(ty) => match ty.kind.as_ref() {
+                TypeKind::Primitive(p) => match p {
+                    ast::PrimitiveType::Str => Ok("write_str".to_string()),
+                    ast::PrimitiveType::I8
+                    | ast::PrimitiveType::I16
+                    | ast::PrimitiveType::I32
+                    | ast::PrimitiveType::I64
+                    | ast::PrimitiveType::I128 => Ok("write_i64".to_string()),
+                    ast::PrimitiveType::U8
+                    | ast::PrimitiveType::U16
+                    | ast::PrimitiveType::U32
+                    | ast::PrimitiveType::U64
+                    | ast::PrimitiveType::U128 => Ok("write_u64".to_string()),
+                    ast::PrimitiveType::F32
+                    | ast::PrimitiveType::F64
+                    | ast::PrimitiveType::F80 => Ok("write_f64".to_string()),
+                    ast::PrimitiveType::Bool => Ok("write_bool".to_string()),
+                    ast::PrimitiveType::Char => Ok("write_str".to_string()),
+                    _ => Err(format!("no BufWriter write method for primitive type {:?}", p)),
+                },
+                _ => Err(format!(
+                    "no BufWriter write method for type {:?}",
+                    ty,
+                )),
+            },
+            None => Err("cannot determine value type for placeholder argument".to_string()),
+        }
+    }
+
+    fn sprint_codegen(
+        &mut self,
+        _expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // @sprint: return a string built from the format + value args.
+        // Deferred: proper @sprint with temp-writer allocation.
+        // Currently returns an empty string as a placeholder.
+        let empty_str_ptr = self.intern_const_string_global("");
+        Ok(empty_str_ptr.as_basic_value_enum())
+    }
+
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(primitive) => {
@@ -2617,6 +2801,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     span: expr.span.clone(),
                 })
             }
+            ast::ExpressionKind::Literal(lit) => {
+                let prim = match lit {
+                    ast::Literal::Integer(_) => ast::PrimitiveType::I32,
+                    ast::Literal::Float(_) => ast::PrimitiveType::F64,
+                    ast::Literal::Complex(_, _) => ast::PrimitiveType::C64,
+                    ast::Literal::String(_) => ast::PrimitiveType::Str,
+                    ast::Literal::Char(_) => ast::PrimitiveType::Char,
+                    ast::Literal::Bool(_) => ast::PrimitiveType::Bool,
+                };
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Primitive(prim)),
+                    span: expr.span.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -2773,7 +2971,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|param| param.param_type.clone())
                                 .collect(),
                             return_type: func.return_type.clone(),
-                            is_variadic: false,
+                            is_variadic: func.is_variadic,
                             linkage: None,
                         },
                         Some(func.name.span.clone()),
@@ -2788,7 +2986,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|param| param.param_type.clone())
                                 .collect::<Vec<_>>(),
                             func.return_type.as_ref(),
-                            false,
+                            func.is_variadic,
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
@@ -7193,7 +7391,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             .map(|param| param.param_type.clone())
                             .collect(),
                         return_type: function_item.return_type.clone(),
-                        is_variadic: false,
+                        is_variadic: function_item.is_variadic,
                         linkage: None,
                     },
                     Some(function_item.name.span.clone()),
@@ -7206,7 +7404,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         .map(|param| param.param_type.clone())
                         .collect::<Vec<_>>(),
                     function_item.return_type.as_ref(),
-                    false,
+                    function_item.is_variadic,
                     None,
                 )?;
                 self.module
@@ -7341,7 +7539,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map(|param| param.param_type.clone())
                     .collect(),
                 return_type: func.return_type.clone(),
-                is_variadic: false,
+                is_variadic: func.is_variadic,
                 linkage: None,
             },
             Some(func.name.span.clone()),
@@ -7358,7 +7556,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         .map(|param| param.param_type.clone())
                         .collect(),
                     return_type: func.return_type.clone(),
-                    is_variadic: false,
+                    is_variadic: func.is_variadic,
                     linkage: None,
                 },
                 Some(func.name.span.clone()),
@@ -7374,7 +7572,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map(|param| param.param_type.clone())
                     .collect::<Vec<_>>(),
                 func.return_type.as_ref(),
-                false,
+                func.is_variadic,
                 None,
             )?;
             let function = self.module.add_function(llvm_name, fn_ty, None);

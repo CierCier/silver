@@ -1,34 +1,11 @@
-import std.io;
+import std.test;  // assert_true, assert_eq_i64, check, done, STDOUT
 import std.map;
 
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== HashMap Tests ===\n\n");
+    STDOUT.write_str("=== HashMap Tests ===\n\n");
 
     // --- i32 -> i64 ---
-    printf("--- i32 -> i64 ---\n");
+    STDOUT.write_str("--- i32 -> i64 ---\n");
     HashMap<i32, i64> m = HashMap<i32, i64>.new();
     assert_eq_i64(m.len(), 0, "new map is empty");
     assert_true(m.is_empty(), "new map is_empty true");
@@ -62,7 +39,7 @@ i32 main() {
     m.drop();
 
     // --- Resize test (triggers grow) ---
-    printf("\n--- Resize ---\n");
+    STDOUT.write_str("\n--- Resize ---\n");
     HashMap<i32, i64> m2 = HashMap<i32, i64>.new();
     i32 i = 0;
     while (i < 16) {
@@ -77,6 +54,5 @@ i32 main() {
     }
     m2.drop();
 
-    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }

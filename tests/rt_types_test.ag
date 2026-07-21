@@ -1,46 +1,12 @@
 // Tests for std/rt/types.ag — port of the registry cases from
 // silver_runtime/src/types/tests.rs.
-import std.io;
+import std.test;
 import std.rt.types;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_str(str a, str b, str msg) {
-    if (a != (str)0 && a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected \"%s\", got \"%s\")\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== TypeRegistry Tests ===\n\n");
+    STDOUT.write_str("=== TypeRegistry Tests ===\n\n");
 
     // --- registry_has_builtins -----------------------------------------
-    printf("--- Builtin names ---\n");
+    STDOUT.write_str("--- Builtin names ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         assert_eq_str(reg.name_of(TypeId.UNIT()), "unit", "name_of(UNIT) == unit");
@@ -87,7 +53,7 @@ i32 main() {
     }
 
     // --- vec_and_optional_are_cached -----------------------------------
-    printf("\n--- Vec/optional interning ---\n");
+    STDOUT.write_str("\n--- Vec/optional interning ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         TypeResult v1 = reg.vec_of(TypeId.I64());
@@ -133,7 +99,7 @@ i32 main() {
     }
 
     // --- struct_definition (+ duplicate rejection) ----------------------
-    printf("\n--- Struct definition ---\n");
+    STDOUT.write_str("\n--- Struct definition ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<FieldDef> fields = Vec<FieldDef>.new();
@@ -185,7 +151,7 @@ i32 main() {
     }
 
     // --- enum_definition (auto discriminants 0..n) ----------------------
-    printf("\n--- Enum definition (auto) ---\n");
+    STDOUT.write_str("\n--- Enum definition (auto) ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<VariantDef> variants = Vec<VariantDef>.new();
@@ -225,7 +191,7 @@ i32 main() {
     }
 
     // --- enum_discriminants_can_be_explicit -----------------------------
-    printf("\n--- Enum explicit discriminants ---\n");
+    STDOUT.write_str("\n--- Enum explicit discriminants ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<VariantDef> variants = Vec<VariantDef>.new();
@@ -272,7 +238,7 @@ i32 main() {
     }
 
     // --- enum_discriminants_auto_fill_mixed -----------------------------
-    printf("\n--- Enum autofill (mixed) ---\n");
+    STDOUT.write_str("\n--- Enum autofill (mixed) ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<VariantDef> variants = Vec<VariantDef>.new();
@@ -301,7 +267,7 @@ i32 main() {
     }
 
     // --- enum_discriminant_autofill_overflow_is_error -------------------
-    printf("\n--- Enum autofill overflow ---\n");
+    STDOUT.write_str("\n--- Enum autofill overflow ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<VariantDef> variants = Vec<VariantDef>.new();
@@ -321,7 +287,7 @@ i32 main() {
     }
 
     // --- function type display name + interning -------------------------
-    printf("\n--- Function types ---\n");
+    STDOUT.write_str("\n--- Function types ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         Vec<TypeId> params = Vec<TypeId>.new();
@@ -362,6 +328,6 @@ i32 main() {
         reg.drop();
     }
 
-    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
+    return done();
 }

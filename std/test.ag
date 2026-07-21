@@ -1,0 +1,117 @@
+// std/test.ag — test harness using BufWriter.
+//
+// Provides shared counters (tests_passed/tests_failed) and a full
+// assertion suite so test files no longer need libc printf.
+
+import std.io;  // BufWriter, STDOUT, STDERR
+import std.fmt; // cstr_len, itoa, utoa
+
+pub i32 tests_passed = 0;
+pub i32 tests_failed = 0;
+
+/// Print a section header.
+pub void test_start(str name) {
+    STDOUT.write_str("\n--- ");
+    STDOUT.write_str(name);
+    STDOUT.write_str(" ---\n");
+}
+
+/// Simple pass/fail check (no value comparison).
+pub void check(bool cond, str msg) {
+    if (cond) {
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        tests_passed += 1;
+    } else {
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str("\n");
+        tests_failed += 1;
+    }
+}
+
+/// Check a boolean condition is false.
+pub void assert_false(bool cond, str msg) {
+    if (!cond) {
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        tests_passed += 1;
+    } else {
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str("\n");
+        tests_failed += 1;
+    }
+}
+
+/// Check a boolean condition.
+pub void assert_true(bool cond, str msg) {
+    if (cond) {
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        tests_passed += 1;
+    } else {
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str("\n");
+        tests_failed += 1;
+    }
+}
+
+/// Check i64 equality.
+pub void assert_eq_i64(i64 expected, i64 actual, str msg) {
+    if (expected == actual) {
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        tests_passed += 1;
+    } else {
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str(" (expected ");
+        STDERR.write_i64(expected);
+        STDERR.write_str(", got ");
+        STDERR.write_i64(actual);
+        STDERR.write_str(")\n");
+        tests_failed += 1;
+    }
+}
+
+/// Check i32 equality.
+pub void assert_eq_i32(i32 expected, i32 actual, str msg) {
+    assert_eq_i64((i64)expected, (i64)actual, msg);
+}
+
+/// Check string equality.
+pub void assert_eq_str(str expected, str actual, str msg) {
+    // Use strcmp from std.mem.memory (transitive via std.io)
+    if (strcmp(expected, actual) == 0) {
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        tests_passed += 1;
+    } else {
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str(" (expected \"");
+        STDERR.write_str(expected);
+        STDERR.write_str("\", got \"");
+        STDERR.write_str(actual);
+        STDERR.write_str("\")\n");
+        tests_failed += 1;
+    }
+}
+
+/// Print summary and return failure count (for main() to return).
+pub i32 done() {
+    STDOUT.write_str("\n=== Results ===\n");
+    STDOUT.write_str("Passed: ");
+    STDOUT.write_i64(tests_passed);
+    STDOUT.write_str(", Failed: ");
+    STDOUT.write_i64(tests_failed);
+    STDOUT.write_str("\n");
+    return tests_failed;
+}

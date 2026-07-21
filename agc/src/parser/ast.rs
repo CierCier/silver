@@ -55,6 +55,7 @@ pub struct MacroDef {
 pub struct FunctionItem {
     pub name: Identifier,
     pub generics: Option<Generics>,
+    pub is_variadic: bool,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<Type>,
     pub body: Block,
@@ -423,6 +424,7 @@ pub enum ImplItemKind {
 pub struct ImplFunction {
     pub name: Identifier,
     pub generics: Option<Generics>,
+    pub is_variadic: bool,
     pub parameters: Vec<Parameter>,
     pub method_kind: MethodKind,
     pub visibility: Visibility,
