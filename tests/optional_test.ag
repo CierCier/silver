@@ -174,8 +174,11 @@ i32 main() {
     
     // Summary
     STDOUT.write_str("\n=== Results ===\n");
-    printf("Passed: %d\n", tests_passed);
-    printf("Failed: %d\n", tests_failed);
+    STDOUT.write_str("Passed: ");
+    STDOUT.write_i64(tests_passed);
+    STDOUT.write_str(", Failed: ");
+    STDOUT.write_i64(tests_failed);
+    STDOUT.write_str("\n");
     
     if (tests_failed > 0) {
         return 1;

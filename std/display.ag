@@ -11,7 +11,7 @@ import std.io;  // BufWriter
 
 /// Trait for types that can be formatted for display.
 pub trait Display<Self> {
-    pub void fmt(Self* self, BufWriter* out);
+    void fmt(Self* self, BufWriter* out);
 }
 
 // Primitives — redirect to BufWriter.write_T methods

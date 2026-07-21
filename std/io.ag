@@ -6,7 +6,7 @@
 // try_close/try_lseek) — no FILE*, no libc stdio buffering.
 
 import std.fmt;
-import std.mem.vec;
+import std.mem.alloc;
 import std.sys.result;
 
 const i32 EOF = -1;
@@ -49,10 +49,9 @@ impl BufWriter {
     /// Ensure internal buffer is initialized (lazy mmap).
     void ensure_init(BufWriter* self) {
         if ((*self).cap == 0) {
-            Vec<u8> v = Vec<u8>.with_capacity(4096);
-            (*self).data = (i64)v.data;
-            (*self).len = v.len;
-            (*self).cap = v.cap;
+            (*self).data = (i64)alloc<u8>(4096);
+            (*self).len = 0;
+            (*self).cap = 4096;
         }
     }
 
@@ -117,13 +116,32 @@ impl BufWriter {
         if (v) { self.write_str("true"); }
         else   { self.write_str("false"); }
     }
+    /// Write a single byte.
+    pub void write_u8(BufWriter* self, u8 c) {
+        self.write(&c, 1);
+    }
 
     /// Flush buffered data to the underlying fd via a single sys_write call.
     pub void flush(BufWriter* self) {
         self.ensure_init();
         if ((*self).len > 0) {
-            __fmt_write_fd((*self).fd, (u8*)(*self).data, (*self).len);
-            (*self).len = 0;
+            if ((*self).fd >= 0) {
+                i64 written = __fmt_write_fd((*self).fd, (u8*)(*self).data, (*self).len);
+                if (written > 0) {
+                    if (written < (*self).len) {
+                        u8* buf = (u8*)(*self).data;
+                        i64 i = 0;
+                        i64 remaining = (*self).len - written;
+                        while (i < remaining) {
+                            buf[i] = buf[written + i];
+                            i = i + 1;
+                        }
+                        (*self).len = remaining;
+                    } else {
+                        (*self).len = 0;
+                    }
+                }
+            }
         }
     }
 

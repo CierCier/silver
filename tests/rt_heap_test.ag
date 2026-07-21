@@ -2,6 +2,18 @@
 // Ports the heap/GC cases from silver_runtime/src/runtime/tests.rs.
 import std.test;
 import std.rt.heap;
+import std.string;
+
+Object make_string_object(str text) {
+    String s = String.with_capacity(16);
+    s.push_str(text);
+    return Object.new_string(move s);
+}
+
+void assert_eq_u32(u32 expected, u32 actual, str msg) {
+    assert_eq_i64((i64)expected, (i64)actual, msg);
+}
+
 i32 main() {
     STDOUT.write_str("=== rt heap tests ===\n\n");
 

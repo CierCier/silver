@@ -1117,6 +1117,7 @@ mod tests {
                 | "private"
                 | "true"
                 | "false"
+                | "in"
         )
     }
 
