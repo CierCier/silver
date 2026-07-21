@@ -1,0 +1,717 @@
+// std/rt/casts.ag — the Silver runtime numeric cast system.
+//
+// Port of silver_runtime/src/types/cast.rs (rule-based CastKind
+// classification + wrapping numeric execution with Rust-`as` semantics) and
+// silver_runtime/src/runtime/casts.rs (CastRegistry: a (from, to) -> cast
+// table prepopulated with the 156 numeric pairs).
+//
+// FN-POINTER-FREE DESIGN
+// ──────────────────────
+// The Rust CastRegistry stores one `Arc<dyn Fn>` closure per (from, to)
+// pair.  Silver has no fn pointers, so each registered pair maps to an
+// INTEGER OPCODE and a single dispatcher (`cast_exec_opcode`) executes the
+// cast by opcode with an if-chain.  Opcodes are laid out on the 13x12
+// numeric-type grid:
+//
+//   opcode = 0               -> BOOL source,   to_index = target type 1..13
+//   opcode = (t - 1) * 12    -> non-BOOL source of numeric index t (2..13),
+//                               to_index = target type skipping the source
+//                               itself (identity pairs are never registered,
+//                               exactly like the Rust `if from == to
+//                               { continue; }` guard)
+//
+// 13 numeric types x 12 non-identity targets = 156 registered pairs, the
+// same count install_builtin_casts() produces in Rust.
+//
+// KEY ENCODING
+// ────────────
+// The map key packs the pair into one u64: `(from_raw << 32) | to_raw`.
+// std.map HashMap hashes values by raw bytes, so any POD key works; a
+// single u64 avoids a nested map and keeps lookups O(1).
+//
+// SEMANTIC NOTES (verified against Silver codegen, which lowers `(T)x` to
+// the same LLVM trunc/sext/zext/sitofp/fptosi/fptoui ops Rust `as` uses):
+// - bool -> int/uint/float is computed as an explicit 1/0 (Rust writes the
+//   branch out; a naive Silver `(i128)bool` cast sign-extends the i1 and
+//   would produce -1).
+// - Rust float->int `as` saturates since 1.45; float->u8/u16/u32/u64/u128
+//   here routes through fptoui exactly like Rust.  Float->i8/i16/i32/i64/
+//   i128 routes through fptosi.  Both agree on in-range values and on the
+//   boundary spot-checks in tests/rt_casts_test.ag.
+// - i128/u128 payloads are kept at full width (Silver i128/u128 codegen is
+//   exercised by the test suite and matches Rust wrapping semantics).
+//
+// DEVIATIONS FROM THE RUST API (documented):
+// - The registry is keyed by RAW u32 type ids (not the TypeId newtype) so
+//   it can be used without a TypeRegistry; convenience TypeId overloads are
+//   provided (register_ids/lookup_ids/cast_ids).
+// - Errors are reported as a `CastResult` tagged struct (ok flag +
+//   CAST_ERR discriminant + owned message String mirroring the Rust
+//   RuntimeError/ValueError Display text) instead of Result<_, _>.
+// - cast_value on an unregistered pair reports CAST_NOT_FOUND with the raw
+//   ids in the message (the Rust code formats type names; it has a registry
+//   handy and this port's CastRegistry deliberately does not — use
+//   cast_with_registry() to get name-formatted errors).
+
+import std.io;
+import std.map;
+import std.mem.drop;
+import std.rt.type_info;
+import std.rt.types;
+import std.string;
+
+// ---------------------------------------------------------------------------
+// CAST_KIND — mirrors silver_runtime's CastKind enum (payload flattened to
+// parallel fields on CastKindInfo, same layout idiom as std/rt/type_info.ag)
+// ---------------------------------------------------------------------------
+
+pub enum CAST_KIND {
+    NONE = 0;          // not a numeric cast (Rust: Ok(None))
+    IDENTITY = 1;
+    INT_TO_INT = 2;
+    INT_TO_FLOAT = 3;
+    FLOAT_TO_INT = 4;
+    FLOAT_TO_FLOAT = 5;
+}
+
+/// Classification result: `kind` is a CAST_KIND discriminant; the bit/signed
+/// fields are valid per kind (from_bits/from_signed unused by FLOAT_TO_FLOAT,
+/// to_signed unused by INT_TO_FLOAT/FLOAT_TO_FLOAT, exactly like Rust).
+pub struct CastKindInfo {
+    i32 kind;
+    u16 from_bits;
+    bool from_signed;
+    u16 to_bits;
+    bool to_signed;
+}
+
+impl CastKindInfo {
+    pub CastKindInfo none() {
+        CastKindInfo k;
+        k.kind = (i32)CAST_KIND.NONE;
+        k.from_bits = (u16)0;
+        k.from_signed = false;
+        k.to_bits = (u16)0;
+        k.to_signed = false;
+        return k;
+    }
+}
+
+/// Rule-based classification, ported from TypeRegistry::cast_kind in
+/// silver_runtime/src/types/cast.rs.  Unknown type ids classify as NONE
+/// (Rust surfaces TypeError::UnknownTypeId; callers here can pre-check with
+/// registry.get() if they need to distinguish).
+pub CastKindInfo classify_cast(TypeRegistry* reg, TypeId from, TypeId to) {
+    if (from.eq(to)) {
+        CastKindInfo k = CastKindInfo.none();
+        k.kind = (i32)CAST_KIND.IDENTITY;
+        return k;
+    }
+    Type* from_ty = reg.get(from);
+    Type* to_ty = reg.get(to);
+    if (from_ty == (Type*)0 || to_ty == (Type*)0) {
+        return CastKindInfo.none();
+    }
+    CastKindInfo k = CastKindInfo.none();
+    k.from_bits = from_ty.bits;
+    k.from_signed = from_ty.is_signed;
+    k.to_bits = to_ty.bits;
+    k.to_signed = to_ty.is_signed;
+    bool from_int = from_ty.kind == (i32)TYPE_KIND.INT;
+    bool from_float = from_ty.kind == (i32)TYPE_KIND.FLOAT;
+    bool to_int = to_ty.kind == (i32)TYPE_KIND.INT;
+    bool to_float = to_ty.kind == (i32)TYPE_KIND.FLOAT;
+    if (from_int && to_int) {
+        k.kind = (i32)CAST_KIND.INT_TO_INT;
+    } else {
+        if (from_int && to_float) {
+            k.kind = (i32)CAST_KIND.INT_TO_FLOAT;
+        } else {
+            if (from_float && to_int) {
+                k.kind = (i32)CAST_KIND.FLOAT_TO_INT;
+            } else {
+                if (from_float && to_float) {
+                    k.kind = (i32)CAST_KIND.FLOAT_TO_FLOAT;
+                } else {
+                    k.kind = (i32)CAST_KIND.NONE;
+                }
+            }
+        }
+    }
+    return k;
+}
+
+/// TypeRegistry::can_cast — true when classify yields any cast (identity
+/// included, matching the Rust `is_some()`).
+pub bool can_cast(TypeRegistry* reg, TypeId from, TypeId to) {
+    CastKindInfo k = classify_cast(reg, from, to);
+    return k.kind != (i32)CAST_KIND.NONE;
+}
+
+// ---------------------------------------------------------------------------
+// CastValue — tagged numeric value (the RtValue subset casts operate on)
+//
+// kind        payload field
+// BOOL        bool_val
+// INT         int_val   (+ ty = the specific int TypeId raw)
+// UINT        uint_val  (+ ty)
+// FLOAT       float_val (+ ty)
+// ---------------------------------------------------------------------------
+
+pub enum CAST_VALUE_KIND {
+    BOOL = 0;
+    INT = 1;
+    UINT = 2;
+    FLOAT = 3;
+}
+
+pub struct CastValue {
+    i32 kind;
+    u32 ty;          // raw TypeId of the payload's specific type
+    bool bool_val;
+    i128 int_val;
+    u128 uint_val;
+    f64 float_val;
+}
+
+impl CastValue {
+    CastValue blank() {
+        CastValue v;
+        v.kind = (i32)CAST_VALUE_KIND.BOOL;
+        v.ty = 1;
+        v.bool_val = false;
+        v.int_val = (i128)0;
+        v.uint_val = (u128)0;
+        v.float_val = 0.0;
+        return v;
+    }
+
+    pub CastValue from_bool(bool value) {
+        CastValue v = CastValue.blank();
+        v.kind = (i32)CAST_VALUE_KIND.BOOL;
+        v.ty = 1;
+        v.bool_val = value;
+        return v;
+    }
+
+    /// `ty` must be one of I8..I128 (raw 2..6).
+    pub CastValue from_int(u32 ty, i128 value) {
+        CastValue v = CastValue.blank();
+        v.kind = (i32)CAST_VALUE_KIND.INT;
+        v.ty = ty;
+        v.int_val = value;
+        return v;
+    }
+
+    /// `ty` must be one of U8..U128 (raw 7..11).
+    pub CastValue from_uint(u32 ty, u128 value) {
+        CastValue v = CastValue.blank();
+        v.kind = (i32)CAST_VALUE_KIND.UINT;
+        v.ty = ty;
+        v.uint_val = value;
+        return v;
+    }
+
+    /// `ty` must be F32 or F64 (raw 12/13).
+    pub CastValue from_float(u32 ty, f64 value) {
+        CastValue v = CastValue.blank();
+        v.kind = (i32)CAST_VALUE_KIND.FLOAT;
+        v.ty = ty;
+        v.float_val = value;
+        return v;
+    }
+
+    /// Raw TypeId of this value (RtValue::type_id in the Rust runtime).
+    pub u32 type_id(CastValue* self) {
+        return self.ty;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CAST_ERR — mirrors the Rust error variants casts can produce
+// ---------------------------------------------------------------------------
+
+pub enum CAST_ERR {
+    NONE = 0;
+    CAST_NOT_FOUND = 1;   // RuntimeError::CastNotFound
+    TYPE_MISMATCH = 2;    // RuntimeError::TypeMismatch / ValueError::TypeMismatch
+    CANNOT_CAST = 3;      // ValueError::CannotCast
+}
+
+/// Fallible cast result (Silver has no payload enums): ok flag, the cast
+/// value (zero value when !ok), a CAST_ERR discriminant, and an owned
+/// message String whose text mirrors the Rust Display strings.
+pub struct CastResult {
+    bool ok;
+    CastValue value;
+    i32 err;
+    String msg;
+}
+
+impl CastResult {
+    pub CastResult ok_value(CastValue value) {
+        CastResult r;
+        r.ok = true;
+        r.value = value;
+        r.err = (i32)CAST_ERR.NONE;
+        r.msg = String.new();
+        return move r;
+    }
+
+    pub CastResult error(i32 err, String msg) {
+        CastResult r;
+        r.ok = false;
+        r.value = CastValue.blank();
+        r.err = err;
+        r.msg = move msg;
+        return move r;
+    }
+
+    pub bool is_ok(CastResult* self) {
+        return self.ok;
+    }
+
+    pub bool is_err(CastResult* self) {
+        return !self.ok;
+    }
+}
+
+impl Drop<CastResult> for CastResult {
+    void drop(CastResult* self) {
+        self.msg.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Numeric type predicates (runtime/casts.rs is_int_type/is_uint_type/
+// is_float_type), plus bits/signed tables over raw builtin ids
+// ---------------------------------------------------------------------------
+
+pub bool rt_cast_is_int_type(u32 ty) {
+    return ty >= 2 && ty <= 6;   // I8..I128
+}
+
+pub bool rt_cast_is_uint_type(u32 ty) {
+    return ty >= 7 && ty <= 11;  // U8..U128
+}
+
+pub bool rt_cast_is_float_type(u32 ty) {
+    return ty == 12 || ty == 13; // F32, F64
+}
+
+/// Bit width of a builtin numeric raw id; 0 for BOOL/unknown.
+pub u16 rt_cast_type_bits(u32 ty) {
+    if (ty == 2 || ty == 7) { return (u16)8; }
+    if (ty == 3 || ty == 8) { return (u16)16; }
+    if (ty == 4 || ty == 9) { return (u16)32; }
+    if (ty == 5 || ty == 10) { return (u16)64; }
+    if (ty == 6 || ty == 11) { return (u16)128; }
+    if (ty == 12) { return (u16)32; }
+    if (ty == 13) { return (u16)64; }
+    return (u16)0;
+}
+
+/// Display name of a builtin numeric raw id (for error messages without a
+/// registry); "unknown" for anything outside 1..13.
+str rt_cast_type_name(u32 ty) {
+    if (ty == 1) { return "bool"; }
+    if (ty == 2) { return "i8"; }
+    if (ty == 3) { return "i16"; }
+    if (ty == 4) { return "i32"; }
+    if (ty == 5) { return "i64"; }
+    if (ty == 6) { return "i128"; }
+    if (ty == 7) { return "u8"; }
+    if (ty == 8) { return "u16"; }
+    if (ty == 9) { return "u32"; }
+    if (ty == 10) { return "u64"; }
+    if (ty == 11) { return "u128"; }
+    if (ty == 12) { return "f32"; }
+    if (ty == 13) { return "f64"; }
+    return "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// Wrapping primitive helpers — types/cast.rs cast_*_bits / normalize_float.
+// Silver `(T)x` lowers to the same LLVM ops as Rust `as`, so these are
+// one-line chains; they exist so the executor reads like the Rust source.
+// ---------------------------------------------------------------------------
+
+/// normalize_float: round an f64 through f32 when bits == 32.
+f64 rt_cast_normalize_float(f64 v, u16 bits) {
+    if (bits == (u16)32) {
+        return (f64)((f32)v);
+    }
+    return v;
+}
+
+/// cast_i128_to_signed_bits: truncate/wrap to a signed width, keep i128.
+i128 rt_cast_i128_to_signed(i128 v, u16 bits) {
+    if (bits == (u16)8) { return (i128)((i8)v); }
+    if (bits == (u16)16) { return (i128)((i16)v); }
+    if (bits == (u16)32) { return (i128)((i32)v); }
+    if (bits == (u16)64) { return (i128)((i64)v); }
+    return v;
+}
+
+/// cast_i128_to_unsigned_bits.
+u128 rt_cast_i128_to_unsigned(i128 v, u16 bits) {
+    if (bits == (u16)8) { return (u128)((u8)v) & (u128)255; }
+    if (bits == (u16)16) { return (u128)((u16)v) & (u128)65535; }
+    if (bits == (u16)32) { return (u128)((u32)v) & (u128)4294967295; }
+    if (bits == (u16)64) { return (u128)((u64)v) & (u128)18446744073709551615; }
+    return (u128)v;
+}
+
+/// cast_u128_to_signed_bits.
+i128 rt_cast_u128_to_signed(u128 v, u16 bits) {
+    if (bits == (u16)8) { return (i128)((i8)v); }
+    if (bits == (u16)16) { return (i128)((i16)v); }
+    if (bits == (u16)32) { return (i128)((i32)v); }
+    if (bits == (u16)64) { return (i128)((i64)v); }
+    return (i128)v;
+}
+
+/// cast_u128_to_unsigned_bits.
+u128 rt_cast_u128_to_unsigned(u128 v, u16 bits) {
+    if (bits == (u16)8) { return (u128)((u8)v) & (u128)255; }
+    if (bits == (u16)16) { return (u128)((u16)v) & (u128)65535; }
+    if (bits == (u16)32) { return (u128)((u32)v) & (u128)4294967295; }
+    if (bits == (u16)64) { return (u128)((u64)v) & (u128)18446744073709551615; }
+    return v;
+}
+
+/// cast_f64_to_signed_bits.
+i128 rt_cast_f64_to_signed(f64 v, u16 bits) {
+    if (bits == (u16)8) { return (i128)((i8)v); }
+    if (bits == (u16)16) { return (i128)((i16)v); }
+    if (bits == (u16)32) { return (i128)((i32)v); }
+    if (bits == (u16)64) { return (i128)((i64)v); }
+    return (i128)v;
+}
+
+/// cast_f64_to_unsigned_bits.
+u128 rt_cast_f64_to_unsigned(f64 v, u16 bits) {
+    if (bits == (u16)8) { return (u128)((u8)v) & (u128)255; }
+    if (bits == (u16)16) { return (u128)((u16)v) & (u128)65535; }
+    if (bits == (u16)32) { return (u128)((u32)v) & (u128)4294967295; }
+    if (bits == (u16)64) { return (u128)((u64)v) & (u128)18446744073709551615; }
+    return (u128)v;
+}
+
+// ---------------------------------------------------------------------------
+// Opcode executor — the single dispatcher replacing the Rust closure table.
+// Executes `value` -> `to` with the exact semantics of runtime/casts.rs
+// cast_numeric (bool special-cased to 1/0; float->int via fptosi/fptoui;
+// int width wrapping through the rt_cast_* helpers above).
+// ---------------------------------------------------------------------------
+
+CastValue rt_cast_exec_numeric(CastValue value, u32 to) {
+    // -> float
+    if (rt_cast_is_float_type(to)) {
+        f64 as_f64 = 0.0;
+        if (value.kind == (i32)CAST_VALUE_KIND.BOOL) {
+            if (value.bool_val) { as_f64 = 1.0; } else { as_f64 = 0.0; }
+        } else {
+            if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+                as_f64 = (f64)value.int_val;
+            } else {
+                if (value.kind == (i32)CAST_VALUE_KIND.UINT) {
+                    as_f64 = (f64)value.uint_val;
+                } else {
+                    as_f64 = value.float_val;
+                }
+            }
+        }
+        return CastValue.from_float(to, rt_cast_normalize_float(as_f64, rt_cast_type_bits(to)));
+    }
+
+    // -> unsigned int
+    if (rt_cast_is_uint_type(to)) {
+        u128 as_u128 = (u128)0;
+        if (value.kind == (i32)CAST_VALUE_KIND.BOOL) {
+            if (value.bool_val) { as_u128 = (u128)1; } else { as_u128 = (u128)0; }
+        } else {
+            if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+                as_u128 = (u128)value.int_val;
+            } else {
+                if (value.kind == (i32)CAST_VALUE_KIND.UINT) {
+                    as_u128 = value.uint_val;
+                } else {
+                    as_u128 = (u128)value.float_val;
+                }
+            }
+        }
+        return CastValue.from_uint(to, rt_cast_u128_to_unsigned(as_u128, rt_cast_type_bits(to)));
+    }
+
+    // -> signed int
+    if (rt_cast_is_int_type(to)) {
+        i128 as_i128 = (i128)0;
+        if (value.kind == (i32)CAST_VALUE_KIND.BOOL) {
+            if (value.bool_val) { as_i128 = (i128)1; } else { as_i128 = (i128)0; }
+        } else {
+            if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+                as_i128 = value.int_val;
+            } else {
+                if (value.kind == (i32)CAST_VALUE_KIND.UINT) {
+                    as_i128 = (i128)value.uint_val;
+                } else {
+                    as_i128 = (i128)value.float_val;
+                }
+            }
+        }
+        return CastValue.from_int(to, rt_cast_i128_to_signed(as_i128, rt_cast_type_bits(to)));
+    }
+
+    // -> bool
+    bool b = false;
+    if (value.kind == (i32)CAST_VALUE_KIND.BOOL) {
+        b = value.bool_val;
+    } else {
+        if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+            b = value.int_val != (i128)0;
+        } else {
+            if (value.kind == (i32)CAST_VALUE_KIND.UINT) {
+                b = value.uint_val != (u128)0;
+            } else {
+                b = value.float_val != 0.0;
+            }
+        }
+    }
+    return CastValue.from_bool(b);
+}
+
+/// Encode a registered (from, to) pair as an opcode (see header for the
+/// layout).  Only called for numeric pairs with from != to.
+i32 rt_cast_opcode_for(u32 from, u32 to) {
+    if (from == 1) {
+        return (i32)to;                       // BOOL source: 1..13
+    }
+    i32 to_index = (i32)to;
+    if (to > from) { to_index = to_index - 1; } // skip self in 12-wide row
+    return (i32)(from - 1) * 12 + to_index;   // non-BOOL source
+}
+
+/// Decode the target raw type id from an opcode (inverse of
+/// rt_cast_opcode_for given the source).
+u32 rt_cast_opcode_target(i32 opcode, u32 from) {
+    if (from == 1) {
+        return (u32)opcode;
+    }
+    u32 to_index = (u32)(opcode - (i32)(from - 1) * 12);
+    if (to_index >= from) { to_index = to_index + 1; }
+    return to_index;
+}
+
+/// The dispatcher: execute the cast an opcode stands for.  `from` is only
+/// needed to decode the target; the opcode alone fixes the (from, to) pair.
+CastValue rt_cast_exec_opcode(i32 opcode, u32 from, CastValue value) {
+    return rt_cast_exec_numeric(value, rt_cast_opcode_target(opcode, from));
+}
+
+// ---------------------------------------------------------------------------
+// CastRegistry — port of runtime/casts.rs CastRegistry
+// ---------------------------------------------------------------------------
+
+pub struct CastRegistry {
+    HashMap<u64, i32> by_type;   // packed (from << 32) | to  ->  opcode
+}
+
+u64 rt_cast_key(u32 from, u32 to) {
+    return ((u64)from * (u64)4294967296) + (u64)to; // (from << 32) | to
+}
+
+impl CastRegistry {
+    /// Empty registry (CastRegistry::new in Rust).
+    pub CastRegistry new() {
+        CastRegistry r;
+        r.by_type = HashMap<u64, i32>.new();
+        return move r;
+    }
+
+    /// Registry prepopulated with the 156 numeric pairs
+    /// (Runtime::install_builtin_casts in Rust).
+    pub CastRegistry with_builtin_casts() {
+        CastRegistry r = CastRegistry.new();
+        r.install_builtin_casts();
+        return move r;
+    }
+
+    /// Number of registered pairs.
+    pub i64 len(CastRegistry* self) {
+        return self.by_type.len();
+    }
+
+    /// register(from, to, func) — the func is an opcode here (see header).
+    pub void register(CastRegistry* self, u32 from, u32 to, i32 opcode) {
+        self.by_type.insert(rt_cast_key(from, to), opcode);
+    }
+
+    /// TypeId convenience wrapper over register.
+    pub void register_ids(CastRegistry* self, TypeId from, TypeId to, i32 opcode) {
+        self.register(from.raw, to.raw, opcode);
+    }
+
+    /// lookup(from, to) -> opcode, or -1 when absent (Rust: Option<NativeCast>).
+    pub i32 lookup(CastRegistry* self, u32 from, u32 to) {
+        u64 key = rt_cast_key(from, to);
+        if (self.by_type.contains_key(key)) {
+            return self.by_type.get(key);
+        }
+        return -1;
+    }
+
+    /// TypeId convenience wrapper over lookup.
+    pub i32 lookup_ids(CastRegistry* self, TypeId from, TypeId to) {
+        return self.lookup(from.raw, to.raw);
+    }
+
+    /// Runtime::install_builtin_casts — register every (from, to) pair over
+    /// the 13 numeric builtin types except identity pairs: 13 x 12 = 156.
+    pub void install_builtin_casts(CastRegistry* self) {
+        u32 from = 1; // BOOL .. F64 (raw ids 1..13 are exactly the numerics)
+        while (from <= 13) {
+            u32 to = 1;
+            while (to <= 13) {
+                if (from != to) {
+                    self.register(from, to, rt_cast_opcode_for(from, to));
+                }
+                to = to + 1;
+            }
+            from = from + 1;
+        }
+    }
+
+    /// Runtime::cast_value — identity short-circuits; otherwise the
+    /// registered opcode executes the cast.  Unknown pairs fail with
+    /// CAST_NOT_FOUND ("cast not found: {from} -> {to}", the
+    /// RuntimeError::CastNotFound Display shape with names resolved to
+    /// builtin names where possible).
+    pub CastResult cast_value(CastRegistry* self, CastValue value, u32 to) {
+        u32 from = value.type_id();
+        if (from == to) {
+            return CastResult.ok_value(value);
+        }
+        i32 opcode = self.lookup(from, to);
+        if (opcode < 0) {
+            String m = rt_type_str_owned("cast not found: ");
+            m.push_str(rt_cast_type_name(from));
+            m.push_str(" -> ");
+            m.push_str(rt_cast_type_name(to));
+            return CastResult.error((i32)CAST_ERR.CAST_NOT_FOUND, move m);
+        }
+        return CastResult.ok_value(rt_cast_exec_opcode(opcode, from, value));
+    }
+
+    /// TypeId convenience wrapper over cast.
+    pub CastResult cast_ids(CastRegistry* self, CastValue value, TypeId to) {
+        return self.cast_value(value, to.raw);
+    }
+    /// Like cast, but formats CAST_NOT_FOUND with registry-resolved type
+    /// names (exactly the Rust Runtime::cast_value error text).
+    pub CastResult cast_with_registry(CastRegistry* self, TypeRegistry* reg, CastValue value, TypeId to) {
+        u32 from = value.type_id();
+        if (from == to.raw) {
+            return CastResult.ok_value(value);
+        }
+        i32 opcode = self.lookup(from, to.raw);
+        if (opcode < 0) {
+            str from_name = reg.name_of(TypeId.from_raw(from));
+            str to_name = reg.name_of(to);
+            String m = rt_type_str_owned("cast not found: ");
+            if (from_name == (str)0) { m.push_str("<unknown>"); } else { m.push_str(from_name); }
+            m.push_str(" -> ");
+            if (to_name == (str)0) { m.push_str("<unknown>"); } else { m.push_str(to_name); }
+            return CastResult.error((i32)CAST_ERR.CAST_NOT_FOUND, move m);
+        }
+        return CastResult.ok_value(rt_cast_exec_opcode(opcode, from, value));
+    }
+}
+
+impl Drop<CastRegistry> for CastRegistry {
+    void drop(CastRegistry* self) {
+        self.by_type.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TypeRegistry::cast_value — the types/cast.rs (unregistered, rule-based)
+// entry point.  Classifies via the registry's type metadata and executes
+// with the same wrapping helpers; CANNOT_CAST for non-numeric pairs
+// (Rust: Ok(None) -> ValueError::CannotCast), TYPE_MISMATCH when the
+// payload kind disagrees with the classification.
+// ---------------------------------------------------------------------------
+
+pub CastResult rt_cast_value(TypeRegistry* reg, CastValue value, TypeId to) {
+    TypeId from = TypeId.from_raw(value.type_id());
+    if (from.eq(to)) {
+        return CastResult.ok_value(value);
+    }
+    CastKindInfo kind = classify_cast(reg, from, to);
+    if (kind.kind == (i32)CAST_KIND.NONE) {
+        // Rust: ValueError::CannotCast { from, to } with registry names.
+        str from_name = reg.name_of(from);
+        str to_name = reg.name_of(to);
+        String m = rt_type_str_owned("cannot cast ");
+        if (from_name == (str)0) { m.push_str("<unknown>"); } else { m.push_str(from_name); }
+        m.push_str(" to ");
+        if (to_name == (str)0) { m.push_str("<unknown>"); } else { m.push_str(to_name); }
+        return CastResult.error((i32)CAST_ERR.CANNOT_CAST, move m);
+    }
+
+    // Payload-kind agreement check (Rust: type_mismatch(...) arms).
+    bool want_int = kind.kind == (i32)CAST_KIND.INT_TO_INT
+        || kind.kind == (i32)CAST_KIND.INT_TO_FLOAT;
+    bool want_float = kind.kind == (i32)CAST_KIND.FLOAT_TO_INT
+        || kind.kind == (i32)CAST_KIND.FLOAT_TO_FLOAT;
+    bool have_int = value.kind == (i32)CAST_VALUE_KIND.INT
+        || value.kind == (i32)CAST_VALUE_KIND.UINT;
+    bool have_float = value.kind == (i32)CAST_VALUE_KIND.FLOAT;
+    if ((want_int && !have_int) || (want_float && !have_float)) {
+        str found_name = reg.name_of(from);
+        String m = rt_type_str_owned("type mismatch: expected ");
+        if (want_int) { m.push_str("int"); } else { m.push_str("float"); }
+        m.push_str(", found ");
+        if (found_name == (str)0) { m.push_str("<unknown>"); } else { m.push_str(found_name); }
+        return CastResult.error((i32)CAST_ERR.TYPE_MISMATCH, move m);
+    }
+
+    // Execution mirrors cast_value's match arms; width/sign routing comes
+    // from the classification (from the registry's metadata), not the
+    // payload tag — same as Rust.
+    if (kind.kind == (i32)CAST_KIND.INT_TO_INT) {
+        if (kind.to_signed) {
+            i128 out = (i128)0;
+            if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+                out = rt_cast_i128_to_signed(value.int_val, kind.to_bits);
+            } else {
+                out = rt_cast_u128_to_signed(value.uint_val, kind.to_bits);
+            }
+            return CastResult.ok_value(CastValue.from_int(to.raw, out));
+        }
+        u128 out = (u128)0;
+        if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+            out = rt_cast_i128_to_unsigned(value.int_val, kind.to_bits);
+        } else {
+            out = rt_cast_u128_to_unsigned(value.uint_val, kind.to_bits);
+        }
+        return CastResult.ok_value(CastValue.from_uint(to.raw, out));
+    }
+    if (kind.kind == (i32)CAST_KIND.INT_TO_FLOAT) {
+        f64 as_f64 = 0.0;
+        if (value.kind == (i32)CAST_VALUE_KIND.INT) {
+            as_f64 = (f64)value.int_val;
+        } else {
+            as_f64 = (f64)value.uint_val;
+        }
+        return CastResult.ok_value(CastValue.from_float(to.raw, rt_cast_normalize_float(as_f64, kind.to_bits)));
+    }
+    if (kind.kind == (i32)CAST_KIND.FLOAT_TO_FLOAT) {
+        return CastResult.ok_value(CastValue.from_float(to.raw, rt_cast_normalize_float(value.float_val, kind.to_bits)));
+    }
+    // FLOAT_TO_INT
+    if (kind.to_signed) {
+        return CastResult.ok_value(CastValue.from_int(to.raw, rt_cast_f64_to_signed(value.float_val, kind.to_bits)));
+    }
+    return CastResult.ok_value(CastValue.from_uint(to.raw, rt_cast_f64_to_unsigned(value.float_val, kind.to_bits)));
+}
