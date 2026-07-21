@@ -188,6 +188,10 @@ struct Cli {
     #[arg(long = "dynamic-runtime", action = ArgAction::SetTrue)]
     dynamic_runtime: bool,
 
+    /// Link statically (no libc runtime support). This is the default.
+    #[arg(long = "static-runtime", action = ArgAction::SetTrue)]
+    static_runtime: bool,
+
     /// Prefer shared module artifacts and emit shared libraries for module packaging
     #[arg(long = "shared", action = ArgAction::SetTrue)]
     shared: bool,
@@ -307,8 +311,8 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         debug_info: cli.debug_info,
         target: cli.target,
         sysroot: cli.sysroot,
-        no_std: cli.no_std || !cli.dynamic_runtime,
-        static_runtime: !cli.dynamic_runtime,
+        no_std: cli.no_std || cli.static_runtime,
+        static_runtime: cli.static_runtime,
         shared: cli.shared,
         verbose: cli.verbose,
         dry_run: cli.dry_run,
