@@ -1,0 +1,477 @@
+// Tests for std/rt/casts.ag — port of the cast cases from
+// silver_runtime/src/runtime/tests.rs (builtin_numeric_casts_work,
+// missing_cast_reports_error), the CastKind classification rules from
+// silver_runtime/src/types/cast.rs, an exhaustive sweep over all 156
+// prepopulated numeric pairs, and boundary spot-checks for Rust-`as`
+// wrapping semantics.
+import std.io;
+import std.rt.casts;
+import std.rt.type_info;
+import std.rt.types;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+void assert_eq_i128(i128 a, i128 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (i128 mismatch: low64 expected %ld, got %ld)\n", msg, (i64)b, (i64)a);
+    }
+}
+
+void assert_eq_u128(u128 a, u128 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (u128 mismatch: low64 expected %lu, got %lu)\n", msg, (u64)b, (u64)a);
+    }
+}
+
+void assert_eq_f64(f64 a, f64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %f, got %f)\n", msg, b, a);
+    }
+}
+
+void assert_f64_near(f64 a, f64 b, f64 eps, str msg) {
+    f64 d = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    if (d < eps) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected ~%f, got %f)\n", msg, b, a);
+    }
+}
+
+/// Numeric test matrix payload for `idx` in 0..12 (BOOL..F64, raw 1..13):
+/// 42 as the source value, in the payload kind of the raw type id.
+CastValue sample_value(u32 raw) {
+    if (raw == 1) { return CastValue.from_bool(true); }
+    if (rt_cast_is_int_type(raw)) { return CastValue.from_int(raw, (i128)42); }
+    if (rt_cast_is_uint_type(raw)) { return CastValue.from_uint(raw, (u128)42); }
+    return CastValue.from_float(raw, 42.5);
+}
+
+i32 main() {
+    printf("=== CastRegistry / CastKind Tests ===\n\n");
+
+    // --- builtin_numeric_casts_work (port of runtime/tests.rs) -----------
+    printf("--- builtin_numeric_casts_work (Rust port) ---\n");
+    {
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+
+        CastResult r1 = casts.cast_value(CastValue.from_int(4, (i128)42), 5); // I32 -> I64
+        assert_true(r1.is_ok(), "i32 42 -> i64 ok");
+        assert_eq_i64((i64)r1.value.ty, 5, "i32 42 -> i64 has ty I64");
+        assert_eq_i128(r1.value.int_val, (i128)42, "i32 42 -> i64 value 42");
+        r1.drop();
+
+        CastResult r2 = casts.cast_value(CastValue.from_int(4, (i128)42), 13); // I32 -> F64
+        assert_true(r2.is_ok(), "i32 42 -> f64 ok");
+        assert_eq_i64((i64)r2.value.ty, 13, "i32 42 -> f64 has ty F64");
+        assert_eq_f64(r2.value.float_val, 42.0, "i32 42 -> f64 value 42.0");
+        r2.drop();
+
+        CastResult r3 = casts.cast_value(CastValue.from_float(13, 3.141592653589793), 4); // F64 -> I32
+        assert_true(r3.is_ok(), "f64 pi -> i32 ok");
+        assert_eq_i64((i64)r3.value.ty, 4, "f64 pi -> i32 has ty I32");
+        assert_eq_i128(r3.value.int_val, (i128)3, "f64 pi -> i32 truncates to 3");
+        r3.drop();
+
+        CastResult r4 = casts.cast_value(CastValue.from_bool(true), 4); // BOOL -> I32
+        assert_true(r4.is_ok(), "bool true -> i32 ok");
+        assert_eq_i64((i64)r4.value.ty, 4, "bool true -> i32 has ty I32");
+        assert_eq_i128(r4.value.int_val, (i128)1, "bool true -> i32 value 1");
+        r4.drop();
+
+        CastResult r5 = casts.cast_value(CastValue.from_int(4, (i128)0), 1); // I32 0 -> BOOL
+        assert_true(r5.is_ok(), "i32 0 -> bool ok");
+        assert_eq_i64((i64)r5.value.ty, 1, "i32 0 -> bool has ty BOOL");
+        assert_true(!r5.value.bool_val, "i32 0 -> bool value false");
+        r5.drop();
+
+        casts.drop();
+    }
+
+    // --- missing_cast_reports_error (port of runtime/tests.rs) -----------
+    // The Rust test casts a heap string to i32 and expects CastNotFound.
+    // STRING (raw 14) is never registered by install_builtin_casts, so a
+    // cast from it hits the same error path.
+    printf("--- missing_cast_reports_error (Rust port) ---\n");
+    {
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+        TypeRegistry reg = TypeRegistry.new();
+
+        CastValue fake_string;
+        fake_string.kind = (i32)CAST_VALUE_KIND.INT; // payload kind irrelevant here
+        fake_string.ty = 14;                          // STRING raw id
+        fake_string.bool_val = false;
+        fake_string.int_val = (i128)0;
+        fake_string.uint_val = (u128)0;
+        fake_string.float_val = 0.0;
+
+        CastResult err = casts.cast_with_registry(&reg, fake_string, TypeId.I32());
+        assert_true(err.is_err(), "string -> i32 cast fails");
+        assert_eq_i64((i64)err.err, (i64)CAST_ERR.CAST_NOT_FOUND, "error is CAST_NOT_FOUND");
+        assert_true(err.msg.equals("cast not found: string -> i32"), "error message matches Rust Display");
+        err.drop();
+
+        // Raw-id variant of the same failure (no registry names).
+        CastResult err2 = casts.cast_value(fake_string, 4);
+        assert_true(err2.is_err(), "raw string -> i32 cast fails");
+        assert_eq_i64((i64)err2.err, (i64)CAST_ERR.CAST_NOT_FOUND, "raw error is CAST_NOT_FOUND");
+        err2.drop();
+
+        reg.drop();
+        casts.drop();
+    }
+
+    // --- identity short-circuit -------------------------------------------
+    printf("--- identity short-circuit ---\n");
+    {
+        CastRegistry casts = CastRegistry.new(); // empty: nothing registered
+        CastResult r = casts.cast_value(CastValue.from_int(5, (i128)(0 - 7)), 5);
+        assert_true(r.is_ok(), "identity i64 -> i64 works on empty registry");
+        assert_eq_i128(r.value.int_val, (i128)(0 - 7), "identity preserves value");
+        r.drop();
+
+        CastResult missing = casts.cast_value(CastValue.from_int(5, (i128)1), 4);
+        assert_true(missing.is_err(), "unregistered i64 -> i32 fails on empty registry");
+        assert_eq_i64((i64)missing.err, (i64)CAST_ERR.CAST_NOT_FOUND, "empty-registry error kind");
+        missing.drop();
+        casts.drop();
+    }
+
+    // --- registry shape: 156 pairs ----------------------------------------
+    printf("--- registry shape ---\n");
+    {
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+        assert_eq_i64(casts.len(), 156, "156 numeric pairs registered");
+
+        // Every (from, to) with from != to over raw ids 1..13 is present.
+        bool all_present = true;
+        u32 from = 1;
+        while (from <= 13) {
+            u32 to = 1;
+            while (to <= 13) {
+                if (from != to && casts.lookup(from, to) < 0) { all_present = false; }
+                to = to + 1;
+            }
+            from = from + 1;
+        }
+        assert_true(all_present, "all 156 (from, to) pairs lookup-able");
+
+        // Identity pairs are NOT registered (Rust `continue`s them).
+        bool no_identity = true;
+        u32 i = 1;
+        while (i <= 13) {
+            if (casts.lookup(i, i) >= 0) { no_identity = false; }
+            i = i + 1;
+        }
+        assert_true(no_identity, "no identity pairs registered");
+
+        // Opcode decode round-trip for every registered pair.
+        bool decode_ok = true;
+        from = 1;
+        while (from <= 13) {
+            u32 to = 1;
+            while (to <= 13) {
+                if (from != to) {
+                    i32 op = casts.lookup(from, to);
+                    if (rt_cast_opcode_target(op, from) != to) { decode_ok = false; }
+                }
+                to = to + 1;
+            }
+            from = from + 1;
+        }
+        assert_true(decode_ok, "opcode -> target decode round-trips for all 156");
+        casts.drop();
+    }
+
+    // --- exhaustive sweep: every registered pair executes ------------------
+    printf("--- exhaustive 156-pair sweep ---\n");
+    {
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+        i64 ok_count = 0;
+        i64 err_count = 0;
+        u32 from = 1;
+        while (from <= 13) {
+            u32 to = 1;
+            while (to <= 13) {
+                if (from != to) {
+                    CastResult r = casts.cast_value(sample_value(from), to);
+                    if (r.is_ok() && r.value.ty == to) {
+                        ok_count = ok_count + 1;
+                    } else {
+                        err_count = err_count + 1;
+                    }
+                    r.drop();
+                }
+                to = to + 1;
+            }
+            from = from + 1;
+        }
+        assert_eq_i64(ok_count, 156, "all 156 pairs execute successfully");
+        assert_eq_i64(err_count, 0, "no pair errors");
+        casts.drop();
+    }
+
+    // --- boundary spot-checks: Rust-`as` wrapping semantics ---------------
+    printf("--- boundary spot-checks ---\n");
+    {
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+
+        // i64 -> i8 truncation: 300 wraps to 44.
+        CastResult t1 = casts.cast_value(CastValue.from_int(5, (i128)300), 2);
+        assert_true(t1.is_ok(), "i64 300 -> i8 ok");
+        assert_eq_i128(t1.value.int_val, (i128)44, "i64 300 -> i8 == 44");
+        t1.drop();
+
+        // i64 -> i8: -1 stays -1.
+        CastResult t1b = casts.cast_value(CastValue.from_int(5, (i128)(0 - 1)), 2);
+        assert_eq_i128(t1b.value.int_val, (i128)(0 - 1), "i64 -1 -> i8 == -1");
+        t1b.drop();
+
+        // i64 -1 -> u8 wraps to 255.
+        CastResult t1c = casts.cast_value(CastValue.from_int(5, (i128)(0 - 1)), 7);
+        assert_eq_u128(t1c.value.uint_val, (u128)255, "i64 -1 -> u8 == 255");
+        t1c.drop();
+
+        // f64 -> i32 truncates toward zero (both directions).
+        CastResult t2 = casts.cast_value(CastValue.from_float(13, 3.99), 4);
+        assert_eq_i128(t2.value.int_val, (i128)3, "f64 3.99 -> i32 == 3");
+        t2.drop();
+        CastResult t2b = casts.cast_value(CastValue.from_float(13, 0.0 - 3.99), 4);
+        assert_eq_i128(t2b.value.int_val, (i128)(0 - 3), "f64 -3.99 -> i32 == -3");
+        t2b.drop();
+
+        // u64 max -> i64 sign flip: 2^64-1 -> -1.
+        CastResult t3 = casts.cast_value(CastValue.from_uint(10, (u128)18446744073709551615), 5);
+        assert_true(t3.is_ok(), "u64 max -> i64 ok");
+        assert_eq_i128(t3.value.int_val, (i128)(0 - 1), "u64 max -> i64 == -1");
+        t3.drop();
+
+        // f64 -> f32 -> f64 round trip (normalize through f32).
+        f64 pi = 3.141592653589793;
+        CastResult t4 = casts.cast_value(CastValue.from_float(13, pi), 12);
+        assert_true(t4.is_ok(), "f64 pi -> f32 ok");
+        assert_eq_i64((i64)t4.value.ty, 12, "f64 pi -> f32 has ty F32");
+        f64 pi32 = t4.value.float_val;
+        t4.drop();
+        CastResult t4b = casts.cast_value(CastValue.from_float(12, pi32), 13);
+        assert_eq_f64(t4b.value.float_val, pi32, "f32 -> f64 is exact");
+        t4b.drop();
+        assert_f64_near(pi32, pi, 0.000001, "f64->f32->f64 pi within f32 epsilon");
+        // f64 -> f32 must actually round (not be a bit-preserving no-op).
+        assert_true(pi32 != pi, "f64 pi -> f32 loses precision");
+
+        // bool edges.
+        CastResult b1 = casts.cast_value(CastValue.from_bool(true), 10); // -> u64
+        assert_eq_u128(b1.value.uint_val, (u128)1, "bool true -> u64 == 1");
+        b1.drop();
+        CastResult b2 = casts.cast_value(CastValue.from_bool(false), 5); // -> i64
+        assert_eq_i128(b2.value.int_val, (i128)0, "bool false -> i64 == 0");
+        b2.drop();
+        CastResult b3 = casts.cast_value(CastValue.from_bool(true), 13); // -> f64
+        assert_eq_f64(b3.value.float_val, 1.0, "bool true -> f64 == 1.0");
+        b3.drop();
+        CastResult b4 = casts.cast_value(CastValue.from_float(13, 0.0), 1); // 0.0 -> bool
+        assert_true(!b4.value.bool_val, "f64 0.0 -> bool == false");
+        b4.drop();
+        CastResult b5 = casts.cast_value(CastValue.from_float(13, 0.5), 1); // nonzero -> bool
+        assert_true(b5.value.bool_val, "f64 0.5 -> bool == true");
+        b5.drop();
+        CastResult b6 = casts.cast_value(CastValue.from_uint(7, (u128)200), 1); // 200u8 -> bool
+        assert_true(b6.value.bool_val, "u8 200 -> bool == true");
+        b6.drop();
+
+        // Wide types: i128/u128 round-trips.
+        CastResult w1 = casts.cast_value(CastValue.from_uint(11, (u128)(0 - 1)), 6); // u128 max -> i128
+        assert_eq_i128(w1.value.int_val, (i128)(0 - 1), "u128 max -> i128 == -1");
+        w1.drop();
+        CastResult w2 = casts.cast_value(CastValue.from_int(6, (i128)(0 - 1)), 7); // i128 -1 -> u8
+        assert_eq_u128(w2.value.uint_val, (u128)255, "i128 -1 -> u8 == 255");
+        w2.drop();
+
+        // f64 -> u8: 300.7 -> 300 -> wraps to 44 (u8).
+        CastResult f1 = casts.cast_value(CastValue.from_float(13, 300.7), 7);
+        assert_eq_u128(f1.value.uint_val, (u128)44, "f64 300.7 -> u8 == 44");
+        f1.drop();
+
+        casts.drop();
+    }
+
+    // --- CastKind classification (types/cast.rs rules) ----------------------
+    printf("--- classify_cast / can_cast ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+
+        CastKindInfo id = classify_cast(&reg, TypeId.I64(), TypeId.I64());
+        assert_eq_i64((i64)id.kind, (i64)CAST_KIND.IDENTITY, "i64 -> i64 is IDENTITY");
+
+        CastKindInfo ii = classify_cast(&reg, TypeId.I32(), TypeId.U8());
+        assert_eq_i64((i64)ii.kind, (i64)CAST_KIND.INT_TO_INT, "i32 -> u8 is INT_TO_INT");
+        assert_eq_i64((i64)ii.from_bits, 32, "i32 -> u8 from_bits 32");
+        assert_true(ii.from_signed, "i32 -> u8 from_signed");
+        assert_eq_i64((i64)ii.to_bits, 8, "i32 -> u8 to_bits 8");
+        assert_true(!ii.to_signed, "i32 -> u8 to unsigned");
+
+        CastKindInfo itf = classify_cast(&reg, TypeId.U64(), TypeId.F32());
+        assert_eq_i64((i64)itf.kind, (i64)CAST_KIND.INT_TO_FLOAT, "u64 -> f32 is INT_TO_FLOAT");
+        assert_eq_i64((i64)itf.to_bits, 32, "u64 -> f32 to_bits 32");
+
+        CastKindInfo fti = classify_cast(&reg, TypeId.F64(), TypeId.I16());
+        assert_eq_i64((i64)fti.kind, (i64)CAST_KIND.FLOAT_TO_INT, "f64 -> i16 is FLOAT_TO_INT");
+        assert_eq_i64((i64)fti.from_bits, 64, "f64 -> i16 from_bits 64");
+        assert_true(fti.to_signed, "f64 -> i16 to signed");
+
+        CastKindInfo ftf = classify_cast(&reg, TypeId.F32(), TypeId.F64());
+        assert_eq_i64((i64)ftf.kind, (i64)CAST_KIND.FLOAT_TO_FLOAT, "f32 -> f64 is FLOAT_TO_FLOAT");
+
+        // bool is not an INT/FLOAT kind in the registry: numeric casts with
+        // bool classify as NONE (the Rust rule-based path agrees — the
+        // CastRegistry opcode path is what handles bool).
+        CastKindInfo bn = classify_cast(&reg, TypeId.BOOL(), TypeId.I64());
+        assert_eq_i64((i64)bn.kind, (i64)CAST_KIND.NONE, "bool -> i64 classifies NONE (rule path)");
+        CastKindInfo sn = classify_cast(&reg, TypeId.STRING(), TypeId.I64());
+        assert_eq_i64((i64)sn.kind, (i64)CAST_KIND.NONE, "string -> i64 classifies NONE");
+
+        assert_true(can_cast(&reg, TypeId.I8(), TypeId.F64()), "can_cast(i8, f64)");
+        assert_true(can_cast(&reg, TypeId.I8(), TypeId.I8()), "can_cast(i8, i8) identity");
+        assert_true(!can_cast(&reg, TypeId.STRING(), TypeId.I8()), "!can_cast(string, i8)");
+
+        reg.drop();
+    }
+
+    // --- rt_cast_value (types/cast.rs rule-based entry point) -------------
+    printf("--- rt_cast_value (rule-based) ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+
+        // Identity.
+        CastResult id = rt_cast_value(&reg, CastValue.from_int(5, (i128)9), TypeId.I64());
+        assert_true(id.is_ok(), "rule path identity ok");
+        assert_eq_i128(id.value.int_val, (i128)9, "rule path identity value");
+        id.drop();
+
+        // IntToInt with width wrap: i64 300 -> i8 == 44.
+        CastResult w = rt_cast_value(&reg, CastValue.from_int(5, (i128)300), TypeId.I8());
+        assert_true(w.is_ok(), "rule i64 300 -> i8 ok");
+        assert_eq_i128(w.value.int_val, (i128)44, "rule i64 300 -> i8 == 44");
+        assert_eq_i64((i64)w.value.ty, 2, "rule result ty is I8");
+        w.drop();
+
+        // IntToFloat: i32 42 -> f32 normalizes through f32.
+        CastResult f = rt_cast_value(&reg, CastValue.from_int(4, (i128)42), TypeId.F32());
+        assert_true(f.is_ok(), "rule i32 42 -> f32 ok");
+        assert_eq_f64(f.value.float_val, 42.0, "rule i32 42 -> f32 == 42.0");
+        f.drop();
+
+        // FloatToInt: f64 pi -> i32 truncates toward zero.
+        CastResult p = rt_cast_value(&reg, CastValue.from_float(13, 3.141592653589793), TypeId.I32());
+        assert_true(p.is_ok(), "rule f64 pi -> i32 ok");
+        assert_eq_i128(p.value.int_val, (i128)3, "rule f64 pi -> i32 == 3");
+        p.drop();
+
+        // FloatToFloat: f64 pi -> f32 rounds.
+        CastResult q = rt_cast_value(&reg, CastValue.from_float(13, 3.141592653589793), TypeId.F32());
+        assert_true(q.is_ok(), "rule f64 pi -> f32 ok");
+        assert_f64_near(q.value.float_val, 3.141592653589793, 0.000001, "rule f64 pi -> f32 within eps");
+        q.drop();
+
+        // CannotCast: string -> i32 (non-numeric pair).
+        CastValue fake_string;
+        fake_string.kind = (i32)CAST_VALUE_KIND.INT;
+        fake_string.ty = 14;
+        fake_string.bool_val = false;
+        fake_string.int_val = (i128)0;
+        fake_string.uint_val = (u128)0;
+        fake_string.float_val = 0.0;
+        CastResult cc = rt_cast_value(&reg, fake_string, TypeId.I32());
+        assert_true(cc.is_err(), "rule string -> i32 fails");
+        assert_eq_i64((i64)cc.err, (i64)CAST_ERR.CANNOT_CAST, "rule error is CANNOT_CAST");
+        assert_true(cc.msg.equals("cannot cast string to i32"), "rule error message matches Rust");
+        cc.drop();
+
+        // TypeMismatch: payload kind disagrees with classification
+        // (float payload offered for an INT_TO_INT pair).
+        CastResult tm = rt_cast_value(&reg, CastValue.from_float(4, 1.5), TypeId.U64());
+        assert_true(tm.is_err(), "rule float payload for int->int fails");
+        assert_eq_i64((i64)tm.err, (i64)CAST_ERR.TYPE_MISMATCH, "rule error is TYPE_MISMATCH");
+        tm.drop();
+
+        reg.drop();
+    }
+
+    // --- rule path agrees with registry path on the shared numeric grid ---
+    // (bool pairs excluded: the rule-based classifier says NONE for bool,
+    // exactly like the Rust types/cast.rs match which has no Bool arm.)
+    printf("--- rule path vs registry path agreement ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        CastRegistry casts = CastRegistry.with_builtin_casts();
+        i64 agree = 0;
+        i64 disagree = 0;
+        u32 from = 2; // I8..F64 (skip BOOL)
+        while (from <= 13) {
+            u32 to = 2;
+            while (to <= 13) {
+                if (from != to) {
+                    CastResult rr = rt_cast_value(&reg, sample_value(from), TypeId.from_raw(to));
+                    CastResult or = casts.cast_value(sample_value(from), to);
+                    bool same = rr.is_ok() == or.is_ok();
+                    if (same && rr.is_ok()) {
+                        same = rr.value.ty == or.value.ty
+                            && rr.value.int_val == or.value.int_val
+                            && rr.value.uint_val == or.value.uint_val
+                            && rr.value.float_val == or.value.float_val
+                            && rr.value.bool_val == or.value.bool_val;
+                    }
+                    if (same) { agree = agree + 1; } else { disagree = disagree + 1; }
+                    rr.drop();
+                    or.drop();
+                }
+                to = to + 1;
+            }
+            from = from + 1;
+        }
+        assert_eq_i64(agree, 132, "rule/registry agree on all 132 non-bool pairs (12 x 11)");
+        assert_eq_i64(disagree, 0, "no rule/registry disagreements");
+        casts.drop();
+        reg.drop();
+    }
+
+    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return tests_failed;
+}

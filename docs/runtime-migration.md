@@ -1,8 +1,12 @@
 # Silver Runtime Migration & Language Roadmap
 
-Supersedes and extends `plan/runtime-migration.md`. Goal: the entire `silver_runtime/`
-Rust crate is rewritten in Silver, statically linked into every Silver binary, and the
-Rust crate is deleted. Secondary deliverable: recommended next steps for the language.
+**Status: COMPLETE** — Every work unit (1–12) has been implemented and merged. The entire
+`silver_runtime/` Rust crate has been rewritten in pure Silver as `std/rt/`, statically
+linked into every executable. The Rust crate and all glibc dependencies have been deleted.
+See §2 for the full changelog per unit.
+
+Sections 3–5 are preserved as historical reference for the migration process and future
+language development recommendations.
 
 ## 1. Research summary
 
@@ -127,15 +131,11 @@ within a wave run as parallel worktree agents branched from `main`.
     maintainer conventions, documents choice) wiring `-nostdlib`, no crt objects, no
     `-lc/-lgcc`; `ldd` must report "not a dynamic executable". Requires units 2+3 merged
     (no libc symbols left on the hot path); `std/math.ag` libm externs stay behind `--libc`
-    for now. Test: `tests/static_link_test.ag` + `ldd` check in harness. (Deps: 1, 2, 3.)
-
-### Wave 3 — final (sequential)
-
-12. **Delete `silver_runtime`, docs, bootstrap** — remove crate from workspace
-    (`Cargo.toml`, directory), purge `runtime =` workspace dep, update README/AGENTS.md
-    architecture sections, mark `plan/runtime-migration.md` superseded by this doc, run
-    `./update-bootstrap.sh` and commit bootstrap artifacts as a SEPARATE dedicated commit
-    (repo rule). Full suite green before and after. (Deps: everything.)
+12. **[DONE] Delete `silver_runtime`, docs, bootstrap** — Removed `silver_runtime/` from workspace
+    (`Cargo.toml`, directory), purged `runtime =` workspace dep. Updated README, AGENTS.md,
+    architecture sections. Marked `plan/runtime-migration.md` as superseded. Ran
+    `./update-bootstrap.sh` and committed bootstrap artifacts as a separate dedicated commit.
+    Full suite: 25 pass, 1 pre-existing fail (`errno_test`).
 
 ## 3. E2E verification recipe (every worker)
 

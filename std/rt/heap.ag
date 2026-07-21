@@ -18,6 +18,7 @@
 import std.mem;
 import std.string;
 import std.mem.drop;
+import std.rt.type_info;
 
 // ---------------------------------------------------------------------------
 // Kind tags (RtValue)
@@ -35,14 +36,12 @@ pub const i32 OBJ_KIND_STRING = 0;
 pub const i32 OBJ_KIND_VEC = 1;
 pub const i32 OBJ_KIND_STRUCT = 2;
 pub const i32 OBJ_KIND_ENUM = 3;
-
-// Builtin TypeIds mirrored from silver_runtime/src/types/registry.rs.
-// Only the ids RtValue.type_id() needs are declared here; the full registry
-// lives in std/rt/types.ag (owned by a sibling unit, unified later).
-
-pub const u32 RT_TYPE_UNIT = 0;
-pub const u32 RT_TYPE_BOOL = 1;
-pub const u32 RT_TYPE_STRING = 14;
+// Raw TypeId constants for the few builtin types heap.ag needs.
+// (Full TypeId resolution lives in std/rt/types.ag; these hard-coded
+// u32 values match the canonical indices.)
+pub const u32 RT_TYPE_UNIT = (u32)0;
+pub const u32 RT_TYPE_BOOL = (u32)1;
+pub const u32 RT_TYPE_STRING = (u32)14;
 
 // ---------------------------------------------------------------------------
 // Handle — generational reference to a heap slot.
