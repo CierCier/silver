@@ -192,7 +192,7 @@ impl HashMap<K, V> {
         if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
             return self.values[idx];
         }
-        printf("HashMap::get: key not found\n");
+        STDOUT.write_str("HashMap::get: key not found\n");
         abort();
         // unreachable - dummy return to satisfy return type
         V dummy;
@@ -205,7 +205,7 @@ impl HashMap<K, V> {
         if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
             return &self.values[idx];
         }
-        printf("HashMap::get_ptr: key not found\n");
+        STDOUT.write_str("HashMap::get_ptr: key not found\n");
         abort();
         return (V*)0;
     }

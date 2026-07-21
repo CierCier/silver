@@ -1,24 +1,12 @@
-// std/io.ag — Silver I/O: pure-Silver print path, typed-syscall File API,
-// and a small set of kept libc stdio externs.
+// std/io.ag — Silver I/O: pure-Silver print path, typed-syscall File API.
 //
 // The plain print path (println/eprintln) writes through raw sys_write via
 // std.fmt (pure Silver, no printf/puts).  The File API runs directly on the
 // typed syscall layer (std.sys.result: try_open/try_read/try_write/
 // try_close/try_lseek) — no FILE*, no libc stdio buffering.
-//
-// KEPT LIBC EXTERNS (live callers — removing them breaks the build):
-//   printf   — every test's assert/print harness (tests/*.ag), plus
-//              std/map.ag, std/slice.ag, std/rt/types.ag failure paths.
-//   fprintf  — std/optional.ag unwrap failure messages (fprintf(stderr,..)).
-//   puts     — tests/io_test.ag.
-//   putchar  — tests/io_test.ag.
-//   remove   — file_delete() below (callers: tests/file_test.ag).
-//   rename   — file_rename() below (callers: tests/file_test.ag).
-// stdin/stdout/stderr FILE* variables are kept solely as fprintf's stream
-// operands.  All variadic/scan/temp/positioning stdio externs were removed
-// with the FILE struct.
 
 import std.fmt;
+import std.mem.alloc;
 import std.sys.result;
 
 const i32 EOF = -1;
@@ -30,30 +18,143 @@ enum IO_SEEK {
     END = 2;
 }
 
-// Opaque FILE struct: only ever used behind a pointer (fprintf's stream).
-struct FILE {
-    i32 _opaque;
+
+// ---------------------------------------------------------------------------
+// BufWriter — buffered I/O backed by a growable heap buffer and a raw fd.
+// Provides write_str/write_i64/write_u64/write_f64/write_bool for the
+// compile-time print expansion and manual formatting use.
+// Global instances STDOUT and STDERR are lazy-initialized (cap == 0).
+//
+// We store the buffer address as `i64` rather than `u8*` so the global
+// initializer (which runs at compile time) can use integer 0 instead of
+// a null-pointer literal.
+// ---------------------------------------------------------------------------
+
+pub struct BufWriter {
+    i64 data;   // address of buffer (0 = uninitialized)
+    i64 len;
+    i64 cap;
+    i64 fd;
 }
 
-// Raw stdio symbols that still have live callers (see header comment).
+// Zero-cost global instances (all zero → triggers lazy init on first write).
+pub BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1 };
+pub BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2 };
 
-extern "C" {
+// Scratch buffers for number formatting.
+struct __Buf32 { u8 data[32]; }
+struct __Buf64 { u8 data[64]; }
 
-FILE* stdin;
-FILE* stdout;
-FILE* stderr;
+impl BufWriter {
+    /// Ensure internal buffer is initialized (lazy mmap).
+    void ensure_init(BufWriter* self) {
+        if ((*self).cap == 0) {
+            (*self).data = (i64)alloc<u8>(4096);
+            (*self).len = 0;
+            (*self).cap = 4096;
+        }
+    }
 
-i32 remove(const char* path);
-i32 rename(const char* from, const char* to);
+    /// Buffer a write.  Does NOT flush unless the buffer is full.
+    pub void write(BufWriter* self, u8* src, i64 n) {
+        self.ensure_init();
+        // Grow if needed
+        if ((*self).len + n > (*self).cap) {
+            i64 new_cap = (*self).cap * 2;
+            if (new_cap < (*self).len + n) {
+                new_cap = (*self).len + n;
+            }
+            u8* ptr = (u8*)realloc<u8>((u8*)(*self).data, new_cap);
+            (*self).data = (i64)ptr;
+            (*self).cap = new_cap;
+        }
+        // Copy bytes
+        u8* buf = (u8*)(*self).data;
+        i64 i = 0;
+        while (i < n) {
+            buf[(*self).len + i] = src[i];
+            i = i + 1;
+        }
+        (*self).len = (*self).len + n;
+        // Auto-flush on newline (line-buffered semantics)
+        if (n > 0 && src[n - 1] == (u8)10) {
+            self.flush();
+        }
+    }
 
-i32 fprintf(FILE* stream, const char* fmt, ...);
-i32 printf(const char* fmt, ...);
-i32 putchar(i32 ch);
-i32 puts(const char* text);
+    /// Write a null-terminated string.
+    pub void write_str(BufWriter* self, str s) {
+        self.write((u8*)s, cstr_len((u8*)s));
+    }
 
-} // Extern "C" End
+    /// Format and buffer an i64 value.
+    pub void write_i64(BufWriter* self, i64 v) {
+        __Buf32 tmp;
+        u8* p = (u8*)&tmp;
+        i64 n = itoa(v, p);
+        self.write(p, n);
+    }
 
+    /// Format and buffer a u64 value.
+    pub void write_u64(BufWriter* self, u64 v) {
+        __Buf32 tmp;
+        u8* p = (u8*)&tmp;
+        i64 n = utoa(v, p);
+        self.write(p, n);
+    }
 
+    /// Format and buffer an f64 value.
+    pub void write_f64(BufWriter* self, f64 v) {
+        __Buf64 tmp;
+        u8* p = (u8*)&tmp;
+        i64 n = ftoa(v, p);
+        self.write(p, n);
+    }
+
+    /// Format and buffer a bool value.
+    pub void write_bool(BufWriter* self, bool v) {
+        if (v) { self.write_str("true"); }
+        else   { self.write_str("false"); }
+    }
+    /// Write a single byte.
+    pub void write_u8(BufWriter* self, u8 c) {
+        self.write(&c, 1);
+    }
+
+    /// Flush buffered data to the underlying fd via a single sys_write call.
+    pub void flush(BufWriter* self) {
+        self.ensure_init();
+        if ((*self).len > 0) {
+            if ((*self).fd >= 0) {
+                i64 written = __fmt_write_fd((*self).fd, (u8*)(*self).data, (*self).len);
+                if (written > 0) {
+                    if (written < (*self).len) {
+                        u8* buf = (u8*)(*self).data;
+                        i64 i = 0;
+                        i64 remaining = (*self).len - written;
+                        while (i < remaining) {
+                            buf[i] = buf[written + i];
+                            i = i + 1;
+                        }
+                        (*self).len = remaining;
+                    } else {
+                        (*self).len = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop: flush remaining data, then free the buffer.
+    pub void drop(BufWriter* self) {
+        self.flush();
+        if ((*self).cap > 0) {
+            free((void*)(*self).data);
+            (*self).data = 0;
+            (*self).cap = 0;
+        }
+    }
+}
 // File — a typed-syscall file descriptor wrapper.
 //
 // Holds the raw fd and an open flag; unbuffered (every operation is one
@@ -435,9 +536,9 @@ bool file_exists(str path) {
 }
 
 bool file_delete(str path) {
-    return remove(path) == 0;
+    return sys_unlink((i64)path) == 0;
 }
 
 bool file_rename(str from, str to) {
-    return rename(from, to) == 0;
+    return sys_rename((i64)from, (i64)to) == 0;
 }
