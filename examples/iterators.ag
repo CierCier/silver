@@ -27,9 +27,9 @@ impl IntoIterator<Counter> for Counter {
 impl Iterator<Counter> for Counter {
     type Item = i32;
     Optional<i32> next(Counter* self) {
-        if ((*self).current < (*self).end) {
-            Optional<i32> result = Optional<i32>.some((*self).current);
-            (*self).current = (*self).current + 1;
+        if (self.current < self.end) {
+            Optional<i32> result = Optional<i32>.some(self.current);
+            self.current = self.current + 1;
             return result;
         }
         return Optional<i32>.none();
@@ -39,15 +39,15 @@ impl Iterator<Counter> for Counter {
 i32 main() {
     Counter c = Counter.new(5);
     for i in c {
-        printf("counter: %d\n", i);
+        @println("counter: {}", i);
     }
 
-    printf("sum 0..9 = ");
+    @print("sum 0..9 = ");
     i32 total = 0;
     for i in 0..10 {
         total = total + i;
     }
-    printf("%d\n", total);
+    @println("{}", total);
 
     return 0;
 }

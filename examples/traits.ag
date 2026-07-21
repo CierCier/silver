@@ -22,7 +22,7 @@ impl Area<Circle> for Circle {
 
 i32 main() {
     Circle c = { .radius = 5.0 };
-    printf("A %s has area %.2f\n", c.kind(), c.area());
+    @println("A {} has area {}", c.kind(), c.area());
 
     return 0;
 }

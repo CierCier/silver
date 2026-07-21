@@ -104,32 +104,32 @@ impl SysResult {
     }
 
     bool is_ok(SysResult* self) {
-        return (*self).ok;
+        return self.ok;
     }
 
     bool is_err(SysResult* self) {
-        return !(*self).ok;
+        return !self.ok;
     }
 
     // True when this result failed with exactly errno `err`.
     bool err_is(SysResult* self, i64 err) {
-        return !(*self).ok && (*self).errno == err;
+        return !self.ok && self.errno == err;
     }
 
     // Successful value, or `fallback` on error.
     i64 unwrap_or(SysResult* self, i64 fallback) {
-        if ((*self).ok) {
-            return (*self).value;
+        if (self.ok) {
+            return self.value;
         }
         return fallback;
     }
 
     // Symbolic errno name ("EOK" when the call succeeded).
     str err_name(SysResult* self) {
-        if ((*self).ok) {
+        if (self.ok) {
             return "EOK";
         }
-        return errno_name((*self).errno);
+        return errno_name(self.errno);
     }
 }
 

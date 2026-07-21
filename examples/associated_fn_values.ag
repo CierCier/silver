@@ -20,7 +20,7 @@ impl HasHandler for Tripler {
 }
 
 i32 main() {
-    printf("Doubler::handler(7) = %d\n", Doubler.handler(7));
-    printf("Tripler::handler(7) = %d\n", Tripler.handler(7));
+    @println("Doubler::handler(7) = {}", Doubler.handler(7));
+    @println("Tripler::handler(7) = {}", Tripler.handler(7));
     return 0;
 }
