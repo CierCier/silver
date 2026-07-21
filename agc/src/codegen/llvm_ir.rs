@@ -3443,6 +3443,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     true,
                 )
                 .as_basic_value_enum()),
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::PointerType(ptr_ty)) => {
+                // Integer-to-pointer constant cast (e.g., null pointer in global init).
+                // Only null (zero) is valid as a pointer constant in global initializers.
+                let raw: u64 = int_val
+                    .get_sign_extended_constant()
+                    .or_else(|| int_val.get_zero_extended_constant().map(|v| v as i64))
+                    .ok_or_else(|| {
+                        CodegenError::with_span(
+                            "expected integer constant in global initializer",
+                            span.clone(),
+                        )
+                    })? as u64;
+                if raw == 0 {
+                    Ok(ptr_ty.const_null().as_basic_value_enum())
+                } else {
+                    Err(CodegenError::with_span(
+                        "non-null integer-to-pointer cast is not supported in global initializers",
+                        span.clone(),
+                    ))
+                }
+            }
             (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::FloatType(float_ty)) => {
                 Ok(float_ty
                     .const_float(

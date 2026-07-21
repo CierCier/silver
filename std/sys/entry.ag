@@ -1,4 +1,5 @@
 // std/sys/entry.ag — Silver _start entry point for static (no-libc) binaries.
+import std.io;
 //
 // Importing this module inlines a `_start` symbol that:
 //   1. Zeroes %rbp (ABI: marks outermost stack frame).
@@ -6,8 +7,9 @@
 //   3. Computes argv = rsp+8 into %rsi (second arg, for future use).
 //   4. Re-aligns the stack to 16 bytes (and $-16, %rsp).
 //   5. Calls main().
-//   6. Zero-extends the i32 return in %eax into %rdi (writing %edi zero-extends
-//      on x86-64) and invokes exit_group via syscall 231.
+//   6. Saves return value in %r12, calls __silver_flush_all() to flush any
+//      buffered I/O (BufWriter STDOUT/STDERR).
+//   7. Restores the return value into %rdi and invokes exit_group via syscall 231.
 //
 // Usage:
 //   import std.sys.entry;       // in any Silver program compiled with --static-runtime
@@ -21,5 +23,5 @@ extern "C" {
 }
 
 void _start() {
-    asm("xor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nand $$-16, %rsp\ncall main\nmov %eax, %edi\nmov $$231, %eax\nsyscall");
+    asm("xor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nand $$-16, %rsp\ncall main\nmov %rax, %r12\ncall __silver_flush_all\nmov %r12, %rdi\nmov $$231, %eax\nsyscall");
 }
