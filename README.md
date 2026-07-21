@@ -8,7 +8,6 @@ type checking, and LLVM-based code generation, all from a single self-hosted pip
 
 The project currently includes:
 - `agc`, the Silver compiler
-- `silver_runtime`, the runtime crate
 - `std`, the standard library sources used for bootstrapping
 - `vendor`, imports/includes for third-party libraries
 - `bootstrap`, generated compiler and standard library artifacts for local development
@@ -37,7 +36,6 @@ Silver is still under active development. Expect sharp edges, incomplete feature
 ## Repository Layout
 
 - `agc/` - compiler sources
-- `silver_runtime/` - runtime crate
 - `std/` - standard library sources
 - `vendor/` - third-party library headers
 - `bootstrap/` - generated bootstrap compiler and stdlib outputs

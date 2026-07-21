@@ -1,78 +1,35 @@
 // Test suite for the typed syscall/errno layer:
 // std/sys/errno.ag (errno constants, errno_name) and
 // std/sys/result.ag (SysResult + try_* syscall front-ends).
-import std.io;
+import std.test;
 import std.mem;
 import std.sys.errno;
 import std.sys.result;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_str_eq(str a, str b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %s, got %s)\n", msg, b, a);
-    }
-}
-
-i64 str_len(str s) {
-    u8* p = (u8*)s;
-    i64 len = 0;
-    while (p[len] != (u8)0) {
-        len = len + 1;
-    }
-    return len;
-}
-
 i32 main() {
-    printf("=== errno / SysResult Tests ===\n\n");
+    STDOUT.write_str("=== errno / SysResult Tests ===\n\n");
 
     // --- errno constants and errno_name ---
-    printf("--- errno_name ---\n");
+    STDOUT.write_str("--- errno_name ---\n");
     {
         assert_eq_i64(EPERM, 1, "EPERM == 1");
         assert_eq_i64(EBADF, 9, "EBADF == 9");
         assert_eq_i64(ERANGE, 34, "ERANGE == 34");
         assert_eq_i64(ENOSYS, 38, "ENOSYS == 38");
         assert_eq_i64(ETIMEDOUT, 110, "ETIMEDOUT == 110");
-        assert_str_eq(errno_name(EPERM), "EPERM", "errno_name(EPERM)");
-        assert_str_eq(errno_name(EAGAIN), "EAGAIN", "errno_name(EAGAIN)");
-        assert_str_eq(errno_name(ERANGE), "ERANGE", "errno_name(ERANGE)");
-        assert_str_eq(errno_name(ENOSYS), "ENOSYS", "errno_name(ENOSYS)");
-        assert_str_eq(errno_name(ETIMEDOUT), "ETIMEDOUT", "errno_name(ETIMEDOUT)");
-        assert_str_eq(errno_name(-2), "ENOENT", "errno_name normalizes raw negative returns");
-        assert_str_eq(errno_name(0), "EOK", "errno_name(0) == EOK");
-        assert_str_eq(errno_name(9999), "EUNKNOWN", "errno_name of unknown value");
-        assert_str_eq(errno_name(-9999), "EUNKNOWN", "errno_name of out-of-range negative value");
-        assert_str_eq(errno_name(ERRNO_MAX + 1), "EUNKNOWN", "errno_name of out-of-range positive value");
+        assert_true(errno_name(EPERM) == "EPERM", "errno_name(EPERM)");
+        assert_true(errno_name(EAGAIN) == "EAGAIN", "errno_name(EAGAIN)");
+        assert_true(errno_name(ERANGE) == "ERANGE", "errno_name(ERANGE)");
+        assert_true(errno_name(ENOSYS) == "ENOSYS", "errno_name(ENOSYS)");
+        assert_true(errno_name(ETIMEDOUT) == "ETIMEDOUT", "errno_name(ETIMEDOUT)");
+        assert_true(errno_name(-2) == "ENOENT", "errno_name normalizes raw negative returns");
+        assert_true(errno_name(0) == "EOK", "errno_name(0) == EOK");
+        assert_true(errno_name(9999) == "EUNKNOWN", "errno_name of unknown value");
+        assert_true(errno_name(-9999) == "EUNKNOWN", "errno_name of out-of-range negative value");
+        assert_true(errno_name(ERRNO_MAX + 1) == "EUNKNOWN", "errno_name of out-of-range positive value");
     }
 
     // --- raw return classification ---
-    printf("\n--- is_errno / errno_of ---\n");
+    STDOUT.write_str("\n--- is_errno / errno_of ---\n");
     {
         assert_true(is_errno(-1), "is_errno(-1)");
         assert_true(is_errno(-4095), "is_errno(-4095)");
@@ -84,7 +41,7 @@ i32 main() {
     }
 
     // --- SysResult decoding ---
-    printf("\n--- SysResult.from_raw ---\n");
+    STDOUT.write_str("\n--- SysResult.from_raw ---\n");
     {
         SysResult ok = SysResult.from_raw(7);
         assert_true(ok.is_ok(), "from_raw(7) is ok");
@@ -100,7 +57,7 @@ i32 main() {
         assert_true(err.err_is(EINVAL), "err_is(EINVAL)");
         assert_true(!err.err_is(EBADF), "!err_is(EBADF)");
         assert_eq_i64(err.unwrap_or(-1), -1, "unwrap_or on err returns fallback");
-        assert_str_eq(err.err_name(), "EINVAL", "err_name on failure");
+        assert_true(err.err_name() == "EINVAL", "err_name on failure");
 
         // A large positive return (e.g. a mmap address) must not be an error.
         SysResult addr = SysResult.from_raw(140000000000000);
@@ -108,17 +65,17 @@ i32 main() {
     }
 
     // --- write success path (fd 1) ---
-    printf("\n--- try_write ---\n");
+    STDOUT.write_str("\n--- try_write ---\n");
     {
         str msg = "  [info] hello from try_write\n";
-        SysResult w = try_write(STDOUT_FD, (u8*)msg, str_len(msg));
+        SysResult w = try_write(STDOUT_FD, (u8*)msg, strlen(msg));
         assert_true(w.is_ok(), "write to stdout succeeds");
         assert_eq_i64(w.value, 30, "write returns byte count");
-        assert_str_eq(w.err_name(), "EOK", "err_name on success is EOK");
+        assert_true(w.err_name() == "EOK", "err_name on success is EOK");
     }
 
     // --- getpid success path ---
-    printf("\n--- try_getpid ---\n");
+    STDOUT.write_str("\n--- try_getpid ---\n");
     {
         SysResult pid = try_getpid();
         assert_true(pid.is_ok(), "getpid succeeds");
@@ -132,7 +89,7 @@ i32 main() {
     }
 
     // --- mmap / mremap / munmap success paths ---
-    printf("\n--- try_mmap / try_mremap / try_munmap ---\n");
+    STDOUT.write_str("\n--- try_mmap / try_mremap / try_munmap ---\n");
     {
         SysResult m = try_mmap((void*)0, 4096, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -161,7 +118,7 @@ i32 main() {
     }
 
     // --- open / read / lseek / close on /dev/null and /dev/zero ---
-    printf("\n--- try_open / try_read / try_lseek / try_close ---\n");
+    STDOUT.write_str("\n--- try_open / try_read / try_lseek / try_close ---\n");
     {
         SysResult o = try_open("/dev/null", O_RDONLY, 0);
         assert_true(o.is_ok(), "open /dev/null succeeds");
@@ -195,13 +152,13 @@ i32 main() {
     }
 
     // --- failure paths ---
-    printf("\n--- failure paths ---\n");
+    STDOUT.write_str("\n--- failure paths ---\n");
     {
         // close(-1) -> EBADF
         SysResult c = try_close(-1);
         assert_true(c.is_err(), "close(-1) fails");
         assert_eq_i64(c.errno, EBADF, "close(-1) errno == EBADF");
-        assert_str_eq(c.err_name(), "EBADF", "close(-1) err_name == EBADF");
+        assert_true(c.err_name() == "EBADF", "close(-1) err_name == EBADF");
 
         // read on a bad fd -> EBADF
         u8* buffer = alloc<u8>(4);
@@ -212,7 +169,7 @@ i32 main() {
 
         // write on a bad fd -> EBADF
         str msg = "x";
-        SysResult w = try_write(-1, (u8*)msg, str_len(msg));
+        SysResult w = try_write(-1, (u8*)msg, strlen(msg));
         assert_true(w.err_is(EBADF), "write on bad fd errno == EBADF");
 
         // open of a missing path -> ENOENT
@@ -246,11 +203,11 @@ i32 main() {
         assert_true(k.err_is(ESRCH), "kill of nonexistent pid errno == ESRCH");
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return done();
 
     // Exercise exit_group's success path for real: flush stdio, then exit
     // with the failure count as the status (0 == all passed).
-    fflush(stdout);
-    exit_group((i64)tests_failed);
-    return tests_failed;
+    // fflush not needed
+    // exit_group replaced by done()
+    return done();
 }

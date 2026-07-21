@@ -1,0 +1,13 @@
+// tests/static_link_test.ag — verifies --static-runtime produces a fully
+// static binary with no libc dependency.
+//
+// Build: cargo run -p agc -- tests/static_link_test.ag --static-runtime -o /tmp/static_link_test
+// Verify: ldd /tmp/static_link_test  →  "not a dynamic executable"
+import std.sys.entry;
+import std.fmt;
+
+i32 main() {
+    // write_stdout is syscall-backed (no libc stdio)
+    write_stdout((u8*)"static link ok\n", 15);
+    return 0;
+}

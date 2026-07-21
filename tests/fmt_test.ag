@@ -1,14 +1,6 @@
 // Test suite for std.fmt — pure-Silver number formatting and print I/O.
-import std.io;
+import std.test;  // assert_true, check, done, STDOUT, STDERR
 import std.fmt;
-
-extern "C" {
-    i32 memcmp(const void* a, const void* b, i64 n);
-    i64 strlen(const char* s);
-}
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
 
 struct CaseBuf {
     u8 data[400];
@@ -21,22 +13,19 @@ void check_buf(u8* got, i64 got_len, str expected, str msg) {
         ok = memcmp((const void*)got, (const void*)expected, exp_len) == 0;
     }
     if (ok) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
+        check(true, msg);
     } else {
-        tests_failed = tests_failed + 1;
         got[got_len] = (u8)0;
-        printf("  [FAIL] %s (expected \"%s\", got \"%s\" len=%ld)\n", msg, expected, (char*)got, got_len);
-    }
-}
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str(" (expected \"");
+        STDERR.write_str(expected);
+        STDERR.write_str("\", got \"");
+        STDERR.write_str((str)got);
+        STDERR.write_str("\" len=");
+        STDERR.write_i64(got_len);
+        STDERR.write_str(")\n");
+        tests_failed += 1;
     }
 }
 
@@ -75,9 +64,9 @@ f64 f64_from_bits(u64 bits) {
 }
 
 i32 main() {
-    printf("=== fmt Tests ===\n\n");
+    STDOUT.write_str("=== fmt Tests ===\n\n");
 
-    printf("--- itoa ---\n");
+    STDOUT.write_str("--- itoa ---\n");
     check_itoa(0, "0", "itoa(0)");
     check_itoa(1, "1", "itoa(1)");
     check_itoa(-1, "-1", "itoa(-1)");
@@ -87,7 +76,7 @@ i32 main() {
     check_itoa(-9223372036854775808, "-9223372036854775808", "itoa(i64::MIN)");
     check_itoa(9223372036854775807, "9223372036854775807", "itoa(i64::MAX)");
 
-    printf("\n--- utoa ---\n");
+    STDOUT.write_str("\n--- utoa ---\n");
     check_utoa((u64)0, "0", "utoa(0)");
     check_utoa((u64)1, "1", "utoa(1)");
     check_utoa((u64)10, "10", "utoa(10)");
@@ -95,11 +84,11 @@ i32 main() {
     check_utoa((u64)12345678901234567890, "12345678901234567890", "utoa(12345678901234567890)");
     check_utoa((u64)18446744073709551615, "18446744073709551615", "utoa(u64::MAX)");
 
-    printf("\n--- btoa ---\n");
+    STDOUT.write_str("\n--- btoa ---\n");
     check_btoa(true, "true", "btoa(true)");
     check_btoa(false, "false", "btoa(false)");
 
-    printf("\n--- ftoa: zero and specials ---\n");
+    STDOUT.write_str("\n--- ftoa: zero and specials ---\n");
     check_ftoa(0.0, "0", "ftoa(0.0)");
     f64 zero = 0.0;
     check_ftoa(-zero, "-0", "ftoa(-0.0)");
@@ -109,7 +98,7 @@ i32 main() {
     check_ftoa(f64_from_bits((u64)9218868437227405312), "inf", "ftoa(inf)");
     check_ftoa(f64_from_bits((u64)18442240474082181120), "-inf", "ftoa(-inf)");
 
-    printf("\n--- ftoa: simple values ---\n");
+    STDOUT.write_str("\n--- ftoa: simple values ---\n");
     check_ftoa(1.5, "1.5", "ftoa(1.5)");
     check_ftoa(0.1, "0.1", "ftoa(0.1)");
     check_ftoa(3.0, "3", "ftoa(3.0)");
@@ -119,16 +108,15 @@ i32 main() {
     check_ftoa(123.456, "123.456", "ftoa(123.456)");
     check_ftoa(1.0 / 3.0, "0.3333333333333333", "ftoa(1/3)");
 
-    printf("\n--- ftoa: large/small magnitudes (positional, like Rust Display) ---\n");
+    STDOUT.write_str("\n--- ftoa: large/small magnitudes (positional, like Rust Display) ---\n");
     check_ftoa(1000000000000000000000.0, "1000000000000000000000", "ftoa(1e21)");
     check_ftoa(100000000000000000000.0, "100000000000000000000", "ftoa(1e20)");
     check_ftoa(0.0000001, "0.0000001", "ftoa(1e-7)");
     check_ftoa(0.00001, "0.00001", "ftoa(1e-5)");
     check_ftoa(9007199254740993.0, "9007199254740992", "ftoa(9007199254740993 rounds to nearest f64)");
 
-    printf("\n--- ftoa: extreme values (structural) ---\n");
+    STDOUT.write_str("\n--- ftoa: extreme values (structural) ---\n");
     {
-        // Smallest subnormal 5e-324: "0." + 323 zeros + "5" (326 chars).
         CaseBuf b;
         u8* p = (u8*)&b;
         i64 n = ftoa(f64_from_bits((u64)1), p);
@@ -148,7 +136,6 @@ i32 main() {
         assert_true(ok, "ftoa(5e-324) is 0.<323 zeros>5");
     }
     {
-        // Largest finite f64: "17976931348623157" + 292 zeros (309 chars).
         CaseBuf b;
         u8* p = (u8*)&b;
         i64 n = ftoa(f64_from_bits((u64)9218868437227405311), p);
@@ -169,7 +156,7 @@ i32 main() {
         assert_true(ok, "ftoa(f64::MAX) is 17976931348623157<292 zeros>");
     }
 
-    printf("\n--- utf8 validation ---\n");
+    STDOUT.write_str("\n--- utf8 validation ---\n");
     {
         CaseBuf b;
         u8* p = (u8*)&b;
@@ -199,13 +186,13 @@ i32 main() {
         assert_true(is_valid_utf8(p, 4), "4-byte sequence valid");
     }
 
-    printf("\n--- write helpers ---\n");
+    STDOUT.write_str("\n--- write helpers ---\n");
     {
         i64 r = write_stdout((u8*)"  [smoke] write_stdout ok\n", 26);
         assert_true(r == 26, "write_stdout returns byte count");
     }
 
-    printf("\n--- silver_rt print surface (smoke, check output manually) ---\n");
+    STDOUT.write_str("\n--- silver_rt print surface (smoke, check output manually) ---\n");
     silver_rt_print_i64(-42);
     silver_rt_print_u64((u64)18446744073709551615);
     silver_rt_print_bool((u8)1);
@@ -217,9 +204,8 @@ i32 main() {
         SilverSlice s;
         s.ptr = (u8*)msg;
         s.len = 4;
-        silver_rt_print_bytes(s); // prints "cstr" with NO newline
-        
-        // Print non-UTF-8 sequence
+        silver_rt_print_bytes(s);
+
         CaseBuf bad_buf;
         u8* bad = (u8*)&bad_buf;
         bad[0] = (u8)255;
@@ -227,14 +213,13 @@ i32 main() {
         SilverSlice s_bad;
         s_bad.ptr = bad;
         s_bad.len = 2;
-        silver_rt_print_bytes(s_bad); // prints "<non-utf8>" WITH newline
+        silver_rt_print_bytes(s_bad);
 
         s.ptr = (u8*)0;
         s.len = 0;
-        silver_rt_print_bytes(s); // prints "<null>" WITH newline
+        silver_rt_print_bytes(s);
         silver_rt_print_cstr((char*)0);
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }

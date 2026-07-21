@@ -1,3 +1,7 @@
+# SUPERSEDED
+This plan has been fully executed. See `docs/runtime-migration.md` for the final status
+of the Silver runtime migration.
+
 # Silver Runtime Migration Plan
 
 This document outlines a detailed, phased architecture plan for migrating the `silver_runtime/` Rust crate into a pure Silver implementation. The final goal is to completely remove glibc and Rust runtime dependencies, producing fully statically-linked Silver executables that interact directly with the Linux kernel via raw syscalls.

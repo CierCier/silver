@@ -93,3 +93,36 @@ pub void* memmove(void* dest, const void* src, i64 num) {
 pub i64 strlen(const char* s) {
     return silver_rt_strlen(s);
 }
+
+pub i32 strcmp(const char* s1, const char* s2) {
+    u8* p1 = (u8*)s1;
+    u8* p2 = (u8*)s2;
+    i64 i = 0;
+    while (p1[i] != 0 && p1[i] == p2[i]) {
+        i = i + 1;
+    }
+    return (i32)p1[i] - (i32)p2[i];
+}
+
+pub i32 memcmp(const void* s1, const void* s2, i64 n) {
+    u8* p1 = (u8*)s1;
+    u8* p2 = (u8*)s2;
+    for (i64 i = 0; i < n; i = i + 1) {
+        if (p1[i] != p2[i]) {
+            return (i32)p1[i] - (i32)p2[i];
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Pure-Silver abort — no libc dependency.
+// Sends SIGABRT to self, then exits with 128+6.
+// ---------------------------------------------------------------------------
+
+import std.sys.linux;
+
+pub void abort() {
+    sys_kill(sys_getpid(), 6);  // SIGABRT
+    sys_exit_group(134);        // 128 + SIGABRT
+}

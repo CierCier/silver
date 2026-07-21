@@ -207,6 +207,7 @@ impl TypeChecker {
                                     span: Span { start: 0, end: 0 },
                                 },
                                 generics: Self::export_type_params_to_generics(&export.type_params),
+                                is_variadic: false,
                                 parameters: Vec::new(),
                                 return_type: None,
                                 body: ast::Block {
@@ -2023,6 +2024,7 @@ impl TypeChecker {
                     let stub = ast::FunctionItem {
                         name: func.name.clone(),
                         generics: None,
+                        is_variadic: func.signature.is_variadic,
                         parameters: func.signature.parameters.clone(),
                         return_type: func.signature.return_type.clone(),
                         body: ast::Block {
@@ -2037,6 +2039,7 @@ impl TypeChecker {
                         let stub = ast::FunctionItem {
                             name: func.name.clone(),
                             generics: None,
+                            is_variadic: func.signature.is_variadic,
                             parameters: func.signature.parameters.clone(),
                             return_type: func.signature.return_type.clone(),
                             body: ast::Block {
@@ -2659,6 +2662,79 @@ impl TypeChecker {
         let _ = self.check_expr(inner_expr, None);
         // @hash always returns i64
         Type::Primitive(ast::PrimitiveType::I64)
+    }
+
+    pub(crate) fn print_typeck(
+        &mut self,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        let fmt_arg_idx = if name == "fprint" { 1 } else { 0 };
+
+        // Minimum args: format string (+ BufWriter for @fprint)
+        let min_args = fmt_arg_idx + 1;
+        if args.len() < min_args {
+            self.error(
+                format!("`@{name}` requires at least {min_args} argument(s)"),
+                expr.span.clone(),
+            );
+            return Type::Unknown;
+        }
+
+        // Extract format string
+        let placeholder_count = match &args[fmt_arg_idx] {
+            ast::MacroArg::Expression(e) => match e.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::String(s)) => {
+                    let segments = crate::builtin_macros::parse_format(s);
+                    segments
+                        .iter()
+                        .filter(|seg| matches!(seg, crate::builtin_macros::FormatSegment::Placeholder))
+                        .count()
+                }
+                _ => {
+                    self.error("format string must be a literal", e.span.clone());
+                    return Type::Unknown;
+                }
+            },
+            _ => {
+                self.error("format string must be a literal", expr.span.clone());
+                return Type::Unknown;
+            }
+        };
+
+        // Check value arg count
+        let value_args_start = fmt_arg_idx + 1;
+        let value_args_count = args.len().saturating_sub(value_args_start);
+
+        if placeholder_count != value_args_count {
+            self.error(
+                format!(
+                    "`@{name}` expected {placeholder_count} format argument(s), got {value_args_count}"
+                ),
+                expr.span.clone(),
+            );
+            return Type::Unknown;
+        }
+
+        // Type-check each value argument
+        for i in value_args_start..args.len() {
+            if let ast::MacroArg::Expression(e) = &args[i] {
+                self.check_expr(e, None);
+            }
+        }
+
+        // For @fprint, also type-check the BufWriter argument
+        if name == "fprint" {
+            if let ast::MacroArg::Expression(e) = &args[0] {
+                self.check_expr(e, None);
+            }
+        }
+
+        match name {
+            "sprint" => Type::Primitive(ast::PrimitiveType::Str),
+            _ => Type::Unit,
+        }
     }
 
     fn resolve_type_name(&mut self, expr: &ast::Expression) -> Option<Type> {

@@ -11,6 +11,7 @@ pub trait MacroHandler {
     fn type_check(
         &self,
         checker: &mut TypeChecker,
+        name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Type;
@@ -18,6 +19,7 @@ pub trait MacroHandler {
     fn codegen<'ctx>(
         &self,
         generator: &mut LlvmIrGenerator<'ctx>,
+        name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>>;
@@ -41,6 +43,12 @@ impl MacroRegistry {
         registry.register("size", Box::new(SizeHandler));
         registry.register("align", Box::new(AlignHandler));
         registry.register("hash", Box::new(HashHandler));
+        registry.register("print", Box::new(PrintHandler));
+        registry.register("println", Box::new(PrintHandler));
+        registry.register("eprint", Box::new(PrintHandler));
+        registry.register("eprintln", Box::new(PrintHandler));
+        registry.register("fprint", Box::new(PrintHandler));
+        registry.register("sprint", Box::new(PrintHandler));
         registry
     }
 
@@ -63,7 +71,7 @@ impl MacroRegistry {
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Option<Type> {
-        self.get(name).map(|h| h.type_check(checker, expr, args))
+        self.get(name).map(|h| h.type_check(checker, name, expr, args))
     }
 
     pub fn codegen<'ctx>(
@@ -73,7 +81,7 @@ impl MacroRegistry {
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Option<CodegenResult<BasicValueEnum<'ctx>>> {
-        self.get(name).map(|h| h.codegen(generator, expr, args))
+        self.get(name).map(|h| h.codegen(generator, name, expr, args))
     }
 }
 
@@ -83,6 +91,7 @@ impl MacroHandler for SizeHandler {
     fn type_check(
         &self,
         checker: &mut TypeChecker,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Type {
@@ -92,6 +101,7 @@ impl MacroHandler for SizeHandler {
     fn codegen<'ctx>(
         &self,
         generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
@@ -104,6 +114,7 @@ impl MacroHandler for AlignHandler {
     fn type_check(
         &self,
         checker: &mut TypeChecker,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Type {
@@ -113,6 +124,7 @@ impl MacroHandler for AlignHandler {
     fn codegen<'ctx>(
         &self,
         generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
@@ -125,6 +137,7 @@ impl MacroHandler for HashHandler {
     fn type_check(
         &self,
         checker: &mut TypeChecker,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Type {
@@ -134,10 +147,89 @@ impl MacroHandler for HashHandler {
     fn codegen<'ctx>(
         &self,
         generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.hash_codegen(expr, args)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Format string parsing & @print macro family
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FormatSegment {
+    Literal(String),
+    Placeholder,
+}
+
+/// Parse a format string into segments.
+/// `{{` and `}}` produce literal braces; `{}` produces Placeholder.
+pub(crate) fn parse_format(fmt: &str) -> Vec<FormatSegment> {
+    let mut segments = Vec::new();
+    let mut chars = fmt.chars().peekable();
+    let mut literal = String::new();
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            if chars.peek() == Some(&'{') {
+                // Escaped brace: {{
+                chars.next();
+                literal.push('{');
+            } else if chars.peek() == Some(&'}') {
+                // Placeholder: {}
+                chars.next();
+                if !literal.is_empty() {
+                    segments.push(FormatSegment::Literal(std::mem::take(&mut literal)));
+                }
+                segments.push(FormatSegment::Placeholder);
+            } else {
+                literal.push(ch);
+            }
+        } else if ch == '}' {
+            if chars.peek() == Some(&'}') {
+                // Escaped brace: }}
+                chars.next();
+                literal.push('}');
+            } else {
+                literal.push(ch);
+            }
+        } else {
+            literal.push(ch);
+        }
+    }
+
+    if !literal.is_empty() {
+        segments.push(FormatSegment::Literal(literal));
+    }
+
+    segments
+}
+
+/// Handler for @print, @println, @eprint, @eprintln, @fprint, @sprint
+pub(crate) struct PrintHandler;
+
+impl MacroHandler for PrintHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.print_typeck(name, expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.print_codegen(name, expr, args)
     }
 }
 
@@ -174,6 +266,7 @@ mod tests {
         fn type_check(
             &self,
             _checker: &mut TypeChecker,
+            _name: &str,
             _expr: &ast::Expression,
             _args: &[ast::MacroArg],
         ) -> Type {
@@ -183,6 +276,7 @@ mod tests {
         fn codegen<'ctx>(
             &self,
             _generator: &mut LlvmIrGenerator<'ctx>,
+            _name: &str,
             _expr: &ast::Expression,
             _args: &[ast::MacroArg],
         ) -> CodegenResult<BasicValueEnum<'ctx>> {

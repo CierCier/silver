@@ -2054,7 +2054,7 @@ impl PRT_Parser {
                 span: Span { start: 0, end: 0 },
             })?;
 
-            let expr = match &token.kind {
+            let mut expr = match &token.kind {
                 Token::Identifier(name) if name == "match" => {
                     let match_start = token.span.start;
                     cursor.bump();
@@ -2577,6 +2577,23 @@ impl PRT_Parser {
             };
 
             cursor.bump();
+            // String literal concatenation: "A" "B" → "AB"
+            if matches!(&*expr.kind, ast::ExpressionKind::Literal(ast::Literal::String(_))) {
+                while let Some(next) = cursor.current()
+                    && matches!(&next.kind, Token::StringLiteral(_))
+                {
+                    if let Token::StringLiteral(part) = &next.kind {
+                        match &mut *expr.kind {
+                            ast::ExpressionKind::Literal(ast::Literal::String(val)) => {
+                                val.push_str(part);
+                                expr.span.end = next.span.end;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    cursor.bump();
+                }
+            }
             Ok(expr)
         }
 
@@ -5489,6 +5506,7 @@ impl PRT_Parser {
             ast::ImplFunction {
                 name: function.name,
                 generics: function.generics,
+                is_variadic: function.is_variadic,
                 parameters: function.parameters,
                 method_kind,
                 visibility,
@@ -5733,10 +5751,24 @@ impl PRT_Parser {
         cursor += 1;
 
         let mut parameters = Vec::new();
+        let mut is_variadic = false;
         while cursor < end {
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
                 cursor += 1;
                 break;
+            }
+
+            let is_ellipsis = matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::DotDotDot));
+            if is_ellipsis {
+                is_variadic = true;
+                cursor += 1;
+                if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "variadic marker must be last parameter".to_string(),
+                        span: tokens[cursor - 1].span.clone(),
+                    });
+                }
+                continue;
             }
 
             let param_type_token = tokens
@@ -5824,6 +5856,7 @@ impl PRT_Parser {
                 span: name_token.span.clone(),
             },
             generics,
+            is_variadic,
             parameters,
             return_type: Some(return_type),
             body,

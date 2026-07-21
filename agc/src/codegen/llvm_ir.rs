@@ -1021,6 +1021,318 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(result_phi.as_basic_value())
     }
 
+    pub(crate) fn print_codegen(
+        &mut self,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Determine writer and format-string arg index
+        let (fmt_arg_idx, writer_expr) = match name {
+            "fprint" => {
+                let Some(ast::MacroArg::Expression(w)) = args.first() else {
+                    return Err(CodegenError::with_span(
+                        "@fprint expects a BufWriter* as first argument".to_string(),
+                        expr.span.clone(),
+                    ));
+                };
+                // Evaluate writer expression once and store in a temp
+                let writer_val = self.emit_expression_value(w)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@fprint requires an active function", expr.span.clone())
+                })?;
+                let writer_tmp = self.create_entry_alloca(fn_ctx, "fprint.writer", writer_val.get_type())?;
+                self.builder.build_store(writer_tmp, writer_val).map_err(|e| {
+                    CodegenError::with_span(format!("failed to spill fprint receiver: {e}"), expr.span.clone())
+                })?;
+                let ast_ty = self.resolve_receiver_type(w)
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&writer_val, &expr.span));
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(
+                        "__fprint_writer".to_string(),
+                        VarInfo { ptr: writer_tmp, ty: ast_ty, is_mutable: false },
+                    );
+                }
+                let w_ident = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: "__fprint_writer".to_string(),
+                        span: expr.span.clone(),
+                    })),
+                    span: expr.span.clone(),
+                };
+                (1, w_ident)
+            }
+            "sprint" => {
+                let buf_writer_type = ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "BufWriter".to_string(),
+                            span: expr.span.clone(),
+                        }],
+                        generics: None,
+                    })),
+                    span: expr.span.clone(),
+                };
+                let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@sprint requires an active function", expr.span.clone())
+                })?;
+                let writer_tmp = self.create_entry_alloca(fn_ctx, "sprint.writer", buf_writer_llvm_ty)?;
+
+                let zero_i64 = self.context.i64_type().const_int(0, false);
+                let neg_one_i32 = self.context.i32_type().const_int(u64::MAX, true);
+
+                let fd_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.fd")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 0 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(fd_ptr, neg_one_i32)
+                    .map_err(|e| CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span.clone()))?;
+
+                let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.data")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 1 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(data_ptr, zero_i64)
+                    .map_err(|e| CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span.clone()))?;
+
+                let len_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "sprint.len")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 2 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(len_ptr, zero_i64)
+                    .map_err(|e| CodegenError::with_span(format!("sprint store len failed: {e}"), expr.span.clone()))?;
+
+                let cap_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 3, "sprint.cap")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 3 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(cap_ptr, zero_i64)
+                    .map_err(|e| CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span.clone()))?;
+
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(
+                        "__sprint_writer".to_string(),
+                        VarInfo { ptr: writer_tmp, ty: buf_writer_type.clone(), is_mutable: false },
+                    );
+                }
+                let w_ident = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: "__sprint_writer".to_string(),
+                        span: expr.span.clone(),
+                    })),
+                    span: expr.span.clone(),
+                };
+                (0, w_ident)
+            }
+            _ => {
+                // @print, @println, @eprint, @eprintln
+                let writer_name = if name.starts_with("e") { "STDERR" } else { "STDOUT" };
+                let w = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: writer_name.to_string(),
+                        span: expr.span.clone(),
+                    })),
+                    span: expr.span.clone(),
+                };
+                (0, w)
+            }
+        };
+
+        // Extract format string (must be a literal — validated by typeck)
+        let fmt_str = match &args[fmt_arg_idx] {
+            ast::MacroArg::Expression(e) => match &e.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::String(s)) => s.clone(),
+                _ => return Err(CodegenError::with_span(
+                    "format string must be a literal".to_string(),
+                    e.span.clone(),
+                )),
+            },
+            _ => return Err(CodegenError::with_span(
+                "format string must be a literal".to_string(),
+                expr.span.clone(),
+            )),
+        };
+
+        let segments = crate::builtin_macros::parse_format(&fmt_str);
+
+        // Collect value arguments for placeholders
+        let value_start = fmt_arg_idx + 1;
+        let value_args: Vec<&ast::Expression> = args[value_start..]
+            .iter()
+            .map(|a| match a {
+                ast::MacroArg::Expression(e) => e,
+                _ => unreachable!("typeck verified all value args are expressions"),
+            })
+            .collect();
+
+        // Emit method calls for each format segment
+        let mut placeholder_idx = 0;
+        for segment in &segments {
+            match segment {
+                crate::builtin_macros::FormatSegment::Literal(text) => {
+                    let method = ast::Identifier {
+                        name: "write_str".to_string(),
+                        span: expr.span.clone(),
+                    };
+                    let lit_expr = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Literal(
+                            ast::Literal::String(text.clone()),
+                        )),
+                        span: expr.span.clone(),
+                    };
+                    self.emit_method_call_expression(
+                        &writer_expr,
+                        &method,
+                        &[lit_expr],
+                        true, // allow_void
+                        &expr.span,
+                    )?;
+                }
+                crate::builtin_macros::FormatSegment::Placeholder => {
+                    let val_expr = value_args[placeholder_idx];
+                    placeholder_idx += 1;
+
+                    // Determine the write method based on the value's type
+                    let method_name = self
+                        .value_write_method_name(val_expr)
+                        .map_err(|e| {
+                            CodegenError::with_span(e, val_expr.span.clone())
+                        })?;
+
+                    let method = ast::Identifier {
+                        name: method_name,
+                        span: expr.span.clone(),
+                    };
+                    self.emit_method_call_expression(
+                        &writer_expr,
+                        &method,
+                        &[val_expr.clone()],
+                        true,
+                        &expr.span,
+                    )?;
+                }
+            }
+        }
+
+        // For println/eprintln, append a newline
+        if name == "println" || name == "eprintln" {
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: expr.span.clone(),
+            };
+            let nl_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                    "\n".to_string(),
+                ))),
+                span: expr.span.clone(),
+            };
+            self.emit_method_call_expression(
+                &writer_expr,
+                &method,
+                &[nl_expr],
+                true,
+                &expr.span,
+            )?;
+        }
+
+        if name == "sprint" {
+            // Write a null terminator at the end of the buffer
+            let method = ast::Identifier {
+                name: "write_u8".to_string(),
+                span: expr.span.clone(),
+            };
+            let zero_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
+                span: expr.span.clone(),
+            };
+            self.emit_method_call_expression(
+                &writer_expr,
+                &method,
+                &[zero_expr],
+                true,
+                &expr.span,
+            )?;
+
+            // Load `data` from the stack BufWriter
+            let buf_writer_type = ast::Type {
+                kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "BufWriter".to_string(),
+                        span: expr.span.clone(),
+                    }],
+                    generics: None,
+                })),
+                span: expr.span.clone(),
+            };
+            let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
+            let writer_tmp = self.variables.last().and_then(|scope| scope.get("__sprint_writer")).map(|info| info.ptr).ok_or_else(|| {
+                CodegenError::with_span("sprint writer variable missing".to_string(), expr.span.clone())
+            })?;
+
+            let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.data")
+                .map_err(|e| CodegenError::with_span(format!("sprint struct gep 1 failed: {e}"), expr.span.clone()))?;
+            let data_val = self.builder.build_load(self.context.i64_type(), data_ptr, "sprint.data.val")
+                .map_err(|e| CodegenError::with_span(format!("sprint load data failed: {e}"), expr.span.clone()))?;
+            let str_val = self.builder.build_int_to_ptr(
+                data_val.into_int_value(),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "sprint.str"
+            ).map_err(|e| CodegenError::with_span(format!("sprint int to ptr failed: {e}"), expr.span.clone()))?;
+
+            Ok(str_val.as_basic_value_enum())
+        } else {
+            // All non-sprint variants return void
+            Ok(self.context.i8_type().const_zero().into())
+        }
+    }
+
+    /// Returns the BufWriter write method name appropriate for a value expression.
+    fn value_write_method_name(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> Result<String, String> {
+        let val_type = self.resolve_receiver_type(expr);
+        match val_type {
+            Some(ty) => Self::type_to_write_method(&ty.kind),
+            None => {
+                // Fallback: emit the value and infer type from LLVM type
+                let val = self.emit_expression_value(expr).map_err(|e| {
+                    format!("cannot determine placeholder argument type: {e:?}")
+                })?;
+                let inferred = self.infer_ast_type_from_value(&val, &expr.span);
+                Self::type_to_write_method(&inferred.kind)
+            }
+        }
+    }
+
+    /// Map a type kind to the corresponding BufWriter write method name.
+    fn type_to_write_method(kind: &ast::TypeKind) -> Result<String, String> {
+        use crate::parser::ast::TypeKind;
+        match kind {
+            TypeKind::Primitive(p) => match p {
+                ast::PrimitiveType::Str => Ok("write_str".to_string()),
+                ast::PrimitiveType::I8
+                | ast::PrimitiveType::I16
+                | ast::PrimitiveType::I32
+                | ast::PrimitiveType::I64 => Ok("write_i64".to_string()),
+                ast::PrimitiveType::U8
+                | ast::PrimitiveType::U16
+                | ast::PrimitiveType::U32
+                | ast::PrimitiveType::U64 => Ok("write_u64".to_string()),
+                ast::PrimitiveType::F32
+                | ast::PrimitiveType::F64
+                | ast::PrimitiveType::F80 => Ok("write_f64".to_string()),
+                ast::PrimitiveType::Bool => Ok("write_bool".to_string()),
+                ast::PrimitiveType::Char => Ok("write_u8".to_string()),
+                ast::PrimitiveType::I128 => {
+                    Err("128-bit integer format is not supported yet".to_string())
+                }
+                ast::PrimitiveType::U128 => {
+                    Err("128-bit unsigned integer format is not supported yet".to_string())
+                }
+                _ => Err(format!("no BufWriter write method for primitive type {:?}", p)),
+            },
+            _ => Err(format!(
+                "no BufWriter write method for type {:?}",
+                kind,
+            )),
+        }
+    }
+
+
     fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(primitive) => {
@@ -2617,6 +2929,60 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     span: expr.span.clone(),
                 })
             }
+            ast::ExpressionKind::Literal(lit) => {
+                let prim = match lit {
+                    ast::Literal::Integer(_) => ast::PrimitiveType::I32,
+                    ast::Literal::Float(_) => ast::PrimitiveType::F64,
+                    ast::Literal::Complex(_, _) => ast::PrimitiveType::C64,
+                    ast::Literal::String(_) => ast::PrimitiveType::Str,
+                    ast::Literal::Char(_) => ast::PrimitiveType::Char,
+                    ast::Literal::Bool(_) => ast::PrimitiveType::Bool,
+                };
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Primitive(prim)),
+                    span: expr.span.clone(),
+                })
+            }
+            ast::ExpressionKind::Call { function, .. } => {
+                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
+                    if let Some(sig) = self.signature_for_name(&ident.name) {
+                        sig.return_type.clone()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            ast::ExpressionKind::MethodCall { receiver, method, .. } => {
+                let owners = self.receiver_owner_candidates(receiver);
+                let mut return_ty = None;
+                for owner_name in &owners {
+                    let mangled = Self::mangle_method_name(owner_name, &method.name);
+                    if let Some(sig) = self.signature_for_name(&mangled) {
+                        return_ty = sig.return_type.clone();
+                        break;
+                    }
+                }
+                if return_ty.is_none() {
+                    if let Some(sig) = self.signature_for_name(&method.name) {
+                        return_ty = sig.return_type.clone();
+                    }
+                }
+                return_ty
+            }
+            ast::ExpressionKind::Binary { left, .. } => {
+                self.resolve_receiver_type(left)
+            }
+            ast::ExpressionKind::Unary { operand, operator } => {
+                match operator {
+                    ast::UnaryOperator::Not => Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                        span: expr.span.clone(),
+                    }),
+                    _ => self.resolve_receiver_type(operand),
+                }
+            }
             _ => None,
         }
     }
@@ -2773,7 +3139,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|param| param.param_type.clone())
                                 .collect(),
                             return_type: func.return_type.clone(),
-                            is_variadic: false,
+                            is_variadic: func.is_variadic,
                             linkage: None,
                         },
                         Some(func.name.span.clone()),
@@ -2788,7 +3154,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|param| param.param_type.clone())
                                 .collect::<Vec<_>>(),
                             func.return_type.as_ref(),
-                            false,
+                            func.is_variadic,
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
@@ -5437,7 +5803,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     /// Check that an assignment target is mutable. Returns Ok(()) or a CodegenError
     /// with a message like "cannot assign to const variable 'x'".
-    fn check_assignment_mutability(&self, target: &ast::Expression) -> CodegenResult<()> {
+    fn check_assignment_mutability(&mut self, target: &ast::Expression) -> CodegenResult<()> {
         match target.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if let Some(info) = self.lookup_variable(&ident.name) {
@@ -5461,6 +5827,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             ast::ExpressionKind::FieldAccess { object, .. } => {
+                if let Some(ty) = self.resolve_receiver_type(object) {
+                    match ty.kind.as_ref() {
+                        ast::TypeKind::Pointer(ptr) => {
+                            if !ptr.is_mutable {
+                                return Err(CodegenError::with_span(
+                                    "cannot write through immutable pointer",
+                                    object.span.clone(),
+                                ));
+                            }
+                            return Ok(());
+                        }
+                        ast::TypeKind::Reference(r) => {
+                            if !r.is_mutable {
+                                return Err(CodegenError::with_span(
+                                    "cannot write through immutable reference",
+                                    object.span.clone(),
+                                ));
+                            }
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
                 self.check_assignment_mutability(object)
             }
             ast::ExpressionKind::Unary {
@@ -6900,6 +7289,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 _ => ast::TypeKind::Primitive(ast::PrimitiveType::I64),
             },
             BasicValueEnum::FloatValue(_) => ast::TypeKind::Primitive(ast::PrimitiveType::F64),
+            BasicValueEnum::PointerValue(_) => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
             _ => ast::TypeKind::Primitive(ast::PrimitiveType::I64),
         };
 
@@ -7193,7 +7583,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             .map(|param| param.param_type.clone())
                             .collect(),
                         return_type: function_item.return_type.clone(),
-                        is_variadic: false,
+                        is_variadic: function_item.is_variadic,
                         linkage: None,
                     },
                     Some(function_item.name.span.clone()),
@@ -7206,7 +7596,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         .map(|param| param.param_type.clone())
                         .collect::<Vec<_>>(),
                     function_item.return_type.as_ref(),
-                    false,
+                    function_item.is_variadic,
                     None,
                 )?;
                 self.module
@@ -7341,7 +7731,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map(|param| param.param_type.clone())
                     .collect(),
                 return_type: func.return_type.clone(),
-                is_variadic: false,
+                is_variadic: func.is_variadic,
                 linkage: None,
             },
             Some(func.name.span.clone()),
@@ -7358,7 +7748,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         .map(|param| param.param_type.clone())
                         .collect(),
                     return_type: func.return_type.clone(),
-                    is_variadic: false,
+                    is_variadic: func.is_variadic,
                     linkage: None,
                 },
                 Some(func.name.span.clone()),
@@ -7374,7 +7764,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map(|param| param.param_type.clone())
                     .collect::<Vec<_>>(),
                 func.return_type.as_ref(),
-                false,
+                func.is_variadic,
                 None,
             )?;
             let function = self.module.add_function(llvm_name, fn_ty, None);
@@ -7388,6 +7778,23 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ));
         };
         Self::apply_function_linkage(function, visibility);
+        // Functions named `_start` are entry points for no-libc binaries. Only
+        // apply the `naked` attribute when the body is a single asm statement —
+        // a user-written `_start` with non-asm body should NOT get naked (the
+        // compiler will emit a normal prologue, crashing at runtime, but that
+        // is better than silent UB with naked).
+        if llvm_name == "_start" {
+            let body_is_pure_asm = func.body.statements.len() == 1
+                && match &func.body.statements[0].kind {
+                    ast::StatementKind::Expression(expr) => matches!(&*expr.kind, ast::ExpressionKind::Asm { .. }),
+                    _ => false,
+                };
+            if body_is_pure_asm {
+                let naked_kind = Attribute::get_named_enum_kind_id("naked");
+                let naked_attr = self.context.create_enum_attribute(naked_kind, 0);
+                function.add_attribute(AttributeLoc::Function, naked_attr);
+            }
+        }
 
         self.emit_function_body(
             function,

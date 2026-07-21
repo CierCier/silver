@@ -1,0 +1,413 @@
+// std/rt/methods.ag — dynamic method registry for the Silver runtime.
+//
+// Port of silver_runtime/src/runtime/methods.rs (MethodRegistry +
+// Runtime::call_method + install_builtin_methods) to pure Silver.
+//
+// Silver has no Arc<dyn Fn>, so each method is a MethodSpec carrying an
+// integer OPCODE dispatched through an if-chain (see dispatch_method), plus
+// a small `ctx` word for opcode-private data.  The registry keeps two
+// tables over std.map:
+//
+//   by_type:  (type raw id, interned name id) -> MethodSpec     (packed u64 key)
+//   global:   interned name id                -> MethodSpec
+//
+// Method names are interned by a tiny string table (Vec<String> + str->u32
+// map), so lookup keys are plain integers.
+//
+// ERROR MODEL
+// ───────────
+// Fallible calls return a MethodResult (Result-pattern struct): an `ok`
+// flag, the resulting RtValue, an RT_ERR discriminant, and an owned message
+// String whose text mirrors the Rust RuntimeError Display strings.
+// Receivers and args are passed as pointer + length because Silver's
+// builtin Slice<T> has no length accessor.
+//
+// The registry borrows the runtime's TypeRegistry and Heap through raw
+// pointers set by MethodRegistry.install (or wire_runtime); the caller owns
+// both and must keep them alive for the registry's lifetime.
+
+import std.map;
+import std.mem.vec;
+import std.string;
+import std.rt.heap;
+import std.rt.type_info;
+import std.rt.types;
+
+// ---------------------------------------------------------------------------
+// RT_ERR — mirrors silver_runtime's RuntimeError variants
+
+pub enum RT_ERR {
+    NONE = 0;
+    METHOD_NOT_FOUND = 1;
+    INVALID_RECEIVER = 2;
+    ARITY_MISMATCH = 3;
+    TYPE_MISMATCH = 4;
+    HEAP = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Method opcodes (integer dispatch replaces the Rust Arc<dyn Fn> closures)
+
+pub const i32 RT_METHOD_OP_TYPE_NAME = 1;   // global "type_name" (arity 0)
+pub const i32 RT_METHOD_OP_STRING_LEN = 2;  // string.len (arity 0)
+pub const i32 RT_METHOD_OP_VEC_LEN = 3;     // global "len" for vec<T> (arity 0)
+pub const i32 RT_METHOD_OP_VEC_PUSH = 4;    // global "push" for vec<T> (arity 1)
+
+// ---------------------------------------------------------------------------
+// MethodSpec — arity (-1 = variadic, Rust's None) + opcode + ctx word.
+
+pub struct MethodSpec {
+    i32 arity;
+    i32 opcode;
+    u32 ctx;
+}
+
+// ---------------------------------------------------------------------------
+// MethodResult — Result-pattern struct: ok flag + RtValue + RT_ERR code +
+// owned message.  RtValue owns no resources, so no Drop impl is needed.
+
+pub struct MethodResult {
+    bool ok;
+    RtValue value;
+    i32 err;      // RT_ERR discriminant; NONE when ok
+    String msg;   // human-readable error text; empty when ok
+}
+
+impl MethodResult {
+    pub MethodResult ok_value(RtValue value) {
+        MethodResult r;
+        r.ok = true;
+        r.value = value;
+        r.err = (i32)RT_ERR.NONE;
+        r.msg = String.new();
+        return move r;
+    }
+
+    pub MethodResult error(i32 err, String msg) {
+        MethodResult r;
+        r.ok = false;
+        r.value = RtValue.unit();
+        r.err = err;
+        r.msg = move msg;
+        return move r;
+    }
+
+    pub bool is_ok(MethodResult* self) {
+        return self.ok;
+    }
+
+    pub bool is_err(MethodResult* self) {
+        return !self.ok;
+    }
+}
+
+impl Drop<MethodResult> for MethodResult {
+    void drop(MethodResult* self) {
+        self.msg.drop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MethodRegistry
+
+pub struct MethodRegistry {
+    HashMap<u64, MethodSpec> by_type;   // (type_raw << 32) | name_id -> spec
+    HashMap<u32, MethodSpec> global;    // name_id -> spec
+    HashMap<str, u32> intern_ids;       // name text -> interned id
+    Vec<String> interned;               // interned id -> owned name text
+}
+
+impl MethodRegistry {
+    pub MethodRegistry new() {
+        MethodRegistry r;
+        r.by_type = HashMap<u64, MethodSpec>.new();
+        r.global = HashMap<u32, MethodSpec>.new();
+        r.intern_ids = HashMap<str, u32>.new();
+        r.interned = Vec<String>.new();
+        return move r;
+    }
+
+    // -- Interning ---------------------------------------------------------
+
+    /// Intern `name`, returning its stable u32 id.
+    pub u32 intern(MethodRegistry* self, str name) {
+        if (self.intern_ids.contains_key(name)) {
+            return self.intern_ids.get(name);
+        }
+        u32 id = (u32)self.interned.len();
+        String owned = rt_type_str_owned(name);
+        self.interned.push(move owned);
+        // Key the id map by the buffer now owned by the interned entry;
+        // the heap buffer address is stable across Vec growth.
+        String* stored = self.interned.get_ptr((i64)id);
+        self.intern_ids.insert((str)stored.to_str(), id);
+        return id;
+    }
+
+    // -- Registration --------------------------------------------------------
+
+    u64 by_type_key(u32 type_raw, u32 name_id) {
+        return ((u64)type_raw << (u64)32) | (u64)name_id;
+    }
+
+    /// Register a method on one type (arity -1 = variadic).
+    pub void register(MethodRegistry* self, TypeId ty, str name, i32 arity, i32 opcode, u32 ctx) {
+        u32 name_id = self.intern(name);
+        MethodSpec spec;
+        spec.arity = arity;
+        spec.opcode = opcode;
+        spec.ctx = ctx;
+        self.by_type.insert(MethodRegistry.by_type_key(ty.raw, name_id), spec);
+    }
+
+    /// Register a global fallback method (arity -1 = variadic).
+    pub void register_global(MethodRegistry* self, str name, i32 arity, i32 opcode, u32 ctx) {
+        u32 name_id = self.intern(name);
+        MethodSpec spec;
+        spec.arity = arity;
+        spec.opcode = opcode;
+        spec.ctx = ctx;
+        self.global.insert(name_id, spec);
+    }
+
+    // -- Lookup --------------------------------------------------------------
+
+    /// Type-specific table first, then the global table (Rust lookup order).
+    bool lookup(MethodRegistry* self, u32 type_raw, u32 name_id, MethodSpec* out) {
+        u64 key = MethodRegistry.by_type_key(type_raw, name_id);
+        if (self.by_type.contains_key(key)) {
+            *out = self.by_type.get(key);
+            return true;
+        }
+        if (self.global.contains_key(name_id)) {
+            *out = self.global.get(name_id);
+            return true;
+        }
+        return false;
+    }
+
+    // -- Builtins --------------------------------------------------------------
+
+    /// Rust: install_builtin_methods.  Safe to call exactly once per
+    /// registry (re-installing simply overwrites the same table entries).
+    pub void install_builtin_methods(MethodRegistry* self) {
+        // Global: type_name() -> string
+        self.register_global("type_name", 0, RT_METHOD_OP_TYPE_NAME, (u32)0);
+        // string.len() -> i64
+        self.register(TypeId.STRING(), "len", 0, RT_METHOD_OP_STRING_LEN, (u32)0);
+        // vec<T>.len() -> i64 (global fallback that checks the vec kind)
+        self.register_global("len", 0, RT_METHOD_OP_VEC_LEN, (u32)0);
+        // vec<T>.push(value) -> unit (global fallback with elem type check)
+        self.register_global("push", 1, RT_METHOD_OP_VEC_PUSH, (u32)0);
+    }
+
+    // -- Call --------------------------------------------------------------
+
+    MethodResult method_not_found(TypeRegistry* types, u32 type_raw, str name) {
+        String m = rt_type_str_owned("method not found: ");
+        str type_name = types.name_of(TypeId.from_raw(type_raw));
+        if (type_name == (str)0) {
+            m.push_str("<unknown>");
+        } else {
+            m.push_str(type_name);
+        }
+        m.push_str("::");
+        m.push_str(name);
+        return MethodResult.error((i32)RT_ERR.METHOD_NOT_FOUND, move m);
+    }
+
+    MethodResult invalid_receiver(str expected) {
+        String m = rt_type_str_owned("invalid receiver (expected ");
+        m.push_str(expected);
+        m.push_str(")");
+        return MethodResult.error((i32)RT_ERR.INVALID_RECEIVER, move m);
+    }
+
+    /// Rust: Runtime::call_method.  Looks up the spec (per-type table wins
+    /// over the global table), checks arity, then dispatches on the opcode.
+    /// `args` points at `args_len` values (the receiver is separate).
+    pub MethodResult call_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, str name, RtValue* args, i64 args_len) {
+        u32 type_raw = receiver.type_id();
+        u32 name_id = self.intern(name);
+
+        MethodSpec spec;
+        spec.arity = 0;
+        spec.opcode = 0;
+        spec.ctx = (u32)0;
+        if (!self.lookup(type_raw, name_id, &spec)) {
+            return MethodRegistry.method_not_found(types, type_raw, name);
+        }
+
+        if (spec.arity >= 0 && (i64)spec.arity != args_len) {
+            // Rust: "wrong argument count: expected {expected}, found {found}"
+            String m = rt_type_str_owned("wrong argument count: expected ");
+            rt_type_append_i64(&m, (i64)spec.arity);
+            m.push_str(", found ");
+            rt_type_append_i64(&m, args_len);
+            return MethodResult.error((i32)RT_ERR.ARITY_MISMATCH, move m);
+        }
+
+        return self.dispatch_method(types, heap, spec.opcode, receiver, args, args_len);
+    }
+
+    // -- Opcode dispatch (replaces the Rust closure table) -------------------
+
+    MethodResult dispatch_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, i32 opcode, RtValue receiver, RtValue* args, i64 args_len) {
+        if (opcode == RT_METHOD_OP_TYPE_NAME) {
+            return self.op_type_name(types, heap, receiver);
+        }
+        if (opcode == RT_METHOD_OP_STRING_LEN) {
+            return self.op_string_len(heap, receiver);
+        }
+        if (opcode == RT_METHOD_OP_VEC_LEN) {
+            return self.op_vec_len(types, heap, receiver);
+        }
+        if (opcode == RT_METHOD_OP_VEC_PUSH) {
+            return self.op_vec_push(types, heap, receiver, args, args_len);
+        }
+        // Unknown opcode: programming error, mirror MethodNotFound.
+        String m = rt_type_str_owned("method not found: <opcode ");
+        rt_type_append_i64(&m, (i64)opcode);
+        m.push_str(">");
+        return MethodResult.error((i32)RT_ERR.METHOD_NOT_FOUND, move m);
+    }
+
+    /// type_name() -> string — allocates the receiver's type name on the heap.
+    MethodResult op_type_name(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver) {
+        u32 type_raw = receiver.type_id();
+        str name = types.name_of(TypeId.from_raw(type_raw));
+        String text = String.new();
+        if (name == (str)0) {
+            text.push_str("<unknown>");
+        } else {
+            text.push_str(name);
+        }
+        Handle handle = heap.alloc(Object.new_string(move text));
+        return MethodResult.ok_value(RtValue.obj(RT_TYPE_STRING, handle));
+    }
+
+    /// string.len() -> i64 — receiver must be a heap string object.
+    MethodResult op_string_len(MethodRegistry* self, Heap* heap, RtValue receiver) {
+        if (receiver.kind != RT_KIND_OBJ) {
+            return MethodRegistry.invalid_receiver("string object");
+        }
+        ObjectRef obj = heap.get(receiver.handle);
+        if (!obj.ok) {
+            String m = rt_type_str_owned("heap error: invalid handle");
+            return MethodResult.error((i32)RT_ERR.HEAP, move m);
+        }
+        if ((*obj.object).kind != OBJ_KIND_STRING) {
+            return MethodRegistry.invalid_receiver("string object");
+        }
+        // Rust counts chars(); the runtime only stores valid UTF-8, so count
+        // code points by skipping UTF-8 continuation bytes.
+        i64 count = 0;
+        i64 i = 0;
+        i64 n = (*obj.object).text.len();
+        while (i < n) {
+            u8 b = (*obj.object).text[i];
+            if ((i32)(b & (u8)192) != 128) {
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+        return MethodResult.ok_value(RtValue.from_int((u32)5, (i128)count));
+    }
+
+    /// vec<T>.len() -> i64 — global fallback; errors unless the receiver's
+    /// type is a registered vec type and the object is a vec.
+    MethodResult op_vec_len(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver) {
+        u32 type_raw = receiver.type_id();
+        Type* info = types.get(TypeId.from_raw(type_raw));
+        if (info == (Type*)0) {
+            String m = rt_type_str_owned("type mismatch: expected known type, found unknown type id: ");
+            rt_type_append_u32(&m, type_raw);
+            return MethodResult.error((i32)RT_ERR.TYPE_MISMATCH, move m);
+        }
+        if ((*info).kind != (i32)TYPE_KIND.VEC) {
+            return MethodRegistry.method_not_found(types, type_raw, "len");
+        }
+        if (receiver.kind != RT_KIND_OBJ) {
+            return MethodRegistry.invalid_receiver("vec object");
+        }
+        ObjectRef obj = heap.get(receiver.handle);
+        if (!obj.ok) {
+            String m = rt_type_str_owned("heap error: invalid handle");
+            return MethodResult.error((i32)RT_ERR.HEAP, move m);
+        }
+        if ((*obj.object).kind != OBJ_KIND_VEC) {
+            return MethodRegistry.invalid_receiver("vec object");
+        }
+        i64 n = (*obj.object).values.len();
+        return MethodResult.ok_value(RtValue.from_int((u32)5, (i128)n));
+    }
+
+    /// vec<T>.push(value) -> unit — checks the pushed value against the
+    /// vec's registered element type before appending in place.
+    MethodResult op_vec_push(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, RtValue* args, i64 args_len) {
+        u32 vec_raw = receiver.type_id();
+        Type* info = types.get(TypeId.from_raw(vec_raw));
+        if (info == (Type*)0) {
+            String m = rt_type_str_owned("type mismatch: expected known type, found unknown type id: ");
+            rt_type_append_u32(&m, vec_raw);
+            return MethodResult.error((i32)RT_ERR.TYPE_MISMATCH, move m);
+        }
+        if ((*info).kind != (i32)TYPE_KIND.VEC) {
+            return MethodRegistry.invalid_receiver("vec");
+        }
+        TypeId elem_ty = (*info).elem;
+
+        if (receiver.kind != RT_KIND_OBJ) {
+            return MethodRegistry.invalid_receiver("vec object");
+        }
+
+        RtValue item = args[0];
+        u32 item_raw = item.type_id();
+        if (item_raw != elem_ty.raw) {
+            // Rust: "type mismatch: expected {elem}, found {item}"
+            String m = rt_type_str_owned("type mismatch: expected ");
+            str elem_name = types.name_of(elem_ty);
+            if (elem_name == (str)0) {
+                m.push_str("<unknown>");
+            } else {
+                m.push_str(elem_name);
+            }
+            m.push_str(", found ");
+            str item_name = types.name_of(TypeId.from_raw(item_raw));
+            if (item_name == (str)0) {
+                m.push_str("<unknown>");
+            } else {
+                m.push_str(item_name);
+            }
+            return MethodResult.error((i32)RT_ERR.TYPE_MISMATCH, move m);
+        }
+
+        ObjectRef obj = heap.get_mut(receiver.handle);
+        if (!obj.ok) {
+            String m = rt_type_str_owned("heap error: invalid handle");
+            return MethodResult.error((i32)RT_ERR.HEAP, move m);
+        }
+        if ((*obj.object).kind != OBJ_KIND_VEC) {
+            return MethodRegistry.invalid_receiver("vec object");
+        }
+        (*obj.object).values.push(item);
+        return MethodResult.ok_value(RtValue.unit());
+    }
+}
+
+impl Drop<MethodRegistry> for MethodRegistry {
+    /// Release the tables and every interned name.  The borrowed
+    /// TypeRegistry/Heap are NOT referenced (the caller owns them).  Idempotent.
+    void drop(MethodRegistry* self) {
+        self.by_type.drop();
+        self.global.drop();
+        self.intern_ids.drop();
+        i64 i = 0;
+        while (i < self.interned.len()) {
+            String* name = self.interned.get_ptr(i);
+            name.drop();
+            i = i + 1;
+        }
+        self.interned.drop();
+    }
+}
