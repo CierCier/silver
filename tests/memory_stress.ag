@@ -1,29 +1,26 @@
 // Heavy memory-model stress test.
 // Exercises RAII drop flags, move chains, by-value params, return-by-value,
 // cross-linked structs, nested owned fields, raw heap pressure, realloc, and memmove.
-import std.io;
+import std.test;
 import std.mem;
 
-// ---------------- Assertions ----------------
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
+// ---------------- Assertions (local helpers for arg order) ----------------
 void pass(str msg) {
     tests_passed = tests_passed + 1;
-    printf("  [PASS] %s\n", msg);
+    STDOUT.write_str("  [PASS] ");
+    STDOUT.write_str(msg);
+    STDOUT.write_str("\n");
 }
 
 void fail(str msg) {
     tests_failed = tests_failed + 1;
-    printf("  [FAIL] %s\n", msg);
+    STDERR.write_str("  [FAIL] ");
+    STDERR.write_str(msg);
+    STDERR.write_str("\n");
 }
 
 void assert_true(bool cond, str msg) {
-    if (cond) {
-        pass(msg);
-    } else {
-        fail(msg);
-    }
+    if (cond) { pass(msg); } else { fail(msg); }
 }
 
 void assert_eq_i32(i32 got, i32 expected, str msg) {
@@ -31,7 +28,13 @@ void assert_eq_i32(i32 got, i32 expected, str msg) {
         pass(msg);
     } else {
         tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %d, got %d)\n", msg, expected, got);
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str(" (expected ");
+        STDERR.write_i64((i64)expected);
+        STDERR.write_str(", got ");
+        STDERR.write_i64((i64)got);
+        STDERR.write_str(")\n");
     }
 }
 
@@ -40,9 +43,16 @@ void assert_eq_i64(i64 got, i64 expected, str msg) {
         pass(msg);
     } else {
         tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, expected, got);
+        STDERR.write_str("  [FAIL] ");
+        STDERR.write_str(msg);
+        STDERR.write_str(" (expected ");
+        STDERR.write_i64(expected);
+        STDERR.write_str(", got ");
+        STDERR.write_i64(got);
+        STDERR.write_str(")\n");
     }
 }
+
 
 // ---------------- Raw cross-linked graph node ----------------
 i32 node_drop_count = 0;
@@ -244,7 +254,7 @@ void reset_node_counters() {
 
 // ---------------- Test cases ----------------
 void stress_cross_linked_nodes() {
-    printf("\n--- Cross-linked RawNode graph ---\n");
+    STDOUT.write_str("\n--- Cross-linked RawNode graph ---\n");
     reset_node_counters();
     {
         RawNode a = RawNode.new(1, 128);
@@ -284,7 +294,7 @@ void stress_cross_linked_nodes() {
 }
 
 void stress_owner_moves_and_params() {
-    printf("\n--- Nested owner moves, returns, params ---\n");
+    STDOUT.write_str("\n--- Nested owner moves, returns, params ---\n");
 
     reset_owner_counters();
     {
@@ -326,7 +336,7 @@ void stress_owner_moves_and_params() {
 }
 
 void stress_loop_churn() {
-    printf("\n--- Loop churn and scope pressure ---\n");
+    STDOUT.write_str("\n--- Loop churn and scope pressure ---\n");
     reset_node_counters();
     reset_owner_counters();
 
@@ -347,7 +357,7 @@ void stress_loop_churn() {
 }
 
 void stress_defer_and_break_continue() {
-    printf("\n--- Defer, break, continue with owned locals ---\n");
+    STDOUT.write_str("\n--- Defer, break, continue with owned locals ---\n");
     reset_node_counters();
     reset_owner_counters();
     i32 defer_marker = 0;
@@ -384,7 +394,7 @@ void stress_defer_and_break_continue() {
 }
 
 void stress_large_raw_memory() {
-    printf("\n--- Large raw heap, realloc, memmove ---\n");
+    STDOUT.write_str("\n--- Large raw heap, realloc, memmove ---\n");
 
     i64 large_size = 4000000;
     i8* big = alloc<i8>(large_size);
@@ -425,7 +435,7 @@ void stress_large_raw_memory() {
 }
 
 i32 main() {
-    printf("=== Memory Stress Torture Test ===\n");
+    STDOUT.write_str("=== Memory Stress Torture Test ===\n");
 
     stress_cross_linked_nodes();
     stress_owner_moves_and_params();
@@ -433,11 +443,5 @@ i32 main() {
     stress_defer_and_break_continue();
     stress_large_raw_memory();
 
-    printf("\n=== Results ===\n");
-    printf("Passed: %d\n", tests_passed);
-    printf("Failed: %d\n", tests_failed);
-    if (tests_failed > 0) {
-        return 1;
-    }
-    return 0;
+    return done();
 }

@@ -4,76 +4,10 @@
 // silver_runtime/src/types/cast.rs, an exhaustive sweep over all 156
 // prepopulated numeric pairs, and boundary spot-checks for Rust-`as`
 // wrapping semantics.
-import std.io;
+import std.test;
 import std.rt.casts;
 import std.rt.type_info;
 import std.rt.types;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_i128(i128 a, i128 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (i128 mismatch: low64 expected %ld, got %ld)\n", msg, (i64)b, (i64)a);
-    }
-}
-
-void assert_eq_u128(u128 a, u128 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (u128 mismatch: low64 expected %lu, got %lu)\n", msg, (u64)b, (u64)a);
-    }
-}
-
-void assert_eq_f64(f64 a, f64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %f, got %f)\n", msg, b, a);
-    }
-}
-
-void assert_f64_near(f64 a, f64 b, f64 eps, str msg) {
-    f64 d = a - b;
-    if (d < 0.0) { d = 0.0 - d; }
-    if (d < eps) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected ~%f, got %f)\n", msg, b, a);
-    }
-}
-
 /// Numeric test matrix payload for `idx` in 0..12 (BOOL..F64, raw 1..13):
 /// 42 as the source value, in the payload kind of the raw type id.
 CastValue sample_value(u32 raw) {
@@ -83,11 +17,69 @@ CastValue sample_value(u32 raw) {
     return CastValue.from_float(raw, 42.5);
 }
 
+void assert_eq_i128(i128 a, i128 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+    } else {
+        tests_failed = tests_failed + 1;
+        STDOUT.write_str("  [FAIL] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str(" (i128 mismatch)\n");
+    }
+}
+
+void assert_eq_u128(u128 a, u128 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+    } else {
+        tests_failed = tests_failed + 1;
+        STDOUT.write_str("  [FAIL] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str(" (u128 mismatch)\n");
+    }
+}
+
+void assert_eq_f64(f64 a, f64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+    } else {
+        tests_failed = tests_failed + 1;
+        STDOUT.write_str("  [FAIL] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str(" (f64 mismatch)\n");
+    }
+}
+
+void assert_f64_near(f64 a, f64 b, f64 eps, str msg) {
+    f64 d = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    if (d < eps) {
+        tests_passed = tests_passed + 1;
+        STDOUT.write_str("  [PASS] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+    } else {
+        tests_failed = tests_failed + 1;
+        STDOUT.write_str("  [FAIL] ");
+        STDOUT.write_str(msg);
+        STDOUT.write_str(" (f64 near mismatch)\n");
+    }
+}
+
 i32 main() {
-    printf("=== CastRegistry / CastKind Tests ===\n\n");
+    STDOUT.write_str("=== CastRegistry / CastKind Tests ===\n\n");
 
     // --- builtin_numeric_casts_work (port of runtime/tests.rs) -----------
-    printf("--- builtin_numeric_casts_work (Rust port) ---\n");
+    STDOUT.write_str("--- builtin_numeric_casts_work (Rust port) ---\n");
     {
         CastRegistry casts = CastRegistry.with_builtin_casts();
 
@@ -128,7 +120,7 @@ i32 main() {
     // The Rust test casts a heap string to i32 and expects CastNotFound.
     // STRING (raw 14) is never registered by install_builtin_casts, so a
     // cast from it hits the same error path.
-    printf("--- missing_cast_reports_error (Rust port) ---\n");
+    STDOUT.write_str("--- missing_cast_reports_error (Rust port) ---\n");
     {
         CastRegistry casts = CastRegistry.with_builtin_casts();
         TypeRegistry reg = TypeRegistry.new();
@@ -158,7 +150,7 @@ i32 main() {
     }
 
     // --- identity short-circuit -------------------------------------------
-    printf("--- identity short-circuit ---\n");
+    STDOUT.write_str("--- identity short-circuit ---\n");
     {
         CastRegistry casts = CastRegistry.new(); // empty: nothing registered
         CastResult r = casts.cast_value(CastValue.from_int(5, (i128)(0 - 7)), 5);
@@ -174,7 +166,7 @@ i32 main() {
     }
 
     // --- registry shape: 156 pairs ----------------------------------------
-    printf("--- registry shape ---\n");
+    STDOUT.write_str("--- registry shape ---\n");
     {
         CastRegistry casts = CastRegistry.with_builtin_casts();
         assert_eq_i64(casts.len(), 156, "156 numeric pairs registered");
@@ -220,7 +212,7 @@ i32 main() {
     }
 
     // --- exhaustive sweep: every registered pair executes ------------------
-    printf("--- exhaustive 156-pair sweep ---\n");
+    STDOUT.write_str("--- exhaustive 156-pair sweep ---\n");
     {
         CastRegistry casts = CastRegistry.with_builtin_casts();
         i64 ok_count = 0;
@@ -248,7 +240,7 @@ i32 main() {
     }
 
     // --- boundary spot-checks: Rust-`as` wrapping semantics ---------------
-    printf("--- boundary spot-checks ---\n");
+    STDOUT.write_str("--- boundary spot-checks ---\n");
     {
         CastRegistry casts = CastRegistry.with_builtin_casts();
 
@@ -333,7 +325,7 @@ i32 main() {
     }
 
     // --- CastKind classification (types/cast.rs rules) ----------------------
-    printf("--- classify_cast / can_cast ---\n");
+    STDOUT.write_str("--- classify_cast / can_cast ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
 
@@ -375,7 +367,7 @@ i32 main() {
     }
 
     // --- rt_cast_value (types/cast.rs rule-based entry point) -------------
-    printf("--- rt_cast_value (rule-based) ---\n");
+    STDOUT.write_str("--- rt_cast_value (rule-based) ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
 
@@ -437,7 +429,7 @@ i32 main() {
     // --- rule path agrees with registry path on the shared numeric grid ---
     // (bool pairs excluded: the rule-based classifier says NONE for bool,
     // exactly like the Rust types/cast.rs match which has no Bool arm.)
-    printf("--- rule path vs registry path agreement ---\n");
+    STDOUT.write_str("--- rule path vs registry path agreement ---\n");
     {
         TypeRegistry reg = TypeRegistry.new();
         CastRegistry casts = CastRegistry.with_builtin_casts();
@@ -472,6 +464,5 @@ i32 main() {
         reg.drop();
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }

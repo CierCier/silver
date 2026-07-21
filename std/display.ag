@@ -1,0 +1,32 @@
+// std/display.ag — Display formatting trait.
+//
+// The `Display` trait is recognized by the compiler's compile-time
+// `print`/`format` expansion.  Types that implement `Display` can be
+// formatted with `{}` placeholders.
+//
+// Primitive types (i64, u64, f64, bool, str) have built-in implementations
+// that forward to BufWriter's write_T methods.
+
+import std.io;  // BufWriter
+
+/// Trait for types that can be formatted for display.
+pub trait Display<Self> {
+    pub void fmt(Self* self, BufWriter* out);
+}
+
+// Primitives — redirect to BufWriter.write_T methods
+impl Display<i64> for i64 {
+    pub void fmt(i64* self, BufWriter* out) { out.write_i64(*self); }
+}
+impl Display<u64> for u64 {
+    pub void fmt(u64* self, BufWriter* out) { out.write_u64(*self); }
+}
+impl Display<f64> for f64 {
+    pub void fmt(f64* self, BufWriter* out) { out.write_f64(*self); }
+}
+impl Display<bool> for bool {
+    pub void fmt(bool* self, BufWriter* out) { out.write_bool(*self); }
+}
+impl Display<str> for str {
+    pub void fmt(str* self, BufWriter* out) { out.write_str(*self); }
+}

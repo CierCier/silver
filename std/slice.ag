@@ -12,7 +12,11 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 
     T __index_get(Slice<T>* self, i64 index) {
         if (index < 0 || index >= (*self).len) {
-            printf("Slice index out of bounds: %ld (len: %ld)\n", index, (*self).len);
+            STDOUT.write_str("Slice index out of bounds: ");
+            STDOUT.write_i64(index);
+            STDOUT.write_str(" (len: ");
+            STDOUT.write_i64((*self).len);
+            STDOUT.write_str(")\n");
             abort();
         }
         return (*self).data[index];
@@ -20,7 +24,11 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 
     void __index_set(Slice<T>* self, i64 index, T value) {
         if (index < 0 || index >= (*self).len) {
-            printf("Slice index out of bounds: %ld (len: %ld)\n", index, (*self).len);
+            STDOUT.write_str("Slice index out of bounds: ");
+            STDOUT.write_i64(index);
+            STDOUT.write_str(" (len: ");
+            STDOUT.write_i64((*self).len);
+            STDOUT.write_str(")\n");
             abort();
         }
         (*self).data[index] = move value;

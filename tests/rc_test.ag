@@ -3,37 +3,14 @@
 // monomorphization of static methods with generic args (T val)
 // is currently deferred to the caller's scope, which may not
 // resolve alloc<T>() from imported modules.
-import std.io;
+import std.test;  // assert_true, assert_eq_i32, done, STDOUT
 import std.mem;
 
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i32(i32 a, i32 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== Rc Test Suite ===\n\n");
+    STDOUT.write_str("=== Rc Test Suite ===\n\n");
 
     // Test 1: Rc.new with primitive — use manual construction
-    printf("--- Test 1: Rc.new with primitive ---\n");
+    STDOUT.write_str("--- Test 1: Rc.new with primitive ---\n");
     {
         i32* p = alloc<i32>();
         *p = 42;
@@ -48,7 +25,7 @@ i32 main() {
     }
 
     // Test 2: Rc.clone
-    printf("--- Test 2: Rc.clone ---\n");
+    STDOUT.write_str("--- Test 2: Rc.clone ---\n");
     {
         i32* p = alloc<i32>();
         *p = 42;
@@ -68,7 +45,7 @@ i32 main() {
     }
 
     // Test 3: Shared mutation
-    printf("--- Test 3: Shared mutation ---\n");
+    STDOUT.write_str("--- Test 3: Shared mutation ---\n");
     {
         i32* p = alloc<i32>();
         *p = 100;
@@ -88,7 +65,7 @@ i32 main() {
     }
 
     // Test 4: Three-way sharing
-    printf("--- Test 4: Three-way sharing ---\n");
+    STDOUT.write_str("--- Test 4: Three-way sharing ---\n");
     {
         i32* p = alloc<i32>();
         *p = 1;
@@ -113,6 +90,5 @@ i32 main() {
         a.drop();
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }

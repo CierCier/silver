@@ -1,50 +1,6 @@
 // Test suite for std.string - String type
-import std.io;
+import std.test;  // assert_true, assert_false, assert_eq_i64, assert_eq_i32, done, STDOUT
 import std.string;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_false(bool cond, str msg) {
-    if (!cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_i32(i32 a, i32 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
-    }
-}
-
 
 i32 main(){
     String s = String.new();
@@ -52,7 +8,6 @@ i32 main(){
     assert_eq_i64(s.capacity, 16, "New string has initial capacity 16");
     assert_true(s.data != (u8*)0, "New string has non-null data pointer");
     s.drop();
-
 
     String s1 = String.with_capacity(32);
     assert_eq_i64(s1.len, 0, "String with_capacity has length 0");
@@ -87,9 +42,11 @@ i32 main(){
     assert_false(s2.equals("abcde"), "Modified string no longer equals old literal");
     assert_true(s2.equals("abcdef"), "Modified string equals updated literal");
     
-    // Test to_str via printf (verifies it runs without crashing)
-    printf("to_str: \"%s\"\n", s3.to_str());
-    tests_passed = tests_passed + 1;
+    // Test to_str
+    STDOUT.write_str("to_str: \"");
+    STDOUT.write_str((str)s3.to_str());
+    STDOUT.write_str("\"\n");
+    check(true, "to_str runs without crashing");
 
     // Test clear
     s3.clear();
@@ -98,9 +55,5 @@ i32 main(){
     s2.drop();
     s3.drop();
 
-    printf("Tests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    if (tests_failed > 0) {
-        return 1;
-    }
-    return 0;
+    return done();
 }

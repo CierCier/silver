@@ -90,7 +90,11 @@ impl TypeResult {
     /// The TypeId on success; aborts (with the error message) on failure.
     pub TypeId unwrap(TypeResult* self) {
         if (!self.ok) {
-            printf("TypeResult.unwrap on error %d: %s\n", self.err, self.msg.to_str());
+            STDOUT.write_str("TypeResult.unwrap on error ");
+            STDOUT.write_i64(self.err);
+            STDOUT.write_str(": ");
+            STDOUT.write_str((str)self.msg.to_str());
+            STDOUT.write_str("\n");
             abort();
         }
         return self.id;

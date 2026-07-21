@@ -1,52 +1,12 @@
 // Test suite for std.rt.heap — generational mark-sweep GC heap.
 // Ports the heap/GC cases from silver_runtime/src/runtime/tests.rs.
-import std.io;
+import std.test;
 import std.rt.heap;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_u32(u32 a, u32 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %u, got %u)\n", msg, b, a);
-    }
-}
-
-Object make_string_object(str text) {
-    String s = String.new();
-    s.push_str(text);
-    return Object.new_string(move s);
-}
-
 i32 main() {
-    printf("=== rt heap tests ===\n\n");
+    STDOUT.write_str("=== rt heap tests ===\n\n");
 
     // --- heap_alloc_and_free_are_safe -----------------------------------
-    printf("--- Alloc and free are generationally safe ---\n");
+    STDOUT.write_str("--- Alloc and free are generationally safe ---\n");
     {
         Heap heap = Heap.new();
 
@@ -73,7 +33,7 @@ i32 main() {
     }
 
     // --- gc_collects_unreachable_objects --------------------------------
-    printf("\n--- GC collects unreachable objects ---\n");
+    STDOUT.write_str("\n--- GC collects unreachable objects ---\n");
     {
         Heap heap = Heap.new();
 
@@ -98,7 +58,7 @@ i32 main() {
     }
 
     // --- gc_traces_through_composite_objects ----------------------------
-    printf("\n--- GC traces through composite objects ---\n");
+    STDOUT.write_str("\n--- GC traces through composite objects ---\n");
     {
         Heap heap = Heap.new();
 
@@ -134,7 +94,7 @@ i32 main() {
     }
 
     // --- get_mut allows in-place mutation -------------------------------
-    printf("\n--- get_mut mutates in place ---\n");
+    STDOUT.write_str("\n--- get_mut mutates in place ---\n");
     {
         Heap heap = Heap.new();
 
@@ -159,7 +119,7 @@ i32 main() {
     }
 
     // --- allocated_count bookkeeping ------------------------------------
-    printf("\n--- allocated_count bookkeeping ---\n");
+    STDOUT.write_str("\n--- allocated_count bookkeeping ---\n");
     {
         Heap heap = Heap.new();
         assert_eq_i64(heap.allocated_count(), 0, "fresh heap is empty");
@@ -186,7 +146,7 @@ i32 main() {
     }
 
     // --- free-list slot reuse bumps generation --------------------------
-    printf("\n--- Slot reuse bumps generation ---\n");
+    STDOUT.write_str("\n--- Slot reuse bumps generation ---\n");
     {
         Heap heap = Heap.new();
 
@@ -213,6 +173,6 @@ i32 main() {
         heap.drop();
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
+    return done();
 }

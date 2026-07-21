@@ -8,52 +8,18 @@
 // are called directly inside assert/printf argument expressions instead.
 
 import std.fmt;
-import std.io;
+import std.test;
 import std.mem.vec;
 import std.rt.casts;
 import std.rt.heap;
 import std.rt.methods;
 import std.rt.runtime;
 import std.rt.types;
-
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_i32(i32 a, i32 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %d, got %d)\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== Runtime Aggregate Tests ===\n\n");
+    STDOUT.write_str("=== Runtime Aggregate Tests ===\n\n");
 
     // --- Test 1: Heap alloc and free are safe --------------------------------
-    printf("--- heap_alloc_and_free_are_safe ---\n");
+    STDOUT.write_str("--- heap_alloc_and_free_are_safe ---\n");
     {
         Runtime rt = Runtime.new();
         assert_true(rt.heap.allocated_count() == 0, "fresh heap has 0 allocations");
@@ -78,7 +44,7 @@ i32 main() {
     }
 
     // --- Test 2: GC collects unreachable objects -----------------------------
-    printf("\n--- gc_collects_unreachable_objects ---\n");
+    STDOUT.write_str("\n--- gc_collects_unreachable_objects ---\n");
     {
         Runtime rt = Runtime.new();
 
@@ -108,7 +74,7 @@ i32 main() {
     }
 
     // --- Test 3: GC traces through composite objects -------------------------
-    printf("\n--- gc_traces_through_composite_objects ---\n");
+    STDOUT.write_str("\n--- gc_traces_through_composite_objects ---\n");
     {
         Runtime rt = Runtime.new();
 
@@ -139,7 +105,7 @@ i32 main() {
     }
 
     // --- Test 4: string.len method works ------------------------------------
-    printf("\n--- builtin_string_len_method_works ---\n");
+    STDOUT.write_str("\n--- builtin_string_len_method_works ---\n");
     {
         Runtime rt = Runtime.new();
         RtValue s = rt.alloc_string("hello");
@@ -154,7 +120,7 @@ i32 main() {
     }
 
     // --- Test 5: vec.push and len work --------------------------------------
-    printf("\n--- builtin_vec_push_and_len_work ---\n");
+    STDOUT.write_str("\n--- builtin_vec_push_and_len_work ---\n");
     {
         Runtime rt = Runtime.new();
         TypeResult tr2 = rt.types.vec_of(TypeId.I64());
@@ -180,7 +146,7 @@ i32 main() {
     }
 
     // --- Test 6: Numeric casts work -----------------------------------------
-    printf("\n--- builtin_numeric_casts_work ---\n");
+    STDOUT.write_str("\n--- builtin_numeric_casts_work ---\n");
     {
         Runtime rt = Runtime.new();
 
@@ -214,7 +180,7 @@ i32 main() {
     }
 
     // --- Test 7: Missing cast reports error ---------------------------------
-    printf("\n--- missing_cast_reports_error ---\n");
+    STDOUT.write_str("\n--- missing_cast_reports_error ---\n");
     {
         Runtime rt = Runtime.new();
         RtValue s = rt.alloc_string("hello");
@@ -228,6 +194,5 @@ i32 main() {
         rt.drop();
     }
 
-    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }
