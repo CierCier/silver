@@ -1,0 +1,83 @@
+// std/rt/runtime.ag — the Silver runtime aggregate.
+//
+// Unifies the type registry, GC heap, method registry, and cast registry
+// into one `Runtime` struct (matching silver_runtime/src/runtime/mod.rs).
+// Because Silver globals must be const, state is held in an explicit struct
+// and initialised by calling `Runtime.new()` before use.
+//
+// Port of silver_runtime/src/runtime/mod.rs (Runtime struct + convenience
+// wrappers for alloc_string / call_method / cast_value).
+//
+// The struct is meant to be embedded by consumer code (e.g. std/io.ag, the
+// REPL or any host program) — it is NOT a global singleton.
+
+import std.rt.casts;
+import std.rt.heap;
+import std.rt.methods;
+import std.rt.type_info;
+import std.rt.types;
+
+// ---------------------------------------------------------------------------
+// Runtime — aggregate owning every subsystem
+// ---------------------------------------------------------------------------
+
+pub struct Runtime {
+    /// Type registry (canonical type table).
+    TypeRegistry types;
+    /// Generational GC heap.
+    Heap heap;
+    /// Dynamic method dispatch.
+    MethodRegistry methods;
+    /// Numeric cast dispatch.
+    CastRegistry casts;
+}
+
+impl Runtime {
+    // -- Construction -------------------------------------------------------
+
+    /// Fully constructed Runtime with builtin methods and casts installed.
+    pub Runtime new() {
+        Runtime rt;
+        rt.types = TypeRegistry.new();
+        rt.heap = Heap.new();
+        rt.methods = MethodRegistry.new();
+        rt.casts = CastRegistry.with_builtin_casts();
+        rt.methods.install_builtin_methods();
+        return move rt;
+    }
+
+    // -- Convenience wrappers -----------------------------------------------
+
+    /// Allocate a heap string and wrap it in an RtValue object reference.
+    /// (Mirrors Rust Runtime::alloc_string.)
+    pub RtValue alloc_string(Runtime* self, str text) {
+        String s = String.new();
+        s.push_str(text);
+        Handle handle = self.heap.alloc(Object.new_string(move s));
+        return RtValue.obj(RT_TYPE_STRING, handle);
+    }
+
+    /// Dynamic method dispatch by name.
+    /// Returns a MethodResult (ok flag + RtValue + RT_ERR + owned message).
+    /// (Mirrors Rust Runtime::call_method.)
+    pub MethodResult call_method(Runtime* self, RtValue receiver, str name, RtValue* args, i64 args_len) {
+        return self.methods.call_method(&self.types, &self.heap, receiver, name, args, args_len);
+    }
+
+    /// Numeric cast of a CastValue to a target type.
+    /// Returns a CastResult (ok flag + CastValue + CAST_ERR + owned message).
+    /// Uses the type registry for pretty error messages.
+    /// (Mirrors Rust Runtime::cast_value.)
+    pub CastResult cast_value(Runtime* self, CastValue value, TypeId to) {
+        return self.casts.cast_with_registry(&self.types, value, to);
+    }
+}
+
+impl Drop<Runtime> for Runtime {
+    void drop(Runtime* self) {
+        self.methods.drop();
+        self.casts.drop();
+        self.heap.drop();
+        self.types.drop();
+    }
+}

@@ -40,9 +40,9 @@ silver/
 │   │   ├── symbol_table.rs      # Phase-aware compiler symbol registration & scopes
 │   │   ├── diagnostics.rs       # Clang-style caret-underline error visualizer
 │   │   └── profiler.rs          # Simple phase timing instrumenter
-├── silver_runtime/              # Small support library for generated executables
 ├── std/                         # Silver standard library sources (bootstrap-copied)
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
+│   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch, Runtime aggregate
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
 ├── bootstrap/                   # Cache directory for local development tools and prebuilt std
 ├── tests/                       # Test suite including integration tests
@@ -251,5 +251,5 @@ When introducing a new syntax item or language capability, follow this checklist
 - **DO NOT** mix compilation phases. Do not perform type checking or code generation directly inside the parser, and do not resolve imports during codegen.
 - **DO NOT** assume struct fields are recursively dropped. You must write explicit drops inside custom destructors.
 - **DO NOT** guess platform layout dimensions. Always use target data classification interfaces provided by System V AMD64 ABI specifications in `codegen/abi.rs`.
-- **DO NOT** modify the runtime (`silver_runtime/`) in a way that breaks compatibility with bootstrapped compiler modules. Always run `bash ./update-bootstrap.sh` to ensure consistency.
+- **DO NOT** modify the runtime (`std/rt/') in a way that breaks compatibility with existing test suite expectations. Always run 'bash tests/run_tests.sh' after changes.
 - **DO NOT** squash bootstrap updates into feature commits. Bootstrap artifacts MUST be committed as a separate, dedicated commit — never mixed with source changes. This keeps the binary and module artifacts independently reviewable and revertable.

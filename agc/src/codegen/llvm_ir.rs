@@ -7388,6 +7388,14 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ));
         };
         Self::apply_function_linkage(function, visibility);
+        // Functions named `_start` are entry points for no-libc binaries; they
+        // must not have a compiler-generated prologue/epilogue so the raw asm
+        // can manipulate the kernel-provided stack directly.
+        if llvm_name == "_start" {
+            let naked_kind = Attribute::get_named_enum_kind_id("naked");
+            let naked_attr = self.context.create_enum_attribute(naked_kind, 0);
+            function.add_attribute(AttributeLoc::Function, naked_attr);
+        }
 
         self.emit_function_body(
             function,

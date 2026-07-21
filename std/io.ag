@@ -1,30 +1,41 @@
-// Zero-cost stdio.h wrapper for Silver.
+// std/io.ag — Silver I/O: pure-Silver print path, typed-syscall File API,
+// and a small set of kept libc stdio externs.
 //
-// The raw C entry points remain available where variadic formatting is useful,
-// The plain print path (println/eprintln) now writes through raw sys_write via
-// std.fmt (pure Silver, no printf/puts); the File API and variadic printf
-// externs below are unchanged for now.
+// The plain print path (println/eprintln) writes through raw sys_write via
+// std.fmt (pure Silver, no printf/puts).  The File API runs directly on the
+// typed syscall layer (std.sys.result: try_open/try_read/try_write/
+// try_close/try_lseek) — no FILE*, no libc stdio buffering.
+//
+// KEPT LIBC EXTERNS (live callers — removing them breaks the build):
+//   printf   — every test's assert/print harness (tests/*.ag), plus
+//              std/map.ag, std/slice.ag, std/rt/types.ag failure paths.
+//   fprintf  — std/optional.ag unwrap failure messages (fprintf(stderr,..)).
+//   puts     — tests/io_test.ag.
+//   putchar  — tests/io_test.ag.
+//   remove   — file_delete() below (callers: tests/file_test.ag).
+//   rename   — file_rename() below (callers: tests/file_test.ag).
+// stdin/stdout/stderr FILE* variables are kept solely as fprintf's stream
+// operands.  All variadic/scan/temp/positioning stdio externs were removed
+// with the FILE struct.
 
 import std.fmt;
+import std.sys.result;
 
-struct FILE {
-    i32 _opaque;
-}
 const i32 EOF = -1;
 
+// Seek origins for File.seek_from (values match lseek(2) whence).
 enum IO_SEEK {
     SET = 0;
     CURSOR = 1;
     END = 2;
 }
 
-enum IO_BUFFERING {
-    FULL = 0;
-    LINE = 1;
-    NONE = 2;
+// Opaque FILE struct: only ever used behind a pointer (fprintf's stream).
+struct FILE {
+    i32 _opaque;
 }
 
-// Raw stdio symbols.
+// Raw stdio symbols that still have live callers (see header comment).
 
 extern "C" {
 
@@ -34,61 +45,83 @@ FILE* stderr;
 
 i32 remove(const char* path);
 i32 rename(const char* from, const char* to);
-FILE* tmpfile();
-char* tmpnam(char* buffer);
-
-i32 fclose(FILE* stream);
-i32 fflush(FILE* stream);
-FILE* fopen(const char* path, const char* mode);
-FILE* freopen(const char* path, const char* mode, FILE* stream);
-void setbuf(FILE* stream, char* buffer);
-i32 setvbuf(FILE* stream, char* buffer, i32 mode, i64 size);
 
 i32 fprintf(FILE* stream, const char* fmt, ...);
-i32 fscanf(FILE* stream, const char* fmt, ...);
 i32 printf(const char* fmt, ...);
-i32 scanf(const char* fmt, ...);
-i32 snprintf(char* buffer, i64 len, const char* fmt, ...);
-i32 sprintf(char* buffer, const char* fmt, ...);
-i32 sscanf(const char* buffer, const char* fmt, ...);
-
-i32 fgetc(FILE* stream);
-char* fgets(char* buffer, i32 len, FILE* stream);
-i32 fputc(i32 ch, FILE* stream);
-i32 fputs(const char* text, FILE* stream);
-i32 getchar();
 i32 putchar(i32 ch);
 i32 puts(const char* text);
-i32 ungetc(i32 ch, FILE* stream);
-
-i64 fread(void* buffer, i64 elem_size, i64 elem_count, FILE* stream);
-i64 fwrite(const void* buffer, i64 elem_size, i64 elem_count, FILE* stream);
-
-i32 fseek(FILE* stream, i64 offset, i32 origin);
-i64 ftell(FILE* stream);
-void rewind(FILE* stream);
-void clearerr(FILE* stream);
-i32 feof(FILE* stream);
-i32 ferror(FILE* stream);
-void perror(const char* message);
 
 } // Extern "C" End
 
 
-// FILE wrapper.
+// File — a typed-syscall file descriptor wrapper.
+//
+// Holds the raw fd and an open flag; unbuffered (every operation is one
+// syscall).  `at_eof`/`had_error` remember the last read result so
+// eof()/error() behave like their stdio predecessors.
 struct File {
-    FILE* raw;
+    i32 fd;
     bool is_open;
+    bool at_eof;
+    bool had_error;
 }
 
 impl File {
-    File from_raw(FILE* raw) {
-        File file = { .raw = raw, .is_open = raw != 0 };
+    File from_fd(i32 fd) {
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false };
         return file;
     }
 
+    File closed() {
+        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false };
+        return file;
+    }
+
+    /// fopen-style mode string -> open(2) flags.  Unknown/empty modes
+    /// conservatively map to O_RDONLY.
+    i64 mode_flags(str mode) {
+        if (mode == (str)0) {
+            return O_RDONLY;
+        }
+        u8* m = (u8*)mode;
+        u8 first = m[0];
+        bool plus = cstr_contains(m, 43);   // '+'
+        bool has_x = cstr_contains(m, 120); // 'x'
+        if (first == (u8)114) {             // 'r'
+            if (plus) {
+                return O_RDWR;
+            }
+            return O_RDONLY;
+        }
+        if (first == (u8)119) {             // 'w'
+            i64 flags = O_WRONLY | O_CREAT | O_TRUNC;
+            if (plus) {
+                flags = O_RDWR | O_CREAT | O_TRUNC;
+            }
+            if (has_x) {
+                flags = flags | O_EXCL;
+            }
+            return flags;
+        }
+        if (first == (u8)97) {              // 'a'
+            i64 flags = O_WRONLY | O_CREAT | O_APPEND;
+            if (plus) {
+                flags = O_RDWR | O_CREAT | O_APPEND;
+            }
+            if (has_x) {
+                flags = flags | O_EXCL;
+            }
+            return flags;
+        }
+        return O_RDONLY;
+    }
+
     File open(str path, str mode) {
-        return File.from_raw(fopen(path, mode));
+        SysResult r = try_open(path, File.mode_flags(mode), 438); // 0o666
+        if (r.is_err()) {
+            return File.closed();
+        }
+        return File.from_fd((i32)r.value);
     }
 
     File open_read(str path) {
@@ -103,15 +136,8 @@ impl File {
         return File.open(path, "a");
     }
 
-    File reopen(File self, str path, str mode) {
-        if (!self.valid()) {
-            return File.from_raw((FILE*)0);
-        }
-        return File.from_raw(freopen(path, mode, self.raw));
-    }
-
     bool valid(File self) {
-        return self.raw != (FILE*)0;
+        return self.is_open && self.fd >= 0;
     }
 
     bool invalid(File self) {
@@ -123,185 +149,248 @@ impl File {
             self.is_open = false;
             return 0;
         }
-        i32 result = fclose(self.raw);
-        if (result == 0) {
-            self.raw = (FILE*)0;
+        SysResult r = try_close(self.fd);
+        if (r.is_ok()) {
+            self.fd = -1;
             self.is_open = false;
+            return 0;
         }
-        return result;
+        return (i32)r.errno;
     }
 
+    /// No userspace buffer to flush: a valid fd is already flushed.
     i32 flush(File self) {
         if (self.invalid()) {
             return EOF;
         }
-        return fflush(self.raw);
+        return 0;
     }
 
-    i32 read_char(File self) {
-        if (self.invalid()) {
+    i32 read_char(File* self) {
+        if ((*self).invalid()) {
             return EOF;
         }
-        return fgetc(self.raw);
+        u8 ch = (u8)0;
+        SysResult r = try_read(self.fd, &ch, 1);
+        if (r.is_err()) {
+            self.had_error = true;
+            return EOF;
+        }
+        if (r.value == 0) {
+            self.at_eof = true;
+            return EOF;
+        }
+        return (i32)ch;
     }
 
-    i32 write_char(File self, i32 ch) {
-        if (self.invalid()) {
+    i32 write_char(File* self, i32 ch) {
+        if ((*self).invalid()) {
             return EOF;
         }
-        return fputc(ch, self.raw);
+        u8 b = (u8)ch;
+        SysResult r = try_write(self.fd, &b, 1);
+        if (r.is_err() || r.value != 1) {
+            self.had_error = true;
+            return EOF;
+        }
+        return ch;
     }
 
-    i32 write_str(File self, str text) {
-        if (self.invalid()) {
+    i32 write_str(File* self, str text) {
+        if ((*self).invalid()) {
             return EOF;
         }
-        return fputs(text, self.raw);
+        if (text == (str)0) {
+            self.had_error = true;
+            return EOF;
+        }
+        u8* p = (u8*)text;
+        i64 len = cstr_len(p);
+        i64 written = 0;
+        while (written < len) {
+            SysResult r = try_write(self.fd, (u8*)((i64)p + written), len - written);
+            if (r.is_err()) {
+                self.had_error = true;
+                return EOF;
+            }
+            if (r.value == 0) {
+                self.had_error = true;
+                return EOF;
+            }
+            written = written + r.value;
+        }
+        return 0;
     }
 
-    i32 write_line(File self, str text) {
-        if (self.invalid()) {
+    i32 write_line(File* self, str text) {
+        if ((*self).invalid()) {
             return EOF;
         }
-        i32 result = fputs(text, self.raw);
+        i32 result = self.write_str(text);
         if (result < 0) {
             return result;
         }
-        return fputc(10, self.raw);
+        return self.write_char(10);
     }
 
-    i64 read(File self, void* buffer, i64 elem_size, i64 elem_count) {
-        if (self.invalid()) {
+    /// fread-shaped API: reads up to elem_size*elem_count bytes, returns
+    /// whole elements read (0 at EOF or on error, like a short fread).
+    i64 read(File* self, void* buffer, i64 elem_size, i64 elem_count) {
+        if ((*self).invalid()) {
             return 0;
         }
-        return fread(buffer, elem_size, elem_count, self.raw);
-    }
-
-    i64 write(File self, const void* buffer, i64 elem_size, i64 elem_count) {
-        if (self.invalid()) {
+        if (elem_size <= 0 || elem_count <= 0) {
             return 0;
         }
-        return fwrite(buffer, elem_size, elem_count, self.raw);
-    }
-
-    i32 push_back(File self, i32 ch) {
-        if (self.invalid()) {
-            return EOF;
+        i64 total = elem_size * elem_count;
+        i64 done = 0;
+        while (done < total) {
+            SysResult r = try_read(self.fd, (u8*)((i64)buffer + done), total - done);
+            if (r.is_err()) {
+                self.had_error = true;
+                break;
+            }
+            if (r.value == 0) {
+                self.at_eof = true;
+                break;
+            }
+            done = done + r.value;
         }
-        return ungetc(ch, self.raw);
+        return done / elem_size;
     }
 
-    bool seek(File self, i64 offset) {
+    /// fwrite-shaped API: writes elem_size*elem_count bytes, returns whole
+    /// elements written (short count on error, like fwrite).
+    i64 write(File* self, const void* buffer, i64 elem_size, i64 elem_count) {
+        if ((*self).invalid()) {
+            return 0;
+        }
+        if (elem_size <= 0 || elem_count <= 0) {
+            return 0;
+        }
+        i64 total = elem_size * elem_count;
+        i64 done = 0;
+        while (done < total) {
+            SysResult r = try_write(self.fd, (u8*)((i64)buffer + done), total - done);
+            if (r.is_err()) {
+                self.had_error = true;
+                break;
+            }
+            if (r.value == 0) {
+                self.had_error = true;
+                break;
+            }
+            done = done + r.value;
+        }
+        return done / elem_size;
+    }
+
+    bool seek(File* self, i64 offset) {
         return self.seek_from(offset, IO_SEEK.SET);
     }
 
-    bool seek_to_start(File self) {
+    bool seek_to_start(File* self) {
         return self.seek_from(0, IO_SEEK.SET);
     }
 
-    bool seek_to_end(File self) {
+    bool seek_to_end(File* self) {
         return self.seek_from(0, IO_SEEK.END);
     }
 
-    bool seek_from(File self, i64 offset, IO_SEEK origin) {
-        if (self.invalid()) {
+    bool seek_from(File* self, i64 offset, IO_SEEK origin) {
+        if ((*self).invalid()) {
             return false;
         }
-        return fseek(self.raw, offset, (i32) origin) == 0;
+        SysResult r = try_lseek(self.fd, offset, (i64)((i32)origin));
+        if (r.is_err()) {
+            self.had_error = true;
+            return false;
+        }
+        return true;
     }
 
-    i64 tell(File self) {
-        if (self.invalid()) {
+    i64 tell(File* self) {
+        if ((*self).invalid()) {
             return -1;
         }
-        return ftell(self.raw);
-    }
-
-    void rewind(File self) {
-        if (self.valid()) {
-            rewind(self.raw);
-        }
-    }
-
-    bool eof(File self) {
-        if (self.invalid()) {
-            return true;
-        }
-        return feof(self.raw) != 0;
-    }
-
-    bool error(File self) {
-        if (self.invalid()) {
-            return true;
-        }
-        return ferror(self.raw) != 0;
-    }
-
-    void clear_error(File self) {
-        if (self.valid()) {
-            clearerr(self.raw);
-        }
-    }
-
-    i64 size(File self) {
-        if (self.invalid()) {
+        SysResult r = try_lseek(self.fd, 0, SEEK_CUR);
+        if (r.is_err()) {
+            self.had_error = true;
             return -1;
         }
+        return r.value;
+    }
 
-        i64 pos = ftell(self.raw);
+    void rewind(File* self) {
+        if ((*self).valid()) {
+            self.seek_from(0, IO_SEEK.SET);
+            self.at_eof = false;
+            self.had_error = false;
+        }
+    }
+
+    bool eof(File* self) {
+        if ((*self).invalid()) {
+            return true;
+        }
+        return self.at_eof;
+    }
+
+    bool error(File* self) {
+        if ((*self).invalid()) {
+            return true;
+        }
+        return self.had_error;
+    }
+
+    void clear_error(File* self) {
+        if ((*self).valid()) {
+            self.at_eof = false;
+            self.had_error = false;
+        }
+    }
+
+    i64 size(File* self) {
+        if ((*self).invalid()) {
+            return -1;
+        }
+        i64 pos = self.tell();
         if (pos < 0) {
             return -1;
         }
-        if (!self.seek_to_end()) {
+        SysResult end = try_lseek(self.fd, 0, SEEK_END);
+        if (end.is_err()) {
+            self.had_error = true;
             return -1;
         }
-
-        i64 end = ftell(self.raw);
         self.seek_from(pos, IO_SEEK.SET);
-        return end;
-    }
-
-    i32 set_buffer(File self, char* buffer, IO_BUFFERING mode, i64 size) {
-        if (self.invalid()) {
-            return EOF;
-        }
-        return setvbuf(self.raw, buffer, (i32) mode, size);
-    }
-
-    i32 set_full_buffer(File self, char* buffer, i64 size) {
-        return self.set_buffer(buffer, IO_BUFFERING.FULL, size);
-    }
-
-    i32 set_line_buffer(File self, char* buffer, i64 size) {
-        return self.set_buffer(buffer, IO_BUFFERING.LINE, size);
-    }
-
-    i32 set_no_buffer(File self) {
-        return self.set_buffer((char*)0, IO_BUFFERING.NONE, (i64)0);
-    }
-
-    void set_unbuffered(File self) {
-        if (self.valid()) {
-            setbuf(self.raw, (char*)0);
-        }
+        return end.value;
     }
 }
 
-// Convenience constructors.
+// True when `needle` (a byte value) occurs in the null-terminated string `p`.
+bool cstr_contains(u8* p, u8 needle) {
+    i64 i = 0;
+    while (p[i] != (u8)0) {
+        if (p[i] == needle) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Convenience constructors for the standard descriptors.
 File stdin_file() {
-    return File.from_raw(stdin);
+    return File.from_fd(STDIN_FD);
 }
 
 File stdout_file() {
-    return File.from_raw(stdout);
+    return File.from_fd(STDOUT_FD);
 }
 
 File stderr_file() {
-    return File.from_raw(stderr);
-}
-
-File temp_file() {
-    return File.from_raw(tmpfile());
+    return File.from_fd(STDERR_FD);
 }
 
 // High-level helpers. These write straight through the write(2) syscall

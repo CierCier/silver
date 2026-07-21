@@ -1,0 +1,230 @@
+// tests/rt_methods_test.ag — tests for std/rt/methods.ag and std/rt/value.ag
+//
+// Port of silver_runtime/src/runtime/methods.rs tests (builtin method
+// dispatch, arity checks, method resolution order) and silver_runtime's
+// Value constructors/accessors/display.
+import std.fmt;
+import std.io;
+import std.mem.vec;
+import std.rt.heap;
+import std.rt.methods;
+import std.rt.type_info;
+import std.rt.types;
+import std.rt.value;
+
+i32 tests_passed = 0;
+i32 tests_failed = 0;
+
+void assert_true(bool cond, str msg) {
+    if (cond) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s\n", msg);
+    }
+}
+
+void assert_eq_i64(i64 a, i64 b, str msg) {
+    if (a == b) {
+        tests_passed = tests_passed + 1;
+        printf("  [PASS] %s\n", msg);
+    } else {
+        tests_failed = tests_failed + 1;
+        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
+    }
+}
+
+i32 main() {
+    printf("=== Value & MethodRegistry Tests ===\n\n");
+
+    // --- Value constructors & accessors -----------------------------------
+    printf("--- Value constructors & accessors ---\n");
+    {
+        Value v_i64 = Value.i64_val(42);
+        TypeId tid_i64 = v_i64.type_id();
+        TypeId exp_i64 = TypeId.I64();
+        assert_true(tid_i64.raw == exp_i64.raw, "Value.i64_val has I64 TypeId");
+        bool has_val = false;
+        i64 val_i64 = v_i64.as_i64(&has_val);
+        assert_true(has_val, "as_i64 returned has_val true");
+        assert_eq_i64(val_i64, 42, "as_i64 value is 42");
+        v_i64.drop();
+
+        Value v_bool = Value.from_bool(true);
+        TypeId tid_bool = v_bool.type_id();
+        TypeId exp_bool = TypeId.BOOL();
+        assert_true(tid_bool.raw == exp_bool.raw, "Value.from_bool has BOOL TypeId");
+        bool b_val = v_bool.as_bool(&has_val);
+        assert_true(has_val && b_val, "as_bool is true");
+        v_bool.drop();
+
+        Value v_f64 = Value.f64_val(3.14);
+        TypeId tid_f64 = v_f64.type_id();
+        TypeId exp_f64 = TypeId.F64();
+        assert_true(tid_f64.raw == exp_f64.raw, "Value.f64_val has F64 TypeId");
+        f64 f_val = v_f64.as_f64(&has_val);
+        assert_true(has_val && f_val > 3.13 && f_val < 3.15, "as_f64 is 3.14");
+        v_f64.drop();
+
+        Value v_str = Value.str_value("hello");
+        TypeId tid_str = v_str.type_id();
+        TypeId exp_str = TypeId.STRING();
+        assert_true(tid_str.raw == exp_str.raw, "Value.str_value has STRING TypeId");
+        v_str.drop();
+    }
+
+    // --- Value display ---------------------------------------------------
+    printf("--- Value display ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+
+        Value v_int = Value.i64_val(-123);
+        String s_int = value_display(&v_int, &reg);
+        assert_true(s_int.equals("-123"), "i64 display matches -123");
+        s_int.drop();
+        v_int.drop();
+
+        Value v_bool = Value.from_bool(false);
+        String s_bool = value_display(&v_bool, &reg);
+        assert_true(s_bool.equals("false"), "bool display matches false");
+        s_bool.drop();
+        v_bool.drop();
+
+        Value v_str = Value.str_value("world");
+        String s_str = value_display(&v_str, &reg);
+        assert_true(s_str.equals("\"world\""), "string display is quoted \"world\"");
+        s_str.drop();
+        v_str.drop();
+
+        reg.drop();
+    }
+
+    // --- MethodRegistry: type_name ---------------------------------------
+    printf("--- MethodRegistry: type_name ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Heap heap = Heap.new();
+        MethodRegistry methods = MethodRegistry.new();
+        methods.install_builtin_methods();
+
+        RtValue recv = RtValue.from_bool(true);
+        MethodResult res = methods.call_method(&reg, &heap, recv, "type_name", (RtValue*)0, 0);
+        assert_true(res.is_ok(), "type_name() call ok");
+        u32 res_ty = res.value.type_id();
+        assert_eq_i64((i64)res_ty, (i64)RT_TYPE_STRING, "type_name returns string object");
+        ObjectRef obj_ref = heap.get(res.value.handle);
+        assert_true(obj_ref.ok, "heap object is valid");
+        Object* obj = obj_ref.object;
+        assert_true(obj.text.equals("bool"), "type_name returns \"bool\"");
+        res.drop();
+
+        methods.drop();
+        heap.drop();
+        reg.drop();
+    }
+
+    // --- MethodRegistry: string.len ---------------------------------------
+    printf("--- MethodRegistry: string.len ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Heap heap = Heap.new();
+        MethodRegistry methods = MethodRegistry.new();
+        methods.install_builtin_methods();
+
+        String text = String.new();
+        text.push_str("silver language");
+        Handle h = heap.alloc(Object.new_string(move text));
+        RtValue recv = RtValue.obj(RT_TYPE_STRING, h);
+
+        MethodResult res = methods.call_method(&reg, &heap, recv, "len", (RtValue*)0, 0);
+        assert_true(res.is_ok(), "string.len() call ok");
+        assert_eq_i64((i64)res.value.int_val, 15, "string.len() is 15");
+        res.drop();
+
+        methods.drop();
+        heap.drop();
+        reg.drop();
+    }
+
+    // --- MethodRegistry: vec.len & vec.push ------------------------------
+    printf("--- MethodRegistry: vec.len & vec.push ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Heap heap = Heap.new();
+        MethodRegistry methods = MethodRegistry.new();
+        methods.install_builtin_methods();
+
+        TypeId elem_tid = TypeId.I64();
+        u32 elem_type = elem_tid.raw;
+        TypeId elem_arg = TypeId.from_raw(elem_type);
+        TypeResult vec_res = reg.vec_of(elem_arg);
+        u32 vec_type = vec_res.id.raw;
+        vec_res.drop();
+
+        Handle h = heap.alloc(Object.new_vec(vec_type, Vec<RtValue>.new()));
+        RtValue recv = RtValue.obj(vec_type, h);
+
+        // len initially 0
+        MethodResult res1 = methods.call_method(&reg, &heap, recv, "len", (RtValue*)0, 0);
+        assert_true(res1.is_ok(), "empty vec.len() ok");
+        assert_eq_i64((i64)res1.value.int_val, 0, "vec.len() is 0");
+        res1.drop();
+
+        // push(100)
+        TypeId push_tid = TypeId.I64();
+        RtValue item1 = RtValue.from_int(push_tid.raw, (i128)100);
+        MethodResult res2 = methods.call_method(&reg, &heap, recv, "push", &item1, 1);
+        assert_true(res2.is_ok(), "vec.push(100) ok");
+        res2.drop();
+
+        // len now 1
+        MethodResult res3 = methods.call_method(&reg, &heap, recv, "len", (RtValue*)0, 0);
+        assert_true(res3.is_ok(), "vec.len() ok after push");
+        assert_eq_i64((i64)res3.value.int_val, 1, "vec.len() is 1");
+        res3.drop();
+
+        // Push wrong type (BOOL into vec<I64>) fails
+        RtValue item_bad = RtValue.from_bool(true);
+        MethodResult res_bad = methods.call_method(&reg, &heap, recv, "push", &item_bad, 1);
+        assert_true(res_bad.is_err(), "push wrong type returns error");
+        assert_eq_i64((i64)res_bad.err, (i64)RT_ERR.TYPE_MISMATCH, "error is TYPE_MISMATCH");
+        res_bad.drop();
+
+        methods.drop();
+        heap.drop();
+        reg.drop();
+    }
+
+    // --- MethodRegistry: arity & method not found errors -----------------
+    printf("--- MethodRegistry: errors ---\n");
+    {
+        TypeRegistry reg = TypeRegistry.new();
+        Heap heap = Heap.new();
+        MethodRegistry methods = MethodRegistry.new();
+        methods.install_builtin_methods();
+
+        RtValue recv = RtValue.from_bool(true);
+
+        // Unknown method
+        MethodResult res_notfound = methods.call_method(&reg, &heap, recv, "nonexistent", (RtValue*)0, 0);
+        assert_true(res_notfound.is_err(), "nonexistent method fails");
+        assert_eq_i64((i64)res_notfound.err, (i64)RT_ERR.METHOD_NOT_FOUND, "error is METHOD_NOT_FOUND");
+        res_notfound.drop();
+
+        // Wrong arity: type_name takes 0 args, pass 1
+        TypeId dummy_tid = TypeId.I32();
+        RtValue dummy = RtValue.from_int(dummy_tid.raw, (i128)1);
+        MethodResult res_arity = methods.call_method(&reg, &heap, recv, "type_name", &dummy, 1);
+        assert_true(res_arity.is_err(), "wrong arity fails");
+        assert_eq_i64((i64)res_arity.err, (i64)RT_ERR.ARITY_MISMATCH, "error is ARITY_MISMATCH");
+        res_arity.drop();
+
+        methods.drop();
+        heap.drop();
+        reg.drop();
+    }
+
+    printf("\nTests passed: %d, failed: %d\n", tests_passed, tests_failed);
+    return tests_failed;
+}

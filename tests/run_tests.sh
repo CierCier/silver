@@ -33,9 +33,18 @@ expected_exit() {
     esac
 }
 
+# Some tests require specific compiler flags. Return extra flags for a test
+# name; defaults to empty.
+test_specific_flags() {
+    case "$1" in
+        static_link_test) echo "--static-runtime" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Kill runaway test binaries after this many seconds.
 RUN_TIMEOUT_SECS=120
-# ---------------------------------------------------------------------------
+
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
@@ -106,7 +115,9 @@ for t in "${tests[@]}"; do
 
     # Compile from the repo root: agc resolves `import std.*` relative to
     # the current working directory (the package root).
-    if ! "$AGC" "$t" -o "$bin" >"$compile_log" 2>&1; then
+    extra_flags="$(test_specific_flags "$name")"
+    # shellcheck disable=SC2086  # word-splitting intended for extra_flags
+    if ! "$AGC" "$t" -o "$bin" $extra_flags >"$compile_log" 2>&1; then
         printf 'FAIL %s (compile error)\n' "$name"
         sed 's/^/    /' "$compile_log"
         failed=$((failed + 1))
@@ -120,6 +131,18 @@ for t in "${tests[@]}"; do
     mkdir -p "$run_dir"
     (cd "$run_dir" && timeout "$RUN_TIMEOUT_SECS" "$bin") >"$run_log" 2>&1
     exit_code=$?
+    # For static_link_test, verify the binary is truly static (no dynamic
+    # linker dependency).
+    if [ "$name" = "static_link_test" ]; then
+        if ldd "$bin" 2>&1 | head -1 | grep -q "not a dynamic executable"; then
+            : # good
+        else
+            printf 'FAIL %s (binary is not static)\n' "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            continue
+        fi
+    fi
 
     want="$(expected_exit "$name")"
     if [ "$exit_code" -eq "$want" ]; then

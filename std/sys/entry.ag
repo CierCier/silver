@@ -1,0 +1,25 @@
+// std/sys/entry.ag — Silver _start entry point for static (no-libc) binaries.
+//
+// Importing this module inlines a `_start` symbol that:
+//   1. Zeroes %rbp (ABI: marks outermost stack frame).
+//   2. Loads argc from (%rsp) into %rdi (first arg to main).
+//   3. Computes argv = rsp+8 into %rsi (second arg, for future use).
+//   4. Re-aligns the stack to 16 bytes (and $-16, %rsp).
+//   5. Calls main().
+//   6. Zero-extends the i32 return in %eax into %rdi (writing %edi zero-extends
+//      on x86-64) and invokes exit_group via syscall 231.
+//
+// Usage:
+//   import std.sys.entry;       // in any Silver program compiled with --static-runtime
+//   i32 main() { return 0; }
+//
+// The module's _start is inlined into the consumer's object file by the import
+// hook, so no separate linking step is needed.
+
+extern "C" {
+    i32 main();
+}
+
+void _start() {
+    asm("xor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nand $$-16, %rsp\ncall main\nmov %eax, %edi\nmov $$231, %eax\nsyscall");
+}
