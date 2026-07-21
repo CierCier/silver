@@ -45,18 +45,18 @@ impl Rc<T> {
 
     /// Clone the handle — increments the reference count.
     pub Rc<T> clone(Rc<T>* self) {
-        if ((*self).count != (i32*)0) {
-            *((*self).count) = *((*self).count) + 1;
+        if (self.count != (i32*)0) {
+            *(self.count) = *(self.count) + 1;
         }
         Rc<T> c;
-        c.ptr = (*self).ptr;
-        c.count = (*self).count;
+        c.ptr = self.ptr;
+        c.count = self.count;
         return move c;
     }
 
     /// Get a raw pointer to the value.
     pub T* get(Rc<T>* self) {
-        return (*self).ptr;
+        return self.ptr;
     }
 }
 
@@ -64,16 +64,16 @@ impl<T> Drop<Rc<T>> for Rc<T> {
     /// Drop one handle — decrements the reference count.
     /// Frees the value and count when it reaches zero.
     pub void drop(Rc<T>* self) {
-        if ((*self).count != (i32*)0) {
-            *((*self).count) = *((*self).count) - 1;
-            if (*((*self).count) == 0) {
-                if ((*self).ptr != (T*)0) {
-                    free((*self).ptr);
+        if (self.count != (i32*)0) {
+            *(self.count) = *(self.count) - 1;
+            if (*(self.count) == 0) {
+                if (self.ptr != (T*)0) {
+                    free(self.ptr);
                 }
-                free((*self).count);
+                free(self.count);
             }
         }
-        (*self).ptr = (T*)0;
-        (*self).count = (i32*)0;
+        self.ptr = (T*)0;
+        self.count = (i32*)0;
     }
 }

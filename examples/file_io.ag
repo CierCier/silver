@@ -5,7 +5,7 @@ i32 main() {
 
     File w = File.open_write(path);
     if (w.invalid()) {
-        printf("ERROR: could not open for writing\n");
+        @println("ERROR: could not open for writing");
         return 1;
     }
     w.write_line("Hello from Silver!");
@@ -15,11 +15,11 @@ i32 main() {
 
     File r = File.open_read(path);
     if (r.invalid()) {
-        printf("ERROR: could not open for reading\n");
+        @println("ERROR: could not open for reading");
         return 1;
     }
 
-    printf("File size: %ld bytes\n", r.size());
+    @println("File size: {} bytes", r.size());
 
     i32 count = 0;
     i32 ch = r.read_char();
@@ -27,11 +27,11 @@ i32 main() {
         count = count + 1;
         ch = r.read_char();
     }
-    printf("Total characters: %d\n", count);
+    @println("Total characters: {}", count);
     r.close();
 
     file_delete(path);
-    printf("Cleanup complete\n");
+    @println("Cleanup complete");
 
     return 0;
 }

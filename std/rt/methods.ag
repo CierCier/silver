@@ -296,16 +296,16 @@ impl MethodRegistry {
             String m = rt_type_str_owned("heap error: invalid handle");
             return MethodResult.error((i32)RT_ERR.HEAP, move m);
         }
-        if ((*obj.object).kind != OBJ_KIND_STRING) {
+        if (obj.object.kind != OBJ_KIND_STRING) {
             return MethodRegistry.invalid_receiver("string object");
         }
         // Rust counts chars(); the runtime only stores valid UTF-8, so count
         // code points by skipping UTF-8 continuation bytes.
         i64 count = 0;
         i64 i = 0;
-        i64 n = (*obj.object).text.len();
+        i64 n = obj.object.text.len();
         while (i < n) {
-            u8 b = (*obj.object).text[i];
+            u8 b = obj.object.text[i];
             if ((i32)(b & (u8)192) != 128) {
                 count = count + 1;
             }
@@ -324,7 +324,7 @@ impl MethodRegistry {
             rt_type_append_u32(&m, type_raw);
             return MethodResult.error((i32)RT_ERR.TYPE_MISMATCH, move m);
         }
-        if ((*info).kind != (i32)TYPE_KIND.VEC) {
+        if (info.kind != (i32)TYPE_KIND.VEC) {
             return MethodRegistry.method_not_found(types, type_raw, "len");
         }
         if (receiver.kind != RT_KIND_OBJ) {
@@ -335,10 +335,10 @@ impl MethodRegistry {
             String m = rt_type_str_owned("heap error: invalid handle");
             return MethodResult.error((i32)RT_ERR.HEAP, move m);
         }
-        if ((*obj.object).kind != OBJ_KIND_VEC) {
+        if (obj.object.kind != OBJ_KIND_VEC) {
             return MethodRegistry.invalid_receiver("vec object");
         }
-        i64 n = (*obj.object).values.len();
+        i64 n = obj.object.values.len();
         return MethodResult.ok_value(RtValue.from_int((u32)5, (i128)n));
     }
 
@@ -352,10 +352,10 @@ impl MethodRegistry {
             rt_type_append_u32(&m, vec_raw);
             return MethodResult.error((i32)RT_ERR.TYPE_MISMATCH, move m);
         }
-        if ((*info).kind != (i32)TYPE_KIND.VEC) {
+        if (info.kind != (i32)TYPE_KIND.VEC) {
             return MethodRegistry.invalid_receiver("vec");
         }
-        TypeId elem_ty = (*info).elem;
+        TypeId elem_ty = info.elem;
 
         if (receiver.kind != RT_KIND_OBJ) {
             return MethodRegistry.invalid_receiver("vec object");
@@ -387,10 +387,10 @@ impl MethodRegistry {
             String m = rt_type_str_owned("heap error: invalid handle");
             return MethodResult.error((i32)RT_ERR.HEAP, move m);
         }
-        if ((*obj.object).kind != OBJ_KIND_VEC) {
+        if (obj.object.kind != OBJ_KIND_VEC) {
             return MethodRegistry.invalid_receiver("vec object");
         }
-        (*obj.object).values.push(item);
+        obj.object.values.push(item);
         return MethodResult.ok_value(RtValue.unit());
     }
 }

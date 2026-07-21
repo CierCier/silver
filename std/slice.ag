@@ -11,31 +11,31 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
     type Item = T;
 
     T __index_get(Slice<T>* self, i64 index) {
-        if (index < 0 || index >= (*self).len) {
+        if (index < 0 || index >= self.len) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
             STDOUT.write_str(" (len: ");
-            STDOUT.write_i64((*self).len);
+            STDOUT.write_i64(self.len);
             STDOUT.write_str(")\n");
             abort();
         }
-        return (*self).data[index];
+        return self.data[index];
     }
 
     void __index_set(Slice<T>* self, i64 index, T value) {
-        if (index < 0 || index >= (*self).len) {
+        if (index < 0 || index >= self.len) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
             STDOUT.write_str(" (len: ");
-            STDOUT.write_i64((*self).len);
+            STDOUT.write_i64(self.len);
             STDOUT.write_str(")\n");
             abort();
         }
-        (*self).data[index] = move value;
+        self.data[index] = move value;
     }
 }
 
 impl<T> Slice<T> {
-    pub i64 len(Slice<T>* self) { return (*self).len; }
-    pub T* data(Slice<T>* self) { return (*self).data; }
+    pub i64 len(Slice<T>* self) { return self.len; }
+    pub T* data(Slice<T>* self) { return self.data; }
 }

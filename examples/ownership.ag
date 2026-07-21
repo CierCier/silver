@@ -20,33 +20,33 @@ struct Buffer {
 
 impl Buffer {
     void init(Buffer* self, i32 len) {
-        (*self).data = alloc<i32>(len);
-        (*self).length = len;
+        self.data = alloc<i32>(len);
+        self.length = len;
         live_count = live_count + 1;
-        printf("  [create] Buffer(len=%d)  live=%d\n", len, live_count);
+        @println("  [create] Buffer(len={})  live={}", len, live_count);
     }
 
     void drop(Buffer* self) {
-        if ((*self).data != (i32*)0) {
-            free((*self).data);
-            (*self).data = (i32*)0;
+        if (self.data != (i32*)0) {
+            free(self.data);
+            self.data = (i32*)0;
         }
         live_count = live_count - 1;
-        printf("  [destroy] Buffer(len=%d)  live=%d\n",
-               (*self).length, live_count);
+        @println("  [destroy] Buffer(len={})  live={}",
+               self.length, live_count);
     }
 }
 
 i32 main() {
-    printf("=== Ownership: scope-based teardown ===\n");
+    @println("=== Ownership: scope-based teardown ===");
     {
         Buffer b;
         b.init(16);
-        printf("  using buffer...\n");
+        @println("  using buffer...");
     }
-    printf("  (after scope) live=%d\n\n", live_count);
+    @println("  (after scope) live={}\n", live_count);
 
-    printf("=== Transfer: move prevents double-free ===\n");
+    @println("=== Transfer: move prevents double-free ===");
     {
         Buffer a;
         a.init(32);
@@ -55,24 +55,24 @@ i32 main() {
         // `a`'s drop flag is cleared -- the destructor for `a`
         // will NOT run, only `b`'s drops when this scope exits.
         Buffer b = move a;
-        printf("  moved a -> b  (b.len=%d)\n", b.length);
+        @println("  moved a -> b  (b.len={})", b.length);
 
         // At scope exit, only `b` is destroyed.  Without `move`,
         // both `a` and `b` would call `free()` on the same pointer.
     }
-    printf("  (after move scope) live=%d\n\n", live_count);
+    @println("  (after move scope) live={}\n", live_count);
 
     // Without move, a copy would alias the same pointer and both
     // destructors would fire.  `move` makes the intent explicit.
-    printf("=== Default: without move, destructor runs ===\n");
+    @println("=== Default: without move, destructor runs ===");
     {
         Buffer x;
         x.init(8);
-        printf("  x.len=%d\n", x.length);
+        @println("  x.len={}", x.length);
         // x.drop() runs at scope end
     }
-    printf("  live=%d\n\n", live_count);
+    @println("  live={}\n", live_count);
 
-    printf("All OK\n");
+    @println("All OK");
     return 0;
 }

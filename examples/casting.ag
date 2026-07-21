@@ -15,15 +15,15 @@ impl Point {
 i32 main() {
     i32 x = 42;
     f64 y = (f64)x;
-    printf("i32 %d as f64: %.1f\n", x, y);
+    @println("i32 {} as f64: {}", x, y);
 
     f64 z = 3.14159;
     i32 w = (i32)z;
-    printf("f64 %.5f as i32: %d\n", z, w);
+    @println("f64 {} as i32: {}", z, w);
 
     Point p = { .x = 3.0, .y = 4.0 };
     f64 mag = (f64)p;
-    printf("Point(3,4) magnitude: %.1f\n", mag);
+    @println("Point(3,4) magnitude: {}", mag);
 
     return 0;
 }
