@@ -47,17 +47,17 @@ impl Vec<T> {
 
     /// Number of elements currently in the vector.
     pub i64 len(Vec<T>* self) {
-        return (*self).len;
+        return self.len;
     }
 
     /// Total allocated capacity.
     pub i64 capacity(Vec<T>* self) {
-        return (*self).cap;
+        return self.cap;
     }
 
     /// True when `len` is zero.
     pub bool is_empty(Vec<T>* self) {
-        return (*self).len == 0;
+        return self.len == 0;
     }
 
     // -- Element access -------------------------------------------------
@@ -66,75 +66,75 @@ impl Vec<T> {
     /// this creates a shallow copy that shares resources with the backing
     /// buffer.  Prefer `get_ptr` or `take` for owned types.
     pub T get(Vec<T>* self, i64 index) {
-        return (*self).data[index];
+        return self.data[index];
     }
 
     /// Pointer to element at `index`.
     pub T* get_ptr(Vec<T>* self, i64 index) {
-        return &((*self).data[index]);
+        return &(self.data[index]);
     }
 
     /// Overwrite element at `index`.
     pub void set(Vec<T>* self, i64 index, T value) {
-        (*self).data[index] = move value;
+        self.data[index] = move value;
     }
 
     // -- Mutation -------------------------------------------------------
 
     /// Append `value` to the end (O(1) amortized).
     pub void push(Vec<T>* self, T value) {
-        if ((*self).len >= (*self).cap) {
+        if (self.len >= self.cap) {
             i64 new_cap = 1;
-            if ((*self).cap != 0) {
-                new_cap = (*self).cap * 2;
+            if (self.cap != 0) {
+                new_cap = self.cap * 2;
             }
-            (*self).data = (T*)(realloc((*self).data, @size(T) * new_cap));
-            (*self).cap = new_cap;
+            self.data = (T*)(realloc(self.data, @size(T) * new_cap));
+            self.cap = new_cap;
         }
-        (*self).data[(*self).len] = move value;
-        (*self).len = (*self).len + 1;
+        self.data[self.len] = move value;
+        self.len = self.len + 1;
     }
 
     /// Remove and return the last element.  Assumes `len > 0`.
     /// The stale slot retains a copy; do NOT read a popped index.
     pub T pop(Vec<T>* self) {
-        (*self).len = (*self).len - 1;
-        T result = (*self).data[(*self).len];
+        self.len = self.len - 1;
+        T result = self.data[self.len];
         return move result;
     }
 
     /// Move value out of position `index`.
     pub T take(Vec<T>* self, i64 index) {
-        T result = (*self).data[index];
+        T result = self.data[index];
         return move result;
     }
 
     /// Remove all elements without freeing the backing buffer.
     pub void clear(Vec<T>* self) {
-        (*self).len = 0;
+        self.len = 0;
     }
 
     /// Reserve at least `min_capacity` elements, growing if needed.
     pub void reserve(Vec<T>* self, i64 min_capacity) {
-        if ((*self).cap >= min_capacity) {
+        if (self.cap >= min_capacity) {
             return;
         }
-        (*self).data = (T*)(realloc((*self).data, @size(T) * min_capacity));
-        (*self).cap = min_capacity;
+        self.data = (T*)(realloc(self.data, @size(T) * min_capacity));
+        self.cap = min_capacity;
     }
 
     /// Shrink capacity to match length.
     pub void shrink_to_fit(Vec<T>* self) {
-        if ((*self).len == 0) {
-            if ((*self).data != (T*)0) {
-                free((*self).data);
+        if (self.len == 0) {
+            if (self.data != (T*)0) {
+                free(self.data);
             }
-            (*self).data = (T*)0;
-            (*self).cap = 0;
+            self.data = (T*)0;
+            self.cap = 0;
         } else {
-            if ((*self).len < (*self).cap) {
-                (*self).data = (T*)(realloc((*self).data, @size(T) * (*self).len));
-                (*self).cap = (*self).len;
+            if (self.len < self.cap) {
+                self.data = (T*)(realloc(self.data, @size(T) * self.len));
+                self.cap = self.len;
             }
         }
     }
@@ -144,22 +144,22 @@ impl<T> Drop<Vec<T>> for Vec<T> {
     /// Frees the backing buffer.  Does NOT call per-element destructors
     /// (the type system currently does not iterate elements on drop).
     pub void drop(Vec<T>* self) {
-        if ((*self).data != (T*)0) {
-            free((*self).data);
-            (*self).data = (T*)0;
+        if (self.data != (T*)0) {
+            free(self.data);
+            self.data = (T*)0;
         }
-        (*self).len = 0;
-        (*self).cap = 0;
+        self.len = 0;
+        self.cap = 0;
     }
 }
 impl<T> IndexedAccess<Vec<T>> for Vec<T> {
     type Item = T;
     T __index_get(Vec<T>* self, i64 index) {
-        if (index < 0 || index >= (*self).len) { abort(); }
-        return (*self).data[index];
+        if (index < 0 || index >= self.len) { abort(); }
+        return self.data[index];
     }
     void __index_set(Vec<T>* self, i64 index, T value) {
-        if (index < 0 || index >= (*self).len) { abort(); }
-        (*self).data[index] = move value;
+        if (index < 0 || index >= self.len) { abort(); }
+        self.data[index] = move value;
     }
 }

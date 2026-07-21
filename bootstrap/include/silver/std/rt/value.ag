@@ -183,7 +183,7 @@ impl Value {
         }
         if (self.kind == VALUE_KIND_OPTIONAL && self.has_inner) {
             Value* boxed = alloc_value();
-            *boxed = (*self.inner).clone();
+            *boxed = self.inner.clone();
             v.inner = boxed;
         }
         return move v;
@@ -318,7 +318,7 @@ impl Drop<Value> for Value {
     pub void drop(Value* self) {
         self.text.drop();
         if (self.inner != (Value*)0) {
-            (*self.inner).drop();
+            self.inner.drop();
             free_value(self.inner);
             self.inner = (Value*)0;
             self.has_inner = false;
