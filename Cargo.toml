@@ -2,13 +2,9 @@
 resolver = "2"
 members = [
     "agc",
-    "silver_runtime",
     "aglsp",
 ]
 
-
-[workspace.dependencies]
-runtime = { path = "silver_runtime" }
 
 [profile.profiling]
 inherits = "release"

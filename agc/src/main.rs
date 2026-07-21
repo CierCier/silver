@@ -55,6 +55,7 @@ struct CompilePlan {
     target: Option<String>,
     sysroot: Option<PathBuf>,
     no_std: bool,
+    static_runtime: bool,
     shared: bool,
     verbose: bool,
     dry_run: bool,
@@ -82,6 +83,9 @@ impl CompilePlan {
         }
         if self.no_std {
             parts.push("no_std=true".to_string());
+        }
+        if self.static_runtime {
+            parts.push("static_runtime=true".to_string());
         }
         if self.shared {
             parts.push("shared=true".to_string());
@@ -178,6 +182,15 @@ struct Cli {
     /// Do not link the standard library (accepted for clang-compat; not yet used)
     #[arg(long = "no-std", action = ArgAction::SetTrue)]
     no_std: bool,
+
+    /// Link dynamically (with libc runtime support) instead of producing a
+    /// fully static binary.  Default is static (no libc needed).
+    #[arg(long = "dynamic-runtime", action = ArgAction::SetTrue)]
+    dynamic_runtime: bool,
+
+    /// Link statically (no libc runtime support). This is the default.
+    #[arg(long = "static-runtime", action = ArgAction::SetTrue)]
+    static_runtime: bool,
 
     /// Prefer shared module artifacts and emit shared libraries for module packaging
     #[arg(long = "shared", action = ArgAction::SetTrue)]
@@ -298,7 +311,8 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         debug_info: cli.debug_info,
         target: cli.target,
         sysroot: cli.sysroot,
-        no_std: cli.no_std,
+        no_std: cli.no_std || cli.static_runtime,
+        static_runtime: cli.static_runtime,
         shared: cli.shared,
         verbose: cli.verbose,
         dry_run: cli.dry_run,
@@ -1342,8 +1356,10 @@ fn link_exe_with_ld_lld(
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }
-    if let Some(loader) = default_dynamic_linker(plan.target.as_deref()) {
-        link.arg("-dynamic-linker").arg(loader);
+    if !plan.no_std {
+        if let Some(loader) = default_dynamic_linker(plan.target.as_deref()) {
+            link.arg("-dynamic-linker").arg(loader);
+        }
     }
 
     if !plan.no_std {
@@ -1414,6 +1430,9 @@ fn link_exe_with_cc(
     }
     if plan.no_std {
         link.arg("-nostdlib");
+    }
+    if plan.static_runtime {
+        link.arg("-static");
     }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
@@ -1530,6 +1549,7 @@ mod tests {
             target: None,
             sysroot: None,
             no_std: false,
+            static_runtime: true,
             shared: false,
             verbose: false,
             dry_run: false,

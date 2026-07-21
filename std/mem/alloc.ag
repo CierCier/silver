@@ -332,9 +332,3 @@ pub T* alloc<T>(i64 count) {
 pub T* realloc<T>(T* ptr, i64 count) {
     return (T*)(realloc(ptr, @size(T) * count));
 }
-extern "C" {
-    void abort();
-    void* memset(void* ptr, i32 value, i64 num);
-    void* memcpy(void* dest, const void* src, i64 num);
-    void* memmove(void* dest, const void* src, i64 num);
-}

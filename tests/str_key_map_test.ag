@@ -1,44 +1,11 @@
-import std.io;
+import std.test;  // assert_true, assert_eq_i64, assert_eq_str, check, done, STDOUT
 import std.map;
 
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
-void assert_eq_i64(i64 a, i64 b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected %ld, got %ld)\n", msg, b, a);
-    }
-}
-
-void assert_eq_str(str a, str b, str msg) {
-    if (a == b) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s (expected \"%s\", got \"%s\")\n", msg, b, a);
-    }
-}
-
 i32 main() {
-    printf("=== HashMap<str, i64> Tests ===\n\n");
+    STDOUT.write_str("=== HashMap<str, i64> Tests ===\n\n");
 
     // --- Basic insert/get with str keys ---
-    printf("--- Basic str keys ---\n");
+    STDOUT.write_str("--- Basic str keys ---\n");
     HashMap<str, i64> m = HashMap<str, i64>.new();
     assert_true(m.is_empty(), "new map is empty");
 
@@ -59,10 +26,10 @@ i32 main() {
     m.drop();
 
     // --- str keys with same content from different pointer sources ---
-    printf("\n--- Same content, different sources ---\n");
+    STDOUT.write_str("\n--- Same content, different sources ---\n");
     HashMap<str, i64> m2 = HashMap<str, i64>.new();
     str a = "hello";
-    str b = "hello";  // same literal, likely same ptr
+    str b = "hello";
     m2.insert(a, 100);
     assert_true(m2.contains_key(b), "contains 'hello' via b when inserted via a");
     assert_eq_i64(m2.get(a), 100, "get(a) == 100");
@@ -70,7 +37,7 @@ i32 main() {
     m2.drop();
 
     // --- Erase str keys ---
-    printf("\n--- Erase str keys ---\n");
+    STDOUT.write_str("\n--- Erase str keys ---\n");
     HashMap<str, i64> m3 = HashMap<str, i64>.new();
     m3.insert("alpha", 1);
     m3.insert("beta", 2);
@@ -85,14 +52,12 @@ i32 main() {
     assert_eq_i64(m3.get("alpha"), 1, "get('alpha') still 1");
     assert_eq_i64(m3.get("gamma"), 3, "get('gamma') still 3");
 
-    // Erase non-existent key
     assert_true(!m3.erase("delta"), "erase('delta') returns false for non-existent key");
     m3.drop();
 
     // --- Resize with str keys ---
-    printf("\n--- Resize with str keys ---\n");
+    STDOUT.write_str("\n--- Resize with str keys ---\n");
     HashMap<str, i64> m4 = HashMap<str, i64>.new();
-    // Insert more than INITIAL_CAPACITY * LOAD_FACTOR to trigger grow
     m4.insert("k0", 0);
     m4.insert("k1", 10);
     m4.insert("k2", 20);
@@ -108,10 +73,9 @@ i32 main() {
     m4.insert("k12", 120);
     m4.insert("k13", 130);
     m4.insert("k14", 140);
-    m4.insert("k15", 150);  // 16th insert should trigger grow from 16 to 32
+    m4.insert("k15", 150);
     assert_eq_i64(m4.len(), 16, "len=16 after 16 inserts");
 
-    // Verify all values after resize
     assert_eq_i64(m4.get("k0"), 0, "k0 intact after resize");
     assert_eq_i64(m4.get("k5"), 50, "k5 intact after resize");
     assert_eq_i64(m4.get("k10"), 100, "k10 intact after resize");
@@ -120,7 +84,7 @@ i32 main() {
     m4.drop();
 
     // --- Indexed access with str keys ---
-    printf("\n--- Indexed access ---\n");
+    STDOUT.write_str("\n--- Indexed access ---\n");
     HashMap<str, i64> m5 = HashMap<str, i64>.new();
     m5["apple"] = 5;
     m5["banana"] = 7;
@@ -129,11 +93,9 @@ i32 main() {
     assert_eq_i64(m5["banana"], 7, "m5['banana'] == 7 via index");
     assert_eq_i64(m5["cherry"], 9, "m5['cherry'] == 9 via index");
 
-    // Overwrite via index
     m5["apple"] = 99;
     assert_eq_i64(m5["apple"], 99, "m5['apple'] overwritten to 99 via index");
     m5.drop();
 
-    printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
-    return tests_failed;
+    return done();
 }

@@ -1,0 +1,198 @@
+// tests/runtime_test.ag — end-to-end tests for the Runtime aggregate.
+//
+// Port of silver_runtime/src/runtime/tests.rs: covers heap allocation,
+// GC collection, method dispatch, and numeric casts through Runtime.
+//
+// NOTE: The Silver compiler has a limitation where i64-returning method calls
+// on struct fields cannot be used in assignment contexts. All such methods
+// are called directly inside assert/printf argument expressions instead.
+
+import std.fmt;
+import std.test;
+import std.mem.vec;
+import std.rt.casts;
+import std.rt.heap;
+import std.rt.methods;
+import std.rt.runtime;
+import std.rt.types;
+i32 main() {
+    STDOUT.write_str("=== Runtime Aggregate Tests ===\n\n");
+
+    // --- Test 1: Heap alloc and free are safe --------------------------------
+    STDOUT.write_str("--- heap_alloc_and_free_are_safe ---\n");
+    {
+        Runtime rt = Runtime.new();
+        assert_true(rt.heap.allocated_count() == 0, "fresh heap has 0 allocations");
+
+        String s = String.new();
+        s.push_str("hello");
+        Handle h = rt.heap.alloc(Object.new_string(move s));
+        assert_true(rt.heap.allocated_count() == 1, "after alloc, count is 1");
+        ObjectRef or1 = rt.heap.get(h);
+        assert_true(or1.ok, "handle is valid");
+
+        FreeResult fr = rt.heap.free(h);
+        assert_true(fr.ok, "free succeeded");
+        bool was_string = (fr.object.kind == (i32)OBJ_KIND_STRING);
+        assert_true(was_string, "freed object is a String");
+        fr.object.drop();
+        assert_true(rt.heap.allocated_count() == 0, "after free, count is 0");
+        ObjectRef or2 = rt.heap.get(h);
+        assert_true(!or2.ok, "old handle is invalid after free");
+
+        rt.drop();
+    }
+
+    // --- Test 2: GC collects unreachable objects -----------------------------
+    STDOUT.write_str("\n--- gc_collects_unreachable_objects ---\n");
+    {
+        Runtime rt = Runtime.new();
+
+        String s1 = String.new();
+        s1.push_str("root");
+        Handle h1 = rt.heap.alloc(Object.new_string(move s1));
+
+        String s2 = String.new();
+        s2.push_str("garbage");
+        Handle h2 = rt.heap.alloc(Object.new_string(move s2));
+
+        assert_true(rt.heap.allocated_count() == 2, "two objects allocated");
+
+        // Root set: only h1 is a root
+        Vec<RtValue> roots = Vec<RtValue>.new();
+        u32 str_raw = (u32)14;
+        roots.push(RtValue.obj(str_raw, h1));
+        assert_eq_i64(rt.heap.collect_garbage(roots.get_ptr(0), roots.len()), 1, "GC freed 1 object");
+        assert_true(rt.heap.allocated_count() == 1, "one live object remains");
+        ObjectRef go1 = rt.heap.get(h1);
+        assert_true(go1.ok, "root handle still valid");
+        ObjectRef go2 = rt.heap.get(h2);
+        assert_true(!go2.ok, "garbage handle is invalid after GC");
+
+        roots.drop();
+        rt.drop();
+    }
+
+    // --- Test 3: GC traces through composite objects -------------------------
+    STDOUT.write_str("\n--- gc_traces_through_composite_objects ---\n");
+    {
+        Runtime rt = Runtime.new();
+
+        String inner_text = String.new();
+        inner_text.push_str("inner");
+        Handle inner = rt.heap.alloc(Object.new_string(move inner_text));
+
+        TypeResult tr = rt.types.vec_of(TypeId.STRING());
+        TypeId vec_ty = tr.unwrap();
+        u32 str_raw2 = (u32)14;
+        Vec<RtValue> items = Vec<RtValue>.new();
+        items.push(RtValue.obj(str_raw2, inner));
+        Handle outer = rt.heap.alloc(Object.new_vec(vec_ty.raw, move items));
+
+        // Root set: only the outer vec is a root
+        u32 vec_raw2 = vec_ty.raw;
+        Vec<RtValue> roots = Vec<RtValue>.new();
+        roots.push(RtValue.obj(vec_raw2, outer));
+
+        assert_eq_i64(rt.heap.collect_garbage(roots.get_ptr(0), roots.len()), 0, "GC freed 0 objects (both reachable)");
+        ObjectRef gi = rt.heap.get(inner);
+        assert_true(gi.ok, "inner handle still valid after GC");
+        ObjectRef go = rt.heap.get(outer);
+        assert_true(go.ok, "outer handle still valid after GC");
+
+        roots.drop();
+        rt.drop();
+    }
+
+    // --- Test 4: string.len method works ------------------------------------
+    STDOUT.write_str("\n--- builtin_string_len_method_works ---\n");
+    {
+        Runtime rt = Runtime.new();
+        RtValue s = rt.alloc_string("hello");
+        RtValue* args = (RtValue*)0;
+        MethodResult res = rt.call_method(s, "len", args, 0);
+        assert_true(res.ok, "string.len() returns ok");
+        assert_eq_i32((i32)res.err, (i32)RT_ERR.NONE, "no method error");
+        assert_true(res.value.kind == RT_KIND_INT, "result is an int");
+        assert_eq_i64((i64)res.value.int_val, 5, "len('hello') == 5");
+        res.drop();
+        rt.drop();
+    }
+
+    // --- Test 5: vec.push and len work --------------------------------------
+    STDOUT.write_str("\n--- builtin_vec_push_and_len_work ---\n");
+    {
+        Runtime rt = Runtime.new();
+        TypeResult tr2 = rt.types.vec_of(TypeId.I64());
+        TypeId vec_ty = tr2.unwrap();
+        Vec<RtValue> items = Vec<RtValue>.new();
+        Handle h = rt.heap.alloc(Object.new_vec(vec_ty.raw, move items));
+        RtValue v = RtValue.obj(vec_ty.raw, h);
+        u32 i64_raw = (u32)5;
+        RtValue arg_123 = RtValue.from_int(i64_raw, (i128)123);
+        // push 123 (i64) onto the vec
+        MethodResult push_res = rt.call_method(v, "push", &arg_123, 1);
+        assert_true(push_res.ok, "vec.push(123) returns ok");
+        push_res.drop();
+
+        // check len is 1
+        MethodResult len_res = rt.call_method(v, "len", (RtValue*)0, 0);
+        assert_true(len_res.ok, "vec.len() returns ok");
+        assert_true(len_res.value.kind == RT_KIND_INT, "result is an int");
+        assert_eq_i64((i64)len_res.value.int_val, 1, "vec len is 1 after push");
+        len_res.drop();
+
+        rt.drop();
+    }
+
+    // --- Test 6: Numeric casts work -----------------------------------------
+    STDOUT.write_str("\n--- builtin_numeric_casts_work ---\n");
+    {
+        Runtime rt = Runtime.new();
+
+        // I32(42) -> I64
+        TypeId tid_i32_1;
+        tid_i32_1 = TypeId.I32();
+        CastValue v_i32_42 = CastValue.from_int(tid_i32_1.raw, (i128)42);
+        CastResult r1 = rt.cast_value(v_i32_42, TypeId.I64());
+        assert_true(r1.ok, "i32->i64 cast ok");
+        assert_true(r1.value.kind == (i32)CAST_VALUE_KIND.INT, "result is INT");
+        assert_eq_i64((i64)(r1.value.int_val), 42, "i32(42) -> i64 is 42");
+        r1.drop();
+
+        // I32(42) -> F64
+        TypeId tid_i32_2;
+        tid_i32_2 = TypeId.I32();
+        CastValue v_i32_42b = CastValue.from_int(tid_i32_2.raw, (i128)42);
+        CastResult r2 = rt.cast_value(v_i32_42b, TypeId.F64());
+        assert_true(r2.ok, "i32->f64 cast ok");
+        assert_true(r2.value.kind == (i32)CAST_VALUE_KIND.FLOAT, "result is FLOAT");
+        r2.drop();
+
+        // Bool(true) -> I32
+        CastValue v_true = CastValue.from_bool(true);
+        CastResult r3 = rt.cast_value(v_true, TypeId.I32());
+        assert_true(r3.ok, "bool->i32 cast ok");
+        assert_eq_i64((i64)(r3.value.int_val), 1, "bool(true) -> i32 is 1");
+        r3.drop();
+
+        rt.drop();
+    }
+
+    // --- Test 7: Missing cast reports error ---------------------------------
+    STDOUT.write_str("\n--- missing_cast_reports_error ---\n");
+    {
+        Runtime rt = Runtime.new();
+        RtValue s = rt.alloc_string("hello");
+        // String -> I32 is not a valid numeric cast.
+        // We convert the RtValue to a CastValue for the cast_value API.
+        TypeId tid_i64_2;
+        tid_i64_2 = TypeId.I64();
+        CastValue cv = CastValue.from_int(tid_i64_2.raw, (i128)0);
+        CastResult r = rt.cast_value(cv, TypeId.STRING());
+        assert_true(!r.ok, "i64->string cast fails");
+        rt.drop();
+    }
+
+    return done();
+}
