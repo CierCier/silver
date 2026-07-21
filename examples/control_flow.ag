@@ -34,18 +34,18 @@ i32 skip_threes(i32 limit) {
 }
 
 i32 main() {
-    printf("factorial(5) = %d\n", factorial(5));
-    printf("sum 0..9 = %d\n", sum_while(10));
-    printf("skip_threes(50) = %d\n", skip_threes(50));
+    @println("factorial(5) = {}", factorial(5));
+    @println("sum 0..9 = {}", sum_while(10));
+    @println("skip_threes(50) = {}", skip_threes(50));
 
     for i in 0..5 {
-        printf("for-in: %d\n", i);
+        @println("for-in: {}", i);
     }
 
     i32 z = 40;
     i32* p = &z;
     *p = 50;
-    printf("z via pointer: %d\n", z);
+    @println("z via pointer: {}", z);
 
     return 0;
 }

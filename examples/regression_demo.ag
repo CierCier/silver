@@ -165,10 +165,10 @@ i32 main() {
     reg_y[0] = 1.0; reg_y[1] = 3.1; reg_y[2] = 4.9; reg_y[3] = 7.2; reg_y[4] = 8.8;
     reg_y[5] = 11.1; reg_y[6] = 12.9; reg_y[7] = 15.0; reg_y[8] = 17.2; reg_y[9] = 19.1;
     
-    printf("=== Silver sklearn demo ===\n\n");
+    @println("=== Silver sklearn demo ===\n");
     
     // --- Linear Regression ---
-    printf("--- Linear Regression ---\n");
+    @println("--- Linear Regression ---");
     f64* reg_weights = alloc<f64>(1);
     reg_weights[0] = 0.0;
     LinearRegression reg = LinearRegression.new(reg_weights, 1);
@@ -176,18 +176,18 @@ i32 main() {
     Dataset reg_ds = Dataset.new(reg_X, reg_y, 10, 1);
     reg.fit(&reg_ds, 2000, 0.01);
     
-    printf("Trained weights: w=%f, b=%f\n", reg.weights[0], reg.bias);
+    @println("Trained weights: w={}, b={}", reg.weights[0], reg.bias);
     
     f64* test_x = alloc<f64>(1);
     test_x[0] = 5.0;
     f64 pred = reg.predict(test_x);
-    printf("Prediction for x=5.0: %f\n", pred);
+    @println("Prediction for x=5.0: {}", pred);
     
     f64 err = mse(&reg_ds, &reg);
-    printf("Training MSE: %f\n", err);
+    @println("Training MSE: {}", err);
     
     // --- Logistic Regression ---
-    printf("\n--- Logistic Regression ---\n");
+    @println("\n--- Logistic Regression ---");
     i64 cls_n = 16;
     f64* cls_X = alloc<f64>(cls_n);
     cls_X[0] = 0.5; cls_X[1] = 1.0; cls_X[2] = 1.0; cls_X[3] = 1.5;
@@ -206,16 +206,16 @@ i32 main() {
     Dataset cls_ds = Dataset.new(cls_X, cls_y, 8, 2);
     cls.fit(&cls_ds, 3000, 0.1);
     
-    printf("Trained weights: w0=%f, w1=%f, b=%f\n",
+    @println("Trained weights: w0={}, w1={}, b={}",
            cls.weights[0], cls.weights[1], cls.bias);
     
     f64* test_cls = alloc<f64>(2);
     test_cls[0] = 1.0; test_cls[1] = 1.5;
     i32 cls_pred = cls.predict(test_cls);
-    printf("Prediction for (1.0, 1.5): class %d\n", cls_pred);
+    @println("Prediction for (1.0, 1.5): class {}", cls_pred);
     
     f64 acc = accuracy(&cls_ds, &cls);
-    printf("Training accuracy: %f\n", acc);
+    @println("Training accuracy: {}", acc);
     
     free(reg_X);
     free(reg_y);

@@ -17,28 +17,28 @@ i32 cleanup_log = 0;
 i32 open(str name) {
     i32 id = next_id;
     next_id = next_id + 1;
-    printf("  [open] %s (fd=%d)\n", name, id);
+    @println("  [open] {} (fd={})", name, id);
     return id;
 }
 
 void close(str name, i32 fd) {
-    printf("  [close] %s (fd=%d)\n", name, fd);
+    @println("  [close] {} (fd={})", name, fd);
     cleanup_log = cleanup_log + 1;
 }
 
 i32 main() {
     // -- Single resource: open + defer on the same line --
-    printf("=== Single resource ===\n");
+    @println("=== Single resource ===");
     {
         i32 fd = open("log");
         defer { close("log", fd); }
-        printf("  using fd %d ...\n", fd);
+        @println("  using fd {} ...", fd);
     }
-    printf("cleanup count: %d (expected 1)\n\n", cleanup_log);
+    @println("cleanup count: {} (expected 1)\n", cleanup_log);
 
     // -- Multiple resources in one scope: LIFO release --
     // Releases run in reverse order: pool, cache, config
-    printf("=== Multiple resources (LIFO) ===\n");
+    @println("=== Multiple resources (LIFO) ===");
     {
         i32 cfg = open("config");
         defer { close("config", cfg); }
@@ -49,10 +49,10 @@ i32 main() {
         i32 pool = open("pool");
         defer { close("pool", pool); }
     }
-    printf("cleanup count: %d (expected 4)\n\n", cleanup_log);
+    @println("cleanup count: {} (expected 4)\n", cleanup_log);
 
     // -- Early return still triggers all defers --
-    printf("=== Early return ===\n");
+    @println("=== Early return ===");
     {
         i32 a = open("alpha");
         defer { close("alpha", a); }
@@ -60,7 +60,7 @@ i32 main() {
         i32 b = open("beta");
         defer { close("beta", b); }
 
-        printf("  early return triggered\n");
+        @println("  early return triggered");
         return 0;
     }
 

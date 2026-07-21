@@ -11,7 +11,7 @@ i32 main() {
                 if (i % 5 == 0) {
                     println("Buzz");
                 } else {
-                    printf("%d\n", i);
+                    @println("{}", i);
                 }
             }
         }
