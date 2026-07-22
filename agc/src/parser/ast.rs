@@ -538,6 +538,13 @@ pub struct Expression {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterAccessMode {
+    ByValue,
+    ByPtr,
+    ByConstPtr,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionKind {
     Literal(Literal),
@@ -588,6 +595,8 @@ pub enum ExpressionKind {
         iterable: Box<Expression>,
         body: Block,
         item_type: Option<Box<Type>>,
+        mode: IterAccessMode,
+        iterator_type: Option<Box<Type>>,
     },
     For {
         init: LetStatement,

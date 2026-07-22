@@ -3,3 +3,5 @@ target/
 a.out
 *.o
 dist/
+*.ll
+*.agm

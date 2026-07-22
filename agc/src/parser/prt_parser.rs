@@ -1546,8 +1546,42 @@ impl PRT_Parser {
         start: usize,
         end: usize,
     ) -> Result<ast::Statement, ParseError> {
-        let binding_is_mut = !(start + 1 < end && matches!(tokens[start + 1].kind, Token::Const));
-        let binding_token_idx = if binding_is_mut { start + 1 } else { start + 2 };
+        // Determine access mode and token position of the binding identifier.
+        // Supported forms:
+        //   for <ident> in ...         → ByValue, mutable if no `const`
+        //   for const <ident> in ...   → ByValue, immutable
+        //   for * <ident> in ...       → ByPtr
+        //   for const * <ident> in ... → ByConstPtr
+        let mode: ast::IterAccessMode;
+        let binding_token_idx: usize;
+
+        if start + 1 < end && matches!(tokens[start + 1].kind, Token::Star) {
+            mode = ast::IterAccessMode::ByPtr;
+            binding_token_idx = start + 2;
+        } else if start + 1 < end && matches!(tokens[start + 1].kind, Token::Const) {
+            if start + 2 < end && matches!(tokens[start + 2].kind, Token::Star) {
+                mode = ast::IterAccessMode::ByConstPtr;
+                binding_token_idx = start + 3;
+            } else {
+                mode = ast::IterAccessMode::ByValue;
+                binding_token_idx = start + 2;
+            }
+        } else {
+            mode = ast::IterAccessMode::ByValue;
+            binding_token_idx = start + 1;
+        }
+        if binding_token_idx >= end {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected identifier after for".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        }
+
+        let binding_is_mut = match mode {
+            ast::IterAccessMode::ByConstPtr => false,
+            ast::IterAccessMode::ByPtr => true,
+            ast::IterAccessMode::ByValue => !matches!(tokens[start + 1].kind, Token::Const),
+        };
         let token = &tokens[binding_token_idx];
         let ident_name = match &token.kind {
             Token::Identifier(name) => name.clone(),
@@ -1562,7 +1596,7 @@ impl PRT_Parser {
             span: token.span.clone(),
         };
 
-        let Some(in_pos) = self.find_token_in_range(tokens, start + 2, end, Token::In) else {
+        let Some(in_pos) = self.find_token_in_range(tokens, binding_token_idx + 1, end, Token::In) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected 'in' after for binding".to_string(),
                 span: tokens[start].span.clone(),
@@ -1610,6 +1644,8 @@ impl PRT_Parser {
                     iterable: Box::new(iterable),
                     body,
                     item_type: None,
+                    mode,
+                    iterator_type: None,
                 }),
                 span: Span {
                     start: tokens[start].span.start,

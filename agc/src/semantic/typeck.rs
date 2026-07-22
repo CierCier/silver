@@ -48,6 +48,10 @@ pub struct TypeChecker {
     /// Expression type cache for LSP hover support.
     /// Maps (start_byte, end_byte) → type string.
     pub expr_types: HashMap<(usize, usize), String>,
+    /// Resolved iterator types for ForIn expressions, populated during typeck.
+    /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
+    /// Used to populate the ForIn AST node after typeck for codegen.
+    pub resolved_iter_types: HashMap<(usize, usize), Box<ast::Type>>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +190,11 @@ impl TypeChecker {
         );
         let requests = std::mem::take(&mut self.monomorph_requests);
         (std::mem::take(&mut self.errors), requests)
+    }
+
+    /// Consume the resolved iterator types map for post-typeck AST population.
+    pub fn take_resolved_iter_types(&mut self) -> HashMap<(usize, usize), Box<ast::Type>> {
+        std::mem::take(&mut self.resolved_iter_types)
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -1393,6 +1402,23 @@ impl TypeChecker {
                             }
                         }
                     },
+                    Type::Array { element, size } => {
+                        if *size == 0 {
+                            self.error(
+                                "cannot index into zero-size array".to_string(),
+                                object.span.clone(),
+                            );
+                            return Type::Unknown;
+                        }
+                        if !is_integer(&index_ty) {
+                            self.error(
+                                format!("array index must be integer, found {}", index_ty),
+                                index.span.clone(),
+                            );
+                            return Type::Unknown;
+                        }
+                        (**element).clone()
+                    }
                     _ => {
                         if let Some(result_ty) = self.resolve_method_overload_types(
                             &object_ty,
@@ -1466,6 +1492,7 @@ impl TypeChecker {
                 is_mutable,
                 iterable,
                 body,
+                mode,
                 ..
             } => {
                 self.push_scope();
@@ -1500,16 +1527,32 @@ impl TypeChecker {
                         }
                     }
                     _ => {
+                        let method_name = match mode {
+                            ast::IterAccessMode::ByValue => "into_iter",
+                            ast::IterAccessMode::ByPtr => "into_iter_ptr",
+                            ast::IterAccessMode::ByConstPtr => "into_iter_const_ptr",
+                        };
                         let iterable_ty = self.check_expr(iterable, None);
 
-                        // Validate impl IntoIterator for iterable_ty
-                        let iter_key = iterable_ty.canonical_key();
-                        let has_into_iter = self
-                            .trait_impls
-                            .get("IntoIterator")
-                            .map(|set| set.contains(&iter_key))
-                            .unwrap_or(false);
-                        if !has_into_iter {
+                        let method_ident = ast::Identifier {
+                            name: method_name.to_string(),
+                            span: iterable.span.clone(),
+                        };
+                        let iterator_ty = self.resolve_method_overload(
+                            &iterable_ty,
+                            &method_ident,
+                            &[],
+                            MethodCallStyle::Instance,
+                            iterable.span.clone(),
+                        );
+
+                        // Store resolved iterator type for codegen
+                        self.resolved_iter_types.insert(
+                            (expr.span.start, expr.span.end),
+                            Box::new(iterator_ty.to_ast()),
+                        );
+
+                        if iterator_ty == Type::Unknown {
                             self.error(
                                 format!(
                                     "type {} cannot be iterated over: missing `impl IntoIterator for {}`",
@@ -1519,66 +1562,39 @@ impl TypeChecker {
                             );
                             Type::Unknown
                         } else {
-                            let method_ident = ast::Identifier {
-                                name: "into_iter".to_string(),
-                                span: iterable.span.clone(),
-                            };
-                            let iterator_ty = self.resolve_method_overload(
-                                &iterable_ty,
-                                &method_ident,
+                            let next_ret = self.resolve_method_overload_types(
+                                &iterator_ty,
+                                "next",
                                 &[],
                                 MethodCallStyle::Instance,
-                                iterable.span.clone(),
+                                expr.span.clone(),
                             );
-
-                            // Validate impl Iterator for iterator_ty
-                            let iter_key = iterator_ty.canonical_key();
-                            let has_iterator = self
-                                .trait_impls
-                                .get("Iterator")
-                                .map(|set| set.contains(&iter_key))
-                                .unwrap_or(false);
-                            if !has_iterator {
-                                self.error(
-                                    format!("type {} does not implement `Iterator`", iterator_ty),
-                                    expr.span.clone(),
-                                );
-                                Type::Unknown
-                            } else {
-                                let next_ret = self.resolve_method_overload_types(
-                                    &iterator_ty,
-                                    "next",
-                                    &[],
-                                    MethodCallStyle::Instance,
-                                    expr.span.clone(),
-                                );
-                                match next_ret {
-                                    Some(Type::Named { path, generics })
-                                        if path.last().map(|s| s.as_str()) == Some("Optional") =>
-                                    {
-                                        generics.first().cloned().unwrap_or(Type::Unknown)
-                                    }
-                                    Some(Type::Optional { inner }) => *inner,
-                                    Some(other) => {
-                                        self.error(
-                                            format!(
-                                                "'next' on iterator must return Optional<T>, found {}",
-                                                other
-                                            ),
-                                            expr.span.clone(),
-                                        );
-                                        Type::Unknown
-                                    }
-                                    None => {
-                                        self.error(
-                                            format!(
-                                                "type {} has no 'next' method returning Optional<T>",
-                                                iterator_ty
-                                            ),
-                                            expr.span.clone(),
-                                        );
-                                        Type::Unknown
-                                    }
+                            match next_ret {
+                                Some(Type::Named { path, generics })
+                                    if path.last().map(|s| s.as_str()) == Some("Optional") =>
+                                {
+                                    generics.first().cloned().unwrap_or(Type::Unknown)
+                                }
+                                Some(Type::Optional { inner }) => *inner,
+                                Some(other) => {
+                                    self.error(
+                                        format!(
+                                            "'next' on iterator must return Optional<T>, found {}",
+                                            other
+                                        ),
+                                        expr.span.clone(),
+                                    );
+                                    Type::Unknown
+                                }
+                                None => {
+                                    self.error(
+                                        format!(
+                                            "type {} has no 'next' method returning Optional<T>",
+                                            iterator_ty
+                                        ),
+                                        expr.span.clone(),
+                                    );
+                                    Type::Unknown
                                 }
                             }
                         }
@@ -4000,6 +4016,209 @@ pub(crate) fn unary_operator_method_name(operator: &ast::UnaryOperator) -> Optio
         ast::UnaryOperator::Not => Some("__not"),
         ast::UnaryOperator::BitwiseNot => Some("__bitnot"),
         _ => None,
+    }
+}
+
+/// After type checking, fills in `iterator_type` on all ForIn AST nodes
+/// using the resolved iterator types collected during type checking.
+pub fn populate_for_in_iterator_types(
+    program: &mut ast::Program,
+    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+) {
+    for item in &mut program.items {
+        populate_item_for_in_types(item, resolved_iter_types);
+    }
+}
+
+fn populate_item_for_in_types(
+    item: &mut ast::Item,
+    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+) {
+    match &mut item.kind {
+        ast::ItemKind::Function(func) => {
+            populate_block_for_in_types(&mut func.body, resolved_iter_types);
+        }
+        ast::ItemKind::Impl(impl_item) => {
+            for member in &mut impl_item.items {
+                if let ast::ImplItemKind::Function(func) = member {
+                    populate_block_for_in_types(&mut func.body, resolved_iter_types);
+                }
+            }
+        }
+        ast::ItemKind::Macro(def) => {
+            populate_block_for_in_types(&mut def.body, resolved_iter_types);
+        }
+        _ => {}
+    }
+}
+
+fn populate_block_for_in_types(
+    block: &mut ast::Block,
+    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+) {
+    for stmt in &mut block.statements {
+        populate_statement_for_in_types(stmt, resolved_iter_types);
+    }
+}
+
+fn populate_statement_for_in_types(
+    stmt: &mut ast::Statement,
+    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+) {
+    match &mut stmt.kind {
+        ast::StatementKind::Expression(expr) => {
+            populate_expression_for_in_types(expr, resolved_iter_types);
+        }
+        ast::StatementKind::Let(let_stmt) => {
+            if let Some(init) = &mut let_stmt.initializer {
+                populate_expression_for_in_types(init, resolved_iter_types);
+            }
+        }
+        ast::StatementKind::Block(block) => {
+            populate_block_for_in_types(block, resolved_iter_types);
+        }
+        ast::StatementKind::Return(expr) => {
+            if let Some(expr) = expr {
+                populate_expression_for_in_types(expr, resolved_iter_types);
+            }
+        }
+        ast::StatementKind::Defer(inner) => {
+            populate_statement_for_in_types(inner, resolved_iter_types);
+        }
+        ast::StatementKind::Break(expr) => {
+            if let Some(expr) = expr {
+                populate_expression_for_in_types(expr, resolved_iter_types);
+            }
+        }
+        ast::StatementKind::Continue => {}
+    }
+}
+
+fn populate_expression_for_in_types(
+    expr: &mut ast::Expression,
+    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+) {
+    match expr.kind.as_mut() {
+        ast::ExpressionKind::ForIn {
+            iterator_type, ..
+        } => {
+            if let Some(iter_ty) = resolved_iter_types.get(&(expr.span.start, expr.span.end)) {
+                *iterator_type = Some(iter_ty.clone());
+            }
+        }
+        ast::ExpressionKind::Block(block) => {
+            populate_block_for_in_types(block, resolved_iter_types);
+        }
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            populate_expression_for_in_types(condition, resolved_iter_types);
+            populate_block_for_in_types(then_branch, resolved_iter_types);
+            if let Some(else_block) = else_branch {
+                populate_block_for_in_types(else_block, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::While { condition, body, .. } => {
+            populate_expression_for_in_types(condition, resolved_iter_types);
+            populate_block_for_in_types(body, resolved_iter_types);
+        }
+        ast::ExpressionKind::For {
+            condition,
+            body,
+            ..
+        } => {
+            populate_expression_for_in_types(condition, resolved_iter_types);
+            populate_block_for_in_types(body, resolved_iter_types);
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            populate_expression_for_in_types(left, resolved_iter_types);
+            populate_expression_for_in_types(right, resolved_iter_types);
+        }
+        ast::ExpressionKind::Unary { operand, .. } => {
+            populate_expression_for_in_types(operand, resolved_iter_types);
+        }
+        ast::ExpressionKind::Postfix { operand, .. } => {
+            populate_expression_for_in_types(operand, resolved_iter_types);
+        }
+        ast::ExpressionKind::Cast { expression, .. } => {
+            populate_expression_for_in_types(expression, resolved_iter_types);
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                populate_expression_for_in_types(&mut field.value, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::FieldAccess { object, .. } => {
+            populate_expression_for_in_types(object, resolved_iter_types);
+        }
+        ast::ExpressionKind::Index { object, index, .. } => {
+            populate_expression_for_in_types(object, resolved_iter_types);
+            populate_expression_for_in_types(index, resolved_iter_types);
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver, arguments, ..
+        } => {
+            populate_expression_for_in_types(receiver, resolved_iter_types);
+            for arg in arguments {
+                populate_expression_for_in_types(arg, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::Call {
+            function, arguments, ..
+        } => {
+            populate_expression_for_in_types(function, resolved_iter_types);
+            for arg in arguments {
+                populate_expression_for_in_types(arg, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::Array(elements) => {
+            for element in elements {
+                populate_expression_for_in_types(element, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::Tuple(elements) => {
+            for element in elements {
+                populate_expression_for_in_types(element, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::Initializer { items, .. } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(expr) => {
+                        populate_expression_for_in_types(expr, resolved_iter_types);
+                    }
+                    ast::InitializerItem::Field { value, .. } => {
+                        populate_expression_for_in_types(value, resolved_iter_types);
+                    }
+                    ast::InitializerItem::Index { index, value, .. } => {
+                        populate_expression_for_in_types(index, resolved_iter_types);
+                        populate_expression_for_in_types(value, resolved_iter_types);
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Match {
+            expression, arms, ..
+        } => {
+            populate_expression_for_in_types(expression, resolved_iter_types);
+            for arm in arms {
+                populate_expression_for_in_types(&mut arm.body, resolved_iter_types);
+            }
+        }
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                match arg {
+                    ast::MacroArg::Expression(expr) => {
+                        populate_expression_for_in_types(expr, resolved_iter_types);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 #[cfg(test)]

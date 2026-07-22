@@ -1,0 +1,19 @@
+// Test Vec iteration via for-in
+import std.test;
+import std.mem;
+
+i32 main() {
+    Vec<i32> v = Vec<i32>.new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+
+    i32 sum = 0;
+    for x in v {
+        sum = sum + x;
+    }
+    // v was consumed by into_iter (data cleared), VecIter borrowed
+    // the data during the loop. v's drop at scope exit frees buffer.
+    assert_eq_i32(60, sum, "10+20+30 = 60");
+    return done();
+}

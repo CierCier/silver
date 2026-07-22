@@ -1,0 +1,45 @@
+// Integration test: trait-based for-in with a generic iterator type.
+import std.test;
+
+struct Counter<T> {
+    i64 current;
+}
+
+struct Optional<T> {
+    bool present;
+    T thing;
+}
+
+trait IntoIterator {}
+trait Iterator {}
+
+impl<T> IntoIterator for Counter<T> {
+    Counter<T> into_iter(Counter<T> self) {
+        return self;
+    }
+}
+
+impl<T> Iterator for Counter<T> {
+    Optional<i32> next(Counter<T>* self) {
+        Optional<i32> result;
+        if ((*self).current < 3) {
+            result.present = true;
+            result.thing = 10;
+            (*self).current = (*self).current + 1;
+        } else {
+            result.present = false;
+        }
+        return result;
+    }
+}
+
+i32 main() {
+    Counter<i32> c;
+    c.current = 0;
+    i32 sum = 0;
+    for x in c {
+        sum = sum + x;
+    }
+    assert_eq_i32(sum, 30, "3x10 = 30");
+    return done();
+}

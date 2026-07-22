@@ -13,3 +13,17 @@ trait Iterator<Self> {
     type Item;
     Optional<Item> next(Self* self);
 }
+
+// IntoIteratorPtr: yields mutable pointers to elements.
+trait IntoIteratorPtr<Self> {
+    type Item;
+    type IntoIter;
+    IntoIter into_iter_ptr(Self self);
+}
+
+// IntoIteratorConstPtr: yields const pointers to elements.
+trait IntoIteratorConstPtr<Self> {
+    type Item;
+    type IntoIter;
+    IntoIter into_iter_const_ptr(Self self);
+}
