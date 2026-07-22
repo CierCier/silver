@@ -1,0 +1,113 @@
+// std/net/inet.ag — IPv4 address types and byte-order helpers (Linux x86_64).
+//
+// Provides the SockAddrIn type (wraps C `struct sockaddr_in`, 16 bytes,
+// natural alignment) and pure-Silver helpers for network byte-order
+// conversion and dotted-quad IPv4 string parsing.
+
+import std.sys.result;
+
+// --- SockAddrIn (struct sockaddr_in) ---
+// Layout (16 bytes, 4-byte alignment, no padding holes):
+//   offset 0: sin_family  (u16)
+//   offset 2: sin_port    (u16)
+//   offset 4: sin_addr    (u32)
+//   offset 8: sin_zero_1  (u32)
+//   offset 12: sin_zero_2 (u32)
+pub struct SockAddrIn {
+    u16 sin_family;
+    u16 sin_port;
+    u32 sin_addr;
+    u32 sin_zero_1;
+    u32 sin_zero_2;
+}
+
+impl SockAddrIn {
+    // Construct a SockAddrIn from a port (host byte order) and dotted-quad
+    // IPv4 string. The port is converted to network byte order internally.
+    SockAddrIn v4(u16 port, str addr_str) {
+        SockAddrIn sa;
+        sa.sin_family = (u16)AF_INET;
+        sa.sin_port = hton16(port);
+        sa.sin_addr = (u32)ntoh32(inet_addr(addr_str));
+        sa.sin_zero_1 = (u32)0;
+        sa.sin_zero_2 = (u32)0;
+        return move sa;
+    }
+}
+
+// --- Byte-order helpers ---
+//
+// Silver lowers `>>` as arithmetic (signed) right shift. Every shift is
+// followed by an `& 0xFF` / `& 0xFF00` mask to prevent sign-extension
+// from corrupting high bytes.
+// All intermediate math uses `i64` because bitwise operator operands
+// (| & << >>) must have exactly the same type, and integer literals
+// default to `i32` / `i64`.
+
+// Host byte order -> network byte order (16-bit).
+pub u16 hton16(u16 host) {
+    i64 h = (i64)host;
+    i64 r = ((h & (i64)0xFF) << (i64)8) | ((h >> (i64)8) & (i64)0xFF);
+    return (u16)r;
+}
+
+// Network byte order -> host byte order (16-bit). Symmetric for 16-bit.
+pub u16 ntoh16(u16 net) {
+    return hton16(net);
+}
+
+// Host byte order -> network byte order (32-bit).
+pub u32 hton32(u32 host) {
+    i64 h = (i64)host;
+    i64 r = ((h & (i64)0xFF) << (i64)24)
+          | ((h & (i64)0xFF00) << (i64)8)
+          | ((h >> (i64)8) & (i64)0xFF00)
+          | ((h >> (i64)24) & (i64)0xFF);
+    return (u32)r;
+}
+
+// Network byte order -> host byte order (32-bit). Symmetric for 32-bit.
+pub u32 ntoh32(u32 net) {
+    return hton32(net);
+}
+
+// --- IPv4 dotted-quad parser ---
+//
+// Parses `"a.b.c.d"` into a network-byte-order i64. Returns 0 on any invalid
+// input (null string, non-digit characters, overflow, wrong number of octets).
+// Uses i64 throughout (matching Silver's preferred integer type) with a final
+// cast to u32 at the call site.
+
+pub i64 inet_addr(str s) {
+    if (s == (str)0) { return (i64)0; }
+    u8* p = (u8*)s;
+    i64 result = 0;
+    i64 octet = 0;
+    i64 shift = 24;
+    i64 dots = 0;
+    i64 i = 0;
+    while (i < 16) {
+        u8 c = p[i];
+        if (c == (u8)0) {
+            if (dots != 3) { return (i64)0; }
+            result = result | (octet << shift);
+            break;
+        }
+        if (c == (u8)46) {  // '.'
+            if (dots >= 3 || octet > 255) { return (i64)0; }
+            result = result | (octet << shift);
+            octet = 0;
+            shift = shift - 8;
+            dots = dots + 1;
+        } else {
+            if (c >= (u8)48 && c <= (u8)57) {
+                octet = octet * 10 + ((i64)c - 48);
+                if (octet > 255) { return (i64)0; }
+            } else {
+                return (i64)0;
+            }
+        }
+        i = i + 1;
+    }
+    return result;
+}

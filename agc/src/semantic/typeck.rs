@@ -685,6 +685,14 @@ impl TypeChecker {
                             ident.span.clone(),
                         );
                     }
+                    // Array-to-pointer decay: `i64 arr[9]` as an expression
+                    // yields `i64*` pointing to the first element.
+                    if let Type::Array { element, .. } = &ty {
+                        return Type::Pointer {
+                            inner: element.clone(),
+                            is_mutable: true,
+                        };
+                    }
                     ty
                 }
                 None => {
@@ -2662,6 +2670,76 @@ impl TypeChecker {
         let _ = self.check_expr(inner_expr, None);
         // @hash always returns i64
         Type::Primitive(ast::PrimitiveType::I64)
+    }
+
+    pub(crate) fn memcpy_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 3 {
+            self.error("@memcpy expects exactly 3 arguments (dst, src, len)", expr.span.clone());
+            return Type::Unknown;
+        }
+        // dst
+        if let ast::MacroArg::Expression(e) = &args[0] {
+            self.check_expr(e, None);
+        }
+        // src
+        if let ast::MacroArg::Expression(e) = &args[1] {
+            self.check_expr(e, None);
+        }
+        // len
+        if let ast::MacroArg::Expression(e) = &args[2] {
+            self.check_expr(e, None);
+        }
+        // Returns the destination pointer (u8*)
+        Type::Pointer {
+            is_mutable: true,
+            inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+        }
+    }
+
+    pub(crate) fn memset_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 3 {
+            self.error("@memset expects exactly 3 arguments (dst, value, len)", expr.span.clone());
+            return Type::Unknown;
+        }
+        // dst
+        if let ast::MacroArg::Expression(e) = &args[0] {
+            self.check_expr(e, None);
+        }
+        // value
+        if let ast::MacroArg::Expression(e) = &args[1] {
+            self.check_expr(e, None);
+        }
+        // len
+        if let ast::MacroArg::Expression(e) = &args[2] {
+            self.check_expr(e, None);
+        }
+        Type::Pointer {
+            is_mutable: true,
+            inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+        }
+    }
+
+    pub(crate) fn memmove_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if args.len() != 3 {
+            self.error("@memmove expects exactly 3 arguments (dst, src, len)", expr.span.clone());
+            return Type::Unknown;
+        }
+        // dst
+        if let ast::MacroArg::Expression(e) = &args[0] {
+            self.check_expr(e, None);
+        }
+        // src
+        if let ast::MacroArg::Expression(e) = &args[1] {
+            self.check_expr(e, None);
+        }
+        // len
+        if let ast::MacroArg::Expression(e) = &args[2] {
+            self.check_expr(e, None);
+        }
+        Type::Pointer {
+            is_mutable: true,
+            inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+        }
     }
 
     pub(crate) fn print_typeck(

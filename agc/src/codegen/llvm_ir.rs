@@ -1021,6 +1021,184 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(result_phi.as_basic_value())
     }
 
+    pub(crate) fn memcpy_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects dst as first argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects src as second argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects len as third argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let src_val = self.emit_expression_value(src_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let src_ptr = src_val.into_pointer_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
+        let memcpy_fn = self
+            .module
+            .get_function("llvm.memcpy.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), ptr.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memcpy.p0.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    dst_ptr.into(),
+                    src_ptr.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memcpy",
+            )
+            .map_err(|e| CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span.clone()))?;
+        Ok(dst_val)
+    }
+
+    pub(crate) fn memset_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memset expects dst as first argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(val_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memset expects value as second argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memset expects len as third argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let val_val = self.emit_expression_value(val_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let val_i8 = val_val.into_int_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memset.p0.i64 intrinsic
+        let memset_fn = self
+            .module
+            .get_function("llvm.memset.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i8 = self.context.i8_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), i8.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memset.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memset_fn,
+                &[
+                    dst_ptr.into(),
+                    val_i8.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memset",
+            )
+            .map_err(|e| CodegenError::with_span(format!("@memset call failed: {e}"), expr.span.clone()))?;
+        Ok(dst_val)
+    }
+
+    pub(crate) fn memmove_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memmove expects dst as first argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memmove expects src as second argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memmove expects len as third argument".to_string(),
+                expr.span.clone(),
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let src_val = self.emit_expression_value(src_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let src_ptr = src_val.into_pointer_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memmove.p0.p0.i64 intrinsic
+        let memmove_fn = self
+            .module
+            .get_function("llvm.memmove.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), ptr.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memmove.p0.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memmove_fn,
+                &[
+                    dst_ptr.into(),
+                    src_ptr.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memmove",
+            )
+            .map_err(|e| CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span.clone()))?;
+        Ok(dst_val)
+    }
+
     pub(crate) fn print_codegen(
         &mut self,
         name: &str,
@@ -3838,6 +4016,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map(|ptr| ptr.as_basic_value_enum()),
             ast::ExpressionKind::Identifier(identifier) => {
                 if let Some((ptr, ty)) = self.lookup_storage(&identifier.name) {
+                    // Array-to-pointer decay: emit pointer to first element,
+                    // not a load of the whole array value.
+                    if matches!(ty.kind.as_ref(), ast::TypeKind::Array(_)) {
+                        let array_llvm_ty = self.lower_basic_type(&ty)?;
+                        let zero = self.context.i32_type().const_zero();
+                        let element_ptr = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                array_llvm_ty,
+                                ptr,
+                                &[zero, zero],
+                                format!("{}.ptr", identifier.name).as_str(),
+                            )
+                        }
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to get array pointer `{}`: {e}", identifier.name),
+                                identifier.span.clone(),
+                            )
+                        })?;
+                        return Ok(element_ptr.as_basic_value_enum());
+                    }
                     let llvm_ty = self.lower_basic_type(&ty)?;
                     return self
                         .builder

@@ -51,6 +51,14 @@ pub const i64 ENOTEMPTY = 39;       // Directory not empty
 pub const i64 ELOOP = 40;           // Too many symbolic links encountered
 pub const i64 EOVERFLOW = 75;       // Value too large for defined data type
 pub const i64 ETIMEDOUT = 110;      // Connection timed out
+pub const i64 ECONNRESET = 104;       // Connection reset by peer
+pub const i64 ECONNREFUSED = 111;     // Connection refused
+pub const i64 EADDRINUSE = 98;        // Address already in use
+pub const i64 EADDRNOTAVAIL = 99;     // Cannot assign requested address
+pub const i64 ENETUNREACH = 101;      // Network is unreachable
+pub const i64 EINPROGRESS = 115;      // Operation now in progress
+pub const i64 ENOTCONN = 107;         // Transport endpoint is not connected
+pub const i64 EALREADY = 114;         // Operation already in progress
 
 // Highest errno value the kernel encodes in a raw syscall return.
 pub const i64 ERRNO_MAX = 4095;
@@ -127,6 +135,14 @@ pub str errno_name(i64 err) {
     if (e == ENOTEMPTY) { return "ENOTEMPTY"; }
     if (e == ELOOP) { return "ELOOP"; }
     if (e == EOVERFLOW) { return "EOVERFLOW"; }
+    if (e == EADDRINUSE) { return "EADDRINUSE"; }
+    if (e == EADDRNOTAVAIL) { return "EADDRNOTAVAIL"; }
+    if (e == ENETUNREACH) { return "ENETUNREACH"; }
+    if (e == ECONNRESET) { return "ECONNRESET"; }
+    if (e == ENOTCONN) { return "ENOTCONN"; }
     if (e == ETIMEDOUT) { return "ETIMEDOUT"; }
+    if (e == ECONNREFUSED) { return "ECONNREFUSED"; }
+    if (e == EALREADY) { return "EALREADY"; }
+    if (e == EINPROGRESS) { return "EINPROGRESS"; }
     return "EUNKNOWN";
 }

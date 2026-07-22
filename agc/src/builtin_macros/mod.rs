@@ -49,6 +49,9 @@ impl MacroRegistry {
         registry.register("eprintln", Box::new(PrintHandler));
         registry.register("fprint", Box::new(PrintHandler));
         registry.register("sprint", Box::new(PrintHandler));
+        registry.register("memcpy", Box::new(MemcpyHandler));
+        registry.register("memset", Box::new(MemsetHandler));
+        registry.register("memmove", Box::new(MemmoveHandler));
         registry
     }
 
@@ -152,6 +155,77 @@ impl MacroHandler for HashHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.hash_codegen(expr, args)
+    }
+}
+pub struct MemcpyHandler;
+
+impl MacroHandler for MemcpyHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.memcpy_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.memcpy_codegen(expr, args)
+    }
+}
+
+pub struct MemsetHandler;
+
+impl MacroHandler for MemsetHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.memset_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.memset_codegen(expr, args)
+    }
+}
+
+pub struct MemmoveHandler;
+
+impl MacroHandler for MemmoveHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.memmove_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.memmove_codegen(expr, args)
     }
 }
 

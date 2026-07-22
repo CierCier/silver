@@ -1,0 +1,66 @@
+// Memory growth watch test: allocates ~1 GiB incrementally over ~10 sec,
+// holds for ~10 sec, frees incrementally over ~10 sec.
+// Run with:  top -p $(pgrep -f mem_growth_watch)
+import std.mem;
+import std.io;      // STDOUT
+import std.sys.linux;
+
+// Linux timespec (sys_nanosleep argument).
+struct timespec { i64 tv_sec; i64 tv_nsec; }
+
+void sleep_ms(i64 ms) {
+    timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    sys_nanosleep((i64)&ts, 0);
+}
+
+i32 main() {
+    i64 CHUNK = 50 * 1024 * 1024;  // 50 MiB
+    i64 N = 20;                     // 20 × 50 MiB = ~1 GiB
+    i64 PAGE = 4096;
+    i64 STEP_MS = 500;
+
+    STDOUT.write_str("=== Memory Growth Watch ===\n");
+    STDOUT.write_str("Allocating 1 GiB in 20 × 50 MiB chunks...\n");
+
+    u8** ptrs = alloc<u8*>(N);
+
+    // --- Phase 1: incremental allocation over ~10 sec ---
+    for (i64 i = 0; i < N; i = i + 1) {
+        STDOUT.write_str("  chunk ");
+        STDOUT.write_i64(i + 1);
+        STDOUT.write_str("/20 ");
+
+        ptrs[i] = alloc<u8>(CHUNK);
+        if (ptrs[i] == (u8*)0) {
+            STDOUT.write_str("OOM!\n");
+            return 1;
+        }
+        // Touch every 4 KiB page in the chunk so the OS commits physical RAM.
+        for (i64 off = 0; off < CHUNK; off = off + PAGE) {
+            ptrs[i][off] = (u8)(i + 1);
+        }
+
+        STDOUT.write_str("ok\n");
+        sleep_ms(STEP_MS);
+    }
+
+    // --- Phase 2: hold for ~10 sec ---
+    STDOUT.write_str("Holding 1 GiB for 10 seconds...\n");
+    sleep_ms(10000);
+
+    // --- Phase 3: incremental free over ~10 sec ---
+    STDOUT.write_str("Freeing...\n");
+    for (i64 i = 0; i < N; i = i + 1) {
+        STDOUT.write_str("  free chunk ");
+        STDOUT.write_i64(i + 1);
+        STDOUT.write_str("/20\n");
+        free(ptrs[i]);
+        sleep_ms(STEP_MS);
+    }
+
+    free(ptrs);
+    STDOUT.write_str("Done.\n");
+    return 0;
+}

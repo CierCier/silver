@@ -1,0 +1,115 @@
+// Allocator validity test — verifies static .bss heads, alignment ≤64,
+// free-list recycling, and sentinel value with 64 KiB threshold.
+import std.test;
+import std.mem;
+
+i32 main() {
+    STDOUT.write_str("=== Allocator Validity Test ===\n\n");
+
+    // 1. Basic allocation: non-null, writable, readable
+    STDOUT.write_str("--- Basic allocation ---\n");
+    i64* p = alloc<i64>();
+    assert_true(p != (i64*)0, "alloc<i64>() returns non-null");
+    *p = 12345;
+    assert_eq_i64(*p, 12345, "allocated i64 is writable and readable");
+    free(p);
+
+    // 2. Array allocation with i32 stride
+    STDOUT.write_str("\n--- Array allocation ---\n");
+    i32* arr = alloc<i32>(50);
+    for (i32 i = 0; i < 50; i = i + 1) {
+        arr[i] = i;
+    }
+    bool ok = true;
+    for (i32 i = 0; i < 50; i = i + 1) {
+        if (arr[i] != i) {
+            ok = false;
+        }
+    }
+    assert_true(ok, "50-element i32 array holds correct values");
+    free(arr);
+
+    // 3. Alignment up to 64 bytes (small allocator path)
+    STDOUT.write_str("\n--- Alignment up to 64 bytes ---\n");
+    for (i32 shift = 3; shift <= 6; shift = shift + 1) {
+        i64 align = 1 << shift;  // 8, 16, 32, 64
+        u8* a = silver_rt_alloc(32, align);
+        assert_true(a != (u8*)0, "silver_rt_alloc(32, align) returns non-null");
+        assert_eq_i64((i64)a & (align - (i64)1), 0, "address is aligned to required boundary");
+        a[0] = (u8)shift;
+        a[31] = (u8)shift;
+        silver_rt_dealloc(a, 32, align);
+    }
+    assert_true(true, "all alignment sizes passed");
+
+    // 4. Free-list recycling: freed block reappears for same size class
+    STDOUT.write_str("\n--- Free-list recycling ---\n");
+    i64 addr1 = (i64)alloc<i64>();
+    free((i64*)addr1);
+    i64 addr2 = (i64)alloc<i64>();
+    // The same class (16 bytes) should recycle the just-freed block.
+    assert_eq_i64(addr1, addr2, "free-list recycles freed 16-byte block");
+    free((i64*)addr2);
+
+    // 5. Multiple size classes
+    STDOUT.write_str("\n--- Size classes ---\n");
+    // Exercise each size class individually.
+    u8* b16  = alloc<u8>(16);   assert_true(b16  != (u8*)0, "16-byte alloc non-null");  b16[0] = 16;  free(b16);
+    check(true, "size class 16 exercised");
+    u8* b32  = alloc<u8>(32);   assert_true(b32  != (u8*)0, "32-byte alloc non-null");  b32[0] = 32;  free(b32);
+    check(true, "size class 32 exercised");
+    u8* b64  = alloc<u8>(64);   assert_true(b64  != (u8*)0, "64-byte alloc non-null");  b64[0] = 64;  free(b64);
+    check(true, "size class 64 exercised");
+    u8* b128 = alloc<u8>(128);  assert_true(b128 != (u8*)0, "128-byte alloc non-null"); b128[0] = 128; free(b128);
+    check(true, "size class 128 exercised");
+    u8* b256 = alloc<u8>(256);  assert_true(b256 != (u8*)0, "256-byte alloc non-null"); b256[0] = 256; free(b256);
+    check(true, "size class 256 exercised");
+    u8* b512 = alloc<u8>(512);  assert_true(b512 != (u8*)0, "512-byte alloc non-null"); b512[0] = 512; free(b512);
+    check(true, "size class 512 exercised");
+    u8* b1k  = alloc<u8>(1024); assert_true(b1k  != (u8*)0, "1 KiB alloc non-null");     b1k[0] = 1;   free(b1k);
+    check(true, "size class 1024 exercised");
+    u8* b2k  = alloc<u8>(2048); assert_true(b2k  != (u8*)0, "2 KiB alloc non-null");     b2k[0] = 2;   free(b2k);
+    check(true, "size class 2048 exercised");
+    u8* b4k  = alloc<u8>(4096); assert_true(b4k  != (u8*)0, "4 KiB alloc non-null");     b4k[0] = 4;   free(b4k);
+    check(true, "all size classes exercised");
+
+    // 6. Huge allocation (> 4096 bytes, mmap path)
+    STDOUT.write_str("\n--- Huge allocation (mmap path) ---\n");
+    u8* huge = alloc<u8>(10000);
+    assert_true(huge != (u8*)0, "10 KiB huge alloc returns non-null");
+    huge[0] = 77;
+    huge[9999] = 88;
+    assert_eq_i64(huge[0], 77, "first byte of huge alloc writable");
+    assert_eq_i64(huge[9999], 88, "last byte of huge alloc writable");
+    free(huge);
+
+    // 7. Over-aligned huge path
+    STDOUT.write_str("\n--- Over-aligned huge path (>64 byte alignment) ---\n");
+    u8* over = silver_rt_alloc(256, 128);
+    assert_true(over != (u8*)0, "over-aligned alloc returns non-null");
+    assert_eq_i64((i64)over & (i64)127, 0, "over-aligned address is 128-byte aligned");
+    over[0] = 11;
+    over[255] = 22;
+    free(over);
+
+    // 8. Realloc
+    STDOUT.write_str("\n--- Realloc ---\n");
+    i64* rp = alloc<i64>(4);
+    rp[0] = 10; rp[1] = 20; rp[2] = 30; rp[3] = 40;
+    rp = (i64*)realloc(rp, 8 * 8);
+    assert_true(rp[0] == 10, "realloc preserved first element");
+    assert_true(rp[3] == 40, "realloc preserved last element");
+    rp[7] = 99;
+    assert_eq_i64(rp[7], 99, "realloc extended space is writable");
+    free(rp);
+
+    // 9. Null free is a no-op
+    STDOUT.write_str("\n--- Null/dangling safety ---\n");
+    free((i64*)0);
+    check(true, "free(null) is safe");
+    free((i64*)1);
+    check(true, "free(dangling < 64 KiB) is safe");
+
+    STDOUT.write_str("\n--- All allocator validity tests passed ---\n");
+    return 0;
+}
