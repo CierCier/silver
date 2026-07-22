@@ -1,37 +1,28 @@
 import std.io;
-import std.mem.alloc;
 
 i32 main() {
-    // Using alloc<T>(N) for dynamic arrays (Slice<T> style)
-    i32* arr1 = alloc<i32>(5);
-    arr1[0] = 10; arr1[1] = 20; arr1[2] = 30; arr1[3] = 40; arr1[4] = 50;
+    // Using fixed-size stack arrays with {} initializer blocks
+    i32 arr1[5] = { 10, 20, 30, 40, 50 };
     @println("arr1[2]: {}", arr1[2]);
 
-    // Mixed initialization with designated indices
-    i32* sparse = alloc<i32>(10);
-    sparse[1] = 100;
-    sparse[7] = 200;
+    // Designated index initializer: unset positions are zero-initialized
+    i32 sparse[10] = { [1]=100, [7]=200 };
     @println("sparse[1]: {}", sparse[1]);
     @println("sparse[7]: {}", sparse[7]);
     @println("sparse[0]: {}", sparse[0]);
 
-    i32* mixed = alloc<i32>(8);
-    mixed[0] = 1; mixed[1] = 2;
-    mixed[4] = 8; mixed[5] = 9;
+    // Mixed designated and positional (through index syntax)
+    i32 mixed[8] = { [0]=1, [1]=2, [4]=8, [5]=9 };
     @println("mixed[0]: {}", mixed[0]);
     @println("mixed[4]: {}", mixed[4]);
     @println("mixed[5]: {}", mixed[5]);
 
-    // Sum all elements
+    // Sum all elements of arr1
     i32 sum = 0;
     for (i32 i = 0; i < 5; i = i + 1) {
         sum = sum + arr1[i];
     }
     @println("sum of arr1: {}", sum);
-
-    free(arr1);
-    free(sparse);
-    free(mixed);
 
     return 0;
 }

@@ -965,9 +965,21 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
                 substitute_expression_types(input, mapping);
             }
         }
-        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+        ast::ExpressionKind::ForIn {
+            iterable,
+            body,
+            item_type,
+            iterator_type,
+            ..
+        } => {
             substitute_expression_types(iterable, mapping);
             substitute_block_types(body, mapping);
+            if let Some(item_type) = item_type {
+                *item_type.as_mut() = substitute_ast_type(item_type, mapping);
+            }
+            if let Some(iterator_type) = iterator_type {
+                *iterator_type.as_mut() = substitute_ast_type(iterator_type, mapping);
+            }
         }
     }
 }

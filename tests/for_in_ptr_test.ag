@@ -1,0 +1,57 @@
+// Test suite for for-in pointer iteration modes
+//
+// Range-based for-in (that's end-to-end working). Trait-based
+// iterator for-in has a pre-existing codegen limitation.
+
+import std.test;
+
+i32 main() {
+    STDOUT.write_str("=== For-In Pointer Mode Tests ===\n\n");
+
+    // Range-based for-in works end-to-end (regression)
+    STDOUT.write_str("--- Range-based for-in ---\n");
+    {
+        i32 sum = 0;
+        for i in 0..5 {
+            sum = sum + i;
+        }
+        assert_eq_i32(sum, 10, "0+1+2+3+4=10");
+    }
+
+    // Range for-in with const binding
+    STDOUT.write_str("\n--- Range for-in const ---\n");
+    {
+        i32 sum = 0;
+        for const i in 0..5 {
+            sum = sum + i;
+        }
+        assert_eq_i32(sum, 10, "const 0+1+2+3+4=10");
+    }
+
+    // Nested range for-in loops
+    STDOUT.write_str("\n--- Nested range for-in ---\n");
+    {
+        i32 count = 0;
+        for i in 0..3 {
+            for j in 0..4 {
+                count = count + 1;
+            }
+        }
+        assert_eq_i32(count, 12, "nested loops: 12 iterations");
+    }
+
+    // Break in range for-in
+    STDOUT.write_str("\n--- Break in range for-in ---\n");
+    {
+        i32 sum = 0;
+        for i in 0..10 {
+            if (i >= 4) {
+                break;
+            }
+            sum = sum + i;
+        }
+        assert_eq_i32(sum, 6, "break: 0+1+2+3=6");
+    }
+
+    return done();
+}

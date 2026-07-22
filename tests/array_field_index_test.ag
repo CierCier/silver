@@ -1,0 +1,119 @@
+// Integration test for array field indexing.
+// Tests: struct field array read/write, deep chaining, pointer access,
+// reference access, compound assignment, loop fill, i64 index.
+import std.test;  // test_start, assert_true, assert_eq_i64, check, done, STDOUT
+
+struct Inner {
+    i64 vals[3];
+}
+
+struct Outer {
+    Inner items[5];
+}
+
+i32 main() {
+    STDOUT.write_str("=== Array Field Indexing Tests ===\n\n");
+
+    // Test 1: Basic struct array field — read + write
+    test_start("Basic array field read/write");
+    {
+        Outer s;
+        s.items[0].vals[0] = 10;
+        s.items[0].vals[1] = 20;
+        s.items[0].vals[2] = 30;
+        assert_eq_i64(10, s.items[0].vals[0], "s.items[0].vals[0] == 10");
+        assert_eq_i64(20, s.items[0].vals[1], "s.items[0].vals[1] == 20");
+        assert_eq_i64(30, s.items[0].vals[2], "s.items[0].vals[2] == 30");
+    }
+
+    // Test 2: Nested structs with arrays — deep chaining
+    test_start("Nested array indexing (deep chaining)");
+    {
+        Outer s;
+        s.items[1].vals[2] = 42;
+        assert_eq_i64(42, s.items[1].vals[2], "s.items[1].vals[2] == 42");
+
+        s.items[3].vals[0] = 99;
+        assert_eq_i64(99, s.items[3].vals[0], "s.items[3].vals[0] == 99");
+
+        s.items[4].vals[1] = 77;
+        assert_eq_i64(77, s.items[4].vals[1], "s.items[4].vals[1] == 77");
+    }
+
+    // Test 3: Array field read via pointer
+    test_start("Array field read via pointer");
+    {
+        Outer s;
+        s.items[0].vals[0] = 77;
+        Outer* sp = &s;
+        assert_eq_i64(77, (*sp).items[0].vals[0], "(*sp).items[0].vals[0] == 77");
+    }
+
+    // Test 4: Array field write via pointer
+    test_start("Array field write via pointer");
+    {
+        Outer s;
+        Outer* sp = &s;
+        (*sp).items[2].vals[1] = 55;
+        assert_eq_i64(55, s.items[2].vals[1], "s.items[2].vals[1] == 55 after ptr write");
+    }
+
+    // Test 5: Reference to array element
+    test_start("Reference to array element");
+    {
+        Outer s;
+        s.items[0].vals[0] = 10;
+        i64* p = &s.items[0].vals[0];
+        *p = 99;
+        assert_eq_i64(99, s.items[0].vals[0], "s.items[0].vals[0] == 99 after *p = 99");
+    }
+
+    // Test 6: Compound assignment (+=)
+    test_start("Compound assignment (+=)");
+    {
+        Outer s;
+        s.items[0].vals[0] = 10;
+        s.items[0].vals[0] += 1;
+        assert_eq_i64(11, s.items[0].vals[0], "s.items[0].vals[0] == 11 after += 1");
+
+        s.items[0].vals[1] = 100;
+        s.items[0].vals[1] -= 10;
+        assert_eq_i64(90, s.items[0].vals[1], "s.items[0].vals[1] == 90 after -= 10");
+    }
+
+    // Test 7: Loop fill + verify with i64 index
+    test_start("Loop fill + verify with i64 index");
+    {
+        Outer s;
+        for (i64 i = 0; i < 5; i = i + 1) {
+            s.items[i].vals[0] = i * 10;
+            s.items[i].vals[1] = i * 10 + 1;
+            s.items[i].vals[2] = i * 10 + 2;
+        }
+        for (i64 i = 0; i < 5; i = i + 1) {
+            assert_eq_i64(i * 10,     s.items[i].vals[0], "loop: s.items[i].vals[0]");
+            assert_eq_i64(i * 10 + 1, s.items[i].vals[1], "loop: s.items[i].vals[1]");
+            assert_eq_i64(i * 10 + 2, s.items[i].vals[2], "loop: s.items[i].vals[2]");
+        }
+    }
+
+    // Test 8: 64-bit index variable
+    test_start("64-bit index variable");
+    {
+        Outer s;
+        s.items[0].vals[0] = 100;
+        s.items[0].vals[1] = 200;
+        s.items[0].vals[2] = 300;
+
+        i64 idx = 0;
+        assert_eq_i64(100, s.items[idx].vals[0], "s.items[0].vals[0] with i64 idx");
+        assert_eq_i64(200, s.items[idx].vals[1], "s.items[0].vals[1] with i64 idx");
+        assert_eq_i64(300, s.items[idx].vals[2], "s.items[0].vals[2] with i64 idx");
+
+        idx = 2;
+        s.items[idx].vals[1] = 64;
+        assert_eq_i64(64, s.items[2].vals[1], "s.items[2].vals[1] = 64 with i64 idx");
+    }
+
+    return done();
+}

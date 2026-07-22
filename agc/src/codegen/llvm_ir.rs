@@ -4170,7 +4170,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
                 let object_ty = self.resolve_receiver_type(object);
                 if let Some(ty) = &object_ty
-                    && matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_))
+                && matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_))
                 {
                     let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                     let llvm_ty = self.lower_basic_type(&ty)?;
@@ -4751,6 +4751,154 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 Ok(aggregate.as_basic_value_enum())
             }
+            ast::TypeKind::Array(array) => {
+                let element_llvm_ty = self.lower_basic_type(&array.element_type)?;
+                let array_llvm_ty = element_llvm_ty.array_type(array.size as u32);
+                let function = self.current_fn.ok_or_else(|| {
+                    CodegenError::new("no active function for array initializer")
+                })?;
+                let temp = self.create_entry_alloca(
+                    function,
+                    "init.arr.tmp",
+                    array_llvm_ty.as_basic_type_enum(),
+                )?;
+
+                // Zero-initialize the temp, then overwrite specified positions
+                self.builder
+                    .build_store(temp, array_llvm_ty.const_zero())
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to zero-init array initializer: {e}"),
+                            span.clone(),
+                        )
+                    })?;
+
+                let positional = items.iter().all(|item| {
+                    matches!(item, ast::InitializerItem::Positional(_))
+                });
+
+                if positional {
+                    if (items.len() as i64) > array.size {
+                        return Err(CodegenError::with_span(
+                            format!(
+                                "array initializer has {} elements but array size is {}",
+                                items.len(),
+                                array.size
+                            ),
+                            span.clone(),
+                        ));
+                    }
+                    for (i, item) in items.iter().enumerate() {
+                        let ast::InitializerItem::Positional(expr) = item else {
+                            unreachable!()
+                        };
+                        let value =
+                            self.emit_expression_value_for_expected(expr, &array.element_type)?;
+                        let value =
+                            self.cast_value_to_basic_type(value, element_llvm_ty, &expr.span)?;
+                        let indices = [
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_int(i as u64, false),
+                        ];
+                        let ptr = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                array_llvm_ty,
+                                temp,
+                                &indices,
+                                "arr.init.ptr",
+                            )
+                        }
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("GEP array initializer element {i}: {e}"),
+                                expr.span.clone(),
+                            )
+                        })?;
+                        self.builder.build_store(ptr, value).map_err(|e| {
+                            CodegenError::with_span(
+                                format!("store array initializer element {i}: {e}"),
+                                expr.span.clone(),
+                            )
+                        })?;
+                    }
+                } else {
+                    for item in items {
+                        match item {
+                            ast::InitializerItem::Index { index, value } => {
+                                let idx_val = self.emit_expression_value(index)?;
+                                let BasicValueEnum::IntValue(idx_int) = idx_val else {
+                                    return Err(CodegenError::with_span(
+                                        "array index must be an integer",
+                                        index.span.clone(),
+                                    ));
+                                };
+                                let elem_val = self
+                                    .emit_expression_value_for_expected(value, &array.element_type)?;
+                                let elem_val = self.cast_value_to_basic_type(
+                                    elem_val,
+                                    element_llvm_ty,
+                                    &value.span,
+                                )?;
+
+                                let i64_ty = self.context.i64_type();
+                                let idx_i64 = if idx_int.get_type().get_bit_width() == 64 {
+                                    idx_int
+                                } else {
+                                    self.builder
+                                        .build_int_cast(idx_int, i64_ty, "idx.cast")
+                                        .map_err(|e| {
+                                            CodegenError::with_span(
+                                                format!("failed to cast array index: {e}"),
+                                                index.span.clone(),
+                                            )
+                                        })?
+                                };
+                                let ptr = unsafe {
+                                    self.builder.build_in_bounds_gep(
+                                        array_llvm_ty,
+                                        temp,
+                                        &[i64_ty.const_zero(), idx_i64],
+                                        "arr.init.ptr",
+                                    )
+                                }
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("GEP array initializer: {e}"),
+                                        value.span.clone(),
+                                    )
+                                })?;
+                                self.builder
+                                    .build_store(ptr, elem_val)
+                                    .map_err(|e| {
+                                        CodegenError::with_span(
+                                            format!("store array initializer: {e}"),
+                                            value.span.clone(),
+                                        )
+                                    })?;
+                            }
+                            _ => {
+                                return Err(CodegenError::with_span(
+                                    "array initializer only supports positional and indexed items",
+                                    span.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                self.builder
+                    .build_load(
+                        array_llvm_ty.as_basic_type_enum(),
+                        temp,
+                        "init.arr.val",
+                    )
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to load array initializer: {e}"),
+                            span.clone(),
+                        )
+                    })
+            }
             _ => Err(CodegenError::with_span(
                 "initializer is not supported for this target type",
                 target_type.span.clone(),
@@ -5309,12 +5457,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 index.span.clone(),
                             ));
                         };
-                        let i32_ty = self.context.i32_type();
-                        let index_i32 = if index_int.get_type().get_bit_width() == 32 {
+                        let i64_ty = self.context.i64_type();
+                        let index_i64 = if index_int.get_type().get_bit_width() == 64 {
                             index_int
                         } else {
                             self.builder
-                                .build_int_cast(index_int, i32_ty, "idx.cast")
+                                .build_int_cast(index_int, i64_ty, "idx.cast")
                                 .map_err(|e| {
                                     CodegenError::with_span(
                                         format!("failed to cast pointer index: {e}"),
@@ -5327,7 +5475,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             self.builder.build_in_bounds_gep(
                                 element_llvm_ty,
                                 base_ptr,
-                                &[index_i32],
+                                &[index_i64],
                                 "ptr.idx.ptr",
                             )
                         }
@@ -5338,6 +5486,45 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             )
                         })?;
                         Ok((element_ptr, (*pointer.inner).clone()))
+                    }
+                    ast::TypeKind::Array(array) => {
+                        let index_value = self.emit_expression_value(index)?;
+                        let BasicValueEnum::IntValue(index_int) = index_value else {
+                            return Err(CodegenError::with_span(
+                                "array index must be an integer",
+                                index.span.clone(),
+                            ));
+                        };
+                        let i64_ty = self.context.i64_type();
+                        let index_i64 = if index_int.get_type().get_bit_width() == 64 {
+                            index_int
+                        } else {
+                            self.builder
+                                .build_int_cast(index_int, i64_ty, "idx.cast")
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("failed to cast array index: {e}"),
+                                        index.span.clone(),
+                                    )
+                                })?
+                        };
+                        let array_llvm_ty = self.lower_basic_type(&object_ty)?;
+                        let zero = i64_ty.const_zero();
+                        let element_ptr = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                array_llvm_ty,
+                                object_ptr,
+                                &[zero, index_i64],
+                                "arr.idx.ptr",
+                            )
+                        }
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed array index GEP: {e}"),
+                                index.span.clone(),
+                            )
+                        })?;
+                        Ok((element_ptr, (*array.element_type).clone()))
                     }
                     _ => Err(CodegenError::with_span(
                         "index access currently supports only array and pointer values",
@@ -6110,6 +6297,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 Ok(())
             }
+            ast::ExpressionKind::Index { object, .. } => {
+                self.check_assignment_mutability(object)
+            }
             _ => Ok(()),
         }
     }
@@ -6133,7 +6323,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref() {
                     let object_ty = self.resolve_receiver_type(object);
                     if !object_ty
-                        .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)))
+                        .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_)))
                     {
                         self.check_assignment_mutability(left)?;
                         let value = self.emit_expression_value(right)?;
@@ -7066,6 +7256,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         iterable: &ast::Expression,
         body: &ast::Block,
         _item_type: Option<&ast::Type>,
+        iterator_type: Option<&ast::Type>,
+        mode: ast::IterAccessMode,
         span: &Span,
     ) -> CodegenResult<()> {
         let function = self
@@ -7221,8 +7413,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     })),
                     span: dummy_span.clone(),
                 };
+                let method_name = match mode {
+                    ast::IterAccessMode::ByValue => "into_iter",
+                    ast::IterAccessMode::ByPtr => "into_iter_ptr",
+                    ast::IterAccessMode::ByConstPtr => "into_iter_const_ptr",
+                };
                 let into_iter_ident = ast::Identifier {
-                    name: "into_iter".to_string(),
+                    name: method_name.to_string(),
                     span: dummy_span.clone(),
                 };
                 let iterator_val = self
@@ -7237,19 +7434,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let iter_llvm_ty = iterator_val.get_type();
 
-                // Look up the actual AST return type of into_iter() for method dispatch
-                let iter_ast_ty = {
-                    let owners = self.receiver_owner_candidates(&iterable_expr);
-                    let mut found = None;
-                    for owner_name in &owners {
-                        let mangled = Self::mangle_method_name(owner_name, &into_iter_ident.name);
-                        if let Some(sig) = self.signature_for_name(&mangled) {
-                            found = sig.return_type;
-                            break;
-                        }
-                    }
-                    found.unwrap_or_else(|| self.infer_ast_type_from_value(&iterator_val, span))
-                };
+                // Use the typeck-resolved iterator type (carries generics), or infer from LLVM value
+                let iter_ast_ty = iterator_type
+                    .cloned()
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&iterator_val, span));
                 let iter_ptr = self.create_entry_alloca(function, iter_name, iter_llvm_ty)?;
                 self.builder
                     .build_store(iter_ptr, iterator_val)
@@ -8439,12 +8627,16 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     iterable,
                     body,
                     item_type,
+                    mode,
+                    iterator_type,
                 } => self.emit_for_in_statement(
                     binding,
                     *is_mutable,
                     iterable,
                     body,
                     item_type.as_deref(),
+                    iterator_type.as_deref(),
+                    *mode,
                     &statement.span,
                 ),
                 _ => self.emit_expression_statement(expr),
@@ -8599,8 +8791,18 @@ mod tests {
         let (mut program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
 
-        let (type_errors, monomorphs) = TypeChecker::new().check_program(&program);
+        let mut checker = TypeChecker::new();
+        let mut table = crate::symbol_table::CompilerSymbolTable::new();
+        let (type_errors, monomorphs) = checker.check_program_with_table(&program, &mut table);
         assert!(type_errors.is_empty(), "type errors: {type_errors:?}");
+        // Populate ForIn iterator types from typeck-resolved data
+        let resolved_iter_types = checker.take_resolved_iter_types();
+        if !resolved_iter_types.is_empty() {
+            crate::semantic::typeck::populate_for_in_iterator_types(
+                &mut program,
+                &resolved_iter_types,
+            );
+        }
         monomorph::append_monomorphs(&mut program, &monomorphs);
         program
     }
@@ -8793,6 +8995,17 @@ mod tests {
         assert!(
             ir.contains("forin.cond"),
             "expected protocol for-in loop in IR:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_generic_protocol_for_in() {
+        let ir = lower_to_llvm(
+            "trait IntoIterator {} trait Iterator {} struct Optional<T> { bool present; T thing; } struct Vec<T> { T* data; i64 len; } struct VecIter<T> { Vec<T>* vec; i64 idx; } impl IntoIterator for Vec<T> { VecIter<T> into_iter(Vec<T> self) { VecIter<T> it; return it; } } impl Iterator for VecIter<T> { Optional<T> next(VecIter<T>* self) { Optional<T> r; return r; } } i32 main() { Vec<i32> v; for i in v { return 0; } return 0; }",
+        );
+        assert!(
+            ir.contains("VecIter__i32__next"),
+            "expected monomorphized next in IR:\n{ir}"
         );
     }
     #[test]

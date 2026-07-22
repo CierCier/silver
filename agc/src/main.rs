@@ -16,6 +16,7 @@ use agc::semantic::{
 };
 use agc::symbol_table::{CompilerPhase, CompilerSymbolTable};
 use agc::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
+use agc::parser::ast;
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -793,10 +794,64 @@ fn main() {
 
                 profiler.begin_phase("type check");
                 TypeChecker::resolve_type_aliases_in_program(&mut ast);
-                let (type_errors, monomorphs) = TypeChecker::new()
-                    .with_imported_modules(&imported_modules)
-                    .check_program_with_table(&ast, &mut symbol_table);
-                profiler.end_phase("type check");
+                let mut checker = TypeChecker::new()
+                    .with_imported_modules(&imported_modules);
+                let (type_errors, mut monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
+                // Populate ForIn iterator_type from typeck-resolved types
+                let resolved_iter_types = checker.take_resolved_iter_types();
+                if !resolved_iter_types.is_empty() {
+                    agc::semantic::typeck::populate_for_in_iterator_types(
+                        &mut ast,
+                        &resolved_iter_types,
+                    );
+                    // MonomorphRequest sources were captured before population,
+                    // so their ForIn nodes have iterator_type: None. Replace
+                    // the sources with the now-populated bodies from the AST.
+                    for request in &mut monomorphs {
+                        use agc::semantic::monomorph::MonomorphRequest;
+                        match request {
+                            MonomorphRequest::Function { source, .. } => {
+                                for item in &ast.items {
+                                    if let ast::ItemKind::Function(f) = &item.kind
+                                        && f.name.name == source.name.name
+                                    {
+                                        source.body = f.body.clone();
+                                        break;
+                                    }
+                                }
+                            }
+                            MonomorphRequest::ImplMethod {
+                                impl_item, method, ..
+                            } => {
+                                // Find matching impl in the populated AST and
+                                // replace the method body.
+                                for item in &ast.items {
+                                    if let ast::ItemKind::Impl(impl_item_ast) = &item.kind
+                                        && impl_item_ast.self_type == impl_item.self_type
+                                    {
+                                        for member in &impl_item_ast.items {
+                                            if let ast::ImplItemKind::Function(func) = member
+                                                && func.name.name == method.name.name
+                                            {
+                                                // Find matching method in our source impl
+                                                for source_member in &mut impl_item.items {
+                                                    if let ast::ImplItemKind::Function(source_func) = source_member
+                                                        && source_func.name.name == method.name.name
+                                                    {
+                                                        source_func.body = func.body.clone();
+                                                        break;
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if !type_errors.is_empty() {
                     eprintln!("agc: type errors:");
                     for error in &type_errors {
