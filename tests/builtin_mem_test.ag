@@ -1,0 +1,126 @@
+// Test suite for @memcpy, @memset, @memmove builtin intrinsics.
+import std.test;
+import std.mem;
+
+struct Pair { i64 a; i64 b; }
+
+i32 main() {
+    STDOUT.write_str("=== @memcpy / @memset / @memmove Tests ===\n\n");
+    STDOUT.write_str("--- @memset ---\n");
+
+    u8* buf = alloc<u8>(64);
+
+    // Fill with 0xAA
+    u8* ret = @memset(buf, (u8)0xAA, 64);
+    assert_true(ret == buf, "@memset returns dst pointer");
+
+    bool all_aa = true;
+    for (i32 i = 0; i < 64; i = i + 1) {
+        if (buf[i] != (u8)0xAA) {
+            all_aa = false;
+        }
+    }
+    assert_true(all_aa, "@memset fills 64 bytes with 0xAA");
+
+    // Fill partial range with 0
+    @memset(buf, (u8)0, 16);
+    bool partial_zero = true;
+    for (i32 i = 0; i < 16; i = i + 1) {
+        if (buf[i] != (u8)0) {
+            partial_zero = false;
+        }
+    }
+    assert_true(partial_zero, "@memset zeroes first 16 bytes");
+
+    // Remaining bytes should still be 0xAA
+    bool remaining_aa = true;
+    for (i32 i = 16; i < 64; i = i + 1) {
+        if (buf[i] != (u8)0xAA) {
+            remaining_aa = false;
+        }
+    }
+    assert_true(remaining_aa, "@memset preserves bytes 16..63");
+
+    // --- @memcpy ---
+    STDOUT.write_str("\n--- @memcpy ---\n");
+
+    u8* src = alloc<u8>(32);
+    u8* dst = alloc<u8>(32);
+
+    // Fill source with pattern
+    for (i32 i = 0; i < 32; i = i + 1) {
+        src[i] = (u8)(i + 1);
+    }
+
+    // Zero destination
+    @memset(dst, (u8)0, 32);
+
+    // Copy
+    u8* ret2 = @memcpy(dst, src, 32);
+    assert_true(ret2 == dst, "@memcpy returns dst pointer");
+
+    bool copy_ok = true;
+    for (i32 i = 0; i < 32; i = i + 1) {
+        if (dst[i] != src[i]) {
+            copy_ok = false;
+        }
+    }
+    assert_true(copy_ok, "@memcpy copies all 32 bytes correctly");
+
+    // --- @memmove (overlapping forward) ---
+    STDOUT.write_str("\n--- @memmove (forward overlap) ---\n");
+
+    u8* overlap = alloc<u8>(32);
+    for (i32 i = 0; i < 16; i = i + 1) {
+        overlap[i] = (u8)(i + 48);  // '0' .. '9' ':' ';' '<' '=' '>' '?'
+    }
+
+    // Move bytes 0..9 to 5..14 (forward overlap)
+    @memmove(&overlap[5], overlap, 10);
+
+    assert_true(overlap[0] == 48, "@memmove preserves src[0]");
+    assert_true(overlap[4] == 52, "@memmove preserves src[4]");
+    assert_true(overlap[5] == 48, "@memmove copies src[0] to dst[5]");
+    assert_true(overlap[14] == 57, "@memmove copies src[9] to dst[14]");
+
+    free(overlap);
+
+    // --- @memmove (backward overlap) ---
+    STDOUT.write_str("\n--- @memmove (backward overlap) ---\n");
+
+    u8* overlap2 = alloc<u8>(32);
+    for (i32 i = 0; i < 16; i = i + 1) {
+        overlap2[i] = (u8)(i + 65);  // 'A' .. 'P'
+    }
+
+    // Move bytes 5..14 to 0..9 (backward overlap — dst < src)
+    @memmove(overlap2, &overlap2[5], 10);
+
+    assert_true(overlap2[0] == 70, "@memmove copies src[5] (F) to dst[0]");
+    assert_true(overlap2[9] == 79, "@memmove copies src[14] (O) to dst[9]");
+    assert_true(overlap2[15] == 80, "@memmove preserves src[15] (P) at [15]");
+
+    free(overlap2);
+
+    // --- @memcpy with structs ---
+    STDOUT.write_str("\n--- @memcpy with structs ---\n");
+
+    Pair p1;
+    p1.a = 100;
+    p1.b = 200;
+
+    Pair p2;
+    p2.a = 0;
+    p2.b = 0;
+
+    @memcpy((u8*)&p2, (u8*)&p1, @size(Pair));
+    assert_eq_i64(p2.a, 100, "@memcpy copies struct field a");
+    assert_eq_i64(p2.b, 200, "@memcpy copies struct field b");
+
+    free(src);
+    free(dst);
+    free(buf);
+
+    done();
+    return 0;
+}

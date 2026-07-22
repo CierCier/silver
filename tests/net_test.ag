@@ -1,0 +1,45 @@
+// tests/net_test.ag — Integration tests for std/net/tcp.ag and std/net/inet.ag.
+//
+// Tests: TCP echo (bind, connect, accept, send, recv) and connection refused.
+
+import std.net.tcp;
+import std.net.inet;
+import std.sys.result;
+import std.mem;
+import std.test;
+
+i32 main() {
+    // Test A: TCP echo
+    test_start("tcp echo");
+    SockAddrIn bind_addr = SockAddrIn.v4((u16)0, "127.0.0.1");
+    TcpListener listener = TcpListener.bind(&bind_addr, 1);
+    assert_true(listener.valid(), "listener bind ok");
+    SockAddrIn sa;
+    u32 len = 16;
+    SysResult gn = try_getsockname(listener.fd, (void*)&sa, &len);
+    assert_true(gn.is_ok(), "getsockname ok");
+    SockAddrIn conn_addr = SockAddrIn.v4(ntoh16(sa.sin_port), "127.0.0.1");
+    TcpStream client = TcpStream.connect(&conn_addr);
+    assert_true(client.valid(), "connect ok");
+    SysResult w = client.write((u8*)"hello", 5);
+    assert_true(w.is_ok(), "write ok");
+    assert_eq_i64(5, w.value, "wrote 5 bytes");
+    SysResult a = listener.accept();
+    assert_true(a.is_ok(), "accept ok");
+    TcpStream server = { .fd = (i32)a.value, .is_open = true };
+    u8* msg = alloc<u8>(8);
+    SysResult r = server.read(msg, 7);
+    assert_true(r.is_ok(), "read ok");
+    assert_eq_i64(5, r.value, "read 5 bytes");
+    msg[r.value] = (u8)0;
+    assert_eq_str("hello", (str)msg, "echo message matches");
+    free(msg);
+
+    // Test B: connection refused
+    test_start("tcp connect refused");
+    SockAddrIn addr = SockAddrIn.v4((u16)9999, "127.0.0.1");
+    TcpStream s = TcpStream.connect(&addr);
+    assert_true(s.invalid(), "connect refused returns invalid");
+
+    return done();
+}

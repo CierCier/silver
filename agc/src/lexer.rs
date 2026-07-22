@@ -508,6 +508,28 @@ impl Lexer {
 
     fn number_literal(&mut self, first_digit: char) -> Result<Token, LexError> {
         let start_pos = self.position - 1;
+
+        // Check for hex literal (0x or 0X prefix)
+        if first_digit == '0' && !self.is_at_end() && (self.peek() == 'x' || self.peek() == 'X') {
+            self.advance(); // consume 'x' or 'X'
+            let mut hex_str = String::new();
+            while !self.is_at_end() && self.peek().is_ascii_hexdigit() {
+                hex_str.push(self.advance());
+            }
+            if hex_str.is_empty() {
+                return Err(LexError::InvalidNumber {
+                    span: (start_pos, self.position),
+                    message: "Invalid hex literal: expected hex digits after 0x".to_string(),
+                });
+            }
+            let value = i128::from_str_radix(&hex_str, 16)
+                .map_err(|_| LexError::InvalidNumber {
+                    span: (start_pos, self.position),
+                    message: "Invalid hex number".to_string(),
+                })?;
+            return Ok(Token::IntLiteral(value));
+        }
+
         let mut number_str = String::new();
         number_str.push(first_digit);
 

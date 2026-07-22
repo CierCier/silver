@@ -3842,7 +3842,49 @@ impl PRT_Parser {
         };
 
         let mut initializer = None;
-        if after_type + 1 < decl_end {
+        let mut var_type = var_type;
+ 
+        // Check for array syntax `[N]` after the variable name (zero-initialized, no initializer).
+        if after_type + 2 < decl_end && matches!(tokens[after_type + 1].kind, Token::LeftBracket) {
+            let array_size_pos = after_type + 2;
+            let size_token = &tokens[array_size_pos];
+            let size = match &size_token.kind {
+                Token::IntLiteral(val) => *val,
+                _ => {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected integer array size".to_string(),
+                        span: size_token.span.clone(),
+                    });
+                }
+            };
+            let close_bracket = array_size_pos + 1;
+            if close_bracket >= decl_end || !matches!(tokens[close_bracket].kind, Token::RightBracket) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected `]` after array size".to_string(),
+                    span: tokens[array_size_pos + 1].span.clone(),
+                });
+            }
+            var_type = ast::Type {
+                kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+                    element_type: Box::new(var_type),
+                    size: size as i64,
+                    span: Span {
+                        start: tokens[start].span.start,
+                        end: tokens[close_bracket].span.end,
+                    },
+                }))),
+                span: Span {
+                    start: tokens[start].span.start,
+                    end: tokens[close_bracket].span.end,
+                },
+            };
+            if close_bracket + 1 < decl_end && matches!(tokens[close_bracket + 1].kind, Token::Assign) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "array global variables cannot have an initializer".to_string(),
+                    span: tokens[close_bracket + 1].span.clone(),
+                });
+            }
+        } else if after_type + 1 < decl_end {
             if !matches!(tokens[after_type + 1].kind, Token::Assign) {
                 return Err(ParseError::InvalidSyntax {
                     message: "unsupported global variable declaration syntax".to_string(),

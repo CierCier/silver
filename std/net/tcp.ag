@@ -1,0 +1,184 @@
+// std/net/tcp.ag — TCP stream and listener wrappers (Linux x86_64).
+//
+// Provides TcpStream (connected socket) and TcpListener (bound/listening
+// socket) with RAII via Drop, following the sentinel/valid pattern from
+// std/io.ag.
+
+import std.sys.result;
+import std.net.inet;
+import std.mem.drop;
+
+// --- TcpStream ---
+
+pub struct TcpStream {
+    i32 fd;
+    bool is_open;
+}
+
+impl TcpStream {
+    // Sentinel — returns a closed (invalid) stream.
+    TcpStream closed() {
+        TcpStream s = { .fd = -1, .is_open = false };
+        return move s;
+    }
+
+    bool valid(TcpStream* self) { return self.is_open && self.fd >= 0; }
+    bool invalid(TcpStream* self) { return !self.valid(); }
+
+    // Connect to a SockAddrIn. Returns a closed (invalid) stream on
+    // failure. Invalidates fd and is_open before returning on error to
+    // prevent double-close from Drop.
+    TcpStream connect(SockAddrIn* addr) {
+        SysResult r = try_socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (r.is_err()) { return TcpStream.closed(); }
+        TcpStream s = { .fd = (i32)r.value, .is_open = true };
+        SysResult c = try_connect(s.fd, (void*)addr, 16);
+        if (c.is_err()) {
+            try_close(s.fd);
+            s.fd = -1;
+            s.is_open = false;
+            return TcpStream.closed();
+        }
+        return move s;
+    }
+
+    // Read up to `len` bytes into `buf`. Retries on EINTR. Returns
+    // SysResult so callers can distinguish EAGAIN (would block) from
+    // fatal errors. Value = bytes read, 0 = EOF.
+    SysResult read(TcpStream* self, u8* buf, i64 len) {
+        if (self.invalid()) {
+            return SysResult.failure(EINVAL);
+        }
+        SysResult r = try_read(self.fd, buf, len);
+        if (r.err_is(EINTR)) {
+            r = try_read(self.fd, buf, len);
+        }
+        return r;
+    }
+
+    // Write `len` bytes from `buf`. Loops until all bytes sent, retries
+    // on EINTR. If a partial write succeeds and the next write returns a
+    // non-EINTR error, returns SysResult.success(done) with the bytes
+    // written so far (useful for non-blocking mode).
+    SysResult write(TcpStream* self, u8* buf, i64 len) {
+        if (self.invalid()) {
+            return SysResult.failure(EINVAL);
+        }
+        i64 done = 0;
+        while (done < len) {
+            SysResult r = try_write(self.fd, (u8*)((i64)buf + done), len - done);
+            if (r.is_err()) {
+                if (r.err_is(EINTR)) { continue; }
+                if (done > 0) { return SysResult.success(done); }
+                return r;
+            }
+            done = done + r.value;
+            if (r.value == 0) { break; }
+        }
+        return SysResult.success(done);
+    }
+
+    // Close the socket. Idempotent on invalid streams.
+    i64 close(TcpStream* self) {
+        if (self.invalid()) { return 0; }
+        SysResult r = try_close(self.fd);
+        self.fd = -1;
+        self.is_open = false;
+        return r.value;
+    }
+
+    // Shut down part or all of the connection (SHUT_RD, SHUT_WR,
+    // SHUT_RDWR).
+    SysResult shutdown(TcpStream* self, i64 how) {
+        if (self.invalid()) { return SysResult.failure(EINVAL); }
+        return try_shutdown(self.fd, how);
+    }
+}
+
+impl Drop<TcpStream> for TcpStream {
+    void drop(TcpStream* self) {
+        if (self.is_open && self.fd >= 0) {
+            try_close(self.fd);
+            self.fd = -1;
+            self.is_open = false;
+        }
+    }
+}
+
+// --- TcpListener ---
+
+pub struct TcpListener {
+    i32 fd;
+    bool is_open;
+}
+
+impl TcpListener {
+    // Sentinel — returns a closed (invalid) listener.
+    TcpListener closed() {
+        TcpListener l = { .fd = -1, .is_open = false };
+        return move l;
+    }
+
+    bool valid(TcpListener* self) { return self.is_open && self.fd >= 0; }
+    bool invalid(TcpListener* self) { return !self.valid(); }
+
+    // Bind a TCP listener: socket() + setsockopt(SO_REUSEADDR) + bind()
+    // + listen(). Returns a closed listener on any error. Invalidates fd
+    // and is_open on every error path to prevent Drop double-close.
+    TcpListener bind(SockAddrIn* addr, i64 backlog) {
+        SysResult s = try_socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (s.is_err()) { return TcpListener.closed(); }
+        TcpListener l = { .fd = (i32)s.value, .is_open = true };
+
+        i32 optval = 1;
+        SysResult so = try_setsockopt(l.fd, SOL_SOCKET, SO_REUSEADDR, (void*)&optval, 4);
+        if (so.is_err()) {
+            try_close(l.fd);
+            l.fd = -1;
+            l.is_open = false;
+            return TcpListener.closed();
+        }
+
+        SysResult b = try_bind(l.fd, (void*)addr, 16);
+        if (b.is_err()) {
+            try_close(l.fd);
+            l.fd = -1;
+            l.is_open = false;
+            return TcpListener.closed();
+        }
+
+        SysResult li = try_listen(l.fd, backlog);
+        if (li.is_err()) {
+            try_close(l.fd);
+            l.fd = -1;
+            l.is_open = false;
+            return TcpListener.closed();
+        }
+
+        return move l;
+    }
+
+    // Accept a new connection. Returns SysResult so the caller can
+    // distinguish EAGAIN (would block) from fatal errors.
+    // SysResult.value = client fd (caller constructs TcpStream).
+    SysResult accept(TcpListener* self) {
+        if (self.invalid()) {
+            return SysResult.failure(EINVAL);
+        }
+        SysResult r = try_accept4(self.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);
+        if (r.err_is(EINTR)) {
+            r = try_accept4(self.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);
+        }
+        return r;
+    }
+}
+
+impl Drop<TcpListener> for TcpListener {
+    void drop(TcpListener* self) {
+        if (self.is_open && self.fd >= 0) {
+            try_close(self.fd);
+            self.fd = -1;
+            self.is_open = false;
+        }
+    }
+}
