@@ -35,11 +35,26 @@ pub struct BufWriter {
     i64 len;
     i64 cap;
     i64 fd;
+    BufWriter* list_next;   // intrusive linked list (flush-on-exit chain)
+    BufWriter* list_prev;
+    u8 mode;                // IOMODE_UNBUFFERED | IOMODE_LINE | IOMODE_BLOCK
 }
 
 // Zero-cost global instances (all zero → triggers lazy init on first write).
-pub BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1 };
-pub BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2 };
+pub BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1,
+    .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 1 };
+pub BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2,
+    .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 0 };
+
+// Buffering modes for BufWriter.
+// Internal constants — no `pub` needed (public by default in Silver).
+const u8 IOMODE_UNBUFFERED = 0;   // immediate syscall per write
+const u8 IOMODE_LINE      = 1;   // flush when data contains \n
+const u8 IOMODE_BLOCK     = 2;   // flush when buffer is full or explicit call
+
+// Head of the intrusive linked list of global BufWriters (STDOUT, STDERR).
+// NULL = empty list. No heap allocation, no size limit.
+BufWriter* __buf_writer_list;
 
 // Scratch buffers for number formatting.
 struct __Buf32 { u8 data[32]; }
@@ -49,26 +64,46 @@ impl BufWriter {
     /// Ensure internal buffer is initialized (lazy mmap).
     void ensure_init(BufWriter* self) {
         if (self.cap == 0) {
+            // UNBUFFERED mode: no buffer allocation, just set cap sentinel.
+            if (self.mode == IOMODE_UNBUFFERED) {
+                self.cap = -1;   // sentinel: "initialized, no buffer"
+                return;
+            }
             self.data = (i64)alloc<u8>(4096);
             self.len = 0;
             self.cap = 4096;
         }
     }
 
-    /// Buffer a write.  Does NOT flush unless the buffer is full.
+    /// Buffer a write.  Flush behavior depends on self.mode.
     pub void write(BufWriter* self, u8* src, i64 n) {
         self.ensure_init();
-        // Grow if needed
-        if (self.len + n > self.cap) {
-            i64 new_cap = self.cap * 2;
-            if (new_cap < self.len + n) {
-                new_cap = self.len + n;
+
+        // UNBUFFERED: direct syscall, no buffering.
+        if (self.mode == IOMODE_UNBUFFERED) {
+            if (self.fd >= 0) {
+                __fmt_write_fd(self.fd, src, n);
             }
-            u8* ptr = (u8*)realloc<u8>((u8*)self.data, new_cap);
-            self.data = (i64)ptr;
-            self.cap = new_cap;
+            return;
         }
-        // Copy bytes
+
+        // BLOCK + LINE: use the buffer.
+        // If the incoming data exceeds remaining capacity, flush first.
+        // (Both modes need this guard to prevent buffer overflow.)
+        if (self.len + n > self.cap && self.len > 0) {
+            self.flush();
+        }
+
+        // If data still doesn't fit after flush (single chunk > cap), write directly.
+        // LINE mode: also bypass for oversized chunks — can't reliably detect \n in them.
+        if (n > self.cap) {
+            if (self.fd >= 0) {
+                __fmt_write_fd(self.fd, src, n);
+            }
+            return;
+        }
+
+        // Copy bytes into buffer.
         u8* buf = (u8*)self.data;
         i64 i = 0;
         while (i < n) {
@@ -76,9 +111,20 @@ impl BufWriter {
             i = i + 1;
         }
         self.len = self.len + n;
-        // Auto-flush on newline (line-buffered semantics)
-        if (n > 0 && src[n - 1] == (u8)10) {
-            self.flush();
+
+        // LINE: flush if any \n in the written data.
+        if (self.mode == IOMODE_LINE) {
+            i64 j = self.len - n;
+            i64 flushed = 0;
+            while (j < self.len) {
+                if (buf[j] == (u8)10) {
+                    // Flush up to and including this \n.
+                    self.flush();
+                    flushed = 1;
+                    break;
+                }
+                j = j + 1;
+            }
         }
     }
 
@@ -154,6 +200,19 @@ impl BufWriter {
             self.cap = 0;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Global buffer flush — called by _start after main() returns.
+// ---------------------------------------------------------------------------
+
+/// Flush the global STDOUT and STDERR buffers on process exit.
+/// Called from _start after main() returns.
+/// Uses explicit references rather than an intrusive list, so stack-local
+/// BufWriters with fd=1/2 are never accidentally registered.
+void __silver_flush_all() {
+    STDOUT.flush();
+    STDERR.flush();
 }
 // File — a typed-syscall file descriptor wrapper.
 //
