@@ -1106,6 +1106,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(fd_ptr, neg_one_i32)
                     .map_err(|e| CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span.clone()))?;
 
+                // mode = IOMODE_BLOCK (2) — ensures the writer allocates a buffer
+                // and uses buffered writes. An uninitialized mode risks reading as
+                // IOMODE_UNBUFFERED (0), which would skip buffer allocation and
+                // silently drop all output since fd is -1.
+                let mode_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 6, "sprint.mode")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 6 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(mode_ptr, self.context.i8_type().const_int(2, false))
+                    .map_err(|e| CodegenError::with_span(format!("sprint store mode failed: {e}"), expr.span.clone()))?;
+
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
                         "__sprint_writer".to_string(),
