@@ -15,6 +15,8 @@
 import std.mem.alloc;
 import std.mem.drop;
 import std.ops;
+import std.optional;
+import std.iter;
 pub struct Vec<T> {
     T* data;
     i64 len;
@@ -161,5 +163,55 @@ impl<T> IndexedAccess<Vec<T>> for Vec<T> {
     void __index_set(Vec<T>* self, i64 index, T value) {
         if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = move value;
+    }
+}
+
+// -- Iterator support ---------------------------------------------------
+//
+// VecIter<T> is an iterator over Vec<T> elements.  It borrows the Vec's
+// backing buffer during iteration.  The Vec is consumed by into_iter()
+// (its data pointer is cleared to prevent double-free on drop), and the
+// buffer is freed when the original Vec variable goes out of scope.
+//
+// VecIter does NOT implement Drop — the Vec's Drop handles the buffer.
+
+/// Iterator over Vec<T> elements.
+pub struct VecIter<T> {
+    T* data;
+    i64 len;
+    i64 idx;
+}
+
+impl<T> Vec<T> {
+    /// Consume the Vec and return an iterator over its elements.
+    pub VecIter<T> into_iter(Vec<T>* self) {
+        VecIter<T> iter;
+        iter.data = self.data;
+        iter.len = self.len;
+        iter.idx = 0;
+        // Clear the Vec's buffer reference so its drop won't free it.
+        // The original variable still owns the buffer and frees it on
+        // its own drop — VecIter borrows the data during iteration.
+        self.data = (T*)0;
+        self.len = 0;
+        self.cap = 0;
+        return iter;
+    }
+}
+
+impl<T> Iterator<VecIter<T>> for VecIter<T> {
+    type Item = T;
+    Optional<T> next(VecIter<T>* self) {
+        if ((*self).idx < (*self).len) {
+            T value = (*self).data[(*self).idx];
+            (*self).idx = (*self).idx + 1;
+            Optional<T> result;
+            result.present = true;
+            result.thing = value;
+            return result;
+        }
+        Optional<T> result;
+        result.present = false;
+        return result;
     }
 }
