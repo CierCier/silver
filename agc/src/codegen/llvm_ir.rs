@@ -1082,25 +1082,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let zero_i64 = self.context.i64_type().const_int(0, false);
                 let neg_one_i32 = self.context.i32_type().const_int(u64::MAX, true);
 
-                let fd_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.fd")
+                // Initialize BufWriter fields: data=0, len=0, cap=0, fd=-1.
+                // The zero-valued fields (data=0, cap=0) trigger ensure_init's lazy
+                // buffer allocation on first write. fd=-1 marks this as a string-only
+                // writer (no file descriptor), preventing flush from writing to a real fd.
+                let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
                     .map_err(|e| CodegenError::with_span(format!("sprint struct gep 0 failed: {e}"), expr.span.clone()))?;
-                self.builder.build_store(fd_ptr, neg_one_i32)
-                    .map_err(|e| CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span.clone()))?;
-
-                let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.data")
-                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 1 failed: {e}"), expr.span.clone()))?;
                 self.builder.build_store(data_ptr, zero_i64)
                     .map_err(|e| CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span.clone()))?;
 
-                let len_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "sprint.len")
-                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 2 failed: {e}"), expr.span.clone()))?;
+                let len_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.len")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 1 failed: {e}"), expr.span.clone()))?;
                 self.builder.build_store(len_ptr, zero_i64)
                     .map_err(|e| CodegenError::with_span(format!("sprint store len failed: {e}"), expr.span.clone()))?;
 
-                let cap_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 3, "sprint.cap")
-                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 3 failed: {e}"), expr.span.clone()))?;
+                let cap_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "sprint.cap")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 2 failed: {e}"), expr.span.clone()))?;
                 self.builder.build_store(cap_ptr, zero_i64)
                     .map_err(|e| CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span.clone()))?;
+
+                let fd_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 3, "sprint.fd")
+                    .map_err(|e| CodegenError::with_span(format!("sprint struct gep 3 failed: {e}"), expr.span.clone()))?;
+                self.builder.build_store(fd_ptr, neg_one_i32)
+                    .map_err(|e| CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span.clone()))?;
 
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
@@ -1261,9 +1265,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let writer_tmp = self.variables.last().and_then(|scope| scope.get("__sprint_writer")).map(|info| info.ptr).ok_or_else(|| {
                 CodegenError::with_span("sprint writer variable missing".to_string(), expr.span.clone())
             })?;
-
-            let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.data")
-                .map_err(|e| CodegenError::with_span(format!("sprint struct gep 1 failed: {e}"), expr.span.clone()))?;
+            let data_ptr = self.builder.build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
+                .map_err(|e| CodegenError::with_span(format!("sprint struct gep 0 failed: {e}"), expr.span.clone()))?;
             let data_val = self.builder.build_load(self.context.i64_type(), data_ptr, "sprint.data.val")
                 .map_err(|e| CodegenError::with_span(format!("sprint load data failed: {e}"), expr.span.clone()))?;
             let str_val = self.builder.build_int_to_ptr(

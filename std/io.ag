@@ -72,18 +72,6 @@ impl BufWriter {
             self.data = (i64)alloc<u8>(4096);
             self.len = 0;
             self.cap = 4096;
-
-            // Register in the global flush-on-exit linked list.
-            // Only register global streams (STDOUT/STDERR identified by fd 1/2).
-            // User-created BufWriters flush via drop() — no registration needed.
-            if (self.fd == 1 || self.fd == 2) {
-                self.list_next = __buf_writer_list;
-                self.list_prev = (BufWriter*)0;
-                if (__buf_writer_list != (BufWriter*)0) {
-                    __buf_writer_list.list_prev = self;
-                }
-                __buf_writer_list = self;
-            }
         }
     }
 
@@ -101,12 +89,14 @@ impl BufWriter {
 
         // BLOCK + LINE: use the buffer.
         // If the incoming data exceeds remaining capacity, flush first.
-        if (self.mode == IOMODE_BLOCK && self.len + n > self.cap && self.len > 0) {
+        // (Both modes need this guard to prevent buffer overflow.)
+        if (self.len + n > self.cap && self.len > 0) {
             self.flush();
         }
 
         // If data still doesn't fit after flush (single chunk > cap), write directly.
-        if (self.mode == IOMODE_BLOCK && n > self.cap) {
+        // LINE mode: also bypass for oversized chunks — can't reliably detect \n in them.
+        if (n > self.cap) {
             if (self.fd >= 0) {
                 __fmt_write_fd(self.fd, src, n);
             }
@@ -216,13 +206,13 @@ impl BufWriter {
 // Global buffer flush — called by _start after main() returns.
 // ---------------------------------------------------------------------------
 
-/// Flush every registered global BufWriter. Safe to call with empty list.
+/// Flush the global STDOUT and STDERR buffers on process exit.
+/// Called from _start after main() returns.
+/// Uses explicit references rather than an intrusive list, so stack-local
+/// BufWriters with fd=1/2 are never accidentally registered.
 void __silver_flush_all() {
-    BufWriter* w = __buf_writer_list;
-    while (w != (BufWriter*)0) {
-        w.flush();
-        w = w.list_next;
-    }
+    STDOUT.flush();
+    STDERR.flush();
 }
 // File — a typed-syscall file descriptor wrapper.
 //
