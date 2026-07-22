@@ -206,3 +206,83 @@ pub void exit_group(i64 code) {
     sys_exit(code);
     while (true) {}
 }
+// --- Socket, fcntl, and poll constants ---
+
+pub const i64 F_GETFL = 3;
+pub const i64 F_SETFL = 4;
+pub const i64 AF_INET = 2;
+pub const i64 AF_INET6 = 10;
+pub const i64 SOCK_STREAM = 1;
+pub const i64 SOCK_DGRAM = 2;
+pub const i64 SOCK_NONBLOCK = 2048;
+pub const i64 SOCK_CLOEXEC = 524288;
+pub const i64 IPPROTO_TCP = 6;
+pub const i64 IPPROTO_UDP = 17;
+pub const i64 SOL_SOCKET = 1;
+pub const i64 SO_REUSEADDR = 2;
+pub const i64 SO_ERROR = 4;
+pub const i64 SHUT_RD = 0;
+pub const i64 SHUT_WR = 1;
+pub const i64 SHUT_RDWR = 2;
+pub const i64 INADDR_ANY = 0;
+pub const i64 POLLIN = 1;
+pub const i64 POLLOUT = 4;
+pub const i64 POLLERR = 8;
+pub const i64 POLLHUP = 16;
+
+// --- PollFd ---
+pub struct PollFd {
+    i32 fd;
+    i16 events;
+    i16 revents;
+}
+
+// --- Typed socket/fcntl/poll wrappers ---
+
+pub SysResult try_socket(i64 domain, i64 ty, i64 protocol) {
+    return SysResult.from_raw(sys_socket(domain, ty, protocol));
+}
+
+pub SysResult try_bind(i32 fd, void* addr, i64 addr_len) {
+    return SysResult.from_raw(sys_bind((i64)fd, (i64)addr, addr_len));
+}
+
+pub SysResult try_listen(i32 fd, i64 backlog) {
+    return SysResult.from_raw(sys_listen((i64)fd, backlog));
+}
+
+pub SysResult try_accept4(i32 fd, void* addr, u32* addr_len, i64 flags) {
+    return SysResult.from_raw(sys_accept4((i64)fd, (i64)addr, (i64)addr_len, flags));
+}
+
+pub SysResult try_connect(i32 fd, void* addr, i64 addr_len) {
+    return SysResult.from_raw(sys_connect((i64)fd, (i64)addr, addr_len));
+}
+
+pub SysResult try_shutdown(i32 fd, i64 how) {
+    return SysResult.from_raw(sys_shutdown((i64)fd, how));
+}
+
+pub SysResult try_setsockopt(i32 fd, i64 level, i64 optname, void* optval, i64 optlen) {
+    return SysResult.from_raw(sys_setsockopt((i64)fd, level, optname, (i64)optval, optlen));
+}
+
+pub SysResult try_getsockname(i32 fd, void* addr, u32* addr_len) {
+    return SysResult.from_raw(sys_getsockname((i64)fd, (i64)addr, (i64)addr_len));
+}
+
+pub SysResult try_getpeername(i32 fd, void* addr, u32* addr_len) {
+    return SysResult.from_raw(sys_getpeername((i64)fd, (i64)addr, (i64)addr_len));
+}
+
+pub SysResult try_fcntl(i32 fd, i64 cmd, i64 arg) {
+    return SysResult.from_raw(sys_fcntl((i64)fd, cmd, arg));
+}
+
+pub SysResult try_poll(PollFd* fds, i64 nfds, i64 timeout) {
+    return SysResult.from_raw(sys_poll((i64)fds, nfds, timeout));
+}
+
+pub SysResult try_getsockopt(i32 fd, i64 level, i64 optname, void* optval, u32* optlen) {
+    return SysResult.from_raw(sys_getsockopt((i64)fd, level, optname, (i64)optval, (i64)optlen));
+}
