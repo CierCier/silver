@@ -1,0 +1,11 @@
+import std.test;
+
+enum LargePayload { Data(i64); }
+
+i32 main() {
+    LargePayload x = LargePayload.Data(0x123456789ABCDEF0);
+    i64 val = match x { LargePayload.Data(v) : v };
+    // Ensure the full 64-bit value survived round-trip without corruption
+    assert_eq_i64(0x123456789ABCDEF0, val, "i64 payload round-trip");
+    return done();
+}

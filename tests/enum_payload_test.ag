@@ -1,0 +1,10 @@
+import std.test;
+
+enum OptionInt { Some(i32); None; }
+
+i32 main() {
+    OptionInt x = OptionInt.Some(42);
+    i32 val = match x { OptionInt.Some(v) : v, OptionInt.None : 0 };
+    assert_eq_i32(42, val, "construct + match payload enum");
+    return done();
+}

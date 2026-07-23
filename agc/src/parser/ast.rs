@@ -631,6 +631,11 @@ Asm {
         is_mutable: bool,
         expression: Box<Expression>,
     },
+    EnumVariant {
+        path: Vec<Identifier>,
+        variant: Identifier,
+        fields: Vec<Expression>,
+    },
     Comptime(Box<Expression>),
     MacroCall {
         name: Identifier,

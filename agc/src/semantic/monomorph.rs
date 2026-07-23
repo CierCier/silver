@@ -477,7 +477,8 @@ fn collect_expression_instantiations(
             collect_block_instantiations(body, generic_structs, instantiations, scopes);
         }
         ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_) => {}
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
                 collect_expression_instantiations(input, generic_structs, instantiations, scopes);
@@ -981,6 +982,11 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
                 *iterator_type.as_mut() = substitute_ast_type(iterator_type, mapping);
             }
         }
+        ast::ExpressionKind::EnumVariant { fields, .. } => {
+            for field in fields {
+                substitute_expression_types(field, mapping);
+            }
+        }
     }
 }
 
@@ -1229,7 +1235,8 @@ fn rewrite_expression_function_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_) => {}
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
                 rewrite_expression_function_calls(input, name, args, mangled, span, param_count);
@@ -1482,7 +1489,8 @@ fn rewrite_expression_method_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_) => {}
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
                 rewrite_expression_method_calls(input, base, method, args, span);
@@ -1937,7 +1945,8 @@ fn collect_expression_remaining_calls(
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Identifier(_) => {}
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
                 results.extend(collect_expression_remaining_calls(input, generic_fns));
