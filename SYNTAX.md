@@ -183,11 +183,9 @@ std::io::FileHandle handle;
 ```
 
 ### Function & Tuple Types
-
-```silver
-// Function pointer signature: fn(ParamTypes...) -> ReturnType
-fn(i32, f64) -> bool predicate;
-fn() -> void callback;
+// Function pointer signature: ReturnType(ParamTypes...)
+bool(i32, f64) predicate;
+void() callback;
 
 // Tuple type: (T1, T2, ...)
 (i32, str, bool) tuple_val;
@@ -218,7 +216,7 @@ import path.to.graphics as gfx;
 
 ```silver
 type Distance = f64;
-pub type Handler = fn(i32) -> void;
+pub type Handler = void(i32);
 ```
 
 ### Global & Constant Variables
