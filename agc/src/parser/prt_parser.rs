@@ -2064,6 +2064,60 @@ impl PRT_Parser {
                             kind: ast::PatternKind::Wildcard,
                             span,
                         }
+                    } else if name.starts_with(|c: char| c.is_uppercase())
+                        && matches!(cursor.current().map(|t| &t.kind), Some(Token::Dot))
+                    {
+                        // Enum type pattern: TypeName.Variant or TypeName.Variant(data)
+                        let path = vec![ast::Identifier {
+                            name: name.clone(),
+                            span: span.clone(),
+                        }];
+                        cursor.bump(); // consume dot
+                        let variant_token = cursor.current().ok_or_else(|| {
+                            ParseError::InvalidSyntax {
+                                message: "expected variant name after '.' in enum pattern".to_string(),
+                                span: span.clone(),
+                            }
+                        })?;
+                        let variant_name = match &variant_token.kind {
+                            Token::Identifier(v) => v.clone(),
+                            _ => {
+                                return Err(ParseError::InvalidSyntax {
+                                    message: "expected variant name in enum pattern".to_string(),
+                                    span: variant_token.span.clone(),
+                                });
+                            }
+                        };
+                        let variant_span = variant_token.span.clone();
+                        cursor.bump();
+                        let data = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
+                            cursor.bump();
+                            let data_pattern = parse_match_pattern(cursor)?;
+                            if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
+                                return Err(ParseError::InvalidSyntax {
+                                    message: "expected ')' in enum variant pattern".to_string(),
+                                    span: variant_span.clone(),
+                                });
+                            }
+                            cursor.bump();
+                            Some(Box::new(data_pattern))
+                        } else {
+                            None
+                        };
+                        ast::Pattern {
+                            kind: ast::PatternKind::Enum {
+                                path,
+                                variant: ast::Identifier {
+                                    name: variant_name,
+                                    span: variant_span,
+                                },
+                                data,
+                            },
+                            span: Span {
+                                start: span.start,
+                                end: cursor.current().map(|t| t.span.start).unwrap_or(span.start),
+                            },
+                        }
                     } else {
                         ast::Pattern {
                             kind: ast::PatternKind::Identifier(ast::Identifier {
@@ -2740,11 +2794,10 @@ impl PRT_Parser {
                                     }
                                 }
                             }
-                            let close =
-                                cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
-                                    message: "expected ')' in method call".to_string(),
-                                    span: field_ident.span.clone(),
-                                })?;
+                            let close = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
+                                message: "expected ')' in method call".to_string(),
+                                span: field_ident.span.clone(),
+                            })?;
                             let span = Span {
                                 start: expr.span.start,
                                 end: close.span.end,
