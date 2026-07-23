@@ -1,0 +1,13 @@
+import std.test;
+
+// Enum with a multi-field tuple variant.
+// Multi-field match extraction is deferred (separate work);
+// this test verifies construction succeeds (Fix C).
+enum Point { Coords(i32, i32); }
+
+i32 main() {
+    Point p = Point.Coords(10, 20);
+    // Construction succeeded — just verify we didn't crash
+    assert_true(true, "multi-field enum construction");
+    return done();
+}

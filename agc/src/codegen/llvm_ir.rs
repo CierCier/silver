@@ -104,6 +104,8 @@ pub struct LlvmIrGenerator<'ctx> {
     struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     enum_backing_types: HashMap<String, ast::PrimitiveType>,
     enum_variants: HashMap<String, HashMap<String, i128>>,
+    enum_payload_layouts: HashMap<String, StructType<'ctx>>,
+    enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     defers: Vec<Vec<DeferredEntry<'ctx>>>,
     drop_flags: HashMap<String, PointerValue<'ctx>>,
     method_receivers: HashMap<(String, String), bool>,
@@ -191,6 +193,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_fields: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
             method_receivers: HashMap::default(),
@@ -258,7 +262,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
             enum_backing_types: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
             enum_variants: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
             method_receivers: HashMap::default(),
@@ -494,8 +500,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_variables: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
             method_receivers: HashMap::default(),
@@ -686,6 +694,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|variant| (variant.name.clone(), variant.value))
                                 .collect(),
                         );
+                        // Register payload layouts for imported enums with payload variants
+                        {
+                            let mut max_payload_size: u64 = 0;
+                            let mut variant_payload_types: HashMap<String, Vec<ast::Type>> = HashMap::default();
+                            let target_data = TargetData::create(
+                                self.module.get_data_layout().as_str().to_str().unwrap()
+                            );
+                            for variant in &export.enum_variants {
+                                if variant.payload_types.is_empty() {
+                                    continue;
+                                }
+                                let payload_types: Vec<ast::Type> = variant.payload_types.iter()
+                                    .map(|key| ast_type_from_canonical_key(key))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap_or_else(|_| vec![]);
+                                let mut variant_size: u64 = 0;
+                                for pt in &payload_types {
+                                    let llvm_ty = self.lower_basic_type(pt)?;
+                                    variant_size += target_data.get_abi_size(&llvm_ty);
+                                }
+                                max_payload_size = max_payload_size.max(variant_size);
+                                variant_payload_types.insert(variant.name.clone(), payload_types);
+                            }
+                            if max_payload_size > 0 {
+                                let i16_ty = self.context.i16_type();
+                                let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
+                                let struct_ty = self.context.struct_type(&[i16_ty.into(), array_ty.into()], false);
+                                struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+                                self.enum_payload_layouts.insert(export.name.clone(), struct_ty);
+                                self.struct_types.insert(export.name.clone(), struct_ty);
+                            }
+                            self.enum_variant_payload_types.insert(export.name.clone(), variant_payload_types);
+                        }
                     }
                     crate::module_artifact::ExportKind::Trait => {}
                 }
@@ -1591,6 +1632,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(basic)
             }
             ast::TypeKind::Named(named) => {
+                // Check payload enum layout first
+                if named.path.len() == 1 {
+                    if let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name) {
+                        return Ok(struct_ty.as_basic_type_enum());
+                    }
+                }
                 if let Some(enum_backing) = self.enum_backing_type_for_named(named) {
                     return self.lower_basic_type(&ast::Type {
                         kind: Box::new(ast::TypeKind::Primitive(enum_backing)),
@@ -2724,6 +2771,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let name = ident.name.clone();
                 if let Some(concrete_ty) = mapping.get(&name) {
                     *expr.kind = ast::ExpressionKind::TypeName(concrete_ty.clone());
+                }
+            }
+            ast::ExpressionKind::EnumVariant { fields, .. } => {
+                for field in fields {
+                    Self::substitute_expression_types(field, mapping);
                 }
             }
             ast::ExpressionKind::Literal(_) => {}
@@ -4055,9 +4107,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
-                    && let Some(value) = self.enum_member_constant(&owner.name, &field.name)
+                    && let Some(_value) = self.enum_member_constant(&owner.name, &field.name)
                 {
-                    return Ok(value);
+                    // If this enum has a payload layout, wrap discriminant in struct
+                    if let Some(_struct_ty) = self.enum_payload_layouts.get(&owner.name) {
+                        return self.emit_enum_construction_impl(owner, field, &[], &expr.span);
+                    }
+                    return Ok(_value);
                 }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
@@ -4098,6 +4154,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 method,
                 arguments,
             } => {
+                // Check if this is an enum variant construction
+                if let ast::ExpressionKind::Identifier(receiver_ident) = receiver.kind.as_ref() {
+                    if self.enum_payload_layouts.contains_key(&receiver_ident.name)
+                        || self.enum_variants.contains_key(&receiver_ident.name)
+                    {
+                        return self.emit_enum_construction_impl(receiver_ident, method, arguments, &expr.span);
+                    }
+                }
                 let value = self
                     .emit_method_call_expression(receiver, method, arguments, false, &expr.span)?;
                 value.ok_or_else(|| {
@@ -4236,6 +4300,106 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Asm { code, inputs } => {
                 self.emit_asm_expression(&code, &inputs, &expr.span)
             }
+            ast::ExpressionKind::EnumVariant { path, variant, fields } => {
+                let enum_name = if path.len() == 1 { &path[0].name } else {
+                    return Err(CodegenError::with_span(
+                        "enum type path must be a single name".to_string(),
+                        expr.span.clone(),
+                    ));
+                };
+                // Try payload enum layout first
+                if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
+                    self.current_fn.as_ref().ok_or_else(|| {
+                        CodegenError::new("no active function for enum variant construction")
+                    })?;
+                    let ptr = self.builder.build_alloca(struct_ty, enum_name)
+                        .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
+                    let zero_struct = struct_ty.const_zero();
+                    self.builder.build_store(ptr, zero_struct).map_err(|e| {
+                        CodegenError::new(format!("zero init enum: {e}"))
+                    })?;
+                    // Store tag (i16)
+                    if let Some(tag_value) = self.enum_variants.get(enum_name)
+                        .and_then(|variants| variants.get(&variant.name))
+                    {
+                        let tag = self.context.i16_type().const_int(*tag_value as u64, false);
+                        let tag_ptr = self.builder.build_struct_gep(struct_ty, ptr, 0, "enum.tag")
+                            .map_err(|e| CodegenError::new(format!("GEP enum tag: {e}")))?;
+                        self.builder.build_store(tag_ptr, tag).map_err(|e| {
+                            CodegenError::new(format!("store enum tag: {e}"))
+                        })?;
+                    }
+                    // Store payload values into data field
+                    if !fields.is_empty() {
+                        let data_ptr = self.builder.build_struct_gep(struct_ty, ptr, 1, "enum.data")
+                            .map_err(|e| CodegenError::new(format!("GEP enum data: {e}")))?;
+                        let payload_types_opt = self.enum_variant_payload_types
+                            .get(enum_name)
+                            .and_then(|m| m.get(&variant.name))
+                            .cloned();
+                        if let Some(payload_types) = payload_types_opt {
+                            let target_data = TargetData::create(
+                                self.module.get_data_layout().as_str().to_str().unwrap()
+                            );
+                            let mut offset: u32 = 0;
+                            for (i, field) in fields.iter().enumerate() {
+                                let payload_type = match payload_types.get(i) {
+                                    Some(pt) => pt,
+                                    None => break,
+                                };
+                                let target_llvm_ty = self.lower_basic_type(payload_type)?;
+                                let field_size = target_data.get_abi_size(&target_llvm_ty) as u32;
+                                let field_ptr = if offset == 0 {
+                                    data_ptr
+                                } else {
+                                    unsafe {
+                                        self.builder.build_gep(
+                                            self.context.i8_type(),
+                                            data_ptr,
+                                            &[self.context.i32_type().const_int(offset as u64, false)],
+                                            "enum.field.gep",
+                                        )
+                                    }.map_err(|e| CodegenError::new(format!("GEP enum field: {e}")))?
+                                };
+                                let mut val = self.emit_expression_value(field)?;
+                                val = self.cast_value_to_basic_type(val, target_llvm_ty, &field.span)?;
+                                let val_ptr = self.builder.build_pointer_cast(
+                                    field_ptr,
+                                    self.context.ptr_type(AddressSpace::default()),
+                                    "enum.val.cast",
+                                ).map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
+                                self.builder.build_store(val_ptr, val).map_err(|e| {
+                                    CodegenError::new(format!("store enum payload: {e}"))
+                                })?;
+                                offset += field_size;
+                            }
+                            let val = self.emit_expression_value(&fields[0])?;
+                            let val_ptr = self.builder.build_pointer_cast(
+                                data_ptr,
+                                self.context.ptr_type(AddressSpace::default()),
+                                "enum.val.cast",
+                            ).map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
+                            self.builder.build_store(val_ptr, val).map_err(|e| {
+                                CodegenError::new(format!("store enum payload: {e}"))
+                            })?;
+                        }
+                    }
+                    Ok(self.builder.build_load(struct_ty.as_basic_type_enum(), ptr, enum_name)
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to load enum: {e}"))
+                        })?)
+                } else {
+                    // Unit variant — fall back to integer constant
+                    if let Some(val) = self.enum_member_constant(enum_name, &variant.name) {
+                        Ok(val)
+                    } else {
+                        Err(CodegenError::with_span(
+                            format!("unknown enum variant '{}::{}'", enum_name, variant.name),
+                            expr.span.clone(),
+                        ))
+                    }
+                }
+            }
             _ => Err(CodegenError::with_span(
                 format!(
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
@@ -4243,6 +4407,102 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ),
                 expr.span.clone(),
             )),
+        }
+    }
+
+    fn emit_enum_construction_impl(
+        &mut self,
+        enum_ident: &ast::Identifier,
+        variant: &ast::Identifier,
+        arguments: &[ast::Expression],
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let enum_name = &enum_ident.name;
+        if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() {
+            let ptr = self.builder.build_alloca(struct_ty, enum_name)
+                .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
+            let zero_struct = struct_ty.const_zero();
+            self.builder.build_store(ptr, zero_struct).map_err(|e| {
+                CodegenError::new(format!("zero init enum: {e}"))
+            })?;
+            if let Some(tag_value) = self.enum_variants.get(enum_name)
+                .and_then(|variants| variants.get(&variant.name))
+            {
+                let tag = self.context.i16_type().const_int(*tag_value as u64, false);
+                let tag_ptr = self.builder.build_struct_gep(struct_ty, ptr, 0, "enum.tag")
+                    .map_err(|e| CodegenError::new(format!("GEP enum tag: {e}")))?;
+                self.builder.build_store(tag_ptr, tag).map_err(|e| {
+                    CodegenError::new(format!("store enum tag: {e}"))
+                })?;
+            }
+            if !arguments.is_empty() {
+                let data_ptr = self.builder.build_struct_gep(struct_ty, ptr, 1, "enum.data")
+                    .map_err(|e| CodegenError::new(format!("GEP enum data: {e}")))?;
+                let payload_types_opt = self.enum_variant_payload_types
+                    .get(enum_name)
+                    .and_then(|m| m.get(&variant.name))
+                    .cloned();
+                if let Some(payload_types) = payload_types_opt {
+                    let target_data = TargetData::create(
+                        self.module.get_data_layout().as_str().to_str().unwrap()
+                    );
+                    let mut offset: u32 = 0;
+                    for (i, arg) in arguments.iter().enumerate() {
+                        let payload_type = match payload_types.get(i) {
+                            Some(pt) => pt,
+                            None => break,
+                        };
+                        let target_llvm_ty = self.lower_basic_type(payload_type)?;
+                        let field_size = target_data.get_abi_size(&target_llvm_ty) as u32;
+                        let field_ptr = if offset == 0 {
+                            data_ptr
+                        } else {
+                            unsafe {
+                                self.builder.build_gep(
+                                    self.context.i8_type(),
+                                    data_ptr,
+                                    &[self.context.i32_type().const_int(offset as u64, false)],
+                                    "enum.field.gep",
+                                )
+                            }.map_err(|e| CodegenError::new(format!("GEP enum field: {e}")))?
+                        };
+                        let mut val = self.emit_expression_value(arg)?;
+                        val = self.cast_value_to_basic_type(val, target_llvm_ty, &arg.span)?;
+                        let val_ptr = self.builder.build_pointer_cast(
+                            field_ptr,
+                            self.context.ptr_type(AddressSpace::default()),
+                            "enum.val.cast",
+                        ).map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
+                        self.builder.build_store(val_ptr, val).map_err(|e| {
+                            CodegenError::new(format!("store enum payload: {e}"))
+                        })?;
+                        offset += field_size;
+                    }
+                } else if arguments.len() == 1 {
+                    let val = self.emit_expression_value(&arguments[0])?;
+                    let val_ptr = self.builder.build_pointer_cast(
+                        data_ptr,
+                        self.context.ptr_type(AddressSpace::default()),
+                        "enum.val.cast",
+                    ).map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
+                    self.builder.build_store(val_ptr, val).map_err(|e| {
+                        CodegenError::new(format!("store enum payload: {e}"))
+                    })?;
+                }
+            }
+            Ok(self.builder.build_load(struct_ty.as_basic_type_enum(), ptr, enum_name)
+                .map_err(|e| {
+                    CodegenError::new(format!("failed to load enum: {e}"))
+                })?)
+        } else {
+            if let Some(val) = self.enum_member_constant(enum_name, &variant.name) {
+                Ok(val)
+            } else {
+                Err(CodegenError::with_span(
+                    format!("unknown enum variant '{}::{}'", enum_name, variant.name),
+                    span.clone(),
+                ))
+            }
         }
     }
 
@@ -5099,6 +5359,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::new();
+        let mut catch_all = false;
 
         for (arm_index, arm) in arms.iter().enumerate() {
             let arm_bb = self
@@ -5168,6 +5429,123 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .build_conditional_branch(cond, arm_bb, next_bb)
                         .map_err(|e| CodegenError::new(format!("failed match expr branch: {e}")))?;
                 }
+                ast::PatternKind::Enum { path, variant, data } => {
+                    let enum_name = if path.len() == 1 { &path[0].name } else {
+                        return Err(CodegenError::with_span(
+                            "enum type path must be a single name in match".to_string(),
+                            arm.pattern.span.clone(),
+                        ));
+                    };
+                    if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
+                        let function = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for match enum")
+                        })?;
+                        let scrut_ptr = self.create_entry_alloca(function, "match.scrut.ptr", struct_ty.as_basic_type_enum())?;
+                        let zero_struct = struct_ty.const_zero();
+                        self.builder.build_store(scrut_ptr, zero_struct).map_err(|e| {
+                            CodegenError::new(format!("zero init match scrutinee: {e}"))
+                        })?;
+                        self.builder.build_store(scrut_ptr, scrutinee).map_err(|e| {
+                            CodegenError::new(format!("store match scrutinee: {e}"))
+                        })?;
+                        let tag_ptr = self.builder.build_struct_gep(struct_ty, scrut_ptr, 0, "match.tag.ptr")
+                            .map_err(|e| CodegenError::new(format!("match tag GEP: {e}")))?;
+                        let tag_load = self.builder.build_load(self.context.i16_type(), tag_ptr, "match.tag")
+                            .map_err(|e| CodegenError::new(format!("match tag load: {e}")))?;
+                        let tag_val = match tag_load {
+                            BasicValueEnum::IntValue(v) => v,
+                            _ => return Err(CodegenError::new("enum tag is not an i16 value".to_string())),
+                        };
+                        let expected_tag = if let Some(variants) = self.enum_variants.get(enum_name) {
+                            if let Some(val) = variants.get(&variant.name) {
+                                self.context.i16_type().const_int(*val as u64, false)
+                            } else {
+                                return Err(CodegenError::with_span(
+                                    format!("unknown variant '{}' in enum '{}'", variant.name, enum_name),
+                                    variant.span.clone(),
+                                ));
+                            }
+                        } else {
+                            return Err(CodegenError::with_span(
+                                format!("unknown enum '{}' in match", enum_name),
+                                arm.pattern.span.clone(),
+                            ));
+                        };
+                        let cond = self.builder.build_int_compare(
+                            IntPredicate::EQ, tag_val, expected_tag, "match.enum.tag"
+                        ).map_err(|e| CodegenError::new(format!("match enum tag compare: {e}")))?;
+                        self.builder.build_conditional_branch(cond, arm_bb, next_bb)
+                            .map_err(|e| CodegenError::new(format!("match enum branch: {e}")))?;
+                        self.builder.position_at_end(arm_bb);
+                        self.push_scope();
+                        if let Some(data_pattern) = data {
+                            if let ast::PatternKind::Identifier(binding) = &data_pattern.kind {
+                                if let Some(payload_types) = self.enum_variant_payload_types
+                                    .get(enum_name)
+                                    .and_then(|m| m.get(&variant.name))
+                                    .and_then(|types| types.first())
+                                    .cloned()
+                                {
+                                    let llvm_ty = self.lower_basic_type(&payload_types)?;
+                                    let data_ptr = self.builder.build_struct_gep(struct_ty, scrut_ptr, 1, "match.data.ptr")
+                                        .map_err(|e| CodegenError::new(format!("match data GEP: {e}")))?;
+                                    let cast_ptr = self.builder.build_pointer_cast(
+                                        data_ptr,
+                                        self.context.ptr_type(AddressSpace::default()),
+                                        "data.cast",
+                                    ).map_err(|e| CodegenError::new(format!("pointer cast: {e}")))?;
+                                    let loaded = self.builder.build_load(llvm_ty, cast_ptr, &binding.name)
+                                        .map_err(|e| CodegenError::new(format!("load data payload: {e}")))?;
+                                    let alloca = self.create_entry_alloca(function, &binding.name, llvm_ty)?;
+                                    self.builder.build_store(alloca, loaded).map_err(|e| {
+                                        CodegenError::new(format!("store data binding: {e}"))
+                                    })?;
+                                    if let Some(scope) = self.variables.last_mut() {
+                                        scope.insert(
+                                            binding.name.clone(),
+                                            VarInfo {
+                                                ptr: alloca,
+                                                ty: payload_types,
+                                                is_mutable: false,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Unit enum — compare integer discriminant
+                        if let BasicValueEnum::IntValue(scrutinee_int) = scrutinee {
+                            let expected = if let Some(variants) = self.enum_variants.get(enum_name) {
+                                if let Some(val) = variants.get(&variant.name) {
+                                    scrutinee_int.get_type().const_int(*val as u64, true)
+                                } else {
+                                    return Err(CodegenError::with_span(
+                                        format!("unknown variant '{}' in enum '{}'", variant.name, enum_name),
+                                        variant.span.clone(),
+                                    ));
+                                }
+                            } else {
+                                return Err(CodegenError::with_span(
+                                    format!("unknown enum '{}' in match", enum_name),
+                                    arm.pattern.span.clone(),
+                                ));
+                            };
+                            let cond = self.builder.build_int_compare(
+                                IntPredicate::EQ, scrutinee_int, expected, "match.enum.disc"
+                            ).map_err(|e| CodegenError::new(format!("match enum disc compare: {e}")))?;
+                            self.builder.build_conditional_branch(cond, arm_bb, next_bb)
+                                .map_err(|e| CodegenError::new(format!("match enum branch: {e}")))?;
+                            self.builder.position_at_end(arm_bb);
+                            self.push_scope();
+                        } else {
+                            return Err(CodegenError::with_span(
+                                "unit enum match requires integer scrutinee".to_string(),
+                                arm.pattern.span.clone(),
+                            ));
+                        }
+                    }
+                }
                 _ => {
                     return Err(CodegenError::with_span(
                         "match pattern kind is not supported in LLVM IR codegen yet",
@@ -5175,9 +5553,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ));
                 }
             }
-
-            self.builder.position_at_end(arm_bb);
-            self.push_scope();
+            if !matches!(arm.pattern.kind, ast::PatternKind::Enum { .. }) {
+                self.builder.position_at_end(arm_bb);
+                self.push_scope();
+            }
             if let ast::PatternKind::Identifier(identifier) = &arm.pattern.kind {
                 let function = self.current_fn.ok_or_else(|| {
                     CodegenError::new("no active function for match identifier binding")
@@ -5204,7 +5583,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
 
-            let arm_value = self.emit_expression_value(&arm.body)?;
+            let mut arm_value = self.emit_expression_value(&arm.body)?;
+            // Cast to first arm's type if needed (handles i32 vs i64 mismatch)
+            if let Some((first_value, _)) = incoming.first() {
+                let target_ty = first_value.get_type();
+                if arm_value.get_type() != target_ty {
+                    arm_value = self.cast_value_to_basic_type(arm_value, target_ty, &arm.body.span)?;
+                }
+            }
             let arm_end = self
                 .builder
                 .get_insert_block()
@@ -5221,6 +5607,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             match arm.pattern.kind {
                 ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
                     cond_bb = next_bb;
+                    catch_all = true;
                     break;
                 }
                 _ => {
@@ -5229,16 +5616,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
 
-        self.builder.position_at_end(cond_bb);
-        let cond_terminated = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_terminator())
-            .is_some();
-        if !cond_terminated {
+        if !catch_all {
+            self.builder.position_at_end(cond_bb);
+            let cond_terminated = self
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_terminator())
+                .is_some();
+            if !cond_terminated {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::new(format!("failed final match expr branch: {e}")))?;
+            }
+        } else {
+            // Terminate the dead next_bb created for the catch-all arm
+            self.builder.position_at_end(cond_bb);
             self.builder
-                .build_unconditional_branch(end_bb)
-                .map_err(|e| CodegenError::new(format!("failed final match expr branch: {e}")))?;
+                .build_unreachable()
+                .map_err(|e| CodegenError::new(format!("failed catch-all terminator: {e}")))?;
         }
 
         if incoming.is_empty() {
@@ -8287,6 +8682,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         let mut min_value = 0i128;
         let mut max_value = 0i128;
         let mut saw_any = false;
+        let mut has_payload = false;
+        let mut max_payload_size: u64 = 0;
 
         for variant in &item.variants {
             let value = variant.discriminant.unwrap_or(next_value);
@@ -8300,6 +8697,54 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 min_value = min_value.min(value);
                 max_value = max_value.max(value);
             }
+            // Compute payload size for this variant using known type sizes
+            let payload_types = match &variant.data {
+                ast::EnumVariantData::Unit => vec![],
+                ast::EnumVariantData::Tuple(types) => types.clone(),
+                ast::EnumVariantData::Struct(fields) => {
+                    fields.iter().map(|f| f.field_type.clone()).collect()
+                }
+            };
+            if !payload_types.is_empty() {
+                has_payload = true;
+                self.enum_variant_payload_types
+                    .entry(item.name.name.clone())
+                    .or_default()
+                    .insert(variant.name.name.clone(), payload_types.clone());
+            }
+            let mut variant_size: u64 = 0;
+            for pt in &payload_types {
+                match pt.kind.as_ref() {
+                    ast::TypeKind::Primitive(p) => {
+                        variant_size += match p {
+                            ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,
+                            ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
+                            ast::PrimitiveType::I32 | ast::PrimitiveType::U32 | ast::PrimitiveType::Char => 4,
+                            ast::PrimitiveType::F32 => 4,
+                            ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => 8,
+                            ast::PrimitiveType::F64 => 8,
+                            ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
+                            _ => 8,
+                        };
+                    }
+                    ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => {
+                        variant_size += 8;
+                    }
+                    _ => variant_size += 8,
+                }
+            }
+            max_payload_size = max_payload_size.max(variant_size);
+        }
+
+        if has_payload {
+            let i16_ty = self.context.i16_type();
+            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
+            let struct_ty = self.context.struct_type(&[i16_ty.into(), array_ty.into()], false);
+            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+            self.enum_payload_layouts
+                .insert(item.name.name.clone(), struct_ty);
+            self.struct_types
+                .insert(item.name.name.clone(), struct_ty);
         }
 
         self.enum_backing_types.insert(

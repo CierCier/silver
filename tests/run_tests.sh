@@ -42,6 +42,15 @@ test_specific_flags() {
     esac
 }
 
+
+# Some tests are expected to fail at compile time (e.g., type errors).
+# Return 0 (success) if compilation failure is the expected outcome.
+expected_compile_failure() {
+    case "$1" in
+        enum_arity_error_test) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 # Kill runaway test binaries after this many seconds.
 RUN_TIMEOUT_SECS=120
 
@@ -219,8 +228,20 @@ for t in "${tests[@]}"; do
     compile_real_ms=0; compile_cpu_pct=0; compile_mem_kb=0
     # shellcheck disable=SC2086
     if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" $extra_flags; then
-        printf '  FAIL  %-*s  (compile error)\n' "$COL_NAME" "$name"
-        sed 's/^/    /' "$compile_log"
+        if expected_compile_failure "$name"; then
+            printf '  PASS  %-*s  (expected compile error)\n' "$COL_NAME" "$name"
+            passed=$((passed + 1))
+        else
+            printf '  FAIL  %-*s  (compile error)\n' "$COL_NAME" "$name"
+            sed 's/^/    /' "$compile_log"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+        fi
+        continue
+    fi
+    # Fail if a test expected to fail at compile-time unexpectedly compiled
+    if expected_compile_failure "$name"; then
+        printf '  FAIL  %-*s  (unexpectedly compiled)\n' "$COL_NAME" "$name"
         failed=$((failed + 1))
         failed_names="$failed_names $name"
         continue

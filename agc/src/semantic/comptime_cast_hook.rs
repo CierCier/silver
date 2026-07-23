@@ -65,7 +65,8 @@ fn rewrite_expression(expression: &mut ast::Expression) {
         ast::ExpressionKind::Literal(_)
         | ast::ExpressionKind::Identifier(_)
         | ast::ExpressionKind::TypeName(_)
-        | ast::ExpressionKind::MacroCall { .. } => {}
+        | ast::ExpressionKind::MacroCall { .. }
+        | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
                 rewrite_expression(input);

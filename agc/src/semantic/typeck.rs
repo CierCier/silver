@@ -89,9 +89,16 @@ struct StructDef {
 }
 
 #[derive(Debug, Clone)]
+struct VariantInfo {
+    discriminant: i128,
+    payload: Vec<ast::Type>,
+}
+
+#[derive(Debug, Clone)]
 struct EnumDef {
     backing_type: ast::PrimitiveType,
-    variants: HashMap<String, i128>,
+    has_payload: bool,
+    variants: HashMap<String, VariantInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,12 +281,25 @@ impl TypeChecker {
                     let variants = export
                         .enum_variants
                         .iter()
-                        .map(|variant| (variant.name.clone(), variant.value))
+                        .map(|variant| {
+                            (
+                                variant.name.clone(),
+                                VariantInfo {
+                                    discriminant: variant.value,
+                                    payload: variant.payload_types.iter()
+                                        .map(|key| ast_type_from_canonical_key(key))
+                                        .collect::<Result<Vec<_>, _>>()
+                                        .unwrap_or_else(|_| vec![]),
+                                },
+                            )
+                        })
                         .collect::<HashMap<_, _>>();
+                    let has_payload = export.enum_variants.iter().any(|v| !v.payload_types.is_empty());
                     self.enum_defs.insert(
                         export.name.clone(),
                         EnumDef {
                             backing_type: backing_type.clone(),
+                            has_payload,
                             variants,
                         },
                     );
@@ -1306,6 +1326,33 @@ impl TypeChecker {
             } => {
                 let style = self.method_call_style(receiver);
                 let receiver_ty = self.check_expr(receiver, None);
+                // Check if this is an enum variant construction first
+                if let Type::Named { path: ty_path, .. } = &receiver_ty {
+                    if ty_path.len() == 1 {
+                        let enum_name = &ty_path[0];
+                        if let Some(enum_def) = self.enum_defs.get(enum_name) {
+                            if let Some(variant_info) = enum_def.variants.get(&method.name) {
+                                let expected_count = variant_info.payload.len();
+                                if arguments.len() != expected_count {
+                                    self.error(
+                                        format!("variant '{}' expects {} arguments, got {}", method.name, expected_count, arguments.len()),
+                                        expr.span.clone(),
+                                    );
+                                } else {
+                                    // Collect expected types upfront to release the immutable borrow
+                                    let expected_types: Vec<Type> = variant_info.payload.iter()
+                                        .map(|ast_ty| Type::from_ast(ast_ty))
+                                        .collect();
+                                    for (i, arg) in arguments.iter().enumerate() {
+                                        self.check_expr(arg, Some(&expected_types[i]));
+                                    }
+                                }
+                                return receiver_ty.clone();
+                            }
+                        }
+                    }
+                }
+                // Otherwise, resolve as normal method call
                 self.resolve_method_overload(
                     &receiver_ty,
                     method,
@@ -1468,7 +1515,79 @@ impl TypeChecker {
                     Type::Unknown
                 }
             }
-            ast::ExpressionKind::Match { .. } | ast::ExpressionKind::StructLiteral { .. } => {
+            ast::ExpressionKind::Match { expression, arms } => {
+                let scrutinee_ty = self.check_expr(expression, None);
+                let enum_name = match &scrutinee_ty {
+                    Type::Named { path, .. } if path.len() == 1 => path[0].clone(),
+                    _ => {
+                        self.error(
+                            "match expression requires an enum type",
+                            expr.span.clone(),
+                        );
+                        for arm in arms {
+                            self.check_expr(&arm.body, None);
+                        }
+                        return Type::Unknown;
+                    }
+                };
+                if self.enum_defs.contains_key(&enum_name) {
+                    let mut arm_types: Vec<Type> = Vec::new();
+                    for arm in arms {
+                        self.push_scope();
+                        match &arm.pattern.kind {
+                            ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
+                            ast::PatternKind::Enum { path: _, variant: _, data } => {
+                                if let Some(data_pattern) = data {
+                                    match &data_pattern.kind {
+                                        ast::PatternKind::Identifier(binding) => {
+                                            let payload_type = Type::Primitive(ast::PrimitiveType::I32);
+                                            self.bind(&binding.name, payload_type, false, binding.span.clone());
+                                        }
+                                        _ => {
+                                            self.error(
+                                                "data pattern in match must be an identifier",
+                                                data_pattern.span.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.error(
+                                    "unsupported pattern kind in match",
+                                    arm.pattern.span.clone(),
+                                );
+                            }
+                        }
+                        arm_types.push(self.check_expr(&arm.body, None));
+                        self.pop_scope();
+                    }
+                    if let Some(first) = arm_types.first() {
+                        let unified = first.clone();
+                        for (i, other) in arm_types.iter().enumerate().skip(1) {
+                            if &unified != other {
+                                self.error(
+                                    format!("match arm {} has type {}, expected {}", i + 1, other, unified),
+                                    arms[i].span.clone(),
+                                );
+                            }
+                        }
+                        unified
+                    } else {
+                        Type::Unit
+                    }
+                } else {
+                    self.error(
+                        format!("unknown enum type '{}'", enum_name),
+                        expr.span.clone(),
+                    );
+                    for arm in arms {
+                        self.check_expr(&arm.body, None);
+                    }
+                    Type::Unknown
+                }
+            }
+            ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(
                     "type checking for this expression is not implemented",
                     expr.span.clone(),
@@ -1610,6 +1729,39 @@ impl TypeChecker {
                     self.check_expr(input, None);
                 }
                 Type::Primitive(ast::PrimitiveType::I64)
+            }
+            ast::ExpressionKind::EnumVariant { path, variant, fields } => {
+                for field in fields {
+                    self.check_expr(field, None);
+                }
+                // Resolve to the enum type
+                let enum_name = if path.len() == 1 { &path[0].name } else { "" };
+                if let Some(enum_def) = self.enum_defs.get(enum_name) {
+                    if let Some(info) = enum_def.variants.get(&variant.name) {
+                        if info.payload.len() != fields.len() {
+                            self.error(
+                                format!(
+                                    "enum variant '{}' of '{}' expects {} fields, got {}",
+                                    variant.name,
+                                    enum_name,
+                                    info.payload.len(),
+                                    fields.len()
+                                ),
+                                expr.span.clone(),
+                            );
+                        }
+                    }
+                    Type::Named {
+                        path: path.iter().map(|p| p.name.clone()).collect(),
+                        generics: Vec::new(),
+                    }
+                } else {
+                    self.error(
+                        format!("unknown enum '{}'", enum_name),
+                        expr.span.clone(),
+                    );
+                    Type::Unknown
+                }
             }
         };
         self.expr_types
@@ -3793,24 +3945,41 @@ impl TypeChecker {
         }
     }
 
+    fn variant_payload(variant_data: &ast::EnumVariantData) -> Vec<ast::Type> {
+        match variant_data {
+            ast::EnumVariantData::Unit => vec![],
+            ast::EnumVariantData::Tuple(types) => types.clone(),
+            ast::EnumVariantData::Struct(fields) => {
+                fields.iter().map(|f| f.field_type.clone()).collect()
+            }
+        }
+    }
+
     fn build_enum_def(&mut self, enum_item: &ast::EnumItem) -> Option<EnumDef> {
         let mut variants = HashMap::default();
         let mut next_value = 0i128;
         let mut min_value = 0i128;
         let mut max_value = 0i128;
         let mut saw_any = false;
+        let mut has_payload = false;
 
         for variant in &enum_item.variants {
-            if !matches!(variant.data, ast::EnumVariantData::Unit) {
-                self.error(
-                    "enum variants currently support only unit members",
-                    variant.span.clone(),
-                );
-                continue;
+            let payload = Self::variant_payload(&variant.data);
+            if !payload.is_empty() {
+                has_payload = true;
             }
 
             let value = variant.discriminant.unwrap_or(next_value);
-            if variants.insert(variant.name.name.clone(), value).is_some() {
+            if variants
+                .insert(
+                    variant.name.name.clone(),
+                    VariantInfo {
+                        discriminant: value,
+                        payload,
+                    },
+                )
+                .is_some()
+            {
                 self.error(
                     format!(
                         "duplicate enum variant '{}' in '{}'",
@@ -3847,6 +4016,7 @@ impl TypeChecker {
 
         Some(EnumDef {
             backing_type: choose_enum_backing_type(min_value, max_value),
+            has_payload,
             variants,
         })
     }
