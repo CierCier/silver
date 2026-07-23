@@ -1016,7 +1016,7 @@ mod tests {
             exports: vec![ModuleExport {
                 kind: ExportKind::Function,
                 name: "print".to_string(),
-                signature: "fn()->i32".to_string(),
+                signature: "i32()".to_string(),
                 type_params: Vec::new(),
                 link_name: Some("print".to_string()),
                 abi: Some(ModuleAbi::Silver),
@@ -1087,7 +1087,7 @@ mod tests {
             exports: vec![ModuleExport {
                 kind: ExportKind::Function,
                 name: "print".to_string(),
-                signature: "fn(str)->unit".to_string(),
+                signature: "unit(str)".to_string(),
                 type_params: Vec::new(),
                 link_name: Some("print".to_string()),
                 abi: Some(ModuleAbi::Silver),

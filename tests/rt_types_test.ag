@@ -294,7 +294,7 @@ i32 main() {
         params.push(TypeId.I64());
         TypeResult f1 = reg.function(move params, TypeId.BOOL());
         assert_true(f1.is_ok(), "function(i64 -> bool) ok");
-        assert_eq_str(reg.name_of(f1.id), "fn(i64) -> bool", "fn display name");
+        assert_eq_str(reg.name_of(f1.id), "bool(i64)", "fn display name");
 
         Type* fn_ty = reg.get(f1.id);
         assert_true(fn_ty.kind == (i32)TYPE_KIND.FUNCTION, "fn kind is FUNCTION");
@@ -320,10 +320,10 @@ i32 main() {
         params4.push(TypeId.I64());
         params4.push(TypeId.STRING());
         TypeResult f4 = reg.function(move params4, TypeId.UNIT());
-        assert_eq_str(reg.name_of(f4.id), "fn(i64, string) -> unit",
+        assert_eq_str(reg.name_of(f4.id), "unit(i64, string)",
                       "multi-param fn display name");
         TypeResult f5 = reg.function(Vec<TypeId>.new(), TypeId.UNIT());
-        assert_eq_str(reg.name_of(f5.id), "fn() -> unit", "zero-param fn display name");
+        assert_eq_str(reg.name_of(f5.id), "unit()", "zero-param fn display name");
 
         reg.drop();
     }

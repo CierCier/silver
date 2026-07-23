@@ -3188,9 +3188,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Call { function, .. } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
                     if let Some(sig) = self.signature_for_name(&ident.name) {
-                        sig.return_type.clone()
-                    } else {
-                        None
+                        return sig.return_type.clone();
+                    }
+                }
+                if let Some(func_ty) = self.resolve_receiver_type(function) {
+                    match func_ty.kind.as_ref() {
+                        ast::TypeKind::Function(func) => Some((*func.return_type).clone()),
+                        ast::TypeKind::Pointer(ptr) => {
+                            if let ast::TypeKind::Function(func) = ptr.inner.kind.as_ref() {
+                                Some((*func.return_type).clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None
                     }
                 } else {
                     None
@@ -4099,6 +4110,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 identifier.span.clone(),
                             )
                         });
+                }
+                let name = &identifier.name;
+                let mut func = self.module.get_function(name);
+                if func.is_none() {
+                    if let Some(mangled) = self.imported_function_links.get(name) {
+                        func = self.module.get_function(mangled);
+                    }
+                }
+                if let Some(f) = func {
+                    return Ok(f.as_global_value().as_pointer_value().as_basic_value_enum());
                 }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
@@ -5683,6 +5704,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(storage) = self.lookup_storage(&identifier.name) {
                     return Ok(storage);
                 }
+                let name = &identifier.name;
+                let mut func = self.module.get_function(name);
+                let mut llvm_name = name.clone();
+                if func.is_none() {
+                    if let Some(mangled) = self.imported_function_links.get(name) {
+                        func = self.module.get_function(mangled);
+                        if func.is_some() {
+                            llvm_name = mangled.clone();
+                        }
+                    }
+                }
+                if let Some(f) = func {
+                    let sig = self.signature_for_name(&llvm_name);
+                    let return_type = sig.as_ref()
+                        .and_then(|s| s.return_type.clone())
+                        .unwrap_or_else(|| ast::Type {
+                            kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
+                            span: identifier.span.clone(),
+                        });
+                    let parameters = sig.as_ref()
+                        .map(|s| s.params.clone())
+                        .unwrap_or_default();
+                    let fn_ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
+                            parameters,
+                            return_type: Box::new(return_type),
+                        })),
+                        span: identifier.span.clone(),
+                    };
+                    return Ok((f.as_global_value().as_pointer_value(), fn_ty));
+                }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
                     identifier.span.clone(),
@@ -5959,6 +6011,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    fn emit_indirect_call_expression(
+        &mut self,
+        fn_ptr_val: PointerValue<'ctx>,
+        func_type: &ast::FunctionType,
+        arguments: &[ast::Expression],
+        allow_void: bool,
+        span: &Span,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_type = self.lower_function_type(
+            &func_type.parameters,
+            Some(&func_type.return_type),
+            false,
+            None,
+        )?;
+
+        let declared_param_count = func_type.parameters.len();
+
+        let mut args = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            let mut value = self.emit_expression_value(argument)?;
+            if index < declared_param_count {
+                value = self.cast_value_to_ast_type(
+                    value,
+                    &func_type.parameters[index],
+                    &argument.span,
+                )?;
+            }
+            args.push(BasicMetadataValueEnum::from(value));
+        }
+
+        let call = self
+            .builder
+            .build_indirect_call(fn_type, fn_ptr_val, &args, "calltmp")
+            .map_err(|e| CodegenError::new(format!("failed to emit indirect call: {e}")))?;
+
+        if let Some(value) = call.try_as_basic_value().basic() {
+            Ok(Some(value))
+        } else if allow_void {
+            Ok(None)
+        } else {
+            Err(CodegenError::with_span(
+                "void function call cannot be used as a value",
+                span.clone(),
+            ))
+        }
+    }
+
     fn emit_call_expression(
         &mut self,
         function_expr: &ast::Expression,
@@ -5966,6 +6065,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         allow_void: bool,
         span: &Span,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let is_indirect = if let ast::ExpressionKind::Identifier(identifier) = function_expr.kind.as_ref() {
+            self.lookup_storage(&identifier.name).and_then(|(_, ty)| {
+                match ty.kind.as_ref() {
+                    ast::TypeKind::Function(f) => Some(f.clone()),
+                    ast::TypeKind::Pointer(p) => {
+                        if let ast::TypeKind::Function(f) = p.inner.kind.as_ref() {
+                            Some(f.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None
+                }
+            })
+        } else {
+            self.resolve_receiver_type(function_expr).and_then(|ty| {
+                match ty.kind.as_ref() {
+                    ast::TypeKind::Function(f) => Some(f.clone()),
+                    ast::TypeKind::Pointer(p) => {
+                        if let ast::TypeKind::Function(f) = p.inner.kind.as_ref() {
+                            Some(f.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None
+                }
+            })
+        };
+
+        if let Some(func_type) = is_indirect {
+            let fn_ptr = self.emit_expression_value(function_expr)?;
+            let fn_ptr_val = fn_ptr.into_pointer_value();
+            return self.emit_indirect_call_expression(fn_ptr_val, &func_type, arguments, allow_void, span);
+        }
+
         let (fn_name, explicit_generics) = match function_expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => (identifier.name.clone(), None),
             ast::ExpressionKind::TypeName(ty) => {

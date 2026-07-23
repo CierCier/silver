@@ -725,6 +725,22 @@ impl TypeChecker {
                     ty
                 }
                 None => {
+                    if let Some(sigs) = self.functions.get(&ident.name).and_then(|syms| {
+                        syms.first().and_then(|sym| self.function_symbols.get(sym))
+                    }) {
+                        return Type::Function {
+                            params: sigs.params.clone(),
+                            return_type: Box::new(sigs.return_type.clone()),
+                        };
+                    }
+                    if let Some(sigs) = self.imported_functions.get(&ident.name) {
+                        if let Some(sig) = sigs.first() {
+                            return Type::Function {
+                                params: sig.params.clone(),
+                                return_type: Box::new(sig.return_type.clone()),
+                            };
+                        }
+                    }
                     if self.known_types.contains_key(&ident.name) {
                         return Type::Named {
                             path: vec![ident.name.clone()],
@@ -1261,7 +1277,48 @@ impl TypeChecker {
                 arguments,
             } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
-                    self.resolve_overload(ident, arguments, expr.span.clone())
+                    // Check if this is a known function name first
+                    if self.functions.contains_key(&ident.name) {
+                        self.resolve_overload(ident, arguments, expr.span.clone())
+                    } else {
+                        // Type-check the function expression — may be a fn pointer variable
+                        let fn_ty = self.check_expr(function, None);
+                        if let Type::Function { params, return_type } = &fn_ty {
+                            let arg_types: Vec<Type> = arguments
+                                .iter()
+                                .map(|arg| self.check_expr(arg, None))
+                                .collect();
+                            if arguments.len() != params.len() {
+                                self.error(
+                                    format!(
+                                        "function '{}' expected {} arguments, got {}",
+                                        ident.name,
+                                        params.len(),
+                                        arguments.len()
+                                    ),
+                                    expr.span.clone(),
+                                );
+                            }
+                            for (i, (param_ty, arg_ty)) in params.iter().zip(arg_types.iter()).enumerate() {
+                                if !self.is_assignable(param_ty, arg_ty) {
+                                    self.error(
+                                        format!(
+                                            "mismatched argument type for parameter {}: expected {}, got {}",
+                                            i, param_ty, arg_ty
+                                        ),
+                                        arguments[i].span.clone(),
+                                    );
+                                }
+                            }
+                            *return_type.clone()
+                        } else {
+                            self.error(
+                                format!("'{}' is not callable", ident.name),
+                                expr.span.clone(),
+                            );
+                            Type::Unknown
+                        }
+                    }
                 } else if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
                     if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
                         if named.path.len() == 1 {
@@ -1309,14 +1366,30 @@ impl TypeChecker {
                         Type::Unknown
                     }
                 } else {
-                    for arg in arguments {
-                        self.check_expr(arg, None);
+                    // Type-check the function expression and try indirect call
+                    let fn_ty = self.check_expr(function, None);
+                    if let Type::Function { params, return_type } = &fn_ty {
+                        let arg_types: Vec<Type> = arguments
+                            .iter()
+                            .map(|arg| self.check_expr(arg, None))
+                            .collect();
+                        if arguments.len() != params.len() {
+                            self.error(
+                                format!("expected {} arguments, got {}", params.len(), arguments.len()),
+                                expr.span.clone(),
+                            );
+                        }
+                        *return_type.clone()
+                    } else {
+                        for arg in arguments {
+                            self.check_expr(arg, None);
+                        }
+                        self.error(
+                            "type checking for this call expression is not implemented",
+                            expr.span.clone(),
+                        );
+                        Type::Unknown
                     }
-                    self.error(
-                        "type checking for this call expression is not implemented",
-                        expr.span.clone(),
-                    );
-                    Type::Unknown
                 }
             }
             ast::ExpressionKind::MethodCall {
@@ -2718,9 +2791,9 @@ impl TypeChecker {
             return Self::void_compatible(from, to);
         }
         let from_ok = self.is_primitive_type(from)
-            || matches!(from, Type::Pointer { .. } | Type::Reference { .. });
+            || matches!(from, Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. });
         let to_ok = self.is_primitive_type(to)
-            || matches!(to, Type::Pointer { .. } | Type::Reference { .. });
+            || matches!(to, Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. });
         if from_ok && to_ok {
             return true;
         }
@@ -3088,6 +3161,20 @@ impl TypeChecker {
                     inner,
                 },
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
+            (Type::Pointer { inner, .. }, Type::Function { params, return_type }) => {
+                if let Type::Function { params: from_params, return_type: from_ret } = inner.as_ref() {
+                    from_params == params && from_ret == return_type
+                } else {
+                    false
+                }
+            }
+            (Type::Function { params, return_type }, Type::Pointer { inner, .. }) => {
+                if let Type::Function { params: to_params, return_type: to_ret } = inner.as_ref() {
+                    params == to_params && return_type == to_ret
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -4458,7 +4545,7 @@ mod tests {
             exports: vec![crate::module_artifact::ModuleExport {
                 kind: crate::module_artifact::ExportKind::Function,
                 name: "alloc".to_string(),
-                signature: "fn()->*mut T".to_string(),
+                signature: "*mut T()".to_string(),
                 type_params: vec!["T".to_string()],
                 link_name: Some("alloc".to_string()),
                 abi: Some(crate::module_artifact::ModuleAbi::Silver),
