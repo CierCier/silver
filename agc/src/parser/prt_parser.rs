@@ -918,6 +918,28 @@ impl PRT_Parser {
         Ok(item_end)
     }
 
+fn is_type_like(token: &Token) -> bool {
+    match token {
+        Token::I8 | Token::I16 | Token::I32 | Token::I64 | Token::I128 |
+        Token::U8 | Token::U16 | Token::U32 | Token::U64 | Token::U128 |
+        Token::F32 | Token::F64 | Token::F80 |
+        Token::C32 | Token::C64 | Token::C80 |
+        Token::Bool | Token::Str | Token::Char | Token::Void |
+        Token::Vec | Token::Optional |
+        Token::Identifier(_) |
+        Token::Comma |
+        Token::Star |
+        Token::DoubleColon |
+        Token::Less | Token::Greater |
+        Token::LeftParen | Token::RightParen |
+        Token::LeftBracket | Token::RightBracket |
+        Token::IntLiteral(_) |
+        Token::Const | Token::Mut | Token::Ref |
+        Token::BitwiseAnd => true,
+        _ => false,
+    }
+}
+
     fn parse_type_prefix(
         &self,
         tokens: &[LexToken],
@@ -954,28 +976,12 @@ impl PRT_Parser {
                 return None;
             }
             cursor += 1;
-            if cursor < end && matches!(tokens[cursor].kind, Token::Arrow) {
-                cursor += 1;
-                let (ret, next) = self.parse_type_prefix(tokens, cursor, end)?;
-                cursor = next;
-                ast::Type {
-                    kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
-                        parameters: params,
-                        return_type: Box::new(ret),
-                    })),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[cursor - 1].span.end,
-                    },
-                }
-            } else {
-                ast::Type {
-                    kind: Box::new(ast::TypeKind::Tuple(params)),
-                    span: Span {
-                        start: tokens[open].span.start,
-                        end: tokens[cursor - 1].span.end,
-                    },
-                }
+            ast::Type {
+                kind: Box::new(ast::TypeKind::Tuple(params)),
+                span: Span {
+                    start: tokens[open].span.start,
+                    end: tokens[cursor - 1].span.end,
+                },
             }
         } else {
             let mut path = Vec::new();
@@ -1045,6 +1051,60 @@ impl PRT_Parser {
                 base
             }
         };
+
+        if cursor < end && matches!(tokens[cursor].kind, Token::LeftParen) {
+            if let Some(close) = self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen) {
+                let mut is_fn = false;
+                if close > cursor + 1 {
+                    let mut type_like = true;
+                    for idx in (cursor + 1)..close {
+                        if !Self::is_type_like(&tokens[idx].kind) {
+                            type_like = false;
+                            break;
+                        }
+                    }
+                    if type_like {
+                        is_fn = true;
+                    }
+                }
+                if is_fn {
+                    let mut parsed_types = Vec::new();
+                    let mut arg_cursor = cursor + 1;
+                    let mut ok = true;
+                    while arg_cursor < close {
+                        if let Some((arg, next_arg)) = self.parse_type_prefix(tokens, arg_cursor, close) {
+                            parsed_types.push(arg);
+                            arg_cursor = next_arg;
+                            if arg_cursor < close {
+                                if matches!(tokens[arg_cursor].kind, Token::Comma) {
+                                    arg_cursor += 1;
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        let start_span = ty.span.start;
+                        ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
+                                parameters: parsed_types,
+                                return_type: Box::new(ty),
+                            })),
+                            span: Span {
+                                start: start_span,
+                                end: tokens[close].span.end,
+                            },
+                        };
+                        cursor = close + 1;
+                    }
+                }
+            }
+        }
 
         while cursor < end && matches!(tokens[cursor].kind, Token::Star) {
             let is_mutable = !is_const;

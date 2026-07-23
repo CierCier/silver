@@ -1,0 +1,20 @@
+import std.test;
+
+struct Logger {
+    void (i32) log_func;
+}
+
+i32 g_val = 0;
+
+void my_log(i32 x) {
+    g_val = x;
+}
+
+i32 main() {
+    Logger l;
+    l.log_func = &my_log;
+    void (i32) f = l.log_func;
+    f(42);
+    assert_eq_i32(42, g_val, "struct field void fn ptr call");
+    return done();
+}
