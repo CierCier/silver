@@ -522,8 +522,8 @@ impl Lexer {
                     message: "Invalid hex literal: expected hex digits after 0x".to_string(),
                 });
             }
-            let value = i128::from_str_radix(&hex_str, 16)
-                .map_err(|_| LexError::InvalidNumber {
+            let value =
+                i128::from_str_radix(&hex_str, 16).map_err(|_| LexError::InvalidNumber {
                     span: (start_pos, self.position),
                     message: "Invalid hex number".to_string(),
                 })?;
@@ -752,7 +752,11 @@ impl Lexer {
     }
 
     fn peek(&self) -> char {
-        self.input.as_bytes().get(self.position).copied().unwrap_or(0) as char
+        self.input
+            .as_bytes()
+            .get(self.position)
+            .copied()
+            .unwrap_or(0) as char
     }
 
     fn peek_next(&self) -> Option<char> {
@@ -1042,9 +1046,9 @@ mod tests {
         // Skip keywords as they should be tokenized as keywords, not identifiers
         let keywords = [
             "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "if", "else", "while",
-            "for", "break", "continue", "return", "defer", "import", "comptime", "cast", "move", "ref",
-            "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128", "u8",
-            "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
+            "for", "break", "continue", "return", "defer", "import", "comptime", "cast", "move",
+            "ref", "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128",
+            "u8", "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
             "bool", "str", "char", "void", "Vec", "Optional",
         ];
 

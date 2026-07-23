@@ -292,8 +292,12 @@ impl CompilerSymbolTable {
                 );
                 for member in &trait_item.items {
                     let (name, span) = match member {
-                        ast::TraitItemKind::Function(func) => (&func.name.name, Some(func.name.span.clone())),
-                        ast::TraitItemKind::AssociatedFunctionValue(fv) => (&fv.name.name, Some(fv.name.span.clone())),
+                        ast::TraitItemKind::Function(func) => {
+                            (&func.name.name, Some(func.name.span.clone()))
+                        }
+                        ast::TraitItemKind::AssociatedFunctionValue(fv) => {
+                            (&fv.name.name, Some(fv.name.span.clone()))
+                        }
                         _ => continue,
                     };
                     self.upsert(

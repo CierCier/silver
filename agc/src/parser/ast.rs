@@ -612,10 +612,10 @@ pub enum ExpressionKind {
     Initializer {
         items: Vec<InitializerItem>,
     },
-Asm {
-    code: String,
-    inputs: Vec<Expression>,
-},
+    Asm {
+        code: String,
+        inputs: Vec<Expression>,
+    },
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),
     StructLiteral {

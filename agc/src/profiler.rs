@@ -85,7 +85,10 @@ impl Profiler {
             .max()
             .unwrap_or(0);
 
-        eprintln!("\n{}", "=== Compiler Profile Report ===".bright_cyan().bold());
+        eprintln!(
+            "\n{}",
+            "=== Compiler Profile Report ===".bright_cyan().bold()
+        );
         eprintln!(
             "{:<24} {:>10} {:>12} {:>12} {:>12}",
             "Phase", "Time (ms)", "Mem Before", "Mem After", "Delta (KB)"
@@ -112,10 +115,7 @@ impl Profiler {
         eprintln!("{}", "-".repeat(74).bright_black());
         eprintln!(
             "{:<24} {:>10.2} {:>34} {:>10} KB",
-            "Total",
-            total_time_ms,
-            "",
-            peak_mem_kb,
+            "Total", total_time_ms, "", peak_mem_kb,
         );
         eprintln!(
             "{:<24} {:>36} {:>10} KB",
@@ -191,10 +191,7 @@ impl fmt::Display for Profiler {
         writeln!(
             f,
             "{:<24} {:>10.2} {:>34} {:>10} KB",
-            "Total",
-            total_time_ms,
-            "",
-            peak_mem_kb,
+            "Total", total_time_ms, "", peak_mem_kb,
         )?;
         writeln!(
             f,

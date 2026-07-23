@@ -8,6 +8,7 @@ use agc::module_artifact::{
     ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
 };
 use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
+use agc::parser::ast;
 use agc::semantic::{
     self,
     analyzer::{Analyzer, SemanticAnalyzerHook},
@@ -16,7 +17,6 @@ use agc::semantic::{
 };
 use agc::symbol_table::{CompilerPhase, CompilerSymbolTable};
 use agc::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
-use agc::parser::ast;
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -794,9 +794,9 @@ fn main() {
 
                 profiler.begin_phase("type check");
                 TypeChecker::resolve_type_aliases_in_program(&mut ast);
-                let mut checker = TypeChecker::new()
-                    .with_imported_modules(&imported_modules);
-                let (type_errors, mut monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
+                let mut checker = TypeChecker::new().with_imported_modules(&imported_modules);
+                let (type_errors, mut monomorphs) =
+                    checker.check_program_with_table(&ast, &mut symbol_table);
                 // Populate ForIn iterator_type from typeck-resolved types
                 let resolved_iter_types = checker.take_resolved_iter_types();
                 if !resolved_iter_types.is_empty() {
@@ -835,7 +835,8 @@ fn main() {
                                             {
                                                 // Find matching method in our source impl
                                                 for source_member in &mut impl_item.items {
-                                                    if let ast::ImplItemKind::Function(source_func) = source_member
+                                                    if let ast::ImplItemKind::Function(source_func) =
+                                                        source_member
                                                         && source_func.name.name == method.name.name
                                                     {
                                                         source_func.body = func.body.clone();

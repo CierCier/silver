@@ -1,11 +1,11 @@
 use crate::diagnostics;
 use std::path::{Path, PathBuf};
 
+use crate::attributes::function_link_name;
 use crate::lexer::{self, Span};
 use crate::parser;
 use crate::parser::ast;
-use crate::types::{parse_struct_attributes, struct_layout, Type, TypeContext, TypeLayout};
-use crate::attributes::function_link_name;
+use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 
 const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x02";
 
@@ -390,12 +390,13 @@ impl ModuleArtifact {
 
         if !errors.is_empty() {
             return Err(diagnostics::render(
-                    &src,
-                    &path.display().to_string(),
-                    errors[0].span().clone(),
-                    &errors[0].format_with_help(),
-                    diagnostics::Severity::Error,
-                ).to_string());
+                &src,
+                &path.display().to_string(),
+                errors[0].span().clone(),
+                &errors[0].format_with_help(),
+                diagnostics::Severity::Error,
+            )
+            .to_string());
         }
 
         let module_path = module_path_from_path(path);
@@ -524,7 +525,9 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             .params
                             .iter()
                             .filter_map(|param| match param {
-                                ast::GenericParam::Type(type_param) => Some(type_param.name.name.clone()),
+                                ast::GenericParam::Type(type_param) => {
+                                    Some(type_param.name.name.clone())
+                                }
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -535,7 +538,11 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     name: func.name.name.clone(),
                     signature: format!("{ret}({})", params.join(",")),
                     type_params,
-                    link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
+                    link_name: Some(
+                        link_name_attr
+                            .map(|s| s.to_string())
+                            .unwrap_or(func.name.name.clone()),
+                    ),
                     abi: Some(ModuleAbi::Silver),
                     is_variadic: false,
                     type_key: None,
@@ -565,7 +572,11 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     name: func.name.name.clone(),
                     signature: format!("{ret}({})", params.join(",")),
                     type_params: Vec::new(),
-                    link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
+                    link_name: Some(
+                        link_name_attr
+                            .map(|s| s.to_string())
+                            .unwrap_or(func.name.name.clone()),
+                    ),
                     abi: Some(ModuleAbi::from_linkage(&func.linkage)),
                     is_variadic: func.signature.is_variadic,
                     type_key: None,

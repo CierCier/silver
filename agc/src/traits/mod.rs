@@ -222,12 +222,7 @@ impl TraitRegistry {
                             continue;
                         }
                         let fn_type = Type::Function {
-                            params: fv
-                                .fn_type
-                                .parameters
-                                .iter()
-                                .map(Type::from_ast)
-                                .collect(),
+                            params: fv.fn_type.parameters.iter().map(Type::from_ast).collect(),
                             return_type: Box::new(Type::from_ast(&fv.fn_type.return_type)),
                         };
                         def.assoc_fn_values.insert(
@@ -506,7 +501,11 @@ impl TraitRegistry {
                     .map(|p| Type::from_ast(&p.param_type))
                     .collect();
                 let expected_fn = &fv.fn_type;
-                let Type::Function { params: expected_params, return_type: expected_ret } = expected_fn else {
+                let Type::Function {
+                    params: expected_params,
+                    return_type: expected_ret,
+                } = expected_fn
+                else {
                     continue;
                 };
 
@@ -521,7 +520,9 @@ impl TraitRegistry {
                     continue;
                 }
 
-                for (idx, (expected, found)) in expected_params.iter().zip(params.iter()).enumerate() {
+                for (idx, (expected, found)) in
+                    expected_params.iter().zip(params.iter()).enumerate()
+                {
                     if !unify_type(expected, found, &subst, &impl_generics, &mut impl_subst) {
                         errors.push(TraitError {
                             message: format!(
@@ -703,17 +704,19 @@ fn unify_type(
     let expected = substitute_type(expected, subst);
 
     if let Type::Named { path, generics } = found
-        && path.len() == 1 && impl_generics.contains(&path[0]) {
-            if !generics.is_empty() {
-                return false;
-            }
-            let name = path[0].clone();
-            if let Some(existing) = impl_subst.get(&name) {
-                return existing == &expected;
-            }
-            impl_subst.insert(name, expected.clone());
-            return true;
+        && path.len() == 1
+        && impl_generics.contains(&path[0])
+    {
+        if !generics.is_empty() {
+            return false;
         }
+        let name = path[0].clone();
+        if let Some(existing) = impl_subst.get(&name) {
+            return existing == &expected;
+        }
+        impl_subst.insert(name, expected.clone());
+        return true;
+    }
 
     match (&expected, found) {
         (Type::Unknown, _) => true,
@@ -760,9 +763,7 @@ fn unify_type(
             Type::Slice {
                 element: found_elem,
             },
-        ) => {
-            unify_type(element, found_elem, subst, impl_generics, impl_subst)
-        }
+        ) => unify_type(element, found_elem, subst, impl_generics, impl_subst),
         (Type::Optional { inner }, Type::Optional { inner: found_inner }) => {
             unify_type(inner, found_inner, subst, impl_generics, impl_subst)
         }
@@ -1062,9 +1063,7 @@ mod tests {
 
     #[test]
     fn trait_associated_fn_value_missing_is_error() {
-        let program = parse(
-            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { }",
-        );
+        let program = parse("trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { }");
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
     }
@@ -1125,9 +1124,8 @@ mod tests {
 
     #[test]
     fn trait_associated_fn_value_void_return_ok() {
-        let program = parse(
-            "trait Logger { log: void(i32); } impl Logger for i32 { void log(i32 x) { } }",
-        );
+        let program =
+            parse("trait Logger { log: void(i32); } impl Logger for i32 { void log(i32 x) { } }");
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
     }
@@ -1143,9 +1141,7 @@ mod tests {
 
     #[test]
     fn trait_associated_fn_value_duplicate_is_error() {
-        let program = parse(
-            "trait Foo { handler: i32(i32); handler: i32(i32); }",
-        );
+        let program = parse("trait Foo { handler: i32(i32); handler: i32(i32); }");
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
     }

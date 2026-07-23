@@ -32,13 +32,13 @@ pub enum ResolvedSourceImportKind {
 
 use parking_lot::Mutex;
 
- #[derive(Debug)]
- pub struct ModuleLoader {
-     search_dirs: Vec<PathBuf>,
-     cwd: Option<PathBuf>,
+#[derive(Debug)]
+pub struct ModuleLoader {
+    search_dirs: Vec<PathBuf>,
+    cwd: Option<PathBuf>,
     /// Cache of loaded module artifacts keyed by module path (e.g. "std.mem.vec").
     module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
- }
+}
 
 impl Default for ModuleLoader {
     fn default() -> Self {
@@ -230,23 +230,25 @@ impl ModuleLoader {
 
         // Priority 1: relative_path (relative to the currently compiled file)
         if let Some(base) = base_dir
-            && let Some((source_path, kind)) = resolve_source_in_root(base, &segments) {
-                return Some(ResolvedSourceImport {
-                    module_path: module_path.clone(),
-                    source_path,
-                    kind,
-                });
-            }
+            && let Some((source_path, kind)) = resolve_source_in_root(base, &segments)
+        {
+            return Some(ResolvedSourceImport {
+                module_path: module_path.clone(),
+                source_path,
+                kind,
+            });
+        }
 
         // Priority 2: cwd (current working directory of the process)
         if let Some(cwd) = &self.cwd
-            && let Some((source_path, kind)) = resolve_source_in_root(cwd, &segments) {
-                return Some(ResolvedSourceImport {
-                    module_path: module_path.clone(),
-                    source_path,
-                    kind,
-                });
-            }
+            && let Some((source_path, kind)) = resolve_source_in_root(cwd, &segments)
+        {
+            return Some(ResolvedSourceImport {
+                module_path: module_path.clone(),
+                source_path,
+                kind,
+            });
+        }
 
         // Priority 3+: include dirs then sysroot dirs as appended by build_module_loader.
         for root in &self.search_dirs {
@@ -327,11 +329,12 @@ pub fn module_loader_default_dirs(sysroot: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(root.join("lib").join("silver"));
     }
     if let Ok(home) = std::env::var("SILVER_SYSROOT")
-        && !home.is_empty() {
-            let root = PathBuf::from(home);
-            dirs.push(root.join("include").join("silver"));
-            dirs.push(root.join("lib").join("silver"));
-        }
+        && !home.is_empty()
+    {
+        let root = PathBuf::from(home);
+        dirs.push(root.join("include").join("silver"));
+        dirs.push(root.join("lib").join("silver"));
+    }
     dirs
 }
 

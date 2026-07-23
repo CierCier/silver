@@ -14,9 +14,10 @@ pub fn validate_global_attributes(attributes: &[ast::Attribute]) -> Vec<Attribut
             continue;
         }
         if attr.name.name.as_str() == "link"
-            && let Err(error) = parse_link_attribute(attr) {
-                errors.push(error);
-            }
+            && let Err(error) = parse_link_attribute(attr)
+        {
+            errors.push(error);
+        }
     }
     errors
 }
@@ -82,7 +83,6 @@ fn parse_link_attribute(attr: &ast::Attribute) -> Result<Option<String>, Attribu
     Ok(Some(lib))
 }
 
-
 /// Splits attributes into program-level and item-level attributes.
 /// Known program-level attributes: `link`.
 pub fn filter_program_attributes(
@@ -110,9 +110,10 @@ pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
     for attr in attributes {
         if attr.name.name == "link_name"
             && let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first()
-                && !s.is_empty() {
-                    return Some(s);
-                }
+            && !s.is_empty()
+        {
+            return Some(s);
+        }
     }
     None
 }

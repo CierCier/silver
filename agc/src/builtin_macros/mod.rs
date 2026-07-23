@@ -74,7 +74,8 @@ impl MacroRegistry {
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Option<Type> {
-        self.get(name).map(|h| h.type_check(checker, name, expr, args))
+        self.get(name)
+            .map(|h| h.type_check(checker, name, expr, args))
     }
 
     pub fn codegen<'ctx>(
@@ -84,7 +85,8 @@ impl MacroRegistry {
         expr: &ast::Expression,
         args: &[ast::MacroArg],
     ) -> Option<CodegenResult<BasicValueEnum<'ctx>>> {
-        self.get(name).map(|h| h.codegen(generator, name, expr, args))
+        self.get(name)
+            .map(|h| h.codegen(generator, name, expr, args))
     }
 }
 

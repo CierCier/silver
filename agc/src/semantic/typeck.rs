@@ -286,7 +286,9 @@ impl TypeChecker {
                                 variant.name.clone(),
                                 VariantInfo {
                                     discriminant: variant.value,
-                                    payload: variant.payload_types.iter()
+                                    payload: variant
+                                        .payload_types
+                                        .iter()
                                         .map(|key| ast_type_from_canonical_key(key))
                                         .collect::<Result<Vec<_>, _>>()
                                         .unwrap_or_else(|_| vec![]),
@@ -294,7 +296,10 @@ impl TypeChecker {
                             )
                         })
                         .collect::<HashMap<_, _>>();
-                    let has_payload = export.enum_variants.iter().any(|v| !v.payload_types.is_empty());
+                    let has_payload = export
+                        .enum_variants
+                        .iter()
+                        .any(|v| !v.payload_types.is_empty());
                     self.enum_defs.insert(
                         export.name.clone(),
                         EnumDef {
@@ -1283,7 +1288,11 @@ impl TypeChecker {
                     } else {
                         // Type-check the function expression — may be a fn pointer variable
                         let fn_ty = self.check_expr(function, None);
-                        if let Type::Function { params, return_type } = &fn_ty {
+                        if let Type::Function {
+                            params,
+                            return_type,
+                        } = &fn_ty
+                        {
                             let arg_types: Vec<Type> = arguments
                                 .iter()
                                 .map(|arg| self.check_expr(arg, None))
@@ -1299,7 +1308,9 @@ impl TypeChecker {
                                     expr.span.clone(),
                                 );
                             }
-                            for (i, (param_ty, arg_ty)) in params.iter().zip(arg_types.iter()).enumerate() {
+                            for (i, (param_ty, arg_ty)) in
+                                params.iter().zip(arg_types.iter()).enumerate()
+                            {
                                 if !self.is_assignable(param_ty, arg_ty) {
                                     self.error(
                                         format!(
@@ -1368,14 +1379,22 @@ impl TypeChecker {
                 } else {
                     // Type-check the function expression and try indirect call
                     let fn_ty = self.check_expr(function, None);
-                    if let Type::Function { params, return_type } = &fn_ty {
-                        let arg_types: Vec<Type> = arguments
+                    if let Type::Function {
+                        params,
+                        return_type,
+                    } = &fn_ty
+                    {
+                        let _arg_types: Vec<Type> = arguments
                             .iter()
                             .map(|arg| self.check_expr(arg, None))
                             .collect();
                         if arguments.len() != params.len() {
                             self.error(
-                                format!("expected {} arguments, got {}", params.len(), arguments.len()),
+                                format!(
+                                    "expected {} arguments, got {}",
+                                    params.len(),
+                                    arguments.len()
+                                ),
                                 expr.span.clone(),
                             );
                         }
@@ -1408,12 +1427,19 @@ impl TypeChecker {
                                 let expected_count = variant_info.payload.len();
                                 if arguments.len() != expected_count {
                                     self.error(
-                                        format!("variant '{}' expects {} arguments, got {}", method.name, expected_count, arguments.len()),
+                                        format!(
+                                            "variant '{}' expects {} arguments, got {}",
+                                            method.name,
+                                            expected_count,
+                                            arguments.len()
+                                        ),
                                         expr.span.clone(),
                                     );
                                 } else {
                                     // Collect expected types upfront to release the immutable borrow
-                                    let expected_types: Vec<Type> = variant_info.payload.iter()
+                                    let expected_types: Vec<Type> = variant_info
+                                        .payload
+                                        .iter()
                                         .map(|ast_ty| Type::from_ast(ast_ty))
                                         .collect();
                                     for (i, arg) in arguments.iter().enumerate() {
@@ -1593,10 +1619,7 @@ impl TypeChecker {
                 let enum_name = match &scrutinee_ty {
                     Type::Named { path, .. } if path.len() == 1 => path[0].clone(),
                     _ => {
-                        self.error(
-                            "match expression requires an enum type",
-                            expr.span.clone(),
-                        );
+                        self.error("match expression requires an enum type", expr.span.clone());
                         for arm in arms {
                             self.check_expr(&arm.body, None);
                         }
@@ -1609,12 +1632,22 @@ impl TypeChecker {
                         self.push_scope();
                         match &arm.pattern.kind {
                             ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
-                            ast::PatternKind::Enum { path: _, variant: _, data } => {
+                            ast::PatternKind::Enum {
+                                path: _,
+                                variant: _,
+                                data,
+                            } => {
                                 if let Some(data_pattern) = data {
                                     match &data_pattern.kind {
                                         ast::PatternKind::Identifier(binding) => {
-                                            let payload_type = Type::Primitive(ast::PrimitiveType::I32);
-                                            self.bind(&binding.name, payload_type, false, binding.span.clone());
+                                            let payload_type =
+                                                Type::Primitive(ast::PrimitiveType::I32);
+                                            self.bind(
+                                                &binding.name,
+                                                payload_type,
+                                                false,
+                                                binding.span.clone(),
+                                            );
                                         }
                                         _ => {
                                             self.error(
@@ -1640,7 +1673,12 @@ impl TypeChecker {
                         for (i, other) in arm_types.iter().enumerate().skip(1) {
                             if &unified != other {
                                 self.error(
-                                    format!("match arm {} has type {}, expected {}", i + 1, other, unified),
+                                    format!(
+                                        "match arm {} has type {}, expected {}",
+                                        i + 1,
+                                        other,
+                                        unified
+                                    ),
                                     arms[i].span.clone(),
                                 );
                             }
@@ -1803,7 +1841,11 @@ impl TypeChecker {
                 }
                 Type::Primitive(ast::PrimitiveType::I64)
             }
-            ast::ExpressionKind::EnumVariant { path, variant, fields } => {
+            ast::ExpressionKind::EnumVariant {
+                path,
+                variant,
+                fields,
+            } => {
                 for field in fields {
                     self.check_expr(field, None);
                 }
@@ -1829,10 +1871,7 @@ impl TypeChecker {
                         generics: Vec::new(),
                     }
                 } else {
-                    self.error(
-                        format!("unknown enum '{}'", enum_name),
-                        expr.span.clone(),
-                    );
+                    self.error(format!("unknown enum '{}'", enum_name), expr.span.clone());
                     Type::Unknown
                 }
             }
@@ -2414,8 +2453,9 @@ impl TypeChecker {
         );
         debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
         debug_assert_eq!(table.symbol_key(symbol_id), Some(symbol_key.as_str()));
-        self.function_symbols.entry(symbol_id).or_insert_with(|| {
-            FunctionSig {
+        self.function_symbols
+            .entry(symbol_id)
+            .or_insert_with(|| FunctionSig {
                 params,
                 return_type,
                 type_params,
@@ -2423,8 +2463,7 @@ impl TypeChecker {
                 bounds,
                 source: func.clone(),
                 is_variadic,
-            }
-        });
+            });
         let overloads = self.functions.entry(func.name.name.clone()).or_default();
         // Identical redeclarations (e.g. the same `extern "C"` prototype
         // inlined from multiple imported files) intern to the same symbol id;
@@ -2791,9 +2830,15 @@ impl TypeChecker {
             return Self::void_compatible(from, to);
         }
         let from_ok = self.is_primitive_type(from)
-            || matches!(from, Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. });
+            || matches!(
+                from,
+                Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. }
+            );
         let to_ok = self.is_primitive_type(to)
-            || matches!(to, Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. });
+            || matches!(
+                to,
+                Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. }
+            );
         if from_ok && to_ok {
             return true;
         }
@@ -2915,7 +2960,10 @@ impl TypeChecker {
 
     pub(crate) fn memcpy_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 3 {
-            self.error("@memcpy expects exactly 3 arguments (dst, src, len)", expr.span.clone());
+            self.error(
+                "@memcpy expects exactly 3 arguments (dst, src, len)",
+                expr.span.clone(),
+            );
             return Type::Unknown;
         }
         // dst
@@ -2939,7 +2987,10 @@ impl TypeChecker {
 
     pub(crate) fn memset_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 3 {
-            self.error("@memset expects exactly 3 arguments (dst, value, len)", expr.span.clone());
+            self.error(
+                "@memset expects exactly 3 arguments (dst, value, len)",
+                expr.span.clone(),
+            );
             return Type::Unknown;
         }
         // dst
@@ -2960,9 +3011,16 @@ impl TypeChecker {
         }
     }
 
-    pub(crate) fn memmove_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+    pub(crate) fn memmove_typeck(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
         if args.len() != 3 {
-            self.error("@memmove expects exactly 3 arguments (dst, src, len)", expr.span.clone());
+            self.error(
+                "@memmove expects exactly 3 arguments (dst, src, len)",
+                expr.span.clone(),
+            );
             return Type::Unknown;
         }
         // dst
@@ -3008,7 +3066,9 @@ impl TypeChecker {
                     let segments = crate::builtin_macros::parse_format(s);
                     segments
                         .iter()
-                        .filter(|seg| matches!(seg, crate::builtin_macros::FormatSegment::Placeholder))
+                        .filter(|seg| {
+                            matches!(seg, crate::builtin_macros::FormatSegment::Placeholder)
+                        })
                         .count()
                 }
                 _ => {
@@ -3161,15 +3221,35 @@ impl TypeChecker {
                     inner,
                 },
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
-            (Type::Pointer { inner, .. }, Type::Function { params, return_type }) => {
-                if let Type::Function { params: from_params, return_type: from_ret } = inner.as_ref() {
+            (
+                Type::Pointer { inner, .. },
+                Type::Function {
+                    params,
+                    return_type,
+                },
+            ) => {
+                if let Type::Function {
+                    params: from_params,
+                    return_type: from_ret,
+                } = inner.as_ref()
+                {
                     from_params == params && from_ret == return_type
                 } else {
                     false
                 }
             }
-            (Type::Function { params, return_type }, Type::Pointer { inner, .. }) => {
-                if let Type::Function { params: to_params, return_type: to_ret } = inner.as_ref() {
+            (
+                Type::Function {
+                    params,
+                    return_type,
+                },
+                Type::Pointer { inner, .. },
+            ) => {
+                if let Type::Function {
+                    params: to_params,
+                    return_type: to_ret,
+                } = inner.as_ref()
+                {
                     params == to_params && return_type == to_ret
                 } else {
                     false
@@ -4356,9 +4436,7 @@ fn populate_expression_for_in_types(
     resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
 ) {
     match expr.kind.as_mut() {
-        ast::ExpressionKind::ForIn {
-            iterator_type, ..
-        } => {
+        ast::ExpressionKind::ForIn { iterator_type, .. } => {
             if let Some(iter_ty) = resolved_iter_types.get(&(expr.span.start, expr.span.end)) {
                 *iterator_type = Some(iter_ty.clone());
             }
@@ -4378,14 +4456,14 @@ fn populate_expression_for_in_types(
                 populate_block_for_in_types(else_block, resolved_iter_types);
             }
         }
-        ast::ExpressionKind::While { condition, body, .. } => {
+        ast::ExpressionKind::While {
+            condition, body, ..
+        } => {
             populate_expression_for_in_types(condition, resolved_iter_types);
             populate_block_for_in_types(body, resolved_iter_types);
         }
         ast::ExpressionKind::For {
-            condition,
-            body,
-            ..
+            condition, body, ..
         } => {
             populate_expression_for_in_types(condition, resolved_iter_types);
             populate_block_for_in_types(body, resolved_iter_types);
@@ -4416,7 +4494,9 @@ fn populate_expression_for_in_types(
             populate_expression_for_in_types(index, resolved_iter_types);
         }
         ast::ExpressionKind::MethodCall {
-            receiver, arguments, ..
+            receiver,
+            arguments,
+            ..
         } => {
             populate_expression_for_in_types(receiver, resolved_iter_types);
             for arg in arguments {
@@ -4424,7 +4504,9 @@ fn populate_expression_for_in_types(
             }
         }
         ast::ExpressionKind::Call {
-            function, arguments, ..
+            function,
+            arguments,
+            ..
         } => {
             populate_expression_for_in_types(function, resolved_iter_types);
             for arg in arguments {

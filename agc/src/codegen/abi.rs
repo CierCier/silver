@@ -10,7 +10,6 @@
 /// - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 ///   (https://gitlab.com/x86-psABIs/x86-64-ABI)
 /// - Inko compiler ABI implementation (https://github.com/inko-lang/inko)
-
 use std::num::NonZeroU32;
 
 use inkwell::targets::TargetData;
@@ -210,7 +209,10 @@ impl Amd64Abi {
         match cls {
             AbiClass::Integer(bytes) => {
                 let bits = NonZeroU32::new((bytes * 8) as u32).unwrap();
-                context.custom_width_int_type(bits).unwrap().as_basic_type_enum()
+                context
+                    .custom_width_int_type(bits)
+                    .unwrap()
+                    .as_basic_type_enum()
             }
             AbiClass::Float(4) => context.f32_type().as_basic_type_enum(),
             AbiClass::Float(_) => context.f64_type().as_basic_type_enum(),
@@ -227,11 +229,7 @@ impl Amd64Abi {
         struct_ty: StructType<'ctx>,
     ) -> BasicTypeEnum<'ctx> {
         let mut classes = Vec::new();
-        self.classify_fields(
-            target_data,
-            struct_ty.as_basic_type_enum(),
-            &mut classes,
-        );
+        self.classify_fields(target_data, struct_ty.as_basic_type_enum(), &mut classes);
 
         let align = target_data.get_abi_alignment(&struct_ty);
         let (a, b) = self.combine_classes(classes, align as u64);
@@ -239,7 +237,9 @@ impl Amd64Abi {
         let a_ty = self.class_to_llvm_type(context, a);
         let b_ty = self.class_to_llvm_type(context, b);
 
-        context.struct_type(&[a_ty, b_ty], false).as_basic_type_enum()
+        context
+            .struct_type(&[a_ty, b_ty], false)
+            .as_basic_type_enum()
     }
 }
 
@@ -261,13 +261,18 @@ impl AbiHandler for Amd64Abi {
             let bits = (size * 8) as u32;
             // LLVM requires at least 1 bit
             let bits = if bits == 0 { 1 } else { bits };
-            context.custom_width_int_type(NonZeroU32::new(bits).unwrap()).unwrap().as_basic_type_enum()
+            context
+                .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+                .unwrap()
+                .as_basic_type_enum()
         } else if size <= 16 {
             // Medium struct: classify into eightbytes
             self.build_abi_struct(context, target_data, struct_ty)
         } else {
             // Large struct: pass by reference
-            context.ptr_type(inkwell::AddressSpace::default()).as_basic_type_enum()
+            context
+                .ptr_type(inkwell::AddressSpace::default())
+                .as_basic_type_enum()
         }
     }
 
@@ -322,9 +327,11 @@ pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inkwell::context::Context;
-    use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple};
     use inkwell::OptimizationLevel;
+    use inkwell::context::Context;
+    use inkwell::targets::{
+        CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+    };
 
     fn setup_target_machine() -> TargetMachine {
         Target::initialize_x86(&InitializationConfig::default());
@@ -369,11 +376,7 @@ mod tests {
 
         assert_eq!(
             classes,
-            vec![
-                AbiClass::Float(4),
-                AbiClass::Float(4),
-                AbiClass::Float(4),
-            ]
+            vec![AbiClass::Float(4), AbiClass::Float(4), AbiClass::Float(4),]
         );
     }
 
@@ -430,11 +433,7 @@ mod tests {
     fn test_combine_classes_mixed_promotes_to_integer() {
         let handler = Amd64Abi::new();
         let (a, b) = handler.combine_classes(
-            vec![
-                AbiClass::Float(4),
-                AbiClass::Float(4),
-                AbiClass::Integer(4),
-            ],
+            vec![AbiClass::Float(4), AbiClass::Float(4), AbiClass::Integer(4)],
             4,
         );
 
@@ -467,7 +466,11 @@ mod tests {
     fn test_combine_classes_with_alignment() {
         let handler = Amd64Abi::new();
         let (a, b) = handler.combine_classes(
-            vec![AbiClass::Integer(1), AbiClass::Integer(4), AbiClass::Integer(8)],
+            vec![
+                AbiClass::Integer(1),
+                AbiClass::Integer(4),
+                AbiClass::Integer(8),
+            ],
             8,
         );
 
@@ -511,10 +514,7 @@ mod tests {
         let context = Context::create();
 
         let handler = Amd64Abi::new();
-        let struct_ty = context.struct_type(
-            &[context.i32_type().as_basic_type_enum()],
-            false,
-        );
+        let struct_ty = context.struct_type(&[context.i32_type().as_basic_type_enum()], false);
 
         let result = handler.classify_argument(&context, &tdata, struct_ty);
         assert_eq!(result, context.i32_type().as_basic_type_enum());
@@ -540,9 +540,16 @@ mod tests {
         let result = handler.classify_argument(&context, &tdata, struct_ty);
 
         // Should be a struct of two eightbytes, not i96
-        assert!(result.is_struct_type(), "Vector3 should be classified as a struct, not i96");
+        assert!(
+            result.is_struct_type(),
+            "Vector3 should be classified as a struct, not i96"
+        );
         let result_struct = result.into_struct_type();
-        assert_eq!(result_struct.count_fields(), 2, "Vector3 should have 2 eightbyte fields");
+        assert_eq!(
+            result_struct.count_fields(),
+            2,
+            "Vector3 should have 2 eightbyte fields"
+        );
     }
 
     #[test]
@@ -563,7 +570,10 @@ mod tests {
         );
 
         let result = handler.classify_argument(&context, &tdata, struct_ty);
-        assert!(result.is_pointer_type(), "Large struct should be passed as pointer");
+        assert!(
+            result.is_pointer_type(),
+            "Large struct should be passed as pointer"
+        );
     }
 
     #[test]
