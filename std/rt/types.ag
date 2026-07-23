@@ -342,7 +342,7 @@ impl TypeRegistry {
         return move result;
     }
 
-    /// fn(params...) -> ret — interned by a canonical serialized key of the
+    /// ret(params...) — interned by a canonical serialized key of the
     /// raw param ids + ret id ("p0,p1,...->ret").  Consumes `params`.
     pub TypeResult function(TypeRegistry* self, Vec<TypeId> params, TypeId ret) {
         // Canonical cache key from raw ids.
@@ -365,8 +365,14 @@ impl TypeRegistry {
             return TypeResult.ok_id(TypeId.from_raw(existing));
         }
 
-        // Display name: "fn(i64, string) -> bool"
-        String name = rt_type_str_owned("fn(");
+        // Display name: "bool(i64, string)"
+        str ret_name = self.name_of(ret);
+        if (ret_name == (str)0) {
+            key.drop();
+            return self.unknown_type_id_error(ret.raw);
+        }
+        String name = rt_type_str_owned(ret_name);
+        name.push_str("(");
         i = 0;
         while (i < params.len()) {
             if (i > 0) {
@@ -382,14 +388,7 @@ impl TypeRegistry {
             name.push_str(param_name);
             i = i + 1;
         }
-        name.push_str(") -> ");
-        str ret_name = self.name_of(ret);
-        if (ret_name == (str)0) {
-            name.drop();
-            key.drop();
-            return self.unknown_type_id_error(ret.raw);
-        }
-        name.push_str(ret_name);
+        name.push_str(")");
 
         Type ty = Type.new(move name, (i32)TYPE_KIND.FUNCTION);
         // Type.new left an empty params Vec (null buffer) — overwrite it

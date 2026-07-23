@@ -520,7 +520,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
-                    signature: format!("fn({})->{ret}", params.join(",")),
+                    signature: format!("{ret}({})", params.join(",")),
                     type_params,
                     link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
                     abi: Some(ModuleAbi::Silver),
@@ -550,7 +550,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
-                    signature: format!("fn({})->{ret}", params.join(",")),
+                    signature: format!("{ret}({})", params.join(",")),
                     type_params: Vec::new(),
                     link_name: Some(link_name_attr.map(|s| s.to_string()).unwrap_or(func.name.name.clone())),
                     abi: Some(ModuleAbi::from_linkage(&func.linkage)),
@@ -668,7 +668,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                                 .canonical_key();
                             Some(ModuleTraitItem {
                                 name: func.name.name.clone(),
-                                signature: format!("fn({params})->{ret}"),
+                                signature: format!("{ret}({params})"),
                             })
                         }
                         ast::TraitItemKind::AssociatedType(assoc) => Some(ModuleTraitItem {
@@ -686,7 +686,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             let ret = Type::from_ast(&fv.fn_type.return_type).canonical_key();
                             Some(ModuleTraitItem {
                                 name: fv.name.name.clone(),
-                                signature: format!("fn({params})->{ret}"),
+                                signature: format!("{ret}({params})"),
                             })
                         }
                     })
@@ -725,7 +725,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     exports.push(ModuleExport {
                         kind: ExportKind::Function,
                         name: func.name.name.clone(),
-                        signature: format!("fn({})->{ret}", params.join(",")),
+                        signature: format!("{ret}({})", params.join(",")),
                         type_params: Vec::new(),
                         link_name: Some(func.name.name.clone()),
                         abi: Some(ModuleAbi::from_linkage(&block.linkage)),
@@ -1026,7 +1026,7 @@ mod tests {
                 ModuleExport {
                     kind: ExportKind::Function,
                     name: "print".to_string(),
-                    signature: "fn(str)->unit".to_string(),
+                    signature: "unit(str)".to_string(),
                     type_params: vec!["T".to_string()],
                     link_name: Some("silver_print".to_string()),
                     abi: Some(ModuleAbi::Silver),

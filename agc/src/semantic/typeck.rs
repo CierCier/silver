@@ -4375,7 +4375,7 @@ mod tests {
             exports: vec![crate::module_artifact::ModuleExport {
                 kind: crate::module_artifact::ExportKind::Function,
                 name: "alloc".to_string(),
-                signature: "fn()->*mut T".to_string(),
+                signature: "*mut T()".to_string(),
                 type_params: vec!["T".to_string()],
                 link_name: Some("alloc".to_string()),
                 abi: Some(crate::module_artifact::ModuleAbi::Silver),
