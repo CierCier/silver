@@ -1,0 +1,8 @@
+import std.test;
+import std.process;
+
+i32 main() {
+    exit(0);
+    assert_true(false, "should not reach here");
+    return done();
+}

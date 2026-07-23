@@ -1,0 +1,23 @@
+// std/args.ag — process argument access.
+// References accessor functions compiled from entry.ag.
+
+extern "C" {
+    i32 silver_argc();
+    i8** silver_argv();
+}
+
+pub struct Args {
+    i32 argc;
+    i8** argv;
+}
+
+pub Args new() {
+    Args a;
+    a.argc = silver_argc();
+    a.argv = silver_argv();
+    return move a;
+}
+
+pub i32 argc(Args* self) {
+    return self.argc;
+}

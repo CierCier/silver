@@ -1,0 +1,28 @@
+// std/time.ag — clock and time operations.
+
+import std.sys.linux;
+
+pub const i64 CLOCK_MONOTONIC = 1;
+
+pub struct Timespec {
+    i64 sec;
+    i64 nsec;
+}
+
+pub struct Instant {
+    Timespec ts;
+}
+
+pub Instant now() {
+    Instant inst;
+    sys_clock_gettime(CLOCK_MONOTONIC, (i64)&inst.ts);
+    return move inst;
+}
+
+impl Instant {
+    pub i64 elapsed_ns(Instant* self, Instant earlier) {
+        i64 sec_diff = self.ts.sec - earlier.ts.sec;
+        i64 nsec_diff = self.ts.nsec - earlier.ts.nsec;
+        return sec_diff * 1000000000 + nsec_diff;
+    }
+}

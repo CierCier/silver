@@ -17,11 +17,20 @@ import std.io;
 //
 // The module's _start is inlined into the consumer's object file by the import
 // hook, so no separate linking step is needed.
-
 extern "C" {
     i32 main();
+    i32 __silver_argc;
+    i8** __silver_argv;
+}
+
+pub i32 silver_argc() {
+    return __silver_argc;
+}
+
+pub i8** silver_argv() {
+    return __silver_argv;
 }
 
 void _start() {
-    asm("xor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nand $$-16, %rsp\ncall main\nmov %rax, %r12\ncall __silver_flush_all\nmov %r12, %rdi\nmov $$231, %eax\nsyscall");
+    asm(".section .bss\n__silver_argc: .zero 4\n__silver_argv: .zero 8\n.text\nxor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nmov %rdi, __silver_argc(%rip)\nmov %rsi, __silver_argv(%rip)\nand $$-16, %rsp\ncall main\nmov %rax, %r12\ncall __silver_flush_all\nmov %r12, %rdi\nmov $$231, %eax\nsyscall");
 }
