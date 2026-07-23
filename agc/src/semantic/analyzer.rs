@@ -269,9 +269,10 @@ impl Analyzer {
                 // Register associated type names so method signatures can reference them
                 for item in &trait_item.items {
                     if let ast::TraitItemKind::AssociatedType(assoc) = item
-                        && let Some(scope) = self.type_params.last_mut() {
-                            scope.insert(assoc.name.name.clone());
-                        }
+                        && let Some(scope) = self.type_params.last_mut()
+                    {
+                        scope.insert(assoc.name.name.clone());
+                    }
                 }
                 for item in &trait_item.items {
                     match item {
@@ -330,23 +331,25 @@ impl Analyzer {
                 }
                 self.push_type_params(impl_item.generics.as_ref());
                 if !implicit.is_empty()
-                    && let Some(scope) = self.type_params.last_mut() {
-                        scope.extend(implicit);
-                    }
+                    && let Some(scope) = self.type_params.last_mut()
+                {
+                    scope.extend(implicit);
+                }
                 if let Some(scope) = self.type_params.last_mut() {
                     scope.insert("Self".to_string());
                 }
                 self.check_generics_bounds(impl_item.generics.as_ref());
                 if let Some(trait_ref) = &impl_item.trait_ref
-                    && trait_ref.path.len() == 1 {
-                        let name = trait_ref.path[0].name.clone();
-                        if self.has_symbol(&name).is_none() {
-                            self.errors.push(SemanticError {
-                                message: format!("unknown trait '{}'", name),
-                                span: trait_ref.span.clone(),
-                            });
-                        }
+                    && trait_ref.path.len() == 1
+                {
+                    let name = trait_ref.path[0].name.clone();
+                    if self.has_symbol(&name).is_none() {
+                        self.errors.push(SemanticError {
+                            message: format!("unknown trait '{}'", name),
+                            span: trait_ref.span.clone(),
+                        });
                     }
+                }
                 self.check_type(&impl_item.self_type);
                 for item in &impl_item.items {
                     match item {
@@ -641,7 +644,12 @@ impl Analyzer {
             | ast::ExpressionKind::Reference {
                 expression: expr, ..
             } => self.check_expression(expr),
-            ast::ExpressionKind::ForIn { binding, iterable, body, .. } => {
+            ast::ExpressionKind::ForIn {
+                binding,
+                iterable,
+                body,
+                ..
+            } => {
                 self.check_expression(iterable);
                 self.push_var_scope();
                 self.bind_var(binding, binding.span.clone());
@@ -845,7 +853,9 @@ impl Analyzer {
                     self.bind_pattern(inner);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
+            ast::PatternKind::Literal(_)
+            | ast::PatternKind::Wildcard
+            | ast::PatternKind::Range { .. } => {}
         }
     }
 

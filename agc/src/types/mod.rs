@@ -112,7 +112,10 @@ impl TypeContext {
                 // Optional<T> = { bool present; T thing; }
                 // Size = align_to(bool_size, inner.align) + inner.size, then aligned to max(bool_align, inner.align)
                 let bool_layout = TypeLayout::known(1, 1);
-                let offset = align_to(bool_layout.size.unwrap_or(0), inner_layout.align.unwrap_or(1));
+                let offset = align_to(
+                    bool_layout.size.unwrap_or(0),
+                    inner_layout.align.unwrap_or(1),
+                );
                 let total_size = offset + inner_layout.size.unwrap_or(0);
                 let overall_align = inner_layout.align.unwrap_or(1).max(1);
                 TypeLayout::known(total_size, overall_align)
@@ -319,9 +322,9 @@ impl Type {
                 return_type: Box::new(Type::from_ast(&func.return_type)),
             },
             ast::TypeKind::Tuple(items) => Type::Tuple(items.iter().map(Type::from_ast).collect()),
+        }
     }
-}
-    
+
     pub fn from_canonical_key(text: &str) -> Result<Type, String> {
         let mut parser = TypeParser::new(text);
         let ty = parser.parse_type()?;
@@ -331,7 +334,7 @@ impl Type {
         }
         Ok(ty)
     }
-    
+
     pub fn to_ast(&self) -> ast::Type {
         fn ident(name: &str) -> ast::Identifier {
             ast::Identifier {
@@ -367,13 +370,11 @@ impl Type {
                     path: vec![ident("Slice")],
                     generics: Some(vec![element.to_ast()]),
                 }),
-                Type::Array { element, size } => {
-                    ast::TypeKind::Array(Box::new(ast::ArrayType {
-                        element_type: Box::new(element.to_ast()),
-                        size: *size as i64,
-                        span: Span { start: 0, end: 0 },
-                    }))
-                }
+                Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
+                    element_type: Box::new(element.to_ast()),
+                    size: *size as i64,
+                    span: Span { start: 0, end: 0 },
+                })),
                 Type::Optional { inner } => ast::TypeKind::Optional(Box::new(inner.to_ast())),
                 Type::Tuple(items) => {
                     ast::TypeKind::Tuple(items.iter().map(Type::to_ast).collect())
@@ -402,9 +403,10 @@ impl Type {
         match self {
             Type::Named { path, generics } => {
                 if path.len() == 1
-                    && let Some(mapped) = mapping.get(&path[0]) {
-                        return mapped.clone();
-                    }
+                    && let Some(mapped) = mapping.get(&path[0])
+                {
+                    return mapped.clone();
+                }
                 Type::Named {
                     path: path.clone(),
                     generics: generics
@@ -482,7 +484,9 @@ impl Type {
                     format!("{}<{}>", path.join("::"), args)
                 }
             }
-            Type::Array { element, size } => format!("Array<{}, {}>", element.canonical_key(), size),
+            Type::Array { element, size } => {
+                format!("Array<{}, {}>", element.canonical_key(), size)
+            }
             Type::Slice { element } => format!("Slice<{}>", element.canonical_key()),
             Type::Optional { inner } => format!("Optional<{}>", inner.canonical_key()),
             Type::Tuple(items) => {
@@ -770,10 +774,12 @@ impl<'a> TypeParser<'a> {
             generics = self.parse_type_list(b'>')?;
         }
 
-        if generics.is_empty() && path.len() == 1
-            && let Some(primitive) = parse_primitive_name(&path[0]) {
-                return Ok(Type::Primitive(primitive));
-            }
+        if generics.is_empty()
+            && path.len() == 1
+            && let Some(primitive) = parse_primitive_name(&path[0])
+        {
+            return Ok(Type::Primitive(primitive));
+        }
 
         Ok(Type::Named { path, generics })
     }
@@ -1001,7 +1007,6 @@ mod tests {
         assert_eq!(layout.align, Some(4));
         assert_eq!(layout.size, Some(8));
     }
-
 
     #[test]
     fn canonical_parser_understands_void() {

@@ -2,8 +2,8 @@ use std::path::Path;
 
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DebugInfoBuilder, DICompileUnit, DIBasicType, DIFile, DIFlags, DIFlagsConstants,
-    DILexicalBlock, DILocation, DIScope, DISubprogram, DISubroutineType, DIType,
+    AsDIScope, DIBasicType, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DILexicalBlock,
+    DILocation, DIScope, DISubprogram, DISubroutineType, DIType, DebugInfoBuilder,
     LLVMDWARFTypeEncoding, debug_metadata_version,
 };
 use inkwell::module::{FlagBehavior, Module};
@@ -67,21 +67,20 @@ impl<'ctx> DebugContext<'ctx> {
         source_path: &Path,
         source_text: &str,
     ) -> Self {
-        let debug_metadata_version = context.i32_type().const_int(
-            debug_metadata_version() as u64,
-            false,
-        );
+        let debug_metadata_version = context
+            .i32_type()
+            .const_int(debug_metadata_version() as u64, false);
         module.add_basic_value_flag(
             "Debug Info Version",
             FlagBehavior::Warning,
             debug_metadata_version,
         );
 
-        let filename = source_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown.ag");
-        let directory = source_path
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
+        let filename = source_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.ag");
+        let directory = source_path.parent().and_then(|p| p.to_str()).unwrap_or(".");
 
         let (dibuilder, compile_unit) = module.create_debug_info_builder(
             true,
@@ -128,12 +127,9 @@ impl<'ctx> DebugContext<'ctx> {
 
     pub fn push_lexical_block(&mut self, line: u32, col: u32) {
         let scope = self.current_scope();
-        let block = self.dibuilder.create_lexical_block(
-            scope,
-            self.di_file,
-            line,
-            col,
-        );
+        let block = self
+            .dibuilder
+            .create_lexical_block(scope, self.di_file, line, col);
         self.current_lexical_blocks.push(block);
     }
 
@@ -148,13 +144,8 @@ impl<'ctx> DebugContext<'ctx> {
         col: u32,
     ) -> DILocation<'ctx> {
         let scope = self.current_scope();
-        self.dibuilder.create_debug_location(
-            context,
-            line,
-            col,
-            scope,
-            None,
-        )
+        self.dibuilder
+            .create_debug_location(context, line, col, scope, None)
     }
 
     pub fn create_basic_type(
@@ -163,7 +154,8 @@ impl<'ctx> DebugContext<'ctx> {
         size_in_bits: u64,
         encoding: LLVMDWARFTypeEncoding,
     ) -> Result<DIBasicType<'ctx>, inkwell::error::Error> {
-        self.dibuilder.create_basic_type(name, size_in_bits, encoding, DIFlags::PUBLIC)
+        self.dibuilder
+            .create_basic_type(name, size_in_bits, encoding, DIFlags::PUBLIC)
     }
 
     pub fn create_subroutine_type(

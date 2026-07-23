@@ -1,16 +1,16 @@
+use parking_lot::Mutex;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::time::SystemTime;
 
 use crate::lexer;
 use crate::module_artifact::ModuleArtifact;
 use crate::module_loader::{
-    filter_exports, import_path_to_string, validate_import_conflicts, ModuleLoader,
-    ResolvedSourceImportKind,
+    ModuleLoader, ResolvedSourceImportKind, filter_exports, import_path_to_string,
+    validate_import_conflicts,
 };
-use crate::parser::ast;
 use crate::parser::Parser;
+use crate::parser::ast;
 
 /// Cache keyed by file path: (mtime_nanos, fully-parsed program).
 pub type FileItemCache = HashMap<PathBuf, (u128, ast::Program)>;
@@ -128,7 +128,6 @@ impl<'a> FileImportResolverHook<'a> {
             transitive_module_deps: transitive,
             module_artifacts: self.module_imports.into_iter().map(|(_, m)| m).collect(),
         })
-
     }
     fn lower_program_recursive(
         &mut self,
@@ -208,7 +207,9 @@ impl<'a> FileImportResolverHook<'a> {
                                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                                     .map(|d| d.as_nanos())
                                     .unwrap_or(0);
-                                cache.lock().insert(resolved.source_path.clone(), (mtime, prog.clone()));
+                                cache
+                                    .lock()
+                                    .insert(resolved.source_path.clone(), (mtime, prog.clone()));
                             }
                             prog
                         }
@@ -273,20 +274,21 @@ impl<'a> FileImportResolverHook<'a> {
 fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let tokens = lexer::lex(&src)
-        .map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
+    let tokens =
+        lexer::lex(&src).map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
     let mut parser = Parser::new_with_source(tokens, path.display().to_string());
     let (program, errors) = parser.parse_program();
     if errors.is_empty() {
         return Ok(program);
     }
     Err(crate::diagnostics::render(
-            &src,
-            &path.display().to_string(),
-            errors[0].span().clone(),
-            &errors[0].format_with_help(),
-            crate::diagnostics::Severity::Error,
-        ).to_string())
+        &src,
+        &path.display().to_string(),
+        errors[0].span().clone(),
+        &errors[0].format_with_help(),
+        crate::diagnostics::Severity::Error,
+    )
+    .to_string())
 }
 
 fn public_importable_item_names(program: &ast::Program) -> Vec<String> {
@@ -547,26 +549,28 @@ impl<'a> ImportAliasRewriter<'a> {
         match expr.kind.as_mut() {
             ast::ExpressionKind::Identifier(ident) => {
                 if !self.is_value_bound(&ident.name)
-                    && let Some(target) = self.plan.direct.get(&ident.name) {
-                        ident.name = target.clone();
-                    }
+                    && let Some(target) = self.plan.direct.get(&ident.name)
+                {
+                    ident.name = target.clone();
+                }
             }
             ast::ExpressionKind::TypeName(ty) => self.rewrite_type(ty),
             ast::ExpressionKind::FieldAccess { object, field } => {
                 self.rewrite_expr(object);
                 if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
-                    && !self.is_value_bound(&owner.name) {
-                        if let Some(target) = self.plan.direct.get(&owner.name) {
-                            owner_to_expr(object, target, owner.span.clone());
-                        } else if self
-                            .plan
-                            .namespaces
-                            .get(&owner.name)
-                            .is_some_and(|items| items.contains(&field.name))
-                        {
-                            *expr.kind = ast::ExpressionKind::Identifier(field.clone());
-                        }
+                    && !self.is_value_bound(&owner.name)
+                {
+                    if let Some(target) = self.plan.direct.get(&owner.name) {
+                        owner_to_expr(object, target, owner.span.clone());
+                    } else if self
+                        .plan
+                        .namespaces
+                        .get(&owner.name)
+                        .is_some_and(|items| items.contains(&field.name))
+                    {
+                        *expr.kind = ast::ExpressionKind::Identifier(field.clone());
                     }
+                }
             }
             ast::ExpressionKind::Call {
                 function,
@@ -588,20 +592,20 @@ impl<'a> ImportAliasRewriter<'a> {
                 }
                 if let ast::ExpressionKind::Identifier(owner) = receiver.kind.as_ref()
                     && !self.is_value_bound(&owner.name)
-                        && self
-                            .plan
-                            .namespaces
-                            .get(&owner.name)
-                            .is_some_and(|items| items.contains(&method.name))
-                    {
-                        *expr.kind = ast::ExpressionKind::Call {
-                            function: Box::new(ast::Expression {
-                                kind: Box::new(ast::ExpressionKind::Identifier(method.clone())),
-                                span: method.span.clone(),
-                            }),
-                            arguments: arguments.clone(),
-                        };
-                    }
+                    && self
+                        .plan
+                        .namespaces
+                        .get(&owner.name)
+                        .is_some_and(|items| items.contains(&method.name))
+                {
+                    *expr.kind = ast::ExpressionKind::Call {
+                        function: Box::new(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Identifier(method.clone())),
+                            span: method.span.clone(),
+                        }),
+                        arguments: arguments.clone(),
+                    };
+                }
             }
             ast::ExpressionKind::Binary { left, right, .. } => {
                 self.rewrite_expr(left);
@@ -760,11 +764,9 @@ impl<'a> ImportAliasRewriter<'a> {
         }
     }
 
-    fn push_scope(&mut self) {
-    }
+    fn push_scope(&mut self) {}
 
-    fn pop_scope(&mut self) {
-    }
+    fn pop_scope(&mut self) {}
 
     fn bind_value(&mut self, name: &str) {
         *self.bound_names.entry(name.to_string()).or_insert(0) += 1;
@@ -799,7 +801,9 @@ impl<'a> ImportAliasRewriter<'a> {
                     self.bind_pattern(data);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
+            ast::PatternKind::Literal(_)
+            | ast::PatternKind::Wildcard
+            | ast::PatternKind::Range { .. } => {}
         }
     }
 
@@ -823,7 +827,9 @@ impl<'a> ImportAliasRewriter<'a> {
                     self.unbind_pattern(data);
                 }
             }
-            ast::PatternKind::Literal(_) | ast::PatternKind::Wildcard | ast::PatternKind::Range { .. } => {}
+            ast::PatternKind::Literal(_)
+            | ast::PatternKind::Wildcard
+            | ast::PatternKind::Range { .. } => {}
         }
     }
 
@@ -899,14 +905,18 @@ mod tests {
             .expect("import lowering should succeed");
 
         assert!(result.module_artifacts.is_empty());
-        assert!(program
-            .items
-            .iter()
-            .all(|item| !matches!(item.kind, ast::ItemKind::Import(_))));
-        assert!(program
-            .items
-            .iter()
-            .any(|item| matches!(item.kind, ast::ItemKind::Function(_))));
+        assert!(
+            program
+                .items
+                .iter()
+                .all(|item| !matches!(item.kind, ast::ItemKind::Import(_)))
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item.kind, ast::ItemKind::Function(_)))
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -952,14 +962,18 @@ mod tests {
         hook.lower_program_imports(&mut program, None, None)
             .expect("import lowering should succeed");
 
-        assert!(program
-            .items
-            .iter()
-            .any(|item| item_name(item).as_deref() == Some("print")));
-        assert!(!program
-            .items
-            .iter()
-            .any(|item| item_name(item).as_deref() == Some("hidden")));
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| item_name(item).as_deref() == Some("print"))
+        );
+        assert!(
+            !program
+                .items
+                .iter()
+                .any(|item| item_name(item).as_deref() == Some("hidden"))
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

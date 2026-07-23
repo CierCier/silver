@@ -28,7 +28,6 @@ impl CodegenError {
     }
 }
 
-
 pub trait SilverGenerator {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()>;
     fn generate_item(&mut self, item: &ast::Item) -> CodegenResult<()>;

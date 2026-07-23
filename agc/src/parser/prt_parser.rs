@@ -599,13 +599,13 @@ impl PRT_Parser {
         if matches!(
             tokens.get(index + 1).map(|next| &next.kind),
             Some(Token::Less)
-        )
-            && let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len()) {
-                return matches!(
-                    tokens.get(after_type).map(|next| &next.kind),
-                    Some(Token::Identifier(_))
-                );
-            }
+        ) && let Some((_, after_type)) = self.parse_type_prefix(tokens, index, tokens.len())
+        {
+            return matches!(
+                tokens.get(after_type).map(|next| &next.kind),
+                Some(Token::Identifier(_))
+            );
+        }
 
         if let Some(Token::Identifier(_)) = tokens.get(index + 1).map(|next| &next.kind) {
             if let Some(Token::Assign | Token::Semicolon | Token::Comma) =
@@ -918,27 +918,48 @@ impl PRT_Parser {
         Ok(item_end)
     }
 
-fn is_type_like(token: &Token) -> bool {
-    match token {
-        Token::I8 | Token::I16 | Token::I32 | Token::I64 | Token::I128 |
-        Token::U8 | Token::U16 | Token::U32 | Token::U64 | Token::U128 |
-        Token::F32 | Token::F64 | Token::F80 |
-        Token::C32 | Token::C64 | Token::C80 |
-        Token::Bool | Token::Str | Token::Char | Token::Void |
-        Token::Vec | Token::Optional |
-        Token::Identifier(_) |
-        Token::Comma |
-        Token::Star |
-        Token::DoubleColon |
-        Token::Less | Token::Greater |
-        Token::LeftParen | Token::RightParen |
-        Token::LeftBracket | Token::RightBracket |
-        Token::IntLiteral(_) |
-        Token::Const | Token::Mut | Token::Ref |
-        Token::BitwiseAnd => true,
-        _ => false,
+    fn is_type_like(token: &Token) -> bool {
+        match token {
+            Token::I8
+            | Token::I16
+            | Token::I32
+            | Token::I64
+            | Token::I128
+            | Token::U8
+            | Token::U16
+            | Token::U32
+            | Token::U64
+            | Token::U128
+            | Token::F32
+            | Token::F64
+            | Token::F80
+            | Token::C32
+            | Token::C64
+            | Token::C80
+            | Token::Bool
+            | Token::Str
+            | Token::Char
+            | Token::Void
+            | Token::Vec
+            | Token::Optional
+            | Token::Identifier(_)
+            | Token::Comma
+            | Token::Star
+            | Token::DoubleColon
+            | Token::Less
+            | Token::Greater
+            | Token::LeftParen
+            | Token::RightParen
+            | Token::LeftBracket
+            | Token::RightBracket
+            | Token::IntLiteral(_)
+            | Token::Const
+            | Token::Mut
+            | Token::Ref
+            | Token::BitwiseAnd => true,
+            _ => false,
+        }
     }
-}
 
     fn parse_type_prefix(
         &self,
@@ -1053,7 +1074,9 @@ fn is_type_like(token: &Token) -> bool {
         };
 
         if cursor < end && matches!(tokens[cursor].kind, Token::LeftParen) {
-            if let Some(close) = self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen) {
+            if let Some(close) =
+                self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen)
+            {
                 let mut is_fn = false;
                 if close > cursor + 1 {
                     let mut type_like = true;
@@ -1072,7 +1095,9 @@ fn is_type_like(token: &Token) -> bool {
                     let mut arg_cursor = cursor + 1;
                     let mut ok = true;
                     while arg_cursor < close {
-                        if let Some((arg, next_arg)) = self.parse_type_prefix(tokens, arg_cursor, close) {
+                        if let Some((arg, next_arg)) =
+                            self.parse_type_prefix(tokens, arg_cursor, close)
+                        {
                             parsed_types.push(arg);
                             arg_cursor = next_arg;
                             if arg_cursor < close {
@@ -1150,7 +1175,6 @@ fn is_type_like(token: &Token) -> bool {
                 if depth == 0 {
                     return Some(idx);
                 }
-
             }
         }
         None
@@ -1240,7 +1264,9 @@ fn is_type_like(token: &Token) -> bool {
                 Token::RightBrace => brace = brace.saturating_sub(1),
                 Token::Less => angle += 1,
                 Token::Greater => angle = angle.saturating_sub(1),
-                Token::Comma if paren == 0 && bracket == 0 && brace == 0 && angle == 0 => return Some(idx),
+                Token::Comma if paren == 0 && bracket == 0 && brace == 0 && angle == 0 => {
+                    return Some(idx);
+                }
                 _ => {}
             }
         }
@@ -1645,18 +1671,23 @@ fn is_type_like(token: &Token) -> bool {
         let token = &tokens[binding_token_idx];
         let ident_name = match &token.kind {
             Token::Identifier(name) => name.clone(),
-            _ if token.kind.keyword_name().is_some() => token.kind.keyword_name().unwrap().to_string(),
-            _ => return Err(ParseError::InvalidSyntax {
-                message: "expected identifier after for".to_string(),
-                span: token.span.clone(),
-            }),
+            _ if token.kind.keyword_name().is_some() => {
+                token.kind.keyword_name().unwrap().to_string()
+            }
+            _ => {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected identifier after for".to_string(),
+                    span: token.span.clone(),
+                });
+            }
         };
         let binding = ast::Identifier {
             name: ident_name,
             span: token.span.clone(),
         };
 
-        let Some(in_pos) = self.find_token_in_range(tokens, binding_token_idx + 1, end, Token::In) else {
+        let Some(in_pos) = self.find_token_in_range(tokens, binding_token_idx + 1, end, Token::In)
+        else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected 'in' after for binding".to_string(),
                 span: tokens[start].span.clone(),
@@ -2036,14 +2067,18 @@ fn is_type_like(token: &Token) -> bool {
                 Token::IntLiteral(value) => {
                     let span = token.span.clone();
                     cursor.bump();
-                    if matches!(cursor.current().map(|t| &t.kind), Some(Token::DotDot | Token::DotDotDot)) {
+                    if matches!(
+                        cursor.current().map(|t| &t.kind),
+                        Some(Token::DotDot | Token::DotDotDot)
+                    ) {
                         let op = cursor.current().map(|t| t.kind.clone()).unwrap();
                         let inclusive = matches!(op, Token::DotDot);
                         cursor.bump();
-                        let end_token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
-                            message: "expected range end in match pattern".to_string(),
-                            span: span.clone(),
-                        })?;
+                        let end_token =
+                            cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
+                                message: "expected range end in match pattern".to_string(),
+                                span: span.clone(),
+                            })?;
                         let end_value = match &end_token.kind {
                             Token::IntLiteral(v) => *v,
                             _ => {
@@ -2058,16 +2093,23 @@ fn is_type_like(token: &Token) -> bool {
                         ast::Pattern {
                             kind: ast::PatternKind::Range {
                                 start: ast::Expression {
-                                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(*value))),
+                                    kind: Box::new(ast::ExpressionKind::Literal(
+                                        ast::Literal::Integer(*value),
+                                    )),
                                     span: span.clone(),
                                 },
                                 end: ast::Expression {
-                                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(end_value))),
+                                    kind: Box::new(ast::ExpressionKind::Literal(
+                                        ast::Literal::Integer(end_value),
+                                    )),
                                     span: end_span.clone(),
                                 },
                                 inclusive,
                             },
-                            span: Span { start: span.start, end: end_span.end },
+                            span: Span {
+                                start: span.start,
+                                end: end_span.end,
+                            },
                         }
                     } else {
                         ast::Pattern {
@@ -2133,12 +2175,12 @@ fn is_type_like(token: &Token) -> bool {
                             span: span.clone(),
                         }];
                         cursor.bump(); // consume dot
-                        let variant_token = cursor.current().ok_or_else(|| {
-                            ParseError::InvalidSyntax {
-                                message: "expected variant name after '.' in enum pattern".to_string(),
+                        let variant_token =
+                            cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
+                                message: "expected variant name after '.' in enum pattern"
+                                    .to_string(),
                                 span: span.clone(),
-                            }
-                        })?;
+                            })?;
                         let variant_name = match &variant_token.kind {
                             Token::Identifier(v) => v.clone(),
                             _ => {
@@ -2150,10 +2192,14 @@ fn is_type_like(token: &Token) -> bool {
                         };
                         let variant_span = variant_token.span.clone();
                         cursor.bump();
-                        let data = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
+                        let data = if matches!(
+                            cursor.current().map(|t| &t.kind),
+                            Some(Token::LeftParen)
+                        ) {
                             cursor.bump();
                             let data_pattern = parse_match_pattern(cursor)?;
-                            if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
+                            if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen))
+                            {
                                 return Err(ParseError::InvalidSyntax {
                                     message: "expected ')' in enum variant pattern".to_string(),
                                     span: variant_span.clone(),
@@ -2238,11 +2284,14 @@ fn is_type_like(token: &Token) -> bool {
                             });
                         }
                         cursor.bump();
-                        let body = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftBrace)) {
+                        let body = if matches!(
+                            cursor.current().map(|t| &t.kind),
+                            Some(Token::LeftBrace)
+                        ) {
                             let block_start = cursor.pos;
-                            let Some(close) = find_matching_brace(
-                                cursor.tokens, block_start, cursor.end
-                            ) else {
+                            let Some(close) =
+                                find_matching_brace(cursor.tokens, block_start, cursor.end)
+                            else {
                                 return Err(ParseError::InvalidSyntax {
                                     message: "unterminated match arm block".to_string(),
                                     span: cursor.tokens[block_start].span.clone(),
@@ -2280,7 +2329,10 @@ fn is_type_like(token: &Token) -> bool {
                     let Some(rbrace) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated match expression".to_string(),
-                            span: Span { start: match_start, end: match_start },
+                            span: Span {
+                                start: match_start,
+                                end: match_start,
+                            },
                         });
                     };
                     let span = Span {
@@ -2345,8 +2397,9 @@ fn is_type_like(token: &Token) -> bool {
                             span: ty.span.clone(),
                         });
                     }
-                    let name = token.kind.keyword_name()
-                        .unwrap_or_else(|| panic!("keyword token without keyword_name: {:?}", token.kind));
+                    let name = token.kind.keyword_name().unwrap_or_else(|| {
+                        panic!("keyword token without keyword_name: {:?}", token.kind)
+                    });
                     ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                             name: name.to_string(),
@@ -2457,7 +2510,10 @@ fn is_type_like(token: &Token) -> bool {
                         }
                         cursor.bump();
                         // Parse comma-separated expression list
-                        while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBracket)) {
+                        while !matches!(
+                            cursor.current().map(|t| &t.kind),
+                            Some(Token::RightBracket)
+                        ) {
                             let expr = parse_assignment(cursor)?;
                             inputs.push(expr);
                             if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
@@ -2469,7 +2525,10 @@ fn is_type_like(token: &Token) -> bool {
                         let Some(close_bracket) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated asm input list".to_string(),
-                                span: Span { start: asm_start, end: asm_start },
+                                span: Span {
+                                    start: asm_start,
+                                    end: asm_start,
+                                },
                             });
                         };
                         if !matches!(close_bracket.kind, Token::RightBracket) {
@@ -2499,7 +2558,10 @@ fn is_type_like(token: &Token) -> bool {
                     };
                     cursor.bump();
                     return Ok(ast::Expression {
-                        kind: Box::new(ast::ExpressionKind::Asm { code: code.clone(), inputs }),
+                        kind: Box::new(ast::ExpressionKind::Asm {
+                            code: code.clone(),
+                            inputs,
+                        }),
                         span,
                     });
                 }
@@ -2641,7 +2703,10 @@ fn is_type_like(token: &Token) -> bool {
                     let Some(close) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated array/tuple literal".to_string(),
-                            span: Span { start: bracket_start, end: bracket_start },
+                            span: Span {
+                                start: bracket_start,
+                                end: bracket_start,
+                            },
                         });
                     };
                     if !matches!(close.kind, Token::RightBracket) {
@@ -2666,7 +2731,10 @@ fn is_type_like(token: &Token) -> bool {
                     let Some(name_token) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected macro name after '@'".to_string(),
-                            span: Span { start: at_start, end: at_start },
+                            span: Span {
+                                start: at_start,
+                                end: at_start,
+                            },
                         });
                     };
                     let name = match &name_token.kind {
@@ -2683,7 +2751,8 @@ fn is_type_like(token: &Token) -> bool {
                     let mut args = Vec::new();
                     if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
                         cursor.bump();
-                        while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
+                        while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen))
+                        {
                             let arg = parse_assignment(cursor)?;
                             args.push(ast::MacroArg::Expression(arg));
                             if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
@@ -2695,7 +2764,10 @@ fn is_type_like(token: &Token) -> bool {
                         let Some(close) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated macro call".to_string(),
-                                span: Span { start: at_start, end: at_start },
+                                span: Span {
+                                    start: at_start,
+                                    end: at_start,
+                                },
                             });
                         };
                         if !matches!(close.kind, Token::RightParen) {
@@ -2708,11 +2780,17 @@ fn is_type_like(token: &Token) -> bool {
                     }
                     let span = Span {
                         start: at_start,
-                        end: cursor.current().map(|t| t.span.end).unwrap_or(name_span.end),
+                        end: cursor
+                            .current()
+                            .map(|t| t.span.end)
+                            .unwrap_or(name_span.end),
                     };
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::MacroCall {
-                            name: ast::Identifier { name, span: name_span },
+                            name: ast::Identifier {
+                                name,
+                                span: name_span,
+                            },
                             args,
                         }),
                         span,
@@ -2728,7 +2806,10 @@ fn is_type_like(token: &Token) -> bool {
 
             cursor.bump();
             // String literal concatenation: "A" "B" → "AB"
-            if matches!(&*expr.kind, ast::ExpressionKind::Literal(ast::Literal::String(_))) {
+            if matches!(
+                &*expr.kind,
+                ast::ExpressionKind::Literal(ast::Literal::String(_))
+            ) {
                 while let Some(next) = cursor.current()
                     && matches!(&next.kind, Token::StringLiteral(_))
                 {
@@ -2854,10 +2935,11 @@ fn is_type_like(token: &Token) -> bool {
                                     }
                                 }
                             }
-                            let close = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
-                                message: "expected ')' in method call".to_string(),
-                                span: field_ident.span.clone(),
-                            })?;
+                            let close =
+                                cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
+                                    message: "expected ')' in method call".to_string(),
+                                    span: field_ident.span.clone(),
+                                })?;
                             let span = Span {
                                 start: expr.span.start,
                                 end: close.span.end,
@@ -3035,23 +3117,24 @@ fn is_type_like(token: &Token) -> bool {
                     }
                     i += 1;
                 }
-                if i < cursor.end && i > cursor.pos + 1
+                if i < cursor.end
+                    && i > cursor.pos + 1
                     && let Some(target_type) =
                         parse_type_in_parens(cursor.tokens, cursor.pos + 1, i)
-                    {
-                        cursor.pos = i + 1;
-                        let operand = parse_unary(cursor)?;
-                        return Ok(ast::Expression {
-                            kind: Box::new(ast::ExpressionKind::Cast {
-                                expression: Box::new(operand.clone()),
-                                target_type: Box::new(target_type),
-                            }),
-                            span: Span {
-                                start: cast_start,
-                                end: operand.span.end,
-                            },
-                        });
-                    }
+                {
+                    cursor.pos = i + 1;
+                    let operand = parse_unary(cursor)?;
+                    return Ok(ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Cast {
+                            expression: Box::new(operand.clone()),
+                            target_type: Box::new(target_type),
+                        }),
+                        span: Span {
+                            start: cast_start,
+                            end: operand.span.end,
+                        },
+                    });
+                }
             }
 
             parse_postfix(cursor)
@@ -3433,9 +3516,14 @@ fn is_type_like(token: &Token) -> bool {
             });
         }
 
-        let const_offset = if matches!(tokens[start].kind, Token::Const) { 1 } else { 0 };
+        let const_offset = if matches!(tokens[start].kind, Token::Const) {
+            1
+        } else {
+            0
+        };
         if self.statement_type_start_is_unambiguous(tokens, start + const_offset, end - 1)
-            && let Some((_decl_ty, after_type)) = self.parse_type_prefix(tokens, start + const_offset, end - 1)
+            && let Some((_decl_ty, after_type)) =
+                self.parse_type_prefix(tokens, start + const_offset, end - 1)
             && after_type < end
             && matches!(
                 tokens.get(after_type).map(|t| &t.kind),
@@ -3668,10 +3756,12 @@ fn is_type_like(token: &Token) -> bool {
 
             if matches!(tokens[cursor].kind, Token::Break) {
                 let break_start = cursor;
-                let semicolon = self.find_statement_terminator(tokens, break_start, end).ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "missing ';' after break".to_string(),
-                    span: tokens[break_start].span.clone(),
-                })?;
+                let semicolon = self
+                    .find_statement_terminator(tokens, break_start, end)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "missing ';' after break".to_string(),
+                        span: tokens[break_start].span.clone(),
+                    })?;
                 let break_expr = if semicolon > break_start + 1 {
                     Some(self.parse_expression_reduction(tokens, break_start + 1, semicolon)?)
                 } else {
@@ -3792,9 +3882,14 @@ fn is_type_like(token: &Token) -> bool {
                 });
             };
             let statement_end = semicolon + 1;
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
             if self.statement_type_start_is_unambiguous(tokens, cursor + const_offset, semicolon)
-                && let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor + const_offset, semicolon)
+                && let Some((_, after_type)) =
+                    self.parse_type_prefix(tokens, cursor + const_offset, semicolon)
                 && after_type < semicolon
                 && matches!(
                     tokens.get(after_type).map(|t| &t.kind),
@@ -3864,26 +3959,27 @@ fn is_type_like(token: &Token) -> bool {
         let mut alias = None;
         if cursor < end
             && let Token::Identifier(keyword) = &tokens[cursor].kind
-                && keyword == "as" {
-                    cursor += 1;
-                    let token = tokens
-                        .get(cursor)
-                        .ok_or_else(|| ParseError::InvalidSyntax {
-                            message: "expected alias after `as`".to_string(),
-                            span: tokens[end.saturating_sub(1)].span.clone(),
-                        })?;
-                    let Token::Identifier(name) = &token.kind else {
-                        return Err(ParseError::InvalidSyntax {
-                            message: "expected identifier after `as`".to_string(),
-                            span: token.span.clone(),
-                        });
-                    };
-                    alias = Some(ast::Identifier {
-                        name: name.clone(),
-                        span: token.span.clone(),
-                    });
-                    cursor += 1;
-                }
+            && keyword == "as"
+        {
+            cursor += 1;
+            let token = tokens
+                .get(cursor)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected alias after `as`".to_string(),
+                    span: tokens[end.saturating_sub(1)].span.clone(),
+                })?;
+            let Token::Identifier(name) = &token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected identifier after `as`".to_string(),
+                    span: token.span.clone(),
+                });
+            };
+            alias = Some(ast::Identifier {
+                name: name.clone(),
+                span: token.span.clone(),
+            });
+            cursor += 1;
+        }
 
         let mut items = None;
         if cursor < end && !matches!(tokens[cursor].kind, Token::Semicolon) {
@@ -3914,27 +4010,28 @@ fn is_type_like(token: &Token) -> bool {
                 cursor += 1;
                 if cursor < end
                     && let Token::Identifier(keyword) = &tokens[cursor].kind
-                        && keyword == "as" {
-                            cursor += 1;
-                            let alias_token =
-                                tokens
-                                    .get(cursor)
-                                    .ok_or_else(|| ParseError::InvalidSyntax {
-                                        message: "expected alias after `as`".to_string(),
-                                        span: token.span.clone(),
-                                    })?;
-                            let Token::Identifier(alias_name) = &alias_token.kind else {
-                                return Err(ParseError::InvalidSyntax {
-                                    message: "expected identifier after `as`".to_string(),
-                                    span: alias_token.span.clone(),
-                                });
-                            };
-                            item_alias = Some(ast::Identifier {
-                                name: alias_name.clone(),
-                                span: alias_token.span.clone(),
-                            });
-                            cursor += 1;
-                        }
+                    && keyword == "as"
+                {
+                    cursor += 1;
+                    let alias_token =
+                        tokens
+                            .get(cursor)
+                            .ok_or_else(|| ParseError::InvalidSyntax {
+                                message: "expected alias after `as`".to_string(),
+                                span: token.span.clone(),
+                            })?;
+                    let Token::Identifier(alias_name) = &alias_token.kind else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected identifier after `as`".to_string(),
+                            span: alias_token.span.clone(),
+                        });
+                    };
+                    item_alias = Some(ast::Identifier {
+                        name: alias_name.clone(),
+                        span: alias_token.span.clone(),
+                    });
+                    cursor += 1;
+                }
                 imported_items.push(ast::ImportedItem {
                     name: item_name,
                     alias: item_alias,
@@ -3992,7 +4089,7 @@ fn is_type_like(token: &Token) -> bool {
 
         let mut initializer = None;
         let mut var_type = var_type;
- 
+
         // Check for array syntax `[N]` after the variable name (zero-initialized, no initializer).
         if after_type + 2 < decl_end && matches!(tokens[after_type + 1].kind, Token::LeftBracket) {
             let array_size_pos = after_type + 2;
@@ -4007,7 +4104,9 @@ fn is_type_like(token: &Token) -> bool {
                 }
             };
             let close_bracket = array_size_pos + 1;
-            if close_bracket >= decl_end || !matches!(tokens[close_bracket].kind, Token::RightBracket) {
+            if close_bracket >= decl_end
+                || !matches!(tokens[close_bracket].kind, Token::RightBracket)
+            {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected `]` after array size".to_string(),
                     span: tokens[array_size_pos + 1].span.clone(),
@@ -4027,7 +4126,9 @@ fn is_type_like(token: &Token) -> bool {
                     end: tokens[close_bracket].span.end,
                 },
             };
-            if close_bracket + 1 < decl_end && matches!(tokens[close_bracket + 1].kind, Token::Assign) {
+            if close_bracket + 1 < decl_end
+                && matches!(tokens[close_bracket + 1].kind, Token::Assign)
+            {
                 return Err(ParseError::InvalidSyntax {
                     message: "array global variables cannot have an initializer".to_string(),
                     span: tokens[close_bracket + 1].span.clone(),
@@ -4063,10 +4164,12 @@ fn is_type_like(token: &Token) -> bool {
         end: usize,
     ) -> Result<ast::MacroDef, ParseError> {
         let mut cursor = start + 1;
-        let name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-            message: "missing macro name".to_string(),
-            span: tokens[start].span.clone(),
-        })?;
+        let name_token = tokens
+            .get(cursor)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "missing macro name".to_string(),
+                span: tokens[start].span.clone(),
+            })?;
         let Token::Identifier(name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected macro identifier".to_string(),
@@ -4078,11 +4181,16 @@ fn is_type_like(token: &Token) -> bool {
         let mut parameters = Vec::new();
         if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             cursor += 1;
-            while cursor < end && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
-                let param_name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected macro parameter name".to_string(),
-                    span: tokens[cursor - 1].span.clone(),
-                })?;
+            while cursor < end
+                && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen))
+            {
+                let param_name_token =
+                    tokens
+                        .get(cursor)
+                        .ok_or_else(|| ParseError::InvalidSyntax {
+                            message: "expected macro parameter name".to_string(),
+                            span: tokens[cursor - 1].span.clone(),
+                        })?;
                 let Token::Identifier(param_name) = &param_name_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected parameter identifier".to_string(),
@@ -4122,9 +4230,9 @@ fn is_type_like(token: &Token) -> bool {
             });
         }
         let body_start = cursor;
-        let Some(body_end) = self.find_matching_token(
-            tokens, body_start, end, Token::LeftBrace, Token::RightBrace
-        ) else {
+        let Some(body_end) =
+            self.find_matching_token(tokens, body_start, end, Token::LeftBrace, Token::RightBrace)
+        else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated macro body".to_string(),
                 span: tokens[body_start].span.clone(),
@@ -4149,10 +4257,12 @@ fn is_type_like(token: &Token) -> bool {
         end: usize,
     ) -> Result<ast::TypeAliasItem, ParseError> {
         let mut cursor = start + 1;
-        let name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-            message: "missing type alias name".to_string(),
-            span: tokens[start].span.clone(),
-        })?;
+        let name_token = tokens
+            .get(cursor)
+            .ok_or_else(|| ParseError::InvalidSyntax {
+                message: "missing type alias name".to_string(),
+                span: tokens[start].span.clone(),
+            })?;
         let Token::Identifier(name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected type alias identifier".to_string(),
@@ -4169,11 +4279,12 @@ fn is_type_like(token: &Token) -> bool {
         }
         cursor += 1;
 
-        let (type_def, after_type) = self
-            .parse_type_prefix(tokens, cursor, end)
-            .ok_or_else(|| ParseError::InvalidSyntax {
-                message: "expected type in type alias".to_string(),
-                span: tokens[cursor].span.clone(),
+        let (type_def, after_type) =
+            self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
+                ParseError::InvalidSyntax {
+                    message: "expected type in type alias".to_string(),
+                    span: tokens[cursor].span.clone(),
+                }
             })?;
         cursor = after_type;
 
@@ -4813,11 +4924,15 @@ fn is_type_like(token: &Token) -> bool {
                 let paren_open = cursor;
                 cursor += 1;
                 let mut fields = Vec::new();
-                while cursor < end && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
-                    let (field_type, after_type) = self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| ParseError::InvalidSyntax {
-                        message: "invalid tuple variant field type".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    })?;
+                while cursor < end
+                    && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen))
+                {
+                    let (field_type, after_type) = self
+                        .parse_type_prefix(tokens, cursor, end)
+                        .ok_or_else(|| ParseError::InvalidSyntax {
+                            message: "invalid tuple variant field type".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        })?;
                     fields.push(field_type);
                     cursor = after_type;
                     if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
@@ -4836,16 +4951,23 @@ fn is_type_like(token: &Token) -> bool {
                 let brace_open = cursor;
                 cursor += 1;
                 let mut fields = Vec::new();
-                while cursor < end && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightBrace)) {
-                    let (field_type, after_type) = self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| ParseError::InvalidSyntax {
-                        message: "invalid struct variant field type".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    })?;
+                while cursor < end
+                    && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightBrace))
+                {
+                    let (field_type, after_type) = self
+                        .parse_type_prefix(tokens, cursor, end)
+                        .ok_or_else(|| ParseError::InvalidSyntax {
+                            message: "invalid struct variant field type".to_string(),
+                            span: tokens[cursor].span.clone(),
+                        })?;
                     cursor = after_type;
-                    let name_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-                        message: "expected struct variant field name".to_string(),
-                        span: tokens[cursor - 1].span.clone(),
-                    })?;
+                    let name_token =
+                        tokens
+                            .get(cursor)
+                            .ok_or_else(|| ParseError::InvalidSyntax {
+                                message: "expected struct variant field name".to_string(),
+                                span: tokens[cursor - 1].span.clone(),
+                            })?;
                     let Token::Identifier(field_name) = &name_token.kind else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected identifier as field name".to_string(),
@@ -5030,36 +5152,34 @@ fn is_type_like(token: &Token) -> bool {
             }
             if let Token::Identifier(_) = &tokens[cursor].kind
                 && cursor + 1 < end
-                    && matches!(tokens[cursor + 1].kind, Token::Colon)
-                {
-                    let (item, next_cursor) =
-                        self.parse_trait_associated_fn_value_item(tokens, cursor, end - 1)?;
-                    items.push(ast::TraitItemKind::AssociatedFunctionValue(item));
-                    cursor = next_cursor;
-                    continue;
-                }
+                && matches!(tokens[cursor + 1].kind, Token::Colon)
+            {
+                let (item, next_cursor) =
+                    self.parse_trait_associated_fn_value_item(tokens, cursor, end - 1)?;
+                items.push(ast::TraitItemKind::AssociatedFunctionValue(item));
+                cursor = next_cursor;
+                continue;
+            }
             // Fallthrough: try return-type-first syntax (like impl methods).
             // <return_type> <name>(<params>) [; | { body }]
             if let Some((_, after_type)) = self.parse_type_prefix(tokens, cursor, end - 1)
                 && after_type < end - 1
-                    && matches!(
-                        tokens.get(after_type).map(|t| &t.kind),
-                        Some(Token::Identifier(_))
-                    )
-                    && after_type + 1 < end - 1
-                    && matches!(
-                        tokens.get(after_type + 1).map(|t| &t.kind),
-                        Some(Token::LeftParen)
-                    )
-                {
-                    let (item, next_cursor) =
-                        self.parse_trait_function_item_from_return_type(
-                            tokens, cursor, end - 1,
-                        )?;
-                    items.push(ast::TraitItemKind::Function(item));
-                    cursor = next_cursor;
-                    continue;
-                }
+                && matches!(
+                    tokens.get(after_type).map(|t| &t.kind),
+                    Some(Token::Identifier(_))
+                )
+                && after_type + 1 < end - 1
+                && matches!(
+                    tokens.get(after_type + 1).map(|t| &t.kind),
+                    Some(Token::LeftParen)
+                )
+            {
+                let (item, next_cursor) =
+                    self.parse_trait_function_item_from_return_type(tokens, cursor, end - 1)?;
+                items.push(ast::TraitItemKind::Function(item));
+                cursor = next_cursor;
+                continue;
+            }
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported trait item".to_string(),
                 span: tokens[cursor].span.clone(),
@@ -5111,7 +5231,11 @@ fn is_type_like(token: &Token) -> bool {
                 cursor += 1;
                 break;
             }
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
             let (param_type, after_type) =
                 self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                     ParseError::InvalidSyntax {
@@ -5213,12 +5337,12 @@ fn is_type_like(token: &Token) -> bool {
                 }
             })?;
         let mut cursor = after_type;
-        let name_token = tokens.get(cursor).ok_or_else(|| {
-            ParseError::InvalidSyntax {
+        let name_token = tokens
+            .get(cursor)
+            .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing trait method name".to_string(),
                 span: tokens[cursor.min(end - 1)].span.clone(),
-            }
-        })?;
+            })?;
         let Token::Identifier(method_name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait method name".to_string(),
@@ -5240,21 +5364,24 @@ fn is_type_like(token: &Token) -> bool {
                 cursor += 1;
                 break;
             }
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
-            let (param_type, after_param_type) =
-                self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
-                    ParseError::InvalidSyntax {
-                        message: "invalid trait method parameter type".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    }
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
+            let (param_type, after_param_type) = self
+                .parse_type_prefix(tokens, cursor, end)
+                .ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "invalid trait method parameter type".to_string(),
+                    span: tokens[cursor].span.clone(),
                 })?;
             cursor = after_param_type;
-            let param_name_token = tokens.get(cursor).ok_or_else(|| {
-                ParseError::InvalidSyntax {
+            let param_name_token = tokens
+                .get(cursor)
+                .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected trait method parameter name".to_string(),
                     span: param_type.span.clone(),
-                }
-            })?;
+                })?;
             let Token::Identifier(param_name) = &param_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected trait method parameter name".to_string(),
@@ -5749,7 +5876,11 @@ fn is_type_like(token: &Token) -> bool {
                 pcursor += 1;
                 continue;
             }
-            let const_offset = if matches!(tokens[pcursor].kind, Token::Const) { 1 } else { 0 };
+            let const_offset = if matches!(tokens[pcursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
             let (param_type, after_param_type) = self
                 .parse_type_prefix(tokens, pcursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -5968,7 +6099,11 @@ fn is_type_like(token: &Token) -> bool {
                     message: "expected parameter type".to_string(),
                     span: name_token.span.clone(),
                 })?;
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
             let (param_type, next_after_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -6167,7 +6302,11 @@ fn is_type_like(token: &Token) -> bool {
                     message: "expected extern parameter type".to_string(),
                     span: name_token.span.clone(),
                 })?;
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) { 1 } else { 0 };
+            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
+                1
+            } else {
+                0
+            };
             let (param_type, next_after_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -6427,9 +6566,9 @@ fn is_type_like(token: &Token) -> bool {
                 ItemProduction::GlobalVariable => ast::ItemKind::GlobalVariable(
                     self.parse_global_variable_reduction(tokens, item_start, item_end)?,
                 ),
-                ItemProduction::Macro => ast::ItemKind::Macro(
-                    self.parse_macro_reduction(tokens, item_start, item_end)?,
-                ),
+                ItemProduction::Macro => {
+                    ast::ItemKind::Macro(self.parse_macro_reduction(tokens, item_start, item_end)?)
+                }
                 ItemProduction::TypeAlias => ast::ItemKind::TypeAlias(
                     self.parse_type_alias_reduction(tokens, item_start, item_end)?,
                 ),
@@ -6508,15 +6647,25 @@ fn is_type_like(token: &Token) -> bool {
             match &tokens[cursor].kind {
                 Token::Identifier(name) => {
                     if name == "as" {
-                        if let Some(LexToken { kind: Token::Identifier(alias), .. }) = tokens.get(cursor + 1) {
+                        if let Some(LexToken {
+                            kind: Token::Identifier(alias),
+                            ..
+                        }) = tokens.get(cursor + 1)
+                        {
                             self.known_type_names.insert(alias.clone());
                         }
                         break;
                     }
                     let current_name = name.clone();
                     cursor += 1;
-                    if cursor < tokens.len() && matches!(tokens[cursor].kind, Token::Identifier(ref n) if n == "as") {
-                        if let Some(LexToken { kind: Token::Identifier(alias), .. }) = tokens.get(cursor + 1) {
+                    if cursor < tokens.len()
+                        && matches!(tokens[cursor].kind, Token::Identifier(ref n) if n == "as")
+                    {
+                        if let Some(LexToken {
+                            kind: Token::Identifier(alias),
+                            ..
+                        }) = tokens.get(cursor + 1)
+                        {
                             self.known_type_names.insert(alias.clone());
                         }
                         break;
@@ -6537,7 +6686,11 @@ fn is_type_like(token: &Token) -> bool {
                         }
                         if let Token::Identifier(name) = &tokens[cursor].kind {
                             if name == "as" {
-                                if let Some(LexToken { kind: Token::Identifier(alias), .. }) = tokens.get(cursor + 1) {
+                                if let Some(LexToken {
+                                    kind: Token::Identifier(alias),
+                                    ..
+                                }) = tokens.get(cursor + 1)
+                                {
                                     self.known_type_names.insert(alias.clone());
                                 }
                                 cursor += 2;
@@ -6602,7 +6755,11 @@ fn is_type_like(token: &Token) -> bool {
             ast::ItemKind::ExternVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
             }
-            ast::ItemKind::Impl(_) | ast::ItemKind::Import(_) | ast::ItemKind::ExternBlock(_) | ast::ItemKind::Macro(_) | ast::ItemKind::TypeAlias(_) => {}
+            ast::ItemKind::Impl(_)
+            | ast::ItemKind::Import(_)
+            | ast::ItemKind::ExternBlock(_)
+            | ast::ItemKind::Macro(_)
+            | ast::ItemKind::TypeAlias(_) => {}
         }
     }
 }
@@ -6822,7 +6979,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn parses_comma_separated_struct_fields() {
         let source = "struct Point { i32 x, y, z; }";
@@ -6838,7 +6994,6 @@ mod tests {
         assert_eq!(item.fields[1].name.name, "y");
         assert_eq!(item.fields[2].name.name, "z");
     }
-
 
     #[test]
     fn rejects_grouped_declaration_in_for_initializer() {

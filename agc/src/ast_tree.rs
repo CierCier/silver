@@ -71,9 +71,7 @@ fn item_node(item: &ast::Item) -> Node {
         ast::ItemKind::ExternVariable(extern_var) => extern_var_node(extern_var),
         ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
         ast::ItemKind::Macro(macro_def) => macro_node(macro_def),
-        ast::ItemKind::TypeAlias(alias) => {
-            type_node(&alias.type_def)
-        }
+        ast::ItemKind::TypeAlias(alias) => type_node(&alias.type_def),
     };
 
     node.label = format!("{} [{}..{}]", node.label, item.span.start, item.span.end);
@@ -267,7 +265,12 @@ fn macro_node(macro_def: &ast::MacroDef) -> Node {
     }
     if !macro_def.body.statements.is_empty() {
         let mut body = Node::new("body");
-        body.children = macro_def.body.statements.iter().map(statement_node).collect();
+        body.children = macro_def
+            .body
+            .statements
+            .iter()
+            .map(statement_node)
+            .collect();
         node.children.push(body);
     }
     node
@@ -530,9 +533,18 @@ fn pattern_node(pattern: &ast::Pattern) -> Node {
             Node::new(format!("Pattern::Literal {}", literal_name(literal)))
         }
         ast::PatternKind::Wildcard => Node::new("Pattern::Wildcard"),
-        ast::PatternKind::Range { start, end, inclusive } => {
+        ast::PatternKind::Range {
+            start,
+            end,
+            inclusive,
+        } => {
             let op = if *inclusive { ".." } else { "..." };
-            let mut node = Node::new(format!("Pattern::Range {}{}{}", expression_node(start).label, op, expression_node(end).label));
+            let mut node = Node::new(format!(
+                "Pattern::Range {}{}{}",
+                expression_node(start).label,
+                op,
+                expression_node(end).label
+            ));
             node.children.push(expression_node(start));
             node.children.push(expression_node(end));
             node
@@ -677,13 +689,14 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children = items.iter().map(initializer_item_node).collect();
             n
         }
-ast::ExpressionKind::Asm { code, inputs } => {
-    let mut n = Node::new(format!("Expr::Asm \"{}\"", code));
-    if !inputs.is_empty() {
-        n.children.push(Node::new(format!("inputs: {} items", inputs.len())));
-    }
-    n
-}
+        ast::ExpressionKind::Asm { code, inputs } => {
+            let mut n = Node::new(format!("Expr::Asm \"{}\"", code));
+            if !inputs.is_empty() {
+                n.children
+                    .push(Node::new(format!("inputs: {} items", inputs.len())));
+            }
+            n
+        }
         ast::ExpressionKind::Array(items) => {
             let mut n = Node::new("Expr::Array");
             n.children = items.iter().map(expression_node).collect();
@@ -732,7 +745,12 @@ ast::ExpressionKind::Asm { code, inputs } => {
             n.children.push(expression_node(inner));
             n
         }
-        ast::ExpressionKind::ForIn { binding, iterable, body, .. } => {
+        ast::ExpressionKind::ForIn {
+            binding,
+            iterable,
+            body,
+            ..
+        } => {
             let mut n = Node::new(format!("Expr::ForIn {{ binding: {} }}", binding.name));
             n.children.push(expression_node(iterable));
             n.children.push(block_node(body));
@@ -743,8 +761,16 @@ ast::ExpressionKind::Asm { code, inputs } => {
             n.children = args.iter().map(macro_arg_node).collect();
             n
         }
-        ast::ExpressionKind::EnumVariant { path, variant, fields } => {
-            let mut n = Node::new(format!("Expr::EnumVariant {}::{}", path_name(&path), variant.name));
+        ast::ExpressionKind::EnumVariant {
+            path,
+            variant,
+            fields,
+        } => {
+            let mut n = Node::new(format!(
+                "Expr::EnumVariant {}::{}",
+                path_name(&path),
+                variant.name
+            ));
             for field in fields {
                 n.children.push(expression_node(field));
             }
