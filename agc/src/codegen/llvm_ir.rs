@@ -105,6 +105,7 @@ pub struct LlvmIrGenerator<'ctx> {
     enum_backing_types: HashMap<String, ast::PrimitiveType>,
     enum_variants: HashMap<String, HashMap<String, i128>>,
     enum_payload_layouts: HashMap<String, StructType<'ctx>>,
+    enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     defers: Vec<Vec<DeferredEntry<'ctx>>>,
     drop_flags: HashMap<String, PointerValue<'ctx>>,
     method_receivers: HashMap<(String, String), bool>,
@@ -192,6 +193,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_fields: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
@@ -260,6 +262,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
             enum_backing_types: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
             enum_variants: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
@@ -497,6 +500,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_variables: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
@@ -4070,9 +4074,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
-                    && let Some(value) = self.enum_member_constant(&owner.name, &field.name)
+                    && let Some(_value) = self.enum_member_constant(&owner.name, &field.name)
                 {
-                    return Ok(value);
+                    // If this enum has a payload layout, wrap discriminant in struct
+                    if let Some(_struct_ty) = self.enum_payload_layouts.get(&owner.name) {
+                        return self.emit_enum_construction_impl(owner, field, &[], &expr.span);
+                    }
+                    return Ok(_value);
                 }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
@@ -4268,11 +4276,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 // Try payload enum layout first
                 if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
-                    let function = self.current_fn.ok_or_else(|| {
+                    self.current_fn.as_ref().ok_or_else(|| {
                         CodegenError::new("no active function for enum variant construction")
                     })?;
                     let ptr = self.builder.build_alloca(struct_ty, enum_name)
                         .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
+                    let zero_struct = struct_ty.const_zero();
+                    self.builder.build_store(ptr, zero_struct).map_err(|e| {
+                        CodegenError::new(format!("zero init enum: {e}"))
+                    })?;
                     // Store tag (i16)
                     if let Some(tag_value) = self.enum_variants.get(enum_name)
                         .and_then(|variants| variants.get(&variant.name))
@@ -4288,7 +4300,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if fields.len() == 1 {
                         let data_ptr = self.builder.build_struct_gep(struct_ty, ptr, 1, "enum.data")
                             .map_err(|e| CodegenError::new(format!("GEP enum data: {e}")))?;
-                        let val = self.emit_expression_value(&fields[0])?;
+                        let mut val = self.emit_expression_value(&fields[0])?;
+                        // Cast to declared variant payload type to avoid type mismatch
+                        if let Some(payload_type) = self.enum_variant_payload_types
+                            .get(enum_name)
+                            .and_then(|m| m.get(&variant.name))
+                            .and_then(|types| types.first())
+                            .cloned()
+                        {
+                            let target_llvm_ty = self.lower_basic_type(&payload_type)?;
+                            val = self.cast_value_to_basic_type(val, target_llvm_ty, &fields[0].span)?;
+                        }
                         let val_ptr = self.builder.build_pointer_cast(
                             data_ptr,
                             self.context.ptr_type(AddressSpace::default()),
@@ -4335,6 +4357,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() {
             let ptr = self.builder.build_alloca(struct_ty, enum_name)
                 .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
+            let zero_struct = struct_ty.const_zero();
+            self.builder.build_store(ptr, zero_struct).map_err(|e| {
+                CodegenError::new(format!("zero init enum: {e}"))
+            })?;
             if let Some(tag_value) = self.enum_variants.get(enum_name)
                 .and_then(|variants| variants.get(&variant.name))
             {
@@ -4348,7 +4374,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if arguments.len() == 1 {
                 let data_ptr = self.builder.build_struct_gep(struct_ty, ptr, 1, "enum.data")
                     .map_err(|e| CodegenError::new(format!("GEP enum data: {e}")))?;
-                let val = self.emit_expression_value(&arguments[0])?;
+                let mut val = self.emit_expression_value(&arguments[0])?;
+                // Cast to declared variant payload type to avoid type mismatch
+                if let Some(payload_type) = self.enum_variant_payload_types
+                    .get(enum_name)
+                    .and_then(|m| m.get(&variant.name))
+                    .and_then(|types| types.first())
+                    .cloned()
+                {
+                    let target_llvm_ty = self.lower_basic_type(&payload_type)?;
+                    val = self.cast_value_to_basic_type(val, target_llvm_ty, &arguments[0].span)?;
+                }
                 let val_ptr = self.builder.build_pointer_cast(
                     data_ptr,
                     self.context.ptr_type(AddressSpace::default()),
@@ -5227,6 +5263,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::new();
+        let mut catch_all = false;
 
         for (arm_index, arm) in arms.iter().enumerate() {
             let arm_bb = self
@@ -5308,6 +5345,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             CodegenError::new("no active function for match enum")
                         })?;
                         let scrut_ptr = self.create_entry_alloca(function, "match.scrut.ptr", struct_ty.as_basic_type_enum())?;
+                        let zero_struct = struct_ty.const_zero();
+                        self.builder.build_store(scrut_ptr, zero_struct).map_err(|e| {
+                            CodegenError::new(format!("zero init match scrutinee: {e}"))
+                        })?;
                         self.builder.build_store(scrut_ptr, scrutinee).map_err(|e| {
                             CodegenError::new(format!("store match scrutinee: {e}"))
                         })?;
@@ -5343,31 +5384,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.push_scope();
                         if let Some(data_pattern) = data {
                             if let ast::PatternKind::Identifier(binding) = &data_pattern.kind {
-                                let data_ptr = self.builder.build_struct_gep(struct_ty, scrut_ptr, 1, "match.data.ptr")
-                                    .map_err(|e| CodegenError::new(format!("match data GEP: {e}")))?;
-                                let data_i32_ptr = self.builder.build_pointer_cast(
-                                    data_ptr,
-                                    self.context.ptr_type(AddressSpace::default()),
-                                    "data.cast",
-                                ).map_err(|e| CodegenError::new(format!("pointer cast: {e}")))?;
-                                let loaded = self.builder.build_load(self.context.i32_type(), data_i32_ptr, &binding.name)
-                                    .map_err(|e| CodegenError::new(format!("load data payload: {e}")))?;
-                                let alloca = self.create_entry_alloca(function, &binding.name, self.context.i32_type().as_basic_type_enum())?;
-                                self.builder.build_store(alloca, loaded).map_err(|e| {
-                                    CodegenError::new(format!("store data binding: {e}"))
-                                })?;
-                                if let Some(scope) = self.variables.last_mut() {
-                                    scope.insert(
-                                        binding.name.clone(),
-                                        VarInfo {
-                                            ptr: alloca,
-                                            ty: ast::Type {
-                                                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I32)),
-                                                span: binding.span.clone(),
+                                if let Some(payload_types) = self.enum_variant_payload_types
+                                    .get(enum_name)
+                                    .and_then(|m| m.get(&variant.name))
+                                    .and_then(|types| types.first())
+                                    .cloned()
+                                {
+                                    let llvm_ty = self.lower_basic_type(&payload_types)?;
+                                    let data_ptr = self.builder.build_struct_gep(struct_ty, scrut_ptr, 1, "match.data.ptr")
+                                        .map_err(|e| CodegenError::new(format!("match data GEP: {e}")))?;
+                                    let cast_ptr = self.builder.build_pointer_cast(
+                                        data_ptr,
+                                        self.context.ptr_type(AddressSpace::default()),
+                                        "data.cast",
+                                    ).map_err(|e| CodegenError::new(format!("pointer cast: {e}")))?;
+                                    let loaded = self.builder.build_load(llvm_ty, cast_ptr, &binding.name)
+                                        .map_err(|e| CodegenError::new(format!("load data payload: {e}")))?;
+                                    let alloca = self.create_entry_alloca(function, &binding.name, llvm_ty)?;
+                                    self.builder.build_store(alloca, loaded).map_err(|e| {
+                                        CodegenError::new(format!("store data binding: {e}"))
+                                    })?;
+                                    if let Some(scope) = self.variables.last_mut() {
+                                        scope.insert(
+                                            binding.name.clone(),
+                                            VarInfo {
+                                                ptr: alloca,
+                                                ty: payload_types,
+                                                is_mutable: false,
                                             },
-                                            is_mutable: false,
-                                        },
-                                    );
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -5441,7 +5487,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
 
-            let arm_value = self.emit_expression_value(&arm.body)?;
+            let mut arm_value = self.emit_expression_value(&arm.body)?;
+            // Cast to first arm's type if needed (handles i32 vs i64 mismatch)
+            if let Some((first_value, _)) = incoming.first() {
+                let target_ty = first_value.get_type();
+                if arm_value.get_type() != target_ty {
+                    arm_value = self.cast_value_to_basic_type(arm_value, target_ty, &arm.body.span)?;
+                }
+            }
             let arm_end = self
                 .builder
                 .get_insert_block()
@@ -5458,6 +5511,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             match arm.pattern.kind {
                 ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
                     cond_bb = next_bb;
+                    catch_all = true;
                     break;
                 }
                 _ => {
@@ -5466,16 +5520,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
 
-        self.builder.position_at_end(cond_bb);
-        let cond_terminated = self
-            .builder
-            .get_insert_block()
-            .and_then(|bb| bb.get_terminator())
-            .is_some();
-        if !cond_terminated {
+        if !catch_all {
+            self.builder.position_at_end(cond_bb);
+            let cond_terminated = self
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_terminator())
+                .is_some();
+            if !cond_terminated {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::new(format!("failed final match expr branch: {e}")))?;
+            }
+        } else {
+            // Terminate the dead next_bb created for the catch-all arm
+            self.builder.position_at_end(cond_bb);
             self.builder
-                .build_unconditional_branch(end_bb)
-                .map_err(|e| CodegenError::new(format!("failed final match expr branch: {e}")))?;
+                .build_unreachable()
+                .map_err(|e| CodegenError::new(format!("failed catch-all terminator: {e}")))?;
         }
 
         if incoming.is_empty() {
@@ -8549,6 +8611,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             };
             if !payload_types.is_empty() {
                 has_payload = true;
+                self.enum_variant_payload_types
+                    .entry(item.name.name.clone())
+                    .or_default()
+                    .insert(variant.name.name.clone(), payload_types.clone());
             }
             let mut variant_size: u64 = 0;
             for pt in &payload_types {
