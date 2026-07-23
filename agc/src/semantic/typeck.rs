@@ -1517,6 +1517,7 @@ impl TypeChecker {
                     }
                 };
                 if self.enum_defs.contains_key(&enum_name) {
+                    let mut arm_types: Vec<Type> = Vec::new();
                     for arm in arms {
                         self.push_scope();
                         match &arm.pattern.kind {
@@ -1544,8 +1545,22 @@ impl TypeChecker {
                                 );
                             }
                         }
-                        self.check_expr(&arm.body, None);
+                        arm_types.push(self.check_expr(&arm.body, None));
                         self.pop_scope();
+                    }
+                    if let Some(first) = arm_types.first() {
+                        let unified = first.clone();
+                        for (i, other) in arm_types.iter().enumerate().skip(1) {
+                            if &unified != other {
+                                self.error(
+                                    format!("match arm {} has type {}, expected {}", i + 1, other, unified),
+                                    arms[i].span.clone(),
+                                );
+                            }
+                        }
+                        unified
+                    } else {
+                        Type::Unit
                     }
                 } else {
                     self.error(
@@ -1555,8 +1570,8 @@ impl TypeChecker {
                     for arm in arms {
                         self.check_expr(&arm.body, None);
                     }
+                    Type::Unknown
                 }
-                Type::Unit
             }
             ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(

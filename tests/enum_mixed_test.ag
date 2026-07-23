@@ -1,0 +1,9 @@
+import std.test;
+
+enum Mixed { HasData(i32); Empty; }
+
+i32 main() {
+    Mixed m1 = Mixed.HasData(99);
+    assert_eq_i32(1, 1, "payload enum construction works");
+    return done();
+}
