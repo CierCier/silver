@@ -1,0 +1,8 @@
+import std.test;
+i32 double(i32 x) { return x * 2; }
+i32 main() {
+    i32 (i32) ptr = &double;
+    i32 result = ptr(21);
+    assert_eq_i32(42, result, "fn ptr call");
+    return done();
+}

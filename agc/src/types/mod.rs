@@ -502,7 +502,7 @@ impl Type {
                     .map(|inner| inner.canonical_key())
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("fn({})->{}", args, return_type.canonical_key())
+                format!("{}({})", return_type.canonical_key(), args)
             }
             Type::Unknown => "unknown".to_string(),
         }
@@ -555,7 +555,7 @@ impl fmt::Display for Type {
                 return_type,
             } => {
                 let args: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-                write!(f, "fn({}) -> {}", args.join(", "), return_type)
+                write!(f, "{}({})", return_type, args.join(", "))
             }
             Type::Unknown => write!(f, "unknown"),
         }
