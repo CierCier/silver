@@ -57,7 +57,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
   - Static: no `self` param, called as `Type.method()`
 - **Generics**: `struct Foo<T> { T val; }` — works on structs, enums, impls
 - **for-in**: `for i in 0..10 { ... }` — range-based, integer types
-- **Traits**: `trait Name { fn method(Type self) -> Ret; }` with `impl Trait for Type { ... }`
+- **Traits**: `trait Name { method: Ret (params); }` with `impl Trait for Type { ... }`
 - **Casts**: explicit numeric: `(f64) x`; struct: `impl Type { cast Target(Type self) { ... } }`
 - **C interop**: `extern "C" { fn name(params); }` — link with `#[link(lib)]`
 - **Comptime**: `comptime expr` — evaluate at compile time
