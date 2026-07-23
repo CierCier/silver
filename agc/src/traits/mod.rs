@@ -1063,7 +1063,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_missing_is_error() {
         let program = parse(
-            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { }",
+            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_provided_is_ok() {
         let program = parse(
-            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
+            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1081,7 +1081,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_param_count_mismatch() {
         let program = parse(
-            "trait HasHandler { handler: (i32, i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
+            "trait HasHandler { handler: i32(i32, i32); } impl HasHandler for i32 { i32 handler(i32 x) { return x; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1090,7 +1090,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_param_type_mismatch() {
         let program = parse(
-            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i64 handler(i64 x) { return x; } }",
+            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { i64 handler(i64 x) { return x; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_return_type_mismatch() {
         let program = parse(
-            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i64 handler(i32 x) { return 0; } }",
+            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { i64 handler(i32 x) { return 0; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_with_self_is_error() {
         let program = parse(
-            "trait HasHandler { handler: (i32) -> i32; } impl HasHandler for i32 { i32 handler(i32 self, i32 x) { return x; } }",
+            "trait HasHandler { handler: i32(i32); } impl HasHandler for i32 { i32 handler(i32 self, i32 x) { return x; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1117,7 +1117,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_multi_param_ok() {
         let program = parse(
-            "trait BinOp { op: (f64, f64) -> f64; } impl BinOp for i32 { f64 op(f64 a, f64 b) { return a + b; } }",
+            "trait BinOp { op: f64(f64, f64); } impl BinOp for i32 { f64 op(f64 a, f64 b) { return a + b; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_void_return_ok() {
         let program = parse(
-            "trait Logger { log: (i32) -> void; } impl Logger for i32 { void log(i32 x) { } }",
+            "trait Logger { log: void(i32); } impl Logger for i32 { void log(i32 x) { } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1135,7 +1135,7 @@ mod tests {
     #[test]
     fn trait_mixed_fn_value_and_methods_ok() {
         let program = parse(
-            "trait Foo { handler: (i32) -> i32; fn do_thing(i32 self) -> i32; } impl Foo for i32 { i32 handler(i32 x) { return x; } i32 do_thing(i32 self) { return self; } }",
+            "trait Foo { handler: i32(i32); fn do_thing(i32 self) -> i32; } impl Foo for i32 { i32 handler(i32 x) { return x; } i32 do_thing(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1144,7 +1144,7 @@ mod tests {
     #[test]
     fn trait_associated_fn_value_duplicate_is_error() {
         let program = parse(
-            "trait Foo { handler: (i32) -> i32; handler: (i32) -> i32; }",
+            "trait Foo { handler: i32(i32); handler: i32(i32); }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
