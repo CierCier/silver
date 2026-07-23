@@ -286,7 +286,10 @@ impl TypeChecker {
                                 variant.name.clone(),
                                 VariantInfo {
                                     discriminant: variant.value,
-                                    payload: vec![],
+                                    payload: variant.payload_types.iter()
+                                        .map(|key| ast_type_from_canonical_key(key))
+                                        .collect::<Result<Vec<_>, _>>()
+                                        .unwrap_or_else(|_| vec![]),
                                 },
                             )
                         })
@@ -1328,10 +1331,21 @@ impl TypeChecker {
                     if ty_path.len() == 1 {
                         let enum_name = &ty_path[0];
                         if let Some(enum_def) = self.enum_defs.get(enum_name) {
-                            if enum_def.variants.contains_key(&method.name) {
-                                // Enum variant construction — type-check fields
-                                for arg in arguments {
-                                    self.check_expr(arg, None);
+                            if let Some(variant_info) = enum_def.variants.get(&method.name) {
+                                let expected_count = variant_info.payload.len();
+                                if arguments.len() != expected_count {
+                                    self.error(
+                                        format!("variant '{}' expects {} arguments, got {}", method.name, expected_count, arguments.len()),
+                                        expr.span.clone(),
+                                    );
+                                } else {
+                                    // Collect expected types upfront to release the immutable borrow
+                                    let expected_types: Vec<Type> = variant_info.payload.iter()
+                                        .map(|ast_ty| Type::from_ast(ast_ty))
+                                        .collect();
+                                    for (i, arg) in arguments.iter().enumerate() {
+                                        self.check_expr(arg, Some(&expected_types[i]));
+                                    }
                                 }
                                 return receiver_ty.clone();
                             }

@@ -1,0 +1,9 @@
+import std.test;
+
+enum Mixed { HasData(i32); Empty; }
+
+i32 main() {
+    // ERROR: HasData expects 1 argument, got 2
+    Mixed m = Mixed.HasData(1, 2);
+    return done();
+}
