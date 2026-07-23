@@ -653,6 +653,11 @@ impl Analyzer {
                     self.check_expression(input);
                 }
             }
+            ast::ExpressionKind::EnumVariant { fields, .. } => {
+                for field in fields {
+                    self.check_expression(field);
+                }
+            }
             ast::ExpressionKind::MacroCall { .. } => {}
         }
     }

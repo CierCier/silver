@@ -743,6 +743,13 @@ ast::ExpressionKind::Asm { code, inputs } => {
             n.children = args.iter().map(macro_arg_node).collect();
             n
         }
+        ast::ExpressionKind::EnumVariant { path, variant, fields } => {
+            let mut n = Node::new(format!("Expr::EnumVariant {}::{}", path_name(&path), variant.name));
+            for field in fields {
+                n.children.push(expression_node(field));
+            }
+            n
+        }
     };
     node.label = format!(
         "{} [{}..{}]",

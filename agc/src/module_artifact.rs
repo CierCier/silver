@@ -83,6 +83,7 @@ pub struct ModuleTypeLayout {
 pub struct ModuleEnumVariant {
     pub name: String,
     pub value: i128,
+    pub payload_types: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +220,10 @@ impl ModuleArtifact {
             for variant in &export.enum_variants {
                 write_string(&mut out, &variant.name)?;
                 write_i128(&mut out, variant.value);
+                write_len(&mut out, variant.payload_types.len())?;
+                for pt in &variant.payload_types {
+                    write_string(&mut out, pt)?;
+                }
             }
             write_len(&mut out, export.trait_items.len())?;
             for item in &export.trait_items {
@@ -308,9 +313,17 @@ impl ModuleArtifact {
             let variants_len = read_len(bytes, &mut cursor)? as usize;
             let mut enum_variants = Vec::with_capacity(variants_len);
             for _ in 0..variants_len {
+                let name = read_string(bytes, &mut cursor)?;
+                let value = read_i128(bytes, &mut cursor)?;
+                let payload_len = read_len(bytes, &mut cursor)? as usize;
+                let mut payload_types = Vec::with_capacity(payload_len);
+                for _ in 0..payload_len {
+                    payload_types.push(read_string(bytes, &mut cursor)?);
+                }
                 enum_variants.push(ModuleEnumVariant {
-                    name: read_string(bytes, &mut cursor)?,
-                    value: read_i128(bytes, &mut cursor)?,
+                    name,
+                    value,
+                    payload_types,
                 });
             }
             let trait_items_len = read_len(bytes, &mut cursor)? as usize;
@@ -745,17 +758,29 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
     exports
 }
 
+fn variant_payload_types(variant: &ast::EnumVariant) -> Vec<String> {
+    match &variant.data {
+        ast::EnumVariantData::Unit => vec![],
+        ast::EnumVariantData::Tuple(types) => types
+            .iter()
+            .map(|t| crate::types::Type::from_ast(t).canonical_key())
+            .collect(),
+        ast::EnumVariantData::Struct(fields) => fields
+            .iter()
+            .map(|f| crate::types::Type::from_ast(&f.field_type).canonical_key())
+            .collect(),
+    }
+}
+
 fn collect_enum_variants(enum_item: &ast::EnumItem) -> Vec<ModuleEnumVariant> {
     let mut variants = Vec::new();
     let mut next_value = 0i128;
     for variant in &enum_item.variants {
-        if !matches!(variant.data, ast::EnumVariantData::Unit) {
-            continue;
-        }
         let value = variant.discriminant.unwrap_or(next_value);
         variants.push(ModuleEnumVariant {
             name: variant.name.name.clone(),
             value,
+            payload_types: variant_payload_types(variant),
         });
         next_value = value.saturating_add(1);
     }
