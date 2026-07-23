@@ -1,0 +1,12 @@
+// std/process.ag — process management.
+// Backed by sys_fork, sys_execve, sys_wait4, sys_exit_group.
+
+import std.sys.linux;
+
+pub struct Child {
+    i64 pid;
+}
+
+pub void exit(i32 code) {
+    sys_exit_group((i64)code);
+}

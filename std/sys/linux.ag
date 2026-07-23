@@ -1942,3 +1942,11 @@ pub i64 sys_rseq_slice_yield(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
 pub i64 sys_syscalls(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.SYSCALLS, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
+
+pub i64 sys_nanosleep(i64 a1, i64 a2) {
+    return syscall2((i64)SYSCALL.NANOSLEEP, a1, a2);
+}
+
+pub i64 sys_clock_gettime(i64 a1, i64 a2) {
+    return syscall2((i64)SYSCALL.CLOCK_GETTIME, a1, a2);
+}

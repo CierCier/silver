@@ -1,0 +1,10 @@
+import std.test;
+import std.time;
+
+i32 main() {
+    Instant t1 = now();
+    Instant t2 = now();
+    i64 elapsed = t2.elapsed_ns(t1);
+    assert_true(elapsed >= 0, "time elapsed is non-negative");
+    return done();
+}
