@@ -5,10 +5,9 @@ enum Mixed { HasData(i32); Empty; }
 i32 main() {
     Mixed m1 = Mixed.HasData(99);
     i32 val1 = match m1 { Mixed.HasData(v) : v, Mixed.Empty : -1 };
-    assert_eq_i32(99, val1, "construct + match payload variant");
-
+    assert_eq_i32(99, val1, "payload variant match");
     Mixed m2 = Mixed.Empty;
     i32 val2 = match m2 { Mixed.HasData(v) : v, Mixed.Empty : -1 };
-    assert_eq_i32(-1, val2, "construct + match unit variant");
+    assert_eq_i32(-1, val2, "unit variant match in mixed enum");
     return done();
 }

@@ -1,0 +1,10 @@
+import std.test;
+
+enum Simple { A; B; }
+
+i32 main() {
+    Simple x = Simple.A;
+    i32 val = match x { Simple.A : 42, _ : 0 };
+    assert_eq_i32(42, val, "unit enum match");
+    return done();
+}
