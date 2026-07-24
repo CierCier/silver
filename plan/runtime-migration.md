@@ -1,6 +1,5 @@
 # SUPERSEDED
-This plan has been fully executed. See `docs/runtime-migration.md` for the final status
-of the Silver runtime migration.
+This plan has been fully executed. The runtime migration (Phases 1-5) is complete: the `silver_runtime/` Rust crate has been deleted, and the entire runtime is now implemented in pure Silver under `std/rt/` and `std/mem/`.
 
 # Silver Runtime Migration Plan
 

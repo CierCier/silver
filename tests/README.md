@@ -60,37 +60,30 @@ Both suites run in CI on every push and pull request
 
 ## Test Structure
 
-Each test file follows a consistent pattern:
+Most tests use the shared harness `std.test` (`std/test.ag`). Import it instead
+of writing ad-hoc assertion helpers:
 
 ```silver
-import std.io;
+import std.test;
 // Import module being tested
 
-i32 tests_passed = 0;
-i32 tests_failed = 0;
-
-void assert_true(bool cond, str msg) {
-    if (cond) {
-        tests_passed = tests_passed + 1;
-        printf("  [PASS] %s\n", msg);
-    } else {
-        tests_failed = tests_failed + 1;
-        printf("  [FAIL] %s\n", msg);
-    }
-}
-
 i32 main() {
-    // Test cases...
-
-    printf("\n=== Results ===\n");
-    printf("Passed: %d\n", tests_passed);
-    printf("Failed: %d\n", tests_failed);
-
-    return tests_failed > 0 ? 1 : 0;
+    test_start("My Tests");
+    assert_true(1 + 1 == 2, "basic arithmetic");
+    assert_eq_i64(42, compute_answer(), "answer check");
+    return done();  // returns number of failed tests
 }
 ```
 
-By default, tests return exit code 0 on success and 1 on failure. However, some special test cases (like syscall tests) may intentionally exit with a different status if configured in the harness's `expected_exit` function.
+The full assertion suite: `assert_true`, `assert_false`, `check`, `assert_eq_i64`,
+`assert_eq_i32`, `assert_eq_str`. See `std/test.ag` for details.
+
+Some older tests use a local `printf`-based pattern and do not import `std.test`.
+This is legacy — new tests should use `std.test`.
+
+By default, tests return exit code 0 on success and 1 on failure. However, some
+special test cases (like syscall tests) may intentionally exit with a different
+status if configured in the harness's `expected_exit` function.
 
 ## Adding New Tests
 

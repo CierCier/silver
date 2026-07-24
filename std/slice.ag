@@ -1,15 +1,23 @@
+/// A view into a contiguous sequence of elements.
+///
+/// `Slice<T>` represents a non-owning reference to a contiguous sequence of elements in memory,
+/// defined by a pointer to the start of the data and a length.
+
 import std.ops;
 import std.io;
 import std.mem.alloc;
 
+/// A view into a contiguous sequence of elements.
 pub struct Slice<T> {
     T* data;
     i64 len;
 }
 
+/// Indexed access implementation for Slice.
 impl<T> IndexedAccess<Slice<T>> for Slice<T> {
     type Item = T;
 
+    /// Returns the element at `index`, aborting if out of bounds.
     T __index_get(Slice<T>* self, i64 index) {
         if (index < 0 || index >= self.len) {
             STDOUT.write_str("Slice index out of bounds: ");
@@ -22,6 +30,7 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
         return self.data[index];
     }
 
+    /// Sets the element at `index` to `value`, aborting if out of bounds.
     void __index_set(Slice<T>* self, i64 index, T value) {
         if (index < 0 || index >= self.len) {
             STDOUT.write_str("Slice index out of bounds: ");
@@ -36,6 +45,9 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 }
 
 impl<T> Slice<T> {
+    /// Returns the length of the slice.
     pub i64 len(Slice<T>* self) { return self.len; }
+
+    /// Returns a pointer to the slice's underlying data.
     pub T* data(Slice<T>* self) { return self.data; }
 }
