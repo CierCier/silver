@@ -87,7 +87,7 @@ i64 __fmt_clz64(u64 x) {
     i64 n = 0;
     while ((x & (u64)9223372036854775808) == (u64)0) {
         x = x << (u64)1;
-        n = n + 1;
+        n += 1;
     }
     return n;
 }
@@ -133,7 +133,7 @@ pub i64 utoa(u64 v, u8* buf) {
         u64 q = __fmt_udiv10(v);
         i64 digit = (i64)(v - q * (u64)10);
         buf[n] = (u8)(48 + digit);
-        n = n + 1;
+        n += 1;
         v = q;
     }
     // Digits were produced least-significant first; reverse in place.
@@ -143,8 +143,8 @@ pub i64 utoa(u64 v, u8* buf) {
         u8 t = buf[lo];
         buf[lo] = buf[hi];
         buf[hi] = t;
-        lo = lo + 1;
-        hi = hi - 1;
+        lo += 1;
+        hi -= 1;
     }
     return n;
 }
@@ -431,9 +431,9 @@ void __fmt_digit_gen(FmtDiyFp w, FmtDiyFp mp, u64 delta, u8* buf, i64* out_len, 
         p1 = p1 % pw;
         if (d != 0 || len != 0) {
             buf[len] = (u8)(48 + d);
-            len = len + 1;
+            len += 1;
         }
-        kappa = kappa - 1;
+        kappa -= 1;
         u64 tmp = ((u64)p1 << (u64)neg_e) + p2;
         if (!__fmt_ult(delta, tmp)) { // tmp <= delta
             *inout_k = k + kappa;
@@ -450,10 +450,10 @@ void __fmt_digit_gen(FmtDiyFp w, FmtDiyFp mp, u64 delta, u8* buf, i64* out_len, 
         i64 d = (i64)__fmt_lshr(p2, neg_e);
         if (d != 0 || len != 0) {
             buf[len] = (u8)(48 + d);
-            len = len + 1;
+            len += 1;
         }
         p2 = p2 & (onef - (u64)1);
-        kappa = kappa - 1;
+        kappa -= 1;
         if (__fmt_ult(p2, delta)) {
             *inout_k = k + kappa;
             *out_len = len;
@@ -482,10 +482,10 @@ void __fmt_grisu2(u64 mbits, u8* digits, i64* out_len, i64* out_k) {
     i64 ple = ve - 1;
     while ((plf & (u64)9007199254740992) == (u64)0) { // hidden << 1 = 2^53
         plf = plf << (u64)1;
-        ple = ple - 1;
+        ple -= 1;
     }
     plf = plf << (u64)10;
-    ple = ple - 10;
+    ple -= 10;
 
     // Lower boundary. A power-of-two significand has a half-size gap below it,
     // except at the smallest normal exponent where the subnormal gap is equal
@@ -509,7 +509,7 @@ void __fmt_grisu2(u64 mbits, u8* digits, i64* out_len, i64* out_k) {
     f64 dk = ((f64)(0 - 61 - ple)) * 0.30102999566398114 + 347.0;
     i64 k = (i64)dk;
     if (dk - (f64)k > 0.0) {
-        k = k + 1;
+        k += 1;
     }
     i64 index = k / 8 + 1; // k >= 0 here, so / matches >>
     i64 bigk = 0 - (-348 + index * 8);
@@ -593,8 +593,8 @@ pub i64 ftoa(f64 v, u8* buf) {
 
     // Canonicalize: drop trailing zero digits that belong to the fraction.
     while (dlen > 1 && kexp < 0 && digits[dlen - 1] == (u8)48) {
-        dlen = dlen - 1;
-        kexp = kexp + 1;
+        dlen -= 1;
+        kexp += 1;
     }
 
     if (kexp >= 0) {
@@ -602,14 +602,14 @@ pub i64 ftoa(f64 v, u8* buf) {
         i64 i = 0;
         while (i < dlen) {
             buf[n] = digits[i];
-            n = n + 1;
-            i = i + 1;
+            n += 1;
+            i += 1;
         }
         i = 0;
         while (i < kexp) {
             buf[n] = (u8)48;
-            n = n + 1;
-            i = i + 1;
+            n += 1;
+            i += 1;
         }
         return n;
     }
@@ -620,15 +620,15 @@ pub i64 ftoa(f64 v, u8* buf) {
         i64 i = 0;
         while (i < point) {
             buf[n] = digits[i];
-            n = n + 1;
-            i = i + 1;
+            n += 1;
+            i += 1;
         }
         buf[n] = (u8)46; // '.'
-        n = n + 1;
+        n += 1;
         while (i < dlen) {
             buf[n] = digits[i];
-            n = n + 1;
-            i = i + 1;
+            n += 1;
+            i += 1;
         }
         return n;
     }
@@ -636,19 +636,19 @@ pub i64 ftoa(f64 v, u8* buf) {
     // 0.000dddd
     buf[n] = (u8)48;     // '0'
     buf[n + 1] = (u8)46; // '.'
-    n = n + 2;
+    n += 2;
     i64 zeros = 0 - point;
     i64 i = 0;
     while (i < zeros) {
         buf[n] = (u8)48;
-        n = n + 1;
-        i = i + 1;
+        n += 1;
+        i += 1;
     }
     i = 0;
     while (i < dlen) {
         buf[n] = digits[i];
-        n = n + 1;
-        i = i + 1;
+        n += 1;
+        i += 1;
     }
     return n;
 }
@@ -662,7 +662,7 @@ pub bool is_valid_utf8(u8* p, i64 len) {
     while (i < len) {
         i64 c = (i64)p[i] & (i64)255;
         if (c < 128) {
-            i = i + 1;
+            i += 1;
         } else {
             i64 need = -1;
             i64 lo = 128;
@@ -691,7 +691,7 @@ pub bool is_valid_utf8(u8* p, i64 len) {
                 if (cj < 128 || cj > 191) {
                     return false;
                 }
-                j = j + 1;
+                j += 1;
             }
             i = i + need + 1;
         }
@@ -703,7 +703,7 @@ pub bool is_valid_utf8(u8* p, i64 len) {
 pub i64 cstr_len(u8* p) {
     i64 n = 0;
     while (((i64)p[n] & (i64)255) != 0) {
-        n = n + 1;
+        n += 1;
     }
     return n;
 }

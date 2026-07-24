@@ -86,27 +86,27 @@ impl RawNode {
     }
 
     i32 checksum_edges(RawNode* self) {
-        i32 sum = (*self).id;
-        if ((*self).next != (RawNode*)0) {
-            sum = sum + (*((*self).next)).id;
+        i32 sum = self.id;
+        if (self.next != (RawNode*)0) {
+            sum = sum + self.next.id;
         }
-        if ((*self).prev != (RawNode*)0) {
-            sum = sum + (*((*self).prev)).id;
+        if (self.prev != (RawNode*)0) {
+            sum = sum + self.prev.id;
         }
-        if ((*self).alias != (RawNode*)0) {
-            sum = sum + (*((*self).alias)).id;
+        if (self.alias != (RawNode*)0) {
+            sum = sum + self.alias.id;
         }
         return sum;
     }
 
     bool payload_ok(RawNode* self) {
-        if ((*self).payload == (i32*)0) {
+        if (self.payload == (i32*)0) {
             return false;
         }
-        if ((*self).payload[0] != (*self).id * 1000) {
+        if (self.payload[0] != self.id * 1000) {
             return false;
         }
-        if ((*self).payload[(*self).payload_words - 1] != (*self).id * 1000 + (i32)((*self).payload_words - 1)) {
+        if (self.payload[self.payload_words - 1] != self.id * 1000 + (i32)(self.payload_words - 1)) {
             return false;
         }
         return true;
@@ -116,17 +116,17 @@ impl RawNode {
 impl Drop<RawNode> for RawNode {
     void drop(RawNode* self) {
         node_drop_count = node_drop_count + 1;
-        if ((*self).owns_payload && (*self).payload != (i32*)0) {
+        if (self.owns_payload && self.payload != (i32*)0) {
             node_payload_free_count = node_payload_free_count + 1;
-            node_payload_words_freed = node_payload_words_freed + (*self).payload_words;
-            free((*self).payload);
-            (*self).payload = (i32*)0;
-            (*self).owns_payload = false;
+            node_payload_words_freed = node_payload_words_freed + self.payload_words;
+            free(self.payload);
+            self.payload = (i32*)0;
+            self.owns_payload = false;
         }
-        (*self).next = (RawNode*)0;
-        (*self).prev = (RawNode*)0;
-        (*self).alias = (RawNode*)0;
-        (*self).id = -((*self).id);
+        self.next = (RawNode*)0;
+        self.prev = (RawNode*)0;
+        self.alias = (RawNode*)0;
+        self.id = -(self.id);
     }
 }
 
@@ -156,24 +156,24 @@ impl OwnedLeaf {
     }
 
     i32 first(OwnedLeaf* self) {
-        return (i32)((*self).bytes[0]);
+        return (i32)(self.bytes[0]);
     }
 
     bool valid(OwnedLeaf* self) {
-        return (*self).owns && (*self).bytes != (i8*)0 && (*self).len > 0;
+        return self.owns && self.bytes != (i8*)0 && self.len > 0;
     }
 }
 
 impl Drop<OwnedLeaf> for OwnedLeaf {
     void drop(OwnedLeaf* self) {
         leaf_drop_count = leaf_drop_count + 1;
-        if ((*self).owns && (*self).bytes != (i8*)0) {
-            leaf_bytes_freed = leaf_bytes_freed + (*self).len;
-            free((*self).bytes);
-            (*self).bytes = (i8*)0;
-            (*self).owns = false;
+        if (self.owns && self.bytes != (i8*)0) {
+            leaf_bytes_freed = leaf_bytes_freed + self.len;
+            free(self.bytes);
+            self.bytes = (i8*)0;
+            self.owns = false;
         }
-        (*self).id = -((*self).id);
+        self.id = -(self.id);
     }
 }
 
@@ -195,7 +195,7 @@ impl PairOwner {
     }
 
     i32 sum(PairOwner* self) {
-        return (*self).id + (*self).left.id + (*self).right.id;
+        return self.id + self.left.id + self.right.id;
     }
 }
 
@@ -203,8 +203,8 @@ impl Drop<PairOwner> for PairOwner {
     void drop(PairOwner* self) {
         pair_drop_count = pair_drop_count + 1;
         // left and right are dropped automatically via cascading.
-        (*self).peer = (PairOwner*)0;
-        (*self).id = -((*self).id);
+        self.peer = (PairOwner*)0;
+        self.id = -(self.id);
     }
 }
 
@@ -283,9 +283,9 @@ void stress_cross_linked_nodes() {
         assert_eq_i32(a.checksum_edges(), 13, "a edge checksum includes id/next/prev/alias");
         assert_eq_i32(c.checksum_edges(), 15, "c edge checksum includes id/next/prev/alias");
 
-        (*a.next).payload[10] = 4242;
+        a.next.payload[10] = 4242;
         assert_eq_i32(b.payload[10], 4242, "cross-reference write through next pointer");
-        (*d.alias).payload[20] = 9090;
+        d.alias.payload[20] = 9090;
         assert_eq_i32(a.payload[20], 9090, "cross-reference write through alias pointer");
     }
     assert_eq_i32(node_drop_count, 6, "six graph nodes dropped once");

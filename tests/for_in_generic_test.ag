@@ -22,10 +22,10 @@ impl<T> IntoIterator for Counter<T> {
 impl<T> Iterator for Counter<T> {
     Optional<i32> next(Counter<T>* self) {
         Optional<i32> result;
-        if ((*self).current < 3) {
+        if (self.current < 3) {
             result.present = true;
             result.thing = 10;
-            (*self).current = (*self).current + 1;
+            self.current = self.current + 1;
         } else {
             result.present = false;
         }

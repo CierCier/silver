@@ -139,7 +139,7 @@ impl Drop<StructType> for StructType {
         while (i < self.fields.len()) {
             Field* f = self.fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         self.fields.drop();
     }
@@ -176,7 +176,7 @@ impl Drop<EnumType> for EnumType {
         while (i < self.variants.len()) {
             EnumVariant* v = self.variants.get_ptr(i);
             v.drop();
-            i = i + 1;
+            i += 1;
         }
         self.variants.drop();
     }

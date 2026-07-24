@@ -46,7 +46,7 @@ i32 main() {
         Outer s;
         s.items[0].vals[0] = 77;
         Outer* sp = &s;
-        assert_eq_i64(77, (*sp).items[0].vals[0], "(*sp).items[0].vals[0] == 77");
+        assert_eq_i64(77, sp.items[0].vals[0], "sp.items[0].vals[0] == 77");
     }
 
     // Test 4: Array field write via pointer
@@ -54,7 +54,7 @@ i32 main() {
     {
         Outer s;
         Outer* sp = &s;
-        (*sp).items[2].vals[1] = 55;
+        sp.items[2].vals[1] = 55;
         assert_eq_i64(55, s.items[2].vals[1], "s.items[2].vals[1] == 55 after ptr write");
     }
 

@@ -307,9 +307,9 @@ impl MethodRegistry {
         while (i < n) {
             u8 b = obj.object.text[i];
             if ((i32)(b & (u8)192) != 128) {
-                count = count + 1;
+                count += 1;
             }
-            i = i + 1;
+            i += 1;
         }
         return MethodResult.ok_value(RtValue.from_int((u32)5, (i128)count));
     }
@@ -406,7 +406,7 @@ impl Drop<MethodRegistry> for MethodRegistry {
         while (i < self.interned.len()) {
             String* name = self.interned.get_ptr(i);
             name.drop();
-            i = i + 1;
+            i += 1;
         }
         self.interned.drop();
     }

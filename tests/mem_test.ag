@@ -44,10 +44,10 @@ i32 main() {
     
     Point* single_point = alloc<Point>();
     
-    (*single_point).x = 100;
-    (*single_point).y = 200;
-    assert_eq_i32((*single_point).x, 100, "struct field x writable");
-    assert_eq_i32((*single_point).y, 200, "struct field y writable");
+    single_point.x = 100;
+    single_point.y = 200;
+    assert_eq_i32(single_point.x, 100, "struct field x writable");
+    assert_eq_i32(single_point.y, 200, "struct field y writable");
     
     free(single_point);
     
