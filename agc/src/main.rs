@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::LazyLock;
 use std::{env, ffi::OsString};
 
 use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
@@ -1280,7 +1281,6 @@ fn apply_llvm_target_metadata(ir: String, target: Option<&str>) -> String {
         format!("target triple = \"{escaped_target}\"\n{ir}")
     }
 }
-
 fn run_tool(mut command: Command, label: &str) -> Result<(), String> {
     let output = command
         .output()
@@ -1304,6 +1304,64 @@ fn run_tool(mut command: Command, label: &str) -> Result<(), String> {
         }
     ))
 }
+// ---- Cached cc queries — each arg is a LazyLock, spawned once ----
+
+static CRT1_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crt1.o").unwrap_or_default());
+static CRTI_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crti.o").unwrap_or_default());
+static CRTBEGIN_O: LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtbegin.o").unwrap_or_default());
+static CRTEND_O: LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtend.o").unwrap_or_default());
+static CRTN_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtn.o").unwrap_or_default());
+static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
+    cc_query_raw("-print-search-dirs")
+        .ok()
+        .map(|output| {
+            let mut dirs = Vec::new();
+            for line in output.lines() {
+                if let Some(rest) = line.strip_prefix("libraries: =") {
+                    for raw in rest.split(':') {
+                        if !raw.is_empty() { dirs.push(PathBuf::from(raw)); }
+                    }
+                }
+            }
+            dirs
+        })
+        .unwrap_or_default()
+});
+
+fn cc_query_raw(arg: &str) -> Result<String, String> {
+    let output = Command::new("cc")
+        .arg(arg)
+        .output()
+        .map_err(|e| format!("failed to query cc {arg}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cc {arg} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn cc_query_crt(arg: &str) -> Result<String, String> {
+    match arg {
+        "crt1.o" => Ok(CRT1_O.to_string()),
+        "crti.o" => Ok(CRTI_O.to_string()),
+        "crtbegin.o" => Ok(CRTBEGIN_O.to_string()),
+        "crtend.o" => Ok(CRTEND_O.to_string()),
+        "crtn.o" => Ok(CRTN_O.to_string()),
+        _ => cc_query_raw(&format!("-print-file-name={arg}")),
+    }
+}
+
+fn cc_library_dirs() -> Vec<PathBuf> {
+    CC_LIB_DIRS.clone()
+}
+
+fn command_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|p| p.join(name).is_file()))
+        .unwrap_or(false)
+}
 
 fn link_exe(
     plan: &CompilePlan,
@@ -1319,42 +1377,6 @@ fn link_exe(
             format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
         })
     })
-}
-
-fn command_exists(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|p| p.join(name).is_file()))
-        .unwrap_or(false)
-}
-
-fn cc_query(arg: &str) -> Result<String, String> {
-    let output = Command::new("cc")
-        .arg(arg)
-        .output()
-        .map_err(|e| format!("failed to query cc {arg}: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cc {arg} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn cc_library_dirs() -> Result<Vec<PathBuf>, String> {
-    let output = cc_query("-print-search-dirs")?;
-    let mut dirs = Vec::new();
-    for line in output.lines() {
-        if let Some(rest) = line.strip_prefix("libraries: =") {
-            for raw in rest.split(':') {
-                if raw.is_empty() {
-                    continue;
-                }
-                dirs.push(PathBuf::from(raw));
-            }
-        }
-    }
-    Ok(dirs)
 }
 
 fn default_dynamic_linker(target: Option<&str>) -> Option<&'static str> {
@@ -1392,18 +1414,22 @@ fn link_exe_with_ld_lld(
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
-    let lld_name = if command_exists("ld.lld") {
+    // Try mold first (fastest), then ld.lld, then lld.
+    let lld_name = if command_exists("mold") {
+        "mold"
+    } else if command_exists("ld.lld") {
         "ld.lld"
     } else if command_exists("lld") {
         "lld"
     } else {
-        return Err("ld.lld/lld not found in PATH".to_string());
+        return Err("no linker found (mold/ld.lld/lld)".to_string());
     };
 
     let mut link = Command::new(lld_name);
     if lld_name == "lld" {
         link.arg("-flavor").arg("gnu");
     }
+    // mold supports ld.lld-compatible flags.
     link.arg("-o").arg(&plan.output);
 
     if let Some(target) = &plan.target {
@@ -1420,7 +1446,7 @@ fn link_exe_with_ld_lld(
 
     if !plan.no_std {
         for crt in ["crt1.o", "crti.o", "crtbegin.o"] {
-            let path = cc_query(&format!("-print-file-name={crt}"))?;
+            let path = cc_query_crt(crt)?;
             if path != crt {
                 link.arg(path);
             }
@@ -1434,7 +1460,7 @@ fn link_exe_with_ld_lld(
         link.arg(dep);
     }
 
-    for dir in cc_library_dirs()? {
+    for dir in cc_library_dirs() {
         link.arg("-L").arg(dir);
     }
     for dir in &plan.lib_dirs {
@@ -1448,7 +1474,7 @@ fn link_exe_with_ld_lld(
     if !plan.no_std {
         link.arg("-lc").arg("-lgcc_s").arg("-lgcc");
         for crt in ["crtend.o", "crtn.o"] {
-            let path = cc_query(&format!("-print-file-name={crt}"))?;
+            let path = cc_query_crt(crt)?;
             if path != crt {
                 link.arg(path);
             }
@@ -1458,7 +1484,7 @@ fn link_exe_with_ld_lld(
         link.arg(format!("-l{lib}"));
     }
 
-    run_tool(link, "ld.lld")
+    run_tool(link, lld_name)
 }
 
 fn link_exe_with_cc(
