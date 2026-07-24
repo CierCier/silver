@@ -221,6 +221,7 @@ pub const i64 IPPROTO_UDP = 17;
 pub const i64 SOL_SOCKET = 1;
 pub const i64 SO_REUSEADDR = 2;
 pub const i64 SO_ERROR = 4;
+pub const i64 SO_RCVTIMEO = 20;
 pub const i64 SHUT_RD = 0;
 pub const i64 SHUT_WR = 1;
 pub const i64 SHUT_RDWR = 2;
@@ -285,4 +286,20 @@ pub SysResult try_poll(PollFd* fds, i64 nfds, i64 timeout) {
 
 pub SysResult try_getsockopt(i32 fd, i64 level, i64 optname, void* optval, u32* optlen) {
     return SysResult.from_raw(sys_getsockopt((i64)fd, level, optname, (i64)optval, (i64)optlen));
+}
+
+pub SysResult try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr, i64 addr_len) {
+    return SysResult.from_raw(sys_sendto((i64)fd, (i64)buf, len, flags, (i64)addr, addr_len));
+}
+
+pub SysResult try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
+    return SysResult.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
+}
+
+pub SysResult try_sendmsg(i32 fd, void* msg, i64 flags) {
+    return SysResult.from_raw(sys_sendmsg((i64)fd, (i64)msg, flags));
+}
+
+pub SysResult try_recvmsg(i32 fd, void* msg, i64 flags) {
+    return SysResult.from_raw(sys_recvmsg((i64)fd, (i64)msg, flags));
 }

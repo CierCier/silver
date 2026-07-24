@@ -1,0 +1,387 @@
+// std/net/dns.ag — DNS resolver with in-process cache.
+//
+// Nameservers are probed in order on first use:
+//   1. 127.0.0.53       (systemd-resolved stub)
+//   2. /etc/resolv.conf  (standard Unix resolver config)
+//   3. 8.8.8.8           (Google public DNS)
+//   4. 1.1.1.1           (Cloudflare public DNS)
+//
+// The first responsive nameserver is cached and reused.  Queries use raw
+// UDP (sendto/recvfrom).  Successfully resolved A records are cached with
+// a default TTL of 60 s.
+
+import std.net.inet;
+import std.sys.result;
+import std.sys.linux;
+import std.sys.errno;
+import std.mem.alloc;
+import std.mem.drop;
+import std.string;
+import std.time;
+import std.io;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const i64 DNS_PORT = 53;
+const i64 DNS_TIMEOUT_SEC = 2;
+const i64 DNS_CACHE_CAP = 64;
+const i64 DNS_MIN_TTL = 60;
+const i64 DNS_MAX_NS = 8;
+
+// ---------------------------------------------------------------------------
+// DNS wire helpers
+// ---------------------------------------------------------------------------
+void dns_put_u16(u8* buf, i64 pos, u16 val) {
+    buf[pos]     = (u8)((val >> (u16)8) & (u16)0xFF);
+    buf[pos + 1] = (u8)(val & (u16)0xFF);
+}
+
+u16 dns_get_u16(u8* buf, i64 pos) {
+    return (u16)(((u16)buf[pos] << (u16)8) | (u16)buf[pos + 1]);
+}
+struct DnsHeader {
+    u16 id;
+    u16 flags;
+    u16 qdcount;
+    u16 ancount;
+    u16 nscount;
+    u16 arcount;
+}
+
+// timeval for SO_RCVTIMEO
+struct Timeval { i64 tv_sec; i64 tv_usec; }
+
+// ---------------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------------
+
+struct DnsCacheEntry {
+    String key;
+    i32   ip;
+    i64   expires;
+}
+
+DnsCacheEntry g_cache[64];
+
+// ---------------------------------------------------------------------------
+// Nameserver list — discovered once, tried in order
+// ---------------------------------------------------------------------------
+
+i32  g_ns_ips[8];   // network byte order; 0 = unused slot
+i64  g_ns_count = 0;
+bool g_ns_inited = false;
+
+/// Scan /etc/resolv.conf and push each nameserver IP found.
+void dns_scan_resolv() {
+    File f = File.open_read("/etc/resolv.conf");
+    if (!f.valid()) { return; }
+    u8 buf[512];
+    i64 n = f.read((void*)&buf, 1, 512);
+    f.close();
+
+    i64 i = 0;
+    while (i + 10 < n && g_ns_count < DNS_MAX_NS) {
+        if (buf[i] != (u8)110) { i = i + 1; continue; }
+        // Compare "nameserver" via explicit byte checks
+        bool is_ns = true;
+        u8 ns[10] = { (u8)110,(u8)97,(u8)109,(u8)101,(u8)115,(u8)101,(u8)114,(u8)118,(u8)101,(u8)114 };
+        i64 k = 0;
+        while (k < 10) { if (buf[i+k] != ns[k]) { is_ns = false; break; } k = k + 1; }
+        if (!is_ns) { i = i + 1; continue; }
+
+        i = i + 10;
+        while (i < n && (buf[i] == (u8)32 || buf[i] == (u8)9)) { i = i + 1; }
+
+        u8 ip_buf[40];
+        k = 0;
+        while (i < n && k < 39 && buf[i] != (u8)10 && buf[i] != (u8)0) { ip_buf[k] = buf[i]; i = i + 1; k = k + 1; }
+        ip_buf[k] = (u8)0;
+
+        i64 ip = inet_addr((str)&ip_buf);
+        if (ip != 0) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count = g_ns_count + 1; }
+    }
+}
+
+/// Populate the nameserver list once.  Called lazily on first dns_resolve().
+void dns_init() {
+    if (g_ns_inited) { return; }
+    g_ns_inited = true;
+
+    i64 ip;
+
+    // 1. systemd-resolved
+    ip = inet_addr("127.0.0.53");
+    if (ip != 0 && g_ns_count < DNS_MAX_NS) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count = g_ns_count + 1; }
+
+    // 2. /etc/resolv.conf
+    dns_scan_resolv();
+
+    // 3. Google
+    ip = inet_addr("8.8.8.8");
+    if (ip != 0 && g_ns_count < DNS_MAX_NS) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count = g_ns_count + 1; }
+
+    // 4. Cloudflare
+    ip = inet_addr("1.1.1.1");
+    if (ip != 0 && g_ns_count < DNS_MAX_NS) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count = g_ns_count + 1; }
+}
+
+// ---------------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------------
+
+i32 dns_cache_get(str hostname) {
+    i64 now_sec = 0;
+    i64 i = 0;
+    while (i < DNS_CACHE_CAP) {
+        if (g_cache[i].key.data != (u8*)0 && g_cache[i].key.equals(hostname)) {
+            if (now_sec == 0) { Instant inst = now(); now_sec = inst.ts.sec; }
+            if (g_cache[i].expires == 0 || now_sec < g_cache[i].expires) { return g_cache[i].ip; }
+            g_cache[i].key.drop();
+            g_cache[i].key = String.new(); g_cache[i].key.data = (u8*)0;
+            g_cache[i].expires = 0;
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+void dns_cache_put(str hostname, i32 ip, i64 ttl_sec) {
+    Instant inst = now();
+    i64 expires = inst.ts.sec + ttl_sec;
+
+    i64 i = 0;
+    while (i < DNS_CACHE_CAP) {
+        if (g_cache[i].key.data != (u8*)0 && g_cache[i].key.equals(hostname)) {
+            g_cache[i].ip = ip; g_cache[i].expires = expires; return;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < DNS_CACHE_CAP) {
+        if (g_cache[i].key.data == (u8*)0) {
+            g_cache[i].key = String.with_capacity(64);
+            g_cache[i].key.push_str(hostname);
+            g_cache[i].ip = ip; g_cache[i].expires = expires; return;
+        }
+        i = i + 1;
+    }
+    // Evict oldest.
+    i64 best = 0; i64 best_exp = g_cache[0].expires;
+    if (best_exp == 0) { best_exp = inst.ts.sec + (i64)86401; }
+    i = 1;
+    while (i < DNS_CACHE_CAP) {
+        i64 e = g_cache[i].expires; if (e == 0) { e = inst.ts.sec + (i64)86401; }
+        if (e < best_exp) { best_exp = e; best = i; }
+        i = i + 1;
+    }
+    g_cache[best].key.drop();
+    g_cache[best].key = String.with_capacity(64);
+    g_cache[best].key.push_str(hostname);
+    g_cache[best].ip = ip; g_cache[best].expires = expires;
+}
+
+// ---------------------------------------------------------------------------
+// DNS wire helpers
+// ---------------------------------------------------------------------------
+
+void dns_put_u16(u8* buf, i64 pos, u16 val) {
+    buf[pos]     = (u8)((val >> (u16)8) & (u16)0xFF);
+    buf[pos + 1] = (u8)(val & (u16)0xFF);
+}
+
+u16 dns_get_u16(u8* buf, i64 pos) {
+    return (u16)(((u16)buf[pos] << (u16)8) | (u16)buf[pos + 1]);
+}
+
+/// Encode hostname as DNS labels. "google.com" -> {6,g,o,o,g,l,e,3,c,o,m,0}
+i64 dns_encode_name(u8* buf, str hostname) {
+    u8* p = (u8*)hostname;
+    if (p == (u8*)0) { return 0; }
+    i64 wpos = 0;
+    i64 seg = 0;
+    i64 i = 0;
+    while (p[i] != (u8)0) {
+        if (p[i] == (u8)46) {
+            i64 len = i - seg;
+            if (len == 0 || len > 63) { return 0; }
+            buf[wpos] = (u8)len; wpos = wpos + 1;
+            i64 k = seg;
+            while (k < i) { buf[wpos] = p[k]; wpos = wpos + 1; k = k + 1; }
+            seg = i + 1;
+        }
+        i = i + 1;
+    }
+    i64 len = i - seg;
+    if (len == 0 || len > 63) { return 0; }
+    buf[wpos] = (u8)len; wpos = wpos + 1;
+    i64 k = seg;
+    while (k < i) { buf[wpos] = p[k]; wpos = wpos + 1; k = k + 1; }
+    buf[wpos] = (u8)0;
+    return wpos + 1;
+}
+
+/// Build query into buf; returns total byte length.
+i64 dns_build_query(u8* buf, str hostname) {
+    i64 pos = 0;
+    u16 txid = (u16)(@hash(hostname) & (i64)0xFFFF);
+    dns_put_u16(buf, pos, txid);         pos = pos + 2;
+    dns_put_u16(buf, pos, (u16)0x0100);  pos = pos + 2;  // std query, RD
+    dns_put_u16(buf, pos, (u16)1);       pos = pos + 2;  // QDCOUNT=1
+    dns_put_u16(buf, pos, (u16)0);       pos = pos + 2;  // ANCOUNT
+    dns_put_u16(buf, pos, (u16)0);       pos = pos + 2;  // NSCOUNT
+    dns_put_u16(buf, pos, (u16)0);       pos = pos + 2;  // ARCOUNT
+
+    i64 nlen = dns_encode_name(&buf[pos], hostname);
+    if (nlen == 0) { return 0; }
+    pos = pos + nlen;
+
+    dns_put_u16(buf, pos, (u16)1);  pos = pos + 2;  // QTYPE=A
+    dns_put_u16(buf, pos, (u16)1);  pos = pos + 2;  // QCLASS=IN
+    return pos;
+}
+
+/// Parse A record from response. Returns IP in network byte order, 0 on failure.
+i32 dns_parse_a(u8* buf, i64 len, u16 expected_id) {
+    if (len < 12) { return 0; }
+    if (dns_get_u16(buf, 0) != expected_id) { return 0; }
+    u16 flags = dns_get_u16(buf, 2);
+    if ((flags & (u16)0x8000) == 0) { return 0; }
+    if ((flags & (u16)0x000F) != 0) { return 0; }
+    u16 an = dns_get_u16(buf, 6);
+    if (an == 0) { return 0; }
+
+    // Skip question
+    i64 pos = 12;
+    while (pos < len && buf[pos] != (u8)0) {
+        if ((buf[pos] & (u8)0xC0) == (u8)0xC0) { pos = pos + 2; break; }
+        pos = pos + 1 + (i64)buf[pos];
+    }
+    if (pos < len && buf[pos] == (u8)0) { pos = pos + 1; }
+    pos = pos + 4;
+
+    // Scan answers
+    u16 a = 0;
+    while (a < an) {
+        if (pos + 10 > len) { return 0; }
+        if ((buf[pos] & (u8)0xC0) == (u8)0xC0) { pos = pos + 2; }
+        else { while (pos < len && buf[pos] != (u8)0) { pos = pos + 1 + (i64)buf[pos]; if (pos >= len) { return 0; } } pos = pos + 1; }
+
+        u16 rtype = dns_get_u16(buf, pos); pos = pos + 2;
+        pos = pos + 2;  // CLASS
+        pos = pos + 4;  // TTL
+        u16 rdlen = dns_get_u16(buf, pos); pos = pos + 2;
+
+        if (rtype == (u16)1 && rdlen == (u16)4) {
+            // Mask each byte to avoid u8->i32 sign-extension on values >127.
+            i32 a = ((i32)buf[pos]   & (i32)0xFF) << (i32)24;
+            i32 b = ((i32)buf[pos+1] & (i32)0xFF) << (i32)16;
+            i32 c = ((i32)buf[pos+2] & (i32)0xFF) << (i32)8;
+            i32 d = ((i32)buf[pos+3] & (i32)0xFF);
+            return a | b | c | d;
+        }
+        pos = pos + (i64)rdlen;
+        a = a + (u16)1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Try a single UDP query to one nameserver. Returns IP, 0 on failure.
+i32 dns_try_ns(str hostname, i32 ns_ip, u16 txid, u8* query, i64 qlen) {
+    SockAddrIn ns;
+    ns.sin_family = (u16)AF_INET;
+    ns.sin_port   = hton16((u16)DNS_PORT);
+    ns.sin_addr   = (u32)ns_ip;
+    ns.sin_zero_1 = (u32)0;
+    ns.sin_zero_2 = (u32)0;
+
+    SysResult s = try_socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s.is_err()) { return 0; }
+    i32 fd = (i32)s.value;
+
+    Timeval tv = { .tv_sec = DNS_TIMEOUT_SEC, .tv_usec = 0 };
+    try_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, 16);
+
+    SysResult sr = try_sendto(fd, (void*)query, qlen, 0, (void*)&ns, 16);
+    if (sr.is_err()) { try_close(fd); return 0; }
+
+    u8 resp[512];
+    SysResult rr = try_recvfrom(fd, (void*)resp, 512, 0, (void*)0, (u32*)0);
+    try_close(fd);
+    if (rr.is_err()) { return 0; }
+
+    return dns_parse_a(resp, rr.value, txid);
+}
+
+/// Resolve hostname to IPv4 (network byte order). 0 on failure.
+/// Tries each nameserver in order; first response wins.
+pub i32 dns_resolve(str hostname) {
+    if (hostname == (str)0) { return 0; }
+    dns_init();
+
+    i32 cached = dns_cache_get(hostname);
+    if (cached != 0) { return cached; }
+
+    u8 query[512];
+    i64 qlen = dns_build_query(query, hostname);
+    if (qlen == 0) { return 0; }
+    u16 txid = (u16)(@hash(hostname) & (i64)0xFFFF);
+
+    i32 result = 0;
+    i64 ni = 0;
+    while (ni < g_ns_count) {
+        result = dns_try_ns(hostname, g_ns_ips[ni], txid, query, qlen);
+        if (result != 0) { break; }
+        ni = ni + 1;
+    }
+
+    if (result != 0) { dns_cache_put(hostname, result, DNS_MIN_TTL); }
+    return result;
+}
+
+/// Resolve and return dotted-quad string. null on failure.
+pub str dns_resolve_str(str hostname) {
+    i32 ip = dns_resolve(hostname);
+    if (ip == 0) { return (str)0; }
+    return ip_to_str((u32)ip);
+}
+
+// Static buffer for ip_to_str
+u8 g_ip_str_buf[16];
+
+/// Network-byte-order u32 -> dotted-quad. NOT thread-safe.
+pub str ip_to_str(u32 ip) {
+    u8* buf = g_ip_str_buf;
+    i64 raw = (i64)ip;
+    i64 pos = 0;
+    i64 d;
+
+    d = (raw >> (i64)24) & (i64)0xFF;
+    if (d >= 100) { buf[pos] = (u8)(48 + d / 100); pos = pos + 1; d = d % 100; }
+    if (d >= 10)  { buf[pos] = (u8)(48 + d / 10);  pos = pos + 1; d = d % 10; }
+    buf[pos] = (u8)(48 + d); pos = pos + 1; buf[pos] = (u8)46; pos = pos + 1;
+
+    d = (raw >> (i64)16) & (i64)0xFF;
+    if (d >= 100) { buf[pos] = (u8)(48 + d / 100); pos = pos + 1; d = d % 100; }
+    if (d >= 10)  { buf[pos] = (u8)(48 + d / 10);  pos = pos + 1; d = d % 10; }
+    buf[pos] = (u8)(48 + d); pos = pos + 1; buf[pos] = (u8)46; pos = pos + 1;
+
+    d = (raw >> (i64)8) & (i64)0xFF;
+    if (d >= 100) { buf[pos] = (u8)(48 + d / 100); pos = pos + 1; d = d % 100; }
+    if (d >= 10)  { buf[pos] = (u8)(48 + d / 10);  pos = pos + 1; d = d % 10; }
+    buf[pos] = (u8)(48 + d); pos = pos + 1; buf[pos] = (u8)46; pos = pos + 1;
+
+    d = raw & (i64)0xFF;
+    if (d >= 100) { buf[pos] = (u8)(48 + d / 100); pos = pos + 1; d = d % 100; }
+    if (d >= 10)  { buf[pos] = (u8)(48 + d / 10);  pos = pos + 1; d = d % 10; }
+    buf[pos] = (u8)(48 + d); pos = pos + 1;
+    buf[pos] = (u8)0;
+
+    return (str)buf;
+}
