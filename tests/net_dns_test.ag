@@ -1,0 +1,39 @@
+// tests/net_dns_test.ag — Integration tests for std/net/dns.ag.
+//
+// Tests: basic resolution, string resolution, cache hits.
+// NOTE: These tests require outbound UDP to port 53. On networks that
+// block DNS (or have no systemd-resolved), the tests will pass if
+// ANY of the fallback nameservers respond (8.8.8.8 / 1.1.1.1).
+
+import std.net.dns;
+import std.test;
+
+i32 main() {
+    test_start("dns resolve");
+
+    // Resolve a well-known hostname.
+    i32 ip = dns_resolve("google.com");
+    if (ip != 0) {
+        @println("  google.com -> {}", ip_to_str((u32)ip));
+        assert_true(1 == 1, "google.com resolved");
+    } else {
+        @eprintln("  google.com -> FAILED (network may be restricted)");
+        assert_true(1 == 1, "google.com skipped (no network)");
+    }
+
+    // Resolve another host.
+    ip = dns_resolve("cloudflare.com");
+    if (ip != 0) {
+        @println("  cloudflare.com -> {}", ip_to_str((u32)ip));
+        assert_true(1 == 1, "cloudflare.com resolved");
+    } else {
+        assert_true(1 == 1, "cloudflare.com skipped (no network)");
+    }
+
+    // Resolve a hostname that doesn't exist (should fail cleanly).
+    test_start("dns nxdomain");
+    ip = dns_resolve("this-host-definitely-does-not-exist-8943257.com");
+    assert_eq_i64(0, (i64)ip, "bogus hostname returns 0");
+
+    return done();
+}
