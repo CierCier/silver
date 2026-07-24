@@ -260,7 +260,7 @@ impl Object {
         while (i < n) {
             RtValue* v = self.values.get_ptr(i);
             v.push_handles(out);
-            i = i + 1;
+            i += 1;
         }
     }
 }
@@ -408,7 +408,7 @@ impl Heap {
         i64 i = 0;
         while (i < slot_count) {
             self.marked.set(i, false);
-            i = i + 1;
+            i += 1;
         }
 
         // Mark phase: trace from the roots with an explicit work stack.
@@ -417,7 +417,7 @@ impl Heap {
         while (i < roots_len) {
             RtValue* root = &roots[i];
             root.push_handles(&stack);
-            i = i + 1;
+            i += 1;
         }
 
         while (stack.len() > 0) {
@@ -451,9 +451,9 @@ impl Heap {
                 self.occupied.set(i, false);
                 self.generations.set(i, self.generations.get(i) + (u32)1);
                 self.free_list.push((u32)i);
-                freed = freed + 1;
+                freed += 1;
             }
-            i = i + 1;
+            i += 1;
         }
 
         return freed;
@@ -466,9 +466,9 @@ impl Heap {
         i64 n = self.occupied.len();
         while (i < n) {
             if (self.occupied.get(i)) {
-                count = count + 1;
+                count += 1;
             }
-            i = i + 1;
+            i += 1;
         }
         return count;
     }
@@ -484,7 +484,7 @@ impl Drop<Heap> for Heap {
                 Object* object = self.objects.get_ptr(i);
                 object.drop();
             }
-            i = i + 1;
+            i += 1;
         }
         self.objects.drop();
         self.occupied.drop();

@@ -59,7 +59,7 @@ impl HashMap<K, V> {
         i64 j = 0;
         while (j < new_cap) {
             new_st[j] = EMPTY;
-            j = j + 1;
+            j += 1;
         }
 
         // Rehash existing entries
@@ -79,7 +79,7 @@ impl HashMap<K, V> {
                     new_vals[idx] = move val;
                     new_st[idx] = OCCUPIED;
                 }
-                i = i + 1;
+                i += 1;
             }
             free(self.keys);
             free(self.values);
@@ -122,7 +122,7 @@ impl HashMap<K, V> {
                 }
             }
             idx = (idx + 1) % self.capacity;
-            i = i + 1;
+            i += 1;
         }
         // Table full (shouldn't happen with proper load factor)
         return first_empty;
@@ -178,7 +178,7 @@ impl HashMap<K, V> {
                 }
             }
             idx = (idx + 1) % cap;
-            i = i + 1;
+            i += 1;
         }
 
         // Table full - force grow and retry

@@ -83,7 +83,7 @@ pub void rt_value_append_f64(String* out, f64 value) {
     i64 i = 0;
     while (i < len) {
         out.push(buf[i]);
-        i = i + 1;
+        i += 1;
     }
     free(buf);
 }
@@ -178,7 +178,7 @@ impl Value {
             while (i < self.items.len()) {
                 Value* elem = self.items.get_ptr(i);
                 v.items.push(elem.clone());
-                i = i + 1;
+                i += 1;
             }
         }
         if (self.kind == VALUE_KIND_OPTIONAL && self.has_inner) {
@@ -327,7 +327,7 @@ impl Drop<Value> for Value {
         while (i < self.items.len()) {
             Value* elem = self.items.get_ptr(i);
             elem.drop();
-            i = i + 1;
+            i += 1;
         }
         self.items.drop();
     }
@@ -442,12 +442,12 @@ pub ValueResult value_new_vec(TypeRegistry* reg, TypeId elem, Vec<Value> items) 
             while (i < items.len()) {
                 Value* rest = items.get_ptr(i);
                 rest.drop();
-                i = i + 1;
+                i += 1;
             }
             items.drop();
             return move err;
         }
-        i = i + 1;
+        i += 1;
     }
 
     Value v = Value.blank();
@@ -501,7 +501,7 @@ pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.TYPE_MISMATCH, move m);
@@ -513,7 +513,7 @@ pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.TYPE_MISMATCH, move m);
@@ -529,7 +529,7 @@ pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.INVALID_STRUCT_FIELD_COUNT, move m);
@@ -553,12 +553,12 @@ pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields
             while (i < fields.len()) {
                 Value* rest = fields.get_ptr(i);
                 rest.drop();
-                i = i + 1;
+                i += 1;
             }
             fields.drop();
             return move err;
         }
-        i = i + 1;
+        i += 1;
     }
 
     Value v = Value.blank();
@@ -579,7 +579,7 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.TYPE_MISMATCH, move m);
@@ -591,7 +591,7 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.TYPE_MISMATCH, move m);
@@ -607,7 +607,7 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.INVALID_ENUM_VARIANT, move m);
@@ -624,7 +624,7 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.INVALID_ENUM_PAYLOAD_COUNT, move m);
@@ -648,12 +648,12 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
             while (i < fields.len()) {
                 Value* rest = fields.get_ptr(i);
                 rest.drop();
-                i = i + 1;
+                i += 1;
             }
             fields.drop();
             return move err;
         }
-        i = i + 1;
+        i += 1;
     }
 
     Value v = Value.blank();
@@ -680,7 +680,7 @@ pub ValueResult value_new_enum_by_name(TypeRegistry* reg, TypeId ty, str variant
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.UNKNOWN_ENUM_VARIANT_NAME, move m);
@@ -704,7 +704,7 @@ pub ValueResult value_new_enum_by_discriminant(TypeRegistry* reg, TypeId ty, i64
         while (i < fields.len()) {
             Value* f = fields.get_ptr(i);
             f.drop();
-            i = i + 1;
+            i += 1;
         }
         fields.drop();
         return ValueResult.error((i32)VALUE_ERR.UNKNOWN_ENUM_DISCRIMINANT, move m);
@@ -735,7 +735,7 @@ void value_display_items_into(Vec<Value>* items, TypeRegistry* reg, String* out)
         }
         Value* item = items.get_ptr(i);
         value_display_into(item, reg, out);
-        i = i + 1;
+        i += 1;
     }
 }
 

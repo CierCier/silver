@@ -97,8 +97,8 @@ pub i64 inet_addr(str s) {
             if (dots >= 3 || octet > 255) { return (i64)0; }
             result = result | (octet << shift);
             octet = 0;
-            shift = shift - 8;
-            dots = dots + 1;
+            shift -= 8;
+            dots += 1;
         } else {
             if (c >= (u8)48 && c <= (u8)57) {
                 octet = octet * 10 + ((i64)c - 48);
@@ -107,7 +107,7 @@ pub i64 inet_addr(str s) {
                 return (i64)0;
             }
         }
-        i = i + 1;
+        i += 1;
     }
     return result;
 }
@@ -175,16 +175,16 @@ pub bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
             if (i > 0 && p[i-1] == (u8)58) {  // "::"
                 if (compress != -1) { return false; }  // only one ::
                 compress = hpos;
-                i = i + 1;
+                i += 1;
                 if (p[i] == (u8)0) { break; }  // trailing ::
                 continue;
             }
             if (i == 0) {  // leading ':' without second ':' is invalid
                 if (p[i+1] != (u8)58) { return false; }
-                i = i + 1;
+                i += 1;
                 continue;
             }
-            i = i + 1;
+            i += 1;
             continue;
         }
 
@@ -203,12 +203,12 @@ pub bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
                 }
             }
             val = (val << (u16)4) | (u16)d;
-            digits = digits + 1;
-            i = i + 1;
+            digits += 1;
+            i += 1;
         }
         if (digits == 0) { return false; }
         hextets[hpos] = val;
-        hpos = hpos + 1;
+        hpos += 1;
     }
 
     if (hpos >= 8 && p[i] != (u8)0) { return false; }
@@ -220,13 +220,13 @@ pub bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
         if (gap < 0) { return false; }
         i64 j = 0;
         i64 k = 0;
-        while (j < compress)    { out[k] = hextets[j]; k = k + 1; j = j + 1; }
-        while (gap > 0)         { out[k] = (u16)0;     k = k + 1; gap = gap - 1; }
-        while (j < hpos)        { out[k] = hextets[j]; k = k + 1; j = j + 1; }
+        while (j < compress)    { out[k] = hextets[j]; k += 1; j += 1; }
+        while (gap > 0)         { out[k] = (u16)0;     k += 1; gap -= 1; }
+        while (j < hpos)        { out[k] = hextets[j]; k += 1; j += 1; }
     } else {
         if (hpos != 8) { return false; }  // need exactly 8 hextets without ::
         i64 j = 0;
-        while (j < 8) { out[j] = hextets[j]; j = j + 1; }
+        while (j < 8) { out[j] = hextets[j]; j += 1; }
     }
 
     // Pack into two u64 in network byte order.

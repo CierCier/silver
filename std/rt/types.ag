@@ -170,7 +170,7 @@ void rt_free_variant_defs(Vec<VariantDef>* defs) {
     while (i < defs.len()) {
         VariantDef* d = defs.get_ptr(i);
         d.payload.drop();
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -354,7 +354,7 @@ impl TypeRegistry {
             }
             TypeId param_id = params.get(i);
             rt_type_append_u32(&key, param_id.raw);
-            i = i + 1;
+            i += 1;
         }
         key.push_str("->");
         rt_type_append_u32(&key, ret.raw);
@@ -386,7 +386,7 @@ impl TypeRegistry {
                 return self.unknown_type_id_error(param_id.raw);
             }
             name.push_str(param_name);
-            i = i + 1;
+            i += 1;
         }
         name.push_str(")");
 
@@ -434,12 +434,12 @@ impl TypeRegistry {
                     m.push_str("'");
                     return TypeResult.error((i32)TYPE_ERR.DUPLICATE_FIELD_NAME, move m);
                 }
-                j = j + 1;
+                j += 1;
             }
             if (self.get(fi.ty) == (Type*)0) {
                 return self.unknown_type_id_error(fi.ty.raw);
             }
-            i = i + 1;
+            i += 1;
         }
 
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.STRUCT);
@@ -450,7 +450,7 @@ impl TypeRegistry {
             field.name = rt_type_str_owned(fd.name);
             field.ty = fd.ty;
             ty.struct_data.fields.push(move field);
-            i = i + 1;
+            i += 1;
         }
         return self.alloc_type(move ty);
     }
@@ -464,7 +464,7 @@ impl TypeRegistry {
             VariantDef* v = variants.get_ptr(i);
             v.discriminant = i;
             v.has_discriminant = true;
-            i = i + 1;
+            i += 1;
         }
         return self.define_enum_core(name, move variants);
     }
@@ -500,7 +500,7 @@ impl TypeRegistry {
             next = disc + 1;
             v.discriminant = disc;
             v.has_discriminant = true;
-            i = i + 1;
+            i += 1;
         }
         return self.define_enum_core(name, move variants);
     }
@@ -534,7 +534,7 @@ impl TypeRegistry {
                     m.push_str("'");
                     return TypeResult.error((i32)TYPE_ERR.DUPLICATE_VARIANT_NAME, move m);
                 }
-                j = j + 1;
+                j += 1;
             }
             j = 0;
             while (j < i) {
@@ -548,7 +548,7 @@ impl TypeRegistry {
                     m.push_str("'");
                     return TypeResult.error((i32)TYPE_ERR.DUPLICATE_VARIANT_DISCRIMINANT, move m);
                 }
-                j = j + 1;
+                j += 1;
             }
             i64 p = 0;
             while (p < vi.payload.len()) {
@@ -557,9 +557,9 @@ impl TypeRegistry {
                     rt_free_variant_defs(&defs);
                     return self.unknown_type_id_error(payload_ty.raw);
                 }
-                p = p + 1;
+                p += 1;
             }
-            i = i + 1;
+            i += 1;
         }
 
         // Build the Type, transferring each payload Vec by shallow copy.
@@ -574,7 +574,7 @@ impl TypeRegistry {
             variant.discriminant = vd.discriminant;
             variant.payload = vd.payload;
             ty.enum_data.variants.push(move variant);
-            i = i + 1;
+            i += 1;
         }
         return self.alloc_type(move ty);
     }
@@ -597,7 +597,7 @@ impl TypeRegistry {
             if (v.name.equals(name)) {
                 return i;
             }
-            i = i + 1;
+            i += 1;
         }
         return -1;
     }
@@ -633,7 +633,7 @@ impl TypeRegistry {
             if (v.discriminant == discriminant) {
                 return i;
             }
-            i = i + 1;
+            i += 1;
         }
         return -1;
     }
@@ -647,7 +647,7 @@ impl Drop<TypeRegistry> for TypeRegistry {
         while (i < self.types.len()) {
             Type* ty = self.types.get_ptr(i);
             ty.drop();
-            i = i + 1;
+            i += 1;
         }
         self.types.drop();
         self.by_name.drop();
@@ -658,7 +658,7 @@ impl Drop<TypeRegistry> for TypeRegistry {
         while (i < self.fn_cache_keys.len()) {
             String* key = self.fn_cache_keys.get_ptr(i);
             key.drop();
-            i = i + 1;
+            i += 1;
         }
         self.fn_cache_keys.drop();
     }

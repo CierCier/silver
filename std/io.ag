@@ -108,7 +108,7 @@ impl BufWriter {
         i64 i = 0;
         while (i < n) {
             buf[self.len + i] = src[i];
-            i = i + 1;
+            i += 1;
         }
         self.len = self.len + n;
 
@@ -123,7 +123,7 @@ impl BufWriter {
                     flushed = 1;
                     break;
                 }
-                j = j + 1;
+                j += 1;
             }
         }
     }
@@ -180,7 +180,7 @@ impl BufWriter {
                         i64 remaining = self.len - written;
                         while (i < remaining) {
                             buf[i] = buf[written + i];
-                            i = i + 1;
+                            i += 1;
                         }
                         self.len = remaining;
                     } else {
@@ -535,7 +535,7 @@ bool cstr_contains(u8* p, u8 needle) {
         if (p[i] == needle) {
             return true;
         }
-        i = i + 1;
+        i += 1;
     }
     return false;
 }

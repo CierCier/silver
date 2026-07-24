@@ -488,7 +488,7 @@ i32 rt_cast_opcode_for(u32 from, u32 to) {
         return (i32)to;                       // BOOL source: 1..13
     }
     i32 to_index = (i32)to;
-    if (to > from) { to_index = to_index - 1; } // skip self in 12-wide row
+    if (to > from) { to_index -= 1; } // skip self in 12-wide row
     return (i32)(from - 1) * 12 + to_index;   // non-BOOL source
 }
 
@@ -499,7 +499,7 @@ u32 rt_cast_opcode_target(i32 opcode, u32 from) {
         return (u32)opcode;
     }
     u32 to_index = (u32)(opcode - (i32)(from - 1) * 12);
-    if (to_index >= from) { to_index = to_index + 1; }
+    if (to_index >= from) { to_index += 1; }
     return to_index;
 }
 
@@ -576,9 +576,9 @@ impl CastRegistry {
                 if (from != to) {
                     self.register(from, to, rt_cast_opcode_for(from, to));
                 }
-                to = to + 1;
+                to += 1;
             }
-            from = from + 1;
+            from += 1;
         }
     }
 

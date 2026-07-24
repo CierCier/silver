@@ -103,7 +103,7 @@ i64 mem_class_index(i64 size) {
     i64 csize = 16;
     while (csize < size) {
         csize = csize * 2;
-        idx = idx + 1;
+        idx += 1;
     }
     return idx;
 }

@@ -204,9 +204,9 @@ impl<T> Iterator<VecIter<T>> for VecIter<T> {
     type Item = T;
     /// Returns the next element in the iteration sequence, or an empty Optional when done.
     Optional<T> next(VecIter<T>* self) {
-        if ((*self).idx < (*self).len) {
-            T value = (*self).data[(*self).idx];
-            (*self).idx = (*self).idx + 1;
+        if (self.idx < self.len) {
+            T value = self.data[self.idx];
+            self.idx = self.idx + 1;
             Optional<T> result;
             result.present = true;
             result.thing = value;
