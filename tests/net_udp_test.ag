@@ -1,0 +1,61 @@
+// tests/net_udp_test.ag — Integration tests for std/net/socket.ag.
+//
+// Tests: UdpSocket create, bind, send_to, recv_from, local_port, close.
+
+import std.net.socket;
+import std.net.inet;
+import std.test;
+
+i32 main() {
+    test_start("udp create and bind");
+
+    UdpSocket sock = UdpSocket.new();
+    assert_true(sock.valid(), "create udp socket");
+
+    SockAddrIn addr;
+    addr.sin_family = (u16)AF_INET;
+    addr.sin_port = hton16((u16)0);
+    addr.sin_addr = (u32)ntoh32(inet_addr("127.0.0.1"));
+    addr.sin_zero_1 = (u32)0;
+    addr.sin_zero_2 = (u32)0;
+    assert_true(sock.bind(&addr), "bind to port 0");
+
+    // Verify we got a non-zero port.
+    u16 port = sock.local_port();
+    assert_true(port != (u16)0, "got non-zero port");
+
+    // Close and verify.
+    sock.close();
+    assert_true(sock.invalid(), "close marks invalid");
+
+    test_start("udp send and recv");
+    UdpSocket a = UdpSocket.new();
+    UdpSocket b = UdpSocket.new();
+
+    SockAddrIn bind_a;
+    bind_a.sin_family = (u16)AF_INET;
+    bind_a.sin_port = hton16((u16)0);
+    bind_a.sin_addr = (u32)ntoh32(inet_addr("127.0.0.1"));
+    bind_a.sin_zero_1 = (u32)0;
+    bind_a.sin_zero_2 = (u32)0;
+    a.bind(&bind_a);
+    u16 port_a = a.local_port();
+
+    SockAddrIn dst;
+    dst.sin_family = (u16)AF_INET;
+    dst.sin_port = hton16(port_a);
+    dst.sin_addr = (u32)ntoh32(inet_addr("127.0.0.1"));
+    dst.sin_zero_1 = (u32)0;
+    dst.sin_zero_2 = (u32)0;
+
+    // b -> a
+    i64 sent = b.send_to((u8*)"hello", 5, &dst);
+    assert_eq_i64(5, sent, "send 5 bytes");
+
+    // a recv
+    u8 buf[64];
+    i64 got = a.recv_from(buf, 5, (SockAddrIn*)0);
+    assert_eq_i64(5, got, "recv 5 bytes");
+
+    return done();
+}

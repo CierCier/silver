@@ -1,0 +1,147 @@
+// std/net/socket.ag — RAII socket wrapper and UdpSocket.
+//
+// Socket wraps a raw file descriptor with Drop-based cleanup.  UdpSocket
+// provides send_to / recv_from on top of a SOCK_DGRAM socket.
+
+import std.sys.result;
+import std.sys.errno;
+import std.net.inet;
+import std.mem.drop;
+import std.time;
+
+// ---------------------------------------------------------------------------
+// Socket — RAII fd wrapper
+// ---------------------------------------------------------------------------
+
+
+// timeval for setsockopt SO_RCVTIMEO
+struct Timeval { i64 tv_sec; i64 tv_usec; }
+
+pub struct Socket {
+    i32  fd;
+    bool is_open;
+}
+
+impl Socket {
+    /// Create a socket. Returns a closed socket on failure.
+    pub Socket new(i64 domain, i64 ty, i64 protocol) {
+        SysResult r = try_socket(domain, ty, protocol);
+        if (r.is_err()) {
+            Socket s = { .fd = -1, .is_open = false };
+            return move s;
+        }
+        Socket s = { .fd = (i32)r.value, .is_open = true };
+        return move s;
+    }
+
+    /// Create from an already-open fd. Caller must ensure the fd is valid.
+    pub Socket from_fd(i32 fd) {
+        Socket s = { .fd = fd, .is_open = fd >= 0 };
+        return move s;
+    }
+
+    pub bool valid(Socket* self)  { return self.is_open && self.fd >= 0; }
+    pub bool invalid(Socket* self) { return !self.valid(); }
+
+    /// Set socket option. No-op on invalid sockets.
+    pub void set_opt(Socket* self, i64 level, i64 optname, void* optval, i64 optlen) {
+        if (self.invalid()) { return; }
+        try_setsockopt(self.fd, level, optname, optval, optlen);
+    }
+
+    /// Set receive timeout in seconds.
+    pub void set_recv_timeout(Socket* self, i64 sec) {
+        if (self.invalid()) { return; }
+        Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
+        try_setsockopt(self.fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, 16);
+    }
+
+    /// Close the socket. Idempotent.
+    pub void close(Socket* self) {
+        if (self.invalid()) { return; }
+        try_close(self.fd);
+        self.fd = -1;
+        self.is_open = false;
+    }
+}
+
+impl Drop<Socket> for Socket {
+    void drop(Socket* self) {
+        if (self.is_open && self.fd >= 0) {
+            try_close(self.fd);
+            self.fd = -1;
+            self.is_open = false;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UdpSocket — datagram socket with send_to / recv_from
+// ---------------------------------------------------------------------------
+
+pub struct UdpSocket {
+    Socket sock;
+}
+
+impl UdpSocket {
+    /// Create an unbound UDP socket. Returns a closed socket on failure.
+    pub UdpSocket new() {
+        UdpSocket u;
+        u.sock = Socket.new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        return move u;
+    }
+
+    /// Bind to the given address and port.
+    pub bool bind(UdpSocket* self, SockAddrIn* addr) {
+        if (self.sock.invalid()) { return false; }
+        SysResult r = try_bind(self.sock.fd, (void*)addr, 16);
+        return r.is_ok();
+    }
+
+    /// Send `len` bytes to `dst`. Returns bytes sent, or -errno on error.
+    pub i64 send_to(UdpSocket* self, u8* buf, i64 len, SockAddrIn* dst) {
+        if (self.sock.invalid()) { return -EINVAL; }
+        SysResult r = try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)dst, 16);
+        if (r.is_err()) { return -r.errno; }
+        return r.value;
+    }
+
+    /// Receive up to `len` bytes. Returns bytes received, or -errno on error.
+    /// `src` is filled with the sender's address if non-null.
+    pub i64 recv_from(UdpSocket* self, u8* buf, i64 len, SockAddrIn* src) {
+        if (self.sock.invalid()) { return -EINVAL; }
+        u32 addr_len = 16;
+        SysResult r = try_recvfrom(self.sock.fd, (void*)buf, len, 0, (void*)src, &addr_len);
+        if (r.is_err()) { return -r.errno; }
+        return r.value;
+    }
+
+    /// Set receive timeout in seconds.
+    pub void set_recv_timeout(UdpSocket* self, i64 sec) {
+        self.sock.set_recv_timeout(sec);
+    }
+
+    pub bool valid(UdpSocket* self)    { return self.sock.valid(); }
+    pub bool invalid(UdpSocket* self)  { return self.sock.invalid(); }
+
+    /// Close the underlying socket.
+    pub void close(UdpSocket* self) {
+        self.sock.close();
+    }
+
+    /// Get the bound port (via getsockname). Returns 0 on failure.
+    pub u16 local_port(UdpSocket* self) {
+        if (self.sock.invalid()) { return (u16)0; }
+        SockAddrIn sa;
+        u32 len = 16;
+        SysResult r = try_getsockname(self.sock.fd, (void*)&sa, &len);
+        if (r.is_err()) { return (u16)0; }
+        return ntoh16(sa.sin_port);
+    }
+}
+
+impl Drop<UdpSocket> for UdpSocket {
+    void drop(UdpSocket* self) {
+        self.sock.drop();
+    }
+}
