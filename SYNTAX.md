@@ -183,6 +183,8 @@ std::io::FileHandle handle;
 ```
 
 ### Function & Tuple Types
+
+```silver
 // Function pointer signature: ReturnType(ParamTypes...)
 bool(i32, f64) predicate;
 void() callback;
@@ -666,11 +668,10 @@ asm("mov x0, {}", [syscall_num]);
 ```
 
 ### Macro Invocation Expressions
-
 Builtin macros use `@name(...)` or `name!(...)` syntax.
 
 ```silver
-// Formatting & Printing Macros
+// Formatting & Printing Macros (compile-time expansion)
 @print("Value: {}", x);
 @println("Formatted {} {}", val1, val2);
 @eprintln("Error: {}", err_msg);
@@ -685,6 +686,12 @@ memcpy!(dst_ptr, src_ptr, bytes_count);
 memset!(dst_ptr, 0, bytes_count);
 memmove!(dst_ptr, src_ptr, bytes_count);
 ```
+
+> **Note**: The `@print` / `@println` / `@eprintln` macros ARE NOT the same as the
+> `println(str)` / `eprintln(str)` functions in `std.io`. Macros use `{}` format
+> placeholders; the plain functions take a single pre-formatted NUL-terminated string
+> and write directly via the `write(2)` syscall. Prefer the `@` macros for formatted
+> output.
 
 ---
 
@@ -778,3 +785,73 @@ Silver employs a stack-machine resource tracking architecture based on **explici
 3. **Explicit Field Cleanups**: Struct destructors must explicitly invoke `drop()` on inner managed resource fields; field destruction is **not** automatically recursive.
 4. **Pointer Immunity**: Raw pointers (`T*`) and reference views (`ref T`) do not own resources and are never automatically dropped.
 5. **Defer Stack Execution**: Defer statements are pushed onto a LIFO execution stack for the current scope depth and fire before any function return or block exit.
+
+---
+
+## 9. Standard Library & Patterns
+
+The Silver standard library (`std/`) provides data structures, I/O, memory management,
+networking, and runtime services. This section documents key patterns used throughout.
+
+### 9.1 Error Handling Patterns
+
+Silver uses tagged structs for error handling — there is no exception mechanism.
+The standard library defines several error/value containers optimized for different domains:
+
+| Type | Module | Use Case |
+|---|---|---|
+| `Optional<T>` | `std.optional` | A value that may or may not be present. Fields: `bool present`, `T thing`. Use `is_some()`/`is_none()`/`unwrap()`/`unwrap_or()`. |
+| `Result<T, E>` | `std.optional` | A success value OR an error. Fields: `bool ok`, `T value`, `E error`. Use `success()`/`failed()`/`unwrap()`/`get_error()`. |
+| `SysResult` | `std.sys.result` | Decoded syscall outcome. Fields: `bool ok`, `i64 value`, `i64 errno`. Use `is_ok()`/`is_err()`/`unwrap_or()`/`err_name()`. |
+| `TypeResult` | `std.rt.types` | Type-registry outcome with owned error message. Fields: `bool ok`, `TypeId id`, `i32 err`, `String msg`. |
+
+Unrecoverable errors (out of memory, bounds violation) call `abort()` from `std.mem.memory`.
+
+### 9.2 Output & Formatting
+
+Silver has TWO output surfaces — they are NOT interchangeable:
+
+| Mechanism | Module | When to Use |
+|---|---|---|
+| `@print`, `@println`, `@eprintln` | Compiler builtin macro | Format strings with `{}` placeholders. Uses compile-time expansion through `BufWriter` write_T methods. **Preferred for most output.** |
+| `println(str)`, `eprintln(str)` | `std.io` | Plain functions taking a single NUL-terminated `str`. Writes directly via `write(2)` syscall. No formatting. Legacy / simple cases. |
+
+The `Display` trait (`std.display`) bridges these: types implementing `Display` can be formatted with `@println("{}", value)`.
+
+### 9.3 Memory Allocation API
+
+The allocator (`std.mem.alloc`) provides a three-tier interface:
+
+1. **libc-compatible shims**: `malloc`, `calloc`, `realloc`, `free` — for existing code. Route through the pure-Silver allocator.
+2. **Raw frozen ABI**: `silver_rt_alloc`, `silver_rt_alloc_zeroed`, `silver_rt_realloc`, `silver_rt_dealloc` — stable C-ABI entry points.
+3. **Typed generic**: `alloc<T>()`, `alloc<T>(count)`, `realloc<T>(ptr, count)` — abort on OOM. Preferred for new code.
+
+Prefer the typed generic interface for new code; it aborts on allocation failure rather than returning null.
+
+### 9.4 Receiver Convention
+
+Silver methods receive `self` explicitly as the first parameter. The convention:
+
+| Receiver | When | Example |
+|---|---|---|
+| `T* self` | Mutating or read-only access (pointer) | `i64 len(Vec<T>* self)` |
+| `T self` | Consuming transfer or copy semantics | `T unwrap(Optional<T> self)` |
+
+Constructors return `T` by value (typically moved): `pub Vec<T> new() { ... return move v; }`.
+
+### 9.5 Test Framework
+
+The `std.test` module provides a shared test harness. Import it instead of writing ad-hoc assertion helpers:
+
+```silver
+import std.test;
+
+i32 main() {
+    test_start("My Tests");
+    assert_true(1 + 1 == 2, "basic arithmetic");
+    assert_eq_i64(42, compute_answer(), "answer check");
+    return done();
+}
+```
+
+See `std/test.ag` for the full assertion suite (`assert_true`, `assert_false`, `check`, `assert_eq_i64`, `assert_eq_i32`, `assert_eq_str`, `done`).

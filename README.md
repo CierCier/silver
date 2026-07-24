@@ -41,7 +41,8 @@ Silver is still under active development. Expect sharp edges, incomplete feature
 - `bootstrap/` - generated bootstrap compiler and stdlib outputs
 - `examples/` - sample Silver programs
 - `tests/` - project test inputs and supporting material
-- `docs/` - project documentation, currently the runtime migration plan (`docs/runtime-migration.md`)
+- `plan/` - architectural plans and migration roadmaps
+- `aglsp/` - Silver language server (LSP)
 
 ## Getting Started
 

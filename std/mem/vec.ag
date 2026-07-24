@@ -17,6 +17,7 @@ import std.mem.drop;
 import std.ops;
 import std.optional;
 import std.iter;
+/// A contiguous, growable array type.
 pub struct Vec<T> {
     T* data;
     i64 len;
@@ -201,6 +202,7 @@ impl<T> Vec<T> {
 
 impl<T> Iterator<VecIter<T>> for VecIter<T> {
     type Item = T;
+    /// Returns the next element in the iteration sequence, or an empty Optional when done.
     Optional<T> next(VecIter<T>* self) {
         if ((*self).idx < (*self).len) {
             T value = (*self).data[(*self).idx];

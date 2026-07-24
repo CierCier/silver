@@ -17,6 +17,47 @@ This project is still evolving quickly, so the most helpful contributions are th
 - Update bootstrap outputs when your changes affect the compiler or standard library.
 - Add or update tests when behavior changes.
 
+
+## Silver Style Guide
+
+### Naming
+
+| Element | Convention | Examples |
+|---|---|---|
+| Types (structs, enums) | `PascalCase` | `Vec`, `HashMap`, `BufWriter` |
+| Traits | `PascalCase` | `Drop`, `Display`, `Iterator` |
+| Functions / methods | `snake_case` | `silver_rt_alloc`, `mem_align_up` |
+| Variables | `snake_case` | `tracked_drop_count`, `idx` |
+| Constants | `SCREAMING_SNAKE_CASE` | `MEM_PAGE_SIZE`, `IO_SEEK` |
+| Internal helpers | `__` prefix + `snake_case` | `__fmt_write_fd`, `__optional_abort` |
+
+### Documentation
+
+- Use `///` for public-item doc comments (doc comments), `//` for implementation notes.
+- Every public type, function, and method should carry at least a one-sentence `///` summary.
+- Module-level documentation goes at the top of the file, before `import` statements.
+- See `std/mem/alloc.ag` and `std/rt/types.ag` for well-documented examples.
+
+### Error Handling
+
+- Use `Optional<T>` / `Result<T,E>` from `std.optional` for recoverable errors.
+- Use `SysResult` from `std.sys.result` for decoded syscall outcomes.
+- Unrecoverable errors (OOM, bounds violations) call `abort()` — do not return null and hope.
+- New allocation code should use the typed generic interface (`alloc<T>()`) which aborts on OOM.
+
+### Testing
+
+- Import `std.test` for shared assertion helpers (`assert_true`, `assert_eq_i64`, `done()`).
+- Return the result of `done()` from `main()` so the test harness sees the failure count.
+- Do not write ad-hoc `printf`-based assertion helpers; use the standard module.
+- Tests that intentionally exit nonzero must be registered in `tests/run_tests.sh` `expected_exit`.
+
+### Standard Library
+
+- Prefer `@println("fmt {}", val)` (compiler builtin) over `println(str)` (plain function).
+- Prefer pointer receivers (`T* self`) for methods that inspect or mutate state.
+- Structs that own resources must explicitly call `field.drop()` in their own `Drop` implementation — field destruction is NOT automatic.
+- Follow the import structure: import only what you use; do not rely on transitive imports.
 ## Recommended Workflow
 
 Build the compiler:

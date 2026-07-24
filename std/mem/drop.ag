@@ -1,3 +1,9 @@
+/// The `Drop` trait provides a mechanism to release resources (such as heap memory
+/// or file descriptors) when a value goes out of scope.
+///
+/// Types implementing `Drop` must define the `drop` method, which takes a pointer
+/// to the instance and is called automatically by the compiler.
+
 pub trait Drop<Self> {
     void drop(Self* self);
 }
