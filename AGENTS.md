@@ -168,12 +168,14 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 
 ### Critical Invariants
 
-1. **No Automatic Field Cleanups**:
-   - The compiler does *not* recursively drop fields when a struct goes out of scope.
-   - Structs that own resources *must* explicitly call drop on their fields in their own `drop` trait implementation.
+1. **Automatic Field Cleanups**:
+   - The compiler automatically drops struct fields after the struct's own `drop` method returns.
+   - Struct `drop` methods do NOT need to explicitly call `drop()` on fields — the compiler handles this.
+   - The `drop` method is for cleaning up non-field resources (e.g., freeing pointers, closing fds).
      ```silver
      void drop(HasInner* self) {
-         (*self).inner.drop(); // REQUIRED: explicit manual field drop call
+         // inner is dropped automatically by the compiler — no explicit call needed.
+         outer_drop_count = outer_drop_count + 1;
      }
      ```
 2. **Pointer/Reference Exemption**:
