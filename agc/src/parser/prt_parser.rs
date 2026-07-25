@@ -537,7 +537,12 @@ impl PRT_Parser {
             });
         }
 
-        if let Token::Identifier(ref name) = token.kind {
+        let type_name: Option<String> = match &token.kind {
+            Token::Identifier(name) => Some(name.clone()),
+            Token::SelfType => Some("Self".to_string()),
+            _ => None,
+        };
+        if let Some(name) = type_name {
             return Some(ast::Type {
                 kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                     path: vec![ast::Identifier {
@@ -563,7 +568,7 @@ impl PRT_Parser {
             Token::Trait => Some(TokenClass::Trait),
             Token::Impl => Some(TokenClass::Impl),
             Token::Macro => Some(TokenClass::Macro),
-            Token::Identifier(name) if name == "type" => Some(TokenClass::TypeKeyword),
+            Token::Type => Some(TokenClass::TypeKeyword),
             Token::Identifier(_)
                 if self.classify_identifier_as_type_start(tokens, index)
                     || self.looks_like_function_item_start(tokens, index) =>
@@ -583,8 +588,10 @@ impl PRT_Parser {
         let Some(token) = tokens.get(index) else {
             return false;
         };
-        let Token::Identifier(name) = &token.kind else {
-            return false;
+        let name: &str = match &token.kind {
+            Token::Identifier(n) => n.as_str(),
+            Token::SelfType => "Self",
+            _ => return false,
         };
 
         if self.known_type_names.contains(name)
@@ -725,12 +732,14 @@ impl PRT_Parser {
                 | Token::Vec
                 | Token::Optional
                 | Token::Identifier(_)
+                | Token::SelfType
         )
     }
 
     fn type_name_token_name(token: &Token) -> Option<&str> {
         match token {
             Token::Identifier(name) => Some(name.as_str()),
+            Token::SelfType => Some("Self"),
             Token::Vec => Some("Vec"),
             Token::Optional => Some("Optional"),
             _ => None,
@@ -2251,7 +2260,7 @@ impl PRT_Parser {
             })?;
 
             let mut expr = match &token.kind {
-                Token::Identifier(name) if name == "match" => {
+                Token::Match => {
                     let match_start = token.span.start;
                     cursor.bump();
                     let scrutinee = parse_assignment(cursor)?;
@@ -3915,7 +3924,6 @@ impl PRT_Parser {
             },
         })
     }
-
     fn parse_import_reduction(
         &self,
         tokens: &[LexToken],
@@ -3927,26 +3935,22 @@ impl PRT_Parser {
 
         while cursor < end {
             let token = &tokens[cursor];
-            if let Token::Identifier(name) = &token.kind {
-                if name == "as" {
-                    break;
-                }
-                path.push(ast::Identifier {
-                    name: name.clone(),
-                    span: token.span.clone(),
-                });
-                cursor += 1;
-                if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Dot)) {
-                    cursor += 1;
-                    continue;
-                }
-                break;
-            } else {
+            let Token::Identifier(name) = &token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "invalid import path segment".to_string(),
                     span: token.span.clone(),
                 });
+            };
+            path.push(ast::Identifier {
+                name: name.clone(),
+                span: token.span.clone(),
+            });
+            cursor += 1;
+            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Dot)) {
+                cursor += 1;
+                continue;
             }
+            break;
         }
 
         if path.is_empty() {
@@ -3956,104 +3960,7 @@ impl PRT_Parser {
             });
         }
 
-        let mut alias = None;
-        if cursor < end
-            && let Token::Identifier(keyword) = &tokens[cursor].kind
-            && keyword == "as"
-        {
-            cursor += 1;
-            let token = tokens
-                .get(cursor)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected alias after `as`".to_string(),
-                    span: tokens[end.saturating_sub(1)].span.clone(),
-                })?;
-            let Token::Identifier(name) = &token.kind else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected identifier after `as`".to_string(),
-                    span: token.span.clone(),
-                });
-            };
-            alias = Some(ast::Identifier {
-                name: name.clone(),
-                span: token.span.clone(),
-            });
-            cursor += 1;
-        }
-
-        let mut items = None;
-        if cursor < end && !matches!(tokens[cursor].kind, Token::Semicolon) {
-            if !matches!(tokens[cursor].kind, Token::LeftBrace) {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected `{` or `;` after import path".to_string(),
-                    span: tokens[cursor].span.clone(),
-                });
-            }
-            cursor += 1;
-            let mut imported_items = Vec::new();
-            while cursor < end {
-                if matches!(tokens[cursor].kind, Token::RightBrace) {
-                    break;
-                }
-                let token = &tokens[cursor];
-                let Token::Identifier(name) = &token.kind else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "expected imported item name".to_string(),
-                        span: token.span.clone(),
-                    });
-                };
-                let mut item_alias = None;
-                let item_name = ast::Identifier {
-                    name: name.clone(),
-                    span: token.span.clone(),
-                };
-                cursor += 1;
-                if cursor < end
-                    && let Token::Identifier(keyword) = &tokens[cursor].kind
-                    && keyword == "as"
-                {
-                    cursor += 1;
-                    let alias_token =
-                        tokens
-                            .get(cursor)
-                            .ok_or_else(|| ParseError::InvalidSyntax {
-                                message: "expected alias after `as`".to_string(),
-                                span: token.span.clone(),
-                            })?;
-                    let Token::Identifier(alias_name) = &alias_token.kind else {
-                        return Err(ParseError::InvalidSyntax {
-                            message: "expected identifier after `as`".to_string(),
-                            span: alias_token.span.clone(),
-                        });
-                    };
-                    item_alias = Some(ast::Identifier {
-                        name: alias_name.clone(),
-                        span: alias_token.span.clone(),
-                    });
-                    cursor += 1;
-                }
-                imported_items.push(ast::ImportedItem {
-                    name: item_name,
-                    alias: item_alias,
-                });
-                if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
-                    cursor += 1;
-                    continue;
-                }
-                if cursor < end && matches!(tokens[cursor].kind, Token::RightBrace) {
-                    continue;
-                }
-                if cursor < end {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "expected `,` or `}` in import item list".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    });
-                }
-            }
-            items = Some(imported_items);
-        }
-
-        Ok(ast::ImportItem { path, alias, items })
+        Ok(ast::ImportItem { path })
     }
 
     fn parse_global_variable_reduction(
@@ -4465,11 +4372,15 @@ impl PRT_Parser {
         let mut cursor = start + 1;
         while cursor < close {
             let name_token = &tokens[cursor];
-            let Token::Identifier(name) = &name_token.kind else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected generic parameter name".to_string(),
-                    span: name_token.span.clone(),
-                });
+            let name: &str = match &name_token.kind {
+                Token::Identifier(n) => n.as_str(),
+                Token::SelfType => "Self",
+                _ => {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected generic parameter name".to_string(),
+                        span: name_token.span.clone(),
+                    });
+                }
             };
             cursor += 1;
 
@@ -4510,7 +4421,7 @@ impl PRT_Parser {
             };
             params.push(ast::GenericParam::Type(ast::TypeParam {
                 name: ast::Identifier {
-                    name: name.clone(),
+                    name: name.to_string(),
                     span: name_token.span.clone(),
                 },
                 bounds,
@@ -5138,7 +5049,7 @@ impl PRT_Parser {
             // Trait methods use C-style syntax: return_type name(params);
             // Associated types use: type Name;
             // Associated fn values use: name: Type;
-            if matches!(&tokens[cursor].kind, Token::Identifier(name) if name == "type") {
+            if matches!(&tokens[cursor].kind, Token::Type) {
                 let (item, next_cursor) =
                     self.parse_trait_assoc_type_item(tokens, cursor, end - 1)?;
                 items.push(ast::TraitItemKind::AssociatedType(item));
@@ -5732,7 +5643,7 @@ impl PRT_Parser {
                 let (cast_item, next_cursor) = self.parse_impl_cast(tokens, cursor, end - 1)?;
                 items.push(ast::ImplItemKind::Cast(cast_item));
                 cursor = next_cursor;
-            } else if matches!(&tokens[cursor].kind, Token::Identifier(name) if name == "type") {
+            } else if matches!(&tokens[cursor].kind, Token::Type) {
                 let (item, next_cursor) =
                     self.parse_impl_assoc_type_item(tokens, cursor, end - 1)?;
                 items.push(ast::ImplItemKind::AssociatedType(item));
@@ -7028,8 +6939,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_import_with_alias() {
-        let source = "import std.io as io;";
+    fn parses_basic_import() {
+        let source = "import std.io;";
         let tokens = crate::lexer::lex(source).expect("lex failed");
         let mut parser = PRT_Parser::new(None);
         let program = parser.parse_program(&tokens).expect("parse failed");
@@ -7037,32 +6948,9 @@ mod tests {
         let ast::ItemKind::Import(item) = &program.items[0].kind else {
             panic!("expected import item");
         };
-        assert_eq!(
-            item.alias.as_ref().map(|alias| alias.name.as_str()),
-            Some("io")
-        );
-        assert!(item.items.is_none());
-    }
-
-    #[test]
-    fn parses_import_with_selected_items_and_aliases() {
-        let source = "import std.io { print as p, println };";
-        let tokens = crate::lexer::lex(source).expect("lex failed");
-        let mut parser = PRT_Parser::new(None);
-        let program = parser.parse_program(&tokens).expect("parse failed");
-
-        let ast::ItemKind::Import(item) = &program.items[0].kind else {
-            panic!("expected import item");
-        };
-        let items = item.items.as_ref().expect("expected selected items");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].name.name, "print");
-        assert_eq!(
-            items[0].alias.as_ref().map(|alias| alias.name.as_str()),
-            Some("p")
-        );
-        assert_eq!(items[1].name.name, "println");
-        assert!(items[1].alias.is_none());
+        assert_eq!(item.path.len(), 2);
+        assert_eq!(item.path[0].name, "std");
+        assert_eq!(item.path[1].name, "io");
     }
 
     #[test]

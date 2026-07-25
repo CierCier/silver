@@ -304,21 +304,8 @@ pub fn import_path_to_string(path: &[ast::Identifier]) -> String {
         .join(".")
 }
 
-pub fn filter_exports(artifact: &ModuleArtifact, import: &ast::ImportItem) -> Vec<ModuleExport> {
-    if let Some(items) = &import.items {
-        let export_map: HashMap<&str, &ModuleExport> = artifact
-            .exports
-            .iter()
-            .map(|export| (export.name.as_str(), export))
-            .collect();
-        let mut selected = Vec::new();
-        for item in items {
-            if let Some(export) = export_map.get(item.name.name.as_str()) {
-                selected.push((*export).clone());
-            }
-        }
-        return selected;
-    }
+/// Returns all exports from the artifact (import guards removed).
+pub fn filter_exports(artifact: &ModuleArtifact, _import: &ast::ImportItem) -> Vec<ModuleExport> {
     artifact.exports.clone()
 }
 
@@ -456,8 +443,6 @@ mod tests {
             items: vec![ast::Item {
                 kind: ast::ItemKind::Import(ast::ImportItem {
                     path: path.iter().map(|segment| ident(segment)).collect(),
-                    alias: None,
-                    items: None,
                 }),
                 span: Span { start: 0, end: 0 },
                 visibility: ast::Visibility::Private,
@@ -583,12 +568,12 @@ mod tests {
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::write(
             root.join("a").join("mod1.ag"),
-            "pub struct Thing { i32 x; }",
+            "struct Thing { i32 x; }",
         )
         .unwrap();
         std::fs::write(
             root.join("b").join("mod2.ag"),
-            "pub struct Thing { i32 y; }",
+            "struct Thing { i32 y; }",
         )
         .unwrap();
 
@@ -598,9 +583,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
-                        alias: None,
-                        items: None,
-                    }),
+                                            }),
                     span: Span { start: 0, end: 0 },
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -608,9 +591,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
-                        alias: None,
-                        items: None,
-                    }),
+                                            }),
                     span: Span { start: 0, end: 0 },
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -636,12 +617,12 @@ mod tests {
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::write(
             root.join("a").join("mod1.ag"),
-            "pub i32 add(i32 x, i32 y) { return x + y; }",
+            "i32 add(i32 x, i32 y) { return x + y; }",
         )
         .unwrap();
         std::fs::write(
             root.join("b").join("mod2.ag"),
-            "pub i32 add(i32 a, i32 b) { return a + b; }",
+            "i32 add(i32 a, i32 b) { return a + b; }",
         )
         .unwrap();
 
@@ -651,9 +632,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
-                        alias: None,
-                        items: None,
-                    }),
+                                            }),
                     span: Span { start: 0, end: 0 },
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -661,9 +640,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
-                        alias: None,
-                        items: None,
-                    }),
+                                            }),
                     span: Span { start: 0, end: 0 },
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
