@@ -312,7 +312,7 @@ struct FilePathList {
 
 struct AutomationEvent {
     u32 frame;
-    u32 type;
+    u32 event_type;
     i32 params[4];
 }
 
@@ -1199,7 +1199,7 @@ Font LoadFontEx(const char *fileName, i32 fontSize, const i32 *codepoints, i32 c
 Font LoadFontFromImage(Image image, Color key, i32 firstChar);
 Font LoadFontFromMemory(const char *fileType, const u8 *fileData, i32 dataSize, i32 fontSize, const i32 *codepoints, i32 codepointCount);
 bool IsFontValid(Font font);
-GlyphInfo *LoadFontData(const u8 *fileData, i32 dataSize, i32 fontSize, const i32 *codepoints, i32 codepointCount, i32 type, i32 *glyphCount);
+GlyphInfo *LoadFontData(const u8 *fileData, i32 dataSize, i32 fontSize, const i32 *codepoints, i32 codepointCount, i32 fontType, i32 *glyphCount);
 Image GenImageFontAtlas(const GlyphInfo *glyphs, Rectangle **glyphRecs, i32 glyphCount, i32 fontSize, i32 padding, i32 packMethod);
 void UnloadFontData(GlyphInfo *glyphs, i32 glyphCount);
 void UnloadFont(Font font);
