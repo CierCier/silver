@@ -13,7 +13,7 @@ import std.sys.result;
 //   offset 4: sin_addr    (u32)
 //   offset 8: sin_zero_1  (u32)
 //   offset 12: sin_zero_2 (u32)
-pub struct SockAddrIn {
+struct SockAddrIn {
     u16 sin_family;
     u16 sin_port;
     u32 sin_addr;
@@ -45,19 +45,19 @@ impl SockAddrIn {
 // default to `i32` / `i64`.
 
 // Host byte order -> network byte order (16-bit).
-pub u16 hton16(u16 host) {
+u16 hton16(u16 host) {
     i64 h = (i64)host;
     i64 r = ((h & (i64)0xFF) << (i64)8) | ((h >> (i64)8) & (i64)0xFF);
     return (u16)r;
 }
 
 // Network byte order -> host byte order (16-bit). Symmetric for 16-bit.
-pub u16 ntoh16(u16 net) {
+u16 ntoh16(u16 net) {
     return hton16(net);
 }
 
 // Host byte order -> network byte order (32-bit).
-pub u32 hton32(u32 host) {
+u32 hton32(u32 host) {
     i64 h = (i64)host;
     i64 r = ((h & (i64)0xFF) << (i64)24)
           | ((h & (i64)0xFF00) << (i64)8)
@@ -67,7 +67,7 @@ pub u32 hton32(u32 host) {
 }
 
 // Network byte order -> host byte order (32-bit). Symmetric for 32-bit.
-pub u32 ntoh32(u32 net) {
+u32 ntoh32(u32 net) {
     return hton32(net);
 }
 
@@ -78,7 +78,7 @@ pub u32 ntoh32(u32 net) {
 // Uses i64 throughout (matching Silver's preferred integer type) with a final
 // cast to u32 at the call site.
 
-pub i64 inet_addr(str s) {
+i64 inet_addr(str s) {
     if (s == (str)0) { return (i64)0; }
     u8* p = (u8*)s;
     i64 result = 0;
@@ -118,7 +118,7 @@ pub i64 inet_addr(str s) {
 
 // struct sockaddr_in6 — 28 bytes, matches Linux x86_64 layout.
 // Address stored as two u64 halves (network byte order).
-pub struct SockAddrIn6 {
+struct SockAddrIn6 {
     u16 sin6_family;
     u16 sin6_port;
     u32 sin6_flowinfo;
@@ -129,7 +129,7 @@ pub struct SockAddrIn6 {
 
 impl SockAddrIn6 {
     /// Construct from port and colon-hex address string ("::1", "2001:db8::1", etc.).
-    pub SockAddrIn6 v6(u16 port, str addr_str) {
+    SockAddrIn6 v6(u16 port, str addr_str) {
         SockAddrIn6 sa;
         sa.sin6_family = (u16)AF_INET6;
         sa.sin6_port = hton16(port);
@@ -145,7 +145,7 @@ impl SockAddrIn6 {
     }
 
     /// Set address from colon-hex string. Returns true on success.
-    pub bool set_addr(SockAddrIn6* self, str addr_str) {
+    bool set_addr(SockAddrIn6* self, str addr_str) {
         u64 hi = 0;
         u64 lo = 0;
         bool ok = inet_pton6(addr_str, &hi, &lo);
@@ -160,7 +160,7 @@ impl SockAddrIn6 {
 /// Parse an IPv6 colon-hex string into two u64 halves (network byte order).
 /// Handles :: compression, but NOT embedded IPv4 (::ffff:1.2.3.4).
 /// Returns true on success.
-pub bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
+bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
     if (s == (str)0) { return false; }
     u8* p = (u8*)s;
 

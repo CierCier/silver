@@ -4794,7 +4794,6 @@ impl PRT_Parser {
         }
 
         match tokens[start].kind {
-            Token::Pub => (ast::Visibility::Public, start + 1),
             Token::Private => (ast::Visibility::Private, start + 1),
             _ => (ast::Visibility::Public, start),
         }
@@ -5136,13 +5135,9 @@ impl PRT_Parser {
         let mut items = Vec::new();
         cursor += 1;
         while cursor < end - 1 {
-            if matches!(tokens[cursor].kind, Token::Fn) {
-                let (item, next_cursor) =
-                    self.parse_trait_function_item(tokens, cursor, end - 1)?;
-                items.push(ast::TraitItemKind::Function(item));
-                cursor = next_cursor;
-                continue;
-            }
+            // Trait methods use C-style syntax: return_type name(params);
+            // Associated types use: type Name;
+            // Associated fn values use: name: Type;
             if matches!(&tokens[cursor].kind, Token::Identifier(name) if name == "type") {
                 let (item, next_cursor) =
                     self.parse_trait_assoc_type_item(tokens, cursor, end - 1)?;

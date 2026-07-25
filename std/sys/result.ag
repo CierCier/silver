@@ -18,52 +18,52 @@ import std.sys.linux;
 // --- Flag constants used by the typed wrappers ---
 
 // mmap protection bits (asm-generic/mman-common.h).
-pub const i64 PROT_NONE = 0;
-pub const i64 PROT_READ = 1;
-pub const i64 PROT_WRITE = 2;
-pub const i64 PROT_EXEC = 4;
+const i64 PROT_NONE = 0;
+const i64 PROT_READ = 1;
+const i64 PROT_WRITE = 2;
+const i64 PROT_EXEC = 4;
 
 // mmap flag bits (x86_64).
-pub const i64 MAP_SHARED = 1;
-pub const i64 MAP_PRIVATE = 2;
-pub const i64 MAP_FIXED = 16;
-pub const i64 MAP_ANONYMOUS = 32;
+const i64 MAP_SHARED = 1;
+const i64 MAP_PRIVATE = 2;
+const i64 MAP_FIXED = 16;
+const i64 MAP_ANONYMOUS = 32;
 
 // mremap flag bits. (MREMAP_FIXED is not supported by try_mremap, which
 // does not take a new_address argument.)
-pub const i64 MREMAP_MAYMOVE = 1;
+const i64 MREMAP_MAYMOVE = 1;
 
 // open(2) flag bits (x86_64, octal values in C headers).
-pub const i64 O_RDONLY = 0;
-pub const i64 O_WRONLY = 1;
-pub const i64 O_RDWR = 2;
-pub const i64 O_CREAT = 64;        // 0o100
-pub const i64 O_EXCL = 128;        // 0o200
-pub const i64 O_TRUNC = 512;       // 0o1000
-pub const i64 O_APPEND = 1024;     // 0o2000
-pub const i64 O_NONBLOCK = 2048;   // 0o4000
-pub const i64 O_DIRECTORY = 65536; // 0o200000
-pub const i64 O_CLOEXEC = 524288;  // 0o2000000
+const i64 O_RDONLY = 0;
+const i64 O_WRONLY = 1;
+const i64 O_RDWR = 2;
+const i64 O_CREAT = 64;        // 0o100
+const i64 O_EXCL = 128;        // 0o200
+const i64 O_TRUNC = 512;       // 0o1000
+const i64 O_APPEND = 1024;     // 0o2000
+const i64 O_NONBLOCK = 2048;   // 0o4000
+const i64 O_DIRECTORY = 65536; // 0o200000
+const i64 O_CLOEXEC = 524288;  // 0o2000000
 
 // openat(2) special dirfd: resolve relative paths against the CWD.
-pub const i64 AT_FDCWD = -100;
+const i64 AT_FDCWD = -100;
 
 // lseek(2) whence values.
-pub const i64 SEEK_SET = 0;
-pub const i64 SEEK_CUR = 1;
-pub const i64 SEEK_END = 2;
+const i64 SEEK_SET = 0;
+const i64 SEEK_CUR = 1;
+const i64 SEEK_END = 2;
 
 // Well-known file descriptors.
-pub const i32 STDIN_FD = 0;
-pub const i32 STDOUT_FD = 1;
-pub const i32 STDERR_FD = 2;
+const i32 STDIN_FD = 0;
+const i32 STDOUT_FD = 1;
+const i32 STDERR_FD = 2;
 
 // --- SysResult ---
 
 // Decoded syscall outcome. Exactly one of the two states holds:
 //   ok == true  -> value is the successful return, errno == 0
 //   ok == false -> errno is the positive errno,   value == 0
-pub struct SysResult {
+struct SysResult {
     bool ok;
     i64 value;
     i64 errno;
@@ -137,41 +137,41 @@ impl SysResult {
 
 // read(2): read up to `count` bytes from `fd` into `buf`.
 // Ok value: number of bytes read (0 = EOF).
-pub SysResult try_read(i32 fd, u8* buf, i64 count) {
+SysResult try_read(i32 fd, u8* buf, i64 count) {
     return SysResult.from_raw(sys_read((i64)fd, (i64)buf, count));
 }
 
 // write(2): write `count` bytes from `buf` to `fd`.
 // Ok value: number of bytes written.
-pub SysResult try_write(i32 fd, u8* buf, i64 count) {
+SysResult try_write(i32 fd, u8* buf, i64 count) {
     return SysResult.from_raw(sys_write((i64)fd, (i64)buf, count));
 }
 
 // open(2): open `path` with O_* `flags`; `mode` is the creation mode
 // (only consulted when flags contain O_CREAT). Ok value: new fd.
-pub SysResult try_open(str path, i64 flags, i64 mode) {
+SysResult try_open(str path, i64 flags, i64 mode) {
     return SysResult.from_raw(sys_open((i64)path, flags, mode));
 }
 
 // openat(2): like open, resolving relative paths against `dirfd`
 // (pass AT_FDCWD for the current working directory). Ok value: new fd.
-pub SysResult try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
+SysResult try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
     return SysResult.from_raw(sys_openat((i64)dirfd, (i64)path, flags, mode));
 }
 
 // close(2): close `fd`. Ok value: 0.
-pub SysResult try_close(i32 fd) {
+SysResult try_close(i32 fd) {
     return SysResult.from_raw(sys_close((i64)fd));
 }
 
 // mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let
 // the kernel choose, fd = -1 with MAP_ANONYMOUS. Ok value: mapping address.
-pub SysResult try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
+SysResult try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
     return SysResult.from_raw(sys_mmap((i64)addr, length, prot, flags, (i64)fd, offset));
 }
 
 // munmap(2): unmap `length` bytes at page-aligned `addr`. Ok value: 0.
-pub SysResult try_munmap(void* addr, i64 length) {
+SysResult try_munmap(void* addr, i64 length) {
     return SysResult.from_raw(sys_munmap((i64)addr, length));
 }
 
@@ -179,60 +179,60 @@ pub SysResult try_munmap(void* addr, i64 length) {
 // Pass MREMAP_MAYMOVE to allow relocation. Ok value: new mapping address.
 // MREMAP_FIXED is intentionally unsupported (no new_address parameter);
 // the kernel receives 0 for it.
-pub SysResult try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
+SysResult try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
     return SysResult.from_raw(sys_mremap((i64)old_addr, old_size, new_size, flags, 0));
 }
 
 // lseek(2): reposition `fd` to `offset` relative to SEEK_*. Ok value: the
 // resulting absolute offset.
-pub SysResult try_lseek(i32 fd, i64 offset, i64 whence) {
+SysResult try_lseek(i32 fd, i64 offset, i64 whence) {
     return SysResult.from_raw(sys_lseek((i64)fd, offset, whence));
 }
 
 // kill(2): send signal `sig` to `pid` (sig 0 probes existence). Ok value: 0.
-pub SysResult try_kill(i32 pid, i32 sig) {
+SysResult try_kill(i32 pid, i32 sig) {
     return SysResult.from_raw(sys_kill((i64)pid, (i64)sig));
 }
 
 // getpid(2): never fails. Ok value: the calling process id.
-pub SysResult try_getpid() {
+SysResult try_getpid() {
     return SysResult.from_raw(sys_getpid());
 }
 
 // exit_group(2): terminate every thread in the process with `code`.
 // Does not return.
-pub void exit_group(i64 code) {
+void exit_group(i64 code) {
     sys_exit_group(code);
     sys_exit(code);
     while (true) {}
 }
 // --- Socket, fcntl, and poll constants ---
 
-pub const i64 F_GETFL = 3;
-pub const i64 F_SETFL = 4;
-pub const i64 AF_INET = 2;
-pub const i64 AF_INET6 = 10;
-pub const i64 SOCK_STREAM = 1;
-pub const i64 SOCK_DGRAM = 2;
-pub const i64 SOCK_NONBLOCK = 2048;
-pub const i64 SOCK_CLOEXEC = 524288;
-pub const i64 IPPROTO_TCP = 6;
-pub const i64 IPPROTO_UDP = 17;
-pub const i64 SOL_SOCKET = 1;
-pub const i64 SO_REUSEADDR = 2;
-pub const i64 SO_ERROR = 4;
-pub const i64 SO_RCVTIMEO = 20;
-pub const i64 SHUT_RD = 0;
-pub const i64 SHUT_WR = 1;
-pub const i64 SHUT_RDWR = 2;
-pub const i64 INADDR_ANY = 0;
-pub const i64 POLLIN = 1;
-pub const i64 POLLOUT = 4;
-pub const i64 POLLERR = 8;
-pub const i64 POLLHUP = 16;
+const i64 F_GETFL = 3;
+const i64 F_SETFL = 4;
+const i64 AF_INET = 2;
+const i64 AF_INET6 = 10;
+const i64 SOCK_STREAM = 1;
+const i64 SOCK_DGRAM = 2;
+const i64 SOCK_NONBLOCK = 2048;
+const i64 SOCK_CLOEXEC = 524288;
+const i64 IPPROTO_TCP = 6;
+const i64 IPPROTO_UDP = 17;
+const i64 SOL_SOCKET = 1;
+const i64 SO_REUSEADDR = 2;
+const i64 SO_ERROR = 4;
+const i64 SO_RCVTIMEO = 20;
+const i64 SHUT_RD = 0;
+const i64 SHUT_WR = 1;
+const i64 SHUT_RDWR = 2;
+const i64 INADDR_ANY = 0;
+const i64 POLLIN = 1;
+const i64 POLLOUT = 4;
+const i64 POLLERR = 8;
+const i64 POLLHUP = 16;
 
 // --- PollFd ---
-pub struct PollFd {
+struct PollFd {
     i32 fd;
     i16 events;
     i16 revents;
@@ -240,66 +240,66 @@ pub struct PollFd {
 
 // --- Typed socket/fcntl/poll wrappers ---
 
-pub SysResult try_socket(i64 domain, i64 ty, i64 protocol) {
+SysResult try_socket(i64 domain, i64 ty, i64 protocol) {
     return SysResult.from_raw(sys_socket(domain, ty, protocol));
 }
 
-pub SysResult try_bind(i32 fd, void* addr, i64 addr_len) {
+SysResult try_bind(i32 fd, void* addr, i64 addr_len) {
     return SysResult.from_raw(sys_bind((i64)fd, (i64)addr, addr_len));
 }
 
-pub SysResult try_listen(i32 fd, i64 backlog) {
+SysResult try_listen(i32 fd, i64 backlog) {
     return SysResult.from_raw(sys_listen((i64)fd, backlog));
 }
 
-pub SysResult try_accept4(i32 fd, void* addr, u32* addr_len, i64 flags) {
+SysResult try_accept4(i32 fd, void* addr, u32* addr_len, i64 flags) {
     return SysResult.from_raw(sys_accept4((i64)fd, (i64)addr, (i64)addr_len, flags));
 }
 
-pub SysResult try_connect(i32 fd, void* addr, i64 addr_len) {
+SysResult try_connect(i32 fd, void* addr, i64 addr_len) {
     return SysResult.from_raw(sys_connect((i64)fd, (i64)addr, addr_len));
 }
 
-pub SysResult try_shutdown(i32 fd, i64 how) {
+SysResult try_shutdown(i32 fd, i64 how) {
     return SysResult.from_raw(sys_shutdown((i64)fd, how));
 }
 
-pub SysResult try_setsockopt(i32 fd, i64 level, i64 optname, void* optval, i64 optlen) {
+SysResult try_setsockopt(i32 fd, i64 level, i64 optname, void* optval, i64 optlen) {
     return SysResult.from_raw(sys_setsockopt((i64)fd, level, optname, (i64)optval, optlen));
 }
 
-pub SysResult try_getsockname(i32 fd, void* addr, u32* addr_len) {
+SysResult try_getsockname(i32 fd, void* addr, u32* addr_len) {
     return SysResult.from_raw(sys_getsockname((i64)fd, (i64)addr, (i64)addr_len));
 }
 
-pub SysResult try_getpeername(i32 fd, void* addr, u32* addr_len) {
+SysResult try_getpeername(i32 fd, void* addr, u32* addr_len) {
     return SysResult.from_raw(sys_getpeername((i64)fd, (i64)addr, (i64)addr_len));
 }
 
-pub SysResult try_fcntl(i32 fd, i64 cmd, i64 arg) {
+SysResult try_fcntl(i32 fd, i64 cmd, i64 arg) {
     return SysResult.from_raw(sys_fcntl((i64)fd, cmd, arg));
 }
 
-pub SysResult try_poll(PollFd* fds, i64 nfds, i64 timeout) {
+SysResult try_poll(PollFd* fds, i64 nfds, i64 timeout) {
     return SysResult.from_raw(sys_poll((i64)fds, nfds, timeout));
 }
 
-pub SysResult try_getsockopt(i32 fd, i64 level, i64 optname, void* optval, u32* optlen) {
+SysResult try_getsockopt(i32 fd, i64 level, i64 optname, void* optval, u32* optlen) {
     return SysResult.from_raw(sys_getsockopt((i64)fd, level, optname, (i64)optval, (i64)optlen));
 }
 
-pub SysResult try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr, i64 addr_len) {
+SysResult try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr, i64 addr_len) {
     return SysResult.from_raw(sys_sendto((i64)fd, (i64)buf, len, flags, (i64)addr, addr_len));
 }
 
-pub SysResult try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
+SysResult try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
     return SysResult.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
 }
 
-pub SysResult try_sendmsg(i32 fd, void* msg, i64 flags) {
+SysResult try_sendmsg(i32 fd, void* msg, i64 flags) {
     return SysResult.from_raw(sys_sendmsg((i64)fd, (i64)msg, flags));
 }
 
-pub SysResult try_recvmsg(i32 fd, void* msg, i64 flags) {
+SysResult try_recvmsg(i32 fd, void* msg, i64 flags) {
     return SysResult.from_raw(sys_recvmsg((i64)fd, (i64)msg, flags));
 }

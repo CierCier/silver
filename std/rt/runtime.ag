@@ -21,7 +21,7 @@ import std.rt.types;
 // Runtime — aggregate owning every subsystem
 // ---------------------------------------------------------------------------
 
-pub struct Runtime {
+struct Runtime {
     /// Type registry (canonical type table).
     TypeRegistry types;
     /// Generational GC heap.
@@ -36,7 +36,7 @@ impl Runtime {
     // -- Construction -------------------------------------------------------
 
     /// Fully constructed Runtime with builtin methods and casts installed.
-    pub Runtime new() {
+    Runtime new() {
         Runtime rt;
         rt.types = TypeRegistry.new();
         rt.heap = Heap.new();
@@ -50,7 +50,7 @@ impl Runtime {
 
     /// Allocate a heap string and wrap it in an RtValue object reference.
     /// (Mirrors Rust Runtime::alloc_string.)
-    pub RtValue alloc_string(Runtime* self, str text) {
+    RtValue alloc_string(Runtime* self, str text) {
         String s = String.new();
         s.push_str(text);
         Handle handle = self.heap.alloc(Object.new_string(move s));
@@ -60,7 +60,7 @@ impl Runtime {
     /// Dynamic method dispatch by name.
     /// Returns a MethodResult (ok flag + RtValue + RT_ERR + owned message).
     /// (Mirrors Rust Runtime::call_method.)
-    pub MethodResult call_method(Runtime* self, RtValue receiver, str name, RtValue* args, i64 args_len) {
+    MethodResult call_method(Runtime* self, RtValue receiver, str name, RtValue* args, i64 args_len) {
         return self.methods.call_method(&self.types, &self.heap, receiver, name, args, args_len);
     }
 
@@ -68,7 +68,7 @@ impl Runtime {
     /// Returns a CastResult (ok flag + CastValue + CAST_ERR + owned message).
     /// Uses the type registry for pretty error messages.
     /// (Mirrors Rust Runtime::cast_value.)
-    pub CastResult cast_value(Runtime* self, CastValue value, TypeId to) {
+    CastResult cast_value(Runtime* self, CastValue value, TypeId to) {
         return self.casts.cast_with_registry(&self.types, value, to);
     }
 }

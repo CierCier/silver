@@ -235,12 +235,12 @@ u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
 
 /// Allocate `size` bytes with `align` alignment.
 /// Size 0 returns a dangling non-null pointer; OOM returns null.
-pub u8* silver_rt_alloc(i64 size, i64 align) {
+u8* silver_rt_alloc(i64 size, i64 align) {
     return mem_alloc_impl(size, align);
 }
 
 /// Allocate zeroed memory (same contract as silver_rt_alloc).
-pub u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
+u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
     u8* ptr = mem_alloc_impl(size, align);
     if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
         i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
@@ -255,7 +255,7 @@ pub u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
 
 /// Reallocate to `new_size`. new_size 0 deallocates and returns dangling;
 /// null input behaves like silver_rt_alloc.
-pub u8* silver_rt_realloc(u8* ptr0, i64 old_size, i64 new_size, i64 align) {
+u8* silver_rt_realloc(u8* ptr0, i64 old_size, i64 new_size, i64 align) {
     if (new_size <= 0) {
         silver_rt_dealloc(ptr0, old_size, align);
         return mem_dangling(align);
@@ -264,7 +264,7 @@ pub u8* silver_rt_realloc(u8* ptr0, i64 old_size, i64 new_size, i64 align) {
 }
 
 /// Deallocate. Null pointer or size 0 is a no-op.
-pub void silver_rt_dealloc(u8* ptr0, i64 size, i64 align) {
+void silver_rt_dealloc(u8* ptr0, i64 size, i64 align) {
     if ((i64)ptr0 == 0 || size <= 0) {
         return;
     }
@@ -275,11 +275,11 @@ pub void silver_rt_dealloc(u8* ptr0, i64 size, i64 align) {
 // Keep existing std/ call sites (malloc/calloc/realloc/free) compiling
 // unchanged, routed through the pure-Silver allocator.
 
-pub void* malloc(i64 size) {
+void* malloc(i64 size) {
     return (void*)mem_alloc_impl(size, 16);
 }
 
-pub void* calloc(i64 count, i64 size) {
+void* calloc(i64 count, i64 size) {
     if (count > 0) {
         if (size > 9223372036854775807 / count) {
             return (void*)0;
@@ -296,11 +296,11 @@ pub void* calloc(i64 count, i64 size) {
     return (void*)ptr;
 }
 
-pub void* realloc(void* ptr, i64 new_size) {
+void* realloc(void* ptr, i64 new_size) {
     return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
 }
 
-pub void free(void* ptr) {
+void free(void* ptr) {
     mem_free_impl((u8*)ptr);
 }
 
@@ -310,22 +310,22 @@ pub void free(void* ptr) {
 // callers that handle OOM explicitly. Prefer `alloc<T>` / `realloc<T>` for
 // new code — they abort on OOM, matching Rust/Zig safe defaults.
 
-pub T* try_alloc<T>() {
+T* try_alloc<T>() {
     return (T*)(malloc(@size(T)));
 }
 
-pub T* try_alloc<T>(i64 count) {
+T* try_alloc<T>(i64 count) {
     return (T*)(calloc(count, @size(T)));
 }
 
-pub T* try_realloc<T>(T* ptr, i64 count) {
+T* try_realloc<T>(T* ptr, i64 count) {
     return (T*)(realloc(ptr, @size(T) * count));
 }
 
 // Abort-on-OOM variants (safe default). These call `abort()` from std.mem.memory
 // when allocation fails, providing explicit failure instead of a segfault.
 
-pub T* alloc<T>() {
+T* alloc<T>() {
     T* ptr = try_alloc<T>();
     if (ptr == (T*)0) {
         abort();
@@ -333,7 +333,7 @@ pub T* alloc<T>() {
     return ptr;
 }
 
-pub T* alloc<T>(i64 count) {
+T* alloc<T>(i64 count) {
     T* ptr = try_alloc<T>(count);
     if (ptr == (T*)0) {
         abort();
@@ -341,7 +341,7 @@ pub T* alloc<T>(i64 count) {
     return ptr;
 }
 
-pub T* realloc<T>(T* ptr, i64 count) {
+T* realloc<T>(T* ptr, i64 count) {
     T* result = try_realloc<T>(ptr, count);
     if (result == (T*)0) {
         abort();

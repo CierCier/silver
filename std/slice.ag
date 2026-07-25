@@ -8,7 +8,7 @@ import std.io;
 import std.mem.alloc;
 
 /// A view into a contiguous sequence of elements.
-pub struct Slice<T> {
+struct Slice<T> {
     T* data;
     i64 len;
 }
@@ -46,8 +46,8 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 
 impl<T> Slice<T> {
     /// Returns the length of the slice.
-    pub i64 len(Slice<T>* self) { return self.len; }
+    i64 len(Slice<T>* self) { return self.len; }
 
     /// Returns a pointer to the slice's underlying data.
-    pub T* data(Slice<T>* self) { return self.data; }
+    T* data(Slice<T>* self) { return self.data; }
 }

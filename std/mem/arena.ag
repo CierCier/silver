@@ -19,7 +19,7 @@
 import std.mem.alloc;
 import std.mem.drop;
 
-pub struct Arena {
+struct Arena {
     u8* base;
     i64 capacity;
     i64 offset;
@@ -27,7 +27,7 @@ pub struct Arena {
 
 impl Arena {
     /// Allocate a new arena with `capacity` bytes.
-    pub Arena new(i64 capacity) {
+    Arena new(i64 capacity) {
         Arena a;
         a.base = (u8*)malloc(capacity);
         a.capacity = capacity;
@@ -36,14 +36,14 @@ impl Arena {
     }
 
     /// Reset the arena — all previous allocations become invalid.
-    pub void reset(Arena* self) {
+    void reset(Arena* self) {
         self.offset = 0;
     }
 }
 
 impl Drop<Arena> for Arena {
     /// Free the entire arena memory.
-    pub void drop(Arena* self) {
+    void drop(Arena* self) {
         if (self.base != (u8*)0) {
             free(self.base);
             self.base = (u8*)0;
@@ -68,7 +68,7 @@ i64 align_up(i64 value, i64 alignment) {
 
 /// Allocate space for one `T` from arena `a`.
 /// Returns `(T*)0` if out of memory.
-pub T* arena_alloc<T>(Arena* a) {
+T* arena_alloc<T>(Arena* a) {
     i64 alignment = 16;
     i64 aligned_offset = align_up(a.offset, alignment);
     i64 needed = @size(T);
@@ -82,7 +82,7 @@ pub T* arena_alloc<T>(Arena* a) {
 }
 
 /// Allocate space for `count` elements of `T` from arena `a`.
-pub T* arena_alloc_n<T>(Arena* a, i64 count) {
+T* arena_alloc_n<T>(Arena* a, i64 count) {
     i64 alignment = 16;
     i64 aligned_offset = align_up(a.offset, alignment);
     i64 needed = @size(T) * count;

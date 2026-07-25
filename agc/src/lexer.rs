@@ -15,7 +15,7 @@ pub enum Token {
     Enum,
     Impl,
     Trait,
-    Fn,
+    // (Fn removed — trait methods use C-style syntax)
     Let,
     Mut,
     Const,
@@ -33,7 +33,7 @@ pub enum Token {
     Move,
     Ref,
     Extern,
-    Pub,
+    // (Pub removed — items public by default, Private to opt out)
     Private,
     Asm,
     In,
@@ -607,7 +607,7 @@ impl Lexer {
             "enum" => Token::Enum,
             "impl" => Token::Impl,
             "trait" => Token::Trait,
-            "fn" => Token::Fn,
+            // (fn keyword removed — trait methods use C-style)
             "let" => Token::Let,
             "mut" => Token::Mut,
             "const" => Token::Const,
@@ -625,7 +625,7 @@ impl Lexer {
             "move" => Token::Move,
             "ref" => Token::Ref,
             "extern" => Token::Extern,
-            "pub" => Token::Pub,
+            // (pub keyword removed — items public by default)
             "private" => Token::Private,
             "asm" => Token::Asm,
             "in" => Token::In,
@@ -1123,7 +1123,7 @@ mod tests {
             ("enum", Token::Enum),
             ("impl", Token::Impl),
             ("trait", Token::Trait),
-            ("fn", Token::Fn),
+            // (fn removed)
             ("let", Token::Let),
             ("mut", Token::Mut),
             ("const", Token::Const),
@@ -1141,7 +1141,7 @@ mod tests {
             ("move", Token::Move),
             ("ref", Token::Ref),
             ("extern", Token::Extern),
-            ("pub", Token::Pub),
+            // (pub removed)
             ("private", Token::Private),
             ("asm", Token::Asm),
             ("in", Token::In),

@@ -65,7 +65,7 @@ import std.string;
 // parallel fields on CastKindInfo, same layout idiom as std/rt/type_info.ag)
 // ---------------------------------------------------------------------------
 
-pub enum CAST_KIND {
+enum CAST_KIND {
     NONE = 0;          // not a numeric cast (Rust: Ok(None))
     IDENTITY = 1;
     INT_TO_INT = 2;
@@ -77,7 +77,7 @@ pub enum CAST_KIND {
 /// Classification result: `kind` is a CAST_KIND discriminant; the bit/signed
 /// fields are valid per kind (from_bits/from_signed unused by FLOAT_TO_FLOAT,
 /// to_signed unused by INT_TO_FLOAT/FLOAT_TO_FLOAT, exactly like Rust).
-pub struct CastKindInfo {
+struct CastKindInfo {
     i32 kind;
     u16 from_bits;
     bool from_signed;
@@ -86,7 +86,7 @@ pub struct CastKindInfo {
 }
 
 impl CastKindInfo {
-    pub CastKindInfo none() {
+    CastKindInfo none() {
         CastKindInfo k;
         k.kind = (i32)CAST_KIND.NONE;
         k.from_bits = (u16)0;
@@ -101,7 +101,7 @@ impl CastKindInfo {
 /// silver_runtime/src/types/cast.rs.  Unknown type ids classify as NONE
 /// (Rust surfaces TypeError::UnknownTypeId; callers here can pre-check with
 /// registry.get() if they need to distinguish).
-pub CastKindInfo classify_cast(TypeRegistry* reg, TypeId from, TypeId to) {
+CastKindInfo classify_cast(TypeRegistry* reg, TypeId from, TypeId to) {
     if (from.eq(to)) {
         CastKindInfo k = CastKindInfo.none();
         k.kind = (i32)CAST_KIND.IDENTITY;
@@ -143,7 +143,7 @@ pub CastKindInfo classify_cast(TypeRegistry* reg, TypeId from, TypeId to) {
 
 /// TypeRegistry::can_cast — true when classify yields any cast (identity
 /// included, matching the Rust `is_some()`).
-pub bool can_cast(TypeRegistry* reg, TypeId from, TypeId to) {
+bool can_cast(TypeRegistry* reg, TypeId from, TypeId to) {
     CastKindInfo k = classify_cast(reg, from, to);
     return k.kind != (i32)CAST_KIND.NONE;
 }
@@ -158,14 +158,14 @@ pub bool can_cast(TypeRegistry* reg, TypeId from, TypeId to) {
 // FLOAT       float_val (+ ty)
 // ---------------------------------------------------------------------------
 
-pub enum CAST_VALUE_KIND {
+enum CAST_VALUE_KIND {
     BOOL = 0;
     INT = 1;
     UINT = 2;
     FLOAT = 3;
 }
 
-pub struct CastValue {
+struct CastValue {
     i32 kind;
     u32 ty;          // raw TypeId of the payload's specific type
     bool bool_val;
@@ -186,7 +186,7 @@ impl CastValue {
         return v;
     }
 
-    pub CastValue from_bool(bool value) {
+    CastValue from_bool(bool value) {
         CastValue v = CastValue.blank();
         v.kind = (i32)CAST_VALUE_KIND.BOOL;
         v.ty = 1;
@@ -195,7 +195,7 @@ impl CastValue {
     }
 
     /// `ty` must be one of I8..I128 (raw 2..6).
-    pub CastValue from_int(u32 ty, i128 value) {
+    CastValue from_int(u32 ty, i128 value) {
         CastValue v = CastValue.blank();
         v.kind = (i32)CAST_VALUE_KIND.INT;
         v.ty = ty;
@@ -204,7 +204,7 @@ impl CastValue {
     }
 
     /// `ty` must be one of U8..U128 (raw 7..11).
-    pub CastValue from_uint(u32 ty, u128 value) {
+    CastValue from_uint(u32 ty, u128 value) {
         CastValue v = CastValue.blank();
         v.kind = (i32)CAST_VALUE_KIND.UINT;
         v.ty = ty;
@@ -213,7 +213,7 @@ impl CastValue {
     }
 
     /// `ty` must be F32 or F64 (raw 12/13).
-    pub CastValue from_float(u32 ty, f64 value) {
+    CastValue from_float(u32 ty, f64 value) {
         CastValue v = CastValue.blank();
         v.kind = (i32)CAST_VALUE_KIND.FLOAT;
         v.ty = ty;
@@ -222,7 +222,7 @@ impl CastValue {
     }
 
     /// Raw TypeId of this value (RtValue::type_id in the Rust runtime).
-    pub u32 type_id(CastValue* self) {
+    u32 type_id(CastValue* self) {
         return self.ty;
     }
 }
@@ -231,7 +231,7 @@ impl CastValue {
 // CAST_ERR — mirrors the Rust error variants casts can produce
 // ---------------------------------------------------------------------------
 
-pub enum CAST_ERR {
+enum CAST_ERR {
     NONE = 0;
     CAST_NOT_FOUND = 1;   // RuntimeError::CastNotFound
     TYPE_MISMATCH = 2;    // RuntimeError::TypeMismatch / ValueError::TypeMismatch
@@ -241,7 +241,7 @@ pub enum CAST_ERR {
 /// Fallible cast result (Silver has no payload enums): ok flag, the cast
 /// value (zero value when !ok), a CAST_ERR discriminant, and an owned
 /// message String whose text mirrors the Rust Display strings.
-pub struct CastResult {
+struct CastResult {
     bool ok;
     CastValue value;
     i32 err;
@@ -249,7 +249,7 @@ pub struct CastResult {
 }
 
 impl CastResult {
-    pub CastResult ok_value(CastValue value) {
+    CastResult ok_value(CastValue value) {
         CastResult r;
         r.ok = true;
         r.value = value;
@@ -258,7 +258,7 @@ impl CastResult {
         return move r;
     }
 
-    pub CastResult error(i32 err, String msg) {
+    CastResult error(i32 err, String msg) {
         CastResult r;
         r.ok = false;
         r.value = CastValue.blank();
@@ -267,11 +267,11 @@ impl CastResult {
         return move r;
     }
 
-    pub bool is_ok(CastResult* self) {
+    bool is_ok(CastResult* self) {
         return self.ok;
     }
 
-    pub bool is_err(CastResult* self) {
+    bool is_err(CastResult* self) {
         return !self.ok;
     }
 }
@@ -287,20 +287,20 @@ impl Drop<CastResult> for CastResult {
 // is_float_type), plus bits/signed tables over raw builtin ids
 // ---------------------------------------------------------------------------
 
-pub bool rt_cast_is_int_type(u32 ty) {
+bool rt_cast_is_int_type(u32 ty) {
     return ty >= 2 && ty <= 6;   // I8..I128
 }
 
-pub bool rt_cast_is_uint_type(u32 ty) {
+bool rt_cast_is_uint_type(u32 ty) {
     return ty >= 7 && ty <= 11;  // U8..U128
 }
 
-pub bool rt_cast_is_float_type(u32 ty) {
+bool rt_cast_is_float_type(u32 ty) {
     return ty == 12 || ty == 13; // F32, F64
 }
 
 /// Bit width of a builtin numeric raw id; 0 for BOOL/unknown.
-pub u16 rt_cast_type_bits(u32 ty) {
+u16 rt_cast_type_bits(u32 ty) {
     if (ty == 2 || ty == 7) { return (u16)8; }
     if (ty == 3 || ty == 8) { return (u16)16; }
     if (ty == 4 || ty == 9) { return (u16)32; }
@@ -513,7 +513,7 @@ CastValue rt_cast_exec_opcode(i32 opcode, u32 from, CastValue value) {
 // CastRegistry — port of runtime/casts.rs CastRegistry
 // ---------------------------------------------------------------------------
 
-pub struct CastRegistry {
+struct CastRegistry {
     HashMap<u64, i32> by_type;   // packed (from << 32) | to  ->  opcode
 }
 
@@ -523,7 +523,7 @@ u64 rt_cast_key(u32 from, u32 to) {
 
 impl CastRegistry {
     /// Empty registry (CastRegistry::new in Rust).
-    pub CastRegistry new() {
+    CastRegistry new() {
         CastRegistry r;
         r.by_type = HashMap<u64, i32>.new();
         return move r;
@@ -531,29 +531,29 @@ impl CastRegistry {
 
     /// Registry prepopulated with the 156 numeric pairs
     /// (Runtime::install_builtin_casts in Rust).
-    pub CastRegistry with_builtin_casts() {
+    CastRegistry with_builtin_casts() {
         CastRegistry r = CastRegistry.new();
         r.install_builtin_casts();
         return move r;
     }
 
     /// Number of registered pairs.
-    pub i64 len(CastRegistry* self) {
+    i64 len(CastRegistry* self) {
         return self.by_type.len();
     }
 
     /// register(from, to, func) — the func is an opcode here (see header).
-    pub void register(CastRegistry* self, u32 from, u32 to, i32 opcode) {
+    void register(CastRegistry* self, u32 from, u32 to, i32 opcode) {
         self.by_type.insert(rt_cast_key(from, to), opcode);
     }
 
     /// TypeId convenience wrapper over register.
-    pub void register_ids(CastRegistry* self, TypeId from, TypeId to, i32 opcode) {
+    void register_ids(CastRegistry* self, TypeId from, TypeId to, i32 opcode) {
         self.register(from.raw, to.raw, opcode);
     }
 
     /// lookup(from, to) -> opcode, or -1 when absent (Rust: Option<NativeCast>).
-    pub i32 lookup(CastRegistry* self, u32 from, u32 to) {
+    i32 lookup(CastRegistry* self, u32 from, u32 to) {
         u64 key = rt_cast_key(from, to);
         if (self.by_type.contains_key(key)) {
             return self.by_type.get(key);
@@ -562,13 +562,13 @@ impl CastRegistry {
     }
 
     /// TypeId convenience wrapper over lookup.
-    pub i32 lookup_ids(CastRegistry* self, TypeId from, TypeId to) {
+    i32 lookup_ids(CastRegistry* self, TypeId from, TypeId to) {
         return self.lookup(from.raw, to.raw);
     }
 
     /// Runtime::install_builtin_casts — register every (from, to) pair over
     /// the 13 numeric builtin types except identity pairs: 13 x 12 = 156.
-    pub void install_builtin_casts(CastRegistry* self) {
+    void install_builtin_casts(CastRegistry* self) {
         u32 from = 1; // BOOL .. F64 (raw ids 1..13 are exactly the numerics)
         while (from <= 13) {
             u32 to = 1;
@@ -587,7 +587,7 @@ impl CastRegistry {
     /// CAST_NOT_FOUND ("cast not found: {from} -> {to}", the
     /// RuntimeError::CastNotFound Display shape with names resolved to
     /// builtin names where possible).
-    pub CastResult cast_value(CastRegistry* self, CastValue value, u32 to) {
+    CastResult cast_value(CastRegistry* self, CastValue value, u32 to) {
         u32 from = value.type_id();
         if (from == to) {
             return CastResult.ok_value(value);
@@ -604,12 +604,12 @@ impl CastRegistry {
     }
 
     /// TypeId convenience wrapper over cast.
-    pub CastResult cast_ids(CastRegistry* self, CastValue value, TypeId to) {
+    CastResult cast_ids(CastRegistry* self, CastValue value, TypeId to) {
         return self.cast_value(value, to.raw);
     }
     /// Like cast, but formats CAST_NOT_FOUND with registry-resolved type
     /// names (exactly the Rust Runtime::cast_value error text).
-    pub CastResult cast_with_registry(CastRegistry* self, TypeRegistry* reg, CastValue value, TypeId to) {
+    CastResult cast_with_registry(CastRegistry* self, TypeRegistry* reg, CastValue value, TypeId to) {
         u32 from = value.type_id();
         if (from == to.raw) {
             return CastResult.ok_value(value);
@@ -642,7 +642,7 @@ impl Drop<CastRegistry> for CastRegistry {
 // payload kind disagrees with the classification.
 // ---------------------------------------------------------------------------
 
-pub CastResult rt_cast_value(TypeRegistry* reg, CastValue value, TypeId to) {
+CastResult rt_cast_value(TypeRegistry* reg, CastValue value, TypeId to) {
     TypeId from = TypeId.from_raw(value.type_id());
     if (from.eq(to)) {
         return CastResult.ok_value(value);

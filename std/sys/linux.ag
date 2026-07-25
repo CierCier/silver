@@ -10,7 +10,7 @@
 import std.sys.syscall;
 
 // Syscall number constants
-pub enum SYSCALL {
+enum SYSCALL {
     READ = 0;
     WRITE = 1;
     OPEN = 2;
@@ -399,1554 +399,1554 @@ pub enum SYSCALL {
     SYSCALLS = 472;
 }
 
-pub i64 sys_read(i64 a1, i64 a2, i64 a3) {
+i64 sys_read(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.READ, a1, a2, a3);
 }
 
-pub i64 sys_write(i64 a1, i64 a2, i64 a3) {
+i64 sys_write(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.WRITE, a1, a2, a3);
 }
 
-pub i64 sys_open(i64 a1, i64 a2, i64 a3) {
+i64 sys_open(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.OPEN, a1, a2, a3);
 }
 
-pub i64 sys_close(i64 a1) {
+i64 sys_close(i64 a1) {
     return syscall1((i64)SYSCALL.CLOSE, a1);
 }
 
-pub i64 sys_stat(i64 a1, i64 a2) {
+i64 sys_stat(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.STAT, a1, a2);
 }
 
-pub i64 sys_fstat(i64 a1, i64 a2) {
+i64 sys_fstat(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FSTAT, a1, a2);
 }
 
-pub i64 sys_lstat(i64 a1, i64 a2) {
+i64 sys_lstat(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.LSTAT, a1, a2);
 }
 
-pub i64 sys_poll(i64 a1, i64 a2, i64 a3) {
+i64 sys_poll(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.POLL, a1, a2, a3);
 }
 
-pub i64 sys_lseek(i64 a1, i64 a2, i64 a3) {
+i64 sys_lseek(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LSEEK, a1, a2, a3);
 }
 
-pub i64 sys_mmap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_mmap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.MMAP, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_mprotect(i64 a1, i64 a2, i64 a3) {
+i64 sys_mprotect(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MPROTECT, a1, a2, a3);
 }
 
-pub i64 sys_munmap(i64 a1, i64 a2) {
+i64 sys_munmap(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MUNMAP, a1, a2);
 }
 
-pub i64 sys_brk(i64 a1) {
+i64 sys_brk(i64 a1) {
     return syscall1((i64)SYSCALL.BRK, a1);
 }
 
-pub i64 sys_rt_sigaction(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_rt_sigaction(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.RT_SIGACTION, a1, a2, a3, a4);
 }
 
-pub i64 sys_rt_sigprocmask(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_rt_sigprocmask(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.RT_SIGPROCMASK, a1, a2, a3, a4);
 }
 
-pub i64 sys_rt_sigreturn() {
+i64 sys_rt_sigreturn() {
     return syscall0((i64)SYSCALL.RT_SIGRETURN);
 }
 
-pub i64 sys_ioctl(i64 a1, i64 a2, i64 a3) {
+i64 sys_ioctl(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IOCTL, a1, a2, a3);
 }
 
-pub i64 sys_pread64(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_pread64(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PREAD64, a1, a2, a3, a4);
 }
 
-pub i64 sys_pwrite64(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_pwrite64(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PWRITE64, a1, a2, a3, a4);
 }
 
-pub i64 sys_readv(i64 a1, i64 a2, i64 a3) {
+i64 sys_readv(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.READV, a1, a2, a3);
 }
 
-pub i64 sys_writev(i64 a1, i64 a2, i64 a3) {
+i64 sys_writev(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.WRITEV, a1, a2, a3);
 }
 
-pub i64 sys_access(i64 a1, i64 a2) {
+i64 sys_access(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.ACCESS, a1, a2);
 }
 
-pub i64 sys_pipe(i64 a1) {
+i64 sys_pipe(i64 a1) {
     return syscall1((i64)SYSCALL.PIPE, a1);
 }
 
-pub i64 sys_select(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_select(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.SELECT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_sched_yield() {
+i64 sys_sched_yield() {
     return syscall0((i64)SYSCALL.SCHED_YIELD);
 }
 
-pub i64 sys_mremap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_mremap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MREMAP, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_msync(i64 a1, i64 a2, i64 a3) {
+i64 sys_msync(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MSYNC, a1, a2, a3);
 }
 
-pub i64 sys_mincore(i64 a1, i64 a2, i64 a3) {
+i64 sys_mincore(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MINCORE, a1, a2, a3);
 }
 
-pub i64 sys_madvise(i64 a1, i64 a2, i64 a3) {
+i64 sys_madvise(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MADVISE, a1, a2, a3);
 }
 
-pub i64 sys_shmget(i64 a1, i64 a2, i64 a3) {
+i64 sys_shmget(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SHMGET, a1, a2, a3);
 }
 
-pub i64 sys_shmat(i64 a1, i64 a2, i64 a3) {
+i64 sys_shmat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SHMAT, a1, a2, a3);
 }
 
-pub i64 sys_shmctl(i64 a1, i64 a2, i64 a3) {
+i64 sys_shmctl(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SHMCTL, a1, a2, a3);
 }
 
-pub i64 sys_dup(i64 a1) {
+i64 sys_dup(i64 a1) {
     return syscall1((i64)SYSCALL.DUP, a1);
 }
 
-pub i64 sys_dup2(i64 a1, i64 a2) {
+i64 sys_dup2(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.DUP2, a1, a2);
 }
 
-pub i64 sys_pause() {
+i64 sys_pause() {
     return syscall0((i64)SYSCALL.PAUSE);
 }
 
-pub i64 sys_nanosleep(i64 a1, i64 a2) {
+i64 sys_nanosleep(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.NANOSLEEP, a1, a2);
 }
 
-pub i64 sys_getitimer(i64 a1) {
+i64 sys_getitimer(i64 a1) {
     return syscall1((i64)SYSCALL.GETITIMER, a1);
 }
 
-pub i64 sys_alarm(i64 a1) {
+i64 sys_alarm(i64 a1) {
     return syscall1((i64)SYSCALL.ALARM, a1);
 }
 
-pub i64 sys_setitimer(i64 a1, i64 a2) {
+i64 sys_setitimer(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETITIMER, a1, a2);
 }
 
-pub i64 sys_getpid() {
+i64 sys_getpid() {
     return syscall0((i64)SYSCALL.GETPID);
 }
 
-pub i64 sys_sendfile(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_sendfile(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SENDFILE, a1, a2, a3, a4);
 }
 
-pub i64 sys_socket(i64 a1, i64 a2, i64 a3) {
+i64 sys_socket(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SOCKET, a1, a2, a3);
 }
 
-pub i64 sys_connect(i64 a1, i64 a2, i64 a3) {
+i64 sys_connect(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.CONNECT, a1, a2, a3);
 }
 
-pub i64 sys_accept(i64 a1, i64 a2, i64 a3) {
+i64 sys_accept(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.ACCEPT, a1, a2, a3);
 }
 
-pub i64 sys_sendto(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_sendto(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.SENDTO, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_recvfrom(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_recvfrom(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.RECVFROM, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_sendmsg(i64 a1, i64 a2, i64 a3) {
+i64 sys_sendmsg(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SENDMSG, a1, a2, a3);
 }
 
-pub i64 sys_recvmsg(i64 a1, i64 a2, i64 a3) {
+i64 sys_recvmsg(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.RECVMSG, a1, a2, a3);
 }
 
-pub i64 sys_shutdown(i64 a1, i64 a2) {
+i64 sys_shutdown(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SHUTDOWN, a1, a2);
 }
 
-pub i64 sys_bind(i64 a1, i64 a2, i64 a3) {
+i64 sys_bind(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.BIND, a1, a2, a3);
 }
 
-pub i64 sys_listen(i64 a1, i64 a2) {
+i64 sys_listen(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.LISTEN, a1, a2);
 }
 
-pub i64 sys_getsockname(i64 a1, i64 a2, i64 a3) {
+i64 sys_getsockname(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETSOCKNAME, a1, a2, a3);
 }
 
-pub i64 sys_getpeername(i64 a1, i64 a2, i64 a3) {
+i64 sys_getpeername(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETPEERNAME, a1, a2, a3);
 }
 
-pub i64 sys_socketpair(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_socketpair(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SOCKETPAIR, a1, a2, a3, a4);
 }
 
-pub i64 sys_setsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_setsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.SETSOCKOPT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_getsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_getsockopt(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.GETSOCKOPT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_clone(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_clone(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.CLONE, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_fork() {
+i64 sys_fork() {
     return syscall0((i64)SYSCALL.FORK);
 }
 
-pub i64 sys_vfork() {
+i64 sys_vfork() {
     return syscall0((i64)SYSCALL.VFORK);
 }
 
-pub i64 sys_execve(i64 a1, i64 a2, i64 a3) {
+i64 sys_execve(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.EXECVE, a1, a2, a3);
 }
 
-pub i64 sys_exit(i64 a1) {
+i64 sys_exit(i64 a1) {
     return syscall1((i64)SYSCALL.EXIT, a1);
 }
 
-pub i64 sys_wait4(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_wait4(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.WAIT4, a1, a2, a3, a4);
 }
 
-pub i64 sys_kill(i64 a1, i64 a2) {
+i64 sys_kill(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.KILL, a1, a2);
 }
 
-pub i64 sys_uname(i64 a1) {
+i64 sys_uname(i64 a1) {
     return syscall1((i64)SYSCALL.UNAME, a1);
 }
 
-pub i64 sys_semget(i64 a1, i64 a2, i64 a3) {
+i64 sys_semget(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SEMGET, a1, a2, a3);
 }
 
-pub i64 sys_semop(i64 a1, i64 a2, i64 a3) {
+i64 sys_semop(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SEMOP, a1, a2, a3);
 }
 
-pub i64 sys_semctl(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_semctl(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SEMCTL, a1, a2, a3, a4);
 }
 
-pub i64 sys_shmdt(i64 a1) {
+i64 sys_shmdt(i64 a1) {
     return syscall1((i64)SYSCALL.SHMDT, a1);
 }
 
-pub i64 sys_msgget(i64 a1, i64 a2) {
+i64 sys_msgget(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MSGGET, a1, a2);
 }
 
-pub i64 sys_msgsnd(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_msgsnd(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.MSGSND, a1, a2, a3, a4);
 }
 
-pub i64 sys_msgrcv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_msgrcv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MSGRCV, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_msgctl(i64 a1, i64 a2, i64 a3) {
+i64 sys_msgctl(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MSGCTL, a1, a2, a3);
 }
 
-pub i64 sys_fcntl(i64 a1, i64 a2, i64 a3) {
+i64 sys_fcntl(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FCNTL, a1, a2, a3);
 }
 
-pub i64 sys_flock(i64 a1, i64 a2) {
+i64 sys_flock(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FLOCK, a1, a2);
 }
 
-pub i64 sys_fsync(i64 a1) {
+i64 sys_fsync(i64 a1) {
     return syscall1((i64)SYSCALL.FSYNC, a1);
 }
 
-pub i64 sys_fdatasync(i64 a1) {
+i64 sys_fdatasync(i64 a1) {
     return syscall1((i64)SYSCALL.FDATASYNC, a1);
 }
 
-pub i64 sys_truncate(i64 a1, i64 a2) {
+i64 sys_truncate(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.TRUNCATE, a1, a2);
 }
 
-pub i64 sys_ftruncate(i64 a1, i64 a2) {
+i64 sys_ftruncate(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FTRUNCATE, a1, a2);
 }
 
-pub i64 sys_getdents(i64 a1, i64 a2, i64 a3) {
+i64 sys_getdents(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETDENTS, a1, a2, a3);
 }
 
-pub i64 sys_getcwd(i64 a1, i64 a2) {
+i64 sys_getcwd(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETCWD, a1, a2);
 }
 
-pub i64 sys_chdir(i64 a1) {
+i64 sys_chdir(i64 a1) {
     return syscall1((i64)SYSCALL.CHDIR, a1);
 }
 
-pub i64 sys_fchdir(i64 a1) {
+i64 sys_fchdir(i64 a1) {
     return syscall1((i64)SYSCALL.FCHDIR, a1);
 }
 
-pub i64 sys_rename(i64 a1, i64 a2) {
+i64 sys_rename(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.RENAME, a1, a2);
 }
 
-pub i64 sys_mkdir(i64 a1, i64 a2) {
+i64 sys_mkdir(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MKDIR, a1, a2);
 }
 
-pub i64 sys_rmdir(i64 a1) {
+i64 sys_rmdir(i64 a1) {
     return syscall1((i64)SYSCALL.RMDIR, a1);
 }
 
-pub i64 sys_creat(i64 a1, i64 a2) {
+i64 sys_creat(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CREAT, a1, a2);
 }
 
-pub i64 sys_link(i64 a1, i64 a2) {
+i64 sys_link(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.LINK, a1, a2);
 }
 
-pub i64 sys_unlink(i64 a1) {
+i64 sys_unlink(i64 a1) {
     return syscall1((i64)SYSCALL.UNLINK, a1);
 }
 
-pub i64 sys_symlink(i64 a1, i64 a2) {
+i64 sys_symlink(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SYMLINK, a1, a2);
 }
 
-pub i64 sys_readlink(i64 a1, i64 a2, i64 a3) {
+i64 sys_readlink(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.READLINK, a1, a2, a3);
 }
 
-pub i64 sys_chmod(i64 a1, i64 a2) {
+i64 sys_chmod(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CHMOD, a1, a2);
 }
 
-pub i64 sys_fchmod(i64 a1, i64 a2) {
+i64 sys_fchmod(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FCHMOD, a1, a2);
 }
 
-pub i64 sys_chown(i64 a1, i64 a2, i64 a3) {
+i64 sys_chown(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.CHOWN, a1, a2, a3);
 }
 
-pub i64 sys_fchown(i64 a1, i64 a2, i64 a3) {
+i64 sys_fchown(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FCHOWN, a1, a2, a3);
 }
 
-pub i64 sys_lchown(i64 a1, i64 a2, i64 a3) {
+i64 sys_lchown(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LCHOWN, a1, a2, a3);
 }
 
-pub i64 sys_umask(i64 a1) {
+i64 sys_umask(i64 a1) {
     return syscall1((i64)SYSCALL.UMASK, a1);
 }
 
-pub i64 sys_gettimeofday(i64 a1, i64 a2) {
+i64 sys_gettimeofday(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETTIMEOFDAY, a1, a2);
 }
 
-pub i64 sys_getrlimit(i64 a1, i64 a2) {
+i64 sys_getrlimit(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETRLIMIT, a1, a2);
 }
 
-pub i64 sys_getrusage(i64 a1, i64 a2) {
+i64 sys_getrusage(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETRUSAGE, a1, a2);
 }
 
-pub i64 sys_sysinfo(i64 a1) {
+i64 sys_sysinfo(i64 a1) {
     return syscall1((i64)SYSCALL.SYSINFO, a1);
 }
 
-pub i64 sys_times(i64 a1) {
+i64 sys_times(i64 a1) {
     return syscall1((i64)SYSCALL.TIMES, a1);
 }
 
-pub i64 sys_ptrace(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_ptrace(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PTRACE, a1, a2, a3, a4);
 }
 
-pub i64 sys_getuid() {
+i64 sys_getuid() {
     return syscall0((i64)SYSCALL.GETUID);
 }
 
-pub i64 sys_syslog(i64 a1, i64 a2, i64 a3) {
+i64 sys_syslog(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SYSLOG, a1, a2, a3);
 }
 
-pub i64 sys_getgid() {
+i64 sys_getgid() {
     return syscall0((i64)SYSCALL.GETGID);
 }
 
-pub i64 sys_setuid(i64 a1) {
+i64 sys_setuid(i64 a1) {
     return syscall1((i64)SYSCALL.SETUID, a1);
 }
 
-pub i64 sys_setgid(i64 a1) {
+i64 sys_setgid(i64 a1) {
     return syscall1((i64)SYSCALL.SETGID, a1);
 }
 
-pub i64 sys_geteuid() {
+i64 sys_geteuid() {
     return syscall0((i64)SYSCALL.GETEUID);
 }
 
-pub i64 sys_getegid() {
+i64 sys_getegid() {
     return syscall0((i64)SYSCALL.GETEGID);
 }
 
-pub i64 sys_setpgid(i64 a1, i64 a2) {
+i64 sys_setpgid(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETPGID, a1, a2);
 }
 
-pub i64 sys_getppid() {
+i64 sys_getppid() {
     return syscall0((i64)SYSCALL.GETPPID);
 }
 
-pub i64 sys_getpgrp() {
+i64 sys_getpgrp() {
     return syscall0((i64)SYSCALL.GETPGRP);
 }
 
-pub i64 sys_setsid() {
+i64 sys_setsid() {
     return syscall0((i64)SYSCALL.SETSID);
 }
 
-pub i64 sys_setreuid(i64 a1, i64 a2) {
+i64 sys_setreuid(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETREUID, a1, a2);
 }
 
-pub i64 sys_setregid(i64 a1, i64 a2) {
+i64 sys_setregid(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETREGID, a1, a2);
 }
 
-pub i64 sys_getgroups(i64 a1, i64 a2) {
+i64 sys_getgroups(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETGROUPS, a1, a2);
 }
 
-pub i64 sys_setgroups(i64 a1, i64 a2) {
+i64 sys_setgroups(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETGROUPS, a1, a2);
 }
 
-pub i64 sys_setresuid(i64 a1, i64 a2, i64 a3) {
+i64 sys_setresuid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SETRESUID, a1, a2, a3);
 }
 
-pub i64 sys_getresuid(i64 a1, i64 a2, i64 a3) {
+i64 sys_getresuid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETRESUID, a1, a2, a3);
 }
 
-pub i64 sys_setresgid(i64 a1, i64 a2, i64 a3) {
+i64 sys_setresgid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SETRESGID, a1, a2, a3);
 }
 
-pub i64 sys_getresgid(i64 a1, i64 a2, i64 a3) {
+i64 sys_getresgid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETRESGID, a1, a2, a3);
 }
 
-pub i64 sys_getpgid() {
+i64 sys_getpgid() {
     return syscall0((i64)SYSCALL.GETPGID);
 }
 
-pub i64 sys_setfsuid(i64 a1) {
+i64 sys_setfsuid(i64 a1) {
     return syscall1((i64)SYSCALL.SETFSUID, a1);
 }
 
-pub i64 sys_setfsgid(i64 a1) {
+i64 sys_setfsgid(i64 a1) {
     return syscall1((i64)SYSCALL.SETFSGID, a1);
 }
 
-pub i64 sys_getsid() {
+i64 sys_getsid() {
     return syscall0((i64)SYSCALL.GETSID);
 }
 
-pub i64 sys_capget(i64 a1, i64 a2) {
+i64 sys_capget(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CAPGET, a1, a2);
 }
 
-pub i64 sys_capset(i64 a1, i64 a2) {
+i64 sys_capset(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CAPSET, a1, a2);
 }
 
-pub i64 sys_rt_sigpending(i64 a1, i64 a2) {
+i64 sys_rt_sigpending(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.RT_SIGPENDING, a1, a2);
 }
 
-pub i64 sys_rt_sigtimedwait(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_rt_sigtimedwait(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.RT_SIGTIMEDWAIT, a1, a2, a3, a4);
 }
 
-pub i64 sys_rt_sigqueueinfo(i64 a1, i64 a2, i64 a3) {
+i64 sys_rt_sigqueueinfo(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.RT_SIGQUEUEINFO, a1, a2, a3);
 }
 
-pub i64 sys_rt_sigsuspend(i64 a1, i64 a2) {
+i64 sys_rt_sigsuspend(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.RT_SIGSUSPEND, a1, a2);
 }
 
-pub i64 sys_sigaltstack(i64 a1, i64 a2) {
+i64 sys_sigaltstack(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SIGALTSTACK, a1, a2);
 }
 
-pub i64 sys_utime(i64 a1, i64 a2) {
+i64 sys_utime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.UTIME, a1, a2);
 }
 
-pub i64 sys_mknod(i64 a1, i64 a2, i64 a3) {
+i64 sys_mknod(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MKNOD, a1, a2, a3);
 }
 
-pub i64 sys_uselib(i64 a1) {
+i64 sys_uselib(i64 a1) {
     return syscall1((i64)SYSCALL.USELIB, a1);
 }
 
-pub i64 sys_personality(i64 a1) {
+i64 sys_personality(i64 a1) {
     return syscall1((i64)SYSCALL.PERSONALITY, a1);
 }
 
-pub i64 sys_ustat(i64 a1, i64 a2) {
+i64 sys_ustat(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.USTAT, a1, a2);
 }
 
-pub i64 sys_statfs(i64 a1, i64 a2) {
+i64 sys_statfs(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.STATFS, a1, a2);
 }
 
-pub i64 sys_fstatfs(i64 a1, i64 a2) {
+i64 sys_fstatfs(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FSTATFS, a1, a2);
 }
 
-pub i64 sys_sysfs(i64 a1, i64 a2) {
+i64 sys_sysfs(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SYSFS, a1, a2);
 }
 
-pub i64 sys_getpriority(i64 a1, i64 a2) {
+i64 sys_getpriority(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.GETPRIORITY, a1, a2);
 }
 
-pub i64 sys_setpriority(i64 a1, i64 a2, i64 a3) {
+i64 sys_setpriority(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SETPRIORITY, a1, a2, a3);
 }
 
-pub i64 sys_sched_setparam(i64 a1, i64 a2) {
+i64 sys_sched_setparam(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SCHED_SETPARAM, a1, a2);
 }
 
-pub i64 sys_sched_getparam(i64 a1, i64 a2) {
+i64 sys_sched_getparam(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SCHED_GETPARAM, a1, a2);
 }
 
-pub i64 sys_sched_setscheduler(i64 a1, i64 a2, i64 a3) {
+i64 sys_sched_setscheduler(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SCHED_SETSCHEDULER, a1, a2, a3);
 }
 
-pub i64 sys_sched_getscheduler(i64 a1) {
+i64 sys_sched_getscheduler(i64 a1) {
     return syscall1((i64)SYSCALL.SCHED_GETSCHEDULER, a1);
 }
 
-pub i64 sys_sched_get_priority_max(i64 a1) {
+i64 sys_sched_get_priority_max(i64 a1) {
     return syscall1((i64)SYSCALL.SCHED_GET_PRIORITY_MAX, a1);
 }
 
-pub i64 sys_sched_get_priority_min(i64 a1) {
+i64 sys_sched_get_priority_min(i64 a1) {
     return syscall1((i64)SYSCALL.SCHED_GET_PRIORITY_MIN, a1);
 }
 
-pub i64 sys_sched_rr_get_interval(i64 a1, i64 a2) {
+i64 sys_sched_rr_get_interval(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SCHED_RR_GET_INTERVAL, a1, a2);
 }
 
-pub i64 sys_mlock(i64 a1, i64 a2) {
+i64 sys_mlock(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MLOCK, a1, a2);
 }
 
-pub i64 sys_munlock(i64 a1, i64 a2) {
+i64 sys_munlock(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MUNLOCK, a1, a2);
 }
 
-pub i64 sys_mlockall(i64 a1) {
+i64 sys_mlockall(i64 a1) {
     return syscall1((i64)SYSCALL.MLOCKALL, a1);
 }
 
-pub i64 sys_munlockall() {
+i64 sys_munlockall() {
     return syscall0((i64)SYSCALL.MUNLOCKALL);
 }
 
-pub i64 sys_vhangup() {
+i64 sys_vhangup() {
     return syscall0((i64)SYSCALL.VHANGUP);
 }
 
-pub i64 sys_modify_ldt(i64 a1, i64 a2, i64 a3) {
+i64 sys_modify_ldt(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MODIFY_LDT, a1, a2, a3);
 }
 
-pub i64 sys_pivot_root(i64 a1, i64 a2) {
+i64 sys_pivot_root(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.PIVOT_ROOT, a1, a2);
 }
 
-pub i64 sys__sysctl(i64 a1) {
+i64 sys__sysctl(i64 a1) {
     return syscall1((i64)SYSCALL._SYSCTL, a1);
 }
 
-pub i64 sys_prctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_prctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PRCTL, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_arch_prctl(i64 a1, i64 a2) {
+i64 sys_arch_prctl(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.ARCH_PRCTL, a1, a2);
 }
 
-pub i64 sys_adjtimex(i64 a1) {
+i64 sys_adjtimex(i64 a1) {
     return syscall1((i64)SYSCALL.ADJTIMEX, a1);
 }
 
-pub i64 sys_setrlimit(i64 a1, i64 a2) {
+i64 sys_setrlimit(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETRLIMIT, a1, a2);
 }
 
-pub i64 sys_chroot(i64 a1) {
+i64 sys_chroot(i64 a1) {
     return syscall1((i64)SYSCALL.CHROOT, a1);
 }
 
-pub i64 sys_sync() {
+i64 sys_sync() {
     return syscall0((i64)SYSCALL.SYNC);
 }
 
-pub i64 sys_acct(i64 a1) {
+i64 sys_acct(i64 a1) {
     return syscall1((i64)SYSCALL.ACCT, a1);
 }
 
-pub i64 sys_settimeofday(i64 a1, i64 a2) {
+i64 sys_settimeofday(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETTIMEOFDAY, a1, a2);
 }
 
-pub i64 sys_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MOUNT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_umount2(i64 a1, i64 a2) {
+i64 sys_umount2(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.UMOUNT2, a1, a2);
 }
 
-pub i64 sys_swapon(i64 a1, i64 a2) {
+i64 sys_swapon(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SWAPON, a1, a2);
 }
 
-pub i64 sys_swapoff(i64 a1) {
+i64 sys_swapoff(i64 a1) {
     return syscall1((i64)SYSCALL.SWAPOFF, a1);
 }
 
-pub i64 sys_reboot(i64 a1, i64 a2, i64 a3) {
+i64 sys_reboot(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.REBOOT, a1, a2, a3);
 }
 
-pub i64 sys_sethostname(i64 a1, i64 a2) {
+i64 sys_sethostname(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETHOSTNAME, a1, a2);
 }
 
-pub i64 sys_setdomainname(i64 a1, i64 a2) {
+i64 sys_setdomainname(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETDOMAINNAME, a1, a2);
 }
 
-pub i64 sys_iopl(i64 a1) {
+i64 sys_iopl(i64 a1) {
     return syscall1((i64)SYSCALL.IOPL, a1);
 }
 
-pub i64 sys_ioperm(i64 a1, i64 a2, i64 a3) {
+i64 sys_ioperm(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IOPERM, a1, a2, a3);
 }
 
-pub i64 sys_create_module(i64 a1, i64 a2) {
+i64 sys_create_module(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CREATE_MODULE, a1, a2);
 }
 
-pub i64 sys_init_module(i64 a1, i64 a2, i64 a3) {
+i64 sys_init_module(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.INIT_MODULE, a1, a2, a3);
 }
 
-pub i64 sys_delete_module(i64 a1, i64 a2) {
+i64 sys_delete_module(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.DELETE_MODULE, a1, a2);
 }
 
-pub i64 sys_get_kernel_syms(i64 a1) {
+i64 sys_get_kernel_syms(i64 a1) {
     return syscall1((i64)SYSCALL.GET_KERNEL_SYMS, a1);
 }
 
-pub i64 sys_query_module(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_query_module(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.QUERY_MODULE, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_quotactl(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_quotactl(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.QUOTACTL, a1, a2, a3, a4);
 }
 
-pub i64 sys_nfsservctl(i64 a1, i64 a2, i64 a3) {
+i64 sys_nfsservctl(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.NFSSERVCTL, a1, a2, a3);
 }
 
-pub i64 sys_getpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_getpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.GETPMSG, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_putpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_putpmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PUTPMSG, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_afs_syscall() {
+i64 sys_afs_syscall() {
     return syscall0((i64)SYSCALL.AFS_SYSCALL);
 }
 
-pub i64 sys_tuxcall() {
+i64 sys_tuxcall() {
     return syscall0((i64)SYSCALL.TUXCALL);
 }
 
-pub i64 sys_security() {
+i64 sys_security() {
     return syscall0((i64)SYSCALL.SECURITY);
 }
 
-pub i64 sys_gettid() {
+i64 sys_gettid() {
     return syscall0((i64)SYSCALL.GETTID);
 }
 
-pub i64 sys_readahead(i64 a1, i64 a2, i64 a3) {
+i64 sys_readahead(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.READAHEAD, a1, a2, a3);
 }
 
-pub i64 sys_setxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_setxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.SETXATTR, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_lsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_lsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.LSETXATTR, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_fsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_fsetxattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FSETXATTR, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_getxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_getxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.GETXATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_lgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_lgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LGETXATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_fgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_fgetxattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FGETXATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_listxattr(i64 a1, i64 a2, i64 a3) {
+i64 sys_listxattr(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LISTXATTR, a1, a2, a3);
 }
 
-pub i64 sys_llistxattr(i64 a1, i64 a2, i64 a3) {
+i64 sys_llistxattr(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LLISTXATTR, a1, a2, a3);
 }
 
-pub i64 sys_flistxattr(i64 a1, i64 a2, i64 a3) {
+i64 sys_flistxattr(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FLISTXATTR, a1, a2, a3);
 }
 
-pub i64 sys_removexattr(i64 a1, i64 a2) {
+i64 sys_removexattr(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.REMOVEXATTR, a1, a2);
 }
 
-pub i64 sys_lremovexattr(i64 a1, i64 a2) {
+i64 sys_lremovexattr(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.LREMOVEXATTR, a1, a2);
 }
 
-pub i64 sys_fremovexattr(i64 a1, i64 a2) {
+i64 sys_fremovexattr(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FREMOVEXATTR, a1, a2);
 }
 
-pub i64 sys_tkill(i64 a1, i64 a2) {
+i64 sys_tkill(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.TKILL, a1, a2);
 }
 
-pub i64 sys_time(i64 a1) {
+i64 sys_time(i64 a1) {
     return syscall1((i64)SYSCALL.TIME, a1);
 }
 
-pub i64 sys_futex(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_futex(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.FUTEX, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_sched_setaffinity(i64 a1, i64 a2, i64 a3) {
+i64 sys_sched_setaffinity(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SCHED_SETAFFINITY, a1, a2, a3);
 }
 
-pub i64 sys_sched_getaffinity(i64 a1, i64 a2, i64 a3) {
+i64 sys_sched_getaffinity(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SCHED_GETAFFINITY, a1, a2, a3);
 }
 
-pub i64 sys_set_thread_area(i64 a1) {
+i64 sys_set_thread_area(i64 a1) {
     return syscall1((i64)SYSCALL.SET_THREAD_AREA, a1);
 }
 
-pub i64 sys_io_setup(i64 a1, i64 a2) {
+i64 sys_io_setup(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.IO_SETUP, a1, a2);
 }
 
-pub i64 sys_io_destroy(i64 a1) {
+i64 sys_io_destroy(i64 a1) {
     return syscall1((i64)SYSCALL.IO_DESTROY, a1);
 }
 
-pub i64 sys_io_getevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_io_getevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.IO_GETEVENTS, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_io_submit(i64 a1, i64 a2, i64 a3) {
+i64 sys_io_submit(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IO_SUBMIT, a1, a2, a3);
 }
 
-pub i64 sys_io_cancel(i64 a1, i64 a2, i64 a3) {
+i64 sys_io_cancel(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IO_CANCEL, a1, a2, a3);
 }
 
-pub i64 sys_get_thread_area(i64 a1) {
+i64 sys_get_thread_area(i64 a1) {
     return syscall1((i64)SYSCALL.GET_THREAD_AREA, a1);
 }
 
-pub i64 sys_lookup_dcookie(i64 a1, i64 a2, i64 a3) {
+i64 sys_lookup_dcookie(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LOOKUP_DCOOKIE, a1, a2, a3);
 }
 
-pub i64 sys_epoll_create(i64 a1) {
+i64 sys_epoll_create(i64 a1) {
     return syscall1((i64)SYSCALL.EPOLL_CREATE, a1);
 }
 
-pub i64 sys_epoll_ctl_old(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_epoll_ctl_old(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.EPOLL_CTL_OLD, a1, a2, a3, a4);
 }
 
-pub i64 sys_epoll_wait_old(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_epoll_wait_old(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.EPOLL_WAIT_OLD, a1, a2, a3, a4);
 }
 
-pub i64 sys_remap_file_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_remap_file_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.REMAP_FILE_PAGES, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_getdents64(i64 a1, i64 a2, i64 a3) {
+i64 sys_getdents64(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETDENTS64, a1, a2, a3);
 }
 
-pub i64 sys_set_tid_address(i64 a1) {
+i64 sys_set_tid_address(i64 a1) {
     return syscall1((i64)SYSCALL.SET_TID_ADDRESS, a1);
 }
 
-pub i64 sys_restart_syscall() {
+i64 sys_restart_syscall() {
     return syscall0((i64)SYSCALL.RESTART_SYSCALL);
 }
 
-pub i64 sys_semtimedop(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_semtimedop(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SEMTIMEDOP, a1, a2, a3, a4);
 }
 
-pub i64 sys_fadvise64(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_fadvise64(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FADVISE64, a1, a2, a3, a4);
 }
 
-pub i64 sys_timer_create(i64 a1, i64 a2, i64 a3) {
+i64 sys_timer_create(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.TIMER_CREATE, a1, a2, a3);
 }
 
-pub i64 sys_timer_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_timer_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.TIMER_SETTIME, a1, a2, a3, a4);
 }
 
-pub i64 sys_timer_gettime(i64 a1, i64 a2) {
+i64 sys_timer_gettime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.TIMER_GETTIME, a1, a2);
 }
 
-pub i64 sys_timer_getoverrun(i64 a1) {
+i64 sys_timer_getoverrun(i64 a1) {
     return syscall1((i64)SYSCALL.TIMER_GETOVERRUN, a1);
 }
 
-pub i64 sys_timer_delete(i64 a1) {
+i64 sys_timer_delete(i64 a1) {
     return syscall1((i64)SYSCALL.TIMER_DELETE, a1);
 }
 
-pub i64 sys_clock_settime(i64 a1, i64 a2) {
+i64 sys_clock_settime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CLOCK_SETTIME, a1, a2);
 }
 
-pub i64 sys_clock_gettime(i64 a1, i64 a2) {
+i64 sys_clock_gettime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CLOCK_GETTIME, a1, a2);
 }
 
-pub i64 sys_clock_getres(i64 a1, i64 a2) {
+i64 sys_clock_getres(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CLOCK_GETRES, a1, a2);
 }
 
-pub i64 sys_clock_nanosleep(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_clock_nanosleep(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.CLOCK_NANOSLEEP, a1, a2, a3, a4);
 }
 
-pub i64 sys_exit_group(i64 a1) {
+i64 sys_exit_group(i64 a1) {
     return syscall1((i64)SYSCALL.EXIT_GROUP, a1);
 }
 
-pub i64 sys_epoll_wait(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_epoll_wait(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.EPOLL_WAIT, a1, a2, a3, a4);
 }
 
-pub i64 sys_epoll_ctl(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_epoll_ctl(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.EPOLL_CTL, a1, a2, a3, a4);
 }
 
-pub i64 sys_tgkill(i64 a1, i64 a2, i64 a3) {
+i64 sys_tgkill(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.TGKILL, a1, a2, a3);
 }
 
-pub i64 sys_utimes(i64 a1, i64 a2) {
+i64 sys_utimes(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.UTIMES, a1, a2);
 }
 
-pub i64 sys_vserver() {
+i64 sys_vserver() {
     return syscall0((i64)SYSCALL.VSERVER);
 }
 
-pub i64 sys_mbind(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_mbind(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.MBIND, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_set_mempolicy(i64 a1, i64 a2, i64 a3) {
+i64 sys_set_mempolicy(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SET_MEMPOLICY, a1, a2, a3);
 }
 
-pub i64 sys_get_mempolicy(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_get_mempolicy(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.GET_MEMPOLICY, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_mq_open(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_mq_open(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.MQ_OPEN, a1, a2, a3, a4);
 }
 
-pub i64 sys_mq_unlink(i64 a1) {
+i64 sys_mq_unlink(i64 a1) {
     return syscall1((i64)SYSCALL.MQ_UNLINK, a1);
 }
 
-pub i64 sys_mq_timedsend(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_mq_timedsend(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MQ_TIMEDSEND, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_mq_timedreceive(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_mq_timedreceive(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MQ_TIMEDRECEIVE, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_mq_notify(i64 a1, i64 a2) {
+i64 sys_mq_notify(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MQ_NOTIFY, a1, a2);
 }
 
-pub i64 sys_mq_getsetattr(i64 a1, i64 a2, i64 a3) {
+i64 sys_mq_getsetattr(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MQ_GETSETATTR, a1, a2, a3);
 }
 
-pub i64 sys_kexec_load(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_kexec_load(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.KEXEC_LOAD, a1, a2, a3, a4);
 }
 
-pub i64 sys_waitid(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_waitid(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.WAITID, a1, a2, a3, a4);
 }
 
-pub i64 sys_add_key(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_add_key(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.ADD_KEY, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_request_key(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_request_key(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.REQUEST_KEY, a1, a2, a3, a4);
 }
 
-pub i64 sys_keyctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_keyctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.KEYCTL, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_ioprio_set(i64 a1, i64 a2, i64 a3) {
+i64 sys_ioprio_set(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IOPRIO_SET, a1, a2, a3);
 }
 
-pub i64 sys_ioprio_get(i64 a1, i64 a2) {
+i64 sys_ioprio_get(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.IOPRIO_GET, a1, a2);
 }
 
-pub i64 sys_inotify_init() {
+i64 sys_inotify_init() {
     return syscall0((i64)SYSCALL.INOTIFY_INIT);
 }
 
-pub i64 sys_inotify_add_watch(i64 a1, i64 a2, i64 a3) {
+i64 sys_inotify_add_watch(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.INOTIFY_ADD_WATCH, a1, a2, a3);
 }
 
-pub i64 sys_inotify_rm_watch(i64 a1, i64 a2) {
+i64 sys_inotify_rm_watch(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.INOTIFY_RM_WATCH, a1, a2);
 }
 
-pub i64 sys_migrate_pages(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_migrate_pages(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.MIGRATE_PAGES, a1, a2, a3, a4);
 }
 
-pub i64 sys_openat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_openat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.OPENAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_mkdirat(i64 a1, i64 a2, i64 a3) {
+i64 sys_mkdirat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MKDIRAT, a1, a2, a3);
 }
 
-pub i64 sys_mknodat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_mknodat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.MKNODAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_fchownat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_fchownat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FCHOWNAT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_futimesat(i64 a1, i64 a2, i64 a3) {
+i64 sys_futimesat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FUTIMESAT, a1, a2, a3);
 }
 
-pub i64 sys_newfstatat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_newfstatat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.NEWFSTATAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_unlinkat(i64 a1, i64 a2, i64 a3) {
+i64 sys_unlinkat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.UNLINKAT, a1, a2, a3);
 }
 
-pub i64 sys_renameat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_renameat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.RENAMEAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_linkat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_linkat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.LINKAT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_symlinkat(i64 a1, i64 a2, i64 a3) {
+i64 sys_symlinkat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SYMLINKAT, a1, a2, a3);
 }
 
-pub i64 sys_readlinkat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_readlinkat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.READLINKAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_fchmodat(i64 a1, i64 a2, i64 a3) {
+i64 sys_fchmodat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FCHMODAT, a1, a2, a3);
 }
 
-pub i64 sys_faccessat(i64 a1, i64 a2, i64 a3) {
+i64 sys_faccessat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FACCESSAT, a1, a2, a3);
 }
 
-pub i64 sys_pselect6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_pselect6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.PSELECT6, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_ppoll(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_ppoll(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PPOLL, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_unshare(i64 a1) {
+i64 sys_unshare(i64 a1) {
     return syscall1((i64)SYSCALL.UNSHARE, a1);
 }
 
-pub i64 sys_set_robust_list(i64 a1, i64 a2) {
+i64 sys_set_robust_list(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SET_ROBUST_LIST, a1, a2);
 }
 
-pub i64 sys_get_robust_list(i64 a1, i64 a2, i64 a3) {
+i64 sys_get_robust_list(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GET_ROBUST_LIST, a1, a2, a3);
 }
 
-pub i64 sys_splice(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_splice(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SPLICE, a1, a2, a3, a4);
 }
 
-pub i64 sys_tee(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_tee(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.TEE, a1, a2, a3, a4);
 }
 
-pub i64 sys_sync_file_range(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_sync_file_range(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SYNC_FILE_RANGE, a1, a2, a3, a4);
 }
 
-pub i64 sys_vmsplice(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_vmsplice(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.VMSPLICE, a1, a2, a3, a4);
 }
 
-pub i64 sys_move_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_move_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.MOVE_PAGES, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_utimensat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_utimensat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.UTIMENSAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_epoll_pwait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_epoll_pwait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.EPOLL_PWAIT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_signalfd(i64 a1, i64 a2, i64 a3) {
+i64 sys_signalfd(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SIGNALFD, a1, a2, a3);
 }
 
-pub i64 sys_timerfd_create(i64 a1, i64 a2) {
+i64 sys_timerfd_create(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.TIMERFD_CREATE, a1, a2);
 }
 
-pub i64 sys_eventfd(i64 a1) {
+i64 sys_eventfd(i64 a1) {
     return syscall1((i64)SYSCALL.EVENTFD, a1);
 }
 
-pub i64 sys_fallocate(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_fallocate(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FALLOCATE, a1, a2, a3, a4);
 }
 
-pub i64 sys_timerfd_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_timerfd_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.TIMERFD_SETTIME, a1, a2, a3, a4);
 }
 
-pub i64 sys_timerfd_gettime(i64 a1, i64 a2) {
+i64 sys_timerfd_gettime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.TIMERFD_GETTIME, a1, a2);
 }
 
-pub i64 sys_accept4(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_accept4(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.ACCEPT4, a1, a2, a3, a4);
 }
 
-pub i64 sys_signalfd4(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_signalfd4(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SIGNALFD4, a1, a2, a3, a4);
 }
 
-pub i64 sys_eventfd2(i64 a1, i64 a2) {
+i64 sys_eventfd2(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.EVENTFD2, a1, a2);
 }
 
-pub i64 sys_epoll_create1(i64 a1) {
+i64 sys_epoll_create1(i64 a1) {
     return syscall1((i64)SYSCALL.EPOLL_CREATE1, a1);
 }
 
-pub i64 sys_dup3(i64 a1, i64 a2, i64 a3) {
+i64 sys_dup3(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.DUP3, a1, a2, a3);
 }
 
-pub i64 sys_pipe2(i64 a1, i64 a2) {
+i64 sys_pipe2(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.PIPE2, a1, a2);
 }
 
-pub i64 sys_inotify_init1(i64 a1, i64 a2) {
+i64 sys_inotify_init1(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.INOTIFY_INIT1, a1, a2);
 }
 
-pub i64 sys_preadv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_preadv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PREADV, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_pwritev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_pwritev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PWRITEV, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_rt_tgsigqueueinfo(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_rt_tgsigqueueinfo(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.RT_TGSIGQUEUEINFO, a1, a2, a3, a4);
 }
 
-pub i64 sys_perf_event_open(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_perf_event_open(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.PERF_EVENT_OPEN, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_recvmmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_recvmmsg(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.RECVMMSG, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_fanotify_init(i64 a1, i64 a2) {
+i64 sys_fanotify_init(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.FANOTIFY_INIT, a1, a2);
 }
 
-pub i64 sys_fanotify_mark(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_fanotify_mark(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FANOTIFY_MARK, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_prlimit64(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_prlimit64(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PRLIMIT64, a1, a2, a3, a4);
 }
 
-pub i64 sys_name_to_handle_at(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_name_to_handle_at(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.NAME_TO_HANDLE_AT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_open_by_handle_at(i64 a1, i64 a2, i64 a3) {
+i64 sys_open_by_handle_at(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.OPEN_BY_HANDLE_AT, a1, a2, a3);
 }
 
-pub i64 sys_clock_adjtime(i64 a1, i64 a2) {
+i64 sys_clock_adjtime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CLOCK_ADJTIME, a1, a2);
 }
 
-pub i64 sys_syncfs(i64 a1) {
+i64 sys_syncfs(i64 a1) {
     return syscall1((i64)SYSCALL.SYNCFS, a1);
 }
 
-pub i64 sys_sendmmsg(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_sendmmsg(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SENDMMSG, a1, a2, a3, a4);
 }
 
-pub i64 sys_setns(i64 a1, i64 a2) {
+i64 sys_setns(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.SETNS, a1, a2);
 }
 
-pub i64 sys_getcpu(i64 a1, i64 a2, i64 a3) {
+i64 sys_getcpu(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETCPU, a1, a2, a3);
 }
 
-pub i64 sys_process_vm_readv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_process_vm_readv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.PROCESS_VM_READV, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_process_vm_writev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_process_vm_writev(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.PROCESS_VM_WRITEV, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_kcmp(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_kcmp(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.KCMP, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_finit_module(i64 a1, i64 a2, i64 a3) {
+i64 sys_finit_module(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FINIT_MODULE, a1, a2, a3);
 }
 
-pub i64 sys_sched_setattr(i64 a1, i64 a2, i64 a3) {
+i64 sys_sched_setattr(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SCHED_SETATTR, a1, a2, a3);
 }
 
-pub i64 sys_sched_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_sched_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.SCHED_GETATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_renameat2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_renameat2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.RENAMEAT2, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_seccomp(i64 a1, i64 a2, i64 a3) {
+i64 sys_seccomp(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SECCOMP, a1, a2, a3);
 }
 
-pub i64 sys_getrandom(i64 a1, i64 a2, i64 a3) {
+i64 sys_getrandom(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.GETRANDOM, a1, a2, a3);
 }
 
-pub i64 sys_memfd_create(i64 a1, i64 a2) {
+i64 sys_memfd_create(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.MEMFD_CREATE, a1, a2);
 }
 
-pub i64 sys_kexec_file_load(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_kexec_file_load(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.KEXEC_FILE_LOAD, a1, a2, a3, a4);
 }
 
-pub i64 sys_bpf(i64 a1, i64 a2, i64 a3) {
+i64 sys_bpf(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.BPF, a1, a2, a3);
 }
 
-pub i64 sys_execveat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_execveat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.EXECVEAT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_userfaultfd(i64 a1) {
+i64 sys_userfaultfd(i64 a1) {
     return syscall1((i64)SYSCALL.USERFAULTFD, a1);
 }
 
-pub i64 sys_membarrier(i64 a1, i64 a2, i64 a3) {
+i64 sys_membarrier(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MEMBARRIER, a1, a2, a3);
 }
 
-pub i64 sys_mlock2(i64 a1, i64 a2, i64 a3) {
+i64 sys_mlock2(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MLOCK2, a1, a2, a3);
 }
 
-pub i64 sys_copy_file_range(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_copy_file_range(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.COPY_FILE_RANGE, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_preadv2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_preadv2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.PREADV2, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_pwritev2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_pwritev2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.PWRITEV2, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_pkey_mprotect(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_pkey_mprotect(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PKEY_MPROTECT, a1, a2, a3, a4);
 }
 
-pub i64 sys_pkey_alloc(i64 a1, i64 a2) {
+i64 sys_pkey_alloc(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.PKEY_ALLOC, a1, a2);
 }
 
-pub i64 sys_pkey_free(i64 a1) {
+i64 sys_pkey_free(i64 a1) {
     return syscall1((i64)SYSCALL.PKEY_FREE, a1);
 }
 
-pub i64 sys_statx(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_statx(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.STATX, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_io_pgetevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_io_pgetevents(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.IO_PGETEVENTS, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_rseq(i64 a1, i64 a2, i64 a3) {
+i64 sys_rseq(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.RSEQ, a1, a2, a3);
 }
 
-pub i64 sys_uretprobe() {
+i64 sys_uretprobe() {
     return syscall0((i64)SYSCALL.URETPROBE);
 }
 
-pub i64 sys_uprobe() {
+i64 sys_uprobe() {
     return syscall0((i64)SYSCALL.UPROBE);
 }
 
-pub i64 sys_pidfd_send_signal(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_pidfd_send_signal(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PIDFD_SEND_SIGNAL, a1, a2, a3, a4);
 }
 
-pub i64 sys_io_uring_setup(i64 a1, i64 a2) {
+i64 sys_io_uring_setup(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.IO_URING_SETUP, a1, a2);
 }
 
-pub i64 sys_io_uring_enter(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_io_uring_enter(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.IO_URING_ENTER, a1, a2, a3, a4);
 }
 
-pub i64 sys_io_uring_register(i64 a1, i64 a2, i64 a3) {
+i64 sys_io_uring_register(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.IO_URING_REGISTER, a1, a2, a3);
 }
 
-pub i64 sys_open_tree(i64 a1, i64 a2, i64 a3) {
+i64 sys_open_tree(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.OPEN_TREE, a1, a2, a3);
 }
 
-pub i64 sys_move_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_move_mount(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MOVE_MOUNT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_fsopen(i64 a1) {
+i64 sys_fsopen(i64 a1) {
     return syscall1((i64)SYSCALL.FSOPEN, a1);
 }
 
-pub i64 sys_fsconfig(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_fsconfig(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FSCONFIG, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_fsmount(i64 a1, i64 a2, i64 a3) {
+i64 sys_fsmount(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FSMOUNT, a1, a2, a3);
 }
 
-pub i64 sys_fspick(i64 a1, i64 a2, i64 a3) {
+i64 sys_fspick(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FSPICK, a1, a2, a3);
 }
 
-pub i64 sys_pidfd_open(i64 a1, i64 a2) {
+i64 sys_pidfd_open(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.PIDFD_OPEN, a1, a2);
 }
 
-pub i64 sys_clone3(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_clone3(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.CLONE3, a1, a2, a3, a4);
 }
 
-pub i64 sys_close_range(i64 a1, i64 a2, i64 a3) {
+i64 sys_close_range(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.CLOSE_RANGE, a1, a2, a3);
 }
 
-pub i64 sys_openat2(i64 a1, i64 a2, i64 a3) {
+i64 sys_openat2(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.OPENAT2, a1, a2, a3);
 }
 
-pub i64 sys_pidfd_getfd(i64 a1, i64 a2, i64 a3) {
+i64 sys_pidfd_getfd(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.PIDFD_GETFD, a1, a2, a3);
 }
 
-pub i64 sys_faccessat2(i64 a1, i64 a2, i64 a3) {
+i64 sys_faccessat2(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FACCESSAT2, a1, a2, a3);
 }
 
-pub i64 sys_process_madvise(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_process_madvise(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.PROCESS_MADVISE, a1, a2, a3, a4);
 }
 
-pub i64 sys_epoll_pwait2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_epoll_pwait2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.EPOLL_PWAIT2, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_mount_setattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_mount_setattr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.MOUNT_SETATTR, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_quotactl_fd(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_quotactl_fd(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.QUOTACTL_FD, a1, a2, a3, a4);
 }
 
-pub i64 sys_landlock_create_ruleset(i64 a1, i64 a2, i64 a3) {
+i64 sys_landlock_create_ruleset(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LANDLOCK_CREATE_RULESET, a1, a2, a3);
 }
 
-pub i64 sys_landlock_add_rule(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_landlock_add_rule(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LANDLOCK_ADD_RULE, a1, a2, a3, a4);
 }
 
-pub i64 sys_landlock_restrict_self(i64 a1, i64 a2) {
+i64 sys_landlock_restrict_self(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.LANDLOCK_RESTRICT_SELF, a1, a2);
 }
 
-pub i64 sys_memfd_secret(i64 a1) {
+i64 sys_memfd_secret(i64 a1) {
     return syscall1((i64)SYSCALL.MEMFD_SECRET, a1);
 }
 
-pub i64 sys_process_mrelease(i64 a1, i64 a2) {
+i64 sys_process_mrelease(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.PROCESS_MRELEASE, a1, a2);
 }
 
-pub i64 sys_futex_waitv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_futex_waitv(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FUTEX_WAITV, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_set_mempolicy_home_node(i64 a1, i64 a2, i64 a3) {
+i64 sys_set_mempolicy_home_node(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.SET_MEMPOLICY_HOME_NODE, a1, a2, a3);
 }
 
-pub i64 sys_cachestat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_cachestat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.CACHESTAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_fchmodat2(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_fchmodat2(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FCHMODAT2, a1, a2, a3, a4);
 }
 
-pub i64 sys_map_shadow_stack(i64 a1, i64 a2, i64 a3) {
+i64 sys_map_shadow_stack(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MAP_SHADOW_STACK, a1, a2, a3);
 }
 
-pub i64 sys_futex_wake(i64 a1, i64 a2, i64 a3) {
+i64 sys_futex_wake(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.FUTEX_WAKE, a1, a2, a3);
 }
 
-pub i64 sys_futex_wait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_futex_wait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.FUTEX_WAIT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_futex_requeue(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_futex_requeue(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.FUTEX_REQUEUE, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_statmount(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_statmount(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.STATMOUNT, a1, a2, a3, a4);
 }
 
-pub i64 sys_listmount(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_listmount(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LISTMOUNT, a1, a2, a3, a4);
 }
 
-pub i64 sys_lsm_get_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_lsm_get_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LSM_GET_SELF_ATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_lsm_set_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_lsm_set_self_attr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LSM_SET_SELF_ATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_lsm_list_modules(i64 a1, i64 a2, i64 a3) {
+i64 sys_lsm_list_modules(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.LSM_LIST_MODULES, a1, a2, a3);
 }
 
-pub i64 sys_mseal(i64 a1, i64 a2, i64 a3) {
+i64 sys_mseal(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.MSEAL, a1, a2, a3);
 }
 
-pub i64 sys_setxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_setxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.SETXATTRAT, a1, a2, a3, a4, a5, a6);
 }
 
-pub i64 sys_getxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_getxattrat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.GETXATTRAT, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_listxattrat(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_listxattrat(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.LISTXATTRAT, a1, a2, a3, a4);
 }
 
-pub i64 sys_removexattrat(i64 a1, i64 a2, i64 a3) {
+i64 sys_removexattrat(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)SYSCALL.REMOVEXATTRAT, a1, a2, a3);
 }
 
-pub i64 sys_open_tree_attr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
+i64 sys_open_tree_attr(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)SYSCALL.OPEN_TREE_ATTR, a1, a2, a3, a4, a5);
 }
 
-pub i64 sys_file_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_file_getattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FILE_GETATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_file_setattr(i64 a1, i64 a2, i64 a3, i64 a4) {
+i64 sys_file_setattr(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)SYSCALL.FILE_SETATTR, a1, a2, a3, a4);
 }
 
-pub i64 sys_listns(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_listns(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.LISTNS, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
 
-pub i64 sys_rseq_slice_yield(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_rseq_slice_yield(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.RSEQ_SLICE_YIELD, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
 
-pub i64 sys_syscalls(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+i64 sys_syscalls(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)SYSCALL.SYSCALLS, a1, a2, a3, a4, a5, a6);  // arg count guessed
 }
 
-pub i64 sys_nanosleep(i64 a1, i64 a2) {
+i64 sys_nanosleep(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.NANOSLEEP, a1, a2);
 }
 
-pub i64 sys_clock_gettime(i64 a1, i64 a2) {
+i64 sys_clock_gettime(i64 a1, i64 a2) {
     return syscall2((i64)SYSCALL.CLOCK_GETTIME, a1, a2);
 }

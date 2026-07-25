@@ -39,11 +39,11 @@ i64 __fmt_write_fd(i64 fd, u8* p, i64 len) {
     return written;
 }
 
-pub i64 write_stdout(u8* p, i64 len) {
+i64 write_stdout(u8* p, i64 len) {
     return __fmt_write_fd(1, p, len);
 }
 
-pub i64 write_stderr(u8* p, i64 len) {
+i64 write_stderr(u8* p, i64 len) {
     return __fmt_write_fd(2, p, len);
 }
 
@@ -123,7 +123,7 @@ u64 __fmt_pow10(i64 i) {
 // Buffer requirements: itoa <= 20 bytes, utoa <= 20 bytes, btoa <= 5 bytes.
 // ---------------------------------------------------------------------------
 
-pub i64 utoa(u64 v, u8* buf) {
+i64 utoa(u64 v, u8* buf) {
     if (v == (u64)0) {
         buf[0] = (u8)48; // '0'
         return 1;
@@ -149,7 +149,7 @@ pub i64 utoa(u64 v, u8* buf) {
     return n;
 }
 
-pub i64 itoa(i64 v, u8* buf) {
+i64 itoa(i64 v, u8* buf) {
     if (v < 0) {
         buf[0] = (u8)45; // '-'
         // Two's-complement negation in u64 handles i64::MIN correctly.
@@ -159,7 +159,7 @@ pub i64 itoa(i64 v, u8* buf) {
     return utoa((u64)v, buf);
 }
 
-pub i64 btoa(bool v, u8* buf) {
+i64 btoa(bool v, u8* buf) {
     if (v) {
         buf[0] = (u8)116; // 't'
         buf[1] = (u8)114; // 'r'
@@ -542,9 +542,9 @@ struct FmtDigitsBuf {
 // always positional notation, "NaN"/"inf"/"-inf" for specials, "-0" for
 // negative zero. Worst-case output length is 326 bytes (5e-324): size buffers
 // with FTOA_MAX_LEN.
-pub const i64 FTOA_MAX_LEN = 344;
+const i64 FTOA_MAX_LEN = 344;
 
-pub i64 ftoa(f64 v, u8* buf) {
+i64 ftoa(f64 v, u8* buf) {
     f64 local = v;
     u64* bp = (u64*)&local;
     u64 bits = *bp;
@@ -657,7 +657,7 @@ pub i64 ftoa(f64 v, u8* buf) {
 // UTF-8 validation (exact, rejects overlongs/surrogates/out-of-range).
 // ---------------------------------------------------------------------------
 
-pub bool is_valid_utf8(u8* p, i64 len) {
+bool is_valid_utf8(u8* p, i64 len) {
     i64 i = 0;
     while (i < len) {
         i64 c = (i64)p[i] & (i64)255;
@@ -700,7 +700,7 @@ pub bool is_valid_utf8(u8* p, i64 len) {
 }
 
 // Length of a NUL-terminated C string (pure Silver, no libc).
-pub i64 cstr_len(u8* p) {
+i64 cstr_len(u8* p) {
     i64 n = 0;
     while (((i64)p[n] & (i64)255) != 0) {
         n += 1;
@@ -718,7 +718,7 @@ struct FmtPrintBuf {
     u8 data[352];
 }
 
-pub void silver_rt_print_i64(i64 v) {
+void silver_rt_print_i64(i64 v) {
     FmtPrintBuf b;
     u8* p = (u8*)&b;
     i64 n = itoa(v, p);
@@ -726,7 +726,7 @@ pub void silver_rt_print_i64(i64 v) {
     write_stdout(p, n + 1);
 }
 
-pub void silver_rt_print_u64(u64 v) {
+void silver_rt_print_u64(u64 v) {
     FmtPrintBuf b;
     u8* p = (u8*)&b;
     i64 n = utoa(v, p);
@@ -734,7 +734,7 @@ pub void silver_rt_print_u64(u64 v) {
     write_stdout(p, n + 1);
 }
 
-pub void silver_rt_print_bool(u8 v) {
+void silver_rt_print_bool(u8 v) {
     FmtPrintBuf b;
     u8* p = (u8*)&b;
     i64 n = btoa(((i64)v & (i64)255) != 0, p);
@@ -742,7 +742,7 @@ pub void silver_rt_print_bool(u8 v) {
     write_stdout(p, n + 1);
 }
 
-pub void silver_rt_print_f64(f64 v) {
+void silver_rt_print_f64(f64 v) {
     FmtPrintBuf b;
     u8* p = (u8*)&b;
     i64 n = ftoa(v, p);
@@ -750,7 +750,7 @@ pub void silver_rt_print_f64(f64 v) {
     write_stdout(p, n + 1);
 }
 
-pub void silver_rt_print_cstr(char* ptr) {
+void silver_rt_print_cstr(char* ptr) {
     if (ptr == (char*)0) {
         write_stdout((u8*)"<null>\n", 7);
         return;
@@ -773,7 +773,7 @@ struct SilverSlice {
 
 // NB: unlike the other print functions this does NOT append a newline for
 // valid payloads (print! not println! in ffi.rs); the null case does.
-pub void silver_rt_print_bytes(SilverSlice s) {
+void silver_rt_print_bytes(SilverSlice s) {
     if (s.ptr == (u8*)0) {
         write_stdout((u8*)"<null>\n", 7);
         return;
@@ -788,13 +788,13 @@ pub void silver_rt_print_bytes(SilverSlice s) {
 // Abort the process with SIGABRT, mirroring std::process::abort() as closely
 // as raw syscalls allow. If SIGABRT is blocked or handled and returns, fall
 // back to the default-SIGABRT exit status (128 + 6).
-pub void silver_rt_abort() {
+void silver_rt_abort() {
     i64 pid = sys_getpid();
     sys_kill(pid, 6); // SIGABRT
     sys_exit_group(134);
 }
 
-pub void silver_rt_abort_cstr(char* ptr) {
+void silver_rt_abort_cstr(char* ptr) {
     if (ptr != (char*)0) {
         u8* p = (u8*)ptr;
         i64 len = cstr_len(p);

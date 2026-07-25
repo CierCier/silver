@@ -6,16 +6,16 @@
 import std.mem.memory;
 import std.io;
 
-pub i32 tests_passed = 0;
-pub i32 tests_failed = 0;
+i32 tests_passed = 0;
+i32 tests_failed = 0;
 
 /// Print a section header.
-pub void test_start(str name) {
+void test_start(str name) {
     @println("\n--- {} ---", name);
 }
 
 /// Simple pass/fail check (no value comparison).
-pub void check(bool cond, str msg) {
+void check(bool cond, str msg) {
     if (cond) {
         @println("  [PASS] {}", msg);
         tests_passed += 1;
@@ -26,7 +26,7 @@ pub void check(bool cond, str msg) {
 }
 
 /// Check a boolean condition is false.
-pub void assert_false(bool cond, str msg) {
+void assert_false(bool cond, str msg) {
     if (!cond) {
         @println("  [PASS] {}", msg);
         tests_passed += 1;
@@ -37,7 +37,7 @@ pub void assert_false(bool cond, str msg) {
 }
 
 /// Check a boolean condition.
-pub void assert_true(bool cond, str msg) {
+void assert_true(bool cond, str msg) {
     if (cond) {
         @println("  [PASS] {}", msg);
         tests_passed += 1;
@@ -48,7 +48,7 @@ pub void assert_true(bool cond, str msg) {
 }
 
 /// Check i64 equality.
-pub void assert_eq_i64(i64 expected, i64 actual, str msg) {
+void assert_eq_i64(i64 expected, i64 actual, str msg) {
     if (expected == actual) {
         @println("  [PASS] {}", msg);
         tests_passed += 1;
@@ -59,12 +59,12 @@ pub void assert_eq_i64(i64 expected, i64 actual, str msg) {
 }
 
 /// Check i32 equality.
-pub void assert_eq_i32(i32 expected, i32 actual, str msg) {
+void assert_eq_i32(i32 expected, i32 actual, str msg) {
     assert_eq_i64((i64)expected, (i64)actual, msg);
 }
 
 /// Check string equality.
-pub void assert_eq_str(str expected, str actual, str msg) {
+void assert_eq_str(str expected, str actual, str msg) {
     // Use strcmp from std.mem.memory (transitive via std.io/std.fmt)
     if (strcmp(expected, actual) == 0) {
         @println("  [PASS] {}", msg);
@@ -76,7 +76,7 @@ pub void assert_eq_str(str expected, str actual, str msg) {
 }
 
 /// Print summary and return failure count (for main() to return).
-pub i32 done() {
+i32 done() {
     @println("\n=== Results ===");
     @println("Passed: {}, Failed: {}", tests_passed, tests_failed);
     return tests_failed;
