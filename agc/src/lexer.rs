@@ -23,9 +23,12 @@ pub enum Token {
     Else,
     While,
     For,
+    Match,
     Break,
     Continue,
     Return,
+    Type,
+    SelfType,
     Defer,
     Import,
     Comptime,
@@ -615,6 +618,7 @@ impl Lexer {
             "else" => Token::Else,
             "while" => Token::While,
             "for" => Token::For,
+            "match" => Token::Match,
             "break" => Token::Break,
             "continue" => Token::Continue,
             "return" => Token::Return,
@@ -623,6 +627,8 @@ impl Lexer {
             "comptime" => Token::Comptime,
             "cast" => Token::Cast,
             "move" => Token::Move,
+            "type" => Token::Type,
+            "Self" => Token::SelfType,
             "ref" => Token::Ref,
             "extern" => Token::Extern,
             // (pub keyword removed — items public by default)
@@ -1131,6 +1137,7 @@ mod tests {
             ("else", Token::Else),
             ("while", Token::While),
             ("for", Token::For),
+            ("match", Token::Match),
             ("break", Token::Break),
             ("continue", Token::Continue),
             ("return", Token::Return),
@@ -1139,7 +1146,8 @@ mod tests {
             ("comptime", Token::Comptime),
             ("cast", Token::Cast),
             ("move", Token::Move),
-            ("ref", Token::Ref),
+            ("type", Token::Type),
+            ("Self", Token::SelfType),
             ("extern", Token::Extern),
             // (pub removed)
             ("private", Token::Private),
@@ -1199,15 +1207,13 @@ mod tests {
 
     #[test]
     fn test_mixed_tokens() {
-        let mut lexer = Lexer::new("fn main() -> i32 { return 42; }".to_string());
+        let mut lexer = Lexer::new("i32 main() { return 42; }".to_string());
         let tokens = lexer.tokenize().unwrap();
         let expected = vec![
-            Token::Fn,
+            Token::I32,
             Token::Identifier("main".to_string()),
             Token::LeftParen,
             Token::RightParen,
-            Token::Arrow,
-            Token::I32,
             Token::LeftBrace,
             Token::Return,
             Token::IntLiteral(42),

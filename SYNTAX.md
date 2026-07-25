@@ -166,8 +166,7 @@ void() callback;             // function pointer: no params → void
 ```silver
 // Single module import
 import std.io;
-
-// Selective import (NO :: before {)
+// import parts of a module
 import std.io { print, println as pln };
 
 // Module path import with alias

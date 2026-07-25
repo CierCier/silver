@@ -195,27 +195,7 @@ fn impl_node(impl_item: &ast::ImplItem) -> Node {
 }
 
 fn import_node(import: &ast::ImportItem) -> Node {
-    let mut node = Node::new(format!("Import {}", path_name(&import.path)));
-    if let Some(alias) = &import.alias {
-        node.children
-            .push(Node::new(format!("alias: {}", alias.name)));
-    }
-    if let Some(items) = &import.items {
-        let mut imported = Node::new("items");
-        imported.children = items
-            .iter()
-            .map(|item| {
-                let label = if let Some(alias) = &item.alias {
-                    format!("{} as {}", item.name.name, alias.name)
-                } else {
-                    item.name.name.clone()
-                };
-                Node::new(label)
-            })
-            .collect();
-        node.children.push(imported);
-    }
-    node
+    Node::new(format!("Import {}", path_name(&import.path)))
 }
 
 fn extern_fn_node(extern_fn: &ast::ExternFunctionItem) -> Node {

@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn trait_impl_missing_method_is_error() {
         let program =
-            parse("trait Add { fn add(i32 self, i32 other) -> i32; } impl Add for i32 { }");
+            parse("trait Add { i32 add(i32 self, i32 other); } impl Add for i32 { }");
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
     }
@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn trait_impl_with_defaults_is_ok() {
         let program = parse(
-            "trait Foo { type Item = i32; fn bar(i32 self) -> i32 { return self; } } impl Foo for i32 { }",
+            "trait Foo { type Item = i32; i32 bar(i32 self) { return self; } } impl Foo for i32 { }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn trait_super_requires_impl() {
         let program = parse(
-            "trait Base { fn base(i32 self) -> i32; } trait Derived: Base { fn derived(i32 self) -> i32; } impl Derived for i32 { i32 derived(i32 self) { return self; } }",
+            "trait Base { i32 base(i32 self); } trait Derived: Base { i32 derived(i32 self); } impl Derived for i32 { i32 derived(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn trait_super_impl_ok() {
         let program = parse(
-            "trait Base { fn base(i32 self) -> i32; } trait Derived: Base { fn derived(i32 self) -> i32; } impl Base for i32 { i32 base(i32 self) { return self; } } impl Derived for i32 { i32 derived(i32 self) { return self; } }",
+            "trait Base { i32 base(i32 self); } trait Derived: Base { i32 derived(i32 self); } impl Base for i32 { i32 base(i32 self) { return self; } } impl Derived for i32 { i32 derived(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn unknown_super_trait_is_error() {
-        let program = parse("trait Derived: Missing { fn derived(i32 self) -> i32; }");
+        let program = parse("trait Derived: Missing { i32 derived(i32 self); }");
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
     }
@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn conflicting_impl_is_error() {
         let program = parse(
-            "trait Foo { fn foo(i32 self) -> i32; } impl Foo for i32 { i32 foo(i32 self) { return self; } } impl Foo for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Foo { i32 foo(i32 self); } impl Foo for i32 { i32 foo(i32 self) { return self; } } impl Foo for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn orphan_rule_rejects_foreign_trait_for_foreign_type() {
         let program = parse(
-            "trait Local { fn foo(i32 self) -> i32; } impl std::fmt::Display for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Local { i32 foo(i32 self); } impl std::fmt::Display for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn trait_generic_count_mismatch_is_error() {
         let program = parse(
-            "trait Wrap<T, U> { fn wrap(T self, U other) -> T; } impl Wrap<i32> for i32 { i32 wrap(i32 self, i32 other) { return self; } }",
+            "trait Wrap<T, U> { T wrap(T self, U other); } impl Wrap<i32> for i32 { i32 wrap(i32 self, i32 other) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -992,7 +992,7 @@ mod tests {
     #[test]
     fn trait_generic_matching_substitutes_types() {
         let program = parse(
-            "trait Wrap<T> { fn wrap(T self) -> T; } impl Wrap<i32> for i32 { i32 wrap(i32 self) { return self; } }",
+            "trait Wrap<T> { T wrap(T self); } impl Wrap<i32> for i32 { i32 wrap(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn trait_generic_mismatch_is_error() {
         let program = parse(
-            "trait Wrap<T> { fn wrap(T self) -> T; } impl Wrap<i32> for i32 { i64 wrap(i64 self) { return self; } }",
+            "trait Wrap<T> { T wrap(T self); } impl Wrap<i32> for i32 { i64 wrap(i64 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn trait_generic_impl_with_type_param_is_ok() {
         let program = parse(
-            "trait Wrap<T> { fn wrap(T self) -> T; } impl<T> Wrap<T> for T { T wrap(T self) { return self; } }",
+            "trait Wrap<T> { T wrap(T self); } impl<T> Wrap<T> for T { T wrap(T self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn where_bound_requires_impl_for_concrete_type() {
         let program = parse(
-            "trait Bar { fn bar(i32 self) -> i32; } trait Foo { fn foo(i32 self) -> i32; } impl<T> where i32: Bar Foo for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Bar { i32 bar(i32 self); } trait Foo { i32 foo(i32 self); } impl<T> where i32: Bar Foo for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1028,7 +1028,7 @@ mod tests {
     #[test]
     fn where_bound_satisfied_for_concrete_type() {
         let program = parse(
-            "trait Bar { fn bar(i32 self) -> i32; } trait Foo { fn foo(i32 self) -> i32; } impl Bar for i32 { i32 bar(i32 self) { return self; } } impl<T> where i32: Bar Foo for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Bar { i32 bar(i32 self); } trait Foo { i32 foo(i32 self); } impl Bar for i32 { i32 bar(i32 self) { return self; } } impl<T> where i32: Bar Foo for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn trait_param_bound_requires_impl_for_concrete_arg() {
         let program = parse(
-            "trait Bar { fn bar(i32 self) -> i32; } trait Foo<T: Bar> { fn foo(T self) -> T; } impl Foo<i32> for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Bar { i32 bar(i32 self); } trait Foo<T: Bar> { T foo(T self); } impl Foo<i32> for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn trait_param_bound_satisfied_for_concrete_arg() {
         let program = parse(
-            "trait Bar { fn bar(i32 self) -> i32; } trait Foo<T: Bar> { fn foo(T self) -> T; } impl Bar for i32 { i32 bar(i32 self) { return self; } } impl Foo<i32> for i32 { i32 foo(i32 self) { return self; } }",
+            "trait Bar { i32 bar(i32 self); } trait Foo<T: Bar> { T foo(T self); } impl Bar for i32 { i32 bar(i32 self) { return self; } } impl Foo<i32> for i32 { i32 foo(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn trait_param_bound_skips_generic_arg() {
         let program = parse(
-            "trait Bar { fn bar(i32 self) -> i32; } trait Foo<T: Bar> { fn foo(T self) -> T; } impl<T> Foo<T> for T { T foo(T self) { return self; } }",
+            "trait Bar { i32 bar(i32 self); } trait Foo<T: Bar> { T foo(T self); } impl<T> Foo<T> for T { T foo(T self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");
@@ -1133,7 +1133,7 @@ mod tests {
     #[test]
     fn trait_mixed_fn_value_and_methods_ok() {
         let program = parse(
-            "trait Foo { handler: i32(i32); fn do_thing(i32 self) -> i32; } impl Foo for i32 { i32 handler(i32 x) { return x; } i32 do_thing(i32 self) { return self; } }",
+            "trait Foo { handler: i32(i32); i32 do_thing(i32 self); } impl Foo for i32 { i32 handler(i32 x) { return x; } i32 do_thing(i32 self) { return self; } }",
         );
         let errors = validate_traits(&program);
         assert!(errors.is_empty(), "unexpected trait errors: {errors:?}");

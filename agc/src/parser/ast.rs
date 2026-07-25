@@ -105,11 +105,10 @@ pub struct ImplItem {
 }
 
 /// Import statement
+/// Import statement — always imports all public items from the module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportItem {
     pub path: Vec<Identifier>,
-    pub alias: Option<Identifier>,
-    pub items: Option<Vec<ImportedItem>>,
 }
 
 /// External function declaration
@@ -455,12 +454,7 @@ pub struct ImplCast {
     pub span: Span,
 }
 
-/// Import items
-#[derive(Debug, Clone, PartialEq)]
-pub struct ImportedItem {
-    pub name: Identifier,
-    pub alias: Option<Identifier>,
-}
+// (ImportedItem removed — selective imports are not supported)
 
 /// Code blocks
 #[derive(Debug, Clone, PartialEq)]
