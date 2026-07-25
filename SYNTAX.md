@@ -362,19 +362,16 @@ macro swap(a, b) {
 
 ### Variable Declarations
 
+Silver uses **C-style syntax**: type before name.  The `let` keyword is reserved
+(recognized by the lexer) but the bootstrap parser does **not** parse `let`
+statements — only C-style declarations work.
+
 ```silver
-// C-style declaration (type before name) — idiomatic
-i32 x = 42;
-f64 y;                // uninitialized
-
-// let binding with type annotation
-let mut count: i32 = 0;
-
-// let with type inference
-let msg = "Hello";
+i32 x = 42;           // C-style declaration (idiomatic)
+f64 y;                // uninitialized (allowed; drop-flag caveats apply)
 ```
 
-> **Note**: Pattern destructuring (`let (a, b) = ...`) is **not** supported.
+Pattern destructuring (`let (a, b) = ...`) is **not** supported.
 
 ### Assignments & Compound Assignments
 
@@ -503,13 +500,15 @@ Buffer b1 = create_buffer();
 Buffer b2 = move b1;    // b1's drop flag cleared; only b2 drops
 ```
 
-The `ref` keyword creates a non-owning alias (an auto-deref pointer):
+**Reference aliases** are created with `&var` (address-of).  The `ref` keyword
+is reserved by the lexer but the bootstrap parser does **not** parse `ref` as
+an expression — use `&` to create pointers.
 
 ```silver
-ref Buffer r1 = ref b2;
+Buffer* r1 = &b2;     // pointer to b2 (auto-derefs on field access)
 ```
 
-`ref mut` is **not** a distinct syntax — `ref` alone handles the aliasing.
+`ref mut` is **not** a distinct syntax.
 
 ### Cast & Conversion Expressions
 
@@ -577,12 +576,11 @@ chains or the `Optional`/`Result` methods instead.
 ```silver
 asm("nop");
 
-i32 syscall_num = 1;
-asm("mov x0, {}", [syscall_num]);
+asm("syscall", [num, arg1]);   // string, operand list in [...]
 ```
 
-The asm string and operand list are passed directly to LLVM inline assembly.
-
+The asm string is passed directly to LLVM inline assembly.  Operands are
+positional — `{}` in the string has no special meaning.
 ### Macro Invocation Expressions
 
 Builtin macros use `@name(...)` syntax:
@@ -601,11 +599,8 @@ u64 obj_hash = @hash(my_object);
 @memmove(dst_ptr, src_ptr, bytes_count);
 ```
 
-> `@print` / `@println` / `@eprintln` are compiler-builtin macros that expand
-> through `BufWriter` write methods.  They are distinct from the plain
-> `println(str)` / `eprintln(str)` functions in `std/io.ag` which take a single
-> pre-formatted NUL-terminated string and write via `sys_write`.  Prefer the
-> `@` macros for formatted output.
+> **Note**: Only `@name(...)` syntax works.  `name!(...)` syntax is **not**
+> parsed — the `!` token is only used as logical NOT.
 
 ---
 
@@ -616,7 +611,7 @@ Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 | Priority | Operators | Associativity |
 |---|---|---|
 | 1 (highest) | `()` `[]` `.` `::` `++` `--` (postfix) | Left-to-Right |
-| 2 | `+` `-` `!` `~` `*` `&` `++` `--` `move` `ref` `comptime` `(Type)` | Right-to-Left |
+| 2 | `+` `-` `!` `~` `*` `&` `++` `--` `move` `comptime` `(Type)` | Right-to-Left |
 | 3 | `*` `/` `%` | Left-to-Right |
 | 4 | `+` `-` | Left-to-Right |
 | 5 | `<<` `>>` | Left-to-Right |
@@ -628,9 +623,9 @@ Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 | 11 | `\|\|` | Left-to-Right |
 | 12 | `=` `+=` `-=` `*=` `/=` `%=` | Right-to-Left |
 
-> **Changes from previous version**: `->` removed (not an expression operator).
-> `..=` removed (does not exist).  Range `..` is at the relational level, not a
-> separate priority.
+> **Changes from previous version**: `->` and `ref` removed (not expression
+> operators).  `..=` removed (does not exist).  Range `..` is at the relational
+> level, not a separate priority.
 
 ---
 
