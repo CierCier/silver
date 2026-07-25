@@ -1,67 +1,34 @@
 # Silver Language Syntax Specification
 
-This document provides an exhaustive reference of the Silver systems programming language (`agc`) syntax, lexical structure, type system, top-level items, statements, expressions, operator precedence, protocol hooks, and memory ownership semantics.
+This document is the authoritative reference for the Silver systems programming
+language (`agc`) as implemented by the compiler — every claim is verified against
+the compiler source.  Features not yet implemented are explicitly marked as
+**Planned** or omitted.
 
 ---
 
 ## Table of Contents
 
 1. [Lexical Structure & Tokens](#1-lexical-structure--tokens)
-   - [Comments](#comments)
-   - [Identifiers](#identifiers)
-   - [Keywords](#keywords)
-   - [Literals](#literals)
 2. [Type System & Type Expressions](#2-type-system--type-expressions)
-   - [Primitive Types](#primitive-types)
-   - [Pointers & References](#pointers--references)
-   - [Arrays & Slices](#arrays--slices)
-   - [Compound & Generic Types](#compound--generic-types)
-   - [Function & Tuple Types](#function--tuple-types)
 3. [Top-Level Declarations (Items)](#3-top-level-declarations-items)
-   - [Module Imports](#module-imports)
-   - [Type Aliases](#type-aliases)
-   - [Global & Constant Variables](#global--constant-variables)
-   - [Functions & Variadics](#functions--variadics)
-   - [Struct Definitions](#struct-definitions)
-   - [Enum Definitions](#enum-definitions)
-   - [Trait Declarations](#trait-declarations)
-   - [Implementation Blocks (`impl`)](#implementation-blocks-impl)
-   - [External Declarations (`extern`)](#external-declarations-extern)
-   - [Attributes & Metadata](#attributes--metadata)
-   - [Macro Definitions](#macro-definitions)
 4. [Statements & Block Scopes](#4-statements--block-scopes)
-   - [Variable Declarations](#variable-declarations)
-   - [Assignments & Compound Assignments](#assignments--compound-assignments)
-   - [Defer Cleanup Statements](#defer-cleanup-statements)
-   - [Control Flow Statements](#control-flow-statements)
-   - [Block Statements](#block-statements)
 5. [Expression Grammar & Taxonomy](#5-expression-grammar--taxonomy)
-   - [Primary & Path Expressions](#primary--path-expressions)
-   - [Literals & Aggregate Initializers](#literals--aggregate-initializers)
-   - [Binary Expressions](#binary-expressions)
-   - [Unary & Postfix Expressions](#unary--postfix-expressions)
-   - [Ownership & Move Expressions](#ownership--move-expressions)
-   - [Cast & Conversion Expressions](#cast--conversion-expressions)
-   - [Compile-Time (`comptime`) Expressions](#compile-time-comptime-expressions)
-   - [Function Calls & Method Invocations](#function-calls--method-invocations)
-   - [Field Access & Indexing](#field-access--indexing)
-   - [Control Flow Expressions](#control-flow-expressions)
-   - [Inline Assembly (`asm`)](#inline-assembly-asm)
-   - [Macro Invocation Expressions](#macro-invocation-expressions)
 6. [Operator Precedence & Associativity](#6-operator-precedence--associativity)
 7. [Operator Overloading & Custom Protocols](#7-operator-overloading--custom-protocols)
 8. [Memory Management & Ownership Model](#8-memory-management--ownership-model)
+9. [Standard Library & Patterns](#9-standard-library--patterns)
 
 ---
 
 ## 1. Lexical Structure & Tokens
 
-Silver source code files use UTF-8 encoding and standard `.ag` extension.
+Silver source files use UTF-8 encoding and the `.ag` extension.
 
 ### Comments
 
 ```silver
-// Single-line comment running to end of line
+// Single-line comment
 
 /* Multi-line block comment
    spanning multiple lines */
@@ -69,7 +36,10 @@ Silver source code files use UTF-8 encoding and standard `.ag` extension.
 
 ### Identifiers
 
-Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.
+Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.  The identifier `type` is a **soft
+keyword** — it behaves as an identifier but is recognized specially at the start
+of a top-level item (type alias) or inside a trait (associated type).
+
 ```silver
 i32 my_variable_1 = 100;
 f64 _internalCount = 3.14;
@@ -77,41 +47,41 @@ f64 _internalCount = 3.14;
 
 ### Keywords
 
+These are hard keywords — they cannot be used as identifiers:
+
 | Keyword | Description | Keyword | Description |
 |---|---|---|---|
 | `struct` | Struct definition | `enum` | Enum definition |
 | `impl` | Implementation block | `trait` | Trait definition |
-| `fn` | Function definition | `let` | Local variable binding |
-| `mut` | Mutable binding/parameter | `const` | Constant declaration |
-| `if` | Conditional branch | `else` | Alternative branch |
-| `while` | Condition loop | `for` | Counter or iterator loop |
-| `in` | Iterator sequence element | `break` | Loop termination |
-| `continue` | Loop iteration skip | `return` | Early return from function |
-| `defer` | Scope-exit deferred action | `import` | Module import directive |
-| `comptime` | Compile-time evaluation | `cast` | Type cast declaration/expr |
-| `move` | Ownership transfer expression | `ref` | Reference creation |
-| `extern` | External symbol binding | `pub` | Public visibility modifier |
-| `private` | Private visibility modifier | `asm` | Inline assembly block |
-| `macro` | Macro declaration | `type` | Type alias declaration |
-| `where` | Trait bound constraint | `true` | Boolean true literal |
-| `false` | Boolean false literal | `void` | Empty/unit return type |
+| `let` | Local variable binding | `mut` | Mutable modifier |
+| `const` | Constant declaration (parsed, not enforced) | `if` | Conditional branch |
+| `else` | Alternative branch | `while` | Condition loop |
+| `for` | Counter or iterator loop | `in` | Iterator element |
+| `break` | Loop termination (with optional value) | `continue` | Loop iteration skip |
+| `return` | Early return | `defer` | Scope-exit deferred action |
+| `import` | Module import directive | `comptime` | Compile-time evaluation |
+| `cast` | Type cast declaration/expr | `move` | Ownership transfer |
+| `ref` | Reference (aliasing) | `extern` | External symbol binding |
+| `pub` | Public visibility modifier | `private` | Private visibility modifier |
+| `asm` | Inline assembly block | `macro` | Macro declaration |
+| `true` / `false` | Boolean literals | `void` | Empty/unit return type |
+
+**Not keywords** (treated as identifiers): `Self`, `type` (soft keyword), `where`
+(not used).  There is no `match` or `fn` keyword.
 
 ### Literals
 
 ```silver
-// Integers (Decimal, Hexadecimal, Binary, Octal)
+// Integers — decimal and hexadecimal
 i32 dec = 42;
-i32 hex = 0x1A2F;
-i32 bin = 0b101010;
-i32 oct = 0o755;
+i64 hex = 0x1A2F;
 
-// Floating-Point
+// Floating-point
 f64 pi = 3.1415926535;
 f64 sci = 1.0e-5;
 
-// Complex Numbers
+// Complex numbers (lexed but type-level support incomplete)
 c64 c1 = 3.5i;
-c64 c2 = 1.0 + 2.0i;
 
 // Strings & Characters
 str greeting = "Hello, Silver!\n";
@@ -123,57 +93,56 @@ bool active = true;
 bool disabled = false;
 ```
 
+> **Note**: Octal (`0o755`) and binary (`0b101010`) integer literals are **not**
+> supported.  The lexer has no token paths for them.
+
 ---
 
 ## 2. Type System & Type Expressions
 
-Silver features a static type system combining native primitives, raw pointers, explicit references, static arrays, slices, generics, and algebraic data types.
+Silver features a static type system with primitives, pointers, static arrays,
+generics, and algebraic data types.
 
 ### Primitive Types
 
 | Group | Types | Description |
 |---|---|---|
-| Signed Integers | `i8`, `i16`, `i32`, `i64`, `i128` | 2's complement signed integers |
-| Unsigned Integers | `u8`, `u16`, `u32`, `u64`, `u128` | Unsigned integers |
-| IEEE-754 Floats | `f32`, `f64`, `f80` | Single, double, and extended precision floats |
-| Complex Numbers | `c32`, `c64`, `c80` | Complex floating-point primitives |
-| Strings & Characters | `str`, `char` | UTF-8 string view and 32-bit unicode char |
-| Boolean & Void | `bool`, `void` | `true`/`false` boolean and void type |
+| Signed Integers | `i8`, `i16`, `i32`, `i64`, `i128` | 2's complement |
+| Unsigned Integers | `u8`, `u16`, `u32`, `u64`, `u128` | Unsigned |
+| IEEE-754 Floats | `f32`, `f64`, `f80` | Single, double, extended precision |
+| Complex Numbers | `c32`, `c64`, `c80` | Lexer tokens exist; type-level support incomplete |
+| String & Character | `str`, `char` | NUL-terminated byte pointer, 32-bit codepoint |
+| Boolean & Void | `bool`, `void` | `true`/`false`, unit return |
 
-### Pointers & References
+### Pointers
 
-Pointers explicitly manage memory addresses. References declare non-owning references.
-
-```silver
-// Mutable pointer
-i32* p_mut;
-
-// Const pointer (read-only target)
-const i32* p_const;
-
-// Double pointer
-i32** pp_mut;
-
-// Reference types
-ref i32 r_immut;
-ref mut i32 r_mut;
-```
-
-### Arrays & Slices
+Pointers are the primary indirection mechanism.  There is no reference type
+(`ref T` in type position is not parsed — `ref` is an expression operator only).
 
 ```silver
-// Fixed-size array type: [Type; N] or Type[N]
-i32[10] fixed_arr;
-[f64; 4] vec4;
-
-// Slice type (view over sequence)
-[i32] slice_view;
+i32* p_mut;         // mutable pointer to i32
+const i32* p_const; // pointer to const i32 (read-only target)
+i32** pp_mut;       // double pointer
 ```
+
+Pointer field access auto-derefs: `p.x` is equivalent to `(*p).x`.
+
+### Arrays
+
+Fixed-size arrays use postfix `[N]` syntax.  `[Type; N]` form is **not** parsed.
+
+```silver
+i32[10] fixed_arr;      // 10-element array of i32
+u8 buf[512];            // local array
+DnsCacheEntry cache[64]; // global array (size must be an integer literal)
+```
+
+Slices (`[T]`) are **not** a first-class type — they exist as the `Slice<T>`
+library type in `std/slice.ag`.
 
 ### Compound & Generic Types
 
 ```silver
-// Generic named type
 Vec<i32> numbers;
 Map<str, f64> scores;
 Optional<str> name;
@@ -182,39 +151,38 @@ Optional<str> name;
 std::io::FileHandle handle;
 ```
 
-### Function & Tuple Types
+### Function Types
+
+Function types use `ReturnType(ParamTypes...)` syntax.  Tuple types `(T1, T2)`
+are **not** supported — parens group a single expression.
 
 ```silver
-// Function pointer signature: ReturnType(ParamTypes...)
-bool(i32, f64) predicate;
-void() callback;
-
-// Tuple type: (T1, T2, ...)
-(i32, str, bool) tuple_val;
+bool(i32, f64) predicate;   // function pointer: takes i32, f64 → returns bool
+void() callback;             // function pointer: no params → void
 ```
 
 ---
 
 ## 3. Top-Level Declarations (Items)
 
-Silver programs consist of top-level items declared at file scope.
-
 ### Module Imports
-
-Imports inline `.ag` source modules or ingest precompiled binary `.agm` library artifacts.
 
 ```silver
 // Single module import
 import std.io;
 
-// Qualified selective import with aliasing
-import std.io::{println, print as custom_print};
+// Selective import (NO :: before {)
+import std.io { print, println as pln };
 
 // Module path import with alias
 import path.to.graphics as gfx;
 ```
 
+Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
+
 ### Type Aliases
+
+`type` is a soft keyword — recognized at item-start position only.
 
 ```silver
 type Distance = f64;
@@ -224,33 +192,28 @@ pub type Handler = void(i32);
 ### Global & Constant Variables
 
 ```silver
-// Global variable (mutable or immutable)
-pub mut i32 g_counter = 0;
-str g_app_name = "SilverApp";
-
-// Const variable (evaluated at compile time)
-pub const f64 PI = 3.141592653589793;
+str g_app_name = "SilverApp";      // global variable
+pub const f64 PI = 3.1415926535;   // const (parsed; immutability not enforced)
 ```
 
-### Functions & Variadics
+`pub mut i32 g_counter` is **not** valid — `mut` cannot start a type declaration.
 
-Functions can be written using standard keyword syntax or C-style type-prefix return syntax.
+### Functions
+
+Silver uses **C-style syntax** for top-level functions: the return type precedes
+the function name.  There is no `fn` keyword for top-level functions.
 
 ```silver
-// Standard generic function with trait bounds
-pub fn max<T>(T a, T b) -> T where T: Lt<T> {
-    if (a < b) {
-        return b;
-    }
+// Standard function with generics and where clause
+pub T max<T>(T a, T b) where T: Lt<T> {
+    if (a < b) { return b; }
     return a;
 }
 
-// C-style return type signature (supported idiom)
-i32 main() {
-    return 0;
-}
+// C-style return type
+i32 main() { return 0; }
 
-// Explicit void return
+// Void return
 pub void log_message(str msg) {
     @println("[LOG] {}", msg);
 }
@@ -259,14 +222,18 @@ pub void log_message(str msg) {
 pub extern "C" i32 printf(const char* fmt, ...);
 ```
 
+> **Note**: `-> T` return-type syntax is **not** supported.  The `fn` keyword
+> is used for trait methods inside `trait` bodies, not for top-level functions.
+
 ### Struct Definitions
 
-Structs declare memory layout. Struct fields are stored inline without automated recursive destruction unless explicit `Drop` trait methods are provided.
+Fields are separated by `;`.  Field visibility modifiers (`pub`) on individual
+fields are **not** parsed — all fields are implicitly private.
 
 ```silver
 pub struct Point<T> {
-    pub T x;
-    pub T y;
+    T x;
+    T y;
 }
 
 struct Buffer {
@@ -278,28 +245,30 @@ struct Buffer {
 
 ### Enum Definitions
 
-Silver enums support unit variants with explicit discriminants, tuple variants, and struct variants.
+Variants are separated by `;` (**not** `,`).  Discriminants use `=` (not `:`).
+All three variant kinds are supported.
 
 ```silver
-// Simple enum with explicit discriminants
+// Unit enum with discriminants
 pub enum SYSCALL {
-    READ = 0,
-    WRITE = 1,
-    OPEN = 2,
-    CLOSE = 3,
+    READ = 0;
+    WRITE = 1;
+    OPEN = 2;
+    CLOSE = 3;
 }
 
-// Algebraic Data Type (ADT) enum
+// Algebraic data type
 pub enum Shape {
-    Circle(f64),                           // Tuple variant
-    Rectangle { f64 width, f64 height },  // Struct variant
-    Point,                                // Unit variant
+    Circle(f64);                          // tuple variant
+    Rectangle { f64 width; f64 height; }  // struct variant
+    Point;                                // unit variant
 }
 ```
 
 ### Trait Declarations
 
-Traits define interface contracts, associated types, and default method bodies.
+Traits define interface contracts, associated types, and optional default method
+bodies.  `fn` keyword is used for trait methods.
 
 ```silver
 pub trait Display {
@@ -312,78 +281,72 @@ pub trait Iterator<Self> {
 }
 ```
 
+> **Note**: `Self` is **not** a keyword — it is a regular identifier.  In trait
+> definitions it conventionally names the implementing type but has no special
+> substitution behavior.
+
 ### Implementation Blocks (`impl`)
 
-Implementation blocks declare inherent methods, static constructors, custom cast conversions, and trait implementations.
-
 ```silver
-struct Vector2 {
-    f64 x;
-    f64 y;
-}
+struct Vector2 { f64 x; f64 y; }
 
-// Inherent implementation block
+// Inherent implementation
 impl Vector2 {
-    // Static constructor method
     pub Vector2 new(f64 x, f64 y) {
         Vector2 v = { .x = x, .y = y };
         return move v;
     }
 
-    // Instance pointer method
     pub f64 magnitude(Vector2* self) {
         return sqrt(self.x * self.x + self.y * self.y);
     }
 }
 
-// Custom Cast implementation block
+// Custom cast block
 impl Vector2 {
     pub cast f64(Vector2 self) {
         return sqrt(self.x * self.x + self.y * self.y);
     }
 }
 
-// Trait implementation block
+// Trait implementation
 impl Display for Vector2 {
-    fn to_string(Vector2* self) -> str {
-        return "Vector2";
-    }
+    fn to_string(Vector2* self) -> str { return "Vector2"; }
 }
 ```
 
 ### External Declarations (`extern`)
 
-External declarations bind native C or system library routines and global variables.
-
 ```silver
-// Single external function declaration
 extern "C" f32 sinf(f32 x);
 
-// External block with linkage specification
 extern "C" {
     i32 open(const char* path, i32 flags);
     i32 close(i32 fd);
-    mut i32 errno;
+    i32 errno;    // mutable extern variables not supported (no `mut` keyword)
 }
 ```
 
-Supported Linkage Specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`, `"stdcall"`, `"fastcall"`.
+Supported linkage specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`,
+`"stdcall"`, `"fastcall"`.
 
 ### Attributes & Metadata
 
-Attributes attach metadata to top-level items or program units using `#[attr(...)]` or `@attr(...)` syntax.
-
 ```silver
-// Global program link attribute
 #[link("pthread")]
 #[link("m")]
 
-// Function symbol alias attribute
 #[link_name("native_c_pow")]
 extern "C" f64 c_pow(f64 base, f64 exp);
 ```
 
+`@attr(...)` is **not** attribute syntax — `@` is for expression macro calls
+(`@println`, `@size`, etc.).
+
 ### Macro Definitions
+
+Macro definitions parse but are **not expanded** — only built-in macros
+(`@println`, `@size`, `@align`, `@hash`, `@memcpy`, `@memset`, `@memmove`) work.
 
 ```silver
 macro swap(a, b) {
@@ -397,26 +360,25 @@ macro swap(a, b) {
 
 ## 4. Statements & Block Scopes
 
-Statements execute within function bodies and block scopes.
-
 ### Variable Declarations
 
 ```silver
-// Explicit let declaration with type annotation
+// C-style declaration (type before name) — idiomatic
+i32 x = 42;
+f64 y;                // uninitialized
+
+// let binding with type annotation
 let mut count: i32 = 0;
 
-// Type inference let binding
+// let with type inference
 let msg = "Hello";
-
-// C-style variable declaration syntax
-i32 x = 42;
-f64 y; // uninitialized local
-
-// Pattern destructuring assignment
-let (a, b) = get_pair();
 ```
 
+> **Note**: Pattern destructuring (`let (a, b) = ...`) is **not** supported.
+
 ### Assignments & Compound Assignments
+
+All compound assignment operators are supported:
 
 ```silver
 x = 100;
@@ -424,55 +386,47 @@ x = 100;
 arr[0] = 5;
 point.x = 3.14;
 
-// Compound operators
 count += 1;
-sub -= 5;
+sub   -= 5;
 total *= 2;
-div /= 4;
-rem %= 3;
+div   /= 4;
+rem   %= 3;
 ```
 
 ### Defer Cleanup Statements
 
-`defer` postpones execution of a statement or block until the current scope exits. Defer blocks execute in strict **Last-In, First-Out (LIFO)** order.
+`defer` postpones a statement or block until the enclosing scope exits.
+Defers fire in **LIFO** order, including before early returns.
 
 ```silver
 {
     i32 fd = open("file.txt", 0);
-    defer close(fd); // Executed at block exit
+    defer close(fd);
 
     void* buf = malloc(1024);
-    defer {
-        free(buf); // Executed BEFORE close(fd)
-    }
+    defer { free(buf); }   // fires BEFORE close(fd)
 
-    if (error_condition) {
-        return -1; // Defers fire automatically prior to return!
-    }
+    if (error_condition) { return -1; }  // defers fire here
 }
 ```
 
 ### Control Flow Statements
 
 ```silver
-// Early Return
 return;
 return result_value;
 
-// Loop Break & Continue
-break;
-break break_value;
-continue;
+break;               // loop exit
+break value;          // break with value (AST support; semantic support TBD)
+continue;             // skip iteration
 ```
 
 ### Block Statements
 
-Blocks create child scopes for scope-bound drop flag lifetime tracking.
-
 ```silver
 {
     i32 inner_var = 10;
-    // scope exit destroys local resources
+    // scope exit drops local resources
 }
 ```
 
@@ -480,12 +434,9 @@ Blocks create child scopes for scope-bound drop flag lifetime tracking.
 
 ## 5. Expression Grammar & Taxonomy
 
-Silver treats almost all syntactic operations as expressions that return values.
-
 ### Primary & Path Expressions
 
 ```silver
-// Identifiers and Scope Paths
 my_var;
 std::io::stdin;
 ```
@@ -498,260 +449,224 @@ std::io::stdin;
 3.14;
 "Hello";
 
-// C-style Designated Struct Initializer
+// Designated struct initializer
 Point p = { .x = 10.0, .y = 20.0 };
 
-// Positional Initializer
+// Positional struct initializer
 Point p2 = { 10.0, 20.0 };
 
-// Array & Tuple Literals
-i32[3] arr = [1, 2, 3];
-(i32, str) pair = (100, "OK");
+// Array initializer
+i32[3] arr = { 1, 2, 3 };
 ```
+
+> **Note**: `[1, 2, 3]` bracket syntax and `(100, "OK")` tuple literals are
+> **not** supported.  Array and struct initialization uses `{ ... }` braces.
 
 ### Binary Expressions
 
-| Category | Operators | Example Syntax |
+| Category | Operators | Example |
 |---|---|---|
 | Arithmetic | `+`, `-`, `*`, `/`, `%` | `a + b * c` |
 | Bitwise | `&`, `\|`, `^`, `<<`, `>>` | `(mask & 0xFF) << 4` |
 | Comparison | `==`, `!=`, `<`, `>`, `<=`, `>=` | `x >= 0 && x < length` |
 | Logical | `&&`, `\|\|` | `is_valid && !is_expired` |
-| Range | `..`, `..=` | `0..10`, `1..=100` |
+| Range | `..` | `0..10` |
+
+> **Note**: `..=` (inclusive range) does **not** exist.  Range `..` is at the
+> relational precedence level (alongside `<`/`>`), not a separate level.
+
+All binary operands must have matching types — e.g., `u64 << 8` fails;
+use `(u64)8`.
 
 ### Unary & Postfix Expressions
 
 ```silver
-+val;       // Unary plus
--val;       // Unary minus (negation)
-!flag;      // Logical NOT
-~mask;      // Bitwise NOT
-&var;       // Address-of
-*ptr;       // Pointer dereference
-++i;        // Prefix increment
---i;        // Prefix decrement
-i++;        // Postfix increment
-i--;        // Postfix decrement
++val;       // unary plus
+-val;       // unary minus
+!flag;      // logical NOT
+~mask;      // bitwise NOT
+&var;       // address-of
+*ptr;       // pointer dereference
+++i;        // prefix increment
+--i;        // prefix decrement
+i++;        // postfix increment
+i--;        // postfix decrement
 ```
+
+`->` is **not** an expression operator — it is used only for function pointer
+return types (`void() callback`).
 
 ### Ownership & Move Expressions
 
-The `move` keyword explicitly transfers ownership of a variable, clearing its stack frame drop flag to zero (`0`) so the original location will not execute a destructor on scope exit.
-
 ```silver
 Buffer b1 = create_buffer();
-
-// Move transfers resource ownership from b1 to b2
-Buffer b2 = move b1;
+Buffer b2 = move b1;    // b1's drop flag cleared; only b2 drops
 ```
 
-The `ref` keyword explicitly captures non-owning references:
+The `ref` keyword creates a non-owning alias (an auto-deref pointer):
+
 ```silver
 ref Buffer r1 = ref b2;
-ref mut Buffer r2 = ref mut b2;
 ```
+
+`ref mut` is **not** a distinct syntax — `ref` alone handles the aliasing.
 
 ### Cast & Conversion Expressions
 
-Silver supports both C-style explicit cast parentheses and the `cast(...)` operator keyword.
-
 ```silver
-// Primitive numeric casts
-i32 int_val = 42;
-f64 float_val = (f64)int_val;
-
-// Pointer conversions
-void* raw_ptr = (void*)buffer;
-i32* int_ptr = (i32*)raw_ptr;
-
-// Custom struct cast invocation (triggers `impl T { cast TargetType(T self) }`)
-Point p = { .x = 3.0, .y = 4.0 };
-f64 magnitude = (f64)p;
+f64 float_val = (f64)int_val;     // primitive numeric cast
+void* raw_ptr = (void*)buffer;    // pointer cast
+f64 magnitude = (f64)p;           // custom struct cast (triggers cast block)
 ```
 
 ### Compile-Time (`comptime`) Expressions
 
-`comptime` expressions force evaluation during compilation.
-
 ```silver
 const i32 BLOCK_SIZE = comptime (1024 * 64);
-i32 folded_val = comptime (i32)3.99; // folded to 3 at compile time
+i32 folded_val = comptime (i32)3.99;   // → 3
 ```
 
 ### Function Calls & Method Invocations
 
 ```silver
-// Direct function call
-i32 res = add(10, 20);
-
-// Instance method call (passes receiver pointer automatically)
-f64 dist = point.magnitude();
-
-// Associated static method call
-Vector2 v = Vector2.new(1.0, 2.0);
+i32 res = add(10, 20);           // direct call
+f64 dist = point.magnitude();    // method call (passes self pointer)
+Vector2 v = Vector2.new(1, 2);   // static method (no self param)
 ```
 
 ### Field Access & Indexing
 
 ```silver
-// Direct field access
-f64 x = point.x;
-
-// Automatic pointer field access dereference
+f64 x = point.x;          // direct field access
 Point* p_ptr = &point;
-f64 y = p_ptr.y; // equivalent to (*p_ptr).y
-
-// Array/Slice/Container Indexing
-i32 item = arr[0];
-arr[1] = 100; // invokes __index_set if overloaded
+f64 y = p_ptr.y;          // auto-deref: equivalent to (*p_ptr).y
+i32 item = arr[0];        // array/container index (may invoke __index_get)
+arr[1] = 100;             // index write (may invoke __index_set)
 ```
 
 ### Control Flow Expressions
 
-#### If-Else Expressions
+#### If-Else
 
 ```silver
-i32 max_val = if (a > b) { return a; } else { return b; };
+if (a > b) { return a; } else { return b; }
 ```
 
-#### Loop Expressions
+#### Loops
 
 ```silver
-// Condition While Loop
-while (i < 10) {
-    i = i + 1;
-}
+while (i < 10) { i += 1; }
 
-// C-style For Loop
-for (i32 i = 0; i < 10; i = i + 1) {
+for (i32 i = 0; i < 10; i += 1) {   // C-style for
     @println("i = {}", i);
 }
 
-// Iterator For-In Loop
-for item in container {
+for item in container {              // for-in (lowers to IntoIterator+Iterator)
     @println("item = {}", item);
 }
 ```
 
-#### Match Expressions
+#### Match (Planned)
 
-`match` matches pattern arms against values or enum variants.
-
-```silver
-match shape {
-    Shape::Circle(radius) => {
-        @println("Circle with radius {}", radius);
-    },
-    Shape::Rectangle { width, height } => {
-        @println("Rectangle {} x {}", width, height);
-    },
-    Shape::Point => {
-        @println("Point");
-    },
-    _ => {
-        @println("Other shape");
-    }
-}
-```
+`match` is **not implemented**.  An `ExpressionKind::Match` AST node exists but
+is not produced by the parser — no `match` keyword exists.  Use `if`/`else`
+chains or the `Optional`/`Result` methods instead.
 
 ### Inline Assembly (`asm`)
 
-Inline assembly allows embedding target architecture assembly instructions directly into function bodies.
-
 ```silver
-// Simple inline assembly
 asm("nop");
 
-// Inline assembly with input operand expressions
 i32 syscall_num = 1;
 asm("mov x0, {}", [syscall_num]);
 ```
 
+The asm string and operand list are passed directly to LLVM inline assembly.
+
 ### Macro Invocation Expressions
-Builtin macros use `@name(...)` or `name!(...)` syntax.
+
+Builtin macros use `@name(...)` syntax:
 
 ```silver
-// Formatting & Printing Macros (compile-time expansion)
 @print("Value: {}", x);
 @println("Formatted {} {}", val1, val2);
 @eprintln("Error: {}", err_msg);
 
-// Memory & Layout Introspection Macros
-i64 struct_size = size!(Vector2);
-i64 struct_align = align!(Vector2);
-u64 obj_hash = hash!(my_object);
+i64 struct_size = @size(Vector2);
+i64 struct_align = @align(Vector2);
+u64 obj_hash = @hash(my_object);
 
-// Low-level Memory Operations
-memcpy!(dst_ptr, src_ptr, bytes_count);
-memset!(dst_ptr, 0, bytes_count);
-memmove!(dst_ptr, src_ptr, bytes_count);
+@memcpy(dst_ptr, src_ptr, bytes_count);
+@memset(dst_ptr, 0, bytes_count);
+@memmove(dst_ptr, src_ptr, bytes_count);
 ```
 
-> **Note**: The `@print` / `@println` / `@eprintln` macros ARE NOT the same as the
-> `println(str)` / `eprintln(str)` functions in `std.io`. Macros use `{}` format
-> placeholders; the plain functions take a single pre-formatted NUL-terminated string
-> and write directly via the `write(2)` syscall. Prefer the `@` macros for formatted
-> output.
+> `@print` / `@println` / `@eprintln` are compiler-builtin macros that expand
+> through `BufWriter` write methods.  They are distinct from the plain
+> `println(str)` / `eprintln(str)` functions in `std/io.ag` which take a single
+> pre-formatted NUL-terminated string and write via `sys_write`.  Prefer the
+> `@` macros for formatted output.
 
 ---
 
 ## 6. Operator Precedence & Associativity
 
-The following table summarizes Silver operator precedence from highest (1) to lowest (14).
+Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 
-| Priority | Operator | Description | Associativity |
-|---|---|---|---|
-| 1 | `()` `[]` `.` `->` `::` `++` `--` (postfix) | Postfix & Field access | Left-to-Right |
-| 2 | `+` `-` `!` `~` `*` `&` `++` `--` `move` `ref` `comptime` `(Type)` | Unary prefix & Casts | Right-to-Left |
-| 3 | `*` `/` `%` | Multiplicative | Left-to-Right |
-| 4 | `+` `-` | Additive | Left-to-Right |
-| 5 | `<<` `>>` | Bitwise Shift | Left-to-Right |
-| 6 | `&` | Bitwise AND | Left-to-Right |
-| 7 | `^` | Bitwise XOR | Left-to-Right |
-| 8 | `\|` | Bitwise OR | Left-to-Right |
-| 9 | `..` `..=` | Range Operators | Left-to-Right |
-| 10 | `==` `!=` `<` `>` `<=` `>=` | Relational & Equality | Left-to-Right |
-| 11 | `&&` | Logical AND | Left-to-Right |
-| 12 | `\|\|` | Logical OR | Left-to-Right |
-| 13 | `=` `+=` `-=` `*=` `/=` `%=` | Assignment | Right-to-Left |
-| 14 | `,` `;` | Expression separators | Left-to-Right |
+| Priority | Operators | Associativity |
+|---|---|---|
+| 1 (highest) | `()` `[]` `.` `::` `++` `--` (postfix) | Left-to-Right |
+| 2 | `+` `-` `!` `~` `*` `&` `++` `--` `move` `ref` `comptime` `(Type)` | Right-to-Left |
+| 3 | `*` `/` `%` | Left-to-Right |
+| 4 | `+` `-` | Left-to-Right |
+| 5 | `<<` `>>` | Left-to-Right |
+| 6 | `&` (bitwise) | Left-to-Right |
+| 7 | `^` | Left-to-Right |
+| 8 | `\|` | Left-to-Right |
+| 9 | `..` `==` `!=` `<` `>` `<=` `>=` | Left-to-Right |
+| 10 | `&&` | Left-to-Right |
+| 11 | `\|\|` | Left-to-Right |
+| 12 | `=` `+=` `-=` `*=` `/=` `%=` | Right-to-Left |
+
+> **Changes from previous version**: `->` removed (not an expression operator).
+> `..=` removed (does not exist).  Range `..` is at the relational level, not a
+> separate priority.
 
 ---
 
 ## 7. Operator Overloading & Custom Protocols
 
-Silver maps primitive operators to named internal functions. Custom types implement these double-underscore methods in `impl` blocks or standard traits to overload operators.
+Silver maps operators to double-underscore methods.  Implement these in `impl`
+blocks or via standard traits from `std/ops.ag`.
 
-### Operator Protocol Mapping Table
-
-| Operator | Internal Protocol Method | Standard Trait |
+| Operator | Method | Trait |
 |---|---|---|
-| `a + b` | `fn __add(Self self, Other b) -> Self` | `Add<A, B>` |
-| `a - b` | `fn __sub(Self self, Other b) -> Self` | `Sub<A, B>` |
-| `a * b` | `fn __mul(Self self, Other b) -> Self` | `Mul<A, B>` |
-| `a / b` | `fn __div(Self self, Other b) -> Self` | `Div<A, B>` |
-| `a % b` | `fn __mod(Self self, Other b) -> Self` | `Mod<A, B>` |
-| `-a` | `fn __neg(Self self) -> Self` | `Neg<A>` |
-| `!a` | `fn __not(Self self) -> Self` | — |
-| `~a` | `fn __bitnot(Self self) -> Self` | — |
-| `a == b` | `fn __eq(Self self, Self b) -> bool` | `Eq<A>` |
-| `a != b` | `fn __ne(Self self, Self b) -> bool` | `Ne<A>` |
-| `a < b` | `fn __lt(Self self, Self b) -> bool` | `Lt<A>` |
-| `a > b` | `fn __gt(Self self, Self b) -> bool` | `Gt<A>` |
-| `a <= b` | `fn __le(Self self, Self b) -> bool` | `Le<A>` |
-| `a >= b` | `fn __ge(Self self, Self b) -> bool` | `Ge<A>` |
-| `a & b` | `fn __bitand(Self self, Self b) -> Self` | — |
-| `a \| b` | `fn __bitor(Self self, Self b) -> Self` | — |
-| `a ^ b` | `fn __bitxor(Self self, Self b) -> Self` | — |
-| `a << b` | `fn __shl(Self self, Shift b) -> Self` | — |
-| `a >> b` | `fn __shr(Self self, Shift b) -> Self` | — |
-| `c[i]` (read) | `fn __index_get(Self* self, i64 i) -> Item` | `IndexedAccess<Container>` |
-| `c[i] = v` (write) | `fn __index_set(Self* self, i64 i, Item v) -> void` | `IndexedAccess<Container>` |
-| `(TargetType) val` | `cast TargetType(Self self) -> TargetType` | Custom `cast` block |
+| `a + b` | `__add(Self, Other) -> Self` | `Add<A, B>` |
+| `a - b` | `__sub(Self, Other) -> Self` | `Sub<A, B>` |
+| `a * b` | `__mul(Self, Other) -> Self` | `Mul<A, B>` |
+| `a / b` | `__div(Self, Other) -> Self` | `Div<A, B>` |
+| `a % b` | `__mod(Self, Other) -> Self` | `Mod<A, B>` |
+| `-a` | `__neg(Self) -> Self` | `Neg<A>` |
+| `!a` | `__not(Self) -> Self` | — |
+| `~a` | `__bitnot(Self) -> Self` | — |
+| `a == b` | `__eq(Self, Self) -> bool` | `Eq<A>` |
+| `a != b` | `__ne(Self, Self) -> bool` | `Ne<A>` |
+| `a < b` | `__lt(Self, Self) -> bool` | `Lt<A>` |
+| `a > b` | `__gt(Self, Self) -> bool` | `Gt<A>` |
+| `a <= b` | `__le(Self, Self) -> bool` | `Le<A>` |
+| `a >= b` | `__ge(Self, Self) -> bool` | `Ge<A>` |
+| `a & b` | `__bitand(Self, Self) -> Self` | — |
+| `a \| b` | `__bitor(Self, Self) -> Self` | — |
+| `a ^ b` | `__bitxor(Self, Self) -> Self` | — |
+| `a << b` | `__shl(Self, Shift) -> Self` | — |
+| `a >> b` | `__shr(Self, Shift) -> Self` | — |
+| `c[i]` (read) | `__index_get(Self*, i64) -> Item` | `IndexedAccess<Container>` |
+| `c[i] = v` (write) | `__index_set(Self*, i64, Item)` | `IndexedAccess<Container>` |
+| `(Target) val` | `cast Target(Self) -> Target` | Custom `cast` block |
 
-### Iterator Protocol Example
+### Iterator Protocol
 
-`for item in container` syntax lowers to the `IntoIterator` and `Iterator` protocol methods:
+`for item in container` lowers to the `IntoIterator` and `Iterator` protocol:
 
 ```silver
 struct RangeIter {
@@ -764,7 +679,7 @@ impl Iterator<RangeIter> for RangeIter {
     Optional<i32> next(RangeIter* self) {
         if (self.current < self.end) {
             Optional<i32> res = Optional<i32>.some(self.current);
-            self.current = self.current + 1;
+            self.current += 1;
             return res;
         }
         return Optional<i32>.none();
@@ -776,72 +691,68 @@ impl Iterator<RangeIter> for RangeIter {
 
 ## 8. Memory Management & Ownership Model
 
-Silver employs a stack-machine resource tracking architecture based on **explicit move semantics** and **drop flags**.
+Silver uses a stack-machine resource tracking architecture with explicit move
+semantics and drop flags.
 
 ### Core Memory Rules
 
-1. **RAII Teardown**: Local stack-allocated value variables are tracked by LLVM code generation using a 1-bit boolean drop flag (`{var}.drop`).
-2. **Move Invalidation**: `move x` sets `{x}.drop = 0`. Upon scope exit, destructors only execute if `{var}.drop == 1`.
-3. **Explicit Field Cleanups**: Struct destructors must explicitly invoke `drop()` on inner managed resource fields; field destruction is **not** automatically recursive.
-4. **Pointer Immunity**: Raw pointers (`T*`) and reference views (`ref T`) do not own resources and are never automatically dropped.
-5. **Defer Stack Execution**: Defer statements are pushed onto a LIFO execution stack for the current scope depth and fire before any function return or block exit.
+1. **RAII with auto field drops**: The compiler automatically drops struct
+   fields that implement `Drop`, after the struct's own `drop()` method returns.
+   `drop()` methods should **not** explicitly call `drop()` on fields — doing so
+   causes a double-drop.  `drop()` is for cleaning up non-field resources
+   (pointers, file descriptors).
+
+2. **Move semantics**: `move x` clears the source variable's drop flag.  At
+   scope exit, destructors only fire if the drop flag is `true (1)`.
+
+3. **Pointer immunity**: Raw pointers (`T*`) and reference aliases (`ref T`)
+   are never automatically dropped — they are non-owning views.
+
+4. **Defer stack**: `defer` statements execute in **LIFO** order at scope exit,
+   including before `return`.
 
 ---
 
 ## 9. Standard Library & Patterns
 
-The Silver standard library (`std/`) provides data structures, I/O, memory management,
-networking, and runtime services. This section documents key patterns used throughout.
+### Error Handling
 
-### 9.1 Error Handling Patterns
+Silver uses tagged structs — there is no exception mechanism.
 
-Silver uses tagged structs for error handling — there is no exception mechanism.
-The standard library defines several error/value containers optimized for different domains:
-
-| Type | Module | Use Case |
+| Type | Module | Fields |
 |---|---|---|
-| `Optional<T>` | `std.optional` | A value that may or may not be present. Fields: `bool present`, `T thing`. Use `is_some()`/`is_none()`/`unwrap()`/`unwrap_or()`. |
-| `Result<T, E>` | `std.optional` | A success value OR an error. Fields: `bool ok`, `T value`, `E error`. Use `success()`/`failed()`/`unwrap()`/`get_error()`. |
-| `SysResult` | `std.sys.result` | Decoded syscall outcome. Fields: `bool ok`, `i64 value`, `i64 errno`. Use `is_ok()`/`is_err()`/`unwrap_or()`/`err_name()`. |
-| `TypeResult` | `std.rt.types` | Type-registry outcome with owned error message. Fields: `bool ok`, `TypeId id`, `i32 err`, `String msg`. |
+| `Optional<T>` | `std.optional` | `bool present`, `T thing` |
+| `Result<T, E>` | `std.optional` | `bool ok`, `T value`, `E error` |
+| `SysResult` | `std.sys.result` | `bool ok`, `i64 value`, `i64 errno` |
+| `TypeResult` | `std.rt.types` | `bool ok`, `TypeId id`, `i32 err`, `String msg` |
 
-Unrecoverable errors (out of memory, bounds violation) call `abort()` from `std.mem.memory`.
+Unrecoverable errors call `abort()` from `std.mem.memory`.
 
-### 9.2 Output & Formatting
+### Output
 
-Silver has TWO output surfaces — they are NOT interchangeable:
+| Mechanism | How |
+|---|---|
+| `@print`, `@println`, `@eprintln` | Compiler builtin macro with `{}` formatting. Preferred. |
+| `println(str)`, `eprintln(str)` | Plain functions in `std.io`, single NUL-terminated string. |
 
-| Mechanism | Module | When to Use |
-|---|---|---|
-| `@print`, `@println`, `@eprintln` | Compiler builtin macro | Format strings with `{}` placeholders. Uses compile-time expansion through `BufWriter` write_T methods. **Preferred for most output.** |
-| `println(str)`, `eprintln(str)` | `std.io` | Plain functions taking a single NUL-terminated `str`. Writes directly via `write(2)` syscall. No formatting. Legacy / simple cases. |
+### Memory Allocation
 
-The `Display` trait (`std.display`) bridges these: types implementing `Display` can be formatted with `@println("{}", value)`.
+The allocator (`std.mem.alloc`) provides three tiers:
 
-### 9.3 Memory Allocation API
+1. **Libc shims**: `malloc`, `calloc`, `realloc`, `free` — for compatibility.
+2. **Frozen C-ABI**: `silver_rt_alloc`, `silver_rt_realloc`, etc.
+3. **Typed generic**: `alloc<T>()`, `alloc<T>(count)` — aborts on OOM. Preferred.
 
-The allocator (`std.mem.alloc`) provides a three-tier interface:
+### Receiver Convention
 
-1. **libc-compatible shims**: `malloc`, `calloc`, `realloc`, `free` — for existing code. Route through the pure-Silver allocator.
-2. **Raw frozen ABI**: `silver_rt_alloc`, `silver_rt_alloc_zeroed`, `silver_rt_realloc`, `silver_rt_dealloc` — stable C-ABI entry points.
-3. **Typed generic**: `alloc<T>()`, `alloc<T>(count)`, `realloc<T>(ptr, count)` — abort on OOM. Preferred for new code.
+| Receiver | When |
+|---|---|
+| `T* self` | Mutating or inspecting state |
+| `T self` | Consuming transfer or copy semantics |
 
-Prefer the typed generic interface for new code; it aborts on allocation failure rather than returning null.
+Constructors return by value: `pub Vec<T> new() { ... return move v; }`.
 
-### 9.4 Receiver Convention
-
-Silver methods receive `self` explicitly as the first parameter. The convention:
-
-| Receiver | When | Example |
-|---|---|---|
-| `T* self` | Mutating or read-only access (pointer) | `i64 len(Vec<T>* self)` |
-| `T self` | Consuming transfer or copy semantics | `T unwrap(Optional<T> self)` |
-
-Constructors return `T` by value (typically moved): `pub Vec<T> new() { ... return move v; }`.
-
-### 9.5 Test Framework
-
-The `std.test` module provides a shared test harness. Import it instead of writing ad-hoc assertion helpers:
+### Test Framework
 
 ```silver
 import std.test;
@@ -849,9 +760,10 @@ import std.test;
 i32 main() {
     test_start("My Tests");
     assert_true(1 + 1 == 2, "basic arithmetic");
-    assert_eq_i64(42, compute_answer(), "answer check");
-    return done();
+    assert_eq_i64(42, answer(), "answer check");
+    return done();  // returns failure count
 }
 ```
 
-See `std/test.ag` for the full assertion suite (`assert_true`, `assert_false`, `check`, `assert_eq_i64`, `assert_eq_i32`, `assert_eq_str`, `done`).
+See `std/test.ag` for: `assert_true`, `assert_false`, `check`, `assert_eq_i64`,
+`assert_eq_i32`, `assert_eq_str`, `done`.
