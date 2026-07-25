@@ -116,8 +116,7 @@ generics, and algebraic data types.
 
 ### Pointers
 
-Pointers are the primary indirection mechanism.  There is no reference type
-(`ref T` in type position is not parsed — `ref` is an expression operator only).
+Pointers are the primary indirection mechanism.
 
 ```silver
 i32* p_mut;         // mutable pointer to i32
@@ -129,7 +128,7 @@ Pointer field access auto-derefs: `p.x` is equivalent to `(*p).x`.
 
 ### Arrays
 
-Fixed-size arrays use postfix `[N]` syntax.  `[Type; N]` form is **not** parsed.
+Fixed-size arrays use postfix `[N]` syntax.
 
 ```silver
 i32[10] fixed_arr;      // 10-element array of i32
@@ -137,7 +136,7 @@ u8 buf[512];            // local array
 DnsCacheEntry cache[64]; // global array (size must be an integer literal)
 ```
 
-Slices (`[T]`) are **not** a first-class type — they exist as the `Slice<T>`
+Slices exist as the `Slice<T>`
 library type in `std/slice.ag`.
 
 ### Compound & Generic Types
@@ -146,10 +145,11 @@ library type in `std/slice.ag`.
 Vec<i32> numbers;
 Map<str, f64> scores;
 Optional<str> name;
-
-// Namespace-qualified named type
-std::io::FileHandle handle;
 ```
+
+> **Note**: Namespace-qualified types (`std::io::FileHandle`) are **not**
+> supported — the `::` token is not used by the parser in type positions.
+> Module paths use `.` (e.g., `import std.io;`).
 
 ### Function Types
 
@@ -435,7 +435,6 @@ continue;             // skip iteration
 
 ```silver
 my_var;
-std::io::stdin;
 ```
 
 ### Literals & Aggregate Initializers
@@ -610,7 +609,7 @@ Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 
 | Priority | Operators | Associativity |
 |---|---|---|
-| 1 (highest) | `()` `[]` `.` `::` `++` `--` (postfix) | Left-to-Right |
+| 1 (highest) | `()` `[]` `.` `++` `--` (postfix) | Left-to-Right |
 | 2 | `+` `-` `!` `~` `*` `&` `++` `--` `move` `comptime` `(Type)` | Right-to-Left |
 | 3 | `*` `/` `%` | Left-to-Right |
 | 4 | `+` `-` | Left-to-Right |
@@ -623,7 +622,7 @@ Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 | 11 | `\|\|` | Left-to-Right |
 | 12 | `=` `+=` `-=` `*=` `/=` `%=` | Right-to-Left |
 
-> **Changes from previous version**: `->` and `ref` removed (not expression
+> **Changes from previous version**: `->`, `ref`, `::` removed (not expression
 > operators).  `..=` removed (does not exist).  Range `..` is at the relational
 > level, not a separate priority.
 
