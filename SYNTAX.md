@@ -542,7 +542,7 @@ The `move` keyword explicitly transfers ownership of a variable, clearing its st
 Buffer b1 = create_buffer();
 
 // Move transfers resource ownership from b1 to b2
-Buffer b2 = move b1; 
+Buffer b2 = move b1;
 ```
 
 The `ref` keyword explicitly captures non-owning references:
