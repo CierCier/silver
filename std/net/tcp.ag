@@ -10,7 +10,7 @@ import std.mem.drop;
 
 // --- TcpStream ---
 
-pub struct TcpStream {
+struct TcpStream {
     i32 fd;
     bool is_open;
 }
@@ -107,7 +107,7 @@ impl Drop<TcpStream> for TcpStream {
 
 // --- TcpListener ---
 
-pub struct TcpListener {
+struct TcpListener {
     i32 fd;
     bool is_open;
 }

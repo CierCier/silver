@@ -20,7 +20,7 @@ const i64 TOMBSTONE = -1;
 
 impl HashMap<K, V> {
     /// Create empty HashMap (no allocation until first insert).
-    pub HashMap<K, V> new() {
+    HashMap<K, V> new() {
         HashMap<K, V> m;
         m.keys = (K*)0;
         m.values = (V*)0;
@@ -31,12 +31,12 @@ impl HashMap<K, V> {
     }
 
     /// Number of live entries.
-    pub i64 len(HashMap<K, V>* self) {
+    i64 len(HashMap<K, V>* self) {
         return self.len;
     }
 
     /// True when no entries.
-    pub bool is_empty(HashMap<K, V>* self) {
+    bool is_empty(HashMap<K, V>* self) {
         return self.len == 0;
     }
 
@@ -131,7 +131,7 @@ impl HashMap<K, V> {
     // -- Public API ------------------------------------------------------
 
     /// Insert key-value pair. If key exists, value is replaced.
-    pub void insert(HashMap<K, V>* self, K key, V value) {
+    void insert(HashMap<K, V>* self, K key, V value) {
         i64 cap = self.capacity;
         if (cap == 0) {
             self.grow(INITIAL_CAPACITY);
@@ -187,7 +187,7 @@ impl HashMap<K, V> {
     }
 
     /// Get value for key. Aborts if key not found.
-    pub V get(HashMap<K, V>* self, K key) {
+    V get(HashMap<K, V>* self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
             return self.values[idx];
@@ -200,7 +200,7 @@ impl HashMap<K, V> {
     }
 
     /// Get pointer to value for key. Aborts if key not found.
-    pub V* get_ptr(HashMap<K, V>* self, K key) {
+    V* get_ptr(HashMap<K, V>* self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
             return &self.values[idx];
@@ -211,13 +211,13 @@ impl HashMap<K, V> {
     }
 
     /// Check if key exists.
-    pub bool contains_key(HashMap<K, V>* self, K key) {
+    bool contains_key(HashMap<K, V>* self, K key) {
         i64 idx = self.find_slot(key);
         return idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key;
     }
 
     /// Remove key. Returns true if key was present.
-    pub bool erase(HashMap<K, V>* self, K key) {
+    bool erase(HashMap<K, V>* self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
             self.state[idx] = TOMBSTONE;
@@ -228,19 +228,19 @@ impl HashMap<K, V> {
     }
 
     /// Indexed access: map[key] — returns value for key, aborts if not found.
-    pub V __index_get(HashMap<K, V>* self, K key) {
+    V __index_get(HashMap<K, V>* self, K key) {
         return self.get(key);
     }
 
     /// Indexed assignment: map[key] = value — inserts or updates entry.
-    pub void __index_set(HashMap<K, V>* self, K key, V value) {
+    void __index_set(HashMap<K, V>* self, K key, V value) {
         self.insert(key, value);
     }
 }
 
 impl<K, V> Drop<HashMap<K, V>> for HashMap<K, V> {
     /// Free all memory. Does NOT call per-element destructors.
-    pub void drop(HashMap<K, V>* self) {
+    void drop(HashMap<K, V>* self) {
         if (self.state != (i64*)0) {
             free(self.keys);
             free(self.values);

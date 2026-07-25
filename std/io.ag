@@ -30,7 +30,7 @@ enum IO_SEEK {
 // a null-pointer literal.
 // ---------------------------------------------------------------------------
 
-pub struct BufWriter {
+struct BufWriter {
     i64 data;   // address of buffer (0 = uninitialized)
     i64 len;
     i64 cap;
@@ -41,9 +41,9 @@ pub struct BufWriter {
 }
 
 // Zero-cost global instances (all zero → triggers lazy init on first write).
-pub BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1,
+BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1,
     .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 1 };
-pub BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2,
+BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2,
     .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 0 };
 
 // Buffering modes for BufWriter.
@@ -76,7 +76,7 @@ impl BufWriter {
     }
 
     /// Buffer a write.  Flush behavior depends on self.mode.
-    pub void write(BufWriter* self, u8* src, i64 n) {
+    void write(BufWriter* self, u8* src, i64 n) {
         self.ensure_init();
 
         // UNBUFFERED: direct syscall, no buffering.
@@ -129,12 +129,12 @@ impl BufWriter {
     }
 
     /// Write a null-terminated string.
-    pub void write_str(BufWriter* self, str s) {
+    void write_str(BufWriter* self, str s) {
         self.write((u8*)s, cstr_len((u8*)s));
     }
 
     /// Format and buffer an i64 value.
-    pub void write_i64(BufWriter* self, i64 v) {
+    void write_i64(BufWriter* self, i64 v) {
         __Buf32 tmp;
         u8* p = (u8*)&tmp;
         i64 n = itoa(v, p);
@@ -142,7 +142,7 @@ impl BufWriter {
     }
 
     /// Format and buffer a u64 value.
-    pub void write_u64(BufWriter* self, u64 v) {
+    void write_u64(BufWriter* self, u64 v) {
         __Buf32 tmp;
         u8* p = (u8*)&tmp;
         i64 n = utoa(v, p);
@@ -150,7 +150,7 @@ impl BufWriter {
     }
 
     /// Format and buffer an f64 value.
-    pub void write_f64(BufWriter* self, f64 v) {
+    void write_f64(BufWriter* self, f64 v) {
         __Buf64 tmp;
         u8* p = (u8*)&tmp;
         i64 n = ftoa(v, p);
@@ -158,17 +158,17 @@ impl BufWriter {
     }
 
     /// Format and buffer a bool value.
-    pub void write_bool(BufWriter* self, bool v) {
+    void write_bool(BufWriter* self, bool v) {
         if (v) { self.write_str("true"); }
         else   { self.write_str("false"); }
     }
     /// Write a single byte.
-    pub void write_u8(BufWriter* self, u8 c) {
+    void write_u8(BufWriter* self, u8 c) {
         self.write(&c, 1);
     }
 
     /// Flush buffered data to the underlying fd via a single sys_write call.
-    pub void flush(BufWriter* self) {
+    void flush(BufWriter* self) {
         self.ensure_init();
         if (self.len > 0) {
             if (self.fd >= 0) {
@@ -192,7 +192,7 @@ impl BufWriter {
     }
 
     /// Drop: flush remaining data, then free the buffer.
-    pub void drop(BufWriter* self) {
+    void drop(BufWriter* self) {
         self.flush();
         if (self.cap > 0) {
             free((void*)self.data);

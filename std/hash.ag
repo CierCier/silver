@@ -2,6 +2,6 @@
 // HashMap<K, V> uses @hash(key) by default, not this trait.
 // Implement Hash for your type to override the byte-hash behavior.
 
-pub trait Hash<Self> {
-    fn hash(Self self) -> i64;
+trait Hash<Self> {
+    i64 hash(Self self);
 }

@@ -9,7 +9,7 @@ import std.mem.alloc;
 // Helpers
 // ------------------------------------------------------------------
 
-pub f64 dot(f64* a, f64* b, i32 n) {
+f64 dot(f64* a, f64* b, i32 n) {
     f64 sum = 0.0;
     for (i32 i = 0; i < n; i = i + 1) {
         sum = sum + a[i] * b[i];
@@ -21,7 +21,7 @@ pub f64 dot(f64* a, f64* b, i32 n) {
 // Dataset
 // ------------------------------------------------------------------
 
-pub struct Dataset {
+struct Dataset {
     f64* X;
     f64* y;
     i32 n_samples;
@@ -29,12 +29,12 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    pub Dataset new(f64* X, f64* y, i32 n_samples, i32 n_features) {
+    Dataset new(f64* X, f64* y, i32 n_samples, i32 n_features) {
         Dataset ds = { .X = X, .y = y, .n_samples = n_samples, .n_features = n_features };
         return ds;
     }
 
-    pub f64* row(Dataset* self, i32 i) {
+    f64* row(Dataset* self, i32 i) {
         return &self.X[i * self.n_features];
     }
 }
@@ -43,23 +43,23 @@ impl Dataset {
 // Linear Regression
 // ------------------------------------------------------------------
 
-pub struct LinearRegression {
+struct LinearRegression {
     f64* weights;
     f64 bias;
     i32 n_features;
 }
 
 impl LinearRegression {
-    pub LinearRegression new(f64* weights, i32 n_features) {
+    LinearRegression new(f64* weights, i32 n_features) {
         LinearRegression model = { .weights = weights, .bias = 0.0, .n_features = n_features };
         return model;
     }
 
-    pub f64 predict(LinearRegression* self, f64* x) {
+    f64 predict(LinearRegression* self, f64* x) {
         return dot(self.weights, x, self.n_features) + self.bias;
     }
 
-    pub void fit(LinearRegression* self, Dataset* ds, i32 epochs, f64 learning_rate) {
+    void fit(LinearRegression* self, Dataset* ds, i32 epochs, f64 learning_rate) {
         i32 n = ds.n_samples;
         i32 m = self.n_features;
 
@@ -82,24 +82,24 @@ impl LinearRegression {
 // Logistic Regression
 // ------------------------------------------------------------------
 
-pub struct LogisticRegression {
+struct LogisticRegression {
     f64* weights;
     f64 bias;
     i32 n_features;
 }
 
 impl LogisticRegression {
-    pub LogisticRegression new(f64* weights, i32 n_features) {
+    LogisticRegression new(f64* weights, i32 n_features) {
         LogisticRegression model = { .weights = weights, .bias = 0.0, .n_features = n_features };
         return model;
     }
 
-    pub f64 predict_proba(LogisticRegression* self, f64* x) {
+    f64 predict_proba(LogisticRegression* self, f64* x) {
         f64 z = dot(self.weights, x, self.n_features) + self.bias;
         return 1.0 / (1.0 + exp(-z));
     }
 
-    pub i32 predict(LogisticRegression* self, f64* x) {
+    i32 predict(LogisticRegression* self, f64* x) {
         f64 p = self.predict_proba(x);
         if (p >= 0.5) {
             return 1;
@@ -107,7 +107,7 @@ impl LogisticRegression {
         return 0;
     }
 
-    pub void fit(LogisticRegression* self, Dataset* ds, i32 epochs, f64 learning_rate) {
+    void fit(LogisticRegression* self, Dataset* ds, i32 epochs, f64 learning_rate) {
         i32 n = ds.n_samples;
         i32 m = self.n_features;
 
@@ -130,7 +130,7 @@ impl LogisticRegression {
 // Metrics
 // ------------------------------------------------------------------
 
-pub f64 mse(Dataset* ds, LinearRegression* model) {
+f64 mse(Dataset* ds, LinearRegression* model) {
     f64 sum = 0.0;
     for (i32 i = 0; i < ds.n_samples; i = i + 1) {
         f64* x_i = ds.row(i);
@@ -141,7 +141,7 @@ pub f64 mse(Dataset* ds, LinearRegression* model) {
     return sum / (f64) ds.n_samples;
 }
 
-pub f64 accuracy(Dataset* ds, LogisticRegression* model) {
+f64 accuracy(Dataset* ds, LogisticRegression* model) {
     i32 correct = 0;
     for (i32 i = 0; i < ds.n_samples; i = i + 1) {
         f64* x_i = ds.row(i);

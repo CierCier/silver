@@ -36,7 +36,7 @@ import std.rt.types;
 // ---------------------------------------------------------------------------
 // RT_ERR — mirrors silver_runtime's RuntimeError variants
 
-pub enum RT_ERR {
+enum RT_ERR {
     NONE = 0;
     METHOD_NOT_FOUND = 1;
     INVALID_RECEIVER = 2;
@@ -48,15 +48,15 @@ pub enum RT_ERR {
 // ---------------------------------------------------------------------------
 // Method opcodes (integer dispatch replaces the Rust Arc<dyn Fn> closures)
 
-pub const i32 RT_METHOD_OP_TYPE_NAME = 1;   // global "type_name" (arity 0)
-pub const i32 RT_METHOD_OP_STRING_LEN = 2;  // string.len (arity 0)
-pub const i32 RT_METHOD_OP_VEC_LEN = 3;     // global "len" for vec<T> (arity 0)
-pub const i32 RT_METHOD_OP_VEC_PUSH = 4;    // global "push" for vec<T> (arity 1)
+const i32 RT_METHOD_OP_TYPE_NAME = 1;   // global "type_name" (arity 0)
+const i32 RT_METHOD_OP_STRING_LEN = 2;  // string.len (arity 0)
+const i32 RT_METHOD_OP_VEC_LEN = 3;     // global "len" for vec<T> (arity 0)
+const i32 RT_METHOD_OP_VEC_PUSH = 4;    // global "push" for vec<T> (arity 1)
 
 // ---------------------------------------------------------------------------
 // MethodSpec — arity (-1 = variadic, Rust's None) + opcode + ctx word.
 
-pub struct MethodSpec {
+struct MethodSpec {
     i32 arity;
     i32 opcode;
     u32 ctx;
@@ -66,7 +66,7 @@ pub struct MethodSpec {
 // MethodResult — Result-pattern struct: ok flag + RtValue + RT_ERR code +
 // owned message.  RtValue owns no resources, so no Drop impl is needed.
 
-pub struct MethodResult {
+struct MethodResult {
     bool ok;
     RtValue value;
     i32 err;      // RT_ERR discriminant; NONE when ok
@@ -74,7 +74,7 @@ pub struct MethodResult {
 }
 
 impl MethodResult {
-    pub MethodResult ok_value(RtValue value) {
+    MethodResult ok_value(RtValue value) {
         MethodResult r;
         r.ok = true;
         r.value = value;
@@ -83,7 +83,7 @@ impl MethodResult {
         return move r;
     }
 
-    pub MethodResult error(i32 err, String msg) {
+    MethodResult error(i32 err, String msg) {
         MethodResult r;
         r.ok = false;
         r.value = RtValue.unit();
@@ -92,11 +92,11 @@ impl MethodResult {
         return move r;
     }
 
-    pub bool is_ok(MethodResult* self) {
+    bool is_ok(MethodResult* self) {
         return self.ok;
     }
 
-    pub bool is_err(MethodResult* self) {
+    bool is_err(MethodResult* self) {
         return !self.ok;
     }
 }
@@ -110,7 +110,7 @@ impl Drop<MethodResult> for MethodResult {
 // ---------------------------------------------------------------------------
 // MethodRegistry
 
-pub struct MethodRegistry {
+struct MethodRegistry {
     HashMap<u64, MethodSpec> by_type;   // (type_raw << 32) | name_id -> spec
     HashMap<u32, MethodSpec> global;    // name_id -> spec
     HashMap<str, u32> intern_ids;       // name text -> interned id
@@ -118,7 +118,7 @@ pub struct MethodRegistry {
 }
 
 impl MethodRegistry {
-    pub MethodRegistry new() {
+    MethodRegistry new() {
         MethodRegistry r;
         r.by_type = HashMap<u64, MethodSpec>.new();
         r.global = HashMap<u32, MethodSpec>.new();
@@ -130,7 +130,7 @@ impl MethodRegistry {
     // -- Interning ---------------------------------------------------------
 
     /// Intern `name`, returning its stable u32 id.
-    pub u32 intern(MethodRegistry* self, str name) {
+    u32 intern(MethodRegistry* self, str name) {
         if (self.intern_ids.contains_key(name)) {
             return self.intern_ids.get(name);
         }
@@ -151,7 +151,7 @@ impl MethodRegistry {
     }
 
     /// Register a method on one type (arity -1 = variadic).
-    pub void register(MethodRegistry* self, TypeId ty, str name, i32 arity, i32 opcode, u32 ctx) {
+    void register(MethodRegistry* self, TypeId ty, str name, i32 arity, i32 opcode, u32 ctx) {
         u32 name_id = self.intern(name);
         MethodSpec spec;
         spec.arity = arity;
@@ -161,7 +161,7 @@ impl MethodRegistry {
     }
 
     /// Register a global fallback method (arity -1 = variadic).
-    pub void register_global(MethodRegistry* self, str name, i32 arity, i32 opcode, u32 ctx) {
+    void register_global(MethodRegistry* self, str name, i32 arity, i32 opcode, u32 ctx) {
         u32 name_id = self.intern(name);
         MethodSpec spec;
         spec.arity = arity;
@@ -190,7 +190,7 @@ impl MethodRegistry {
 
     /// Rust: install_builtin_methods.  Safe to call exactly once per
     /// registry (re-installing simply overwrites the same table entries).
-    pub void install_builtin_methods(MethodRegistry* self) {
+    void install_builtin_methods(MethodRegistry* self) {
         // Global: type_name() -> string
         self.register_global("type_name", 0, RT_METHOD_OP_TYPE_NAME, (u32)0);
         // string.len() -> i64
@@ -226,7 +226,7 @@ impl MethodRegistry {
     /// Rust: Runtime::call_method.  Looks up the spec (per-type table wins
     /// over the global table), checks arity, then dispatches on the opcode.
     /// `args` points at `args_len` values (the receiver is separate).
-    pub MethodResult call_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, str name, RtValue* args, i64 args_len) {
+    MethodResult call_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, str name, RtValue* args, i64 args_len) {
         u32 type_raw = receiver.type_id();
         u32 name_id = self.intern(name);
 

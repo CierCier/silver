@@ -7,70 +7,70 @@
 // on top of these live in std/sys/result.ag.
 
 // Classic errno range (asm-generic/errno-base.h), 1..34.
-pub const i64 EPERM = 1;            // Operation not permitted
-pub const i64 ENOENT = 2;           // No such file or directory
-pub const i64 ESRCH = 3;            // No such process
-pub const i64 EINTR = 4;            // Interrupted system call
-pub const i64 EIO = 5;              // I/O error
-pub const i64 ENXIO = 6;            // No such device or address
-pub const i64 E2BIG = 7;            // Argument list too long
-pub const i64 ENOEXEC = 8;          // Exec format error
-pub const i64 EBADF = 9;            // Bad file number
-pub const i64 ECHILD = 10;          // No child processes
-pub const i64 EAGAIN = 11;          // Try again (also EWOULDBLOCK)
-pub const i64 ENOMEM = 12;          // Out of memory
-pub const i64 EACCES = 13;          // Permission denied
-pub const i64 EFAULT = 14;          // Bad address
-pub const i64 ENOTBLK = 15;         // Block device required
-pub const i64 EBUSY = 16;           // Device or resource busy
-pub const i64 EEXIST = 17;          // File exists
-pub const i64 EXDEV = 18;           // Cross-device link
-pub const i64 ENODEV = 19;          // No such device
-pub const i64 ENOTDIR = 20;         // Not a directory
-pub const i64 EISDIR = 21;          // Is a directory
-pub const i64 EINVAL = 22;          // Invalid argument
-pub const i64 ENFILE = 23;          // File table overflow
-pub const i64 EMFILE = 24;          // Too many open files
-pub const i64 ENOTTY = 25;          // Not a typewriter
-pub const i64 ETXTBSY = 26;         // Text file busy
-pub const i64 EFBIG = 27;           // File too large
-pub const i64 ENOSPC = 28;          // No space left on device
-pub const i64 ESPIPE = 29;          // Illegal seek
-pub const i64 EROFS = 30;           // Read-only file system
-pub const i64 EMLINK = 31;          // Too many links
-pub const i64 EPIPE = 32;           // Broken pipe
-pub const i64 EDOM = 33;            // Math argument out of domain
-pub const i64 ERANGE = 34;          // Math result not representable
+const i64 EPERM = 1;            // Operation not permitted
+const i64 ENOENT = 2;           // No such file or directory
+const i64 ESRCH = 3;            // No such process
+const i64 EINTR = 4;            // Interrupted system call
+const i64 EIO = 5;              // I/O error
+const i64 ENXIO = 6;            // No such device or address
+const i64 E2BIG = 7;            // Argument list too long
+const i64 ENOEXEC = 8;          // Exec format error
+const i64 EBADF = 9;            // Bad file number
+const i64 ECHILD = 10;          // No child processes
+const i64 EAGAIN = 11;          // Try again (also EWOULDBLOCK)
+const i64 ENOMEM = 12;          // Out of memory
+const i64 EACCES = 13;          // Permission denied
+const i64 EFAULT = 14;          // Bad address
+const i64 ENOTBLK = 15;         // Block device required
+const i64 EBUSY = 16;           // Device or resource busy
+const i64 EEXIST = 17;          // File exists
+const i64 EXDEV = 18;           // Cross-device link
+const i64 ENODEV = 19;          // No such device
+const i64 ENOTDIR = 20;         // Not a directory
+const i64 EISDIR = 21;          // Is a directory
+const i64 EINVAL = 22;          // Invalid argument
+const i64 ENFILE = 23;          // File table overflow
+const i64 EMFILE = 24;          // Too many open files
+const i64 ENOTTY = 25;          // Not a typewriter
+const i64 ETXTBSY = 26;         // Text file busy
+const i64 EFBIG = 27;           // File too large
+const i64 ENOSPC = 28;          // No space left on device
+const i64 ESPIPE = 29;          // Illegal seek
+const i64 EROFS = 30;           // Read-only file system
+const i64 EMLINK = 31;          // Too many links
+const i64 EPIPE = 32;           // Broken pipe
+const i64 EDOM = 33;            // Math argument out of domain
+const i64 ERANGE = 34;          // Math result not representable
 
 // Common extended errno values (asm-generic/errno.h).
-pub const i64 EDEADLK = 35;         // Resource deadlock would occur
-pub const i64 ENAMETOOLONG = 36;    // File name too long
-pub const i64 ENOLCK = 37;          // No record locks available
-pub const i64 ENOSYS = 38;          // Invalid system call number
-pub const i64 ENOTEMPTY = 39;       // Directory not empty
-pub const i64 ELOOP = 40;           // Too many symbolic links encountered
-pub const i64 EOVERFLOW = 75;       // Value too large for defined data type
-pub const i64 ETIMEDOUT = 110;      // Connection timed out
-pub const i64 ECONNRESET = 104;       // Connection reset by peer
-pub const i64 ECONNREFUSED = 111;     // Connection refused
-pub const i64 EADDRINUSE = 98;        // Address already in use
-pub const i64 EADDRNOTAVAIL = 99;     // Cannot assign requested address
-pub const i64 ENETUNREACH = 101;      // Network is unreachable
-pub const i64 EINPROGRESS = 115;      // Operation now in progress
-pub const i64 ENOTCONN = 107;         // Transport endpoint is not connected
-pub const i64 EALREADY = 114;         // Operation already in progress
+const i64 EDEADLK = 35;         // Resource deadlock would occur
+const i64 ENAMETOOLONG = 36;    // File name too long
+const i64 ENOLCK = 37;          // No record locks available
+const i64 ENOSYS = 38;          // Invalid system call number
+const i64 ENOTEMPTY = 39;       // Directory not empty
+const i64 ELOOP = 40;           // Too many symbolic links encountered
+const i64 EOVERFLOW = 75;       // Value too large for defined data type
+const i64 ETIMEDOUT = 110;      // Connection timed out
+const i64 ECONNRESET = 104;       // Connection reset by peer
+const i64 ECONNREFUSED = 111;     // Connection refused
+const i64 EADDRINUSE = 98;        // Address already in use
+const i64 EADDRNOTAVAIL = 99;     // Cannot assign requested address
+const i64 ENETUNREACH = 101;      // Network is unreachable
+const i64 EINPROGRESS = 115;      // Operation now in progress
+const i64 ENOTCONN = 107;         // Transport endpoint is not connected
+const i64 EALREADY = 114;         // Operation already in progress
 
 // Highest errno value the kernel encodes in a raw syscall return.
-pub const i64 ERRNO_MAX = 4095;
+const i64 ERRNO_MAX = 4095;
 
 // True when a raw syscall return value encodes a failure (-4095..-1).
-pub bool is_errno(i64 raw) {
+bool is_errno(i64 raw) {
     return raw < 0 && raw >= -ERRNO_MAX;
 }
 
 // Extract the positive errno from a raw syscall return value.
 // Returns 0 when the raw value is not an error encoding.
-pub i64 errno_of(i64 raw) {
+i64 errno_of(i64 raw) {
     if (is_errno(raw)) {
         return -raw;
     }
@@ -80,7 +80,7 @@ pub i64 errno_of(i64 raw) {
 // Symbolic name of an errno value. Accepts either a positive errno or a
 // raw negative syscall return (which is normalized first). Unknown values
 // map to "EUNKNOWN"; zero maps to "EOK".
-pub str errno_name(i64 err) {
+str errno_name(i64 err) {
     i64 e = err;
     if (e < 0) {
         if (is_errno(e)) {

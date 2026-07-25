@@ -324,7 +324,7 @@ i32 dns_try_ns(str hostname, i32 ns_ip, u16 txid, u8* query, i64 qlen) {
 
 /// Resolve hostname to IPv4 (network byte order). 0 on failure.
 /// Tries each nameserver in order; first response wins.
-pub i32 dns_resolve(str hostname) {
+i32 dns_resolve(str hostname) {
     if (hostname == (str)0) { return 0; }
     dns_init();
 
@@ -349,7 +349,7 @@ pub i32 dns_resolve(str hostname) {
 }
 
 /// Resolve and return dotted-quad string. null on failure.
-pub str dns_resolve_str(str hostname) {
+str dns_resolve_str(str hostname) {
     i32 ip = dns_resolve(hostname);
     if (ip == 0) { return (str)0; }
     return ip_to_str((u32)ip);
@@ -359,7 +359,7 @@ pub str dns_resolve_str(str hostname) {
 u8 g_ip_str_buf[16];
 
 /// Network-byte-order u32 -> dotted-quad. NOT thread-safe.
-pub str ip_to_str(u32 ip) {
+str ip_to_str(u32 ip) {
     u8* buf = g_ip_str_buf;
     i64 raw = (i64)ip;
     i64 pos = 0;
@@ -450,7 +450,7 @@ bool dns_parse_aaaa(u8* buf, i64 len, u16 expected_id, u64* hi, u64* lo) {
 
 /// Resolve hostname to an IPv6 address. Returns true on success; fills
 /// `hi` and `lo` with the 16-byte address in network byte order.
-pub bool dns_resolve6(str hostname, u64* hi, u64* lo) {
+bool dns_resolve6(str hostname, u64* hi, u64* lo) {
     if (hostname == (str)0) { return false; }
     dns_init();
 

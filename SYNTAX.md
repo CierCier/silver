@@ -147,10 +147,6 @@ Map<str, f64> scores;
 Optional<str> name;
 ```
 
-> **Note**: Namespace-qualified types (`std::io::FileHandle`) are **not**
-> supported — the `::` token is not used by the parser in type positions.
-> Module paths use `.` (e.g., `import std.io;`).
-
 ### Function Types
 
 Function types use `ReturnType(ParamTypes...)` syntax.  Tuple types `(T1, T2)`
@@ -222,9 +218,6 @@ pub void log_message(str msg) {
 pub extern "C" i32 printf(const char* fmt, ...);
 ```
 
-> **Note**: `-> T` return-type syntax is **not** supported.  The `fn` keyword
-> is used for trait methods inside `trait` bodies, not for top-level functions.
-
 ### Struct Definitions
 
 Fields are separated by `;`.  Field visibility modifiers (`pub`) on individual
@@ -268,11 +261,11 @@ pub enum Shape {
 ### Trait Declarations
 
 Traits define interface contracts, associated types, and optional default method
-bodies.  `fn` keyword is used for trait methods.
+bodies.  Methods use **C-style syntax**: return type before name.
 
 ```silver
 pub trait Display {
-    fn to_string(Self* self) -> str;
+    str to_string(Self* self);
 }
 
 pub trait Iterator<Self> {
@@ -281,9 +274,8 @@ pub trait Iterator<Self> {
 }
 ```
 
-> **Note**: `Self` is **not** a keyword — it is a regular identifier.  In trait
-> definitions it conventionally names the implementing type but has no special
-> substitution behavior.
+> **Note**: `Self` is a regular identifier conventionally naming the
+> implementing type.  It has no special substitution behavior.
 
 ### Implementation Blocks (`impl`)
 

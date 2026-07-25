@@ -36,11 +36,11 @@ import std.rt.types;
 
 /// Heap-box a Value (Rust: Box<Value> inside Optional).  Uses the generic
 /// alloc<T>/free from std.mem.alloc.
-pub Value* alloc_value() {
+Value* alloc_value() {
     return alloc<Value>();
 }
 
-pub void free_value(Value* p) {
+void free_value(Value* p) {
     free(p);
 }
 
@@ -54,7 +54,7 @@ void rt_value_append_i128_neg(String* out, i128 value) {
 }
 
 /// Append the decimal representation of a signed 128-bit value.
-pub void rt_value_append_i128(String* out, i128 value) {
+void rt_value_append_i128(String* out, i128 value) {
     if (value < (i128)0) {
         out.push((u8)45); // '-'
         rt_value_append_i128_neg(out, value);
@@ -67,7 +67,7 @@ pub void rt_value_append_i128(String* out, i128 value) {
 }
 
 /// Append the decimal representation of an unsigned 128-bit value.
-pub void rt_value_append_u128(String* out, u128 value) {
+void rt_value_append_u128(String* out, u128 value) {
     if (value >= (u128)10) {
         rt_value_append_u128(out, value / (u128)10);
     }
@@ -77,7 +77,7 @@ pub void rt_value_append_u128(String* out, u128 value) {
 /// Append an f64 exactly like Rust's Display: shortest round-trip positional
 /// notation.  std.fmt.ftoa already implements that (Grisu2); FTOA_MAX_LEN
 /// bounds the scratch buffer.
-pub void rt_value_append_f64(String* out, f64 value) {
+void rt_value_append_f64(String* out, f64 value) {
     u8* buf = alloc<u8>(FTOA_MAX_LEN + 1);
     i64 len = ftoa(value, buf);
     i64 i = 0;
@@ -97,21 +97,21 @@ pub void rt_value_append_f64(String* out, f64 value) {
 // UINT        uint_val   (+ ty)     STRUCT   items       (+ ty)
 // FLOAT       float_val  (+ ty)     ENUM     items + variant   (+ ty)
 
-pub const i32 VALUE_KIND_UNIT = 0;
-pub const i32 VALUE_KIND_BOOL = 1;
-pub const i32 VALUE_KIND_INT = 2;
-pub const i32 VALUE_KIND_UINT = 3;
-pub const i32 VALUE_KIND_FLOAT = 4;
-pub const i32 VALUE_KIND_STRING = 5;
-pub const i32 VALUE_KIND_VEC = 6;
-pub const i32 VALUE_KIND_OPTIONAL = 7;
-pub const i32 VALUE_KIND_STRUCT = 8;
-pub const i32 VALUE_KIND_ENUM = 9;
+const i32 VALUE_KIND_UNIT = 0;
+const i32 VALUE_KIND_BOOL = 1;
+const i32 VALUE_KIND_INT = 2;
+const i32 VALUE_KIND_UINT = 3;
+const i32 VALUE_KIND_FLOAT = 4;
+const i32 VALUE_KIND_STRING = 5;
+const i32 VALUE_KIND_VEC = 6;
+const i32 VALUE_KIND_OPTIONAL = 7;
+const i32 VALUE_KIND_STRUCT = 8;
+const i32 VALUE_KIND_ENUM = 9;
 
 // ---------------------------------------------------------------------------
 // VALUE_ERR — mirrors silver_runtime's ValueError variants
 
-pub enum VALUE_ERR {
+enum VALUE_ERR {
     NONE = 0;
     TYPE_MISMATCH = 1;
     INVALID_STRUCT_FIELD_COUNT = 2;
@@ -124,7 +124,7 @@ pub enum VALUE_ERR {
 // ---------------------------------------------------------------------------
 // Value — tagged dynamic value.
 
-pub struct Value {
+struct Value {
     i32 kind;
     TypeId ty;
     bool bool_val;
@@ -191,12 +191,12 @@ impl Value {
 
     // -- Plain constructors (type tag is fixed or supplied by the caller) --
 
-    pub Value unit() {
+    Value unit() {
         Value v = Value.blank();
         return move v;
     }
 
-    pub Value from_bool(bool value) {
+    Value from_bool(bool value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_BOOL;
         v.ty = TypeId.BOOL();
@@ -204,7 +204,7 @@ impl Value {
         return move v;
     }
 
-    pub Value from_int(TypeId ty, i128 value) {
+    Value from_int(TypeId ty, i128 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_INT;
         v.ty = ty;
@@ -212,7 +212,7 @@ impl Value {
         return move v;
     }
 
-    pub Value from_uint(TypeId ty, u128 value) {
+    Value from_uint(TypeId ty, u128 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_UINT;
         v.ty = ty;
@@ -220,7 +220,7 @@ impl Value {
         return move v;
     }
 
-    pub Value from_float(TypeId ty, f64 value) {
+    Value from_float(TypeId ty, f64 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_FLOAT;
         v.ty = ty;
@@ -229,25 +229,25 @@ impl Value {
     }
 
     /// Value::i64 — Int value tagged I64.
-    pub Value i64_val(i64 value) {
+    Value i64_val(i64 value) {
         Value v = Value.from_int(TypeId.I64(), (i128)value);
         return move v;
     }
 
     /// Value::u64 — UInt value tagged U64.
-    pub Value u64_val(u64 value) {
+    Value u64_val(u64 value) {
         Value v = Value.from_uint(TypeId.U64(), (u128)value);
         return move v;
     }
 
     /// Value::f64 — Float value tagged F64.
-    pub Value f64_val(f64 value) {
+    Value f64_val(f64 value) {
         Value v = Value.from_float(TypeId.F64(), value);
         return move v;
     }
 
     /// Value::String — takes ownership of `text`.
-    pub Value from_string(String text) {
+    Value from_string(String text) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_STRING;
         v.ty = TypeId.STRING();
@@ -256,7 +256,7 @@ impl Value {
     }
 
     /// Value::String from a borrowed str (deep-copied).
-    pub Value str_value(str text) {
+    Value str_value(str text) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_STRING;
         v.ty = TypeId.STRING();
@@ -267,12 +267,12 @@ impl Value {
     // -- Accessors ----------------------------------------------------------
 
     /// Value::type_id in the Rust runtime.
-    pub TypeId type_id(Value* self) {
+    TypeId type_id(Value* self) {
         return self.ty;
     }
 
     /// Value::as_bool — has_value is false for non-bool kinds.
-    pub bool as_bool(Value* self, bool* has_value) {
+    bool as_bool(Value* self, bool* has_value) {
         if (self.kind == VALUE_KIND_BOOL) {
             *has_value = true;
             return self.bool_val;
@@ -282,7 +282,7 @@ impl Value {
     }
 
     /// Value::as_i64 — has_value is false unless this is an Int tagged I64.
-    pub i64 as_i64(Value* self, bool* has_value) {
+    i64 as_i64(Value* self, bool* has_value) {
         if (self.kind == VALUE_KIND_INT && self.ty.eq(TypeId.I64())) {
             *has_value = true;
             return (i64)self.int_val;
@@ -292,7 +292,7 @@ impl Value {
     }
 
     /// Value::as_f64 — has_value is false unless this is a Float tagged F64.
-    pub f64 as_f64(Value* self, bool* has_value) {
+    f64 as_f64(Value* self, bool* has_value) {
         if (self.kind == VALUE_KIND_FLOAT && self.ty.eq(TypeId.F64())) {
             *has_value = true;
             return self.float_val;
@@ -303,7 +303,7 @@ impl Value {
 
     /// Value::as_str — registry-owned pointer semantics do not apply here;
     /// the returned pointer borrows this value's buffer (or is null).
-    pub str as_str(Value* self) {
+    str as_str(Value* self) {
         if (self.kind == VALUE_KIND_STRING) {
             return (str)self.text.to_str();
         }
@@ -315,7 +315,7 @@ impl Drop<Value> for Value {
     /// Release owned payloads: the string buffer, the boxed optional inner,
     /// and every element of the items vector before its buffer.  Idempotent
     /// (String/Vec drops null-check internally; inner is re-nulled).
-    pub void drop(Value* self) {
+    void drop(Value* self) {
         self.text.drop();
         if (self.inner != (Value*)0) {
             self.inner.drop();
@@ -338,7 +338,7 @@ impl Drop<Value> for Value {
 // ok flag + Value + VALUE_ERR code + owned message mirroring the Rust
 // ValueError Display strings.
 
-pub struct ValueResult {
+struct ValueResult {
     bool ok;
     Value value;
     i32 err;      // VALUE_ERR discriminant; NONE when ok
@@ -346,7 +346,7 @@ pub struct ValueResult {
 }
 
 impl ValueResult {
-    pub ValueResult ok_value(Value value) {
+    ValueResult ok_value(Value value) {
         ValueResult r;
         r.ok = true;
         r.value = move value;
@@ -355,7 +355,7 @@ impl ValueResult {
         return move r;
     }
 
-    pub ValueResult error(i32 err, String msg) {
+    ValueResult error(i32 err, String msg) {
         ValueResult r;
         r.ok = false;
         r.value = Value.blank();
@@ -364,11 +364,11 @@ impl ValueResult {
         return move r;
     }
 
-    pub bool is_ok(ValueResult* self) {
+    bool is_ok(ValueResult* self) {
         return self.ok;
     }
 
-    pub bool is_err(ValueResult* self) {
+    bool is_err(ValueResult* self) {
         return !self.ok;
     }
 }
@@ -420,7 +420,7 @@ ValueResult value_type_mismatch_str(str expected, TypeRegistry* reg, TypeId foun
 
 /// Value::new_vec — interns vec<elem> and checks every item's type.
 /// Consumes `items`.
-pub ValueResult value_new_vec(TypeRegistry* reg, TypeId elem, Vec<Value> items) {
+ValueResult value_new_vec(TypeRegistry* reg, TypeId elem, Vec<Value> items) {
     TypeResult vec_ty = reg.vec_of(elem);
     if (vec_ty.is_err()) {
         // vec_of only fails on an unknown element id; mirror the Rust
@@ -460,7 +460,7 @@ pub ValueResult value_new_vec(TypeRegistry* reg, TypeId elem, Vec<Value> items) 
 /// Value::new_optional — interns optional<inner> and checks the payload.
 /// When `has_value` is false the result is the none value of optional<inner>;
 /// otherwise `value` is consumed into the boxed inner slot.
-pub ValueResult value_new_optional(TypeRegistry* reg, TypeId inner, bool has_value, Value value) {
+ValueResult value_new_optional(TypeRegistry* reg, TypeId inner, bool has_value, Value value) {
     TypeResult opt_ty = reg.optional_of(inner);
     if (opt_ty.is_err()) {
         String m = rt_type_str_owned("type mismatch: expected valid inner type, found ");
@@ -491,7 +491,7 @@ pub ValueResult value_new_optional(TypeRegistry* reg, TypeId inner, bool has_val
 
 /// Value::new_struct — checks the field count and each field's type against
 /// the registered struct definition.  Consumes `fields`.
-pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields) {
+ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields) {
     Type* info = reg.get(ty);
     if (info == (Type*)0) {
         String m = rt_type_str_owned("type mismatch: expected known struct type, found unknown type id: ");
@@ -570,7 +570,7 @@ pub ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields
 
 /// Value::new_enum_by_index — checks the variant index, payload count, and
 /// each payload field's type.  Consumes `fields`.
-pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 variant, Vec<Value> fields) {
+ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 variant, Vec<Value> fields) {
     Type* info = reg.get(ty);
     if (info == (Type*)0) {
         String m = rt_type_str_owned("type mismatch: expected known enum type, found unknown type id: ");
@@ -666,7 +666,7 @@ pub ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 varian
 
 /// Value::new_enum_by_name — resolves the variant name, then validates like
 /// new_enum_by_index.  Consumes `fields`.
-pub ValueResult value_new_enum_by_name(TypeRegistry* reg, TypeId ty, str variant, Vec<Value> fields) {
+ValueResult value_new_enum_by_name(TypeRegistry* reg, TypeId ty, str variant, Vec<Value> fields) {
     i64 idx = reg.enum_variant_index(ty, variant);
     if (idx < 0) {
         // Rust: "unknown enum variant: {type}::{variant}"
@@ -690,7 +690,7 @@ pub ValueResult value_new_enum_by_name(TypeRegistry* reg, TypeId ty, str variant
 
 /// Value::new_enum_by_discriminant — resolves the discriminant, then
 /// validates like new_enum_by_index.  Consumes `fields`.
-pub ValueResult value_new_enum_by_discriminant(TypeRegistry* reg, TypeId ty, i64 discriminant, Vec<Value> fields) {
+ValueResult value_new_enum_by_discriminant(TypeRegistry* reg, TypeId ty, i64 discriminant, Vec<Value> fields) {
     i64 idx = reg.enum_variant_by_discriminant(ty, discriminant);
     if (idx < 0) {
         // Rust: "unknown enum discriminant: {type}::{discriminant}"
@@ -815,7 +815,7 @@ void value_display_into(Value* v, TypeRegistry* reg, String* out) {
 }
 
 /// TypeRegistry::display_value(...).to_string() — owned display text.
-pub String value_display(Value* v, TypeRegistry* reg) {
+String value_display(Value* v, TypeRegistry* reg) {
     String out = String.new();
     value_display_into(v, reg, &out);
     return move out;

@@ -6,18 +6,18 @@ extern "C" {
     i8** silver_argv();
 }
 
-pub struct Args {
+struct Args {
     i32 argc;
     i8** argv;
 }
 
-pub Args new() {
+Args new() {
     Args a;
     a.argc = silver_argc();
     a.argv = silver_argv();
     return move a;
 }
 
-pub i32 argc(Args* self) {
+i32 argc(Args* self) {
     return self.argc;
 }

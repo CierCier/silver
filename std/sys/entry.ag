@@ -23,11 +23,11 @@ extern "C" {
     i8** __silver_argv;
 }
 
-pub i32 silver_argc() {
+i32 silver_argc() {
     return __silver_argc;
 }
 
-pub i8** silver_argv() {
+i8** silver_argv() {
     return __silver_argv;
 }
 

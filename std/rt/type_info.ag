@@ -43,57 +43,57 @@ const i64 RT_NO_TYPE_ID = 4294967295;
 // ---------------------------------------------------------------------------
 
 // Newtype wrapper over the raw u32 index into the registry's type table.
-pub struct TypeId {
+struct TypeId {
     u32 raw;
 }
 
 impl TypeId {
-    pub TypeId from_raw(u32 raw) {
+    TypeId from_raw(u32 raw) {
         TypeId t;
         t.raw = raw;
         return t;
     }
 
     /// Sentinel "no type" value (raw == RT_NO_TYPE_ID).
-    pub TypeId none() {
+    TypeId none() {
         return TypeId.from_raw((u32)RT_NO_TYPE_ID);
     }
 
-    pub bool is_none(TypeId self) {
+    bool is_none(TypeId self) {
         return self.raw == (u32)RT_NO_TYPE_ID;
     }
 
-    pub bool is_some(TypeId self) {
+    bool is_some(TypeId self) {
         return self.raw != (u32)RT_NO_TYPE_ID;
     }
 
-    pub bool eq(TypeId self, TypeId other) {
+    bool eq(TypeId self, TypeId other) {
         return self.raw == other.raw;
     }
 
     // The 15 builtin type ids (fixed indices in every registry).
-    pub TypeId UNIT() { return TypeId.from_raw((u32)0); }
-    pub TypeId BOOL() { return TypeId.from_raw((u32)1); }
-    pub TypeId I8() { return TypeId.from_raw((u32)2); }
-    pub TypeId I16() { return TypeId.from_raw((u32)3); }
-    pub TypeId I32() { return TypeId.from_raw((u32)4); }
-    pub TypeId I64() { return TypeId.from_raw((u32)5); }
-    pub TypeId I128() { return TypeId.from_raw((u32)6); }
-    pub TypeId U8() { return TypeId.from_raw((u32)7); }
-    pub TypeId U16() { return TypeId.from_raw((u32)8); }
-    pub TypeId U32() { return TypeId.from_raw((u32)9); }
-    pub TypeId U64() { return TypeId.from_raw((u32)10); }
-    pub TypeId U128() { return TypeId.from_raw((u32)11); }
-    pub TypeId F32() { return TypeId.from_raw((u32)12); }
-    pub TypeId F64() { return TypeId.from_raw((u32)13); }
-    pub TypeId STRING() { return TypeId.from_raw((u32)14); }
+    TypeId UNIT() { return TypeId.from_raw((u32)0); }
+    TypeId BOOL() { return TypeId.from_raw((u32)1); }
+    TypeId I8() { return TypeId.from_raw((u32)2); }
+    TypeId I16() { return TypeId.from_raw((u32)3); }
+    TypeId I32() { return TypeId.from_raw((u32)4); }
+    TypeId I64() { return TypeId.from_raw((u32)5); }
+    TypeId I128() { return TypeId.from_raw((u32)6); }
+    TypeId U8() { return TypeId.from_raw((u32)7); }
+    TypeId U16() { return TypeId.from_raw((u32)8); }
+    TypeId U32() { return TypeId.from_raw((u32)9); }
+    TypeId U64() { return TypeId.from_raw((u32)10); }
+    TypeId U128() { return TypeId.from_raw((u32)11); }
+    TypeId F32() { return TypeId.from_raw((u32)12); }
+    TypeId F64() { return TypeId.from_raw((u32)13); }
+    TypeId STRING() { return TypeId.from_raw((u32)14); }
 }
 
 // ---------------------------------------------------------------------------
 // TypeKind discriminants (C-style; payload lives on Type — see LAYOUT NOTES)
 // ---------------------------------------------------------------------------
 
-pub enum TYPE_KIND {
+enum TYPE_KIND {
     UNIT = 0;
     BOOL = 1;
     INT = 2;
@@ -110,7 +110,7 @@ pub enum TYPE_KIND {
 // Aggregate payloads
 // ---------------------------------------------------------------------------
 
-pub struct Field {
+struct Field {
     String name;
     TypeId ty;
 }
@@ -121,12 +121,12 @@ impl Drop<Field> for Field {
     }
 }
 
-pub struct StructType {
+struct StructType {
     Vec<Field> fields;
 }
 
 impl StructType {
-    pub StructType new() {
+    StructType new() {
         StructType s;
         s.fields = Vec<Field>.new();
         return move s;
@@ -145,7 +145,7 @@ impl Drop<StructType> for StructType {
     }
 }
 
-pub struct EnumVariant {
+struct EnumVariant {
     String name;
     i64 discriminant;
     Vec<TypeId> payload;
@@ -158,12 +158,12 @@ impl Drop<EnumVariant> for EnumVariant {
     }
 }
 
-pub struct EnumType {
+struct EnumType {
     Vec<EnumVariant> variants;
 }
 
 impl EnumType {
-    pub EnumType new() {
+    EnumType new() {
         EnumType e;
         e.variants = Vec<EnumVariant>.new();
         return move e;
@@ -182,13 +182,13 @@ impl Drop<EnumType> for EnumType {
     }
 }
 
-pub struct FunctionType {
+struct FunctionType {
     Vec<TypeId> params;
     TypeId ret;
 }
 
 impl FunctionType {
-    pub FunctionType new() {
+    FunctionType new() {
         FunctionType f;
         f.params = Vec<TypeId>.new();
         f.ret = TypeId.none();
@@ -206,7 +206,7 @@ impl Drop<FunctionType> for FunctionType {
 // Type — one entry in the registry's type table (flattened TypeKind payload)
 // ---------------------------------------------------------------------------
 
-pub struct Type {
+struct Type {
     TypeId id;
     String name;
     i32 kind;              // TYPE_KIND discriminant
@@ -221,7 +221,7 @@ pub struct Type {
 impl Type {
     /// Fresh Type with the given owned name and kind; every payload field is
     /// initialized to its documented empty state.
-    pub Type new(String name, i32 kind) {
+    Type new(String name, i32 kind) {
         Type t;
         t.id = TypeId.none();
         t.name = move name;
@@ -250,14 +250,14 @@ impl Drop<Type> for Type {
 // ---------------------------------------------------------------------------
 
 /// Owned deep copy of a borrowed str.
-pub String rt_type_str_owned(str text) {
+String rt_type_str_owned(str text) {
     String s = String.new();
     s.push_str(text);
     return move s;
 }
 
 /// Append the decimal representation of an unsigned 32-bit value.
-pub void rt_type_append_u32(String* out, u32 value) {
+void rt_type_append_u32(String* out, u32 value) {
     if (value >= (u32)10) {
         rt_type_append_u32(out, value / (u32)10);
     }
@@ -274,7 +274,7 @@ void rt_type_append_i64_neg(String* out, i64 value) {
 }
 
 /// Append the decimal representation of a signed 64-bit value.
-pub void rt_type_append_i64(String* out, i64 value) {
+void rt_type_append_i64(String* out, i64 value) {
     if (value < 0) {
         out.push((u8)45); // '-'
         rt_type_append_i64_neg(out, value);

@@ -10,7 +10,7 @@
 //   - strlen(null) returns 0.
 
 /// Fill `len` bytes at `dst` with `value`. Returns `dst`. Null-tolerant.
-pub u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
+u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
     if (dst == (u8*)0) {
         return dst;
     }
@@ -22,7 +22,7 @@ pub u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
 
 /// Copy `len` bytes from `src` to `dst` (regions must not overlap).
 /// Returns `dst`. Null-tolerant.
-pub u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
+u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
     if (dst == (u8*)0 || src == (u8*)0) {
         return dst;
     }
@@ -34,7 +34,7 @@ pub u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
 
 /// Copy `len` bytes from `src` to `dst`; overlap is allowed.
 /// Returns `dst`. Null-tolerant.
-pub u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
+u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
     if (dst == (u8*)0 || src == (u8*)0) {
         return dst;
     }
@@ -58,7 +58,7 @@ pub u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
 }
 
 /// Length of a NUL-terminated string. Returns 0 for null.
-pub i64 silver_rt_strlen(const char* s) {
+i64 silver_rt_strlen(const char* s) {
     u8* p = (u8*)s;
     if (p == (u8*)0) {
         return 0;
@@ -78,23 +78,23 @@ pub i64 silver_rt_strlen(const char* s) {
 // implementations above.
 // ---------------------------------------------------------------------------
 
-pub void* memset(void* ptr, i32 value, i64 num) {
+void* memset(void* ptr, i32 value, i64 num) {
     return (void*)silver_rt_memset((u8*)ptr, (u8)value, num);
 }
 
-pub void* memcpy(void* dest, const void* src, i64 num) {
+void* memcpy(void* dest, const void* src, i64 num) {
     return (void*)silver_rt_memcpy((u8*)dest, (u8*)src, num);
 }
 
-pub void* memmove(void* dest, const void* src, i64 num) {
+void* memmove(void* dest, const void* src, i64 num) {
     return (void*)silver_rt_memmove((u8*)dest, (u8*)src, num);
 }
 
-pub i64 strlen(const char* s) {
+i64 strlen(const char* s) {
     return silver_rt_strlen(s);
 }
 
-pub i32 strcmp(const char* s1, const char* s2) {
+i32 strcmp(const char* s1, const char* s2) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
     i64 i = 0;
@@ -104,7 +104,7 @@ pub i32 strcmp(const char* s1, const char* s2) {
     return (i32)p1[i] - (i32)p2[i];
 }
 
-pub i32 memcmp(const void* s1, const void* s2, i64 n) {
+i32 memcmp(const void* s1, const void* s2, i64 n) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
     for (i64 i = 0; i < n; i = i + 1) {
@@ -122,7 +122,7 @@ pub i32 memcmp(const void* s1, const void* s2, i64 n) {
 
 import std.sys.linux;
 
-pub void abort() {
+void abort() {
     sys_kill(sys_getpid(), 6);  // SIGABRT
     sys_exit_group(134);        // 128 + SIGABRT
 }
