@@ -97,10 +97,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug.finalize();
         }
     }
+
+    /// Declare the global __silver_leak_check_enabled i1 flag.
+    /// Called at the start of generate_program() before pass 1.
+    pub(crate) fn declare_leak_check_flag(&self) {
+        let global = self.module.add_global(
+            self.context.bool_type(),
+            None,
+            "__silver_leak_check_enabled",
+        );
+        global.set_constant(true);
+        let initializer = self.context.bool_type().const_int(self.leak_check as u64, false);
+        global.set_initializer(&initializer);
+    }
 }
 
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()> {
+        self.declare_leak_check_flag();
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Struct(struct_item) => {
@@ -849,6 +863,19 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 // emit_defers (Bug A).
                 let saved_value = if let Some(expr) = expr {
                     let expr_span = expr.span.clone();
+                    // Reject bare identifier return of droppable locals.
+                    // `return move x;` already clears the drop flag in expr.rs.
+                    if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
+                        && self.drop_flags.contains_key(&ident.name)
+                    {
+                        return Err(CodegenError::with_span(
+                            format!(
+                                "return of droppable local '{}' requires 'move {}'",
+                                ident.name, ident.name
+                            ),
+                            expr_span,
+                        ));
+                    }
                     let mut value = self.emit_expression_value(expr)?;
                     if let Some(return_ty) = self.current_return_type.clone() {
                         value = self.cast_value_to_ast_type(value, &return_ty, &expr_span)?;

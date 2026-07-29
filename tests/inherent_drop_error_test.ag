@@ -1,0 +1,8 @@
+import std.sys.entry;
+struct BadDrop { i32 value; }
+impl BadDrop {
+    void drop(BadDrop* self) {
+        self.value = 0;
+    }
+}
+i32 main() { return 0; }

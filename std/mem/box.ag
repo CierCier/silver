@@ -17,7 +17,7 @@ impl Box<T> {
         *p = val;
         Box<T> b;
         b.ptr = p;
-        return b;
+        return move b;
     }
 
     /// Returns a pointer to the inner boxed value.

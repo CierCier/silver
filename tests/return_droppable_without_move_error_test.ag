@@ -1,0 +1,19 @@
+import std.mem;
+import std.sys.entry;
+struct OwnedBuf { i8* data; }
+impl OwnedBuf {
+    OwnedBuf new() {
+        OwnedBuf b;
+        b.data = alloc<i8>();
+        return b;
+    }
+}
+impl Drop<OwnedBuf> for OwnedBuf {
+    void drop(OwnedBuf* self) {
+        if (self.data != (i8*)0) {
+            free(self.data);
+            self.data = (i8*)0;
+        }
+    }
+}
+i32 main() { OwnedBuf b = OwnedBuf.new(); return 0; }

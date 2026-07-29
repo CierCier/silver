@@ -48,6 +48,8 @@ test_specific_flags() {
 expected_compile_failure() {
     case "$1" in
         enum_arity_error_test) return 0 ;;
+        inherent_drop_error_test) return 0 ;;
+        return_droppable_without_move_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

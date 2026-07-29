@@ -62,6 +62,7 @@ struct CompilePlan {
     verbose: bool,
     dry_run: bool,
     profile: bool,
+    leak_check: bool,
 }
 
 impl CompilePlan {
@@ -88,6 +89,9 @@ impl CompilePlan {
         }
         if self.static_runtime {
             parts.push("static_runtime=true".to_string());
+        }
+        if self.leak_check {
+            parts.push("leak_check=true".to_string());
         }
         if self.shared {
             parts.push("shared=true".to_string());
@@ -209,6 +213,9 @@ struct Cli {
     /// Enable time and memory profiling output
     #[arg(long = "profile", action = ArgAction::SetTrue)]
     profile: bool,
+    /// Enable allocator leak-check, double-free, and buffer overflow diagnostics
+    #[arg(long = "leak-check", action = ArgAction::SetTrue)]
+    leak_check: bool,
 }
 
 fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
@@ -319,6 +326,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         verbose: cli.verbose,
         dry_run: cli.dry_run,
         profile: cli.profile,
+        leak_check: cli.leak_check,
     })
 }
 
@@ -963,7 +971,7 @@ fn main() {
                     let binary_output = module_binary_output_path(&plan.output, plan.shared);
                     if plan.shared {
                         let temp_object = plan.output.with_extension("module.tmp.o");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
                             &temp_object,
@@ -973,6 +981,7 @@ fn main() {
                             Some(input),
                             Some(&src),
                             plan.debug_info,
+                            plan.leak_check,
                         );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1003,7 +1012,7 @@ fn main() {
                         }
                         let _ = std::fs::remove_file(&temp_object);
                     } else {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
                             &binary_output,
@@ -1013,6 +1022,7 @@ fn main() {
                             Some(input),
                             Some(&src),
                             plan.debug_info,
+                            plan.leak_check,
                         );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1043,7 +1053,7 @@ fn main() {
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
                         profiler.begin_phase("codegen");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
                             &plan.output,
@@ -1053,6 +1063,7 @@ fn main() {
                             Some(input),
                             Some(&src),
                             plan.debug_info,
+                            plan.leak_check,
                         );
                         profiler.end_phase("codegen");
                         if let Err(error) = result {
@@ -1075,7 +1086,7 @@ fn main() {
                     } else if matches!(plan.emit, EmitKind::Asm) {
                         profiler.begin_phase("codegen");
                         let result =
-                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table_and_source(
+                            codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
                                 &ast,
                                 &imported_modules,
                                 &plan.output,
@@ -1085,6 +1096,7 @@ fn main() {
                                 Some(input),
                                 Some(&src),
                                 plan.debug_info,
+                                plan.leak_check,
                             );
                         profiler.end_phase("codegen");
                         if let Err(error) = result {
@@ -1106,13 +1118,14 @@ fn main() {
                         }
                     } else if matches!(plan.emit, EmitKind::LlvmIr) {
                         profiler.begin_phase("codegen");
-                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source(
+                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
                             &mut symbol_table,
                             Some(input),
                             Some(&src),
                             plan.debug_info,
+                            plan.leak_check,
                         );
                         profiler.end_phase("codegen");
                         match output {
@@ -1148,7 +1161,7 @@ fn main() {
                             .and_then(|s| s.to_str())
                             .unwrap_or("input");
                         let temp_o = temp_dir.join(format!("{stem}.o"));
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
                             &temp_o,
@@ -1158,6 +1171,7 @@ fn main() {
                             Some(input),
                             Some(&src),
                             plan.debug_info,
+                            plan.leak_check,
                         );
                         profiler.end_phase("codegen");
                         if let Err(error) = result {
@@ -1636,6 +1650,7 @@ mod tests {
             verbose: false,
             dry_run: false,
             profile: false,
+            leak_check: false,
         }
     }
 

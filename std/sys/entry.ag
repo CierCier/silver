@@ -32,5 +32,5 @@ i8** silver_argv() {
 }
 
 void _start() {
-    asm(".section .bss\n__silver_argc: .zero 4\n__silver_argv: .zero 8\n.text\nxor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nmov %rdi, __silver_argc(%rip)\nmov %rsi, __silver_argv(%rip)\nand $$-16, %rsp\ncall main\nmov %rax, %r12\ncall __silver_flush_all\nmov %r12, %rdi\nmov $$231, %eax\nsyscall");
+    asm(".section .bss\n__silver_argc: .zero 4\n__silver_argv: .zero 8\n.text\nxor %ebp, %ebp\nmov (%rsp), %rdi\nlea 8(%rsp), %rsi\nmov %rdi, __silver_argc(%rip)\nmov %rsi, __silver_argv(%rip)\nand $$-16, %rsp\ncall main\nmov %rax, %r12\ncall __silver_flush_all\ncall __silver_leak_check_report\ncmp $$0, %eax\nje 1f\nmov $$1, %r12\n1:\nmov %r12, %rdi\nmov $$231, %eax\nsyscall");
 }

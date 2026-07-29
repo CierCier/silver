@@ -140,9 +140,11 @@ void mem_refill(i64* heads, i64 idx) {
     heads[idx] = head;
 }
 
+// -- Raw allocator core -----------------------------------------------------
+
 /// Core allocation: `size` bytes with at least `align` alignment.
 /// Returns dangling non-null for size <= 0, null on OOM.
-u8* mem_alloc_impl(i64 size, i64 align) {
+u8* mem_alloc_raw_impl(i64 size, i64 align) {
     if (size <= 0) {
         return mem_dangling(align);
     }
@@ -183,7 +185,7 @@ u8* mem_alloc_impl(i64 size, i64 align) {
 }
 
 /// Core free. Tolerates null and dangling pointers.
-void mem_free_impl(u8* ptr) {
+void mem_free_raw_impl(u8* ptr) {
     i64 a = (i64)ptr;
     if (a < MEM_MIN_VALID_ADDR) {
         // Null or dangling (zero-page) pointer: no-op.
@@ -206,15 +208,254 @@ void mem_free_impl(u8* ptr) {
     // Unknown tag: defensive no-op.
 }
 
+// -- Leak-check runtime (allocation-free, static tracking) -------------------
+//
+// When the compiler's --leak-check flag is active, the codegen emits a constant
+// global __silver_leak_check_enabled = true.  The allocator checks this global
+// and routes every allocation/free through tracking functions that detect
+// leaks, double-frees, and buffer overflows without doing any dynamic
+// allocation themselves.
+
+extern "C" { bool __silver_leak_check_enabled; }
+
+const i64 LEAK_MAX_RECORDS = 65536;
+const i64 LEAK_CANARY_LIVE = 0x4C4956454C495645;  // "LIVELIVE"
+const i64 LEAK_CANARY_DEAD = 0x4445414444454144;  // "DEADDEAD"
+
+i64 __leak_user_ptrs[65536];
+i64 __leak_raw_ptrs[65536];
+i64 __leak_sizes[65536];
+u8 __leak_states[65536]; // 0 empty, 1 live, 2 freed
+
+// -- Raw stderr helpers (no allocation, no BufWriter) ------------------------
+
+void __silver_leak_write_str(str msg) {
+    if (msg == (str)0) { return; }
+    u8* p = (u8*)msg;
+    i64 len = 0;
+    while (p[len] != (u8)0) { len = len + 1; }
+    sys_write(2, (i64)msg, len);
+}
+
+void __silver_leak_write_hex(i64 v) {
+    u8 buf[19];
+    i64 i = 0;
+    if (v == 0) {
+        buf[0] = (u8)48;
+        i = 1;
+    } else {
+        i64 pos = 18;
+        while (v != 0 && pos >= 0) {
+            i64 d = v & (i64)15;
+            if (d < 10) {
+                buf[pos] = (u8)(48 + d);
+            } else {
+                buf[pos] = (u8)(87 + d);
+            }
+            v = v >> (i64)4;
+            pos = pos - 1;
+        }
+        while (pos < 18) {
+            pos = pos + 1;
+            buf[i] = buf[pos];
+            i = i + 1;
+        }
+    }
+    sys_write(2, (i64)buf, i);
+}
+
+void __silver_leak_write_i64(i64 v) {
+    if (v < 0) {
+        sys_write(2, (i64)"-", 1);
+        v = 0 - v;
+    }
+    u8 buf[20];
+    i64 i = 20;
+    if (v == 0) {
+        i = i - 1;
+        buf[i] = (u8)48;
+    } else {
+        while (v != 0) {
+            i = i - 1;
+            buf[i] = (u8)(48 + (v % (i64)10));
+            v = v / (i64)10;
+        }
+    }
+    sys_write(2, (i64)&buf[i], 20 - i);
+}
+
+void __silver_leak_abort(str msg) {
+    __silver_leak_write_str("leak-check: ");
+    __silver_leak_write_str(msg);
+    sys_write(2, (i64)"\n", 1);
+    sys_exit_group(1);
+    while (true) {}
+}
+
+// -- Alignment helper (local to avoid import cycle) --------------------------
+
+i64 __leak_align_up(i64 value, i64 alignment) {
+    if (alignment <= 1) {
+        return value;
+    }
+    i64 remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    return value + alignment - remainder;
+}
+
+// -- Tracking insert/find ----------------------------------------------------
+
+i64 __leak_find_empty() {
+    for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
+        if (__leak_states[i] == (u8)0 || __leak_states[i] == (u8)2) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+i64 __leak_find_user(i64 user) {
+    for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
+        if (__leak_states[i] == (u8)1 && __leak_user_ptrs[i] == user) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// -- Public allocation hooks -------------------------------------------------
+
+u8* __silver_leak_alloc(i64 size, i64 align) {
+    if (size <= 0) {
+        return mem_alloc_raw_impl(size, align);
+    }
+    // Allocate extra for canaries + alignment slop
+    i64 raw_size = size + align + 16;
+    u8* raw = mem_alloc_raw_impl(raw_size, align);
+    if (raw == (u8*)0) {
+        __silver_leak_abort("allocation failed");
+    }
+    i64 user = __leak_align_up((i64)raw + 8, align);
+    // Live canary before user data
+    i64* canary_before = (i64*)(user - 8);
+    canary_before[0] = LEAK_CANARY_LIVE;
+    // Live canary after user data
+    i64* canary_after = (i64*)(user + size);
+    canary_after[0] = LEAK_CANARY_LIVE;
+
+    i64 slot = __leak_find_empty();
+    if (slot < 0) {
+        __silver_leak_abort("record table full");
+    }
+    __leak_user_ptrs[slot] = user;
+    __leak_raw_ptrs[slot] = (i64)raw;
+    __leak_sizes[slot] = size;
+    __leak_states[slot] = (u8)1;
+    return (u8*)user;
+}
+
+void __silver_leak_free(u8* ptr) {
+    i64 user = (i64)ptr;
+    if (user < MEM_MIN_VALID_ADDR) {
+        // Null or dangling pointer: no-op, matching mem_free_impl.
+        return;
+    }
+    i64 slot = __leak_find_user(user);
+    if (slot < 0) {
+        __silver_leak_abort("invalid or double free");
+    }
+    i64 size = __leak_sizes[slot];
+    // Check canaries
+    i64* canary_before = (i64*)(user - 8);
+    i64* canary_after = (i64*)(user + size);
+    if (canary_before[0] != LEAK_CANARY_LIVE || canary_after[0] != LEAK_CANARY_LIVE) {
+        __silver_leak_abort("buffer overflow or corrupted allocation");
+    }
+    // Write dead canaries
+    canary_before[0] = LEAK_CANARY_DEAD;
+    canary_after[0] = LEAK_CANARY_DEAD;
+    // Mark freed
+    __leak_states[slot] = (u8)2;
+    // Free the raw storage
+    mem_free_raw_impl((u8*)__leak_raw_ptrs[slot]);
+}
+
+u8* __silver_leak_realloc(u8* ptr, i64 new_size, i64 align) {
+    i64 user = (i64)ptr;
+    if (user < MEM_MIN_VALID_ADDR) {
+        return __silver_leak_alloc(new_size, align);
+    }
+    if (new_size <= 0) {
+        __silver_leak_free(ptr);
+        return mem_alloc_raw_impl(0, align);
+    }
+    i64 slot = __leak_find_user(user);
+    if (slot < 0) {
+        __silver_leak_abort("invalid or double free in realloc");
+    }
+    i64 old_size = __leak_sizes[slot];
+    u8* fresh = __silver_leak_alloc(new_size, align);
+    if ((i64)fresh < MEM_MIN_VALID_ADDR) {
+        return (u8*)0;
+    }
+    i64 copy_n = old_size;
+    if (new_size < old_size) {
+        copy_n = new_size;
+    }
+    silver_rt_memcpy(fresh, ptr, copy_n);
+    __silver_leak_free(ptr);
+    return fresh;
+}
+
+i32 __silver_leak_check_report() {
+    if (!__silver_leak_check_enabled) {
+        return 0;
+    }
+    i32 count = 0;
+    for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
+        if (__leak_states[i] == (u8)1) {
+            __silver_leak_write_str("leak-check: leak ptr=0x");
+            __silver_leak_write_hex(__leak_user_ptrs[i]);
+            __silver_leak_write_str(" size=");
+            __silver_leak_write_i64(__leak_sizes[i]);
+            __silver_leak_write_str("\n");
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// -- Checked wrappers (routed through leak-check hooks when enabled) ---------
+
+u8* mem_alloc_impl(i64 size, i64 align) {
+    if (__silver_leak_check_enabled) {
+        return __silver_leak_alloc(size, align);
+    }
+    return mem_alloc_raw_impl(size, align);
+}
+
+void mem_free_impl(u8* ptr) {
+    if (__silver_leak_check_enabled) {
+        __silver_leak_free(ptr);
+        return;
+    }
+    mem_free_raw_impl(ptr);
+}
+
 /// Core realloc. Null/dangling input behaves like a fresh allocation;
 /// new_size <= 0 frees and returns a dangling pointer.
 u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
+    if (__silver_leak_check_enabled) {
+        return __silver_leak_realloc(ptr, new_size, align);
+    }
     i64 a = (i64)ptr;
     if (a < MEM_MIN_VALID_ADDR) {
-        return mem_alloc_impl(new_size, align);
+        return mem_alloc_raw_impl(new_size, align);
     }
     if (new_size <= 0) {
-        mem_free_impl(ptr);
+        mem_free_raw_impl(ptr);
         return mem_dangling(align);
     }
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
@@ -222,12 +463,12 @@ u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
     if (new_size <= cap) {
         return ptr;
     }
-    u8* fresh = mem_alloc_impl(new_size, align);
+    u8* fresh = mem_alloc_raw_impl(new_size, align);
     if (fresh == (u8*)0) {
         return (u8*)0;
     }
     silver_rt_memcpy(fresh, ptr, cap);
-    mem_free_impl(ptr);
+    mem_free_raw_impl(ptr);
     return fresh;
 }
 

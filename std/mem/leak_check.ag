@@ -1,0 +1,8 @@
+// std/mem/leak_check.ag — Leak-check runtime (consolidated into std.mem.alloc).
+//
+// The leak-check tracking tables, hooks, and report function now live directly
+// in std/mem/alloc.ag to avoid a circular import.  This module exists as a
+// compatibility shim so that `import std.mem.leak_check;` still pulls in
+// the leak-check symbols.
+
+import std.mem.alloc;

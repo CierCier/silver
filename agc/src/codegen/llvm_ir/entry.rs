@@ -106,6 +106,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             debug,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
+            leak_check: false,
         };
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
@@ -134,6 +135,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_path: Option<&std::path::Path>,
         source_text: Option<&str>,
         debug_info: bool,
+    ) -> CodegenResult<String> {
+        Self::generate_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+        )
+    }
+    pub fn generate_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
     ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -177,6 +197,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             temp_counter: 0,
+            leak_check,
         };
         generator.declare_imported_modules(imported_modules)?;
         generator.generate_program(program)?;
@@ -233,6 +254,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             None,
             false,
+            false,
         )
     }
 
@@ -247,6 +269,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
     ) -> CodegenResult<()> {
+        Self::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+        )
+    }
+    pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+    ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
             imported_modules,
@@ -258,6 +305,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_path,
             source_text,
             debug_info,
+            leak_check,
         )
     }
 
@@ -310,6 +358,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             None,
             false,
+            false,
         )
     }
 
@@ -324,6 +373,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
     ) -> CodegenResult<()> {
+        Self::emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+        )
+    }
+    pub fn emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+    ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
             imported_modules,
@@ -335,6 +409,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_path,
             source_text,
             debug_info,
+            leak_check,
         )
     }
 
@@ -360,6 +435,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_path,
             source_text,
             debug_info,
+            false,
         )
     }
 
@@ -374,6 +450,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_path: Option<&Path>,
         source_text: Option<&str>,
         debug_info: bool,
+        leak_check: bool,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -417,6 +494,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
             temp_counter: 0,
+            leak_check,
         };
         generator.declare_imported_modules(imported_modules)?;
 

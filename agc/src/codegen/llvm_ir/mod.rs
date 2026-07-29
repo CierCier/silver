@@ -98,6 +98,7 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) debug: Option<DebugContext<'ctx>>,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
+    pub(crate) leak_check: bool,
 }
 
 pub(crate) mod entry;

@@ -7,6 +7,7 @@
 
 import std.fmt;
 import std.mem.alloc;
+import std.mem.drop;
 import std.sys.result;
 
 const i32 EOF = -1;
@@ -191,6 +192,9 @@ impl BufWriter {
         }
     }
 
+}
+
+impl Drop<BufWriter> for BufWriter {
     /// Drop: flush remaining data, then free the buffer.
     void drop(BufWriter* self) {
         self.flush();
@@ -201,6 +205,8 @@ impl BufWriter {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Global buffer flush — called by _start after main() returns.
@@ -224,18 +230,24 @@ struct File {
     bool is_open;
     bool at_eof;
     bool had_error;
+    bool owns_fd;
 }
 
 impl File {
     File from_fd(i32 fd) {
-        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false };
-        return file;
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true };
+        return move file;
     }
 
     File closed() {
-        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false };
-        return file;
+        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false };
+        return move file;
     }
+    File borrow_fd(i32 fd) {
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false };
+        return move file;
+    }
+
 
     /// fopen-style mode string -> open(2) flags.  Unknown/empty modes
     /// conservatively map to O_RDONLY.
@@ -309,17 +321,24 @@ impl File {
             self.is_open = false;
             return 0;
         }
+        if (!self.owns_fd) {
+            self.fd = -1;
+            self.is_open = false;
+            self.owns_fd = false;
+            return 0;
+        }
         SysResult r = try_close(self.fd);
         if (r.is_ok()) {
             self.fd = -1;
             self.is_open = false;
+            self.owns_fd = false;
             return 0;
         }
         return (i32)r.errno;
     }
 
     /// No userspace buffer to flush: a valid fd is already flushed.
-    i32 flush(File self) {
+    i32 flush(File* self) {
         if (self.invalid()) {
             return EOF;
         }
@@ -528,6 +547,13 @@ impl File {
     }
 }
 
+impl Drop<File> for File {
+    void drop(File* self) {
+        self.close();
+    }
+}
+
+
 // True when `needle` (a byte value) occurs in the null-terminated string `p`.
 bool cstr_contains(u8* p, u8 needle) {
     i64 i = 0;
@@ -542,15 +568,15 @@ bool cstr_contains(u8* p, u8 needle) {
 
 // Convenience constructors for the standard descriptors.
 File stdin_file() {
-    return File.from_fd(STDIN_FD);
+    return File.borrow_fd(STDIN_FD);
 }
 
 File stdout_file() {
-    return File.from_fd(STDOUT_FD);
+    return File.borrow_fd(STDOUT_FD);
 }
 
 File stderr_file() {
-    return File.from_fd(STDERR_FD);
+    return File.borrow_fd(STDERR_FD);
 }
 
 // High-level helpers. These write straight through the write(2) syscall
