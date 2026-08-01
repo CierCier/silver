@@ -1,19 +1,20 @@
-
-
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum, BasicMetadataValueEnum, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::types::Type;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> CodegenResult<()> {
+    pub(crate) fn emit_expression_statement(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<()> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Call {
                 function,
@@ -37,7 +38,6 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
             }
         }
     }
-
 
     pub(crate) fn emit_indirect_call_expression(
         &mut self,
@@ -94,7 +94,6 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
             ))
         }
     }
-
 
     pub(crate) fn emit_call_expression(
         &mut self,
@@ -432,10 +431,8 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
                                 if let Some(drop_fn_name) =
                                     self.get_drop_function_name(receiver_ty)?
                                 {
-                                    let flag_name = format!(
-                                        "method.recv.tmp.{}.drop",
-                                        self.temp_counter
-                                    );
+                                    let flag_name =
+                                        format!("method.recv.tmp.{}.drop", self.temp_counter);
                                     self.temp_counter += 1;
                                     let flag_alloca = self.create_entry_alloca(
                                         function_ctx,
@@ -613,7 +610,6 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
             ))
         }
     }
-
 
     pub(crate) fn apply_variadic_default_promotion(
         &self,

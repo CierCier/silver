@@ -128,9 +128,7 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::UnexpectedToken {
-                expected,
-                found,
-                ..
+                expected, found, ..
             } => {
                 write!(
                     f,

@@ -1,20 +1,18 @@
-
-
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::module::Linkage;
 use inkwell::types::BasicType;
 use inkwell::values::{BasicValueEnum, FunctionValue};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, VarInfo};
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-pub(crate) fn emit_function_body(
+    pub(crate) fn emit_function_body(
         &mut self,
         function: FunctionValue<'ctx>,
         parameters: &[ast::Parameter],
@@ -168,7 +166,6 @@ pub(crate) fn emit_function_body(
         Ok(())
     }
 
-
     pub(crate) fn emit_if_statement(
         &mut self,
         condition: &ast::Expression,
@@ -229,7 +226,6 @@ pub(crate) fn emit_function_body(
         Ok(())
     }
 
-
     pub(crate) fn emit_while_statement(
         &mut self,
         condition: &ast::Expression,
@@ -274,7 +270,6 @@ pub(crate) fn emit_function_body(
         self.builder.position_at_end(end_bb);
         Ok(())
     }
-
 
     pub(crate) fn emit_for_statement(
         &mut self,
@@ -342,7 +337,6 @@ pub(crate) fn emit_function_body(
         self.pop_scope();
         Ok(())
     }
-
 
     pub(crate) fn emit_for_in_statement(
         &mut self,
@@ -681,7 +675,6 @@ pub(crate) fn emit_function_body(
         }
     }
 
-
     pub(crate) fn emit_let_statement(
         &mut self,
         let_stmt: &ast::LetStatement,
@@ -756,17 +749,20 @@ pub(crate) fn emit_function_body(
             let global = self.module.add_global(storage_ty, None, &global_name);
             global.set_linkage(Linkage::Internal);
             if let Some(init) = &let_stmt.initializer {
-                let const_val = self.emit_const_value_for_type(init, &inferred_ty).map_err(|e| {
-                    if e.message == "global initializer must be a compile-time constant expression"
-                    {
-                        CodegenError::with_span(
-                            "static local initializer must be a compile-time constant",
-                            init.span.clone(),
-                        )
-                    } else {
-                        e
-                    }
-                })?;
+                let const_val =
+                    self.emit_const_value_for_type(init, &inferred_ty)
+                        .map_err(|e| {
+                            if e.message
+                                == "global initializer must be a compile-time constant expression"
+                            {
+                                CodegenError::with_span(
+                                    "static local initializer must be a compile-time constant",
+                                    init.span.clone(),
+                                )
+                            } else {
+                                e
+                            }
+                        })?;
                 global.set_initializer(&const_val);
             } // no initializer → zero-initialized (LLVM global default)
             if let Some(scope) = self.variables.last_mut() {
@@ -845,8 +841,11 @@ pub(crate) fn emit_function_body(
         Ok(())
     }
 
-
-    pub(crate) fn infer_ast_type_from_value(&self, value: &BasicValueEnum<'ctx>, span: &Span) -> ast::Type {
+    pub(crate) fn infer_ast_type_from_value(
+        &self,
+        value: &BasicValueEnum<'ctx>,
+        span: &Span,
+    ) -> ast::Type {
         let kind = match value {
             BasicValueEnum::IntValue(int_value) => match int_value.get_type().get_bit_width() {
                 1 => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
@@ -867,7 +866,6 @@ pub(crate) fn emit_function_body(
             span: span.clone(),
         }
     }
-
 
     pub(crate) fn emit_match_statement(
         &mut self,

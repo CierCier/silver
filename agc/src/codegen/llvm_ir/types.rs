@@ -1,16 +1,18 @@
-
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
-use inkwell::types::{AnyType, BasicType, BasicTypeEnum, BasicMetadataTypeEnum, FunctionType};
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::parser::ast;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-    pub(crate) fn value_write_method_name(&mut self, expr: &ast::Expression) -> Result<String, String> {
+    pub(crate) fn value_write_method_name(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> Result<String, String> {
         let val_type = self.resolve_receiver_type(expr);
         match val_type {
             Some(ty) => Self::type_to_write_method(&ty.kind),
@@ -59,7 +61,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    pub(crate) fn lower_basic_type(&mut self, ty: &ast::Type) -> CodegenResult<BasicTypeEnum<'ctx>> {
+    pub(crate) fn lower_basic_type(
+        &mut self,
+        ty: &ast::Type,
+    ) -> CodegenResult<BasicTypeEnum<'ctx>> {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(primitive) => {
                 let basic = match primitive {
@@ -583,5 +588,4 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::TypeKind::Primitive(ast::PrimitiveType::Void)
         )
     }
-
 }

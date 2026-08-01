@@ -3,13 +3,13 @@ mod tests {
     use super::*;
     use crate::codegen::llvm_ir::LlvmIrGenerator;
     use crate::codegen::llvm_ir::generate::run_module_optimization_passes;
-    use inkwell::OptimizationLevel;
-    use crate::symbol_table::CompilerSymbolTable;
     use crate::lexer::lex;
-    use crate::parser::ast;
     use crate::parser::Parser;
+    use crate::parser::ast;
     use crate::semantic::monomorph;
     use crate::semantic::typeck::TypeChecker;
+    use crate::symbol_table::CompilerSymbolTable;
+    use inkwell::OptimizationLevel;
     use inkwell::context::Context;
     use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 
@@ -464,7 +464,9 @@ mod tests {
 
     #[test]
     fn static_local_lowers_to_internal_global() {
-        let ir = lower_to_llvm("i32 main() { static i32 counter = 0; counter = counter + 1; return counter; }");
+        let ir = lower_to_llvm(
+            "i32 main() { static i32 counter = 0; counter = counter + 1; return counter; }",
+        );
         assert!(
             ir.contains("@main.counter.0 = internal global i32 0"),
             "expected internal global for static local:\n{ir}"

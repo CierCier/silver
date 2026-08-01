@@ -1,4 +1,3 @@
-
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::AddressSpace;
@@ -6,19 +5,20 @@ use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::module::Linkage;
 use inkwell::targets::TargetData;
-use inkwell::types::{AnyType, BasicType, BasicTypeEnum, BasicMetadataTypeEnum};
-use inkwell::values::{ArrayValue, BasicValue, BasicValueEnum, BasicMetadataValueEnum, FunctionValue, PointerValue};
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::values::{
+    ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-
     pub(crate) fn create_entry_alloca(
         &self,
         function: FunctionValue<'ctx>,
@@ -39,7 +39,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to allocate local `{name}`: {e}")))
     }
 
-    pub(crate) fn intern_string_literal(&mut self, value: &str) -> CodegenResult<PointerValue<'ctx>> {
+    pub(crate) fn intern_string_literal(
+        &mut self,
+        value: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
         Ok(self.intern_const_string_global(value))
     }
 
@@ -1724,7 +1727,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ///
     /// All statements except the last are emitted for side effects. The final
     /// statement must be an expression and becomes the block's result value.
-    pub(crate) fn emit_block_value(&mut self, block: &ast::Block) -> CodegenResult<BasicValueEnum<'ctx>> {
+    pub(crate) fn emit_block_value(
+        &mut self,
+        block: &ast::Block,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
         if block.statements.is_empty() {
             return Err(CodegenError::with_span(
                 "value-producing block cannot be empty",
@@ -2098,12 +2104,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 for (i, binding) in bindings.iter().enumerate() {
                                     if let Some(pt) = payload_types.get(i).cloned() {
                                         let llvm_ty = self.lower_basic_type(&pt)?;
-                                        let field_ptr = if byte_offset == 0 {
-                                            data_ptr
-                                        } else {
-                                            unsafe {
-                                                self.builder
-                                                    .build_gep(
+                                        let field_ptr =
+                                            if byte_offset == 0 {
+                                                data_ptr
+                                            } else {
+                                                unsafe {
+                                                    self.builder.build_gep(
                                                         self.context.i8_type(),
                                                         data_ptr,
                                                         &[self
@@ -2112,11 +2118,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                             .const_int(byte_offset as u64, false)],
                                                         "match.field.gep",
                                                     )
-                                            }
-                                            .map_err(|e| {
-                                                CodegenError::new(format!("GEP match field: {e}"))
-                                            })?
-                                        };
+                                                }
+                                                .map_err(|e| {
+                                                    CodegenError::new(format!(
+                                                        "GEP match field: {e}"
+                                                    ))
+                                                })?
+                                            };
                                         let cast_ptr = self
                                             .builder
                                             .build_pointer_cast(
@@ -2133,8 +2141,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             .map_err(|e| {
                                                 CodegenError::new(format!("load data payload: {e}"))
                                             })?;
-                                        let alloca = self
-                                            .create_entry_alloca(function, &binding.name, llvm_ty)?;
+                                        let alloca = self.create_entry_alloca(
+                                            function,
+                                            &binding.name,
+                                            llvm_ty,
+                                        )?;
                                         self.builder.build_store(alloca, loaded).map_err(|e| {
                                             CodegenError::new(format!("store data binding: {e}"))
                                         })?;
@@ -2621,5 +2632,4 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )),
         }
     }
-
 }

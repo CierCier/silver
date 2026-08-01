@@ -915,8 +915,7 @@ mod tests {
 
     #[test]
     fn trait_impl_missing_method_is_error() {
-        let program =
-            parse("trait Add { i32 add(i32 self, i32 other); } impl Add for i32 { }");
+        let program = parse("trait Add { i32 add(i32 self, i32 other); } impl Add for i32 { }");
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
     }

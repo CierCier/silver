@@ -1,19 +1,18 @@
-
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::types::StructType;
 use inkwell::values::{BasicValue, BasicValueEnum};
 
-use crate::codegen::{CodegenError, CodegenResult};
-use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::FunctionSig;
+use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::parser::ast;
 use crate::semantic::monomorph::mangle_name;
 use crate::symbol_table::SymbolKind;
 use crate::types::Type;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-pub(crate) fn substitute_generic_type(
+    pub(crate) fn substitute_generic_type(
         ty: &ast::Type,
         substitutions: &HashMap<String, ast::Type>,
     ) -> ast::Type {
@@ -95,7 +94,6 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn ensure_named_struct_type(
         &mut self,
         named: &ast::NamedType,
@@ -155,14 +153,15 @@ pub(crate) fn substitute_generic_type(
         Ok(struct_ty)
     }
 
-
-    pub(crate) fn enum_backing_type_for_named(&self, named: &ast::NamedType) -> Option<ast::PrimitiveType> {
+    pub(crate) fn enum_backing_type_for_named(
+        &self,
+        named: &ast::NamedType,
+    ) -> Option<ast::PrimitiveType> {
         if named.path.len() != 1 {
             return None;
         }
         self.enum_backing_types.get(&named.path[0].name).cloned()
     }
-
 
     pub(crate) fn enum_member_constant(
         &self,
@@ -200,14 +199,12 @@ pub(crate) fn substitute_generic_type(
         )
     }
 
-
     pub(crate) fn path_name(path: &[ast::Identifier]) -> String {
         path.iter()
             .map(|segment| segment.name.as_str())
             .collect::<Vec<_>>()
             .join("::")
     }
-
 
     pub(crate) fn sanitize_monomorph(value: &str) -> String {
         let mut out = String::new();
@@ -223,7 +220,6 @@ pub(crate) fn substitute_generic_type(
         }
         if out.is_empty() { "_".to_string() } else { out }
     }
-
 
     pub(crate) fn monomorph_owner_name_from_named(named: &ast::NamedType) -> String {
         let base = Self::named_type_name(named);
@@ -242,11 +238,9 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn mangle_method_name(owner: &str, method: &str) -> String {
         format!("{owner}__{method}")
     }
-
 
     pub(crate) fn cast_method_name(target_type: &ast::Type) -> String {
         match target_type.kind.as_ref() {
@@ -260,7 +254,6 @@ pub(crate) fn substitute_generic_type(
             _ => "cast_custom".to_string(),
         }
     }
-
 
     pub(crate) fn owner_name_from_type(ty: &ast::Type) -> Option<String> {
         match ty.kind.as_ref() {
@@ -298,7 +291,6 @@ pub(crate) fn substitute_generic_type(
             _ => Vec::new(),
         }
     }
-
 
     pub(crate) fn substitute_expression_types(
         expr: &mut ast::Expression,
@@ -444,8 +436,10 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
-    pub(crate) fn substitute_block_types(block: &mut ast::Block, mapping: &HashMap<String, ast::Type>) {
+    pub(crate) fn substitute_block_types(
+        block: &mut ast::Block,
+        mapping: &HashMap<String, ast::Type>,
+    ) {
         for statement in &mut block.statements {
             match &mut statement.kind {
                 ast::StatementKind::Block(block) => Self::substitute_block_types(block, mapping),
@@ -536,7 +530,6 @@ pub(crate) fn substitute_generic_type(
             }
         }
     }
-
 
     pub(crate) fn rewrite_call_sites_in_expression(&self, expr: &mut ast::Expression) {
         match expr.kind.as_mut() {
@@ -661,7 +654,6 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn try_instantiate_generic_impl_method_for_type(
         &mut self,
         receiver_type: &ast::Type,
@@ -669,7 +661,6 @@ pub(crate) fn substitute_generic_type(
     ) -> CodegenResult<Option<String>> {
         self.try_instantiate_generic_impl_method_for_type_filtered(receiver_type, method_name, None)
     }
-
 
     pub(crate) fn try_instantiate_generic_impl_method_for_type_filtered(
         &mut self,
@@ -815,7 +806,6 @@ pub(crate) fn substitute_generic_type(
         Ok(None)
     }
 
-
     pub(crate) fn resolve_receiver_type(&mut self, expr: &ast::Expression) -> Option<ast::Type> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
@@ -907,7 +897,6 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn receiver_owner_name(&mut self, expr: &ast::Expression) -> Option<String> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_from_type(ty),
@@ -924,7 +913,6 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn receiver_owner_candidates(&mut self, expr: &ast::Expression) -> Vec<String> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Self::owner_name_candidates_from_type(ty),
@@ -940,7 +928,6 @@ pub(crate) fn substitute_generic_type(
             }
         }
     }
-
 
     pub(crate) fn has_generic_placeholder_type(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
@@ -981,13 +968,11 @@ pub(crate) fn substitute_generic_type(
         }
     }
 
-
     pub(crate) fn is_generic_placeholder_name(&self, name: &str) -> bool {
         self.struct_generics
             .values()
             .any(|params| params.iter().any(|p| p == name))
     }
-
 
     pub(crate) fn has_generic_placeholder_signature(
         &self,

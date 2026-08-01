@@ -122,9 +122,20 @@ impl Profiler {
         });
     }
 
-    fn render_report_line(&self, name: &str, width: usize, elapsed_ms: f64, before: u64, after: u64, skipped: bool) -> String {
+    fn render_report_line(
+        &self,
+        name: &str,
+        width: usize,
+        elapsed_ms: f64,
+        before: u64,
+        after: u64,
+        skipped: bool,
+    ) -> String {
         if skipped {
-            return format!("{name:<width$} {:<10} {:<10} {:<10} {:<10}", "SKIPPED", "-", "-", "-");
+            return format!(
+                "{name:<width$} {:<10} {:<10} {:<10} {:<10}",
+                "SKIPPED", "-", "-", "-"
+            );
         }
         let delta = after as i64 - before as i64;
         let delta_str = if delta >= 0 {
@@ -429,9 +440,17 @@ mod tests {
         let it = &il.children[0];
         assert_eq!(
             names(&it.children),
-            vec!["read test.ag", "lex test.ag", "parse test.ag", "import memory.ag"]
+            vec![
+                "read test.ag",
+                "lex test.ag",
+                "parse test.ag",
+                "import memory.ag"
+            ]
         );
         let im = &it.children[3];
-        assert_eq!(names(&im.children), vec!["read memory.ag", "lex memory.ag", "parse memory.ag"]);
+        assert_eq!(
+            names(&im.children),
+            vec!["read memory.ag", "lex memory.ag", "parse memory.ag"]
+        );
     }
 }

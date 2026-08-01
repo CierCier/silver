@@ -15,10 +15,24 @@ pub enum Severity {
 pub fn render(span: Span, message: &str, severity: Severity) -> String {
     let (path, line_text, line, col) = match source_file(span.file) {
         Some(file) if span.start_line > 0 => {
-            let line_text = file.text.lines().nth(span.start_line as usize - 1).unwrap_or("");
-            (file.path, line_text.to_string(), span.start_line, span.start_col)
+            let line_text = file
+                .text
+                .lines()
+                .nth(span.start_line as usize - 1)
+                .unwrap_or("");
+            (
+                file.path,
+                line_text.to_string(),
+                span.start_line,
+                span.start_col,
+            )
         }
-        _ => (String::from("memory"), String::new(), span.start_line, span.start_col),
+        _ => (
+            String::from("memory"),
+            String::new(),
+            span.start_line,
+            span.start_col,
+        ),
     };
 
     let header = match severity {
@@ -95,8 +109,15 @@ mod tests {
             end_line: line,
             end_col: col + 3,
         };
-        let out = render(span, "integer literal 300 does not fit in type U8", Severity::Error);
-        assert!(out.contains("/tmp/diag_test.ag:2:14"), "header location: {out}");
+        let out = render(
+            span,
+            "integer literal 300 does not fit in type U8",
+            Severity::Error,
+        );
+        assert!(
+            out.contains("/tmp/diag_test.ag:2:14"),
+            "header location: {out}"
+        );
         assert!(
             out.contains("300 does not fit in type U8"),
             "header message: {out}"

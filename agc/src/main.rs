@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString};
 
 use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
@@ -1300,11 +1300,16 @@ fn run_tool(mut command: Command, label: &str) -> Result<(), String> {
 }
 // ---- Cached cc queries — each arg is a LazyLock, spawned once ----
 
-static CRT1_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crt1.o").unwrap_or_default());
-static CRTI_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crti.o").unwrap_or_default());
-static CRTBEGIN_O: LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtbegin.o").unwrap_or_default());
-static CRTEND_O: LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtend.o").unwrap_or_default());
-static CRTN_O:   LazyLock<String> = LazyLock::new(|| cc_query_raw("-print-file-name=crtn.o").unwrap_or_default());
+static CRT1_O: LazyLock<String> =
+    LazyLock::new(|| cc_query_raw("-print-file-name=crt1.o").unwrap_or_default());
+static CRTI_O: LazyLock<String> =
+    LazyLock::new(|| cc_query_raw("-print-file-name=crti.o").unwrap_or_default());
+static CRTBEGIN_O: LazyLock<String> =
+    LazyLock::new(|| cc_query_raw("-print-file-name=crtbegin.o").unwrap_or_default());
+static CRTEND_O: LazyLock<String> =
+    LazyLock::new(|| cc_query_raw("-print-file-name=crtend.o").unwrap_or_default());
+static CRTN_O: LazyLock<String> =
+    LazyLock::new(|| cc_query_raw("-print-file-name=crtn.o").unwrap_or_default());
 static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     cc_query_raw("-print-search-dirs")
         .ok()
@@ -1313,7 +1318,9 @@ static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
             for line in output.lines() {
                 if let Some(rest) = line.strip_prefix("libraries: =") {
                     for raw in rest.split(':') {
-                        if !raw.is_empty() { dirs.push(PathBuf::from(raw)); }
+                        if !raw.is_empty() {
+                            dirs.push(PathBuf::from(raw));
+                        }
                     }
                 }
             }

@@ -1,20 +1,19 @@
-
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::module::Linkage;
 use inkwell::values::{BasicMetadataValueEnum, PointerValue};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig, VarInfo};
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 use crate::types::Type;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-pub(crate) fn set_debug_location(&self, span: &Span) {
+    pub(crate) fn set_debug_location(&self, span: &Span) {
         if let Some(debug) = &self.debug {
             let (line, col, _, _) = debug.source_map.span_to_line_col(span);
             let loc = debug.create_debug_location(self.context, line, col);
@@ -22,18 +21,15 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         }
     }
 
-
     pub(crate) fn push_scope(&mut self) {
         self.variables.push(HashMap::default());
         self.defers.push(Vec::new());
     }
 
-
     pub(crate) fn pop_scope(&mut self) {
         let _ = self.variables.pop();
         let _ = self.defers.pop();
     }
-
 
     pub(crate) fn emit_defers(&mut self, levels: usize) -> CodegenResult<()> {
         let total = self.defers.len();
@@ -100,14 +96,12 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         Ok(())
     }
 
-
     pub(crate) fn lookup_variable(&self, name: &str) -> Option<VarInfo<'ctx>> {
         self.variables
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
     }
-
 
     pub(crate) fn lookup_extern_global(
         &self,
@@ -116,7 +110,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         let ty = self.extern_globals.get(name)?.clone();
         self.module.get_global(name).map(|global| (global, ty))
     }
-
 
     pub(crate) fn lookup_module_global(
         &self,
@@ -130,7 +123,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         self.lookup_extern_global(name)
     }
 
-
     pub(crate) fn lookup_storage(&self, name: &str) -> Option<(PointerValue<'ctx>, ast::Type)> {
         if let Some(info) = self.lookup_variable(name) {
             return Some((info.ptr, info.ty));
@@ -139,14 +131,12 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
             .map(|(global, ty)| (global.as_pointer_value(), ty))
     }
 
-
     pub(crate) fn lookup_value_type(&self, name: &str) -> Option<ast::Type> {
         self.lookup_variable(name)
             .map(|info| info.ty)
             .or_else(|| self.global_variables.get(name).cloned())
             .or_else(|| self.extern_globals.get(name).cloned())
     }
-
 
     pub(crate) fn intern_const_string_global(&mut self, value: &str) -> PointerValue<'ctx> {
         if let Some(existing) = self.string_constants.get(value) {
@@ -166,7 +156,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         ptr
     }
 
-
     pub(crate) fn register_function_signature(
         &mut self,
         llvm_name: &str,
@@ -183,14 +172,12 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         self.function_sigs.insert(symbol_id, sig);
     }
 
-
     pub(crate) fn signature_for_name(&self, llvm_name: &str) -> Option<FunctionSig> {
         self.function_name_to_symbol
             .get(llvm_name)
             .and_then(|symbol_id| self.function_sigs.get(symbol_id))
             .cloned()
     }
-
 
     pub(crate) fn named_type_name(named: &ast::NamedType) -> String {
         named
@@ -200,7 +187,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
             .collect::<Vec<_>>()
             .join("::")
     }
-
 
     pub(crate) fn named_type_key(named: &ast::NamedType) -> String {
         let base = Self::named_type_name(named);
@@ -216,8 +202,10 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         }
     }
 
-
-    pub(crate) fn get_drop_function_name(&mut self, ty: &ast::Type) -> CodegenResult<Option<String>> {
+    pub(crate) fn get_drop_function_name(
+        &mut self,
+        ty: &ast::Type,
+    ) -> CodegenResult<Option<String>> {
         // 1. Check concrete Drop-impl owners already registered
         let drop_owners = Self::owner_name_candidates_from_type(ty);
         for owner in &drop_owners {
@@ -237,7 +225,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         // 3. No Drop trait impl
         Ok(None)
     }
-
 
     pub(crate) fn register_field_drops(
         &mut self,
@@ -287,7 +274,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
         Ok(())
     }
 
-
     pub(crate) fn extract_named_type(ty: &ast::Type) -> Option<&ast::NamedType> {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => Some(named),
@@ -296,7 +282,6 @@ pub(crate) fn set_debug_location(&self, span: &Span) {
             _ => None,
         }
     }
-
 
     pub(crate) fn is_pointer_or_reference(ty: &ast::Type) -> bool {
         matches!(

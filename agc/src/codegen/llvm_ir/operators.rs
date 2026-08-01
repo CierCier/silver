@@ -1,19 +1,17 @@
-
-
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
 
-use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-pub(crate) fn emit_unary_expression(
+    pub(crate) fn emit_unary_expression(
         &mut self,
         operator: &ast::UnaryOperator,
         operand: &ast::Expression,
@@ -160,7 +158,6 @@ pub(crate) fn emit_unary_expression(
         }
     }
 
-
     pub(crate) fn emit_inc_dec(
         &mut self,
         operand: &ast::Expression,
@@ -232,7 +229,10 @@ pub(crate) fn emit_unary_expression(
     /// Check that an assignment target is mutable. Returns Ok(()) or a CodegenError
     /// with a message like "cannot assign to const variable 'x'".
 
-    pub(crate) fn check_assignment_mutability(&mut self, target: &ast::Expression) -> CodegenResult<()> {
+    pub(crate) fn check_assignment_mutability(
+        &mut self,
+        target: &ast::Expression,
+    ) -> CodegenResult<()> {
         match target.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if let Some(info) = self.lookup_variable(&ident.name) {
@@ -311,7 +311,6 @@ pub(crate) fn emit_unary_expression(
             _ => Ok(()),
         }
     }
-
 
     pub(crate) fn emit_binary_expression(
         &mut self,
@@ -725,7 +724,6 @@ pub(crate) fn emit_unary_expression(
         Ok(phi.as_basic_value())
     }
 
-
     pub(crate) fn emit_arith_values(
         &mut self,
         lhs: &BasicValueEnum<'ctx>,
@@ -802,7 +800,6 @@ pub(crate) fn emit_unary_expression(
             )),
         }
     }
-
 
     pub(crate) fn emit_binary_values(
         &mut self,
@@ -919,7 +916,6 @@ pub(crate) fn emit_unary_expression(
         }
     }
 
-
     pub(crate) fn emit_compare_values(
         &mut self,
         lhs: &BasicValueEnum<'ctx>,
@@ -934,16 +930,32 @@ pub(crate) fn emit_unary_expression(
                     ast::BinaryOperator::Equal => IntPredicate::EQ,
                     ast::BinaryOperator::NotEqual => IntPredicate::NE,
                     ast::BinaryOperator::Less => {
-                        if is_unsigned { IntPredicate::ULT } else { IntPredicate::SLT }
+                        if is_unsigned {
+                            IntPredicate::ULT
+                        } else {
+                            IntPredicate::SLT
+                        }
                     }
                     ast::BinaryOperator::Greater => {
-                        if is_unsigned { IntPredicate::UGT } else { IntPredicate::SGT }
+                        if is_unsigned {
+                            IntPredicate::UGT
+                        } else {
+                            IntPredicate::SGT
+                        }
                     }
                     ast::BinaryOperator::LessEqual => {
-                        if is_unsigned { IntPredicate::ULE } else { IntPredicate::SLE }
+                        if is_unsigned {
+                            IntPredicate::ULE
+                        } else {
+                            IntPredicate::SLE
+                        }
                     }
                     ast::BinaryOperator::GreaterEqual => {
-                        if is_unsigned { IntPredicate::UGE } else { IntPredicate::SGE }
+                        if is_unsigned {
+                            IntPredicate::UGE
+                        } else {
+                            IntPredicate::SGE
+                        }
                     }
                     _ => {
                         return Err(CodegenError::with_span(
@@ -1012,7 +1024,6 @@ pub(crate) fn emit_unary_expression(
         }
     }
 
-
     pub(crate) fn emit_as_bool(
         &mut self,
         value: &BasicValueEnum<'ctx>,
@@ -1041,7 +1052,6 @@ pub(crate) fn emit_unary_expression(
             )),
         }
     }
-
 
     pub(crate) fn cast_value_to_basic_type(
         &mut self,
@@ -1120,7 +1130,6 @@ pub(crate) fn emit_unary_expression(
         }
     }
 
-
     pub(crate) fn cast_value_to_ast_type(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -1154,7 +1163,10 @@ pub(crate) fn emit_unary_expression(
             .builder
             .build_call(cast_fn, &args, "cast.arg")
             .map_err(|e| {
-                CodegenError::with_span(format!("failed to call user-defined cast: {e}"), span.clone())
+                CodegenError::with_span(
+                    format!("failed to call user-defined cast: {e}"),
+                    span.clone(),
+                )
             })?;
         let result = call.try_as_basic_value().basic().ok_or_else(|| {
             CodegenError::with_span("user-defined cast returned void".to_string(), span.clone())
@@ -1181,7 +1193,10 @@ pub(crate) fn emit_unary_expression(
                         .build_int_z_extend_or_bit_cast(int_val, int_ty, "cast.u2i")
                         .map(|v| v.as_basic_value_enum())
                         .map_err(|e| {
-                            CodegenError::with_span(format!("unsigned int cast failed: {e}"), span.clone())
+                            CodegenError::with_span(
+                                format!("unsigned int cast failed: {e}"),
+                                span.clone(),
+                            )
                         })
                 } else {
                     self.cast_value_to_basic_type(value, target, span)

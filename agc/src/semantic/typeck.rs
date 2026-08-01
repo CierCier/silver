@@ -652,7 +652,8 @@ impl TypeChecker {
                     _ => {
                         self.error(
                             "let declarations must bind a single identifier; destructuring \
-                            patterns are not supported".to_string(),
+                            patterns are not supported"
+                                .to_string(),
                             let_stmt.pattern.span.clone(),
                         );
                     }
@@ -728,7 +729,9 @@ impl TypeChecker {
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
         let ty = match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected, &expr.span),
+            ast::ExpressionKind::Literal(literal) => {
+                self.literal_type(literal, expected, &expr.span)
+            }
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
                     if self.is_moved(&ident.name) {
@@ -856,19 +859,26 @@ impl TypeChecker {
                                 }
                             }
                         }
-                    ast::UnaryOperator::Not => {
-                        if is_bool(&operand_ty) {
-                            Type::Primitive(ast::PrimitiveType::Bool)
-                        } else if !self.is_primitive_type(&operand_ty) {
-                            if let Some(result_ty) = self.resolve_method_overload_types(
-                                &operand_ty,
-                                "__not",
-                                &[],
-                                None,
-                                MethodCallStyle::Instance,
-                                expr.span.clone(),
-                            ) {
-                                result_ty
+                        ast::UnaryOperator::Not => {
+                            if is_bool(&operand_ty) {
+                                Type::Primitive(ast::PrimitiveType::Bool)
+                            } else if !self.is_primitive_type(&operand_ty) {
+                                if let Some(result_ty) = self.resolve_method_overload_types(
+                                    &operand_ty,
+                                    "__not",
+                                    &[],
+                                    None,
+                                    MethodCallStyle::Instance,
+                                    expr.span.clone(),
+                                ) {
+                                    result_ty
+                                } else {
+                                    self.error(
+                                        format!("logical not requires bool, found {}", operand_ty),
+                                        expr.span.clone(),
+                                    );
+                                    Type::Primitive(ast::PrimitiveType::Bool)
+                                }
                             } else {
                                 self.error(
                                     format!("logical not requires bool, found {}", operand_ty),
@@ -876,27 +886,30 @@ impl TypeChecker {
                                 );
                                 Type::Primitive(ast::PrimitiveType::Bool)
                             }
-                        } else {
-                            self.error(
-                                format!("logical not requires bool, found {}", operand_ty),
-                                expr.span.clone(),
-                            );
-                            Type::Primitive(ast::PrimitiveType::Bool)
                         }
-                    }
-                    ast::UnaryOperator::BitwiseNot => {
-                        if self.is_integer_type(&operand_ty) {
-                            operand_ty
-                        } else if !self.is_primitive_type(&operand_ty) {
-                            if let Some(result_ty) = self.resolve_method_overload_types(
-                                &operand_ty,
-                                "__bitnot",
-                                &[],
-                                None,
-                                MethodCallStyle::Instance,
-                                expr.span.clone(),
-                            ) {
-                                result_ty
+                        ast::UnaryOperator::BitwiseNot => {
+                            if self.is_integer_type(&operand_ty) {
+                                operand_ty
+                            } else if !self.is_primitive_type(&operand_ty) {
+                                if let Some(result_ty) = self.resolve_method_overload_types(
+                                    &operand_ty,
+                                    "__bitnot",
+                                    &[],
+                                    None,
+                                    MethodCallStyle::Instance,
+                                    expr.span.clone(),
+                                ) {
+                                    result_ty
+                                } else {
+                                    self.error(
+                                        format!(
+                                            "bitwise not requires integer, found {}",
+                                            operand_ty
+                                        ),
+                                        expr.span.clone(),
+                                    );
+                                    operand_ty
+                                }
                             } else {
                                 self.error(
                                     format!("bitwise not requires integer, found {}", operand_ty),
@@ -904,25 +917,18 @@ impl TypeChecker {
                                 );
                                 operand_ty
                             }
-                        } else {
-                            self.error(
-                                format!("bitwise not requires integer, found {}", operand_ty),
-                                expr.span.clone(),
-                            );
+                        }
+                        ast::UnaryOperator::Increment | ast::UnaryOperator::Decrement => {
+                            if !self.is_incdec_type(&operand_ty) {
+                                self.error(
+                                    "increment/decrement requires numeric or pointer operand",
+                                    expr.span.clone(),
+                                );
+                            }
                             operand_ty
                         }
                     }
-                    ast::UnaryOperator::Increment | ast::UnaryOperator::Decrement => {
-                        if !self.is_incdec_type(&operand_ty) {
-                            self.error(
-                                "increment/decrement requires numeric or pointer operand",
-                                expr.span.clone(),
-                            );
-                        }
-                        operand_ty
-                    }
                 }
-            }
             }
             ast::ExpressionKind::Postfix { operator, operand } => {
                 let operand_ty = self.check_expr(operand, None);
@@ -1103,7 +1109,8 @@ impl TypeChecker {
                         }
                     }
 
-                    self.common_numeric_type(&left_ty, &right_ty).unwrap_or(left_ty)
+                    self.common_numeric_type(&left_ty, &right_ty)
+                        .unwrap_or(left_ty)
                 }
                 ast::BinaryOperator::Assign
                 | ast::BinaryOperator::AddAssign
@@ -1723,9 +1730,7 @@ impl TypeChecker {
                             self.push_scope();
                             match &arm.pattern.kind {
                                 ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
-                                ast::PatternKind::Enum {
-                                    variant, data, ..
-                                } => {
+                                ast::PatternKind::Enum { variant, data, .. } => {
                                     if let Some(data_pattern) = data {
                                         let payload_types = self
                                             .enum_defs
@@ -1761,7 +1766,8 @@ impl TypeChecker {
                                             }
                                             _ => {
                                                 self.error(
-                                                    "data pattern in match must bind identifiers".to_string(),
+                                                    "data pattern in match must bind identifiers"
+                                                        .to_string(),
                                                     data_pattern.span.clone(),
                                                 );
                                             }
@@ -1933,7 +1939,8 @@ impl TypeChecker {
             ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(
                     "struct literal expressions are not supported here; use a variable \
-                    initializer ('Type id = { .field = value }') instead".to_string(),
+                    initializer ('Type id = { .field = value }') instead"
+                        .to_string(),
                     expr.span.clone(),
                 );
                 Type::Unknown
@@ -2166,7 +2173,8 @@ impl TypeChecker {
                 }
             }
 
-            for (i, (param_ty, arg_ty)) in candidate.params.iter().zip(arg_types.iter()).enumerate() {
+            for (i, (param_ty, arg_ty)) in candidate.params.iter().zip(arg_types.iter()).enumerate()
+            {
                 let mut matched = false;
 
                 // Phase 0: integer literals cannot narrow into a parameter
@@ -2184,12 +2192,14 @@ impl TypeChecker {
 
                 // Phase 1: try with inferred type-parameter mapping
                 let mut inferred_mapping = mapping.clone();
-                if !matched && self.infer_type_params(
-                    param_ty,
-                    &arg_ty,
-                    &candidate.type_params,
-                    &mut inferred_mapping,
-                ) {
+                if !matched
+                    && self.infer_type_params(
+                        param_ty,
+                        &arg_ty,
+                        &candidate.type_params,
+                        &mut inferred_mapping,
+                    )
+                {
                     let substituted = self.substitute_type(param_ty, &inferred_mapping);
                     if self.is_assignable(&substituted, &arg_ty) {
                         mapping = inferred_mapping;
@@ -2466,8 +2476,9 @@ impl TypeChecker {
                     // type they overflow; otherwise the natural-typed arg flows
                     // through the normal assignable/cast matching below.
                     if let Some(exprs) = arg_exprs
-                        && let Some(lit_value) =
-                            exprs.get(param_offset).and_then(Self::literal_integer_value)
+                        && let Some(lit_value) = exprs
+                            .get(param_offset)
+                            .and_then(Self::literal_integer_value)
                         && let Type::Primitive(prim) = &self.substitute_type(&param_ty, &mapping)
                         && Self::integer_prim_range(prim).is_some()
                         && !Self::integer_value_fits(lit_value, prim)
@@ -2478,12 +2489,14 @@ impl TypeChecker {
 
                     // First try with inferred type-parameter mapping.
                     let mut inferred_mapping = mapping.clone();
-                    if !matched && self.infer_type_params(
-                        &param_ty,
-                        arg_ty,
-                        &candidate.type_params,
-                        &mut inferred_mapping,
-                    ) {
+                    if !matched
+                        && self.infer_type_params(
+                            &param_ty,
+                            arg_ty,
+                            &candidate.type_params,
+                            &mut inferred_mapping,
+                        )
+                    {
                         let substituted = self.substitute_type(&param_ty, &inferred_mapping);
                         if self.is_assignable(&substituted, arg_ty) {
                             mapping = inferred_mapping;
@@ -2670,7 +2683,10 @@ impl TypeChecker {
         let declared = Type::from_ast(&var.var_type);
         self.reject_plain_void_value_type(&declared, var.var_type.span.clone());
         if var.is_volatile && matches!(declared, Type::Array { .. }) {
-            self.error("volatile arrays are not supported", var.var_type.span.clone());
+            self.error(
+                "volatile arrays are not supported",
+                var.var_type.span.clone(),
+            );
         }
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
@@ -2743,7 +2759,12 @@ impl TypeChecker {
         }
     }
 
-    fn literal_type(&mut self, literal: &ast::Literal, expected: Option<&Type>, span: &Span) -> Type {
+    fn literal_type(
+        &mut self,
+        literal: &ast::Literal,
+        expected: Option<&Type>,
+        span: &Span,
+    ) -> Type {
         // Integer literals default to the biggest integer type (i128) and
         // decompose down to the expected type with an overflow check when a
         // narrower integer type is expected (e.g. `u8 x = 300` errors).
@@ -2780,10 +2801,7 @@ impl TypeChecker {
                 if let Some((min, max)) = Self::integer_prim_range(prim) {
                     if value < min || value > max {
                         self.error(
-                            format!(
-                                "integer literal {} does not fit in type {:?}",
-                                value, prim
-                            ),
+                            format!("integer literal {} does not fit in type {:?}", value, prim),
                             span.clone(),
                         );
                     }
@@ -5504,22 +5522,21 @@ mod tests {
         let program = parse("i32 main() { volatile i32 v = 1; i32* p = &v; return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("cannot take the address of volatile")),
+            errors.iter().any(|error| error
+                .message
+                .contains("cannot take the address of volatile")),
             "expected address-of-volatile error, got {errors:?}"
         );
     }
 
     #[test]
     fn rejects_address_of_volatile_global() {
-        let program =
-            parse("volatile i32 g = 0; i32 main() { i32* p = &g; return 0; }");
+        let program = parse("volatile i32 g = 0; i32 main() { i32* p = &g; return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("cannot take the address of volatile")),
+            errors.iter().any(|error| error
+                .message
+                .contains("cannot take the address of volatile")),
             "expected address-of-volatile error, got {errors:?}"
         );
     }
@@ -5534,8 +5551,7 @@ mod tests {
 
     #[test]
     fn rejects_volatile_array_local() {
-        let program =
-            parse("i32 main() { volatile i32 arr[10]; arr[0] = 1; return 0; }");
+        let program = parse("i32 main() { volatile i32 arr[10]; arr[0] = 1; return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
             errors
