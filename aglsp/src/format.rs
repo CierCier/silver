@@ -49,7 +49,11 @@ pub(crate) fn format_type(ty: &ast::Type) -> String {
         ast::TypeKind::Array(a) => format!("[{}; {}]", format_type(&a.element_type), a.size),
         ast::TypeKind::Function(f) => {
             let params: Vec<String> = f.parameters.iter().map(|t| format_type(t)).collect();
-            format!("fn({}) -> {}", params.join(", "), format_type(&f.return_type))
+            format!(
+                "fn({}) -> {}",
+                params.join(", "),
+                format_type(&f.return_type)
+            )
         }
         ast::TypeKind::Tuple(t) => {
             let items: Vec<String> = t.iter().map(|ty| format_type(ty)).collect();
@@ -77,8 +81,17 @@ pub(crate) fn format_generics(g: &ast::Generics) -> String {
             ast::GenericParam::Type(tp) => {
                 let mut s = tp.name.name.clone();
                 if !tp.bounds.is_empty() {
-                    let bounds: Vec<String> = tp.bounds.iter()
-                        .map(|b| b.trait_ref.path.iter().map(|id| id.name.clone()).collect::<Vec<_>>().join("::"))
+                    let bounds: Vec<String> = tp
+                        .bounds
+                        .iter()
+                        .map(|b| {
+                            b.trait_ref
+                                .path
+                                .iter()
+                                .map(|id| id.name.clone())
+                                .collect::<Vec<_>>()
+                                .join("::")
+                        })
                         .collect();
                     s.push_str(&format!(": {}", bounds.join(" + ")));
                 }
@@ -92,17 +105,29 @@ pub(crate) fn format_generics(g: &ast::Generics) -> String {
 
 pub(crate) fn primitive_size(p: &ast::PrimitiveType) -> Option<usize> {
     match p {
-        ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool | ast::PrimitiveType::Char => Some(1),
+        ast::PrimitiveType::I8
+        | ast::PrimitiveType::U8
+        | ast::PrimitiveType::Bool
+        | ast::PrimitiveType::Char => Some(1),
         ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => Some(2),
         ast::PrimitiveType::I32 | ast::PrimitiveType::U32 | ast::PrimitiveType::F32 => Some(4),
-        ast::PrimitiveType::I64 | ast::PrimitiveType::U64 | ast::PrimitiveType::F64 | ast::PrimitiveType::C32 => Some(8),
-        ast::PrimitiveType::I128 | ast::PrimitiveType::U128 | ast::PrimitiveType::F80 | ast::PrimitiveType::C64 => Some(16),
+        ast::PrimitiveType::I64
+        | ast::PrimitiveType::U64
+        | ast::PrimitiveType::F64
+        | ast::PrimitiveType::C32 => Some(8),
+        ast::PrimitiveType::I128
+        | ast::PrimitiveType::U128
+        | ast::PrimitiveType::F80
+        | ast::PrimitiveType::C64 => Some(16),
         ast::PrimitiveType::C80 => Some(32),
         ast::PrimitiveType::Str | ast::PrimitiveType::Void => None,
     }
 }
 
-pub(crate) fn field_type_size(ty: &ast::Type, struct_map: &HashMap<String, usize>) -> Option<usize> {
+pub(crate) fn field_type_size(
+    ty: &ast::Type,
+    struct_map: &HashMap<String, usize>,
+) -> Option<usize> {
     match &*ty.kind {
         ast::TypeKind::Primitive(p) => primitive_size(p),
         ast::TypeKind::Reference(_) | ast::TypeKind::Pointer(_) => Some(8),
@@ -112,7 +137,9 @@ pub(crate) fn field_type_size(ty: &ast::Type, struct_map: &HashMap<String, usize
         }
         ast::TypeKind::Optional(t) => field_type_size(t, struct_map).map(|s| s + 1),
         ast::TypeKind::Slice(_) => None,
-        ast::TypeKind::Array(a) => field_type_size(&a.element_type, struct_map).map(|s| s * a.size as usize),
+        ast::TypeKind::Array(a) => {
+            field_type_size(&a.element_type, struct_map).map(|s| s * a.size as usize)
+        }
         _ => None,
     }
 }
@@ -122,11 +149,17 @@ pub(crate) fn is_repr_packed(attrs: &[ast::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.name.name == "packed"
             || (a.name.name == "repr"
-                && a.args.iter().any(|arg| matches!(arg, ast::AttributeArg::Identifier(id) if id.name == "packed")))
+                && a.args.iter().any(
+                    |arg| matches!(arg, ast::AttributeArg::Identifier(id) if id.name == "packed"),
+                ))
     })
 }
 
-pub(crate) fn compute_struct_size(s: &ast::StructItem, struct_map: &HashMap<String, usize>, packed: bool) -> Option<usize> {
+pub(crate) fn compute_struct_size(
+    s: &ast::StructItem,
+    struct_map: &HashMap<String, usize>,
+    packed: bool,
+) -> Option<usize> {
     let mut total = 0usize;
     for field in &s.fields {
         let size = field_type_size(&field.field_type, struct_map)?;
@@ -143,10 +176,14 @@ pub(crate) fn compute_struct_size(s: &ast::StructItem, struct_map: &HashMap<Stri
 
 pub(crate) fn format_attribute(attr: &ast::Attribute) -> String {
     let name = attr.name.name.clone();
-    let args: Vec<String> = attr.args.iter().map(|arg| match arg {
-        ast::AttributeArg::Identifier(id) => id.name.clone(),
-        ast::AttributeArg::Literal(lit) => format!("{lit:?}"),
-    }).collect();
+    let args: Vec<String> = attr
+        .args
+        .iter()
+        .map(|arg| match arg {
+            ast::AttributeArg::Identifier(id) => id.name.clone(),
+            ast::AttributeArg::Literal(lit) => format!("{lit:?}"),
+        })
+        .collect();
     if args.is_empty() {
         format!("#[{name}]")
     } else {
@@ -228,7 +265,10 @@ pub(crate) fn format_extern_function_sig(f: &ast::ExternFunctionItem) -> String 
         .map(|t| format_type(t))
         .unwrap_or_else(|| "void".to_string());
     let variadic = if f.signature.is_variadic { ", ..." } else { "" };
-    format!("extern \"{linkage}\" {ret} {}({params}{variadic})", f.name.name)
+    format!(
+        "extern \"{linkage}\" {ret} {}({params}{variadic})",
+        f.name.name
+    )
 }
 
 pub(crate) fn format_item_hover(item: &ast::Item) -> Option<String> {
@@ -265,15 +305,23 @@ pub(crate) fn format_item_hover(item: &ast::Item) -> Option<String> {
                     }
                 })
                 .collect();
-            Some(format!("enum {} {{ {} }}", e.name.name, variants.join("; ")))
+            Some(format!(
+                "enum {} {{ {} }}",
+                e.name.name,
+                variants.join("; ")
+            ))
         }
-        ast::ItemKind::TypeAlias(a) => {
-            Some(format!("type {} = {}", a.name.name, format_type(&a.type_def)))
-        }
+        ast::ItemKind::TypeAlias(a) => Some(format!(
+            "type {} = {}",
+            a.name.name,
+            format_type(&a.type_def)
+        )),
         ast::ItemKind::ExternFunction(f) => Some(format_extern_function_sig(f)),
-        ast::ItemKind::ExternVariable(v) => {
-            Some(format!("extern {} {}", format_type(&v.var_type), v.name.name))
-        }
+        ast::ItemKind::ExternVariable(v) => Some(format!(
+            "extern {} {}",
+            format_type(&v.var_type),
+            v.name.name
+        )),
         ast::ItemKind::Trait(t) => Some(format!("trait {}", t.name.name)),
         ast::ItemKind::Struct(_) | ast::ItemKind::Impl(_) => None,
         ast::ItemKind::Import(_) | ast::ItemKind::ExternBlock(_) => None,
