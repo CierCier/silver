@@ -21,7 +21,7 @@ impl ByteStream {
         bs.buf = alloc<u8>(bs.cap);
         bs.len = 0;
         bs.pos = 0;
-        return bs;
+        return move bs;
     }
 
     i32 read_byte(ByteStream* self) {

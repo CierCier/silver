@@ -2,6 +2,7 @@
 // Bytes is an owned growable sequence of u8 values, similar to Rust's Vec<u8>
 // but with a simpler interface focused on byte-oriented I/O and binary data.
 import std.mem.alloc;
+import std.mem.drop;
 import std.ops;
 
 struct Bytes {
