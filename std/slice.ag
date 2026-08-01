@@ -4,7 +4,7 @@
 /// defined by a pointer to the start of the data and a length.
 
 import std.ops;
-import std.io;
+import std.io.file;
 import std.mem.alloc;
 
 /// A view into a contiguous sequence of elements.

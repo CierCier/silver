@@ -1,0 +1,42 @@
+// Test suite: std umbrella modules re-export their submodules.
+//
+// `import std.io;` must provide the File/BufWriter API (from std.io.file)
+// as well as the scanner and byte stream; `import std.algo;` must provide
+// the algorithm functions split across std/algo/*.
+import std.test;
+import std.io;
+import std.algo;
+import std.mem.vec;
+
+i32 main() {
+    test_start("std.io umbrella exposes submodules");
+    {
+        // std.io.file: STDOUT + File
+        STDOUT.write_str("  [PASS] std.io STDOUT\n");
+        File f = File.closed();
+        assert_true(f.invalid(), "File API available via std.io");
+
+        // std.io.scanner: Scanner re-exported through the umbrella
+        Scanner s = Scanner.stdin();
+        assert_true(s.good(), "Scanner available via std.io");
+        s.drop();
+    }
+
+    test_start("std.algo umbrella exposes split submodules");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(5);
+        v.push(2);
+        v.push(8);
+        v.push(1);
+        sort(&v);                     // std/algo/sort.ag
+        assert_eq_i64(1, v[0], "sort via std.algo");
+        assert_eq_i64(8, v[3], "sort max last");
+        assert_eq_i64(2, lower_bound(&v, 5), "lower_bound via std.algo");
+        assert_true(binary_search(&v, 8), "binary_search via std.algo");
+        assert_eq_i64(3, max<i64>(2, 3), "max via std.algo");
+        v.drop();
+    }
+
+    return done();
+}

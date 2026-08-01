@@ -1,0 +1,8 @@
+// std/rt.ag — Runtime support: re-exports the std.rt submodules.
+import std.rt.casts;
+import std.rt.heap;
+import std.rt.methods;
+import std.rt.runtime;
+import std.rt.type_info;
+import std.rt.types;
+import std.rt.value;

@@ -1,0 +1,31 @@
+// std/algo/order.ag — Element swap and min/max helpers.
+//
+// Self-contained generic helpers (no inter-generic calls).
+
+// -- Element swap ---------------------------------------------------------
+
+/// Swap two elements in place using move semantics.
+void swap<T>(T* a, T* b) {
+    T tmp = *a;
+    T val_b = *b;
+    *a = move val_b;
+    *b = move tmp;
+}
+
+// -- Min / Max -------------------------------------------------------------
+
+/// Return the smaller of two values.
+T min<T>(T a, T b) {
+    if (a < b) {
+        return move a;
+    }
+    return move b;
+}
+
+/// Return the larger of two values.
+T max<T>(T a, T b) {
+    if (a > b) {
+        return move a;
+    }
+    return move b;
+}

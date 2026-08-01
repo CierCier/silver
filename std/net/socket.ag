@@ -15,7 +15,6 @@ import std.time;
 
 
 // timeval for setsockopt SO_RCVTIMEO
-struct Timeval { i64 tv_sec; i64 tv_usec; }
 
 struct Socket {
     i32  fd;

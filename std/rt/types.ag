@@ -24,7 +24,7 @@
 //   enum, or the variant is absent (Rust distinguishes Err(UnknownTypeId)
 //   from Ok(None); callers can use `get` to tell those cases apart).
 
-import std.io;
+import std.io.file;
 import std.map;
 import std.mem.alloc;
 import std.mem.drop;

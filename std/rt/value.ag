@@ -24,7 +24,7 @@
 // port uses them directly (no wide-arithmetic fallback needed).
 
 import std.fmt;
-import std.io;
+import std.io.file;
 import std.mem.alloc;
 import std.mem.vec;
 import std.string;

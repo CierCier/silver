@@ -6,6 +6,10 @@
 
 import std.sys.result;
 
+// Timeval — POSIX struct timeval (seconds/microseconds), shared by
+// the dns and socket modules for timeouts.
+struct Timeval { i64 tv_sec; i64 tv_usec; }
+
 // --- SockAddrIn (struct sockaddr_in) ---
 // Layout (16 bytes, 4-byte alignment, no padding holes):
 //   offset 0: sin_family  (u16)

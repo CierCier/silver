@@ -18,7 +18,7 @@ import std.mem.alloc;
 import std.mem.drop;
 import std.string;
 import std.time;
-import std.io;
+import std.io.file;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,7 +51,6 @@ struct DnsHeader {
 }
 
 // timeval for SO_RCVTIMEO
-struct Timeval { i64 tv_sec; i64 tv_usec; }
 
 // ---------------------------------------------------------------------------
 // Cache

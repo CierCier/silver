@@ -1,5 +1,5 @@
 import std.mem.alloc;
-import std.io;
+import std.io.file;
 import std.mem.drop;
 
 // Internal entry state: 0=empty, 1=occupied, -1=tombstone.

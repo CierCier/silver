@@ -53,7 +53,7 @@
 //   handy and this port's CastRegistry deliberately does not — use
 //   cast_with_registry() to get name-formatted errors).
 
-import std.io;
+import std.io.file;
 import std.map;
 import std.mem.drop;
 import std.rt.type_info;

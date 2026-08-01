@@ -1,0 +1,56 @@
+// std/algo/search.ag — Binary search over sorted Vec<T>.
+//
+// Self-contained; bounds are inlined to avoid transitive generic calls.
+import std.mem.vec;
+
+// -- Binary search on sorted slices -- self-contained ---------------------
+
+/// Return first index i where v[i] >= key, or v.len if none exists.
+i64 lower_bound<T>(Vec<T>* v, T key) {
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (v.data[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/// Return first index i where v[i] > key, or v.len if none exists.
+i64 upper_bound<T>(Vec<T>* v, T key) {
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (key < v.data[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+/// Return true if key is present in sorted Vec<T>.
+/// lower_bound is inlined to avoid transitive generic calls.
+bool binary_search<T>(Vec<T>* v, T key) {
+    // Inlined lower_bound
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (v.data[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo >= v.len) {
+        return false;
+    }
+    return !(v.data[lo] < key) && !(key < v.data[lo]);
+}

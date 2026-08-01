@@ -29,7 +29,7 @@
 // owned members manually (idempotently — null checks live in String/Vec) and
 // container types iterate their elements before releasing the buffer.
 
-import std.io;
+import std.io.file;
 import std.mem.alloc;
 import std.mem.drop;
 import std.mem.vec;

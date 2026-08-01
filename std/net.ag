@@ -1,0 +1,5 @@
+// std/net.ag — Networking: re-exports the std.net submodules.
+import std.net.inet;
+import std.net.dns;
+import std.net.socket;
+import std.net.tcp;

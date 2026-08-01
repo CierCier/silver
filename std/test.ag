@@ -4,7 +4,7 @@
 // assertion suite using compiler-builtin print macros.
 
 import std.mem.memory;
-import std.io;
+import std.io.file;
 
 i32 tests_passed = 0;
 i32 tests_failed = 0;

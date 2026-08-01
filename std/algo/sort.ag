@@ -1,0 +1,131 @@
+// std/algo/sort.ag — In-place heapsort over Vec<T> and slices.
+//
+// The entire heap algorithm is inlined to avoid transitive generic calls.
+import std.mem.vec;
+
+// -- Heapsort (max-heap, in-place, O(n log n)) -- self-contained ----------
+
+/// Sort Vec<T> ascending using in-place heapsort.
+/// The entire heap algorithm is inlined to avoid transitive generic calls.
+void sort<T>(Vec<T>* v) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    T* data = v.data;
+    i64 len = v.len;
+
+    // Build max-heap
+    i64 i = (len / 2) - 1;
+    while (i >= 0) {
+        // sift_down at i
+        i64 root = i;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= len) {
+                break;
+            }
+            if (child + 1 < len && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root = data[root];
+            T tmp_child = data[child];
+            data[root] = move tmp_child;
+            data[child] = move tmp_root;
+            root = child;
+        }
+        i = i - 1;
+    }
+
+    // Extract elements from heap
+    i64 end = len;
+    while (end > 1) {
+        end = end - 1;
+        T tmp_root = data[0];
+        T tmp_end = data[end];
+        data[0] = move tmp_end;
+        data[end] = move tmp_root;
+
+        // sift_down at 0
+        i64 root = 0;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= end) {
+                break;
+            }
+            if (child + 1 < end && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root2 = data[root];
+            T tmp_child2 = data[child];
+            data[root] = move tmp_child2;
+            data[child] = move tmp_root2;
+            root = child;
+        }
+    }
+}
+
+/// Sort a slice [data, data+len) ascending using in-place heapsort.
+void sort_slice<T>(T* data, i64 len) {
+    if (len <= 1) {
+        return;
+    }
+
+    // Build max-heap
+    i64 i = (len / 2) - 1;
+    while (i >= 0) {
+        i64 root = i;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= len) {
+                break;
+            }
+            if (child + 1 < len && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root = data[root];
+            T tmp_child = data[child];
+            data[root] = move tmp_child;
+            data[child] = move tmp_root;
+            root = child;
+        }
+        i = i - 1;
+    }
+
+    // Extract
+    i64 end = len;
+    while (end > 1) {
+        end = end - 1;
+        T tmp_root = data[0];
+        T tmp_end = data[end];
+        data[0] = move tmp_end;
+        data[end] = move tmp_root;
+
+        i64 root = 0;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= end) {
+                break;
+            }
+            if (child + 1 < end && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root2 = data[root];
+            T tmp_child2 = data[child];
+            data[root] = move tmp_child2;
+            data[child] = move tmp_root2;
+            root = child;
+        }
+    }
+}

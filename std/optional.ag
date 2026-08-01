@@ -5,7 +5,7 @@
 // and `get_error()` on an ok value.  Use `is_some`/`is_none` (Optional)
 // or `success`/`failed` (Result) to test first, or `unwrap_or` for a
 // non-aborting fallback.
-import std.io;
+import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
 // Uses the pure-Silver abort() from std.mem.memory (transitively via std.io).

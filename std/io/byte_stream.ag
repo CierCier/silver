@@ -1,7 +1,7 @@
 // std/io/byte_stream.ag — Buffered byte-oriented stream over a File.
 // Provides a read-ahead buffer for efficient single-byte and bulk reads
 // from unbuffered file descriptors.
-import std.io;
+import std.io.file;
 import std.mem;
 import std.mem.alloc;
 
