@@ -171,10 +171,14 @@ pub(crate) fn emit_unary_expression(
         self.check_assignment_mutability(operand)?;
         let (target_ptr, target_ty) = self.resolve_lvalue_ptr(operand)?;
         let llvm_ty = self.lower_basic_type(&target_ty)?;
-        let current = self
-            .builder
-            .build_load(llvm_ty, target_ptr, "incdec.load")
-            .map_err(|e| CodegenError::new(format!("load failed: {e}")))?;
+        let volatile = self.lvalue_is_volatile(operand);
+        let current = if volatile {
+            self.emit_volatile_load(llvm_ty, target_ptr, "incdec.load")?
+        } else {
+            self.builder
+                .build_load(llvm_ty, target_ptr, "incdec.load")
+                .map_err(|e| CodegenError::new(format!("load failed: {e}")))?
+        };
 
         let updated = match current {
             BasicValueEnum::IntValue(value) => {
@@ -211,12 +215,16 @@ pub(crate) fn emit_unary_expression(
             }
         };
 
-        self.builder.build_store(target_ptr, updated).map_err(|e| {
-            CodegenError::with_span(
-                format!("failed to update value: {e}"),
-                whole_expr.span.clone(),
-            )
-        })?;
+        if volatile {
+            self.emit_volatile_store(target_ptr, updated)?;
+        } else {
+            self.builder.build_store(target_ptr, updated).map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to update value: {e}"),
+                    whole_expr.span.clone(),
+                )
+            })?;
+        }
 
         if return_old { Ok(current) } else { Ok(updated) }
     }
@@ -354,12 +362,16 @@ pub(crate) fn emit_unary_expression(
                     let rhs = self.emit_expression_value(right)?;
                     self.cast_value_to_ast_type(rhs, &target_ty, &right.span)?
                 };
-                self.builder.build_store(target_ptr, value).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("failed assignment: {e}"),
-                        whole_expr.span.clone(),
-                    )
-                })?;
+                if self.lvalue_is_volatile(left) {
+                    self.emit_volatile_store(target_ptr, value)?;
+                } else {
+                    self.builder.build_store(target_ptr, value).map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed assignment: {e}"),
+                            whole_expr.span.clone(),
+                        )
+                    })?;
+                }
                 Ok(value)
             }
             ast::BinaryOperator::AddAssign
@@ -370,10 +382,13 @@ pub(crate) fn emit_unary_expression(
                 self.check_assignment_mutability(left)?;
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let llvm_ty = self.lower_basic_type(&target_ty)?;
-                let lhs = self
-                    .builder
-                    .build_load(llvm_ty, target_ptr, "assign.load")
-                    .map_err(|e| CodegenError::new(format!("load failed: {e}")))?;
+                let lhs = if self.lvalue_is_volatile(left) {
+                    self.emit_volatile_load(llvm_ty, target_ptr, "assign.load")?
+                } else {
+                    self.builder
+                        .build_load(llvm_ty, target_ptr, "assign.load")
+                        .map_err(|e| CodegenError::new(format!("load failed: {e}")))?
+                };
                 let rhs = self.emit_expression_value(right)?;
 
                 let updated = if lhs.get_type().is_struct_type() {
@@ -416,12 +431,16 @@ pub(crate) fn emit_unary_expression(
                     let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
                     self.emit_arith_values(&lhs, operator, &rhs, whole_expr)?
                 };
-                self.builder.build_store(target_ptr, updated).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("failed assignment: {e}"),
-                        whole_expr.span.clone(),
-                    )
-                })?;
+                if self.lvalue_is_volatile(left) {
+                    self.emit_volatile_store(target_ptr, updated)?;
+                } else {
+                    self.builder.build_store(target_ptr, updated).map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed assignment: {e}"),
+                            whole_expr.span.clone(),
+                        )
+                    })?;
+                }
                 Ok(updated)
             }
             _ => {
@@ -433,7 +452,7 @@ pub(crate) fn emit_unary_expression(
                 {
                     let lhs = self.emit_expression_value(left)?;
                     let rhs = self.emit_expression_value(right)?;
-                    return self.emit_strcmp_comparison(lhs, operator, rhs, whole_expr);
+                    return self.emit_strcmp_comparison(lhs, operator, rhs, &whole_expr.span);
                 }
 
                 let lhs = self.emit_expression_value(left)?;
@@ -460,7 +479,8 @@ pub(crate) fn emit_unary_expression(
                 if rhs.get_type() != lhs.get_type() {
                     rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
                 }
-                self.emit_binary_values(&lhs, operator, &rhs, whole_expr)
+                let is_unsigned = self.expression_is_unsigned(left);
+                self.emit_binary_values(&lhs, operator, &rhs, whole_expr, is_unsigned)
             }
         }
     }
@@ -481,6 +501,14 @@ pub(crate) fn emit_unary_expression(
         }
     }
 
+    /// Determine whether an expression evaluates to an unsigned integer type.
+    /// Used to pick unsigned LLVM compare predicates (ULT/UGT/ULE/UGE) and
+    /// zero-extending casts.
+    pub(crate) fn expression_is_unsigned(&mut self, expr: &ast::Expression) -> bool {
+        self.resolve_receiver_type(expr)
+            .is_some_and(|ty| type_is_unsigned(&ty))
+    }
+
     /// Emit `strcmp(left, right)` and compare the result against zero.
     /// Used for `str == str` and `str != str` comparisons.
     ///
@@ -492,7 +520,7 @@ pub(crate) fn emit_unary_expression(
         lhs: BasicValueEnum<'ctx>,
         operator: &ast::BinaryOperator,
         rhs: BasicValueEnum<'ctx>,
-        whole_expr: &ast::Expression,
+        span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         // Both values must be pointers (str is ptr_type)
         let lhs_ptr = match lhs {
@@ -500,7 +528,7 @@ pub(crate) fn emit_unary_expression(
             _ => {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
-                    whole_expr.span.clone(),
+                    span.clone(),
                 ));
             }
         };
@@ -509,7 +537,7 @@ pub(crate) fn emit_unary_expression(
             _ => {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
-                    whole_expr.span.clone(),
+                    span.clone(),
                 ));
             }
         };
@@ -782,6 +810,7 @@ pub(crate) fn emit_unary_expression(
         operator: &ast::BinaryOperator,
         rhs: &BasicValueEnum<'ctx>,
         whole_expr: &ast::Expression,
+        is_unsigned: bool,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         match operator {
             ast::BinaryOperator::Add
@@ -795,7 +824,7 @@ pub(crate) fn emit_unary_expression(
             | ast::BinaryOperator::Greater
             | ast::BinaryOperator::LessEqual
             | ast::BinaryOperator::GreaterEqual => {
-                self.emit_compare_values(lhs, operator, rhs, whole_expr)
+                self.emit_compare_values(lhs, operator, rhs, whole_expr, is_unsigned)
             }
             ast::BinaryOperator::LogicalAnd => {
                 let lhs_bool = self.emit_as_bool(lhs, &whole_expr.span)?;
@@ -894,16 +923,25 @@ pub(crate) fn emit_unary_expression(
         operator: &ast::BinaryOperator,
         rhs: &BasicValueEnum<'ctx>,
         whole_expr: &ast::Expression,
+        is_unsigned: bool,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                 let pred = match operator {
                     ast::BinaryOperator::Equal => IntPredicate::EQ,
                     ast::BinaryOperator::NotEqual => IntPredicate::NE,
-                    ast::BinaryOperator::Less => IntPredicate::SLT,
-                    ast::BinaryOperator::Greater => IntPredicate::SGT,
-                    ast::BinaryOperator::LessEqual => IntPredicate::SLE,
-                    ast::BinaryOperator::GreaterEqual => IntPredicate::SGE,
+                    ast::BinaryOperator::Less => {
+                        if is_unsigned { IntPredicate::ULT } else { IntPredicate::SLT }
+                    }
+                    ast::BinaryOperator::Greater => {
+                        if is_unsigned { IntPredicate::UGT } else { IntPredicate::SGT }
+                    }
+                    ast::BinaryOperator::LessEqual => {
+                        if is_unsigned { IntPredicate::ULE } else { IntPredicate::SLE }
+                    }
+                    ast::BinaryOperator::GreaterEqual => {
+                        if is_unsigned { IntPredicate::UGE } else { IntPredicate::SGE }
+                    }
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported integer comparison",
@@ -1089,4 +1127,47 @@ pub(crate) fn emit_unary_expression(
         let target = self.lower_basic_type(target_type)?;
         self.cast_value_to_basic_type(value, target, span)
     }
+
+    /// Like `cast_value_to_ast_type`, but widens integer values from an
+    /// *unsigned* source with zero-extension. LLVM integer types are signless,
+    /// and the generic int cast sign-extends, which corrupts e.g. `(i32)(u8)255`.
+    pub(crate) fn cast_unsigned_value_to_ast_type(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        target_type: &ast::Type,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let target = self.lower_basic_type(target_type)?;
+        match (value, target) {
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::IntType(int_ty)) => {
+                let src_width = int_val.get_type().get_bit_width();
+                let dst_width = int_ty.get_bit_width();
+                if dst_width > src_width {
+                    self.builder
+                        .build_int_z_extend_or_bit_cast(int_val, int_ty, "cast.u2i")
+                        .map(|v| v.as_basic_value_enum())
+                        .map_err(|e| {
+                            CodegenError::with_span(format!("unsigned int cast failed: {e}"), span.clone())
+                        })
+                } else {
+                    self.cast_value_to_basic_type(value, target, span)
+                }
+            }
+            _ => self.cast_value_to_basic_type(value, target, span),
+        }
+    }
+}
+
+/// True when the type is an unsigned integer primitive.
+fn type_is_unsigned(ty: &ast::Type) -> bool {
+    matches!(
+        ty.kind.as_ref(),
+        ast::TypeKind::Primitive(
+            ast::PrimitiveType::U8
+                | ast::PrimitiveType::U16
+                | ast::PrimitiveType::U32
+                | ast::PrimitiveType::U64
+                | ast::PrimitiveType::U128
+        )
+    )
 }

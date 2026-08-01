@@ -95,6 +95,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
+            volatile_globals: HashSet::default(),
+            static_local_counter: 0,
             method_receivers: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
@@ -186,6 +188,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
+            volatile_globals: HashSet::default(),
+            static_local_counter: 0,
             method_receivers: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
@@ -483,6 +487,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
             drop_flags: HashMap::default(),
+            volatile_globals: HashSet::default(),
+            static_local_counter: 0,
             method_receivers: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
@@ -1277,6 +1283,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ptr: writer_tmp,
                             ty: ast_ty,
                             is_mutable: false,
+                            is_volatile: false,
                         },
                     );
                 }
@@ -1410,6 +1417,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ptr: writer_tmp,
                             ty: buf_writer_type.clone(),
                             is_mutable: false,
+                            is_volatile: false,
                         },
                     );
                 }

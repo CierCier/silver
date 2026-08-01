@@ -1,0 +1,125 @@
+// std/io/byte_stream.ag — Buffered byte-oriented stream over a File.
+// Provides a read-ahead buffer for efficient single-byte and bulk reads
+// from unbuffered file descriptors.
+import std.io;
+import std.mem;
+import std.mem.alloc;
+
+struct ByteStream {
+    File file;
+    u8* buf;
+    i64 len;
+    i64 pos;
+    i64 cap;
+}
+
+impl ByteStream {
+    ByteStream stdin() {
+        ByteStream bs;
+        bs.file = stdin_file();
+        bs.cap = 4096;
+        bs.buf = alloc<u8>(bs.cap);
+        bs.len = 0;
+        bs.pos = 0;
+        return bs;
+    }
+
+    i32 read_byte(ByteStream* self) {
+        if (self.pos < self.len) {
+            i32 result = (i32)self.buf[self.pos];
+            self.pos = self.pos + 1;
+            return result;
+        }
+        if (self.file.invalid()) {
+            return -1;
+        }
+        // Refill buffer from file.
+        self.pos = 0;
+        self.len = 0;
+        SysResult r = try_read(self.file.fd, self.buf, self.cap);
+        if (r.is_err()) {
+            self.file.had_error = true;
+            return -1;
+        }
+        if (r.value == 0) {
+            self.file.at_eof = true;
+            return -1;
+        }
+        self.len = r.value;
+        self.pos = 1;
+        return (i32)self.buf[0];
+    }
+
+    i64 read_into(ByteStream* self, u8* dst, i64 dst_len) {
+        if (dst_len <= 0 || self.file.invalid()) {
+            return 0;
+        }
+        i64 total = 0;
+        // Consume buffered bytes first.
+        i64 avail = self.len - self.pos;
+        if (avail > 0) {
+            i64 to_copy = dst_len;
+            if (to_copy > avail) {
+                to_copy = avail;
+            }
+            i64 i = 0;
+            while (i < to_copy) {
+                dst[i] = self.buf[self.pos + i];
+                i = i + 1;
+            }
+            self.pos = self.pos + to_copy;
+            total = total + to_copy;
+            dst = (u8*)((i64)dst + to_copy);
+            dst_len = dst_len - to_copy;
+        }
+        // If more bytes are needed, refill and copy again.
+        while (dst_len > 0 && !self.file.at_eof && !self.file.had_error) {
+            self.pos = 0;
+            self.len = 0;
+            SysResult r = try_read(self.file.fd, self.buf, self.cap);
+            if (r.is_err()) {
+                self.file.had_error = true;
+                break;
+            }
+            if (r.value == 0) {
+                self.file.at_eof = true;
+                break;
+            }
+            self.len = r.value;
+            i64 to_copy = dst_len;
+            if (to_copy > self.len) {
+                to_copy = self.len;
+            }
+            i64 i = 0;
+            while (i < to_copy) {
+                dst[i] = self.buf[i];
+                i = i + 1;
+            }
+            self.pos = to_copy;
+            total = total + to_copy;
+            dst = (u8*)((i64)dst + to_copy);
+            dst_len = dst_len - to_copy;
+        }
+        return total;
+    }
+
+    bool eof(ByteStream* self) {
+        if (self.pos < self.len) {
+            return false;
+        }
+        return self.file.at_eof;
+    }
+}
+
+impl Drop<ByteStream> for ByteStream {
+    void drop(ByteStream* self) {
+        if (self.buf != (u8*)0) {
+            free(self.buf);
+            self.buf = (u8*)0;
+        }
+        self.file.close();
+        self.len = 0;
+        self.pos = 0;
+        self.cap = 0;
+    }
+}

@@ -227,6 +227,20 @@ impl HashMap<K, V> {
         return false;
     }
 
+    /// Remove all entries and release backing memory.
+    void clear(HashMap<K, V>* self) {
+        if (self.state != (i64*)0) {
+            free(self.keys);
+            free(self.values);
+            free(self.state);
+            self.keys = (K*)0;
+            self.values = (V*)0;
+            self.state = (i64*)0;
+        }
+        self.capacity = 0;
+        self.len = 0;
+    }
+
     /// Indexed access: map[key] — returns value for key, aborts if not found.
     V __index_get(HashMap<K, V>* self, K key) {
         return self.get(key);

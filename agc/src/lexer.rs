@@ -19,6 +19,8 @@ pub enum Token {
     Let,
     Mut,
     Const,
+    Static,
+    Volatile,
     If,
     Else,
     While,
@@ -415,10 +417,13 @@ impl Lexer {
 
     fn string_literal(&mut self) -> Result<Token, LexError> {
         let start_pos = self.position - 1;
-        let mut value = String::new();
+        // Raw bytes: `\xNN` escapes must contribute exact bytes (C-like
+        // semantics), so the literal is assembled byte-wise and validated as
+        // UTF-8 at the end (Silver `str` is UTF-8 text).
+        let mut bytes: Vec<u8> = Vec::new();
 
         while !self.is_at_end() && self.peek() != '"' {
-            let ch = self.advance();
+            let ch = self.advance_utf8_char();
             if ch == '\\' {
                 // Handle escape sequences
                 if self.is_at_end() {
@@ -429,13 +434,64 @@ impl Lexer {
                 }
                 let escaped = self.advance();
                 match escaped {
-                    'n' => value.push('\n'),
-                    't' => value.push('\t'),
-                    'r' => value.push('\r'),
-                    '\\' => value.push('\\'),
-                    '"' => value.push('"'),
-                    '\'' => value.push('\''),
-                    '0' => value.push('\0'),
+                    'n' => bytes.push(b'\n'),
+                    't' => bytes.push(b'\t'),
+                    'r' => bytes.push(b'\r'),
+                    '\\' => bytes.push(b'\\'),
+                    '"' => bytes.push(b'"'),
+                    '\'' => bytes.push(b'\''),
+                    '0' => bytes.push(0),
+                    'x' => {
+                        let (hi, lo) = (self.advance(), self.advance());
+                        let Some(byte) = Self::parse_hex_byte(hi, lo) else {
+                            return Err(LexError::InvalidString {
+                                span: (start_pos, self.position),
+                                message: format!("Invalid hex escape: \\x{hi}{lo}"),
+                            });
+                        };
+                        bytes.push(byte);
+                    }
+                    'u' => {
+                        if !self.match_char('{') {
+                            return Err(LexError::InvalidString {
+                                span: (start_pos, self.position),
+                                message: "Expected `{` after \\u".to_string(),
+                            });
+                        }
+                        let mut codepoint: u32 = 0;
+                        let mut digits = 0u8;
+                        while !self.is_at_end() && self.peek() != '}' && digits < 6 {
+                            let Some(d) = Self::hex_digit(self.advance()) else {
+                                return Err(LexError::InvalidString {
+                                    span: (start_pos, self.position),
+                                    message: "Invalid hex digit in \\u escape".to_string(),
+                                });
+                            };
+                            codepoint = codepoint * 16 + d as u32;
+                            digits += 1;
+                        }
+                        if digits == 0 {
+                            return Err(LexError::InvalidString {
+                                span: (start_pos, self.position),
+                                message: "Empty \\u{} escape".to_string(),
+                            });
+                        }
+                        if self.is_at_end() || self.peek() != '}' {
+                            return Err(LexError::InvalidString {
+                                span: (start_pos, self.position),
+                                message: "Unclosed \\u{ escape".to_string(),
+                            });
+                        }
+                        self.advance(); // consume `}`
+                        let Some(ch) = char::from_u32(codepoint) else {
+                            return Err(LexError::InvalidString {
+                                span: (start_pos, self.position),
+                                message: format!("Invalid Unicode scalar: \\u{{{codepoint:X}}}"),
+                            });
+                        };
+                        let mut buf = [0u8; 4];
+                        bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
                     _ => {
                         return Err(LexError::InvalidString {
                             span: (start_pos, self.position),
@@ -444,7 +500,8 @@ impl Lexer {
                     }
                 }
             } else {
-                value.push(ch);
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             }
         }
 
@@ -456,6 +513,13 @@ impl Lexer {
         }
 
         self.advance(); // consume closing quote
+        let Ok(value) = String::from_utf8(bytes) else {
+            return Err(LexError::InvalidString {
+                span: (start_pos, self.position),
+                message: "string literal contains bytes that are not valid UTF-8; \
+                    use \\u{} escapes or literal characters for text".to_string(),
+            });
+        };
         Ok(Token::StringLiteral(value))
     }
 
@@ -614,6 +678,8 @@ impl Lexer {
             "let" => Token::Let,
             "mut" => Token::Mut,
             "const" => Token::Const,
+            "static" => Token::Static,
+            "volatile" => Token::Volatile,
             "if" => Token::If,
             "else" => Token::Else,
             "while" => Token::While,
@@ -757,6 +823,13 @@ impl Lexer {
         ch
     }
 
+    fn advance_utf8_char(&mut self) -> char {
+        let ch = self.input[self.position..].chars().next().unwrap_or('\0');
+        self.position += ch.len_utf8();
+        self.column += 1;
+        ch
+    }
+
     fn peek(&self) -> char {
         self.input
             .as_bytes()
@@ -781,6 +854,23 @@ impl Lexer {
 
     fn is_at_end(&self) -> bool {
         self.position >= self.input.len()
+    }
+
+    /// Parse exactly two hex digits into a byte value.
+    fn parse_hex_byte(hi: char, lo: char) -> Option<u8> {
+        let hi = Self::hex_digit(hi)?;
+        let lo = Self::hex_digit(lo)?;
+        Some(hi * 16 + lo)
+    }
+
+    /// Map a single hex digit char to its value (0-15).
+    fn hex_digit(ch: char) -> Option<u8> {
+        match ch {
+            '0'..='9' => Some(ch as u8 - b'0'),
+            'a'..='f' => Some(ch as u8 - b'a' + 10),
+            'A'..='F' => Some(ch as u8 - b'A' + 10),
+            _ => None,
+        }
     }
 }
 
@@ -807,6 +897,8 @@ impl Token {
             Token::Str => Some("str"),
             Token::Char => Some("char"),
             Token::Void => Some("void"),
+            Token::Static => Some("static"),
+            Token::Volatile => Some("volatile"),
             Token::Vec => Some("Vec"),
             Token::Optional => Some("Optional"),
             _ => None,
@@ -1051,7 +1143,8 @@ mod tests {
 
         // Skip keywords as they should be tokenized as keywords, not identifiers
         let keywords = [
-            "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "if", "else", "while",
+            "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "static", "volatile",
+            "if", "else", "while",
             "for", "break", "continue", "return", "defer", "import", "comptime", "cast", "move",
             "ref", "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128",
             "u8", "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
@@ -1133,6 +1226,8 @@ mod tests {
             ("let", Token::Let),
             ("mut", Token::Mut),
             ("const", Token::Const),
+            ("static", Token::Static),
+            ("volatile", Token::Volatile),
             ("if", Token::If),
             ("else", Token::Else),
             ("while", Token::While),
@@ -1153,6 +1248,8 @@ mod tests {
             ("private", Token::Private),
             ("asm", Token::Asm),
             ("in", Token::In),
+            ("static", Token::Static),
+            ("volatile", Token::Volatile),
             ("true", Token::True),
             ("false", Token::False),
         ];

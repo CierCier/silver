@@ -1,0 +1,95 @@
+// Dijkstra's shortest paths with a min-heap.
+//
+// BinaryHeap is a max-heap ordered by the `<` operator, so Node.__lt
+// reverses distance ordering: the node with the smallest distance compares
+// as "greatest" and is popped first.
+//
+// Reads N (nodes), M (edges), then M lines of "from to weight". Prints the
+// shortest distance from node 0 to every node, or -1 if unreachable.
+import std.io.scanner;
+import std.ops;
+import std.mem.vec;
+import std.collections.heap;
+
+struct Node {
+    i64 dist;
+    i64 id;
+}
+
+// Reversed ordering -> min-heap by distance.
+impl Lt<Node> for Node {
+    bool __lt(Node self, Node other) {
+        return self.dist > other.dist;
+    }
+}
+
+struct Edge {
+    i64 from;
+    i64 to;
+    i64 w;
+}
+
+i32 main() {
+    Scanner s = Scanner.stdin();
+    i64 n = s.next_i64();
+    i64 m = s.next_i64();
+
+    Vec<Edge> edges = Vec<Edge>.new();
+    i64 i = 0;
+    while (i < m) {
+        Edge e;
+        e.from = s.next_i64();
+        e.to = s.next_i64();
+        e.w = s.next_i64();
+        edges.push(move e);
+        i = i + 1;
+    }
+
+    Vec<i64> dist = Vec<i64>.new();
+    i = 0;
+    while (i < n) {
+        dist.push((i64)-1); // -1 = unreachable
+        i = i + 1;
+    }
+    dist.set(0, 0);
+
+    BinaryHeap<Node> heap = BinaryHeap<Node>.new();
+    Node start;
+    start.dist = 0;
+    start.id = 0;
+    heap.push(move start);
+
+    while (!heap.is_empty()) {
+        Node cur = heap.pop();
+        if (cur.dist != dist.data[cur.id]) {
+            continue; // stale heap entry
+        }
+        i = 0;
+        while (i < m) {
+            if (edges.data[i].from == cur.id) {
+                i64 to_id = edges.data[i].to;
+                i64 nd = cur.dist + edges.data[i].w;
+                if (dist.data[to_id] == (i64)-1 || nd < dist.data[to_id]) {
+                    dist.set(to_id, nd);
+                    Node next;
+                    next.dist = nd;
+                    next.id = to_id;
+                    heap.push(move next);
+                }
+            }
+            i = i + 1;
+        }
+    }
+
+    i = 0;
+    while (i < n) {
+        @println("{}", dist.data[i]);
+        i = i + 1;
+    }
+
+    heap.drop();
+    dist.drop();
+    edges.drop();
+    s.drop();
+    return 0;
+}

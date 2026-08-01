@@ -1,0 +1,34 @@
+// Test suite for Scanner — stdin parsing with BOM skip, tokenization,
+// integer parsing, and line reading.
+import std.test;
+import std.io.scanner;
+
+i32 main() {
+    STDOUT.write_str("=== Scanner Tests ===\n\n");
+
+    // --- stdin() reads BOM-prefixed input, parses tokens ---
+    STDOUT.write_str("--- stdin() and basic tokenization ---\n");
+    {
+        Scanner s = Scanner.stdin();
+
+        // Input (after BOM skip): "3\n10 -20 café\nlast line\n"
+        assert_eq_i64(3, s.next_i64(), "first token is 3");
+        assert_eq_i64(10, s.next_i64(), "second token is 10");
+        assert_eq_i64(-20, s.next_i64(), "third token is -20");
+
+        // next() returns "café" as a borrowed NUL-terminated str
+        str cafe = s.next();
+        assert_eq_str("café", cafe, "next token is café");
+
+        // next_line() returns the remainder of the current line
+        str line = s.next_line();
+        assert_eq_str("last line", line, "next_line returns 'last line'");
+
+        // Scanner reports good status
+        assert_true(s.good(), "scanner good() is true");
+
+        s.drop();
+    }
+
+    return done();
+}

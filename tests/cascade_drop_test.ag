@@ -54,7 +54,7 @@ impl InherentOnly {
         return move t;
     }
 
-    void drop(InherentOnly* self) {
+    void manual_drop(InherentOnly* self) {
         inherent_drop_count = inherent_drop_count + 1;
     }
 }

@@ -1,0 +1,101 @@
+// Test suite for BinaryHeap<T> — max-heap priority queue.
+import std.test;
+import std.collections.heap;
+
+i32 main() {
+    STDOUT.write_str("=== BinaryHeap Tests ===\n\n");
+
+    // --- new ---
+    STDOUT.write_str("--- new ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        assert_eq_i64(0, h.len(), "new heap len 0");
+        assert_true(h.is_empty(), "new heap is empty");
+        h.drop();
+    }
+
+    // --- push/pop descending order ---
+    STDOUT.write_str("\n--- push/pop descending ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        h.push(3);
+        h.push(1);
+        h.push(2);
+        assert_eq_i64(3, h.len(), "len 3 after 3 pushes");
+        assert_eq_i64(3, h.pop(), "pop returns 3 (max)");
+        assert_eq_i64(2, h.pop(), "pop returns 2");
+        assert_eq_i64(1, h.pop(), "pop returns 1");
+        assert_true(h.is_empty(), "empty after all pops");
+        h.drop();
+    }
+
+    // --- push/pop large set ---
+    STDOUT.write_str("\n--- large set ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        i64 i = 0;
+        while (i < 100) {
+            h.push(i);
+            i = i + 1;
+        }
+        assert_eq_i64(100, h.len(), "len 100 after 100 pushes");
+        i = 99;
+        bool descending = true;
+        while (i >= 0) {
+            i64 val = h.pop();
+            if (val != i) {
+                descending = false;
+            }
+            i = i - 1;
+        }
+        assert_true(descending, "pops in descending order from 99 to 0");
+        assert_true(h.is_empty(), "empty after all pops");
+        h.drop();
+    }
+
+    // --- duplicates ---
+    STDOUT.write_str("\n--- duplicates ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        h.push(5);
+        h.push(5);
+        h.push(3);
+        h.push(5);
+        assert_eq_i64(5, h.pop(), "first pop 5");
+        assert_eq_i64(5, h.pop(), "second pop 5");
+        assert_eq_i64(5, h.pop(), "third pop 5");
+        assert_eq_i64(3, h.pop(), "fourth pop 3");
+        h.drop();
+    }
+
+    // --- peek ---
+    STDOUT.write_str("\n--- peek ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        h.push(10);
+        h.push(30);
+        h.push(20);
+        assert_eq_i64(30, h.peek(), "peek returns 30");
+        assert_eq_i64(3, h.len(), "len unchanged after peek");
+        assert_eq_i64(30, h.pop(), "pop still returns 30");
+        assert_eq_i64(20, h.peek(), "peek now returns 20");
+        h.drop();
+    }
+
+    // --- clear ---
+    STDOUT.write_str("\n--- clear ---\n");
+    {
+        BinaryHeap<i64> h = BinaryHeap<i64>.new();
+        h.push(1);
+        h.push(2);
+        h.push(3);
+        h.clear();
+        assert_eq_i64(0, h.len(), "len 0 after clear");
+        assert_true(h.is_empty(), "is_empty after clear");
+        h.push(99);
+        assert_eq_i64(99, h.pop(), "can push and pop after clear");
+        h.drop();
+    }
+
+    return done();
+}

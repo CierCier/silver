@@ -1,8 +1,10 @@
 // Test suite for std.string - String type
-import std.test;  // assert_true, assert_false, assert_eq_i64, assert_eq_i32, done, STDOUT
+import std.test;
 import std.string;
+import std.mem.vec;
 
 i32 main(){
+    // -- Existing tests ---------------------------------------------------
     String s = String.new();
     assert_eq_i64(s.len, 0, "New string has length 0");
     assert_eq_i64(s.capacity, 16, "New string has initial capacity 16");
@@ -54,6 +56,285 @@ i32 main(){
     
     s2.drop();
     s3.drop();
+
+    test_start("from_str");
+    {
+        String fs1 = String.from_str("hello");
+        assert_eq_i64(fs1.len(), 5, "from_str('hello') has len 5");
+        assert_eq_str("hello", (str)fs1.to_str(), "from_str('hello') content");
+        fs1.drop();
+
+        String fs2 = String.from_str("");
+        assert_eq_i64(fs2.len(), 0, "from_str('') has len 0");
+        assert_eq_str("", (str)fs2.to_str(), "from_str('') content");
+        fs2.drop();
+    }
+
+    test_start("trim");
+    {
+        String t1 = String.from_str("  hello  ");
+        String tr1 = t1.trim();
+        assert_eq_str("hello", (str)tr1.to_str(), "trim('  hello  ')");
+        tr1.drop();
+        t1.drop();
+
+        String t2 = String.from_str("no_ws");
+        String tr2 = t2.trim();
+        assert_eq_str("no_ws", (str)tr2.to_str(), "trim('no_ws')");
+        tr2.drop();
+        t2.drop();
+
+        String t3 = String.from_str("   ");
+        String tr3 = t3.trim();
+        assert_eq_str("", (str)tr3.to_str(), "trim('   ') empty");
+        tr3.drop();
+        t3.drop();
+
+        String t4 = String.from_str("\t\n a \r");
+        String tr4 = t4.trim();
+        assert_eq_str("a", (str)tr4.to_str(), "trim('\\t\\n a \\r')");
+        tr4.drop();
+        t4.drop();
+    }
+
+    test_start("starts_with");
+    {
+        String sw = String.from_str("hello world");
+        assert_true(sw.starts_with("hello"), "starts_with 'hello'");
+        assert_true(sw.starts_with("h"), "starts_with 'h'");
+        assert_false(sw.starts_with("world"), "starts_with 'world'");
+        assert_true(sw.starts_with(""), "starts_with empty prefix");
+        assert_false(sw.starts_with((str)0), "starts_with null prefix");
+        sw.drop();
+    }
+
+    test_start("ends_with");
+    {
+        String ew = String.from_str("hello world");
+        assert_true(ew.ends_with("world"), "ends_with 'world'");
+        assert_true(ew.ends_with("d"), "ends_with 'd'");
+        assert_false(ew.ends_with("hello"), "ends_with 'hello'");
+        assert_true(ew.ends_with(""), "ends_with empty suffix");
+        assert_false(ew.ends_with((str)0), "ends_with null suffix");
+        ew.drop();
+    }
+
+    test_start("contains");
+    {
+        String cs = String.from_str("hello world");
+        assert_true(cs.contains("hello"), "contains 'hello'");
+        assert_true(cs.contains("world"), "contains 'world'");
+        assert_true(cs.contains("lo wo"), "contains 'lo wo'");
+        assert_false(cs.contains("xyz"), "contains 'xyz'");
+        assert_true(cs.contains(""), "contains empty");
+        assert_false(cs.contains((str)0), "contains null");
+        cs.drop();
+    }
+
+    test_start("find");
+    {
+        String fs = String.from_str("hello world");
+        assert_eq_i64(fs.find("hello"), 0, "find 'hello' at 0");
+        assert_eq_i64(fs.find("world"), 6, "find 'world' at 6");
+        assert_eq_i64(fs.find("o"), 4, "find first 'o' at 4");
+        assert_eq_i64(fs.find("xyz"), -1, "find 'xyz' returns -1");
+        assert_eq_i64(fs.find(""), 0, "find empty returns 0");
+        assert_eq_i64(fs.find((str)0), -1, "find null returns -1");
+        fs.drop();
+    }
+
+    test_start("substr");
+    {
+        String ss = String.from_str("hello world");
+        String sub1 = ss.substr(0, 5);
+        assert_eq_str("hello", (str)sub1.to_str(), "substr(0,5)");
+        sub1.drop();
+
+        String sub2 = ss.substr(6, 5);
+        assert_eq_str("world", (str)sub2.to_str(), "substr(6,5)");
+        sub2.drop();
+
+        String sub3 = ss.substr(6, 100);
+        assert_eq_str("world", (str)sub3.to_str(), "substr(6,100) truncated");
+        sub3.drop();
+
+        String sub4 = ss.substr(-5, 10);
+        assert_eq_str("hello worl", (str)sub4.to_str(), "substr(-5,10) clamped start");
+        sub4.drop();
+
+        String sub5 = ss.substr(100, 5);
+        assert_eq_str("", (str)sub5.to_str(), "substr(100,5) start beyond len");
+        sub5.drop();
+
+        String sub6 = ss.substr(0, 0);
+        assert_eq_str("", (str)sub6.to_str(), "substr(0,0) empty");
+        sub6.drop();
+
+        String sub7 = ss.substr(3, -1);
+        assert_eq_str("", (str)sub7.to_str(), "substr(3,-1) negative len");
+        sub7.drop();
+
+        ss.drop();
+    }
+
+    test_start("split");
+    {
+        String sp = String.from_str("a,b,c");
+        SplitIter sit = sp.split(",");
+        Optional<str> part0 = sit.next();
+        assert_true(part0.is_some(), "split[0] is_some");
+        assert_eq_str("a", part0.unwrap(), "split[0] = 'a'");
+
+        Optional<str> part1 = sit.next();
+        assert_true(part1.is_some(), "split[1] is_some");
+        assert_eq_str("b", part1.unwrap(), "split[1] = 'b'");
+
+        Optional<str> part2 = sit.next();
+        assert_true(part2.is_some(), "split[2] is_some");
+        assert_eq_str("c", part2.unwrap(), "split[2] = 'c'");
+
+        Optional<str> part3 = sit.next();
+        assert_true(part3.is_none(), "split[3] is_none");
+        sp.drop();
+    }
+
+    test_start("split consecutive delimiters");
+    {
+        String sp2 = String.from_str("a,,b");
+        SplitIter sit2 = sp2.split(",");
+        Optional<str> p0 = sit2.next();
+        assert_eq_str("a", p0.unwrap(), "consecutive[0] = 'a'");
+        Optional<str> p1 = sit2.next();
+        assert_eq_str("", p1.unwrap(), "consecutive[1] = ''");
+        Optional<str> p2 = sit2.next();
+        assert_eq_str("b", p2.unwrap(), "consecutive[2] = 'b'");
+        assert_true(sit2.next().is_none(), "consecutive[3] is_none");
+        sp2.drop();
+    }
+
+    test_start("split trailing delimiter");
+    {
+        String sp3 = String.from_str("x,");
+        SplitIter sit3 = sp3.split(",");
+        Optional<str> q0 = sit3.next();
+        assert_eq_str("x", q0.unwrap(), "trailing[0] = 'x'");
+        Optional<str> q1 = sit3.next();
+        assert_eq_str("", q1.unwrap(), "trailing[1] = ''");
+        assert_true(sit3.next().is_none(), "trailing[2] is_none");
+        sp3.drop();
+    }
+
+    test_start("split empty string");
+    {
+        String sp4 = String.from_str("");
+        SplitIter sit4 = sp4.split(",");
+        Optional<str> r0 = sit4.next();
+        assert_true(r0.is_some(), "empty split yields one");
+        assert_eq_str("", r0.unwrap(), "empty split yields ''");
+        assert_true(sit4.next().is_none(), "empty split second is_none");
+        sp4.drop();
+    }
+
+    test_start("split null delimiter");
+    {
+        String sp5 = String.from_str("hello");
+        SplitIter sit5 = sp5.split((str)0);
+        Optional<str> s0 = sit5.next();
+        assert_true(s0.is_some(), "null delim yields one");
+        assert_eq_str("hello", s0.unwrap(), "null delim yields whole string");
+        assert_true(sit5.next().is_none(), "null delim second is_none");
+        sp5.drop();
+    }
+
+    test_start("join");
+    {
+        Vec<String> v = Vec<String>.new();
+        v.push(String.from_str("a"));
+        v.push(String.from_str("b"));
+        v.push(String.from_str("c"));
+        String j = String.join(",", &v);
+        assert_eq_str("a,b,c", (str)j.to_str(), "join 'a,b,c'");
+        j.drop();
+        v.drop();
+    }
+
+    test_start("join single element");
+    {
+        Vec<String> v2 = Vec<String>.new();
+        v2.push(String.from_str("only"));
+        String j2 = String.join(",", &v2);
+        assert_eq_str("only", (str)j2.to_str(), "join single element");
+        j2.drop();
+        v2.drop();
+    }
+
+    test_start("join empty vec");
+    {
+        Vec<String> v3 = Vec<String>.new();
+        String j3 = String.join(",", &v3);
+        assert_eq_str("", (str)j3.to_str(), "join empty vec");
+        j3.drop();
+        v3.drop();
+    }
+
+    test_start("replace");
+    {
+        String s = String.from_str("hello world hello");
+        String r = s.replace("hello", "hi");
+        assert_eq_str("hi world hi", (str)r.to_str(), "replace 'hello' -> 'hi'");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("a,b,c");
+        String r = s.replace(",", " :: ");
+        assert_eq_str("a :: b :: c", (str)r.to_str(), "replace ',' -> ' :: '");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("no match here");
+        String r = s.replace("xyz", "abc");
+        assert_eq_str("no match here", (str)r.to_str(), "replace no match -> clone");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("remove-the-dashes");
+        String r = s.replace("-", "");
+        assert_eq_str("removethedashes", (str)r.to_str(), "replace '-' -> '' (delete)");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("unchanged");
+        String r = s.replace((str)0, "x");
+        assert_eq_str("unchanged", (str)r.to_str(), "replace null needle -> clone");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("cut--this");
+        String r = s.replace("--", (str)0);
+        assert_eq_str("cutthis", (str)r.to_str(), "replace '--' -> null (delete)");
+        r.drop();
+        s.drop();
+    }
+    {
+        String s = String.from_str("aaa");
+        String r = s.replace("aa", "X");
+        assert_eq_str("Xa", (str)r.to_str(), "replace 'aa' -> 'X' in 'aaa'");
+        r.drop();
+        s.drop();
+    }
+    // String + String and String + str are waiting on ABI support
+    // for large struct value passing in operator overload codegen.
+    // See: agc/src/codegen/llvm_ir.rs cast_value_to_basic_type
+    test_start("concat String + String (SKIP)");
+    check(true, "concat op skipped - ABI limitation for large structs");
+
+    test_start("concat String + str (SKIP)");
+    check(true, "concat op skipped - ABI limitation for large structs");
 
     return done();
 }

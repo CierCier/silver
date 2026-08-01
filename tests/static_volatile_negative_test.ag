@@ -1,0 +1,9 @@
+// Negative integration test: `static` and `volatile` are hard keywords and
+// cannot be used as identifiers. This file must FAIL to compile; the harness
+// expects a compile failure for static_volatile_negative_test.
+
+i32 static = 5;
+
+i32 main() {
+    return 0;
+}

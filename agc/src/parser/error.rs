@@ -57,7 +57,8 @@ impl ParseError {
                         Token::IntLiteral(_) => Some("Identifiers cannot start with a number. Try using a letter or underscore first.".to_string()),
                         // Check if it's a keyword token
                         Token::Struct | Token::Enum | Token::Impl | Token::Trait |
-                        Token::Let | Token::Mut | Token::Const | Token::If | Token::Else |
+                        Token::Let | Token::Mut | Token::Const | Token::Static | Token::Volatile |
+                        Token::If | Token::Else |
                         Token::While | Token::For | Token::Break | Token::Continue | Token::Return |
                         Token::Import | Token::Comptime | Token::Cast | Token::Move | Token::Ref |
                         Token::Extern | Token::Private | Token::True | Token::False =>

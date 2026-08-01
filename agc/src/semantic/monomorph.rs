@@ -130,6 +130,32 @@ fn collect_struct_instantiations(
     for item in &program.items {
         collect_item_instantiations(item, generic_structs, instantiations, &mut scopes);
     }
+
+    // A concrete generic type can contain another generic type after substitution,
+    // e.g. HashSet<i64> has a HashMap<i64, bool> field even though HashSet<K>'s
+    // source field is HashMap<K, bool>. Walk generated instances to a fixpoint so
+    // nested concrete types get their structs and impls monomorphized normally.
+    let mut processed = HashSet::default();
+    loop {
+        let pending = instantiations
+            .iter()
+            .filter(|(key, _)| !processed.contains(*key))
+            .map(|(key, inst)| (key.clone(), inst.item.clone()))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+        for (key, item) in pending {
+            processed.insert(key);
+            let mut instance_scopes = Vec::new();
+            collect_item_instantiations(
+                &item,
+                generic_structs,
+                instantiations,
+                &mut instance_scopes,
+            );
+        }
+    }
 }
 
 fn collect_item_instantiations(

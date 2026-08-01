@@ -1,0 +1,39 @@
+// Frequency count.
+//
+// Reads N numbers, then Q queries. For each query prints how many times the
+// queried value appeared in the input (0 if it never appeared).
+import std.io.scanner;
+import std.map;
+
+i32 main() {
+    Scanner s = Scanner.stdin();
+    i64 n = s.next_i64();
+
+    HashMap<i64, i64> counts = HashMap<i64, i64>.new();
+    i64 i = 0;
+    while (i < n) {
+        i64 x = s.next_i64();
+        if (counts.contains_key(x)) {
+            counts.insert(x, counts.get(x) + 1);
+        } else {
+            counts.insert(x, 1);
+        }
+        i = i + 1;
+    }
+
+    i64 q = s.next_i64();
+    i = 0;
+    while (i < q) {
+        i64 x = s.next_i64();
+        if (counts.contains_key(x)) {
+            @println("{}", counts.get(x));
+        } else {
+            @println("{}", (i64)0);
+        }
+        i = i + 1;
+    }
+
+    counts.drop();
+    s.drop();
+    return 0;
+}

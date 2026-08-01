@@ -24,6 +24,9 @@ pub struct TypeChecker {
     errors: Vec<TypeError>,
     scopes: Vec<HashMap<String, (Type, bool)>>,
     moved_locals: Vec<HashSet<String>>,
+    static_vars: Vec<HashSet<String>>,
+    volatile_vars: Vec<HashSet<String>>,
+    volatile_globals: HashSet<String>,
     current_return: Option<Type>,
     method_symbols: HashMap<SymbolId, MethodSig>,
     defer_depth: u32,
@@ -606,6 +609,10 @@ impl TypeChecker {
                 let declared = Type::from_ast(annotation);
                 self.reject_plain_void_value_type(&declared, annotation.span.clone());
 
+                if let_stmt.is_volatile && matches!(declared, Type::Array { .. }) {
+                    self.error("volatile arrays are not supported", stmt.span.clone());
+                }
+
                 if let Some(init) = &let_stmt.initializer {
                     let init_type = self.check_expr(init, Some(&declared));
                     if !self.is_assignable(&declared, &init_type)
@@ -626,6 +633,16 @@ impl TypeChecker {
                             let_stmt.is_mutable,
                             let_stmt.pattern.span.clone(),
                         );
+                        if let Some(scope) = self.static_vars.last_mut() {
+                            if let_stmt.is_static {
+                                scope.insert(ident.name.clone());
+                            }
+                        }
+                        if let Some(scope) = self.volatile_vars.last_mut() {
+                            if let_stmt.is_volatile {
+                                scope.insert(ident.name.clone());
+                            }
+                        }
                         // Record for hover: variable name gets its declared type
                         self.expr_types.insert(
                             (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
@@ -1252,6 +1269,34 @@ impl TypeChecker {
                 is_mutable: _is_mutable,
             } => {
                 let inner = self.check_expr(expression, None);
+                // Reject address-of on volatile variables (local or global):
+                // the pointee could be observed changing underneath, so a plain
+                // pointer view would bypass the volatile access guarantees.
+                let mut root = expression;
+                while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
+                    root = object;
+                }
+                if let ast::ExpressionKind::Identifier(ident) = root.kind.as_ref() {
+                    let is_local = self
+                        .scopes
+                        .iter()
+                        .rev()
+                        .any(|scope| scope.contains_key(ident.name.as_str()));
+                    let volatile = if is_local {
+                        self.is_volatile_local(&ident.name)
+                    } else {
+                        self.volatile_globals.contains(&ident.name)
+                    };
+                    if volatile {
+                        self.error(
+                            format!(
+                                "cannot take the address of volatile variable '{}'",
+                                ident.name
+                            ),
+                            expr.span.clone(),
+                        );
+                    }
+                }
                 // Constness of &expr depends on the source variable:
                 // if the source is const, the pointer is immutable regardless of syntax.
                 let source_is_mutable =
@@ -1271,6 +1316,12 @@ impl TypeChecker {
                 let ty = self.check_expr(inner, None);
                 if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
                     self.mark_moved(&ident.name);
+                    if self.is_static_var(&ident.name) {
+                        self.error(
+                            format!("cannot move out of static variable '{}'", ident.name),
+                            expr.span.clone(),
+                        );
+                    }
                 } else {
                     self.error("move operand must be an identifier", inner.span.clone());
                 }
@@ -1616,46 +1667,167 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 let scrutinee_ty = self.check_expr(expression, None);
-                let enum_name = match &scrutinee_ty {
-                    Type::Named { path, .. } if path.len() == 1 => path[0].clone(),
-                    _ => {
-                        self.error("match expression requires an enum type", expr.span.clone());
+
+                // Enum dispatch: scrutinee is a named enum type.
+                if let Type::Named { path, .. } = &scrutinee_ty {
+                    if path.len() == 1 && self.enum_defs.contains_key(&path[0]) {
+                        let enum_name = path[0].clone();
+                        let mut arm_types: Vec<Type> = Vec::new();
+                        for (arm_index, arm) in arms.iter().enumerate() {
+                            self.push_scope();
+                            match &arm.pattern.kind {
+                                ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
+                                ast::PatternKind::Enum {
+                                    variant, data, ..
+                                } => {
+                                    if let Some(data_pattern) = data {
+                                        let payload_types = self
+                                            .enum_defs
+                                            .get(&enum_name)
+                                            .and_then(|def| def.variants.get(&variant.name))
+                                            .map(|info| info.payload.clone())
+                                            .unwrap_or_default();
+                                        match &data_pattern.kind {
+                                            ast::PatternKind::Identifier(binding) => {
+                                                if let Some(pt) = payload_types.first() {
+                                                    self.bind(
+                                                        &binding.name,
+                                                        Type::from_ast(pt),
+                                                        false,
+                                                        binding.span.clone(),
+                                                    );
+                                                }
+                                            }
+                                            ast::PatternKind::Tuple(bindings) => {
+                                                for (i, sub) in bindings.iter().enumerate() {
+                                                    if let ast::PatternKind::Identifier(b) =
+                                                        &sub.kind
+                                                        && let Some(pt) = payload_types.get(i)
+                                                    {
+                                                        self.bind(
+                                                            &b.name,
+                                                            Type::from_ast(pt),
+                                                            false,
+                                                            b.span.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                self.error(
+                                                    "data pattern in match must bind identifiers".to_string(),
+                                                    data_pattern.span.clone(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.error(
+                                        "unsupported pattern kind in match",
+                                        arm.pattern.span.clone(),
+                                    );
+                                }
+                            }
+                            // Later arms infer their type from the first arm so
+                            // integer literals like `Rect2.E : 0` widen to i64
+                            // instead of defaulting to i32.
+                            let arm_expected = if arm_index == 0 {
+                                expected
+                            } else {
+                                arm_types.first()
+                            };
+                            arm_types.push(self.check_expr(&arm.body, arm_expected));
+                            self.pop_scope();
+                        }
+                        if let Some(first) = arm_types.first() {
+                            let unified = first.clone();
+                            for (i, other) in arm_types.iter().enumerate().skip(1) {
+                                if &unified != other {
+                                    self.error(
+                                        format!(
+                                            "match arm {} has type {}, expected {}",
+                                            i + 1,
+                                            other,
+                                            unified
+                                        ),
+                                        arms[i].span.clone(),
+                                    );
+                                }
+                            }
+                            unified
+                        } else {
+                            Type::Unit
+                        }
+                    } else {
+                        self.error(
+                            format!("unknown enum type '{}'", path[0]),
+                            expr.span.clone(),
+                        );
                         for arm in arms {
                             self.check_expr(&arm.body, None);
                         }
-                        return Type::Unknown;
+                        Type::Unknown
                     }
-                };
-                if self.enum_defs.contains_key(&enum_name) {
+                } else if let Type::Primitive(prim) = &scrutinee_ty
+                    && matches!(
+                        prim,
+                        ast::PrimitiveType::I8
+                            | ast::PrimitiveType::I16
+                            | ast::PrimitiveType::I32
+                            | ast::PrimitiveType::I64
+                            | ast::PrimitiveType::I128
+                            | ast::PrimitiveType::U8
+                            | ast::PrimitiveType::U16
+                            | ast::PrimitiveType::U32
+                            | ast::PrimitiveType::U64
+                            | ast::PrimitiveType::U128
+                            | ast::PrimitiveType::F32
+                            | ast::PrimitiveType::F64
+                            | ast::PrimitiveType::Bool
+                            | ast::PrimitiveType::Char
+                            | ast::PrimitiveType::Str
+                    )
+                {
+                    // Value dispatch: literal patterns compared against a
+                    // primitive int / float / bool / char / str scrutinee.
                     let mut arm_types: Vec<Type> = Vec::new();
-                    for arm in arms {
+                    for (arm_index, arm) in arms.iter().enumerate() {
                         self.push_scope();
                         match &arm.pattern.kind {
                             ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
-                            ast::PatternKind::Enum {
-                                path: _,
-                                variant: _,
-                                data,
-                            } => {
-                                if let Some(data_pattern) = data {
-                                    match &data_pattern.kind {
-                                        ast::PatternKind::Identifier(binding) => {
-                                            let payload_type =
-                                                Type::Primitive(ast::PrimitiveType::I32);
-                                            self.bind(
-                                                &binding.name,
-                                                payload_type,
-                                                false,
-                                                binding.span.clone(),
-                                            );
-                                        }
-                                        _ => {
-                                            self.error(
-                                                "data pattern in match must be an identifier",
-                                                data_pattern.span.clone(),
-                                            );
-                                        }
-                                    }
+                            ast::PatternKind::Literal(lit) => {
+                                let ok = match (prim, lit) {
+                                    (
+                                        ast::PrimitiveType::F32 | ast::PrimitiveType::F64,
+                                        ast::Literal::Float(_),
+                                    )
+                                    | (
+                                        ast::PrimitiveType::I8
+                                        | ast::PrimitiveType::I16
+                                        | ast::PrimitiveType::I32
+                                        | ast::PrimitiveType::I64
+                                        | ast::PrimitiveType::I128
+                                        | ast::PrimitiveType::U8
+                                        | ast::PrimitiveType::U16
+                                        | ast::PrimitiveType::U32
+                                        | ast::PrimitiveType::U64
+                                        | ast::PrimitiveType::U128,
+                                        ast::Literal::Integer(_),
+                                    )
+                                    | (ast::PrimitiveType::Bool, ast::Literal::Bool(_))
+                                    | (ast::PrimitiveType::Char, ast::Literal::Char(_))
+                                    | (ast::PrimitiveType::Str, ast::Literal::String(_)) => true,
+                                    _ => false,
+                                };
+                                if !ok {
+                                    self.error(
+                                        format!(
+                                            "match pattern type does not match scrutinee type {}",
+                                            scrutinee_ty
+                                        ),
+                                        arm.pattern.span.clone(),
+                                    );
                                 }
                             }
                             _ => {
@@ -1665,7 +1837,15 @@ impl TypeChecker {
                                 );
                             }
                         }
-                        arm_types.push(self.check_expr(&arm.body, None));
+                        // Later arms infer their type from the first arm so
+                        // integer literals widen to the arm type instead of
+                        // defaulting to i32.
+                        let arm_expected = if arm_index == 0 {
+                            expected
+                        } else {
+                            arm_types.first()
+                        };
+                        arm_types.push(self.check_expr(&arm.body, arm_expected));
                         self.pop_scope();
                     }
                     if let Some(first) = arm_types.first() {
@@ -1689,7 +1869,7 @@ impl TypeChecker {
                     }
                 } else {
                     self.error(
-                        format!("unknown enum type '{}'", enum_name),
+                        "match expression requires an enum type or a primitive int/float/bool/char/str value".to_string(),
                         expr.span.clone(),
                     );
                     for arm in arms {
@@ -2397,12 +2577,18 @@ impl TypeChecker {
             );
             self.global_variables
                 .insert(var.name.name.clone(), Type::from_ast(&var.var_type));
+            if var.is_volatile {
+                self.volatile_globals.insert(var.name.name.clone());
+            }
         }
     }
 
     fn check_global_variable(&mut self, var: &ast::GlobalVariableItem) {
         let declared = Type::from_ast(&var.var_type);
         self.reject_plain_void_value_type(&declared, var.var_type.span.clone());
+        if var.is_volatile && matches!(declared, Type::Array { .. }) {
+            self.error("volatile arrays are not supported", var.var_type.span.clone());
+        }
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
             if !self.is_assignable(&declared, &init_type)
@@ -4224,11 +4410,15 @@ impl TypeChecker {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::default());
         self.moved_locals.push(HashSet::default());
+        self.static_vars.push(HashSet::default());
+        self.volatile_vars.push(HashSet::default());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.moved_locals.pop();
+        self.static_vars.pop();
+        self.volatile_vars.pop();
     }
 
     fn bind(&mut self, name: &str, ty: Type, is_mutable: bool, span: Span) {
@@ -4267,6 +4457,22 @@ impl TypeChecker {
             }
         }
         false
+    }
+
+    /// True if `name` is declared `static` in any enclosing scope.
+    fn is_static_var(&self, name: &str) -> bool {
+        self.static_vars
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    /// True if `name` is declared `volatile` in the innermost scope that binds it.
+    fn is_volatile_local(&self, name: &str) -> bool {
+        self.volatile_vars
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
     }
 
     fn mark_moved(&mut self, name: &str) {
@@ -5092,5 +5298,75 @@ mod tests {
         for ((start, end), ty) in &types {
             eprintln!("  span({start},{end}) → {ty}");
         }
+    }
+
+    #[test]
+    fn rejects_move_of_static_local() {
+        let program = parse("i32 main() { static i32 x = 1; i32 y = move x; return y; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("cannot move out of static variable")),
+            "expected move-of-static error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_address_of_volatile_local() {
+        let program = parse("i32 main() { volatile i32 v = 1; i32* p = &v; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("cannot take the address of volatile")),
+            "expected address-of-volatile error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_address_of_volatile_global() {
+        let program =
+            parse("volatile i32 g = 0; i32 main() { i32* p = &g; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("cannot take the address of volatile")),
+            "expected address-of-volatile error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn shadowed_non_volatile_local_allows_address_of() {
+        let program =
+            parse("volatile i32 g = 0; i32 main() { i32 g = 5; i32* p = &g; return *p; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_volatile_array_local() {
+        let program =
+            parse("i32 main() { volatile i32 arr[10]; arr[0] = 1; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("volatile arrays are not supported")),
+            "expected volatile-array error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_volatile_array_global() {
+        let program = parse("volatile i32 arr[10]; i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("volatile arrays are not supported")),
+            "expected volatile-array error, got {errors:?}"
+        );
     }
 }

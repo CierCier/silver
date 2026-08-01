@@ -1,0 +1,118 @@
+// std/bytes.ag — Raw byte buffer (no encoding assumptions).
+// Bytes is an owned growable sequence of u8 values, similar to Rust's Vec<u8>
+// but with a simpler interface focused on byte-oriented I/O and binary data.
+import std.mem.alloc;
+import std.ops;
+
+struct Bytes {
+    u8* data;
+    i64 len;
+    i64 cap;
+}
+
+impl Bytes {
+    Bytes new() {
+        return Bytes.with_capacity(0);
+    }
+
+    Bytes with_capacity(i64 capacity) {
+        Bytes b;
+        b.len = 0;
+        b.cap = capacity;
+        if (capacity > 0) {
+            b.data = alloc<u8>(capacity);
+        } else {
+            b.data = (u8*)0;
+        }
+        return move b;
+    }
+
+    i64 len(Bytes* self) {
+        return self.len;
+    }
+
+    i64 capacity(Bytes* self) {
+        return self.cap;
+    }
+
+    void push(Bytes* self, u8 byte) {
+        if (self.len + 1 > self.cap) {
+            i64 new_cap = self.cap * 2;
+            if (new_cap < 16) {
+                new_cap = 16;
+            }
+            self.data = realloc<u8>(self.data, new_cap);
+            self.cap = new_cap;
+        }
+        self.data[self.len] = byte;
+        self.len = self.len + 1;
+    }
+
+    void extend(Bytes* self, u8* src, i64 src_len) {
+        if (src_len <= 0) {
+            return;
+        }
+        if (self.len + src_len > self.cap) {
+            i64 new_cap = self.cap * 2;
+            if (new_cap < self.len + src_len) {
+                new_cap = self.len + src_len;
+            }
+            if (new_cap < 16) {
+                new_cap = 16;
+            }
+            self.data = realloc<u8>(self.data, new_cap);
+            self.cap = new_cap;
+        }
+        i64 i = 0;
+        while (i < src_len) {
+            self.data[self.len + i] = src[i];
+            i = i + 1;
+        }
+        self.len = self.len + src_len;
+    }
+
+    u8 get(Bytes* self, i64 index) {
+        if (index < 0 || index >= self.len) {
+            abort();
+        }
+        return self.data[index];
+    }
+
+    void set(Bytes* self, i64 index, u8 value) {
+        if (index < 0 || index >= self.len) {
+            abort();
+        }
+        self.data[index] = value;
+    }
+
+    u8* as_ptr(Bytes* self) {
+        return self.data;
+    }
+
+    void clear(Bytes* self) {
+        self.len = 0;
+    }
+}
+
+impl Drop<Bytes> for Bytes {
+    void drop(Bytes* self) {
+        if (self.data != (u8*)0) {
+            free(self.data);
+            self.data = (u8*)0;
+        }
+        self.len = 0;
+        self.cap = 0;
+    }
+}
+
+impl IndexedAccess<Bytes> for Bytes {
+    type Item = u8;
+    u8 __index_get(Bytes* self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return self.data[index];
+    }
+    void __index_set(Bytes* self, i64 index, u8 value) {
+        if (index < 0 || index >= self.len) { abort(); }
+        self.data[index] = value;
+    }
+}

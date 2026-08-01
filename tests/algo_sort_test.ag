@@ -1,0 +1,147 @@
+// Test suite for generic algorithms: sort, search, reverse, swap.
+import std.test;
+import std.mem;
+import std.algo;
+
+i32 main() {
+    STDOUT.write_str("=== Algo Sort Tests ===\n\n");
+
+    // --- sort empty ---
+    STDOUT.write_str("--- sort empty ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        sort(&v);
+        assert_eq_i64(0, v.len(), "empty vec len 0 after sort");
+        assert_true(v.is_empty(), "empty vec is_empty after sort");
+        v.drop();
+    }
+
+    // --- sort single element ---
+    STDOUT.write_str("\n--- sort single element ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(42);
+        sort(&v);
+        assert_eq_i64(1, v.len(), "single elem len 1 after sort");
+        assert_eq_i64(42, (i64)v[0], "single elem value preserved");
+        v.drop();
+    }
+
+    // --- sort already sorted ---
+    STDOUT.write_str("\n--- sort already sorted ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.push(4);
+        v.push(5);
+        sort(&v);
+        assert_eq_i64(1, (i64)v[0], "sorted[0] = 1");
+        assert_eq_i64(2, (i64)v[1], "sorted[1] = 2");
+        assert_eq_i64(5, (i64)v[4], "sorted[4] = 5");
+        v.drop();
+    }
+
+    // --- sort reversed ---
+    STDOUT.write_str("\n--- sort reversed ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(5);
+        v.push(4);
+        v.push(3);
+        v.push(2);
+        v.push(1);
+        sort(&v);
+        assert_eq_i64(1, (i64)v[0], "reversed[0] = 1");
+        assert_eq_i64(2, (i64)v[1], "reversed[1] = 2");
+        assert_eq_i64(5, (i64)v[4], "reversed[4] = 5");
+        v.drop();
+    }
+
+    // --- sort duplicates ---
+    STDOUT.write_str("\n--- sort duplicates ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(3);
+        v.push(1);
+        v.push(2);
+        v.push(1);
+        v.push(3);
+        sort(&v);
+        assert_eq_i64(1, (i64)v[0], "dupes[0] = 1");
+        assert_eq_i64(1, (i64)v[1], "dupes[1] = 1");
+        assert_eq_i64(2, (i64)v[2], "dupes[2] = 2");
+        assert_eq_i64(3, (i64)v[3], "dupes[3] = 3");
+        assert_eq_i64(3, (i64)v[4], "dupes[4] = 3");
+        v.drop();
+    }
+
+    // --- lower_bound / upper_bound / binary_search ---
+    STDOUT.write_str("\n--- lower_bound / upper_bound / binary_search ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(1);
+        v.push(2);
+        v.push(2);
+        v.push(2);
+        v.push(3);
+        v.push(5);
+        // v is already sorted
+
+        assert_eq_i64(0, lower_bound(&v, 1), "lower_bound(1) = 0");
+        assert_eq_i64(1, lower_bound(&v, 2), "lower_bound(2) = 1");
+        assert_eq_i64(4, lower_bound(&v, 3), "lower_bound(3) = 4");
+        assert_eq_i64(5, lower_bound(&v, 5), "lower_bound(5) = 5");
+        assert_eq_i64(6, lower_bound(&v, 6), "lower_bound(6) = 6 (len)");
+
+        assert_eq_i64(1, upper_bound(&v, 1), "upper_bound(1) = 1");
+        assert_eq_i64(4, upper_bound(&v, 2), "upper_bound(2) = 4");
+        assert_eq_i64(5, upper_bound(&v, 3), "upper_bound(3) = 5");
+        assert_eq_i64(6, upper_bound(&v, 5), "upper_bound(5) = 6");
+
+        assert_true(binary_search(&v, 1), "binary_search(1) = true");
+        assert_true(binary_search(&v, 2), "binary_search(2) = true");
+        assert_true(binary_search(&v, 5), "binary_search(5) = true");
+        assert_false(binary_search(&v, 0), "binary_search(0) = false");
+        assert_false(binary_search(&v, 4), "binary_search(4) = false");
+        assert_false(binary_search(&v, 6), "binary_search(6) = false");
+
+        v.drop();
+    }
+
+    // --- reverse ---
+    STDOUT.write_str("\n--- reverse ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        reverse(&v);
+        assert_eq_i64(3, (i64)v[0], "reverse[0] = 3");
+        assert_eq_i64(2, (i64)v[1], "reverse[1] = 2");
+        assert_eq_i64(1, (i64)v[2], "reverse[2] = 1");
+        v.drop();
+    }
+
+    // --- swap ---
+    STDOUT.write_str("\n--- swap ---\n");
+    {
+        i64 a = 10;
+        i64 b = 20;
+        swap<i64>(&a, &b);
+        assert_eq_i64(20, a, "swap a becomes 20");
+        assert_eq_i64(10, b, "swap b becomes 10");
+    }
+
+    // --- min / max ---
+    STDOUT.write_str("\n--- min / max ---\n");
+    {
+        i64 a = 5;
+        i64 b = 10;
+        assert_eq_i64(5, min<i64>(a, b), "min(5, 10) = 5");
+        assert_eq_i64(10, max<i64>(a, b), "max(5, 10) = 10");
+    }
+
+    return done();
+}

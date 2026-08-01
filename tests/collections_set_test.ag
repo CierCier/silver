@@ -1,0 +1,81 @@
+// Test suite for HashSet<K> — hash set backed by HashMap<K, bool>.
+import std.test;
+import std.collections.set;
+
+i32 main() {
+    STDOUT.write_str("=== HashSet Tests ===\n\n");
+
+    // --- new ---
+    STDOUT.write_str("--- new ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        assert_eq_i64(0, s.len(), "new set len 0");
+        assert_true(s.is_empty(), "new set is empty");
+        s.drop();
+    }
+
+    // --- insert and contains ---
+    STDOUT.write_str("\n--- insert and contains ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(10);
+        s.insert(20);
+        s.insert(30);
+        assert_eq_i64(3, s.len(), "len 3 after 3 inserts");
+        assert_true(!s.is_empty(), "not empty after inserts");
+        assert_true(s.contains(10), "contains 10");
+        assert_true(s.contains(20), "contains 20");
+        assert_true(s.contains(30), "contains 30");
+        assert_true(!s.contains(99), "does not contain 99");
+        s.drop();
+    }
+
+    // --- duplicate insert ---
+    STDOUT.write_str("\n--- duplicate insert ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(42);
+        assert_eq_i64(1, s.len(), "len 1 after first insert");
+        s.insert(42);
+        // HashMap replaces, so len stays the same
+        assert_eq_i64(1, s.len(), "len still 1 after duplicate insert");
+        assert_true(s.contains(42), "still contains 42");
+        s.drop();
+    }
+
+    // --- erase ---
+    STDOUT.write_str("\n--- erase ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(1);
+        s.insert(2);
+        s.insert(3);
+        assert_eq_i64(3, s.len(), "len 3 before erase");
+        assert_true(!s.erase(99), "erase missing returns false");
+        assert_eq_i64(3, s.len(), "len unchanged after failed erase");
+        assert_true(s.erase(2), "erase existing returns true");
+        assert_eq_i64(2, s.len(), "len 2 after erase");
+        assert_true(!s.contains(2), "no longer contains 2");
+        assert_true(s.contains(1), "still contains 1");
+        assert_true(s.contains(3), "still contains 3");
+        s.drop();
+    }
+
+    // --- clear ---
+    STDOUT.write_str("\n--- clear ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(1);
+        s.insert(2);
+        s.insert(3);
+        s.clear();
+        assert_eq_i64(0, s.len(), "len 0 after clear");
+        assert_true(s.is_empty(), "is_empty after clear");
+        assert_true(!s.contains(1), "no longer contains 1 after clear");
+        s.insert(99);
+        assert_true(s.contains(99), "can insert after clear");
+        s.drop();
+    }
+
+    return done();
+}

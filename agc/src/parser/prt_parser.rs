@@ -84,6 +84,15 @@ impl GrammarSpec {
     }
 }
 
+/// Declaration-level qualifiers consumed by `consume_declaration_qualifiers`.
+/// Mirrors the `const` model: qualifiers are declaration-level, not type-level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeclQualifiers {
+    is_static: bool,
+    is_volatile: bool,
+    is_const: bool,
+}
+
 #[allow(non_camel_case_types)]
 pub struct PRT_Parser {
     source_name: Option<String>,
@@ -678,6 +687,9 @@ impl PRT_Parser {
     }
 
     fn looks_like_function_item_start(&self, tokens: &[LexToken], start: usize) -> bool {
+        let start = Self::consume_declaration_qualifiers(tokens, start, tokens.len())
+            .map(|(cursor, _)| cursor)
+            .unwrap_or(start);
         let Some((_, after_type)) = self.parse_type_prefix(tokens, start, tokens.len()) else {
             return false;
         };
@@ -707,10 +719,50 @@ impl PRT_Parser {
         )
     }
 
+    /// Consume a run of declaration qualifiers (static, volatile, const), each at
+    /// most once, in any order. Returns the new cursor and collected flags.
+    /// Always returns Some((cursor, flags)) — flags are all-false when the first
+    /// token is not a qualifier — and None ONLY on a duplicate qualifier.
+    fn consume_declaration_qualifiers(
+        tokens: &[LexToken],
+        cursor: usize,
+        end: usize,
+    ) -> Option<(usize, DeclQualifiers)> {
+        let mut cursor = cursor;
+        let mut flags = DeclQualifiers::default();
+        loop {
+            if cursor >= end {
+                break;
+            }
+            let Some(token) = tokens.get(cursor) else {
+                break;
+            };
+            match &token.kind {
+                Token::Static if !flags.is_static => {
+                    flags.is_static = true;
+                    cursor += 1;
+                }
+                Token::Volatile if !flags.is_volatile => {
+                    flags.is_volatile = true;
+                    cursor += 1;
+                }
+                Token::Const if !flags.is_const => {
+                    flags.is_const = true;
+                    cursor += 1;
+                }
+                Token::Static | Token::Volatile | Token::Const => return None,
+                _ => break,
+            }
+        }
+        Some((cursor, flags))
+    }
+
     fn is_type_start_token(token: &Token) -> bool {
         matches!(
             token,
             Token::Const
+                | Token::Static
+                | Token::Volatile
                 | Token::LeftBracket
                 | Token::I8
                 | Token::I16
@@ -847,8 +899,15 @@ impl PRT_Parser {
                 .map(|idx| idx + 1)
             }
             ItemProduction::Function => {
+                let type_start = Self::consume_declaration_qualifiers(
+                    tokens,
+                    item_start,
+                    tokens.len(),
+                )
+                .map(|(cursor, _)| cursor)
+                .unwrap_or(item_start);
                 let (_, after_type) =
-                    self.parse_type_prefix(tokens, item_start, tokens.len()).ok_or_else(|| {
+                    self.parse_type_prefix(tokens, type_start, tokens.len()).ok_or_else(|| {
                         ParseError::InvalidSyntax {
                             message: format!(
                                 "PRT_Parser could not parse item return type at token index {item_start} in source `{source}`"
@@ -1446,17 +1505,79 @@ impl PRT_Parser {
         let mut cursor = then_end;
         if cursor < end && matches!(tokens[cursor].kind, Token::Else) {
             cursor += 1;
-            let Some(else_end_inclusive) =
-                self.find_matching_token(tokens, cursor, end, Token::LeftBrace, Token::RightBrace)
-            else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "missing else block".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
-                });
-            };
-            let else_end = else_end_inclusive + 1;
-            else_branch = Some(self.parse_block_reduction(tokens, cursor, else_end)?);
-            cursor = else_end;
+            // Support "else if" — find the extent of the chained if-expression,
+            // then parse it as a unit and wrap in a block.
+            if cursor < end && matches!(tokens[cursor].kind, Token::If) {
+                let chain_start = cursor;
+                // Walk through the else-if chain to find where it ends.
+                // Each link: `if (cond) { body }`
+                let mut pos = chain_start;
+                while pos < end && matches!(tokens[pos].kind, Token::If) {
+                    // condition
+                    let Some(co) = self.find_matching_token(
+                        tokens, pos + 1, end, Token::LeftParen, Token::RightParen,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "unterminated if condition".to_string(),
+                            span: tokens[pos].span.clone(),
+                        });
+                    };
+                    // then block
+                    let Some(te) = self.find_matching_token(
+                        tokens, co + 1, end, Token::LeftBrace, Token::RightBrace,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "missing if block".to_string(),
+                            span: tokens[pos].span.clone(),
+                        });
+                    };
+                    pos = te + 1;
+                    // Check for else / else if
+                    if pos < end && matches!(tokens[pos].kind, Token::Else) {
+                        pos += 1;
+                        if pos < end && matches!(tokens[pos].kind, Token::If) {
+                            // else if — continue the loop
+                            continue;
+                        }
+                        // plain else — find its block
+                        let Some(ee) = self.find_matching_token(
+                            tokens, pos, end, Token::LeftBrace, Token::RightBrace,
+                        ) else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "missing else block".to_string(),
+                                span: tokens[pos.min(end - 1)].span.clone(),
+                            });
+                        };
+                        pos = ee + 1;
+                    }
+                    break;
+                }
+                let chain_end = pos;
+                let if_stmt = self.parse_if_statement_reduction(tokens, chain_start, chain_end)?;
+                if let ast::StatementKind::Expression(expr) = if_stmt.kind {
+                    let fake_brace_span = expr.span.clone();
+                    else_branch = Some(ast::Block {
+                        statements: vec![ast::Statement {
+                            kind: ast::StatementKind::Expression(expr),
+                            span: fake_brace_span.clone(),
+                        }],
+                        span: fake_brace_span,
+                    });
+                    cursor = chain_end;
+                }
+            } else {
+                let Some(else_end_inclusive) = self.find_matching_token(
+                    tokens, cursor, end, Token::LeftBrace, Token::RightBrace,
+                ) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "missing else block".to_string(),
+                        span: tokens[cursor.min(end - 1)].span.clone(),
+                    });
+                };
+                let else_end = else_end_inclusive + 1;
+                else_branch = Some(self.parse_block_reduction(tokens, cursor, else_end)?);
+                cursor = else_end;
+            }
         }
 
         if cursor != end {
@@ -2206,15 +2327,36 @@ impl PRT_Parser {
                             Some(Token::LeftParen)
                         ) {
                             cursor.bump();
-                            let data_pattern = parse_match_pattern(cursor)?;
-                            if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen))
-                            {
+                            let mut data_patterns = vec![parse_match_pattern(cursor)?];
+                            // Multiple payload bindings: Variant(a, b, c)
+                            while matches!(
+                                cursor.current().map(|t| &t.kind),
+                                Some(Token::Comma)
+                            ) {
+                                cursor.bump();
+                                data_patterns.push(parse_match_pattern(cursor)?);
+                            }
+                            if !matches!(
+                                cursor.current().map(|t| &t.kind),
+                                Some(Token::RightParen)
+                            ) {
                                 return Err(ParseError::InvalidSyntax {
                                     message: "expected ')' in enum variant pattern".to_string(),
                                     span: variant_span.clone(),
                                 });
                             }
                             cursor.bump();
+                            let data_pattern = if data_patterns.len() == 1 {
+                                data_patterns.pop().unwrap()
+                            } else {
+                                ast::Pattern {
+                                    kind: ast::PatternKind::Tuple(data_patterns),
+                                    span: Span {
+                                        start: span.start,
+                                        end: variant_span.end,
+                                    },
+                                }
+                            };
                             Some(Box::new(data_pattern))
                         } else {
                             None
@@ -3525,21 +3667,25 @@ impl PRT_Parser {
             });
         }
 
-        let const_offset = if matches!(tokens[start].kind, Token::Const) {
-            1
-        } else {
-            0
+        let Some((qual_cursor, qualifiers)) =
+            Self::consume_declaration_qualifiers(tokens, start, end - 1)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "duplicate declaration qualifier".to_string(),
+                span: tokens[start].span.clone(),
+            });
         };
-        if self.statement_type_start_is_unambiguous(tokens, start + const_offset, end - 1)
+        if self.statement_type_start_is_unambiguous(tokens, qual_cursor, end - 1)
             && let Some((_decl_ty, after_type)) =
-                self.parse_type_prefix(tokens, start + const_offset, end - 1)
+                self.parse_type_prefix(tokens, qual_cursor, end - 1)
             && after_type < end
             && matches!(
                 tokens.get(after_type).map(|t| &t.kind),
                 Some(Token::Identifier(_))
             )
         {
-            let statements = self.parse_let_statement_reductions(tokens, start, end)?;
+            let statements =
+                self.parse_let_statement_reductions(tokens, start, end, qualifiers)?;
             if statements.len() != 1 {
                 return Err(ParseError::InvalidSyntax {
                     message: "grouped declaration is not allowed in this context".to_string(),
@@ -3567,9 +3713,11 @@ impl PRT_Parser {
         tokens: &[LexToken],
         start: usize,
         end: usize,
+        qualifiers: DeclQualifiers,
     ) -> Result<Vec<ast::Statement>, ParseError> {
-        let has_const = matches!(tokens[start].kind, Token::Const);
-        let decl_start = if has_const { start + 1 } else { start };
+        let decl_start = Self::consume_declaration_qualifiers(tokens, start, end - 1)
+            .map(|(cursor, _)| cursor)
+            .unwrap_or(start);
         let (_, declarators) = self.parse_declarator_group(tokens, decl_start, end - 1, true)?;
         let statement_end = tokens[end - 1].span.end;
         let mut statements = Vec::with_capacity(declarators.len());
@@ -3584,7 +3732,9 @@ impl PRT_Parser {
                     },
                     type_annotation: Some(declarator.ty),
                     initializer: declarator.initializer,
-                    is_mutable: !has_const,
+                    is_mutable: !qualifiers.is_const,
+                    is_static: qualifiers.is_static,
+                    is_volatile: qualifiers.is_volatile,
                 }),
                 span: Span {
                     start: declarator.span.start,
@@ -3646,21 +3796,45 @@ impl PRT_Parser {
                     });
                 };
                 let mut stmt_end = then_end_inclusive + 1;
-                if stmt_end < end && matches!(tokens[stmt_end].kind, Token::Else) {
+                // Walk through else / else-if chain
+                while stmt_end < end && matches!(tokens[stmt_end].kind, Token::Else) {
                     let else_start = stmt_end + 1;
-                    let Some(else_end_inclusive) = self.find_matching_token(
-                        tokens,
-                        else_start,
-                        end,
-                        Token::LeftBrace,
-                        Token::RightBrace,
-                    ) else {
-                        return Err(ParseError::InvalidSyntax {
-                            message: "missing else block".to_string(),
-                            span: tokens[stmt_end].span.clone(),
-                        });
-                    };
-                    stmt_end = else_end_inclusive + 1;
+                    if else_start < end && matches!(tokens[else_start].kind, Token::If) {
+                        // else if — find condition and body
+                        let Some(co) = self.find_matching_token(
+                            tokens, else_start + 1, end,
+                            Token::LeftParen, Token::RightParen,
+                        ) else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "unterminated if condition".to_string(),
+                                span: tokens[else_start].span.clone(),
+                            });
+                        };
+                        let Some(te) = self.find_matching_token(
+                            tokens, co + 1, end,
+                            Token::LeftBrace, Token::RightBrace,
+                        ) else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "missing if block".to_string(),
+                                span: tokens[else_start].span.clone(),
+                            });
+                        };
+                        stmt_end = te + 1;
+                        // Continue loop to check for another else
+                    } else {
+                        // plain else — find body
+                        let Some(ee) = self.find_matching_token(
+                            tokens, else_start, end,
+                            Token::LeftBrace, Token::RightBrace,
+                        ) else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "missing else block".to_string(),
+                                span: tokens[stmt_end].span.clone(),
+                            });
+                        };
+                        stmt_end = ee + 1;
+                        break;
+                    }
                 }
                 statements.push(self.parse_if_statement_reduction(tokens, cursor, stmt_end)?);
                 cursor = stmt_end;
@@ -3891,14 +4065,17 @@ impl PRT_Parser {
                 });
             };
             let statement_end = semicolon + 1;
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
-                1
-            } else {
-                0
+            let Some((qual_cursor, qualifiers)) =
+                Self::consume_declaration_qualifiers(tokens, cursor, semicolon)
+            else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "duplicate declaration qualifier".to_string(),
+                    span: tokens[cursor].span.clone(),
+                });
             };
-            if self.statement_type_start_is_unambiguous(tokens, cursor + const_offset, semicolon)
+            if self.statement_type_start_is_unambiguous(tokens, qual_cursor, semicolon)
                 && let Some((_, after_type)) =
-                    self.parse_type_prefix(tokens, cursor + const_offset, semicolon)
+                    self.parse_type_prefix(tokens, qual_cursor, semicolon)
                 && after_type < semicolon
                 && matches!(
                     tokens.get(after_type).map(|t| &t.kind),
@@ -3909,6 +4086,7 @@ impl PRT_Parser {
                     tokens,
                     cursor,
                     statement_end,
+                    qualifiers,
                 )?);
             } else {
                 statements.push(self.parse_statement_reduction(tokens, cursor, statement_end)?);
@@ -3970,8 +4148,16 @@ impl PRT_Parser {
         end: usize,
     ) -> Result<ast::GlobalVariableItem, ParseError> {
         let decl_end = end.saturating_sub(1);
+        let Some((type_start, qualifiers)) =
+            Self::consume_declaration_qualifiers(tokens, start, decl_end)
+        else {
+            return Err(ParseError::InvalidSyntax {
+                message: "duplicate declaration qualifier".to_string(),
+                span: tokens[start].span.clone(),
+            });
+        };
         let (var_type, after_type) =
-            self.parse_type_prefix(tokens, start, decl_end)
+            self.parse_type_prefix(tokens, type_start, decl_end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected global variable type".to_string(),
                     span: tokens[start].span.clone(),
@@ -4061,6 +4247,8 @@ impl PRT_Parser {
             var_type,
             initializer,
             is_mutable: true,
+            is_static: qualifiers.is_static,
+            is_volatile: qualifiers.is_volatile,
         })
     }
 
@@ -6466,9 +6654,23 @@ impl PRT_Parser {
                 ItemProduction::Impl => {
                     ast::ItemKind::Impl(self.parse_impl_reduction(tokens, item_start, item_end)?)
                 }
-                ItemProduction::Function => ast::ItemKind::Function(
-                    self.parse_function_reduction(tokens, item_start, item_end)?,
-                ),
+                ItemProduction::Function => {
+                    if matches!(tokens[item_start].kind, Token::Static) {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "static functions are not supported".to_string(),
+                            span: tokens[item_start].span.clone(),
+                        });
+                    }
+                    if matches!(tokens[item_start].kind, Token::Volatile) {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "volatile functions are not supported".to_string(),
+                            span: tokens[item_start].span.clone(),
+                        });
+                    }
+                    ast::ItemKind::Function(
+                        self.parse_function_reduction(tokens, item_start, item_end)?,
+                    )
+                }
                 ItemProduction::GlobalVariable => ast::ItemKind::GlobalVariable(
                     self.parse_global_variable_reduction(tokens, item_start, item_end)?,
                 ),
@@ -7011,5 +7213,97 @@ mod tests {
         };
         assert_eq!(named.path[0].name, "Optional");
         assert_eq!(named.generics.as_ref().map(|args| args.len()), Some(1));
+    }
+
+    #[test]
+    fn parses_static_global_variable() {
+        let source = "static i32 x = 5;";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::GlobalVariable(global) = &program.items[0].kind else {
+            panic!("expected global variable item");
+        };
+        assert!(global.is_static, "global should be static");
+        assert!(!global.is_volatile, "global should not be volatile");
+        assert_eq!(global.name.name, "x");
+    }
+
+    #[test]
+    fn parses_volatile_global_variable() {
+        let source = "volatile i32 r;";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::GlobalVariable(global) = &program.items[0].kind else {
+            panic!("expected global variable item");
+        };
+        assert!(global.is_volatile, "global should be volatile");
+        assert!(!global.is_static, "global should not be static");
+    }
+
+    #[test]
+    fn parses_static_local_declaration() {
+        let source = "i32 f() { static i32 c = 0; c = c + 1; return c; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Function(function) = &program.items[0].kind else {
+            panic!("expected function item");
+        };
+        let ast::StatementKind::Let(let_stmt) = &function.body.statements[0].kind else {
+            panic!("expected let statement");
+        };
+        assert!(let_stmt.is_static, "local should be static");
+        assert!(!let_stmt.is_volatile, "local should not be volatile");
+        assert!(
+            let_stmt.is_mutable,
+            "static without const should stay mutable"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_declaration_qualifier() {
+        let source = "static static i32 x;";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser.parse_program(&tokens).expect_err("expected parse error");
+        match err {
+            ParseError::InvalidSyntax { message, .. } => {
+                assert!(message.contains("duplicate declaration qualifier"));
+            }
+            other => panic!("expected InvalidSyntax, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_static_function() {
+        let source = "static i32 f() { return 1; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser.parse_program(&tokens).expect_err("expected parse error");
+        match err {
+            ParseError::InvalidSyntax { message, .. } => {
+                assert!(message.contains("static functions are not supported"));
+            }
+            other => panic!("expected InvalidSyntax, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_volatile_function() {
+        let source = "volatile i32 f() { return 1; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser.parse_program(&tokens).expect_err("expected parse error");
+        match err {
+            ParseError::InvalidSyntax { message, .. } => {
+                assert!(message.contains("volatile functions are not supported"));
+            }
+            other => panic!("expected InvalidSyntax, got {other:?}"),
+        }
     }
 }

@@ -267,10 +267,10 @@ pub(crate) fn substitute_generic_type(
             ast::TypeKind::Named(named) => Some(Self::monomorph_owner_name_from_named(named)),
             ast::TypeKind::Reference(reference) => Self::owner_name_from_type(&reference.inner),
             ast::TypeKind::Pointer(pointer) => Self::owner_name_from_type(&pointer.inner),
+            ast::TypeKind::Primitive(p) => Some(format!("{:?}", p).to_lowercase()),
             _ => None,
         }
     }
-
 
     pub(crate) fn owner_name_candidates_from_type(ty: &ast::Type) -> Vec<String> {
         match ty.kind.as_ref() {
@@ -294,6 +294,7 @@ pub(crate) fn substitute_generic_type(
             ast::TypeKind::Pointer(pointer) => {
                 Self::owner_name_candidates_from_type(&pointer.inner)
             }
+            ast::TypeKind::Primitive(p) => vec![format!("{:?}", p).to_lowercase()],
             _ => Vec::new(),
         }
     }

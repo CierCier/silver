@@ -1,0 +1,375 @@
+// std/io/scanner.ag — stdin token scanner with UTF-8 BOM support.
+// Reads all of stdin into a heap buffer, then provides whitespace-delimited
+// token and line iteration with zero-copy str borrows.
+import std.io;
+import std.mem;
+import std.mem.alloc;
+import std.mem.drop;
+import std.string;
+import std.sys.result;
+
+struct Scanner {
+    u8* buf;
+    i64 len;
+    i64 cap;
+    i64 pos;
+    bool ok;
+    bool has_saved;
+    i64 saved_end;
+    u8 saved_byte;
+}
+
+impl Scanner {
+    /// Read all of fd 0 into an internal heap buffer.
+    /// Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
+    /// On read error, ok = false but already-read bytes are kept.
+    Scanner stdin() {
+        Scanner s;
+        s.cap = 4096;
+        s.buf = alloc<u8>(s.cap);
+        s.len = 0;
+        s.pos = 0;
+        s.ok = true;
+        s.has_saved = false;
+        s.saved_end = 0;
+        s.saved_byte = (u8)0;
+
+        while (true) {
+            i64 space = s.cap - s.len;
+            // Need at least 2 bytes: 1 for reading, 1 for NUL.
+            if (space < 2) {
+                i64 new_cap = s.cap * 2;
+                s.buf = realloc<u8>(s.buf, new_cap);
+                s.cap = new_cap;
+                space = s.cap - s.len;
+            }
+            SysResult r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
+            if (r.ok) {
+                i64 n = r.value;
+                if (n == 0) {
+                    break;  // EOF
+                }
+                s.len = s.len + n;
+            } else {
+                s.ok = false;
+                break;
+            }
+        }
+        // NUL-terminate.
+        s.buf[s.len] = (u8)0;
+
+        // Skip UTF-8 BOM.
+        if (s.len >= 3 && s.buf[0] == (u8)0xEF && s.buf[1] == (u8)0xBB && s.buf[2] == (u8)0xBF) {
+            s.pos = 3;
+        }
+        return move s;
+    }
+
+    /// Return true if more non-whitespace tokens are available.
+    /// Restores any saved delimiter and skips whitespace.
+    bool has_next(Scanner* self) {
+        if (self.has_saved) {
+            self.buf[self.saved_end] = self.saved_byte;
+            self.has_saved = false;
+        }
+        while (self.pos < self.len) {
+            u8 ch = self.buf[self.pos];
+            if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
+                self.pos = self.pos + 1;
+            } else {
+                break;
+            }
+        }
+        return self.pos < self.len;
+    }
+
+    /// Return the next whitespace-delimited token as a borrowed NUL-terminated str.
+    /// The returned pointer is valid until the next mutating scanner call.
+    /// Sets ok = false and returns (str)0 when no token remains.
+    str next(Scanner* self) {
+        if (!self.has_next()) {
+            self.ok = false;
+            return (str)0;
+        }
+        i64 start = self.pos;
+        while (self.pos < self.len) {
+            u8 ch = self.buf[self.pos];
+            if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
+                break;
+            }
+            self.pos = self.pos + 1;
+        }
+        self.saved_end = self.pos;
+        self.saved_byte = self.buf[self.pos];
+        self.buf[self.pos] = (u8)0;
+        self.has_saved = true;
+        return (str)&self.buf[start];
+    }
+
+    /// Return the next token as an owned String.
+    /// Sets ok = false on failure.
+    String next_string(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return String.new();
+        }
+        return String.from_str(tok);
+    }
+
+    /// Parse the next token as a signed i64.
+    /// Overflow saturates to i64::MIN or i64::MAX and sets ok = false.
+    /// Non-numeric tokens set ok = false and return 0.
+    i64 next_i64(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return 0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        bool neg = false;
+        if (p[i] == (u8)'-') {
+            neg = true;
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'+') {
+                i = i + 1;
+            }
+        }
+        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
+            self.ok = false;
+            return 0;
+        }
+        i64 val = 0;
+        // Pre-computed overflow thresholds:
+        //   i64::MAX / 10 = 922337203685477580
+        //   i64::MIN / 10 = -922337203685477580
+        bool overflow = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            i64 digit = (i64)(p[i] - (u8)'0');
+            if (!overflow) {
+                if (neg) {
+                    if (val < -922337203685477580) {
+                        overflow = true;
+                    } else {
+                        val = val * 10;
+                        // Check val - digit < i64::MIN
+                        if (val < -9223372036854775807 - 1 + digit) {
+                            overflow = true;
+                        } else {
+                            val = val - digit;
+                        }
+                    }
+                } else {
+                    if (val > 922337203685477580) {
+                        overflow = true;
+                    } else {
+                        val = val * 10;
+                        // Check val + digit > i64::MAX
+                        if (val > 9223372036854775807 - digit) {
+                            overflow = true;
+                        } else {
+                            val = val + digit;
+                        }
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if (p[i] != (u8)0) {
+            self.ok = false;
+            return 0;
+        }
+        if (overflow) {
+            self.ok = false;
+            if (neg) {
+                return -9223372036854775807 - 1;  // i64::MIN
+            }
+            return 9223372036854775807;  // i64::MAX
+        }
+        return val;
+    }
+
+    /// Parse the next token as a signed i32.
+    /// Overflow saturates to i32::MIN or i32::MAX and sets ok = false.
+    i32 next_i32(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return 0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        bool neg = false;
+        if (p[i] == (u8)'-') {
+            neg = true;
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'+') {
+                i = i + 1;
+            }
+        }
+        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
+            self.ok = false;
+            return 0;
+        }
+        i64 val = 0;
+        // i32 overflow thresholds:
+        //   i32::MAX / 10 = 214748364
+        //   i32::MIN / 10 = -214748364
+        bool overflow = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            i64 digit = (i64)(p[i] - (u8)'0');
+            if (!overflow) {
+                if (neg) {
+                    if (val < -214748364) {
+                        overflow = true;
+                    } else {
+                        val = val * 10;
+                        // Check val - digit < i32::MIN
+                        if (val < -2147483647 - 1 + digit) {
+                            overflow = true;
+                        } else {
+                            val = val - digit;
+                        }
+                    }
+                } else {
+                    if (val > 214748364) {
+                        overflow = true;
+                    } else {
+                        val = val * 10;
+                        // Check val + digit > i32::MAX
+                        if (val > 2147483647 - digit) {
+                            overflow = true;
+                        } else {
+                            val = val + digit;
+                        }
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if (p[i] != (u8)0) {
+            self.ok = false;
+            return 0;
+        }
+        if (overflow) {
+            self.ok = false;
+            if (neg) {
+                return -2147483647 - 1;  // i32::MIN
+            }
+            return 2147483647;  // i32::MAX
+        }
+        return (i32)val;
+    }
+
+    /// Parse the next token as an unsigned u64.
+    /// Overflow sets ok = false and returns u64::MAX.
+    u64 next_u64(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return (u64)0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        if (p[i] == (u8)'+') {
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'-') {
+                self.ok = false;
+                return (u64)0;
+            }
+        }
+        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
+            self.ok = false;
+            return (u64)0;
+        }
+        u64 val = (u64)0;
+        // u64 overflow thresholds: cutdiv = u64::MAX / 10, cutrem = u64::MAX % 10
+        u64 cutdiv = (u64)1844674407370955161;
+        u64 cutrem = (u64)5;
+        bool overflow = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            u64 digit = (u64)(p[i] - (u8)'0');
+            if (!overflow) {
+                if (val > cutdiv || (val == cutdiv && digit > cutrem)) {
+                    overflow = true;
+                } else {
+                    val = val * (u64)10 + digit;
+                }
+            }
+            i = i + 1;
+        }
+        if (p[i] != (u8)0) {
+            self.ok = false;
+            return (u64)0;
+        }
+        if (overflow) {
+            self.ok = false;
+            return (u64)-1;  // u64::MAX
+        }
+        return val;
+    }
+
+    /// Return the next line (bytes up to but not including LF or CRLF).
+    /// The returned str is a borrowed NUL-terminated view into the buffer.
+    /// Sets ok = false at EOF.
+    str next_line(Scanner* self) {
+        // Restore previous saved delimiter.
+        if (self.has_saved) {
+            self.buf[self.saved_end] = self.saved_byte;
+            self.has_saved = false;
+        }
+        if (self.pos >= self.len) {
+            self.ok = false;
+            return (str)0;
+        }
+        // If the previous token ended exactly at a line break, consume that
+        // break and return the following line rather than an empty view.
+        if (self.buf[self.pos] == (u8)0x0D) {
+            self.pos = self.pos + 1;
+            if (self.pos < self.len && self.buf[self.pos] == (u8)0x0A) {
+                self.pos = self.pos + 1;
+            }
+        } else {
+            if (self.buf[self.pos] == (u8)0x0A) {
+                self.pos = self.pos + 1;
+            }
+        }
+        if (self.pos >= self.len) {
+            self.ok = false;
+            return (str)0;
+        }
+        i64 start = self.pos;
+        // Scan forward until LF or end.
+        while (self.pos < self.len && self.buf[self.pos] != (u8)0x0A) {
+            self.pos = self.pos + 1;
+        }
+        // If the delimiter is preceded by CR, treat CRLF as a single terminator.
+        if (self.pos > start && self.buf[self.pos - 1] == (u8)0x0D) {
+            self.pos = self.pos - 1;
+        }
+        if (self.pos < self.len) {
+            self.saved_end = self.pos;
+            self.saved_byte = self.buf[self.pos];
+            self.buf[self.pos] = (u8)0;
+            self.has_saved = true;
+        } else {
+            self.has_saved = false;
+        }
+        return (str)&self.buf[start];
+    }
+
+    /// Return true if no errors have been encountered.
+    bool good(Scanner* self) {
+        return self.ok;
+    }
+}
+
+impl Drop<Scanner> for Scanner {
+    /// Free the internal buffer.
+    void drop(Scanner* self) {
+        if (self.buf != (u8*)0) {
+            free(self.buf);
+            self.buf = (u8*)0;
+        }
+    }
+}

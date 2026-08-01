@@ -1,3 +1,4 @@
+import std.mem.memory;
 // Operator overloading traits.
 //
 // Each trait defines a method named `__<op>` so the existing
@@ -21,4 +22,107 @@ trait IndexedAccess<Container> {
     type Item;
     Item __index_get(Container* self, i64 index);
     void __index_set(Container* self, i64 index, Item value);
+}
+
+// Compare trait for ordering algorithms (heapsort, binary search, etc.).
+// Returns < 0 when *self sorts before *other, 0 when equal, > 0 when after.
+trait Compare<Self> {
+    i32 compare(Self* self, Self* other);
+}
+
+impl Compare<i8> for i8 {
+    i32 compare(i8* self, i8* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<i16> for i16 {
+    i32 compare(i16* self, i16* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<i32> for i32 {
+    i32 compare(i32* self, i32* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<i64> for i64 {
+    i32 compare(i64* self, i64* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<i128> for i128 {
+    i32 compare(i128* self, i128* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<u8> for u8 {
+    i32 compare(u8* self, u8* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<u16> for u16 {
+    i32 compare(u16* self, u16* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<u32> for u32 {
+    i32 compare(u32* self, u32* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<u64> for u64 {
+    i32 compare(u64* self, u64* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<u128> for u128 {
+    i32 compare(u128* self, u128* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<f32> for f32 {
+    i32 compare(f32* self, f32* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<f64> for f64 {
+    i32 compare(f64* self, f64* other) {
+        if (*self < *other) { return -1; }
+        if (*self > *other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<bool> for bool {
+    i32 compare(bool* self, bool* other) {
+        if (!*self && *other) { return -1; }
+        if (*self && !*other) { return 1; }
+        return 0;
+    }
+}
+impl Compare<str> for str {
+    i32 compare(str* self, str* other) {
+        return strcmp(*self, *other);
+    }
 }

@@ -1,0 +1,183 @@
+// Test suite for UTF-8 support in std.string
+import std.test;
+import std.string;
+
+i32 main() {
+    test_start("is_valid_utf8 - ASCII only");
+    {
+        String s = String.from_str("hello");
+        assert_true(s.is_valid_utf8(), "ASCII is valid UTF-8");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - multi-byte sequences");
+    {
+        // 'é' = U+00E9 = 0xC3 0xA9
+        String s = String.new();
+        s.push((u8)0xC3);
+        s.push((u8)0xA9);
+        assert_true(s.is_valid_utf8(), "U+00E9 (é) is valid UTF-8");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - 4-byte codepoint");
+    {
+        // U+1F600 (grinning face) = 0xF0 0x9F 0x98 0x80
+        String s = String.new();
+        s.push((u8)0xF0);
+        s.push((u8)0x9F);
+        s.push((u8)0x98);
+        s.push((u8)0x80);
+        assert_true(s.is_valid_utf8(), "U+1F600 is valid UTF-8");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - overlong encoding");
+    {
+        // Overlong 2-byte encoding of NUL: 0xC0 0x80
+        String s = String.new();
+        s.push((u8)0xC0);
+        s.push((u8)0x80);
+        assert_false(s.is_valid_utf8(), "overlong NUL is invalid");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - surrogate range");
+    {
+        // Surrogate U+D800 would be encoded as 0xED 0xA0 0x80
+        String s = String.new();
+        s.push((u8)0xED);
+        s.push((u8)0xA0);
+        s.push((u8)0x80);
+        assert_false(s.is_valid_utf8(), "surrogate U+D800 is invalid");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - out of range (> U+10FFFF)");
+    {
+        // U+110000 would start with 0xF4 0x90
+        String s = String.new();
+        s.push((u8)0xF4);
+        s.push((u8)0x90);
+        s.push((u8)0x80);
+        s.push((u8)0x80);
+        assert_false(s.is_valid_utf8(), "U+110000 is invalid");
+        s.drop();
+    }
+
+    test_start("is_valid_utf8 - invalid continuation byte");
+    {
+        // Start of 2-byte sequence followed by non-continuation byte
+        String s = String.new();
+        s.push((u8)0xC3);
+        s.push((u8)0x50);
+        assert_false(s.is_valid_utf8(), "bad continuation byte is invalid");
+        s.drop();
+    }
+
+    test_start("char_len - ASCII");
+    {
+        String s = String.from_str("hello");
+        assert_eq_i64(5, s.char_len(), "char_len('hello') = 5");
+        s.drop();
+    }
+
+    test_start("char_len - mixed");
+    {
+        // 'café' = 'c' 'a' 'f' U+00E9
+        String s = String.new();
+        s.push((u8)99);  // 'c'
+        s.push((u8)97);  // 'a'
+        s.push((u8)102); // 'f'
+        s.push((u8)0xC3);
+        s.push((u8)0xA9); // é
+        assert_eq_i64(4, s.char_len(), "char_len('café') = 4");
+        s.drop();
+    }
+
+    test_start("char_len - 4-byte codepoint");
+    {
+        // U+1F600 (grinning face) = 0xF0 0x9F 0x98 0x80
+        String s = String.new();
+        s.push((u8)0xF0);
+        s.push((u8)0x9F);
+        s.push((u8)0x98);
+        s.push((u8)0x80);
+        assert_eq_i64(1, s.char_len(), "char_len(U+1F600) = 1");
+        s.drop();
+    }
+
+    test_start("char_len - empty string");
+    {
+        String s = String.new();
+        assert_eq_i64(0, s.char_len(), "char_len('') = 0");
+        s.drop();
+    }
+
+    test_start("push_codepoint - ASCII");
+    {
+        String s = String.new();
+        bool ok = s.push_codepoint((u32)0x48); // 'H'
+        assert_true(ok, "push_codepoint(0x48) returns true");
+        ok = s.push_codepoint((u32)0x69); // 'i'
+        assert_true(ok, "push_codepoint(0x69) returns true");
+        assert_eq_str("Hi", (str)s.to_str(), "push_codepoint ASCII produces correct string");
+        s.drop();
+    }
+
+    test_start("push_codepoint - é (U+00E9)");
+    {
+        String s = String.new();
+        bool ok = s.push_codepoint((u32)0xE9);
+        assert_true(ok, "push_codepoint(U+00E9) returns true");
+        assert_eq_str("\xC3\xA9", (str)s.to_str(), "push_codepoint U+00E9 produces 2-byte UTF-8");
+        assert_eq_i64(1, s.char_len(), "char_len after push_codepoint é = 1");
+        s.drop();
+    }
+
+    test_start("push_codepoint - grinning face (U+1F600)");
+    {
+        String s = String.new();
+        bool ok = s.push_codepoint((u32)0x1F600);
+        assert_true(ok, "push_codepoint(U+1F600) returns true");
+        assert_eq_str("\xF0\x9F\x98\x80", (str)s.to_str(), "push_codepoint U+1F600 produces 4-byte UTF-8");
+        assert_eq_i64(1, s.char_len(), "char_len after push_codepoint U+1F600 = 1");
+        s.drop();
+    }
+
+    test_start("push_codepoint - surrogate rejected");
+    {
+        String s = String.new();
+        bool ok = s.push_codepoint((u32)0xD800);
+        assert_false(ok, "push_codepoint surrogate returns false");
+        assert_eq_i64(0, s.len(), "string unchanged after failed push_codepoint");
+        s.drop();
+    }
+
+    test_start("push_codepoint - out of range rejected");
+    {
+        String s = String.new();
+        bool ok = s.push_codepoint((u32)0x110000);
+        assert_false(ok, "push_codepoint(0x110000) returns false");
+        assert_eq_i64(0, s.len(), "string unchanged after failed push_codepoint");
+        s.drop();
+    }
+
+    test_start("byte_len matches len");
+    {
+        String s = String.from_str("hello");
+        assert_eq_i64(s.len(), s.byte_len(), "byte_len equals len for ASCII");
+        s.drop();
+    }
+
+    test_start("byte_len with multi-byte");
+    {
+        String s = String.new();
+        s.push((u8)0xC3);
+        s.push((u8)0xA9);
+        assert_eq_i64(2, s.byte_len(), "byte_len for é = 2");
+        s.drop();
+    }
+
+    return done();
+}

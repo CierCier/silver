@@ -429,6 +429,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             Linkage::External
         });
+        if item.is_static {
+            // `static` on a global is the C-style spelling of internal linkage
+            // (the same linkage `private` already provides).
+            global.set_linkage(Linkage::Internal);
+        }
         global.set_constant(!item.is_mutable);
         let initializer = if let Some(init) = &item.initializer {
             self.emit_const_value_for_type(init, &item.var_type)?
@@ -436,6 +441,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             llvm_ty.const_zero()
         };
         global.set_initializer(&initializer);
+        if item.is_volatile {
+            self.volatile_globals.insert(item.name.name.clone());
+        }
         self.global_variables
             .insert(item.name.name.clone(), item.var_type.clone());
         self.symbol_table.intern_symbol(
@@ -444,6 +452,60 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             Some(item.name.span.clone()),
             CompilerPhase::Codegen,
         );
+        Ok(())
+    }
+
+    /// True if the lvalue's root identifier names a volatile variable or global.
+    /// Only direct identifier roots and `FieldAccess` chains (volatile struct
+    /// variables are supported, e.g. MMIO register blocks) are checked — `Index`
+    /// is deliberately not walked because volatile arrays are rejected in typeck.
+    /// Accesses that codegen through method calls (__index_get/__index_set,
+    /// value receivers, for-in caches) and pointer dereferences are NOT volatile;
+    /// only loads/stores of the variable's own storage are guaranteed volatile.
+    pub(crate) fn lvalue_is_volatile(&self, expr: &ast::Expression) -> bool {
+        let mut root = expr;
+        while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
+            root = object;
+        }
+        let ast::ExpressionKind::Identifier(ident) = root.kind.as_ref() else {
+            return false;
+        };
+        if let Some(info) = self.lookup_variable(&ident.name) {
+            return info.is_volatile;
+        }
+        self.volatile_globals.contains(&ident.name)
+    }
+
+    /// build_load + as_instruction_value() + set_volatile(true).
+    pub(crate) fn emit_volatile_load(
+        &self,
+        llvm_ty: BasicTypeEnum<'ctx>,
+        ptr: PointerValue<'ctx>,
+        name: &str,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let value = self
+            .builder
+            .build_load(llvm_ty, ptr, name)
+            .map_err(|e| CodegenError::new(format!("volatile load failed: {e}")))?;
+        if let Some(instr) = value.as_instruction_value() {
+            instr
+                .set_volatile(true)
+                .map_err(|e| CodegenError::new(format!("volatile load failed: {e}")))?;
+        }
+        Ok(value)
+    }
+
+    /// build_store + set_volatile(true).
+    pub(crate) fn emit_volatile_store(
+        &self,
+        ptr: PointerValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<()> {
+        self.builder
+            .build_store(ptr, value)
+            .map_err(|e| CodegenError::new(format!("volatile store failed: {e}")))?
+            .set_volatile(true)
+            .map_err(|e| CodegenError::new(format!("volatile store failed: {e}")))?;
         Ok(())
     }
 
@@ -500,6 +562,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         return Ok(element_ptr.as_basic_value_enum());
                     }
                     let llvm_ty = self.lower_basic_type(&ty)?;
+                    if self.lvalue_is_volatile(expr) {
+                        return self.emit_volatile_load(llvm_ty, ptr, &identifier.name);
+                    }
                     return self
                         .builder
                         .build_load(llvm_ty, ptr, &identifier.name)
@@ -537,6 +602,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
+                if self.lvalue_is_volatile(expr) {
+                    return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
+                }
                 self.builder
                     .build_load(llvm_ty, ptr, "lvalue.load")
                     .map_err(|e| {
@@ -627,7 +695,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })
                 } else {
-                    self.cast_value_to_ast_type(source, target_type, &expr.span)
+                    if self.expression_is_unsigned(expression) {
+                        self.cast_unsigned_value_to_ast_type(source, target_type, &expr.span)
+                    } else {
+                        self.cast_value_to_ast_type(source, target_type, &expr.span)
+                    }
                 }
             }
             ast::ExpressionKind::If {
@@ -1887,6 +1959,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     CodegenError::new(format!("failed match float compare: {e}"))
                                 })?
                         }
+                        (BasicValueEnum::PointerValue(_), ast::Literal::String(s)) => {
+                            // String patterns compare via strcmp == 0.
+                            let rhs = self.intern_string_literal(s)?.as_basic_value_enum();
+                            let cmp = self.emit_strcmp_comparison(
+                                scrutinee,
+                                &ast::BinaryOperator::Equal,
+                                rhs,
+                                &arm.pattern.span,
+                            )?;
+                            cmp.into_int_value()
+                        }
                         _ => {
                             return Err(CodegenError::with_span(
                                 "unsupported match literal for scrutinee type",
@@ -1984,51 +2067,89 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.builder.position_at_end(arm_bb);
                         self.push_scope();
                         if let Some(data_pattern) = data {
-                            if let ast::PatternKind::Identifier(binding) = &data_pattern.kind {
-                                if let Some(payload_types) = self
-                                    .enum_variant_payload_types
-                                    .get(enum_name)
-                                    .and_then(|m| m.get(&variant.name))
-                                    .and_then(|types| types.first())
-                                    .cloned()
-                                {
-                                    let llvm_ty = self.lower_basic_type(&payload_types)?;
-                                    let data_ptr = self
-                                        .builder
-                                        .build_struct_gep(struct_ty, scrut_ptr, 1, "match.data.ptr")
-                                        .map_err(|e| {
-                                            CodegenError::new(format!("match data GEP: {e}"))
-                                        })?;
-                                    let cast_ptr = self
-                                        .builder
-                                        .build_pointer_cast(
-                                            data_ptr,
-                                            self.context.ptr_type(AddressSpace::default()),
-                                            "data.cast",
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::new(format!("pointer cast: {e}"))
-                                        })?;
-                                    let loaded = self
-                                        .builder
-                                        .build_load(llvm_ty, cast_ptr, &binding.name)
-                                        .map_err(|e| {
-                                            CodegenError::new(format!("load data payload: {e}"))
-                                        })?;
-                                    let alloca =
-                                        self.create_entry_alloca(function, &binding.name, llvm_ty)?;
-                                    self.builder.build_store(alloca, loaded).map_err(|e| {
-                                        CodegenError::new(format!("store data binding: {e}"))
+                            let payload_types = self
+                                .enum_variant_payload_types
+                                .get(enum_name)
+                                .and_then(|m| m.get(&variant.name))
+                                .cloned()
+                                .unwrap_or_default();
+                            let bindings: Vec<&ast::Identifier> = match &data_pattern.kind {
+                                ast::PatternKind::Identifier(binding) => vec![binding],
+                                ast::PatternKind::Tuple(items) => items
+                                    .iter()
+                                    .filter_map(|p| match &p.kind {
+                                        ast::PatternKind::Identifier(b) => Some(b),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
+                            if !bindings.is_empty() {
+                                let data_ptr = self
+                                    .builder
+                                    .build_struct_gep(struct_ty, scrut_ptr, 1, "match.data.ptr")
+                                    .map_err(|e| {
+                                        CodegenError::new(format!("match data GEP: {e}"))
                                     })?;
-                                    if let Some(scope) = self.variables.last_mut() {
-                                        scope.insert(
-                                            binding.name.clone(),
-                                            VarInfo {
-                                                ptr: alloca,
-                                                ty: payload_types,
-                                                is_mutable: false,
-                                            },
-                                        );
+                                let target_data = TargetData::create(
+                                    self.module.get_data_layout().as_str().to_str().unwrap(),
+                                );
+                                let mut byte_offset: u32 = 0;
+                                for (i, binding) in bindings.iter().enumerate() {
+                                    if let Some(pt) = payload_types.get(i).cloned() {
+                                        let llvm_ty = self.lower_basic_type(&pt)?;
+                                        let field_ptr = if byte_offset == 0 {
+                                            data_ptr
+                                        } else {
+                                            unsafe {
+                                                self.builder
+                                                    .build_gep(
+                                                        self.context.i8_type(),
+                                                        data_ptr,
+                                                        &[self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_int(byte_offset as u64, false)],
+                                                        "match.field.gep",
+                                                    )
+                                            }
+                                            .map_err(|e| {
+                                                CodegenError::new(format!("GEP match field: {e}"))
+                                            })?
+                                        };
+                                        let cast_ptr = self
+                                            .builder
+                                            .build_pointer_cast(
+                                                field_ptr,
+                                                self.context.ptr_type(AddressSpace::default()),
+                                                "data.cast",
+                                            )
+                                            .map_err(|e| {
+                                                CodegenError::new(format!("pointer cast: {e}"))
+                                            })?;
+                                        let loaded = self
+                                            .builder
+                                            .build_load(llvm_ty, cast_ptr, &binding.name)
+                                            .map_err(|e| {
+                                                CodegenError::new(format!("load data payload: {e}"))
+                                            })?;
+                                        let alloca = self
+                                            .create_entry_alloca(function, &binding.name, llvm_ty)?;
+                                        self.builder.build_store(alloca, loaded).map_err(|e| {
+                                            CodegenError::new(format!("store data binding: {e}"))
+                                        })?;
+                                        if let Some(scope) = self.variables.last_mut() {
+                                            scope.insert(
+                                                binding.name.clone(),
+                                                VarInfo {
+                                                    ptr: alloca,
+                                                    ty: pt,
+                                                    is_mutable: false,
+                                                    is_volatile: false,
+                                                },
+                                            );
+                                        }
+                                        byte_offset += target_data.get_abi_size(&llvm_ty) as u32;
                                     }
                                 }
                             }
@@ -2113,6 +2234,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ptr: alloca,
                             ty: inferred,
                             is_mutable: false,
+                            is_volatile: false,
                         },
                     );
                 }

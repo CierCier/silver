@@ -50,6 +50,7 @@ pub(crate) struct VarInfo<'ctx> {
     pub(crate) ptr: PointerValue<'ctx>,
     pub(crate) ty: ast::Type,
     pub(crate) is_mutable: bool,
+    pub(crate) is_volatile: bool,
 }
 
 #[derive(Clone)]
@@ -87,6 +88,8 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     pub(crate) defers: Vec<Vec<DeferredEntry<'ctx>>>,
     pub(crate) drop_flags: HashMap<String, PointerValue<'ctx>>,
+    pub(crate) volatile_globals: HashSet<String>,
+    pub(crate) static_local_counter: usize,
     pub(crate) method_receivers: HashMap<(String, String), bool>,
     pub(crate) string_constants: HashMap<String, PointerValue<'ctx>>,
     pub(crate) struct_generics: HashMap<String, Vec<String>>,

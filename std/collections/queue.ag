@@ -1,0 +1,121 @@
+// Queue<T> — ring-buffer FIFO queue.
+//
+// Memory (malloc/realloc/free) is provided through std.mem.
+// pop and front abort on an empty queue.
+
+import std.mem;
+
+/// A FIFO queue backed by a ring buffer.
+struct Queue<T> {
+    T* data;
+    i64 len;
+    i64 cap;
+    i64 head;
+}
+
+impl Queue<T> {
+    /// Empty queue — no allocation.
+    Queue<T> new() {
+        Queue<T> q;
+        q.data = (T*)0;
+        q.len = 0;
+        q.cap = 0;
+        q.head = 0;
+        return move q;
+    }
+
+    /// Reserve space for `capacity` elements up front.
+    Queue<T> with_capacity(i64 capacity) {
+        Queue<T> q;
+        if (capacity != 0) {
+            q.data = (T*)(malloc(@size(T) * capacity));
+        } else {
+            q.data = (T*)0;
+        }
+        q.len = 0;
+        q.cap = capacity;
+        q.head = 0;
+        return move q;
+    }
+
+    // -- Size ------------------------------------------------------------
+
+    /// Number of elements in the queue.
+    i64 len(Queue<T>* self) {
+        return self.len;
+    }
+
+    /// True when `len` is zero.
+    bool is_empty(Queue<T>* self) {
+        return self.len == 0;
+    }
+
+    // -- Mutation --------------------------------------------------------
+
+    /// Push `value` to the back of the queue (O(1) amortized).
+    void push(Queue<T>* self, T value) {
+        if (self.len >= self.cap) {
+            i64 new_cap = 1;
+            if (self.cap != 0) {
+                new_cap = self.cap * 2;
+            }
+            i64 old_cap = self.cap;
+            T* new_data = (T*)(malloc(@size(T) * new_cap));
+            // Copy existing elements linearly into new buffer
+            if (old_cap > 0) {
+                i64 i = 0;
+                while (i < self.len) {
+                    new_data[i] = self.data[(self.head + i) % old_cap];
+                    i = i + 1;
+                }
+            }
+            if (self.data != (T*)0) {
+                free(self.data);
+            }
+            self.data = new_data;
+            self.head = 0;
+            self.cap = new_cap;
+        }
+        i64 tail = (self.head + self.len) % self.cap;
+        self.data[tail] = move value;
+        self.len = self.len + 1;
+    }
+
+    /// Remove and return the front element.  Aborts if empty.
+    T pop(Queue<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        T result = self.data[self.head];
+        self.head = (self.head + 1) % self.cap;
+        self.len = self.len - 1;
+        return move result;
+    }
+
+    /// Return a copy of the front element without removing it.  Aborts if empty.
+    T front(Queue<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        return self.data[self.head];
+    }
+
+    /// Remove all elements without freeing the backing buffer.
+    void clear(Queue<T>* self) {
+        self.len = 0;
+        self.head = 0;
+    }
+}
+
+impl<T> Drop<Queue<T>> for Queue<T> {
+    /// Frees the backing buffer.
+    void drop(Queue<T>* self) {
+        if (self.data != (T*)0) {
+            free(self.data);
+            self.data = (T*)0;
+        }
+        self.len = 0;
+        self.cap = 0;
+        self.head = 0;
+    }
+}

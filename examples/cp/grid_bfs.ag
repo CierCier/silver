@@ -1,0 +1,83 @@
+// Grid BFS.
+//
+// Reads a grid of rows x cols where 0 = passable and 1 = wall, then finds the
+// shortest path from (0,0) to (rows-1, cols-1) using a Queue<Point>. Prints
+// the distance, or -1 if the target is unreachable.
+import std.io.scanner;
+import std.mem.vec;
+import std.collections.queue;
+
+struct Point {
+    i64 x;
+    i64 y;
+}
+
+/// Try to enqueue (x, y) at distance d + 1 if it is inside the grid,
+/// passable, and not yet visited.
+bool try_move(Vec<i64>* grid, Vec<i64>* dist, Queue<Point>* q,
+              i64 x, i64 y, i64 rows, i64 cols, i64 d) {
+    if (x < (i64)0 || x >= rows || y < (i64)0 || y >= cols) {
+        return false;
+    }
+    i64 idx = x * cols + y;
+    if (grid.data[idx] == (i64)1) {
+        return false;
+    }
+    if (dist.data[idx] != (i64)-1) {
+        return false;
+    }
+    dist.set(idx, d + (i64)1);
+    Point p;
+    p.x = x;
+    p.y = y;
+    q.push(move p);
+    return true;
+}
+
+i32 main() {
+    Scanner s = Scanner.stdin();
+    i64 rows = s.next_i64();
+    i64 cols = s.next_i64();
+
+    Vec<i64> grid = Vec<i64>.new();
+    i64 i = 0;
+    while (i < rows * cols) {
+        grid.push(s.next_i64());
+        i = i + 1;
+    }
+
+    Vec<i64> dist = Vec<i64>.new();
+    i = 0;
+    while (i < rows * cols) {
+        dist.push((i64)-1);
+        i = i + 1;
+    }
+
+    Queue<Point> q = Queue<Point>.new();
+    Point start;
+    start.x = 0;
+    start.y = 0;
+    dist.set(0, 0);
+    q.push(move start);
+
+    i64 answer = (i64)-1;
+    while (!q.is_empty()) {
+        Point cur = q.pop();
+        i64 d = dist.get(cur.x * cols + cur.y);
+        if (cur.x == rows - (i64)1 && cur.y == cols - (i64)1) {
+            answer = d;
+            break;
+        }
+        try_move(&grid, &dist, &q, cur.x + (i64)1, cur.y, rows, cols, d);
+        try_move(&grid, &dist, &q, cur.x - (i64)1, cur.y, rows, cols, d);
+        try_move(&grid, &dist, &q, cur.x, cur.y + (i64)1, rows, cols, d);
+        try_move(&grid, &dist, &q, cur.x, cur.y - (i64)1, rows, cols, d);
+    }
+
+    @println("{}", answer);
+    q.drop();
+    dist.drop();
+    grid.drop();
+    s.drop();
+    return 0;
+}

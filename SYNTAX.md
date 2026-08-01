@@ -54,7 +54,8 @@ These are hard keywords — they cannot be used as identifiers:
 | `struct` | Struct definition | `enum` | Enum definition |
 | `impl` | Implementation block | `trait` | Trait definition |
 | `let` | Local variable binding | `mut` | Mutable modifier |
-| `const` | Constant declaration (parsed, not enforced) | `if` | Conditional branch |
+| `const` | Constant declaration (parsed, not enforced) | `static` | Static local / internal-linkage global |
+| `volatile` | Volatile load/store qualifier | `if` | Conditional branch |
 | `else` | Alternative branch | `while` | Condition loop |
 | `for` | Counter or iterator loop | `in` | Iterator element |
 | `break` | Loop termination (with optional value) | `continue` | Loop iteration skip |
@@ -555,11 +556,25 @@ for item in container {              // for-in (lowers to IntoIterator+Iterator)
 }
 ```
 
-#### Match (Planned)
+#### Match
 
-`match` is **not implemented**.  An `ExpressionKind::Match` AST node exists but
-is not produced by the parser — no `match` keyword exists.  Use `if`/`else`
-chains or the `Optional`/`Result` methods instead.
+`match` evaluates an expression and selects an arm by pattern. It is an
+**expression**: every arm yields a value of the same type.
+
+```silver
+enum Shape { Circle(f64); Rect(f64, f64); }
+
+f64 area(Shape s) {
+    return match s {
+        Shape.Circle(r)  : 3.14159 * r * r,
+        Shape.Rect(w, h) : w * h,
+    };
+}
+```
+
+Arm syntax is `pattern : value` separated by commas. Patterns bind payload
+values (`v` in `OptionInt.Some(v)`), and a wildcard `_` arm can be used as a
+catch-all:
 
 ### Inline Assembly (`asm`)
 

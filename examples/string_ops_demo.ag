@@ -1,0 +1,301 @@
+// examples/string_ops_demo.ag — educational tour of std.string operations
+//
+// Build:   cargo run -p agc -- examples/string_ops_demo.ag -o /tmp/sdemo
+// Run:     /tmp/sdemo
+//
+// Each section prints a heading then demonstrates one method family.
+// Read top-to-bottom; every block explains the operation inline.
+
+import std.string;
+import std.mem.vec;
+import std.io;
+
+i32 main() {
+    // ── from_str: build a String from a C literal ──────────────────────
+    @println("\n=== from_str ===");
+    {
+        // from_str copies the literal into a heap buffer.
+        // The result is an owned, mutable String — you can push into it
+        // later, unlike a bare str literal.
+        String name = String.from_str("Silver");
+        @println("  String.from_str(\"Silver\") -> \"{}\"", (str)name.to_str());
+        // Always drop when done to free the heap buffer.
+        name.drop();
+    }
+
+    // ── trim: strip surrounding whitespace ─────────────────────────────
+    @println("\n=== trim ===");
+    {
+        // trim() returns a NEW String — the original is unchanged.
+        // Whitespace set: space, tab, newline, carriage return.
+        String raw = String.from_str("  \t\n  hello world  \r  ");
+        String cleaned = raw.trim();
+        @println("  raw     = \"{}\"", (str)raw.to_str());
+        @println("  trimmed = \"{}\"", (str)cleaned.to_str());
+        cleaned.drop();
+        raw.drop();
+
+        // All-whitespace becomes empty, not null.
+        String blanks = String.from_str("   \t  ");
+        String empty  = blanks.trim();
+        @println("  all-ws trimmed -> \"{}\" (len={})", (str)empty.to_str(), empty.len());
+        empty.drop();
+        blanks.drop();
+    }
+
+    // ── starts_with / ends_with ────────────────────────────────────────
+    @println("\n=== starts_with / ends_with ===");
+    {
+        String path = String.from_str("/home/cier/projects/silver/main.ag");
+        @println("  path = \"{}\"", (str)path.to_str());
+        @println("  starts_with \"/home\"     -> {}", path.starts_with("/home"));
+        @println("  starts_with \"/usr\"      -> {}", path.starts_with("/usr"));
+        @println("  ends_with   \".ag\"       -> {}", path.ends_with(".ag"));
+        @println("  ends_with   \".rs\"       -> {}", path.ends_with(".rs"));
+
+        // Edge cases from the spec: null prefix/suffix → false,
+        // empty prefix/suffix → true.
+        @println("  starts_with \"\"          -> {}  (empty always matches)", path.starts_with(""));
+        @println("  starts_with null         -> {}  (null never matches)",   path.starts_with((str)0));
+        path.drop();
+    }
+
+    // ── contains / find ────────────────────────────────────────────────
+    @println("\n=== contains / find ===");
+    {
+        String haystack = String.from_str("the quick brown fox");
+        @println("  haystack = \"{}\"", (str)haystack.to_str());
+        @println("  contains \"quick\"        -> {}", haystack.contains("quick"));
+        @println("  contains \"slow\"         -> {}", haystack.contains("slow"));
+        @println("  find     \"brown\"        -> {}  (byte index of first match)", haystack.find("brown"));
+        @println("  find     \"o\"            -> {}  (first 'o')", haystack.find("o"));
+        @println("  find     \"missing\"      -> {}  (-1 means not found)", haystack.find("missing"));
+        haystack.drop();
+    }
+
+    // ── substr: extract a byte range ───────────────────────────────────
+    @println("\n=== substr ===");
+    {
+        String s = String.from_str("0123456789");
+        @println("  source = \"{}\"", (str)s.to_str());
+
+        String sub1 = s.substr(3, 4);         // normal: 4 bytes from index 3
+        @println("  substr(3, 4)    -> \"{}\"", (str)sub1.to_str());
+        sub1.drop();
+
+        String sub2 = s.substr(7, 100);       // len clamped to end
+        @println("  substr(7, 100)  -> \"{}\"   (len clamped)", (str)sub2.to_str());
+        sub2.drop();
+
+        String sub3 = s.substr(-2, 5);        // negative start clamped to 0
+        @println("  substr(-2, 5)   -> \"{}\"     (start clamped to 0)", (str)sub3.to_str());
+        sub3.drop();
+
+        String sub4 = s.substr(50, 3);        // start past end → empty
+        @println("  substr(50, 3)   -> \"{}\"       (past end)", (str)sub4.to_str());
+        sub4.drop();
+
+        // To get everything from start to end, pass s.len() as len:
+        String tail = s.substr(5, s.len() - 5);
+        @println("  substr(5, len-5)-> \"{}\"        (tail)", (str)tail.to_str());
+        tail.drop();
+
+        s.drop();
+    }
+
+    // ── split: zero-copy iterator ──────────────────────────────────────
+    @println("\n=== split ===");
+    {
+        // split() returns a SplitIter that borrows the original String's
+        // buffer.  No heap allocations happen inside next() — it just
+        // tracks a cursor and temporarily writes NUL sentinels.
+        //
+        // Because the iterator borrows the buffer, the original String
+        // MUST outlive the iterator.  Drop the String AFTER you're done
+        // iterating.
+        String csv = String.from_str("Alice,Bob,Carol,Dave");
+
+        @println("  csv = \"{}\"", (str)csv.to_str());
+        @println("  split on ',' :");
+
+        SplitIter it = csv.split(",");
+        i64 count = 0;
+        while (true) {
+            Optional<str> part = it.next();
+            if (part.is_none()) {
+                break;
+            }
+            count = count + 1;
+            @println("    [{}] \"{}\"", count, part.unwrap());
+        }
+        @println("  {} parts total", count);
+
+        // Edge case: consecutive delimiters yield empty strings
+        String gaps = String.from_str("a,,b");
+        @println("\n  consecutive-delim example \"{}\" :", (str)gaps.to_str());
+        SplitIter git = gaps.split(",");
+        while (true) {
+            Optional<str> part = git.next();
+            if (part.is_none()) { break; }
+            @println("    -> \"{}\"", part.unwrap());
+        }
+        gaps.drop();
+
+        // Trailing delimiter yields trailing empty (Python-compatible)
+        String trail = String.from_str("x,");
+        @println("\n  trailing-delim example \"{}\" :", (str)trail.to_str());
+        SplitIter tit = trail.split(",");
+        while (true) {
+            Optional<str> part = tit.next();
+            if (part.is_none()) { break; }
+            @println("    -> \"{}\"", part.unwrap());
+        }
+        trail.drop();
+
+        csv.drop();
+    }
+
+    // ── split: building owned substrings ───────────────────────────────
+    @println("\n=== split + from_str (owned substrings) ===");
+    {
+        // SplitIter yields str pointers into the source buffer.
+        // If you need to keep substrings after the source is dropped,
+        // copy them into owned Strings with String.from_str().
+        String line = String.from_str("one:two:three");
+        SplitIter parts = line.split(":");
+
+        // Collect each piece into an owned String, then print.
+        while (true) {
+            Optional<str> slice = parts.next();
+            if (slice.is_none()) { break; }
+            String owned = String.from_str(slice.unwrap());
+            @println("  owned: \"{}\"", (str)owned.to_str());
+            owned.drop();
+        }
+        line.drop();
+    }
+
+    // ── join: build a string from many pieces ──────────────────────────
+    @println("\n=== join ===");
+    {
+        // join computes total length in one pass, allocates once, then
+        // memcpy's each piece.  O(n) total, single allocation.
+
+        // Three strings joined with " / " separator:
+        Vec<String> parts = Vec<String>.new();
+        parts.push(String.from_str("home"));
+        parts.push(String.from_str("cier"));
+        parts.push(String.from_str("projects"));
+        String path = String.join(" / ", &parts);
+        @println("  join \" / \" [home, cier, projects] -> \"{}\"", (str)path.to_str());
+        path.drop();
+        // NOTE: Vec<String> does NOT drop individual String elements
+        // (known Vec limitation).  Their buffer pointers leak here, which
+        // is harmless for short-lived examples.  For production, iterate
+        // and drop each element before dropping the Vec.
+        parts.drop();
+
+        // Single element: no delimiter inserted.
+        Vec<String> single = Vec<String>.new();
+        single.push(String.from_str("only"));
+        String js = String.join(", ", &single);
+        @println("  join single element -> \"{}\"", (str)js.to_str());
+        js.drop();
+        single.drop();
+
+        // Empty vec → empty string.
+        Vec<String> none = Vec<String>.new();
+        String je = String.join(", ", &none);
+        @println("  join empty vec     -> \"{}\"  (len={})", (str)je.to_str(), je.len());
+        je.drop();
+        none.drop();
+    }
+
+    // ── Composition example: parse "key=value" pairs ───────────────────
+    @println("\n=== Composition: parse key=value ===");
+    {
+        String input = String.from_str("  name =  silver  ");
+        @println("  raw input: \"{}\"", (str)input.to_str());
+
+        // 1. Trim surrounding whitespace
+        String trimmed = input.trim();
+
+        // 2. Find the '=' separator
+        i64 eq_pos = trimmed.find("=");
+        if (eq_pos >= 0) {
+            // 3. Extract key and value as substrings
+            String key   = trimmed.substr(0, eq_pos);
+            String value = trimmed.substr(eq_pos + 1, trimmed.len());
+
+            // 4. Trim each piece individually
+            String clean_key   = key.trim();
+            String clean_value = value.trim();
+
+            @println("  key   = \"{}\"", (str)clean_key.to_str());
+            @println("  value = \"{}\"", (str)clean_value.to_str());
+
+            // 5. Validate
+            if (clean_key.starts_with("name")) {
+                @println("  -> valid 'name' entry!");
+            }
+
+            clean_value.drop();
+            clean_key.drop();
+            value.drop();
+            key.drop();
+        } else {
+            @println("  no '=' found");
+        }
+        trimmed.drop();
+        input.drop();
+    }
+
+    // ── Composition example: CSV row parser ────────────────────────────
+    @println("\n=== Composition: CSV row parser ===");
+    {
+        String row = String.from_str("42 ,  hello world ,  true");
+        @println("  csv row: \"{}\"", (str)row.to_str());
+
+        SplitIter cols = row.split(",");
+        i64 col_num = 0;
+        while (true) {
+            Optional<str> raw = cols.next();
+            if (raw.is_none()) { break; }
+
+            // Copy the slice so we can trim it (trim returns a new String,
+            // but raw.unwrap() is just a pointer — fine, we don't modify
+            // the source).
+            String cell = String.from_str(raw.unwrap());
+            String clean = cell.trim();
+            col_num = col_num + 1;
+            @println("  col[{}] = \"{}\"", col_num, (str)clean.to_str());
+            clean.drop();
+            cell.drop();
+        }
+        row.drop();
+    }
+
+    // ── Composition: path extension check ──────────────────────────────
+    @println("\n=== Composition: file extension check ===");
+    {
+        // Build a small helper inline (Silver has no closures; use
+        // a function if you need reuse).
+        //
+        // Check three paths against ".ag" extension:
+        str paths[3];
+        paths[0] = "src/main.ag";
+        paths[1] = "README.md";
+        paths[2] = "std/string.ag";
+
+        for (i64 i = 0; i < 3; i = i + 1) {
+            String p = String.from_str(paths[i]);
+            bool is_ag = p.ends_with(".ag") && p.contains("string");
+            @println("  \"{}\" ends_with .ag AND contains 'string' -> {}",
+                     (str)p.to_str(), is_ag);
+            p.drop();
+        }
+    }
+
+    @println("\nDone — all string ops exercised.");
+    return 0;
+}

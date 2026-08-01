@@ -1,0 +1,166 @@
+// Deque<T> — ring-buffer double-ended queue.
+//
+// Memory (malloc/realloc/free) is provided through std.mem.
+// pop_front, pop_back, front, and back abort on an empty deque.
+
+import std.mem;
+
+/// A double-ended queue backed by a ring buffer.
+struct Deque<T> {
+    T* data;
+    i64 len;
+    i64 cap;
+    i64 head;
+}
+
+impl Deque<T> {
+    /// Empty deque — no allocation.
+    Deque<T> new() {
+        Deque<T> d;
+        d.data = (T*)0;
+        d.len = 0;
+        d.cap = 0;
+        d.head = 0;
+        return move d;
+    }
+
+    /// Reserve space for `capacity` elements up front.
+    Deque<T> with_capacity(i64 capacity) {
+        Deque<T> d;
+        if (capacity != 0) {
+            d.data = (T*)(malloc(@size(T) * capacity));
+        } else {
+            d.data = (T*)0;
+        }
+        d.len = 0;
+        d.cap = capacity;
+        d.head = 0;
+        return move d;
+    }
+
+    // -- Size ------------------------------------------------------------
+
+    /// Number of elements in the deque.
+    i64 len(Deque<T>* self) {
+        return self.len;
+    }
+
+    /// True when `len` is zero.
+    bool is_empty(Deque<T>* self) {
+        return self.len == 0;
+    }
+
+    // -- Mutation --------------------------------------------------------
+
+    /// Grow capacity to at least `min_cap`, linearizing the ring buffer.
+    void grow(Deque<T>* self, i64 min_cap) {
+        i64 new_cap = self.cap;
+        if (new_cap == 0) {
+            new_cap = 1;
+        }
+        while (new_cap < min_cap) {
+            new_cap = new_cap * 2;
+        }
+        i64 old_cap = self.cap;
+        T* new_data = (T*)(malloc(@size(T) * new_cap));
+        if (old_cap > 0) {
+            i64 i = 0;
+            while (i < self.len) {
+                new_data[i] = self.data[(self.head + i) % old_cap];
+                i = i + 1;
+            }
+        }
+        if (self.data != (T*)0) {
+            free(self.data);
+        }
+        self.data = new_data;
+        self.head = 0;
+        self.cap = new_cap;
+    }
+
+    /// Push `value` to the back (O(1) amortized).
+    void push_back(Deque<T>* self, T value) {
+        if (self.len >= self.cap) {
+            i64 min_cap = 1;
+            if (self.cap != 0) {
+                min_cap = self.cap * 2;
+            }
+            self.grow(min_cap);
+        }
+        i64 tail = (self.head + self.len) % self.cap;
+        self.data[tail] = move value;
+        self.len = self.len + 1;
+    }
+
+    /// Push `value` to the front (O(1) amortized).
+    void push_front(Deque<T>* self, T value) {
+        if (self.len >= self.cap) {
+            i64 min_cap = 1;
+            if (self.cap != 0) {
+                min_cap = self.cap * 2;
+            }
+            self.grow(min_cap);
+        }
+        self.head = (self.head - 1 + self.cap) % self.cap;
+        self.data[self.head] = move value;
+        self.len = self.len + 1;
+    }
+
+    /// Remove and return the front element.  Aborts if empty.
+    T pop_front(Deque<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        T result = self.data[self.head];
+        self.head = (self.head + 1) % self.cap;
+        self.len = self.len - 1;
+        return move result;
+    }
+
+    /// Remove and return the back element.  Aborts if empty.
+    T pop_back(Deque<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        self.len = self.len - 1;
+        i64 tail = (self.head + self.len) % self.cap;
+        T result = self.data[tail];
+        return move result;
+    }
+
+    /// Return a copy of the front element without removing it.  Aborts if empty.
+    T front(Deque<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        return self.data[self.head];
+    }
+
+    /// Return a copy of the back element without removing it.  Aborts if empty.
+    T back(Deque<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        i64 tail = (self.head + self.len - 1) % self.cap;
+        return self.data[tail];
+    }
+
+    /// Remove all elements without freeing the backing buffer.
+    void clear(Deque<T>* self) {
+        self.len = 0;
+        self.head = 0;
+    }
+}
+
+impl<T> Drop<Deque<T>> for Deque<T> {
+    /// Frees the backing buffer.
+    void drop(Deque<T>* self) {
+        if (self.data != (T*)0) {
+            free(self.data);
+            self.data = (T*)0;
+        }
+        self.len = 0;
+        self.cap = 0;
+        self.head = 0;
+    }
+}

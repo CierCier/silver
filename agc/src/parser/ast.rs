@@ -68,6 +68,8 @@ pub struct GlobalVariableItem {
     pub var_type: Type,
     pub initializer: Option<Expression>,
     pub is_mutable: bool,
+    pub is_static: bool,
+    pub is_volatile: bool,
 }
 
 /// Struct definition
@@ -488,6 +490,8 @@ pub struct LetStatement {
     pub type_annotation: Option<Type>,
     pub initializer: Option<Expression>,
     pub is_mutable: bool,
+    pub is_static: bool,
+    pub is_volatile: bool,
 }
 
 /// Patterns for destructuring

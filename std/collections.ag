@@ -1,0 +1,4 @@
+import std.collections.queue;
+import std.collections.deque;
+import std.collections.heap;
+import std.collections.set;

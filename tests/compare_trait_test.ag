@@ -1,0 +1,83 @@
+// Test suite for Compare trait — primitive and custom impls.
+import std.test;
+import std.ops;
+
+struct Pair {
+    i64 first;
+    i64 second;
+}
+
+impl Compare<Pair> for Pair {
+    i32 compare(Pair* self, Pair* other) {
+        if (self.first < other.first) { return -1; }
+        if (self.first > other.first) { return 1; }
+        if (self.second < other.second) { return -1; }
+        if (self.second > other.second) { return 1; }
+        return 0;
+    }
+}
+
+i32 main() {
+    STDOUT.write_str("=== Compare Trait Tests ===\n\n");
+
+    // --- i64 compare ---
+    STDOUT.write_str("--- i64 compare ---\n");
+    {
+        i64 a = 10;
+        i64 b = 20;
+        i64 c = 10;
+        assert_eq_i64(-1, (i64)a.compare(&b), "10 < 20 returns -1");
+        assert_eq_i64(1, (i64)b.compare(&a), "20 > 10 returns 1");
+        assert_eq_i64(0, (i64)a.compare(&c), "10 == 10 returns 0");
+    }
+
+    // --- u64 compare ---
+    STDOUT.write_str("\n--- u64 compare ---\n");
+    {
+        u64 a = 100;
+        u64 b = 200;
+        u64 c = 100;
+        assert_eq_i64(-1, (i64)a.compare(&b), "u64 100 < 200 returns -1");
+        assert_eq_i64(1, (i64)b.compare(&a), "u64 200 > 100 returns 1");
+        assert_eq_i64(0, (i64)a.compare(&c), "u64 100 == 100 returns 0");
+    }
+
+    // --- bool compare ---
+    STDOUT.write_str("\n--- bool compare ---\n");
+    {
+        bool f = false;
+        bool t = true;
+        assert_eq_i64(-1, (i64)f.compare(&t), "false < true returns -1");
+        assert_eq_i64(1, (i64)t.compare(&f), "true > false returns 1");
+        assert_eq_i64(0, (i64)f.compare(&f), "false == false returns 0");
+        assert_eq_i64(0, (i64)t.compare(&t), "true == true returns 0");
+    }
+
+    // --- str compare ---
+    STDOUT.write_str("\n--- str compare ---\n");
+    {
+        str a = "abc";
+        str b = "abd";
+        str c = "abc";
+        assert_eq_i64(0, (i64)a.compare(&c), "str abc == abc returns 0");
+        assert_eq_i64(-1, (i64)a.compare(&b), "str abc < abd returns -1");
+        assert_eq_i64(1, (i64)b.compare(&a), "str abd > abc returns 1");
+    }
+
+    // --- Custom Pair compare ---
+    STDOUT.write_str("\n--- Custom Pair compare ---\n");
+    {
+        Pair p1 = { .first = 1, .second = 2 };
+        Pair p2 = { .first = 1, .second = 3 };
+        Pair p3 = { .first = 2, .second = 0 };
+        Pair p4 = { .first = 1, .second = 2 };
+
+        assert_eq_i64(-1, (i64)p1.compare(&p2), "Pair(1,2) < Pair(1,3) by second");
+        assert_eq_i64(1, (i64)p2.compare(&p1), "Pair(1,3) > Pair(1,2) by second");
+        assert_eq_i64(-1, (i64)p1.compare(&p3), "Pair(1,2) < Pair(2,0) by first");
+        assert_eq_i64(1, (i64)p3.compare(&p1), "Pair(2,0) > Pair(1,2) by first");
+        assert_eq_i64(0, (i64)p1.compare(&p4), "Pair(1,2) == Pair(1,2)");
+    }
+
+    return done();
+}

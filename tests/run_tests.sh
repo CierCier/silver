@@ -29,6 +29,9 @@ expected_exit() {
         # so the expected exit code is 42, not 0.
         syscall_test) echo 42 ;;
         syscall_wrapper_test) echo 42 ;;
+        # main returns a + b + c + d = 1 + 2 + 3 + 1 = 7; the harness
+        # treats the exit status as the expected code.
+        static_volatile_test) echo 7 ;;
         *) echo 0 ;;
     esac
 }
@@ -50,6 +53,7 @@ expected_compile_failure() {
         enum_arity_error_test) return 0 ;;
         inherent_drop_error_test) return 0 ;;
         return_droppable_without_move_error_test) return 0 ;;
+        static_volatile_negative_test) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -249,11 +253,24 @@ for t in "${tests[@]}"; do
         continue
     fi
 
+# Some tests require stdin input. If this function returns 0 for a test name,
+# its stdout is piped into the test binary as stdin.
+test_stdin() {
+    case "$1" in
+        scanner_test) printf '\357\273\2773\n10 -20 caf\303\251\nlast line\n' ;;
+        *) return 1 ;;
+    esac
+}
+
     # ------- Run step -------
     run_dir="$WORKDIR/$name.rundir"
     mkdir -p "$run_dir"
     run_real_ms=0; run_cpu_pct=0; run_mem_kb=0
-    (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin")
+    if test_stdin "$name" > /dev/null 2>&1; then
+        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name"))
+    else
+        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin")
+    fi
     exit_code=$?
 
     # ------- Post-run checks -------

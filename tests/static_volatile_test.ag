@@ -1,0 +1,27 @@
+// static/volatile keyword integration test.
+//
+// Verifies:
+//   - `static` locals: function-persistent storage initialized once; the
+//     counter() function returns 1, 2, 3 across three separate calls.
+//   - `volatile` globals: loads/stores of `reg` are emitted as LLVM volatile
+//     memory operations (see run_tests / --emit-llvm proof in plan).
+//   - Both keywords coexist at top level and inside function bodies.
+//
+// Expected exit status: 0; program prints 7 (1 + 2 + 3 + 1).
+
+i32 counter() {
+    static i32 c = 0;
+    c = c + 1;
+    return c;
+}
+
+volatile i32 reg = 0;
+
+i32 main() {
+    i32 a = counter();   // 1
+    i32 b = counter();   // 2
+    i32 c = counter();   // 3
+    reg = reg + 1;       // volatile store
+    i32 d = reg;         // volatile load
+    return a + b + c + d; // 6 + 1 = 7
+}

@@ -1,0 +1,109 @@
+// Test suite for Queue<T> — ring-buffer FIFO queue.
+import std.test;
+import std.collections.queue;
+
+i32 main() {
+    STDOUT.write_str("=== Queue Tests ===\n\n");
+
+    // --- new ---
+    STDOUT.write_str("--- new ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        assert_eq_i64(0, q.len(), "new queue len 0");
+        assert_true(q.is_empty(), "new queue is empty");
+        q.drop();
+    }
+
+    // --- push/pop FIFO ---
+    STDOUT.write_str("\n--- push/pop FIFO ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        q.push(10);
+        q.push(20);
+        q.push(30);
+        assert_eq_i64(3, q.len(), "len 3 after 3 pushes");
+        assert_true(!q.is_empty(), "not empty after pushes");
+        assert_eq_i64(10, q.pop(), "pop returns 10");
+        assert_eq_i64(20, q.pop(), "pop returns 20");
+        assert_eq_i64(30, q.pop(), "pop returns 30");
+        assert_true(q.is_empty(), "empty after all pops");
+        q.drop();
+    }
+
+    // --- resize ---
+    STDOUT.write_str("\n--- resize ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        i64 i = 0;
+        while (i < 100) {
+            q.push(i * 10);
+            i = i + 1;
+        }
+        assert_eq_i64(100, q.len(), "len 100 after 100 pushes");
+        i = 0;
+        bool all_correct = true;
+        while (i < 100) {
+            i64 val = q.pop();
+            if (val != i * 10) {
+                all_correct = false;
+            }
+            i = i + 1;
+        }
+        assert_true(all_correct, "all 100 values correct FIFO order");
+        assert_true(q.is_empty(), "empty after all pops");
+        q.drop();
+    }
+
+    // --- wraparound ---
+    STDOUT.write_str("\n--- wraparound ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        // Fill beyond initial capacity -> forces head=0, cap>=4
+        q.push(10);
+        q.push(20);
+        q.push(30);
+        q.push(40);
+        // Pop 3 so head advances to 3
+        q.pop();  // 10, head=1
+        q.pop();  // 20, head=2
+        q.pop();  // 30, head=3
+        // Push 2 more — second wraps around
+        q.push(50);  // at data[3] (old 40 slot)
+        q.push(60);  // at data[0] (wraparound)
+        assert_eq_i64(40, q.pop(), "wraparound: first remaining is 40");
+        assert_eq_i64(50, q.pop(), "wraparound: then 50");
+        assert_eq_i64(60, q.pop(), "wraparound: then 60");
+        assert_true(q.is_empty(), "empty after wraparound pops");
+        q.drop();
+    }
+
+    // --- front ---
+    STDOUT.write_str("\n--- front ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        q.push(100);
+        q.push(200);
+        assert_eq_i64(100, q.front(), "front returns 100");
+        assert_eq_i64(2, q.len(), "len unchanged after front");
+        assert_eq_i64(100, q.pop(), "pop still returns 100");
+        assert_eq_i64(200, q.front(), "front now returns 200");
+        q.drop();
+    }
+
+    // --- clear ---
+    STDOUT.write_str("\n--- clear ---\n");
+    {
+        Queue<i64> q = Queue<i64>.new();
+        q.push(1);
+        q.push(2);
+        q.push(3);
+        q.clear();
+        assert_eq_i64(0, q.len(), "len 0 after clear");
+        assert_true(q.is_empty(), "is_empty after clear");
+        q.push(99);
+        assert_eq_i64(99, q.pop(), "can push and pop after clear");
+        q.drop();
+    }
+
+    return done();
+}

@@ -1,0 +1,117 @@
+// Test suite for std.bytes
+import std.test;
+import std.bytes;
+
+i32 main() {
+    test_start("new - empty bytes");
+    {
+        Bytes b = Bytes.new();
+        assert_eq_i64(b.len(), 0, "new Bytes has len 0");
+        assert_eq_i64(b.capacity(), 0, "new Bytes has cap 0");
+        b.drop();
+    }
+
+    test_start("with_capacity");
+    {
+        Bytes b = Bytes.with_capacity(32);
+        assert_eq_i64(b.len(), 0, "with_capacity has len 0");
+        assert_eq_i64(b.capacity(), 32, "with_capacity has specified capacity");
+        b.drop();
+    }
+
+    test_start("push and len");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)65); // 'A'
+        b.push((u8)66); // 'B'
+        b.push((u8)67); // 'C'
+        assert_eq_i64(b.len(), 3, "len is 3 after three pushes");
+        assert_eq_i32((i32)b.get(0), 65, "get(0) is 'A'");
+        assert_eq_i32((i32)b.get(1), 66, "get(1) is 'B'");
+        assert_eq_i32((i32)b.get(2), 67, "get(2) is 'C'");
+        b.drop();
+    }
+
+    test_start("push grows capacity");
+    {
+        Bytes b = Bytes.with_capacity(2);
+        b.push((u8)1);
+        b.push((u8)2);
+        assert_eq_i64(b.capacity(), 2, "capacity still 2 before growth");
+        b.push((u8)3);
+        assert_eq_i64(b.len(), 3, "len is 3 after pushing past capacity");
+        assert_true(b.capacity() >= 3, "capacity grew to fit");
+        b.drop();
+    }
+
+    test_start("extend");
+    {
+        Bytes b = Bytes.new();
+        u8 src[3];
+        src[0] = (u8)10;
+        src[1] = (u8)20;
+        src[2] = (u8)30;
+        b.extend(src, 3);
+        assert_eq_i64(b.len(), 3, "len is 3 after extend");
+        assert_eq_i32((i32)b.get(0), 10, "extend[0] = 10");
+        assert_eq_i32((i32)b.get(1), 20, "extend[1] = 20");
+        assert_eq_i32((i32)b.get(2), 30, "extend[2] = 30");
+        b.drop();
+    }
+
+    test_start("extend empty");
+    {
+        Bytes b = Bytes.new();
+        b.extend((u8*)0, 0);
+        assert_eq_i64(b.len(), 0, "extend with empty is no-op");
+        b.drop();
+    }
+
+    test_start("get and set indexing");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)100);
+        b.push((u8)200);
+        b.push((u8)255);
+        assert_eq_i32((i32)b.get(2), 255, "get(2) = 255");
+        b.set(1, (u8)150);
+        assert_eq_i32((i32)b.get(1), 150, "after set(1, 150) = 150");
+        b.drop();
+    }
+
+    test_start("as_ptr");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)42);
+        u8* ptr = b.as_ptr();
+        assert_true(ptr != (u8*)0, "as_ptr returns non-null");
+        assert_eq_i32((i32)ptr[0], 42, "ptr[0] = 42");
+        b.drop();
+    }
+
+    test_start("clear");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)1);
+        b.push((u8)2);
+        b.clear();
+        assert_eq_i64(b.len(), 0, "len is 0 after clear");
+        b.push((u8)99);
+        assert_eq_i32((i32)b.get(0), 99, "can push after clear");
+        b.drop();
+    }
+
+    test_start("indexed access via []");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)7);
+        b.push((u8)8);
+        assert_eq_i32((i32)b[0], 7, "b[0] = 7");
+        assert_eq_i32((i32)b[1], 8, "b[1] = 8");
+        b[1] = (u8)9;
+        assert_eq_i32((i32)b[1], 9, "b[1] = 9 after assignment");
+        b.drop();
+    }
+
+    return done();
+}

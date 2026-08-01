@@ -461,4 +461,39 @@ mod tests {
             "expected DISubprogram metadata in IR:\n{ir}"
         );
     }
+
+    #[test]
+    fn static_local_lowers_to_internal_global() {
+        let ir = lower_to_llvm("i32 main() { static i32 counter = 0; counter = counter + 1; return counter; }");
+        assert!(
+            ir.contains("@main.counter.0 = internal global i32 0"),
+            "expected internal global for static local:\n{ir}"
+        );
+        assert!(
+            ir.contains("store i32") && ir.contains("@main.counter.0"),
+            "expected store to the static local global:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn volatile_local_lowers_to_volatile_ops() {
+        let ir = lower_to_llvm("i32 main() { volatile i32 v = 1; v = v + 1; return v; }");
+        assert!(
+            ir.contains("load volatile i32"),
+            "expected volatile load in IR:\n{ir}"
+        );
+        assert!(
+            ir.contains("store volatile i32"),
+            "expected volatile store in IR:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn static_global_lowers_to_internal_linkage() {
+        let ir = lower_to_llvm("static i32 g = 42; i32 main() { return g; }");
+        assert!(
+            ir.contains("@g = internal global i32 42"),
+            "expected internal linkage for static global:\n{ir}"
+        );
+    }
 }

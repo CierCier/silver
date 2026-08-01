@@ -2,6 +2,7 @@
 
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
+use inkwell::module::Linkage;
 use inkwell::types::BasicType;
 use inkwell::values::{BasicValueEnum, FunctionValue};
 
@@ -67,6 +68,7 @@ pub(crate) fn emit_function_body(
                         ptr: alloca,
                         ty: param.param_type.clone(),
                         is_mutable: param.is_mutable,
+                        is_volatile: false,
                     },
                 );
             }
@@ -159,6 +161,7 @@ pub(crate) fn emit_function_body(
         self.current_fn = None;
         self.current_return_type = saved_return_type;
         self.drop_flags.clear();
+        self.static_local_counter = 0;
         if let Some(debug) = &mut self.debug {
             debug.current_subprogram = None;
         }
@@ -380,6 +383,7 @@ pub(crate) fn emit_function_body(
                             ptr: i_ptr,
                             ty: ast_ty,
                             is_mutable,
+                            is_volatile: false,
                         },
                     );
                 }
@@ -494,6 +498,7 @@ pub(crate) fn emit_function_body(
                             ptr: iterable_ptr,
                             ty: iterable_ast_ty,
                             is_mutable: true,
+                            is_volatile: false,
                         },
                     );
                 }
@@ -541,6 +546,7 @@ pub(crate) fn emit_function_body(
                             ptr: iter_ptr,
                             ty: iter_ast_ty,
                             is_mutable: true,
+                            is_volatile: false,
                         },
                     );
                 }
@@ -641,6 +647,7 @@ pub(crate) fn emit_function_body(
                             ptr: var_ptr,
                             ty: ast_ty,
                             is_mutable,
+                            is_volatile: false,
                         },
                     );
                 }
@@ -729,6 +736,53 @@ pub(crate) fn emit_function_body(
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for let statement"))?;
+
+        if let_stmt.is_static {
+            // Static local: function-persistent storage, initialized once, never
+            // dropped (C semantics). Backed by an internal-linkage LLVM global.
+            // The name is uniqued per function name and declaration ordinal so
+            // shadowed `static i32 x;` declarations in nested blocks and each
+            // monomorphized generic instantiation get distinct globals. No drop
+            // flag, no field drops, no defer entry: the storage lives for the
+            // whole program, so it is never destroyed (a static of a Drop type
+            // leaks at exit by design).
+            let fn_name = function.get_name().to_string_lossy().into_owned();
+            let ordinal = {
+                let n = self.static_local_counter;
+                self.static_local_counter += 1;
+                n
+            };
+            let global_name = format!("{fn_name}.{}.{ordinal}", identifier.name);
+            let global = self.module.add_global(storage_ty, None, &global_name);
+            global.set_linkage(Linkage::Internal);
+            if let Some(init) = &let_stmt.initializer {
+                let const_val = self.emit_const_value_for_type(init, &inferred_ty).map_err(|e| {
+                    if e.message == "global initializer must be a compile-time constant expression"
+                    {
+                        CodegenError::with_span(
+                            "static local initializer must be a compile-time constant",
+                            init.span.clone(),
+                        )
+                    } else {
+                        e
+                    }
+                })?;
+                global.set_initializer(&const_val);
+            } // no initializer → zero-initialized (LLVM global default)
+            if let Some(scope) = self.variables.last_mut() {
+                scope.insert(
+                    identifier.name.clone(),
+                    VarInfo {
+                        ptr: global.as_pointer_value(),
+                        ty: inferred_ty,
+                        is_mutable: let_stmt.is_mutable,
+                        is_volatile: let_stmt.is_volatile,
+                    },
+                );
+            }
+            return Ok(());
+        }
+
         let alloca = self.create_entry_alloca(function, &identifier.name, storage_ty)?;
         self.builder.build_store(alloca, init_value).map_err(|e| {
             CodegenError::with_span(
@@ -746,6 +800,7 @@ pub(crate) fn emit_function_body(
                     ptr: alloca,
                     ty,
                     is_mutable: let_stmt.is_mutable,
+                    is_volatile: let_stmt.is_volatile,
                 },
             );
         }
@@ -930,6 +985,7 @@ pub(crate) fn emit_function_body(
                             ptr: alloca,
                             ty: inferred,
                             is_mutable: false,
+                            is_volatile: false,
                         },
                     );
                 }

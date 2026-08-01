@@ -67,10 +67,17 @@ pub(crate) fn run_module_optimization_passes(
     // Build a lightweight pipeline matching the plan's original intent:
     //   mem2reg, instcombine, reassociate, gvn, simplifycfg
     // At higher opt levels also run an extra instcombine cleanup.
+    //
+    // instcombine<no-verify-fixpoint> disables instcombine's fixpoint
+    // *verification* (a sanity check). LLVM 22 falsely trips it on `nuw` GEPs
+    // from struct field access, erroring "did not reach a fixpoint"; the pass
+    // itself terminates correctly, so the check is safe to disable.
     let pipeline = if matches!(level, "3" | "s" | "z" | "fast") {
-        CString::new("mem2reg,instcombine,reassociate,gvn,simplifycfg,instcombine")
+        CString::new(
+            "mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>",
+        )
     } else {
-        CString::new("mem2reg,instcombine,reassociate,gvn,simplifycfg")
+        CString::new("mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg")
     }
     .expect("pipeline CString should not contain null bytes");
 

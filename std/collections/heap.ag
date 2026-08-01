@@ -1,0 +1,142 @@
+// BinaryHeap<T> — max-heap priority queue.
+//
+// Elements are ordered by the `<` and `>` operators; the greatest element
+// is always at the front.  Min-heap behavior can be achieved with a wrapper
+// type whose `<` / `>` are reversed.
+//
+// Memory (malloc/realloc/free) is provided through std.mem.
+// pop and peek abort on an empty heap.
+
+import std.mem;
+
+/// A max-heap priority queue backed by a contiguous growable array.
+struct BinaryHeap<T> {
+    T* data;
+    i64 len;
+    i64 cap;
+}
+
+impl BinaryHeap<T> {
+    /// Empty heap — no allocation.
+    BinaryHeap<T> new() {
+        BinaryHeap<T> h;
+        h.data = (T*)0;
+        h.len = 0;
+        h.cap = 0;
+        return move h;
+    }
+
+    /// Reserve space for `capacity` elements up front.
+    BinaryHeap<T> with_capacity(i64 capacity) {
+        BinaryHeap<T> h;
+        if (capacity != 0) {
+            h.data = (T*)(malloc(@size(T) * capacity));
+        } else {
+            h.data = (T*)0;
+        }
+        h.len = 0;
+        h.cap = capacity;
+        return move h;
+    }
+
+    // -- Size ------------------------------------------------------------
+
+    /// Number of elements in the heap.
+    i64 len(BinaryHeap<T>* self) {
+        return self.len;
+    }
+
+    /// True when `len` is zero.
+    bool is_empty(BinaryHeap<T>* self) {
+        return self.len == 0;
+    }
+
+    // -- Mutation --------------------------------------------------------
+
+    /// Push `value` onto the heap (O(log n)).
+    void push(BinaryHeap<T>* self, T value) {
+        if (self.len >= self.cap) {
+            i64 new_cap = 1;
+            if (self.cap != 0) {
+                new_cap = self.cap * 2;
+            }
+            self.data = (T*)(realloc(self.data, @size(T) * new_cap));
+            self.cap = new_cap;
+        }
+        self.data[self.len] = move value;
+        i64 child = self.len;
+        self.len = self.len + 1;
+
+        // Sift up: swap while child > parent
+        while (child > 0) {
+            i64 parent = (child - 1) / 2;
+            if (!(self.data[parent] < self.data[child])) {
+                break;
+            }
+            T tmp_p = self.data[parent];
+            T tmp_c = self.data[child];
+            self.data[parent] = move tmp_c;
+            self.data[child] = move tmp_p;
+            child = parent;
+        }
+    }
+
+    /// Remove and return the greatest element.  Aborts if empty.
+    T pop(BinaryHeap<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        T result = self.data[0];
+        self.len = self.len - 1;
+        if (self.len > 0) {
+            T last = self.data[self.len];
+            self.data[0] = move last;
+
+            // Sift down: swap root with larger child while root < child
+            i64 root = 0;
+            while (true) {
+                i64 child = 2 * root + 1;
+                if (child >= self.len) {
+                    break;
+                }
+                if (child + 1 < self.len && self.data[child] < self.data[child + 1]) {
+                    child = child + 1;
+                }
+                if (!(self.data[root] < self.data[child])) {
+                    break;
+                }
+                T tmp_r = self.data[root];
+                T tmp_c = self.data[child];
+                self.data[root] = move tmp_c;
+                self.data[child] = move tmp_r;
+                root = child;
+            }
+        }
+        return move result;
+    }
+
+    /// Return a copy of the greatest element without removing it.  Aborts if empty.
+    T peek(BinaryHeap<T>* self) {
+        if (self.len == 0) {
+            abort();
+        }
+        return self.data[0];
+    }
+
+    /// Remove all elements without freeing the backing buffer.
+    void clear(BinaryHeap<T>* self) {
+        self.len = 0;
+    }
+}
+
+impl<T> Drop<BinaryHeap<T>> for BinaryHeap<T> {
+    /// Frees the backing buffer.
+    void drop(BinaryHeap<T>* self) {
+        if (self.data != (T*)0) {
+            free(self.data);
+            self.data = (T*)0;
+        }
+        self.len = 0;
+        self.cap = 0;
+    }
+}

@@ -1,0 +1,247 @@
+// std/algo.ag — Generic algorithms over Vec<T> and slices.
+//
+// Algorithms are self-contained (no inter-generic calls) to work with
+// Silver's current monomorphizer which handles explicit type-arg calls
+// at call sites but may not fully chain transitive generic-to-generic calls.
+import std.mem;
+import std.mem.vec;
+
+// -- Element swap ---------------------------------------------------------
+
+/// Swap two elements in place using move semantics.
+void swap<T>(T* a, T* b) {
+    T tmp = *a;
+    T val_b = *b;
+    *a = move val_b;
+    *b = move tmp;
+}
+
+// -- Min / Max -------------------------------------------------------------
+
+/// Return the smaller of two values.
+T min<T>(T a, T b) {
+    if (a < b) {
+        return move a;
+    }
+    return move b;
+}
+
+/// Return the larger of two values.
+T max<T>(T a, T b) {
+    if (a > b) {
+        return move a;
+    }
+    return move b;
+}
+
+// -- Reverse ---------------------------------------------------------------
+
+/// Reverse a Vec<T> in-place.
+void reverse<T>(Vec<T>* v) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    i64 i = 0;
+    i64 j = v.len - 1;
+    while (i < j) {
+        T tmp = v.data[i];
+        T val_j = v.data[j];
+        v.data[i] = move val_j;
+        v.data[j] = move tmp;
+        i = i + 1;
+        j = j - 1;
+    }
+}
+
+/// Reverse a slice [data, data+len) in-place.
+void reverse_slice<T>(T* data, i64 len) {
+    i64 i = 0;
+    i64 j = len - 1;
+    while (i < j) {
+        T tmp = data[i];
+        T val_j = data[j];
+        data[i] = move val_j;
+        data[j] = move tmp;
+        i = i + 1;
+        j = j - 1;
+    }
+}
+
+// -- Heapsort (max-heap, in-place, O(n log n)) -- self-contained ----------
+
+/// Sort Vec<T> ascending using in-place heapsort.
+/// The entire heap algorithm is inlined to avoid transitive generic calls.
+void sort<T>(Vec<T>* v) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    T* data = v.data;
+    i64 len = v.len;
+
+    // Build max-heap
+    i64 i = (len / 2) - 1;
+    while (i >= 0) {
+        // sift_down at i
+        i64 root = i;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= len) {
+                break;
+            }
+            if (child + 1 < len && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root = data[root];
+            T tmp_child = data[child];
+            data[root] = move tmp_child;
+            data[child] = move tmp_root;
+            root = child;
+        }
+        i = i - 1;
+    }
+
+    // Extract elements from heap
+    i64 end = len;
+    while (end > 1) {
+        end = end - 1;
+        T tmp_root = data[0];
+        T tmp_end = data[end];
+        data[0] = move tmp_end;
+        data[end] = move tmp_root;
+
+        // sift_down at 0
+        i64 root = 0;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= end) {
+                break;
+            }
+            if (child + 1 < end && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root2 = data[root];
+            T tmp_child2 = data[child];
+            data[root] = move tmp_child2;
+            data[child] = move tmp_root2;
+            root = child;
+        }
+    }
+}
+
+/// Sort a slice [data, data+len) ascending using in-place heapsort.
+void sort_slice<T>(T* data, i64 len) {
+    if (len <= 1) {
+        return;
+    }
+
+    // Build max-heap
+    i64 i = (len / 2) - 1;
+    while (i >= 0) {
+        i64 root = i;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= len) {
+                break;
+            }
+            if (child + 1 < len && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root = data[root];
+            T tmp_child = data[child];
+            data[root] = move tmp_child;
+            data[child] = move tmp_root;
+            root = child;
+        }
+        i = i - 1;
+    }
+
+    // Extract
+    i64 end = len;
+    while (end > 1) {
+        end = end - 1;
+        T tmp_root = data[0];
+        T tmp_end = data[end];
+        data[0] = move tmp_end;
+        data[end] = move tmp_root;
+
+        i64 root = 0;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= end) {
+                break;
+            }
+            if (child + 1 < end && data[child] < data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(data[root] < data[child])) {
+                break;
+            }
+            T tmp_root2 = data[root];
+            T tmp_child2 = data[child];
+            data[root] = move tmp_child2;
+            data[child] = move tmp_root2;
+            root = child;
+        }
+    }
+}
+
+// -- Binary search on sorted slices -- self-contained ---------------------
+
+/// Return first index i where v[i] >= key, or v.len if none exists.
+i64 lower_bound<T>(Vec<T>* v, T key) {
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (v.data[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/// Return first index i where v[i] > key, or v.len if none exists.
+i64 upper_bound<T>(Vec<T>* v, T key) {
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (key < v.data[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+/// Return true if key is present in sorted Vec<T>.
+/// lower_bound is inlined to avoid transitive generic calls.
+bool binary_search<T>(Vec<T>* v, T key) {
+    // Inlined lower_bound
+    i64 lo = 0;
+    i64 hi = v.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (v.data[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo >= v.len) {
+        return false;
+    }
+    return !(v.data[lo] < key) && !(key < v.data[lo]);
+}

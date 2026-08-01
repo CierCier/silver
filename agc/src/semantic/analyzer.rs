@@ -351,6 +351,20 @@ impl Analyzer {
                     }
                 }
                 self.check_type(&impl_item.self_type);
+                // Lint: inherent method named 'drop' that should be a Drop trait impl
+                if impl_item.trait_ref.is_none() {
+                    for item in &impl_item.items {
+                        if let ast::ImplItemKind::Function(func) = item
+                            && func.name.name == "drop"
+                            && !func.parameters.is_empty()
+                        {
+                            self.errors.push(SemanticError {
+                                message: "inherent method 'drop' is not a Drop trait impl; consider 'impl Drop<T> for T' instead".to_string(),
+                                span: func.name.span.clone(),
+                            });
+                        }
+                    }
+                }
                 for item in &impl_item.items {
                     match item {
                         ast::ImplItemKind::Function(func) => {

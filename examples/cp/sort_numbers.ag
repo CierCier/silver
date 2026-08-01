@@ -1,0 +1,31 @@
+// Sort N numbers.
+//
+// Reads a count N followed by N integers, sorts them ascending with
+// std.algo.sort, and prints each on its own line.
+import std.io.scanner;
+import std.mem.vec;
+import std.algo;
+
+i32 main() {
+    Scanner s = Scanner.stdin();
+    i64 n = s.next_i64();
+
+    Vec<i64> v = Vec<i64>.new();
+    i64 i = 0;
+    while (i < n) {
+        v.push(s.next_i64());
+        i = i + 1;
+    }
+
+    sort(&v);
+
+    i = 0;
+    while (i < n) {
+        @println("{}", v[i]);
+        i = i + 1;
+    }
+
+    v.drop();
+    s.drop();
+    return 0;
+}
