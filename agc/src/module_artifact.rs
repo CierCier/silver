@@ -383,15 +383,15 @@ impl ModuleArtifact {
         let src = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
-        let tokens = lexer::lex(&src).map_err(|e| format!("lexer errors in {path:?}: {e:?}"))?;
+        let file_id = lexer::register_source(&path.display().to_string(), &src);
+        let tokens = lexer::lex_with_source(&src, file_id)
+            .map_err(|e| format!("lexer errors in {path:?}: {e:?}"))?;
 
         let mut parser = parser::Parser::new_with_source(tokens, path.display().to_string());
         let (ast, errors) = parser.parse_program();
 
         if !errors.is_empty() {
             return Err(diagnostics::render(
-                &src,
-                &path.display().to_string(),
                 errors[0].span().clone(),
                 &errors[0].format_with_help(),
                 diagnostics::Severity::Error,
@@ -623,11 +623,11 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                                 path: vec![ast::Identifier {
                                     name: s.name.name.clone(),
-                                    span: Span { start: 0, end: 0 },
+                                    span: Span::default(),
                                 }],
                                 generics: None,
                             })),
-                            span: Span { start: 0, end: 0 },
+                            span: Span::default(),
                         })
                         .canonical_key(),
                     ),
@@ -654,11 +654,11 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                             kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                                 path: vec![ast::Identifier {
                                     name: e.name.name.clone(),
-                                    span: Span { start: 0, end: 0 },
+                                    span: Span::default(),
                                 }],
                                 generics: None,
                             })),
-                            span: Span { start: 0, end: 0 },
+                            span: Span::default(),
                         })
                         .canonical_key(),
                     ),

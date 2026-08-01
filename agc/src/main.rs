@@ -523,8 +523,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         e.span,
                                         &format!("{:?}", e.kind),
                                         diagnostics::Severity::Error,
@@ -581,8 +579,6 @@ fn main() {
                                     eprintln!(
                                         "{}",
                                         diagnostics::render(
-                                            &src,
-                                            &input.display().to_string(),
                                             error.span().clone(),
                                             &error.format_with_help(),
                                             diagnostics::Severity::Error,
@@ -621,8 +617,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         e.span,
                                         &format!("{:?}", e.kind),
                                         diagnostics::Severity::Error,
@@ -686,8 +680,13 @@ fn main() {
                 };
                 profiler.end_phase("read source");
 
+                // Register the input source so diagnostic spans resolve to this
+                // file (imported modules register their own files).
+                let input_path = input.display().to_string();
+                let input_file = lexer::register_source(&input_path, &src);
+
                 profiler.begin_phase("lex");
-                let tokens = match lexer::lex(&src) {
+                let tokens = match lexer::lex_with_source(&src, input_file) {
                     Ok(tokens) => tokens,
                     Err(errors) => {
                         eprintln!(
@@ -699,10 +698,8 @@ fn main() {
                             eprintln!(
                                 "{}",
                                 diagnostics::render(
-                                    &src,
-                                    &input.display().to_string(),
                                     e.span,
-                                    &format!("{:?}", e.kind),
+                                    &e.kind.to_string(),
                                     diagnostics::Severity::Error,
                                 )
                             );
@@ -724,8 +721,6 @@ fn main() {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                &src,
-                                &input.display().to_string(),
                                 error.span().clone(),
                                 &error.format_with_help(),
                                 diagnostics::Severity::Error,
@@ -743,8 +738,6 @@ fn main() {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                &src,
-                                &input.display().to_string(),
                                 error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
@@ -790,8 +783,6 @@ fn main() {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                &src,
-                                &input.display().to_string(),
                                 error.span.clone(),
                                 &error.message,
                                 diagnostics::Severity::Error,
@@ -868,8 +859,6 @@ fn main() {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                &src,
-                                &input.display().to_string(),
                                 error.span.clone(),
                                 &error.message,
                                 diagnostics::Severity::Error,
@@ -885,8 +874,6 @@ fn main() {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                &src,
-                                &input.display().to_string(),
                                 error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
@@ -988,8 +975,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         span,
                                         &error.message,
                                         diagnostics::Severity::Error,
@@ -1029,8 +1014,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         span,
                                         &error.message,
                                         diagnostics::Severity::Error,
@@ -1071,8 +1054,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         span,
                                         &error.message,
                                         diagnostics::Severity::Error,
@@ -1104,8 +1085,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         span,
                                         &error.message,
                                         diagnostics::Severity::Error,
@@ -1140,8 +1119,6 @@ fn main() {
                                     eprintln!(
                                         "{}",
                                         diagnostics::render(
-                                            &src,
-                                            &input.display().to_string(),
                                             span,
                                             &error.message,
                                             diagnostics::Severity::Error,
@@ -1179,8 +1156,6 @@ fn main() {
                                 eprintln!(
                                     "{}",
                                     diagnostics::render(
-                                        &src,
-                                        &input.display().to_string(),
                                         span,
                                         &error.message,
                                         diagnostics::Severity::Error,

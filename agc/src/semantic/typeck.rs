@@ -218,12 +218,12 @@ impl TypeChecker {
                             params,
                             return_type,
                             type_params: export.type_params.clone(),
-                            span: Span { start: 0, end: 0 },
+                            span: Span::default(),
                             bounds: Vec::new(),
                             source: ast::FunctionItem {
                                 name: ast::Identifier {
                                     name: export.name.clone(),
-                                    span: Span { start: 0, end: 0 },
+                                    span: Span::default(),
                                 },
                                 generics: Self::export_type_params_to_generics(&export.type_params),
                                 is_variadic: false,
@@ -231,7 +231,7 @@ impl TypeChecker {
                                 return_type: None,
                                 body: ast::Block {
                                     statements: Vec::new(),
-                                    span: Span { start: 0, end: 0 },
+                                    span: Span::default(),
                                 },
                             },
                             is_variadic: false,
@@ -330,18 +330,18 @@ impl TypeChecker {
                 ast::GenericParam::Type(ast::TypeParam {
                     name: ast::Identifier {
                         name: name.clone(),
-                        span: Span { start: 0, end: 0 },
+                        span: Span::default(),
                     },
                     bounds: Vec::new(),
                     default: None,
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                 })
             })
             .collect::<Vec<_>>();
         Some(ast::Generics {
             params,
             where_clause: None,
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         })
     }
 
@@ -651,7 +651,8 @@ impl TypeChecker {
                     }
                     _ => {
                         self.error(
-                            "type checking for complex let patterns is not implemented",
+                            "let declarations must bind a single identifier; destructuring \
+                            patterns are not supported".to_string(),
                             let_stmt.pattern.span.clone(),
                         );
                     }
@@ -1442,7 +1443,10 @@ impl TypeChecker {
                                     self.check_expr(arg, None);
                                 }
                                 self.error(
-                                    "type checking for this call expression is not implemented",
+                                    format!(
+                                        "type '{}' is not callable: no function with that name",
+                                        named.path[0].name
+                                    ),
                                     expr.span.clone(),
                                 );
                                 Type::Unknown
@@ -1452,7 +1456,7 @@ impl TypeChecker {
                                 self.check_expr(arg, None);
                             }
                             self.error(
-                                "type checking for this call expression is not implemented",
+                                "cannot call a namespaced type path; calls must use a single function name".to_string(),
                                 expr.span.clone(),
                             );
                             Type::Unknown
@@ -1462,7 +1466,7 @@ impl TypeChecker {
                             self.check_expr(arg, None);
                         }
                         self.error(
-                            "type checking for this call expression is not implemented",
+                            "type expression is not callable".to_string(),
                             expr.span.clone(),
                         );
                         Type::Unknown
@@ -1495,7 +1499,7 @@ impl TypeChecker {
                             self.check_expr(arg, None);
                         }
                         self.error(
-                            "type checking for this call expression is not implemented",
+                            format!("expression is not callable (type {})", fn_ty),
                             expr.span.clone(),
                         );
                         Type::Unknown
@@ -1766,7 +1770,10 @@ impl TypeChecker {
                                 }
                                 _ => {
                                     self.error(
-                                        "unsupported pattern kind in match",
+                                        format!(
+                                            "unsupported pattern in enum match arm; expected a variant pattern like '{}.Variant(...)', a binding, or '_'",
+                                            enum_name
+                                        ),
                                         arm.pattern.span.clone(),
                                     );
                                 }
@@ -1874,7 +1881,10 @@ impl TypeChecker {
                             }
                             _ => {
                                 self.error(
-                                    "unsupported pattern kind in match",
+                                    format!(
+                                        "unsupported pattern in match on a {} value; expected a literal pattern, a binding, or '_'",
+                                        scrutinee_ty
+                                    ),
                                     arm.pattern.span.clone(),
                                 );
                             }
@@ -1922,7 +1932,8 @@ impl TypeChecker {
             }
             ast::ExpressionKind::StructLiteral { .. } => {
                 self.error(
-                    "type checking for this expression is not implemented",
+                    "struct literal expressions are not supported here; use a variable \
+                    initializer ('Type id = { .field = value }') instead".to_string(),
                     expr.span.clone(),
                 );
                 Type::Unknown

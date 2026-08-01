@@ -162,10 +162,68 @@ pub struct LexToken {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+    /// Source file id (index into the process-wide source registry); 0 means
+    /// unregistered (e.g. synthetic spans, in-memory lexing in tests).
+    pub file: u32,
+    /// 1-based line/column of the span start; 0 means unknown.
+    pub start_line: u32,
+    pub start_col: u32,
+    /// 1-based line/column of the span end; 0 means unknown.
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+impl Span {
+    /// Synthetic span with no source location (file 0, unknown line/col).
+    pub fn new(start: usize, end: usize) -> Self {
+        Self {
+            start,
+            end,
+            ..Self::default()
+        }
+    }
+
+    /// Span running from `self.start` through `other.end`, carrying `self`'s
+    /// file and start location plus `other`'s end location. Used to combine
+    /// two token spans when building AST nodes.
+    pub fn extend_to(&self, other: &Span) -> Self {
+        Self {
+            end: other.end,
+            end_line: other.end_line,
+            end_col: other.end_col,
+            ..*self
+        }
+    }
+
+    /// Keep the start location and file, but set a new end byte offset.
+    pub fn with_end(&self, end: usize) -> Self {
+        Self {
+            end,
+            end_line: 0,
+            end_col: 0,
+            ..*self
+        }
+    }
+
+    /// True when the span carries no usable source location.
+    pub fn is_synthetic(&self) -> bool {
+        self.file == 0 || self.start_line == 0
+    }
+
+    /// Human-readable `path:line:col` for messages rendered without carets.
+    pub fn display_location(&self) -> String {
+        if self.is_synthetic() {
+            return String::from("unknown location");
+        }
+        let path = source_file(self.file)
+            .map(|f| f.path)
+            .unwrap_or_else(|| format!("file#{}", self.file));
+        format!("{}:{}:{}", path, self.start_line, self.start_col)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,35 +234,93 @@ pub struct LexErrorCompat {
 
 // Public interface function expected by main.rs
 pub fn lex(input: &str) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
-    let mut lexer = Lexer::new(input.to_string());
+    lex_with_source(input, 0)
+}
+
+/// Lex a source file with an explicit file id (from the source registry).
+pub fn lex_with_source(
+    input: &str,
+    file: u32,
+) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
+    let mut lexer = Lexer::with_source(input.to_string(), file);
     match lexer.tokenize_with_spans() {
         Ok(tokens) => Ok(tokens),
-        Err(error) => Err(vec![LexErrorCompat {
-            kind: error.clone(),
-            span: match error {
-                LexError::UnexpectedChar { span, .. } => Span {
-                    start: span.0,
-                    end: span.1,
+        Err(error) => {
+            let byte_span = match error {
+                LexError::UnexpectedChar { span, .. }
+                | LexError::UnexpectedEof { span }
+                | LexError::InvalidNumber { span, .. }
+                | LexError::InvalidString { span, .. }
+                | LexError::InvalidChar { span, .. } => span,
+            };
+            let (start_line, start_col) = line_col_at(input, byte_span.0);
+            let (end_line, end_col) = line_col_at(input, byte_span.1);
+            Err(vec![LexErrorCompat {
+                kind: error.clone(),
+                span: Span {
+                    start: byte_span.0,
+                    end: byte_span.1,
+                    file,
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
                 },
-                LexError::UnexpectedEof { span } => Span {
-                    start: span.0,
-                    end: span.1,
-                },
-                LexError::InvalidNumber { span, .. } => Span {
-                    start: span.0,
-                    end: span.1,
-                },
-                LexError::InvalidString { span, .. } => Span {
-                    start: span.0,
-                    end: span.1,
-                },
-                LexError::InvalidChar { span, .. } => Span {
-                    start: span.0,
-                    end: span.1,
-                },
-            },
-        }]),
+            }])
+        }
     }
+}
+
+/// Compute 1-based (line, column) for a byte offset in `text`.
+pub fn line_col_at(text: &str, offset: usize) -> (u32, u32) {
+    let mut line = 1u32;
+    let mut col = 1u32;
+    for ch in text[..offset.min(text.len())].chars() {
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// A registered source file: path + full text, indexed by file id.
+#[derive(Debug, Clone)]
+pub struct SourceFile {
+    pub path: String,
+    pub text: String,
+}
+
+thread_local! {
+    static SOURCE_REGISTRY: std::cell::RefCell<Vec<SourceFile>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// Register a source file's path and text, returning its file id (1-based;
+/// id 0 is reserved for synthetic/unregistered spans). Re-registering the
+/// same path returns the existing id.
+pub fn register_source(path: &str, text: &str) -> u32 {
+    SOURCE_REGISTRY.with(|registry| {
+        let mut files = registry.borrow_mut();
+        if let Some((idx, _)) = files.iter().enumerate().find(|(_, f)| f.path == path) {
+            return idx as u32 + 1;
+        }
+        files.push(SourceFile {
+            path: path.to_string(),
+            text: text.to_string(),
+        });
+        files.len() as u32
+    })
+}
+
+/// Look up a registered source file by id (0 = unregistered).
+pub fn source_file(file: u32) -> Option<SourceFile> {
+    if file == 0 {
+        return None;
+    }
+    SOURCE_REGISTRY.with(|registry| registry.borrow().get(file as usize - 1).cloned())
 }
 
 #[derive(Debug, Clone)]
@@ -213,15 +329,21 @@ pub struct Lexer {
     position: usize,
     line: usize,
     column: usize,
+    file: u32,
 }
 
 impl Lexer {
     pub fn new(input: String) -> Self {
+        Self::with_source(input, 0)
+    }
+
+    pub fn with_source(input: String, file: u32) -> Self {
         Self {
             input,
             position: 0,
             line: 1,
             column: 1,
+            file,
         }
     }
 
@@ -252,21 +374,43 @@ impl Lexer {
             }
 
             let start = self.position;
+            let start_line = self.line as u32;
+            let start_col = self.column as u32;
             let token = self.next_token()?;
             let end = self.position;
+            let end_line = self.line as u32;
+            let end_col = self.column as u32;
             let text = self.input.get(start..end).unwrap_or("").to_string();
 
             tokens.push(LexToken {
                 kind: token,
-                span: Span { start, end },
+                span: Span {
+                    start,
+                    end,
+                    file: self.file,
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                },
                 text,
             });
         }
 
         let end = self.position;
+        let eof_line = self.line as u32;
+        let eof_col = self.column as u32;
         tokens.push(LexToken {
             kind: Token::Eof,
-            span: Span { start: end, end },
+            span: Span {
+                start: end,
+                end,
+                file: self.file,
+                start_line: eof_line,
+                start_col: eof_col,
+                end_line: eof_line,
+                end_col: eof_col,
+            },
             text: String::new(),
         });
 
@@ -773,12 +917,7 @@ impl Lexer {
     fn skip_whitespace(&mut self) {
         while !self.is_at_end() {
             match self.peek() {
-                ' ' | '\r' | '\t' => {
-                    self.advance();
-                }
-                '\n' => {
-                    self.line += 1;
-                    self.column = 1;
+                ' ' | '\r' | '\t' | '\n' => {
                     self.advance();
                 }
                 _ => break,
@@ -819,14 +958,24 @@ impl Lexer {
     fn advance(&mut self) -> char {
         let ch = *self.input.as_bytes().get(self.position).unwrap_or(&0) as char;
         self.position += 1;
-        self.column += 1;
+        if ch == '\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
         ch
     }
 
     fn advance_utf8_char(&mut self) -> char {
         let ch = self.input[self.position..].chars().next().unwrap_or('\0');
         self.position += ch.len_utf8();
-        self.column += 1;
+        if ch == '\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
         ch
     }
 
@@ -924,40 +1073,20 @@ impl fmt::Display for Token {
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LexError::UnexpectedChar { found, span } => {
-                write!(
-                    f,
-                    "Unexpected character '{}' at position {}-{}",
-                    found, span.0, span.1
-                )
+            LexError::UnexpectedChar { found, .. } => {
+                write!(f, "unexpected character '{}'", found)
             }
-            LexError::UnexpectedEof { span } => {
-                write!(
-                    f,
-                    "Unexpected end of file at position {}-{}",
-                    span.0, span.1
-                )
+            LexError::UnexpectedEof { .. } => {
+                write!(f, "unexpected end of file")
             }
-            LexError::InvalidNumber { span, message } => {
-                write!(
-                    f,
-                    "Invalid number at position {}-{}: {}",
-                    span.0, span.1, message
-                )
+            LexError::InvalidNumber { message, .. } => {
+                write!(f, "invalid number literal: {message}")
             }
-            LexError::InvalidString { span, message } => {
-                write!(
-                    f,
-                    "Invalid string at position {}-{}: {}",
-                    span.0, span.1, message
-                )
+            LexError::InvalidString { message, .. } => {
+                write!(f, "invalid string literal: {message}")
             }
-            LexError::InvalidChar { span, message } => {
-                write!(
-                    f,
-                    "Invalid character at position {}-{}: {}",
-                    span.0, span.1, message
-                )
+            LexError::InvalidChar { message, .. } => {
+                write!(f, "invalid character literal: {message}")
             }
         }
     }

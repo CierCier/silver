@@ -373,11 +373,11 @@ mod tests {
             kind: Box::new(ExpressionKind::MacroCall {
                 name: Identifier {
                     name: String::new(),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                 },
                 args: vec![],
             }),
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         }
     }
 

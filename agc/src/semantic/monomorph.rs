@@ -2246,7 +2246,7 @@ mod tests {
             source: Box::new(source),
             type_params,
             mapping,
-            call_span: Span { start: 0, end: 0 },
+            call_span: Span::default(),
         }];
 
         let items = append_monomorphs(&mut program, &requests);
@@ -2271,7 +2271,7 @@ mod tests {
             source: Box::new(source),
             type_params,
             mapping,
-            call_span: Span { start: 0, end: 0 },
+            call_span: Span::default(),
         }];
 
         let items = append_monomorphs(&mut program, &requests);
@@ -2294,7 +2294,7 @@ mod tests {
             source: Box::new(source),
             type_params,
             mapping,
-            call_span: Span { start: 0, end: 0 },
+            call_span: Span::default(),
         };
 
         let items = append_monomorphs(&mut program, &[request.clone(), request]);
@@ -2322,7 +2322,7 @@ mod tests {
             source: Box::new(source),
             type_params,
             mapping,
-            call_span: Span { start: 0, end: 0 },
+            call_span: Span::default(),
         }];
 
         let items = append_monomorphs(&mut program, &requests);
@@ -2597,7 +2597,7 @@ mod tests {
             method: grow_method,
             type_params,
             mapping,
-            call_span: Span { start: 0, end: 0 },
+            call_span: Span::default(),
         };
 
         let items = append_monomorphs(&mut program, &[request]);

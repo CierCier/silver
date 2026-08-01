@@ -469,7 +469,7 @@ impl Analyzer {
                                 .path
                                 .last()
                                 .map(|id| id.span.clone())
-                                .unwrap_or_else(|| Span { start: 0, end: 0 }),
+                                .unwrap_or_else(|| Span::default()),
                         });
                     }
                 }

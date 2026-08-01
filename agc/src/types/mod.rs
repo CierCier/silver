@@ -228,7 +228,7 @@ pub fn parse_struct_attributes(
                 .iter()
                 .find(|attr| attr.name.name == "packed")
                 .map(|attr| attr.span.clone())
-                .unwrap_or_else(|| Span { start: 0, end: 0 }),
+                .unwrap_or_else(|| Span::default()),
         });
     }
 
@@ -339,7 +339,7 @@ impl Type {
         fn ident(name: &str) -> ast::Identifier {
             ast::Identifier {
                 name: name.to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             }
         }
 
@@ -373,7 +373,7 @@ impl Type {
                 Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
                     element_type: Box::new(element.to_ast()),
                     size: *size as i64,
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                 })),
                 Type::Optional { inner } => ast::TypeKind::Optional(Box::new(inner.to_ast())),
                 Type::Tuple(items) => {
@@ -395,7 +395,7 @@ impl Type {
 
         ast::Type {
             kind: Box::new(lower(self)),
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         }
     }
 

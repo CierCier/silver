@@ -476,7 +476,7 @@ pub(crate) fn emit_function_body(
             _ => {
                 self.push_scope();
 
-                let dummy_span = Span { start: 0, end: 0 };
+                let dummy_span = Span::default();
                 let iterable_name = "__forin_iterable";
                 let iter_name = "__forin_iter";
                 let next_name = "__forin_next";

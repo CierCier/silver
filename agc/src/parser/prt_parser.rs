@@ -1067,10 +1067,7 @@ impl PRT_Parser {
             cursor += 1;
             ast::Type {
                 kind: Box::new(ast::TypeKind::Tuple(params)),
-                span: Span {
-                    start: tokens[open].span.start,
-                    end: tokens[cursor - 1].span.end,
-                },
+                span: tokens[open].span.extend_to(&tokens[cursor - 1].span),
             }
         } else {
             let mut path = Vec::new();
@@ -1129,10 +1126,7 @@ impl PRT_Parser {
 
                 ast::Type {
                     kind: Box::new(kind),
-                    span: Span {
-                        start: tokens[base_start].span.start,
-                        end: tokens[cursor - 1].span.end,
-                    },
+                    span: tokens[base_start].span.extend_to(&tokens[cursor - 1].span),
                 }
             } else {
                 let base = Self::parse_base_type_from_token(tokens.get(cursor)?)?;
@@ -1188,10 +1182,7 @@ impl PRT_Parser {
                                 parameters: parsed_types,
                                 return_type: Box::new(ty),
                             })),
-                            span: Span {
-                                start: start_span,
-                                end: tokens[close].span.end,
-                            },
+                            span: Span::new(start_span, tokens[close].span.end),
                         };
                         cursor = close + 1;
                     }
@@ -1206,10 +1197,7 @@ impl PRT_Parser {
                     is_mutable,
                     inner: Box::new(ty),
                 })),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[cursor].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[cursor].span),
             };
             cursor += 1;
         }
@@ -1355,7 +1343,7 @@ impl PRT_Parser {
                     span: tokens
                         .get(start)
                         .map(|token| token.span.clone())
-                        .unwrap_or(Span { start: 0, end: 0 }),
+                        .unwrap_or(Span::default()),
                 }
             })?;
 
@@ -1402,15 +1390,9 @@ impl PRT_Parser {
                     kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
                         element_type: Box::new(base_type.clone()),
                         size,
-                        span: Span {
-                            start: base_type.span.start,
-                            end: tokens[cursor - 1].span.end,
-                        },
+                        span: base_type.span.extend_to(&tokens[cursor - 1].span),
                     }))),
-                    span: Span {
-                        start: base_type.span.start,
-                        end: tokens[cursor - 1].span.end,
-                    },
+                    span: base_type.span.extend_to(&tokens[cursor - 1].span),
                 };
             }
 
@@ -1445,10 +1427,7 @@ impl PRT_Parser {
                 },
                 ty: decl_ty,
                 initializer,
-                span: Span {
-                    start: base_type.span.start,
-                    end: declarator_end,
-                },
+                span: base_type.span.with_end(declarator_end),
             });
 
             if cursor >= end {
@@ -1594,15 +1573,9 @@ impl PRT_Parser {
                     then_branch,
                     else_branch,
                 }),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[end - 1].span),
             }),
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -1647,15 +1620,9 @@ impl PRT_Parser {
                     condition: Box::new(condition),
                     body,
                 }),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[end - 1].span),
             }),
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -1744,15 +1711,9 @@ impl PRT_Parser {
                     increment: Box::new(increment),
                     body,
                 }),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[end - 1].span),
             }),
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -1868,15 +1829,9 @@ impl PRT_Parser {
                     mode,
                     iterator_type: None,
                 }),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[end - 1].span),
             }),
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -1985,10 +1940,7 @@ impl PRT_Parser {
                         is_mutable: !current_is_const,
                         inner: Box::new(ty),
                     })),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[cursor].span.end,
-                    },
+                    span: tokens[start].span.extend_to(&tokens[cursor].span),
                 };
                 current_is_const = false;
                 cursor += 1;
@@ -2097,10 +2049,7 @@ impl PRT_Parser {
 
                     ast::Type {
                         kind: Box::new(ast::TypeKind::Named(ast::NamedType { path, generics })),
-                        span: Span {
-                            start: tokens[base_start].span.start,
-                            end: tokens[cursor - 1].span.end,
-                        },
+                        span: tokens[base_start].span.extend_to(&tokens[cursor - 1].span),
                     }
                 } else {
                     let base = match tokens.get(cursor)?.kind {
@@ -2138,10 +2087,7 @@ impl PRT_Parser {
                         is_mutable,
                         inner: Box::new(ty),
                     })),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[cursor].span.end,
-                    },
+                    span: tokens[start].span.extend_to(&tokens[cursor].span),
                 };
                 cursor += 1;
             }
@@ -2191,7 +2137,7 @@ impl PRT_Parser {
         fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, ParseError> {
             let token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected match pattern".to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             })?;
             let pattern = match &token.kind {
                 Token::IntLiteral(value) => {
@@ -2236,10 +2182,7 @@ impl PRT_Parser {
                                 },
                                 inclusive,
                             },
-                            span: Span {
-                                start: span.start,
-                                end: end_span.end,
-                            },
+                            span: span.extend_to(&end_span),
                         }
                     } else {
                         ast::Pattern {
@@ -2351,10 +2294,7 @@ impl PRT_Parser {
                             } else {
                                 ast::Pattern {
                                     kind: ast::PatternKind::Tuple(data_patterns),
-                                    span: Span {
-                                        start: span.start,
-                                        end: variant_span.end,
-                                    },
+                                    span: span.extend_to(&variant_span),
                                 }
                             };
                             Some(Box::new(data_pattern))
@@ -2370,10 +2310,9 @@ impl PRT_Parser {
                                 },
                                 data,
                             },
-                            span: Span {
-                                start: span.start,
-                                end: cursor.current().map(|t| t.span.start).unwrap_or(span.start),
-                            },
+                            span: span.with_end(
+                                cursor.current().map(|t| t.span.start).unwrap_or(span.start),
+                            ),
                         }
                     } else {
                         ast::Pattern {
@@ -2398,7 +2337,7 @@ impl PRT_Parser {
         fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
             let token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected expression".to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             })?;
 
             let mut expr = match &token.kind {
@@ -2449,10 +2388,8 @@ impl PRT_Parser {
                                 });
                             };
                             cursor.pos = close + 1;
-                            let block_span = Span {
-                                start: cursor.tokens[block_start].span.start,
-                                end: cursor.tokens[close].span.end,
-                            };
+                            let block_span =
+                                cursor.tokens[block_start].span.extend_to(&cursor.tokens[close].span);
                             ast::Expression {
                                 kind: Box::new(ast::ExpressionKind::Block(ast::Block {
                                     statements: Vec::new(),
@@ -2463,10 +2400,7 @@ impl PRT_Parser {
                         } else {
                             parse_assignment(cursor)?
                         };
-                        let arm_span = Span {
-                            start: pattern.span.start,
-                            end: body.span.end,
-                        };
+                        let arm_span = pattern.span.extend_to(&body.span);
                         arms.push(ast::MatchArm {
                             pattern,
                             guard: None,
@@ -2480,16 +2414,10 @@ impl PRT_Parser {
                     let Some(rbrace) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated match expression".to_string(),
-                            span: Span {
-                                start: match_start,
-                                end: match_start,
-                            },
+                            span: token.span.with_end(match_start),
                         });
                     };
-                    let span = Span {
-                        start: match_start,
-                        end: rbrace.span.end,
-                    };
+                    let span = token.span.with_end(rbrace.span.end);
                     cursor.bump();
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Match {
@@ -2601,10 +2529,7 @@ impl PRT_Parser {
                             span: close.span.clone(),
                         });
                     }
-                    let span = Span {
-                        start: left_span.start,
-                        end: close.span.end,
-                    };
+                    let span = left_span.with_end(close.span.end);
                     cursor.bump();
                     return Ok(ast::Expression {
                         kind: inner.kind,
@@ -2676,10 +2601,7 @@ impl PRT_Parser {
                         let Some(close_bracket) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated asm input list".to_string(),
-                                span: Span {
-                                    start: asm_start,
-                                    end: asm_start,
-                                },
+                                span: token.span.with_end(asm_start),
                             });
                         };
                         if !matches!(close_bracket.kind, Token::RightBracket) {
@@ -2703,10 +2625,7 @@ impl PRT_Parser {
                             span: close.span.clone(),
                         });
                     }
-                    let span = Span {
-                        start: asm_start,
-                        end: close.span.end,
-                    };
+                    let span = token.span.with_end(close.span.end);
                     cursor.bump();
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Asm {
@@ -2717,7 +2636,6 @@ impl PRT_Parser {
                     });
                 }
                 Token::LeftBrace => {
-                    let init_start = token.span.start;
                     cursor.bump();
                     let mut items = Vec::new();
                     while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBrace)) {
@@ -2828,10 +2746,7 @@ impl PRT_Parser {
                             span: close.span.clone(),
                         });
                     }
-                    let span = Span {
-                        start: init_start,
-                        end: close.span.end,
-                    };
+                    let span = token.span.with_end(close.span.end);
                     cursor.bump();
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Initializer { items }),
@@ -2854,10 +2769,7 @@ impl PRT_Parser {
                     let Some(close) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated array/tuple literal".to_string(),
-                            span: Span {
-                                start: bracket_start,
-                                end: bracket_start,
-                            },
+                            span: token.span.with_end(bracket_start),
                         });
                     };
                     if !matches!(close.kind, Token::RightBracket) {
@@ -2866,10 +2778,7 @@ impl PRT_Parser {
                             span: close.span.clone(),
                         });
                     }
-                    let span = Span {
-                        start: bracket_start,
-                        end: close.span.end,
-                    };
+                    let span = token.span.with_end(close.span.end);
                     cursor.bump();
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Array(elements)),
@@ -2882,10 +2791,7 @@ impl PRT_Parser {
                     let Some(name_token) = cursor.current() else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected macro name after '@'".to_string(),
-                            span: Span {
-                                start: at_start,
-                                end: at_start,
-                            },
+                            span: token.span.with_end(at_start),
                         });
                     };
                     let name = match &name_token.kind {
@@ -2915,10 +2821,7 @@ impl PRT_Parser {
                         let Some(close) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated macro call".to_string(),
-                                span: Span {
-                                    start: at_start,
-                                    end: at_start,
-                                },
+                                span: token.span.with_end(at_start),
                             });
                         };
                         if !matches!(close.kind, Token::RightParen) {
@@ -2929,13 +2832,12 @@ impl PRT_Parser {
                         }
                         cursor.bump();
                     }
-                    let span = Span {
-                        start: at_start,
-                        end: cursor
+                    let span = token.span.with_end(
+                        cursor
                             .current()
                             .map(|t| t.span.end)
                             .unwrap_or(name_span.end),
-                    };
+                    );
                     return Ok(ast::Expression {
                         kind: Box::new(ast::ExpressionKind::MacroCall {
                             name: ast::Identifier {
@@ -3008,10 +2910,7 @@ impl PRT_Parser {
                                     None => {
                                         return Err(ParseError::InvalidSyntax {
                                             message: "unterminated call expression".to_string(),
-                                            span: Span {
-                                                start: call_start,
-                                                end: call_start,
-                                            },
+                                            span: expr.span.with_end(call_start),
                                         });
                                     }
                                 }
@@ -3020,15 +2919,9 @@ impl PRT_Parser {
 
                         let close = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                             message: "expected ')' in call expression".to_string(),
-                            span: Span {
-                                start: call_start,
-                                end: call_start,
-                            },
+                            span: expr.span.with_end(call_start),
                         })?;
-                        let call_span = Span {
-                            start: call_start,
-                            end: close.span.end,
-                        };
+                        let call_span = expr.span.extend_to(&close.span);
                         cursor.bump();
 
                         expr = ast::Expression {
@@ -3091,10 +2984,7 @@ impl PRT_Parser {
                                     message: "expected ')' in method call".to_string(),
                                     span: field_ident.span.clone(),
                                 })?;
-                            let span = Span {
-                                start: expr.span.start,
-                                end: close.span.end,
-                            };
+                            let span = expr.span.extend_to(&close.span);
                             cursor.bump();
                             expr = ast::Expression {
                                 kind: Box::new(ast::ExpressionKind::MethodCall {
@@ -3105,10 +2995,7 @@ impl PRT_Parser {
                                 span,
                             };
                         } else {
-                            let span = Span {
-                                start: expr.span.start,
-                                end: field_ident.span.end,
-                            };
+                            let span = expr.span.extend_to(&field_ident.span);
                             expr = ast::Expression {
                                 kind: Box::new(ast::ExpressionKind::FieldAccess {
                                     object: Box::new(expr),
@@ -3134,10 +3021,7 @@ impl PRT_Parser {
                                 span: close.span.clone(),
                             });
                         }
-                        let span = Span {
-                            start: expr.span.start,
-                            end: close.span.end,
-                        };
+                        let span = expr.span.extend_to(&close.span);
                         cursor.bump();
                         expr = ast::Expression {
                             kind: Box::new(ast::ExpressionKind::Index {
@@ -3155,10 +3039,7 @@ impl PRT_Parser {
                                 operator: ast::UnaryOperator::Increment,
                                 operand: Box::new(expr.clone()),
                             }),
-                            span: Span {
-                                start: expr.span.start,
-                                end: end_span,
-                            },
+                            span: expr.span.with_end(end_span),
                         };
                     }
                     Token::Decrement => {
@@ -3169,10 +3050,7 @@ impl PRT_Parser {
                                 operator: ast::UnaryOperator::Decrement,
                                 operand: Box::new(expr.clone()),
                             }),
-                            span: Span {
-                                start: expr.span.start,
-                                end: end_span,
-                            },
+                            span: expr.span.with_end(end_span),
                         };
                     }
                     _ => break,
@@ -3186,7 +3064,7 @@ impl PRT_Parser {
             let Some(token) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected expression".to_string(),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                 });
             };
 
@@ -3202,7 +3080,6 @@ impl PRT_Parser {
             };
 
             if let Some(operator) = operator {
-                let span_start = token.span.start;
                 cursor.bump();
                 let operand = parse_unary(cursor)?;
                 return Ok(ast::Expression {
@@ -3210,15 +3087,11 @@ impl PRT_Parser {
                         operator,
                         operand: Box::new(operand.clone()),
                     }),
-                    span: Span {
-                        start: span_start,
-                        end: operand.span.end,
-                    },
+                    span: token.span.with_end(operand.span.end),
                 });
             }
 
             if matches!(token.kind, Token::BitwiseAnd | Token::And) {
-                let start = token.span.start;
                 cursor.bump();
                 let inner = parse_unary(cursor)?;
                 return Ok(ast::Expression {
@@ -3226,41 +3099,29 @@ impl PRT_Parser {
                         is_mutable: true,
                         expression: Box::new(inner.clone()),
                     }),
-                    span: Span {
-                        start,
-                        end: inner.span.end,
-                    },
+                    span: token.span.with_end(inner.span.end),
                 });
             }
 
             if matches!(token.kind, Token::Move) {
-                let start = token.span.start;
                 cursor.bump();
                 let inner = parse_unary(cursor)?;
                 return Ok(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Move(Box::new(inner.clone()))),
-                    span: Span {
-                        start,
-                        end: inner.span.end,
-                    },
+                    span: token.span.with_end(inner.span.end),
                 });
             }
 
             if matches!(token.kind, Token::Comptime) {
-                let start = token.span.start;
                 cursor.bump();
                 let inner = parse_unary(cursor)?;
                 return Ok(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Comptime(Box::new(inner.clone()))),
-                    span: Span {
-                        start,
-                        end: inner.span.end,
-                    },
+                    span: token.span.with_end(inner.span.end),
                 });
             }
 
             if matches!(token.kind, Token::LeftParen) {
-                let cast_start = token.span.start;
                 let mut i = cursor.pos + 1;
                 while i < cursor.end {
                     if matches!(cursor.tokens[i].kind, Token::RightParen) {
@@ -3280,10 +3141,7 @@ impl PRT_Parser {
                             expression: Box::new(operand.clone()),
                             target_type: Box::new(target_type),
                         }),
-                        span: Span {
-                            start: cast_start,
-                            end: operand.span.end,
-                        },
+                        span: token.span.with_end(operand.span.end),
                     });
                 }
             }
@@ -3306,10 +3164,7 @@ impl PRT_Parser {
                 let Some(operator) = operator else { break };
                 cursor.bump();
                 let rhs = parse_unary(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3334,10 +3189,7 @@ impl PRT_Parser {
                 let Some(operator) = operator else { break };
                 cursor.bump();
                 let rhs = parse_multiplicative(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3374,10 +3226,7 @@ impl PRT_Parser {
                 let Some(operator) = operator else { break };
                 cursor.bump(); // consume second < or >
                 let rhs = parse_additive(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3409,10 +3258,7 @@ impl PRT_Parser {
                 } else {
                     parse_additive(cursor)?
                 };
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3437,10 +3283,7 @@ impl PRT_Parser {
                 let Some(operator) = operator else { break };
                 cursor.bump();
                 let rhs = parse_relational(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3462,10 +3305,7 @@ impl PRT_Parser {
                 }
                 cursor.bump();
                 let rhs = parse_equality(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3487,10 +3327,7 @@ impl PRT_Parser {
                 }
                 cursor.bump();
                 let rhs = parse_bitwise_and(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3512,10 +3349,7 @@ impl PRT_Parser {
                 }
                 cursor.bump();
                 let rhs = parse_bitwise_xor(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3537,10 +3371,7 @@ impl PRT_Parser {
                 }
                 cursor.bump();
                 let rhs = parse_bitwise_or(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3562,10 +3393,7 @@ impl PRT_Parser {
                 }
                 cursor.bump();
                 let rhs = parse_logical_and(cursor)?;
-                let span = Span {
-                    start: expr.span.start,
-                    end: rhs.span.end,
-                };
+                let span = expr.span.extend_to(&rhs.span);
                 expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Binary {
                         left: Box::new(expr),
@@ -3600,10 +3428,7 @@ impl PRT_Parser {
 
             cursor.bump();
             let rhs = parse_assignment(cursor)?;
-            let span = Span {
-                start: lhs.span.start,
-                end: rhs.span.end,
-            };
+            let span = lhs.span.extend_to(&rhs.span);
             Ok(ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Binary {
                     left: Box::new(lhs),
@@ -3642,7 +3467,7 @@ impl PRT_Parser {
         if start >= end {
             return Err(ParseError::InvalidSyntax {
                 message: "empty statement range".to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             });
         }
 
@@ -3650,20 +3475,14 @@ impl PRT_Parser {
             if end == start + 2 && matches!(tokens[start + 1].kind, Token::Semicolon) {
                 return Ok(ast::Statement {
                     kind: ast::StatementKind::Return(None),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[end - 1].span.end,
-                    },
+                    span: tokens[start].span.extend_to(&tokens[end - 1].span),
                 });
             }
 
             let expr = self.parse_expression_reduction(tokens, start + 1, end - 1)?;
             return Ok(ast::Statement {
                 kind: ast::StatementKind::Return(Some(expr)),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[end - 1].span),
             });
         }
 
@@ -3689,10 +3508,7 @@ impl PRT_Parser {
             if statements.len() != 1 {
                 return Err(ParseError::InvalidSyntax {
                     message: "grouped declaration is not allowed in this context".to_string(),
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[end - 1].span.end,
-                    },
+                    span: tokens[start].span.extend_to(&tokens[end - 1].span),
                 });
             }
             return Ok(statements.into_iter().next().unwrap());
@@ -3701,10 +3517,7 @@ impl PRT_Parser {
         let expr = self.parse_expression_reduction(tokens, start, end - 1)?;
         Ok(ast::Statement {
             kind: ast::StatementKind::Expression(expr),
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -3736,10 +3549,7 @@ impl PRT_Parser {
                     is_static: qualifiers.is_static,
                     is_volatile: qualifiers.is_volatile,
                 }),
-                span: Span {
-                    start: declarator.span.start,
-                    end: statement_end,
-                },
+                span: declarator.span.with_end(statement_end),
             });
         }
         Ok(statements)
@@ -3757,7 +3567,7 @@ impl PRT_Parser {
                 span: tokens
                     .get(start)
                     .map(|t| t.span.clone())
-                    .unwrap_or(Span { start: 0, end: 0 }),
+                    .unwrap_or(Span::default()),
             });
         }
 
@@ -3952,10 +3762,7 @@ impl PRT_Parser {
                 };
                 statements.push(ast::Statement {
                     kind: ast::StatementKind::Break(break_expr),
-                    span: Span {
-                        start: tokens[break_start].span.start,
-                        end: tokens[semicolon].span.end,
-                    },
+                    span: tokens[break_start].span.extend_to(&tokens[semicolon].span),
                 });
                 cursor = semicolon + 1;
                 continue;
@@ -3971,10 +3778,7 @@ impl PRT_Parser {
                 };
                 statements.push(ast::Statement {
                     kind: ast::StatementKind::Continue,
-                    span: Span {
-                        start: tokens[continue_start].span.start,
-                        end: tokens[semicolon].span.end,
-                    },
+                    span: tokens[continue_start].span.extend_to(&tokens[semicolon].span),
                 });
                 cursor = semicolon + 1;
                 continue;
@@ -4000,15 +3804,9 @@ impl PRT_Parser {
                     statements.push(ast::Statement {
                         kind: ast::StatementKind::Defer(Box::new(ast::Statement {
                             kind: ast::StatementKind::Block(nested),
-                            span: Span {
-                                start: tokens[next].span.start,
-                                end: tokens[close].span.end,
-                            },
+                            span: tokens[next].span.extend_to(&tokens[close].span),
                         })),
-                        span: Span {
-                            start: tokens[defer_start].span.start,
-                            end: tokens[close].span.end,
-                        },
+                        span: tokens[defer_start].span.extend_to(&tokens[close].span),
                     });
                     cursor = close + 1;
                     continue;
@@ -4023,10 +3821,7 @@ impl PRT_Parser {
                     let stmt = self.parse_statement_reduction(tokens, next, statement_end)?;
                     statements.push(ast::Statement {
                         kind: ast::StatementKind::Defer(Box::new(stmt)),
-                        span: Span {
-                            start: tokens[defer_start].span.start,
-                            end: tokens[semicolon].span.end,
-                        },
+                        span: tokens[defer_start].span.extend_to(&tokens[semicolon].span),
                     });
                     cursor = statement_end;
                     continue;
@@ -4049,10 +3844,7 @@ impl PRT_Parser {
                 let nested = self.parse_block_reduction(tokens, cursor, close + 1)?;
                 statements.push(ast::Statement {
                     kind: ast::StatementKind::Block(nested),
-                    span: Span {
-                        start: tokens[cursor].span.start,
-                        end: tokens[close].span.end,
-                    },
+                    span: tokens[cursor].span.extend_to(&tokens[close].span),
                 });
                 cursor = close + 1;
                 continue;
@@ -4096,10 +3888,7 @@ impl PRT_Parser {
 
         Ok(ast::Block {
             statements,
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
     fn parse_import_reduction(
@@ -4209,15 +3998,9 @@ impl PRT_Parser {
                 kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
                     element_type: Box::new(var_type),
                     size: size as i64,
-                    span: Span {
-                        start: tokens[start].span.start,
-                        end: tokens[close_bracket].span.end,
-                    },
+                    span: tokens[start].span.extend_to(&tokens[close_bracket].span),
                 }))),
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[close_bracket].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[close_bracket].span),
             };
             if close_bracket + 1 < decl_end
                 && matches!(tokens[close_bracket + 1].kind, Token::Assign)
@@ -4411,7 +4194,7 @@ impl PRT_Parser {
                 span: tokens
                     .get(start)
                     .map(|t| t.span.clone())
-                    .unwrap_or(Span { start: 0, end: 0 }),
+                    .unwrap_or(Span::default()),
             });
         }
 
@@ -4488,10 +4271,7 @@ impl PRT_Parser {
         Ok(ast::TraitRef {
             path,
             generics,
-            span: Span {
-                start: tokens[start].span.start,
-                end: tokens[end - 1].span.end,
-            },
+            span: tokens[start].span.extend_to(&tokens[end - 1].span),
         })
     }
 
@@ -4504,7 +4284,7 @@ impl PRT_Parser {
         if start >= end {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait name".to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             });
         }
         if !matches!(tokens[start].kind, Token::Identifier(_)) {
@@ -4603,10 +4383,7 @@ impl PRT_Parser {
                 }
             }
 
-            let param_span = Span {
-                start: name_token.span.start,
-                end: tokens[cursor.saturating_sub(1)].span.end,
-            };
+            let param_span = name_token.span.extend_to(&tokens[cursor.saturating_sub(1)].span);
             params.push(ast::GenericParam::Type(ast::TypeParam {
                 name: ast::Identifier {
                     name: name.to_string(),
@@ -4626,10 +4403,7 @@ impl PRT_Parser {
             Some(ast::Generics {
                 params,
                 where_clause: None,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[close].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[close].span),
             }),
             close + 1,
         ))
@@ -4712,10 +4486,7 @@ impl PRT_Parser {
         Ok((
             Some(ast::WhereClause {
                 predicates,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[cursor - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[cursor - 1].span),
             }),
             cursor,
         ))
@@ -4865,10 +4636,7 @@ impl PRT_Parser {
                         span: name_token.span.clone(),
                     },
                     args,
-                    span: Span {
-                        start: name_token.span.start,
-                        end: attr_end_span,
-                    },
+                    span: name_token.span.with_end(attr_end_span),
                 });
 
                 if inner < bracket_end && matches!(tokens[inner].kind, Token::Comma) {
@@ -5017,7 +4785,6 @@ impl PRT_Parser {
             };
             cursor += 1;
 
-            let variant_start = variant_name_token.span.start;
             let data = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
                 let paren_open = cursor;
                 cursor += 1;
@@ -5072,10 +4839,7 @@ impl PRT_Parser {
                             span: name_token.span.clone(),
                         });
                     };
-                    let field_span = Span {
-                        start: field_type.span.start,
-                        end: name_token.span.end,
-                    };
+                    let field_span = field_type.span.extend_to(&name_token.span);
                     fields.push(ast::Field {
                         name: ast::Identifier {
                             name: field_name.clone(),
@@ -5147,10 +4911,7 @@ impl PRT_Parser {
                 },
                 data,
                 discriminant,
-                span: Span {
-                    start: variant_start,
-                    end: semicolon_token.span.end,
-                },
+                span: variant_name_token.span.with_end(semicolon_token.span.end),
             });
         }
 
@@ -5357,10 +5118,7 @@ impl PRT_Parser {
                 },
                 param_type: param_type.clone(),
                 is_mutable: const_offset == 0,
-                span: Span {
-                    start: param_type.span.start,
-                    end: param_name_token.span.end,
-                },
+                span: param_type.span.extend_to(&param_name_token.span),
             });
             cursor += 1;
             if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
@@ -5408,10 +5166,7 @@ impl PRT_Parser {
                 parameters,
                 return_type,
                 default_body,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[item_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
             },
             item_end,
         ))
@@ -5489,10 +5244,7 @@ impl PRT_Parser {
                 },
                 param_type: param_type.clone(),
                 is_mutable: const_offset == 0,
-                span: Span {
-                    start: param_type.span.start,
-                    end: param_name_token.span.end,
-                },
+                span: param_type.span.extend_to(&param_name_token.span),
             });
             cursor += 1;
             if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
@@ -5526,10 +5278,7 @@ impl PRT_Parser {
                 parameters,
                 return_type: Some(return_type),
                 default_body,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[item_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
             },
             item_end,
         ))
@@ -5613,10 +5362,7 @@ impl PRT_Parser {
                 },
                 bounds,
                 default,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[item_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
             },
             item_end,
         ))
@@ -5679,10 +5425,7 @@ impl PRT_Parser {
                     span: name_token.span.clone(),
                 },
                 fn_type: func_type,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[item_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
             },
             item_end,
         ))
@@ -5740,10 +5483,7 @@ impl PRT_Parser {
                     span: name_token.span.clone(),
                 },
                 type_def,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[item_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
             },
             item_end,
         ))
@@ -5924,10 +5664,7 @@ impl PRT_Parser {
                 visibility,
                 return_type: function.return_type,
                 body: function.body,
-                span: Span {
-                    start: tokens[start].span.start,
-                    end: tokens[method_end - 1].span.end,
-                },
+                span: tokens[start].span.extend_to(&tokens[method_end - 1].span),
             },
             method_end,
         )))
@@ -5939,7 +5676,6 @@ impl PRT_Parser {
         start: usize,
         end: usize,
     ) -> Result<(ast::ImplCast, usize), ParseError> {
-        let cast_start = tokens[start].span.start;
         let mut cursor = start + 1;
         let (target_type, after_type) =
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
@@ -5994,10 +5730,7 @@ impl PRT_Parser {
                 },
                 param_type,
                 is_mutable: const_offset == 0,
-                span: Span {
-                    start: tokens[pcursor].span.start,
-                    end: tokens[after_param_type].span.end,
-                },
+                span: tokens[pcursor].span.extend_to(&tokens[after_param_type].span),
             });
             pcursor = after_param_type + 1;
         }
@@ -6024,10 +5757,7 @@ impl PRT_Parser {
                 target_type,
                 parameters,
                 body,
-                span: Span {
-                    start: cast_start,
-                    end: tokens[cursor - 1].span.end,
-                },
+                span: tokens[start].span.with_end(tokens[cursor - 1].span.end),
             },
             cursor,
         ))
@@ -6128,7 +5858,7 @@ impl PRT_Parser {
         let Some(return_type_token) = tokens.get(start) else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing function return type".to_string(),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
             });
         };
         let (return_type, return_type_end) = self
@@ -6227,10 +5957,7 @@ impl PRT_Parser {
                 },
                 param_type: param_type.clone(),
                 is_mutable: const_offset == 0,
-                span: Span {
-                    start: param_type.span.start,
-                    end: param_name_token.span.end,
-                },
+                span: param_type.span.extend_to(&param_name_token.span),
             });
 
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
@@ -6434,10 +6161,7 @@ impl PRT_Parser {
                 },
                 param_type,
                 is_mutable: const_offset == 0,
-                span: Span {
-                    start: param_type_token.span.start,
-                    end: parameter_end,
-                },
+                span: param_type_token.span.with_end(parameter_end),
             });
 
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
@@ -6577,7 +6301,7 @@ impl PRT_Parser {
         let span = tokens
             .last()
             .map(|token| token.span.clone())
-            .unwrap_or(Span { start: 0, end: 0 });
+            .unwrap_or(Span::default());
         let source = self
             .source_name
             .clone()
@@ -6621,10 +6345,7 @@ impl PRT_Parser {
                 });
             };
 
-            let item_span = Span {
-                start: tokens[position].span.start,
-                end: tokens[item_end - 1].span.end,
-            };
+            let item_span = tokens[position].span.extend_to(&tokens[item_end - 1].span);
             let kind = match production {
                 ItemProduction::Import => ast::ItemKind::Import(
                     self.parse_import_reduction(tokens, item_start, item_end)?,
@@ -6698,13 +6419,13 @@ impl PRT_Parser {
         let program_span = if items.is_empty() {
             span.clone()
         } else {
-            Span {
-                start: items
+            Span::new(
+                items
                     .first()
                     .map(|item| item.span.start)
                     .unwrap_or(span.start),
-                end: items.last().map(|item| item.span.end).unwrap_or(span.end),
-            }
+                items.last().map(|item| item.span.end).unwrap_or(span.end),
+            )
         };
 
         Ok(ast::Program {

@@ -130,26 +130,24 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedToken {
                 expected,
                 found,
-                span,
+                ..
             } => {
                 write!(
                     f,
-                    "Unexpected token {:?} at {:?}, expected one of: {}",
+                    "unexpected token '{}', expected one of: {}",
                     found,
-                    span,
                     expected.join(", ")
                 )
             }
-            ParseError::UnexpectedEof { expected, span } => {
+            ParseError::UnexpectedEof { expected, .. } => {
                 write!(
                     f,
-                    "Unexpected end of file at {:?}, expected one of: {}",
-                    span,
+                    "unexpected end of file, expected one of: {}",
                     expected.join(", ")
                 )
             }
-            ParseError::InvalidSyntax { message, span } => {
-                write!(f, "Invalid syntax at {:?}: {}", span, message)
+            ParseError::InvalidSyntax { message, .. } => {
+                write!(f, "{message}")
             }
         }
     }

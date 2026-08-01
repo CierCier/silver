@@ -38,7 +38,7 @@ impl Parser {
                     .tokens
                     .last()
                     .map(|token| token.span.clone())
-                    .unwrap_or(Span { start: 0, end: 0 });
+                    .unwrap_or(Span::default());
                 (
                     Program {
                         attributes: Vec::new(),

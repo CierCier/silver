@@ -910,7 +910,10 @@ pub(crate) fn emit_unary_expression(
                     .map_err(|e| CodegenError::new(format!("right shift failed: {e}")))
             }
             _ => Err(CodegenError::with_span(
-                "binary operator is not supported in LLVM IR codegen yet",
+                format!(
+                    "binary operator {:?} is not supported for these operand types",
+                    operator
+                ),
                 whole_expr.span.clone(),
             )),
         }

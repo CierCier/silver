@@ -756,7 +756,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         };
         Some(ast::Type {
             kind: Box::new(ast::TypeKind::Primitive(prim)),
-            span: crate::lexer::Span { start: 0, end: 0 },
+            span: crate::lexer::Span::default(),
         })
     }
 

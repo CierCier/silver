@@ -433,7 +433,7 @@ mod tests {
     fn ident(name: &str) -> ast::Identifier {
         ast::Identifier {
             name: name.to_string(),
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         }
     }
 
@@ -444,11 +444,11 @@ mod tests {
                 kind: ast::ItemKind::Import(ast::ImportItem {
                     path: path.iter().map(|segment| ident(segment)).collect(),
                 }),
-                span: Span { start: 0, end: 0 },
+                span: Span::default(),
                 visibility: ast::Visibility::Private,
                 attributes: Vec::new(),
             }],
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         }
     }
 
@@ -584,7 +584,7 @@ mod tests {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
                                             }),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 },
@@ -592,12 +592,12 @@ mod tests {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
                                             }),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 },
             ],
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         };
 
         let mut loader = ModuleLoader::new();
@@ -633,7 +633,7 @@ mod tests {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
                                             }),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 },
@@ -641,12 +641,12 @@ mod tests {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
                                             }),
-                    span: Span { start: 0, end: 0 },
+                    span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 },
             ],
-            span: Span { start: 0, end: 0 },
+            span: Span::default(),
         };
 
         let mut loader = ModuleLoader::new();
