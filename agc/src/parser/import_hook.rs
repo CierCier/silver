@@ -138,11 +138,7 @@ impl<'a> FileImportResolverHook<'a> {
                         continue;
                     }
 
-                    let import_label = resolved
-                        .source_path
-                        .display()
-                        .to_string();
-                    let import_phase = format!("import {import_label}");
+                    let import_phase = format!("import {}", import_label(&resolved.source_path));
                     if crate::profiler::verbose() {
                         crate::profiler::begin_phase(&import_phase);
                     }
@@ -218,7 +214,7 @@ impl<'a> FileImportResolverHook<'a> {
 }
 
 fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
-    let label = path.display().to_string();
+    let label = import_label(path);
     let verbose = crate::profiler::verbose();
     if verbose {
         crate::profiler::begin_phase(&format!("read {label}"));
@@ -255,4 +251,20 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
         crate::diagnostics::Severity::Error,
     )
     .to_string())
+}
+
+/// Convert an imported file path to its Silver module form, e.g.
+/// `/…/std/io/scanner.ag` -> `std.io.scanner`. Falls back to the last two
+/// path components for non-std files.
+fn import_label(path: &Path) -> String {
+    let s = path.display().to_string();
+    let comps: Vec<&str> = s.split('/').collect();
+    let start = comps.iter().position(|c| *c == "std").unwrap_or_else(|| {
+        comps.len().saturating_sub(2)
+    });
+    let mut parts: Vec<&str> = comps[start..].to_vec();
+    if let Some(last) = parts.last_mut() {
+        *last = last.strip_suffix(".ag").unwrap_or(last);
+    }
+    parts.join(".")
 }

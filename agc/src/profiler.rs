@@ -101,14 +101,16 @@ impl Profiler {
         });
     }
 
-    fn render_report_line(&self, name: &str, elapsed_ms: f64, before: u64, after: u64) -> String {
+    fn render_report_line(&self, name: &str, width: usize, elapsed_ms: f64, before: u64, after: u64) -> String {
         let delta = after as i64 - before as i64;
         let delta_str = if delta >= 0 {
             format!("+{delta}")
         } else {
             format!("{delta}")
         };
-        format!("{name:<24} {elapsed_ms:>10.2} {before:>10} KB {after:>10} KB {delta_str:>10} KB")
+        format!(
+            "{name:<width$} {elapsed_ms:>10.2} {before:>10} KB {after:>10} KB {delta_str:>10} KB"
+        )
     }
 
     /// Build the phase tree from flat records (which arrive children-first,
@@ -122,7 +124,7 @@ impl Profiler {
             while child_start > 0 && nodes[child_start - 1].record.depth > depth {
                 child_start -= 1;
             }
-            let mut children: Vec<TreeNode> = nodes.drain(child_start..).collect();
+            let children: Vec<TreeNode> = nodes.drain(child_start..).collect();
             // drain preserves arrival (sibling) order, so no reversal needed.
             nodes.push(TreeNode {
                 record: record.clone(),
@@ -132,10 +134,14 @@ impl Profiler {
         nodes
     }
 
-    /// Render the phase tree as UTF-8 box-drawing lines. Root phases (pipeline
-    /// stages) render flat; nested phases get ├── / └── connectors with │
-    /// continuations.
-    fn emit_tree(&self, nodes: &[TreeNode], prefix: &str, root_level: bool, out: &mut Vec<(String, bool)>) {
+    /// Collect (tree-prefixed name, timings, is_sub) pairs for every record.
+    fn collect_tree(
+        &self,
+        nodes: &[TreeNode],
+        prefix: &str,
+        root_level: bool,
+        out: &mut Vec<(String, f64, u64, u64, bool)>,
+    ) {
         for (i, node) in nodes.iter().enumerate() {
             let is_last = i + 1 == nodes.len();
             let connector = if root_level {
@@ -152,21 +158,41 @@ impl Profiler {
             } else {
                 format!("{prefix}│   ")
             };
-            let line = self.render_report_line(
-                &format!("{prefix}{connector}{}", node.record.name),
+            let name = format!("{prefix}{connector}{}", node.record.name);
+            out.push((
+                name,
                 node.record.elapsed_ms,
                 node.record.memory_before_kb,
                 node.record.memory_after_kb,
-            );
-            out.push((line, !root_level));
-            self.emit_tree(&node.children, &child_prefix, false, out);
+                !root_level,
+            ));
+            self.collect_tree(&node.children, &child_prefix, false, out);
         }
     }
 
-    fn report_lines(&self) -> Vec<(String, bool)> {
-        let mut lines = Vec::new();
-        self.emit_tree(&Self::build_tree(&self.records), "", true, &mut lines);
-        lines
+    /// Report entries plus the fixed width of the name column, so the time and
+    /// memory columns align regardless of tree depth or name length.
+    fn report_entries(&self) -> (Vec<(String, f64, u64, u64, bool)>, usize) {
+        let mut entries = Vec::new();
+        self.collect_tree(&Self::build_tree(&self.records), "", true, &mut entries);
+        let width = entries
+            .iter()
+            .map(|(name, _, _, _, _)| name.len())
+            .max()
+            .unwrap_or(24)
+            .max(24);
+        (entries, width)
+    }
+
+    fn report_lines(&self) -> (Vec<(String, bool)>, usize) {
+        let (entries, width) = self.report_entries();
+        let lines = entries
+            .into_iter()
+            .map(|(name, elapsed_ms, before, after, sub)| {
+                (self.render_report_line(&name, width, elapsed_ms, before, after), sub)
+            })
+            .collect();
+        (lines, width)
     }
 
     pub fn print_report(&self) {
@@ -187,13 +213,15 @@ impl Profiler {
             "\n{}",
             "=== Compiler Profile Report ===".bright_cyan().bold()
         );
+        let (lines, width) = self.report_lines();
+        let rule = "─".repeat(width + 1 + 10 + 1 + 13 + 1 + 13 + 1 + 13);
         eprintln!(
-            "{:<24} {:>10} {:>12} {:>12} {:>12}",
+            "{:<width$} {:>10} {:>13} {:>13} {:>13}",
             "Phase", "Time (ms)", "Mem Before", "Mem After", "Delta (KB)"
         );
-        eprintln!("{}", "─".repeat(80).bright_black());
+        eprintln!("{}", rule.bright_black());
 
-        for (line, sub) in self.report_lines() {
+        for (line, sub) in lines {
             // Nested phases are dimmed to keep the top-level stages readable.
             if sub {
                 eprintln!("{}", line.bright_black());
@@ -202,13 +230,13 @@ impl Profiler {
             }
         }
 
-        eprintln!("{}", "─".repeat(80).bright_black());
+        eprintln!("{}", rule.bright_black());
         eprintln!(
-            "{:<24} {:>10.2} {:>34} {:>10} KB",
+            "{:<width$} {:>10.2} {:>34} {:>10} KB",
             "Total", total_time_ms, "", peak_mem_kb,
         );
         eprintln!(
-            "{:<24} {:>36} {:>10} KB",
+            "{:<width$} {:>36} {:>10} KB",
             "",
             "",
             format!("net: {total_mem_delta_kb:+}"),
@@ -297,26 +325,28 @@ impl fmt::Display for Profiler {
             .unwrap_or(0);
 
         writeln!(f, "\n=== Compiler Profile Report ===")?;
+        let (lines, width) = self.report_lines();
+        let rule = "─".repeat(width + 1 + 10 + 1 + 13 + 1 + 13 + 1 + 13);
         writeln!(
             f,
-            "{:<24} {:>10} {:>12} {:>12} {:>12}",
+            "{:<width$} {:>10} {:>13} {:>13} {:>13}",
             "Phase", "Time (ms)", "Mem Before", "Mem After", "Delta (KB)"
         )?;
-        writeln!(f, "{}", "─".repeat(80))?;
+        writeln!(f, "{rule}")?;
 
-        for (line, _sub) in self.report_lines() {
+        for (line, _sub) in lines {
             writeln!(f, "{line}")?;
         }
 
-        writeln!(f, "{}", "─".repeat(80))?;
+        writeln!(f, "{rule}")?;
         writeln!(
             f,
-            "{:<24} {:>10.2} {:>34} {:>10} KB",
+            "{:<width$} {:>10.2} {:>34} {:>10} KB",
             "Total", total_time_ms, "", peak_mem_kb,
         )?;
         writeln!(
             f,
-            "{:<24} {:>36} {:>10} KB",
+            "{:<width$} {:>36} {:>10} KB",
             "",
             "",
             format!("net: {total_mem_delta_kb:+}"),
