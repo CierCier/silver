@@ -28,6 +28,12 @@ struct PhaseFrame {
     memory_before_kb: u64,
 }
 
+/// A node in the phase tree, reconstructed from the flat records.
+struct TreeNode {
+    record: PhaseRecord,
+    children: Vec<TreeNode>,
+}
+
 #[derive(Debug, Default)]
 pub struct Profiler {
     pub enabled: bool,
@@ -105,6 +111,64 @@ impl Profiler {
         format!("{name:<24} {elapsed_ms:>10.2} {before:>10} KB {after:>10} KB {delta_str:>10} KB")
     }
 
+    /// Build the phase tree from flat records (which arrive children-first,
+    /// each phase ending before its parent). A record's children are the
+    /// records immediately preceding it whose depth is greater.
+    fn build_tree(records: &[PhaseRecord]) -> Vec<TreeNode> {
+        let mut nodes: Vec<TreeNode> = Vec::new();
+        for record in records {
+            let depth = record.depth;
+            let mut child_start = nodes.len();
+            while child_start > 0 && nodes[child_start - 1].record.depth > depth {
+                child_start -= 1;
+            }
+            let mut children: Vec<TreeNode> = nodes.drain(child_start..).collect();
+            // drain preserves arrival (sibling) order, so no reversal needed.
+            nodes.push(TreeNode {
+                record: record.clone(),
+                children,
+            });
+        }
+        nodes
+    }
+
+    /// Render the phase tree as UTF-8 box-drawing lines. Root phases (pipeline
+    /// stages) render flat; nested phases get ├── / └── connectors with │
+    /// continuations.
+    fn emit_tree(&self, nodes: &[TreeNode], prefix: &str, root_level: bool, out: &mut Vec<(String, bool)>) {
+        for (i, node) in nodes.iter().enumerate() {
+            let is_last = i + 1 == nodes.len();
+            let connector = if root_level {
+                String::new()
+            } else if is_last {
+                "└── ".to_string()
+            } else {
+                "├── ".to_string()
+            };
+            let child_prefix = if root_level {
+                String::new()
+            } else if is_last {
+                format!("{prefix}    ")
+            } else {
+                format!("{prefix}│   ")
+            };
+            let line = self.render_report_line(
+                &format!("{prefix}{connector}{}", node.record.name),
+                node.record.elapsed_ms,
+                node.record.memory_before_kb,
+                node.record.memory_after_kb,
+            );
+            out.push((line, !root_level));
+            self.emit_tree(&node.children, &child_prefix, false, out);
+        }
+    }
+
+    fn report_lines(&self) -> Vec<(String, bool)> {
+        let mut lines = Vec::new();
+        self.emit_tree(&Self::build_tree(&self.records), "", true, &mut lines);
+        lines
+    }
+
     pub fn print_report(&self) {
         if !self.enabled || self.records.is_empty() {
             return;
@@ -127,25 +191,18 @@ impl Profiler {
             "{:<24} {:>10} {:>12} {:>12} {:>12}",
             "Phase", "Time (ms)", "Mem Before", "Mem After", "Delta (KB)"
         );
-        eprintln!("{}", "-".repeat(74).bright_black());
+        eprintln!("{}", "─".repeat(80).bright_black());
 
-        for record in &self.records {
-            let indent = "  ".repeat(record.depth);
-            let line = self.render_report_line(
-                &format!("{indent}{}", record.name),
-                record.elapsed_ms,
-                record.memory_before_kb,
-                record.memory_after_kb,
-            );
-            // Sub-phases get dimmed to keep the top-level phases readable.
-            if record.depth > 0 {
+        for (line, sub) in self.report_lines() {
+            // Nested phases are dimmed to keep the top-level stages readable.
+            if sub {
                 eprintln!("{}", line.bright_black());
             } else {
                 eprintln!("{line}");
             }
         }
 
-        eprintln!("{}", "-".repeat(74).bright_black());
+        eprintln!("{}", "─".repeat(80).bright_black());
         eprintln!(
             "{:<24} {:>10.2} {:>34} {:>10} KB",
             "Total", total_time_ms, "", peak_mem_kb,
@@ -245,20 +302,13 @@ impl fmt::Display for Profiler {
             "{:<24} {:>10} {:>12} {:>12} {:>12}",
             "Phase", "Time (ms)", "Mem Before", "Mem After", "Delta (KB)"
         )?;
-        writeln!(f, "{}", "-".repeat(74))?;
+        writeln!(f, "{}", "─".repeat(80))?;
 
-        for record in &self.records {
-            let indent = "  ".repeat(record.depth);
-            let line = self.render_report_line(
-                &format!("{indent}{}", record.name),
-                record.elapsed_ms,
-                record.memory_before_kb,
-                record.memory_after_kb,
-            );
+        for (line, _sub) in self.report_lines() {
             writeln!(f, "{line}")?;
         }
 
-        writeln!(f, "{}", "-".repeat(74))?;
+        writeln!(f, "{}", "─".repeat(80))?;
         writeln!(
             f,
             "{:<24} {:>10.2} {:>34} {:>10} KB",
@@ -272,5 +322,52 @@ impl fmt::Display for Profiler {
             format!("net: {total_mem_delta_kb:+}"),
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(name: &str, depth: usize) -> PhaseRecord {
+        PhaseRecord {
+            name: name.to_string(),
+            elapsed_ms: 1.0,
+            memory_before_kb: 0,
+            memory_after_kb: 0,
+            depth,
+        }
+    }
+
+    #[test]
+    fn builds_tree_from_children_first_records() {
+        // Arrival (children-first) order.
+        let records = vec![
+            rec("parse", 0),
+            rec("read test.ag", 2),
+            rec("lex test.ag", 2),
+            rec("parse test.ag", 2),
+            rec("read memory.ag", 3),
+            rec("lex memory.ag", 3),
+            rec("parse memory.ag", 3),
+            rec("import memory.ag", 2),
+            rec("import test.ag", 1),
+            rec("import lowering", 0),
+            rec("semantic", 0),
+        ];
+        let tree = Profiler::build_tree(&records);
+        fn names(nodes: &[TreeNode]) -> Vec<&str> {
+            nodes.iter().map(|n| n.record.name.as_str()).collect()
+        }
+        assert_eq!(names(&tree), vec!["parse", "import lowering", "semantic"]);
+        let il = &tree[1];
+        assert_eq!(names(&il.children), vec!["import test.ag"]);
+        let it = &il.children[0];
+        assert_eq!(
+            names(&it.children),
+            vec!["read test.ag", "lex test.ag", "parse test.ag", "import memory.ag"]
+        );
+        let im = &it.children[3];
+        assert_eq!(names(&im.children), vec!["read memory.ag", "lex memory.ag", "parse memory.ag"]);
     }
 }
