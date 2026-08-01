@@ -44,7 +44,7 @@ silver/
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
 │   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch, Runtime aggregate
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
-├── bootstrap/                   # Cache directory for local development tools and prebuilt std
+├── bootstrap/                   # Generated locally — NOT committed to git (see Build & Test)
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```
@@ -68,8 +68,8 @@ silver/
    bash ./update-bootstrap.sh
    ```
    *Note: This is the ONLY correct way to update bootstrap. The script compiles `agc` in release mode, copies it to `bootstrap/bin/`, copies library files (`std/`) to `bootstrap/include/silver/`, and generates compiled module packages (`.agm` artifacts) in `bootstrap/lib/silver/`. Manual `cp` commands will miss the module packaging step and produce inconsistent bootstrap artifacts. Always run this script after compiler changes or std lib changes.*
-   
-   **IMPORTANT**: Bootstrap updates MUST be committed as a **separate, dedicated commit** — never squash them into a feature commit. This keeps the bootstrap binary and module artifacts independently reviewable and revertable.
+
+   **IMPORTANT**: `bootstrap/` is **git-ignored and not committed** (the repo history was pruned of it). It is a generated cache: after a fresh clone, run `bash ./update-bootstrap.sh` once before compiling Silver code. Re-run it after any compiler or std-lib change so the prebuilt compiler and module packages stay in sync.
 4. **Compile a Silver file**:
    ```bash
    cargo run -p agc -- path/to/file.ag
