@@ -120,6 +120,9 @@ impl<'a> FileImportResolverHook<'a> {
             // in-progress module's items will already be included when its
             // own lowering completes.
             if !self.seen_modules.insert(module_path.clone()) {
+                if crate::profiler::verbose() {
+                    crate::profiler::skip_phase(&format!("import {module_path} (already imported)"));
+                }
                 continue;
             }
 
@@ -130,6 +133,12 @@ impl<'a> FileImportResolverHook<'a> {
             match resolved.kind {
                 ResolvedSourceImportKind::File => {
                     if !self.mark_file_seen(&resolved.source_path) {
+                        if crate::profiler::verbose() {
+                            crate::profiler::skip_phase(&format!(
+                                "import {} (already imported)",
+                                import_label(&resolved.source_path)
+                            ));
+                        }
                         continue;
                     }
 

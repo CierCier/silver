@@ -13,6 +13,9 @@ pub struct PhaseRecord {
     pub memory_after_kb: u64,
     /// Nesting depth; 0 = top-level phase, >0 = sub-phase (per-file detail).
     pub depth: usize,
+    /// True for records that were skipped (e.g. duplicate imports); shown as
+    /// SKIPPED in the report instead of a timing.
+    pub skipped: bool,
 }
 
 impl PhaseRecord {
@@ -98,10 +101,31 @@ impl Profiler {
             memory_before_kb: frame.memory_before_kb,
             memory_after_kb,
             depth: self.stack.len(),
+            skipped: false,
         });
     }
 
-    fn render_report_line(&self, name: &str, width: usize, elapsed_ms: f64, before: u64, after: u64) -> String {
+    /// Record an instantaneous, skipped phase (e.g. a duplicate import that
+    /// was already resolved). Rendered as SKIPPED rather than a timing.
+    pub fn skip_phase(&mut self, name: &str) {
+        if !self.enabled {
+            return;
+        }
+        let memory_kb = read_rss_kb().unwrap_or(0);
+        self.records.push(PhaseRecord {
+            name: name.to_string(),
+            elapsed_ms: 0.0,
+            memory_before_kb: memory_kb,
+            memory_after_kb: memory_kb,
+            depth: self.stack.len(),
+            skipped: true,
+        });
+    }
+
+    fn render_report_line(&self, name: &str, width: usize, elapsed_ms: f64, before: u64, after: u64, skipped: bool) -> String {
+        if skipped {
+            return format!("{name:<width$} {:<10} {:<10} {:<10} {:<10}", "SKIPPED", "-", "-", "-");
+        }
         let delta = after as i64 - before as i64;
         let delta_str = if delta >= 0 {
             format!("+{delta}")
@@ -134,13 +158,13 @@ impl Profiler {
         nodes
     }
 
-    /// Collect (tree-prefixed name, timings, is_sub) pairs for every record.
+    /// Collect (tree-prefixed name, timings, is_sub, skipped) for every record.
     fn collect_tree(
         &self,
         nodes: &[TreeNode],
         prefix: &str,
         root_level: bool,
-        out: &mut Vec<(String, f64, u64, u64, bool)>,
+        out: &mut Vec<(String, f64, u64, u64, bool, bool)>,
     ) {
         for (i, node) in nodes.iter().enumerate() {
             let is_last = i + 1 == nodes.len();
@@ -165,6 +189,7 @@ impl Profiler {
                 node.record.memory_before_kb,
                 node.record.memory_after_kb,
                 !root_level,
+                node.record.skipped,
             ));
             self.collect_tree(&node.children, &child_prefix, false, out);
         }
@@ -172,12 +197,12 @@ impl Profiler {
 
     /// Report entries plus the fixed width of the name column, so the time and
     /// memory columns align regardless of tree depth or name length.
-    fn report_entries(&self) -> (Vec<(String, f64, u64, u64, bool)>, usize) {
+    fn report_entries(&self) -> (Vec<(String, f64, u64, u64, bool, bool)>, usize) {
         let mut entries = Vec::new();
         self.collect_tree(&Self::build_tree(&self.records), "", true, &mut entries);
         let width = entries
             .iter()
-            .map(|(name, _, _, _, _)| name.len())
+            .map(|(name, _, _, _, _, _)| name.len())
             .max()
             .unwrap_or(24)
             .max(24);
@@ -188,8 +213,11 @@ impl Profiler {
         let (entries, width) = self.report_entries();
         let lines = entries
             .into_iter()
-            .map(|(name, elapsed_ms, before, after, sub)| {
-                (self.render_report_line(&name, width, elapsed_ms, before, after), sub)
+            .map(|(name, elapsed_ms, before, after, sub, skipped)| {
+                (
+                    self.render_report_line(&name, width, elapsed_ms, before, after, skipped),
+                    sub,
+                )
             })
             .collect();
         (lines, width)
@@ -285,6 +313,11 @@ pub fn end_phase(name: &str) {
     with_profiler(|p| p.end_phase(name));
 }
 
+/// Record an instantaneous skipped phase (e.g. a duplicate import).
+pub fn skip_phase(name: &str) {
+    with_profiler(|p| p.skip_phase(name));
+}
+
 pub fn print_report() {
     with_profiler(|p| p.print_report());
 }
@@ -366,6 +399,7 @@ mod tests {
             memory_before_kb: 0,
             memory_after_kb: 0,
             depth,
+            skipped: false,
         }
     }
 
