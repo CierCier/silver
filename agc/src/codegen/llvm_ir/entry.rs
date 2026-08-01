@@ -6,16 +6,18 @@ use rustc_hash::FxHashMap as HashMap;
 use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
-use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine};
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+};
 use inkwell::types::BasicType;
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
 
 use crate::codegen::SilverGenerator;
-use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::abi;
-use crate::codegen::{CodegenError, CodegenResult};
-use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
+use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::llvm_ir::generate;
+use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::debug_info::DebugContext;
 use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
@@ -37,7 +39,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    pub(crate) fn apply_function_linkage(function: FunctionValue<'ctx>, visibility: &ast::Visibility) {
+    pub(crate) fn apply_function_linkage(
+        function: FunctionValue<'ctx>,
+        visibility: &ast::Visibility,
+    ) {
         if Self::is_private(visibility) {
             function.set_linkage(Linkage::Internal);
         } else {
@@ -103,6 +108,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             drop_trait_impl_owners: HashSet::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             temp_counter: 0,
@@ -196,6 +202,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
@@ -495,6 +502,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,

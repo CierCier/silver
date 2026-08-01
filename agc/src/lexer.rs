@@ -1,5 +1,24 @@
 use std::fmt;
 
+/// Kinds of comments captured by the lexer (previously discarded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `// ...`
+    Line,
+    /// `/// ...` — documentation comment
+    DocLine,
+    /// `/* ... */`
+    Block,
+    /// `/** ... */` — documentation comment
+    DocBlock,
+}
+
+impl CommentKind {
+    pub fn is_doc(&self) -> bool {
+        matches!(self, CommentKind::DocLine | CommentKind::DocBlock)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
@@ -128,6 +147,13 @@ pub enum Token {
 
     // Special
     Identifier(String),
+    /// A captured comment (`//`, `///`, `/* */`, `/** */`) with its content.
+    /// Previously discarded by the lexer; now surfaced so the parser can
+    /// attach them to the AST and dispatch them (LLVM IR comments, LSP docs).
+    Comment {
+        kind: CommentKind,
+        text: String,
+    },
     Eof,
 }
 
@@ -238,10 +264,7 @@ pub fn lex(input: &str) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
 }
 
 /// Lex a source file with an explicit file id (from the source registry).
-pub fn lex_with_source(
-    input: &str,
-    file: u32,
-) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
+pub fn lex_with_source(input: &str, file: u32) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
     let mut lexer = Lexer::with_source(input.to_string(), file);
     match lexer.tokenize_with_spans() {
         Ok(tokens) => Ok(tokens),
@@ -351,9 +374,15 @@ impl Lexer {
         let mut tokens = Vec::new();
 
         while !self.is_at_end() {
-            self.skip_whitespace_and_comments()?;
+            self.skip_whitespace();
             if self.is_at_end() {
                 break;
+            }
+
+            if self.starts_comment() {
+                let (kind, text) = self.next_comment()?;
+                tokens.push(Token::Comment { kind, text });
+                continue;
             }
 
             let token = self.next_token()?;
@@ -368,9 +397,36 @@ impl Lexer {
         let mut tokens = Vec::new();
 
         while !self.is_at_end() {
-            self.skip_whitespace_and_comments()?;
+            self.skip_whitespace();
             if self.is_at_end() {
                 break;
+            }
+
+            if self.starts_comment() {
+                let start = self.position;
+                let start_line = self.line as u32;
+                let start_col = self.column as u32;
+                let (kind, text) = self.next_comment()?;
+                let end = self.position;
+                let end_line = self.line as u32;
+                let end_col = self.column as u32;
+                tokens.push(LexToken {
+                    kind: Token::Comment {
+                        kind,
+                        text: text.clone(),
+                    },
+                    span: Span {
+                        start,
+                        end,
+                        file: self.file,
+                        start_line,
+                        start_col,
+                        end_line,
+                        end_col,
+                    },
+                    text,
+                });
+                continue;
             }
 
             let start = self.position;
@@ -661,7 +717,8 @@ impl Lexer {
             return Err(LexError::InvalidString {
                 span: (start_pos, self.position),
                 message: "string literal contains bytes that are not valid UTF-8; \
-                    use \\u{} escapes or literal characters for text".to_string(),
+                    use \\u{} escapes or literal characters for text"
+                    .to_string(),
             });
         };
         Ok(Token::StringLiteral(value))
@@ -886,32 +943,73 @@ impl Lexer {
         Ok(token)
     }
 
-    fn skip_whitespace_and_comments(&mut self) -> Result<(), LexError> {
-        loop {
-            self.skip_whitespace();
-            if self.is_at_end() {
-                break;
-            }
+    /// True when the scanner is positioned at a comment start (`//` or `/*`).
+    fn starts_comment(&self) -> bool {
+        self.peek() == '/' && matches!(self.peek_next(), Some('/') | Some('*'))
+    }
 
-            if self.peek() == '/' {
-                if self.peek_next() == Some('/') {
-                    // Line comment
-                    self.advance(); // consume first '/'
-                    self.advance(); // consume second '/'
-                    self.skip_line_comment();
-                } else if self.peek_next() == Some('*') {
-                    // Block comment
-                    self.advance(); // consume '/'
-                    self.advance(); // consume '*'
-                    self.skip_block_comment()?;
+    /// Lex a comment starting at the current `/`. Returns the kind and the
+    /// content text with the comment delimiters stripped.
+    fn next_comment(&mut self) -> Result<(CommentKind, String), LexError> {
+        let start_pos = self.position;
+        self.advance(); // consume '/'
+        let (kind, content_start) = match self.peek() {
+            '/' => {
+                self.advance(); // consume second '/'
+                if self.peek() == '/' {
+                    self.advance(); // third '/' -> doc comment
+                    (CommentKind::DocLine, self.position)
                 } else {
-                    break;
+                    (CommentKind::Line, self.position)
                 }
-            } else {
-                break;
+            }
+            '*' => {
+                self.advance(); // consume '*'
+                if self.peek() == '*' {
+                    self.advance(); // second '*' -> doc comment
+                    (CommentKind::DocBlock, self.position)
+                } else {
+                    (CommentKind::Block, self.position)
+                }
+            }
+            _ => unreachable!("starts_comment guarantees a comment start"),
+        };
+
+        match kind {
+            CommentKind::Line | CommentKind::DocLine => {
+                while !self.is_at_end() && self.peek() != '\n' {
+                    self.advance();
+                }
+            }
+            CommentKind::Block | CommentKind::DocBlock => {
+                let mut depth = 1usize;
+                let mut content_end = self.position;
+                while !self.is_at_end() && depth > 0 {
+                    let ch = self.advance();
+                    if ch == '/' && !self.is_at_end() && self.peek() == '*' {
+                        self.advance();
+                        depth += 1;
+                    } else if ch == '*' && !self.is_at_end() && self.peek() == '/' {
+                        self.advance();
+                        depth -= 1;
+                        if depth == 0 {
+                            // Content ends right before the closing `*/`.
+                            content_end = self.position - 2;
+                        }
+                    }
+                }
+                if depth > 0 {
+                    return Err(LexError::UnexpectedEof {
+                        span: (start_pos, self.position),
+                    });
+                }
+                let text = self.input[content_start..content_end].trim().to_string();
+                return Ok((kind, text));
             }
         }
-        Ok(())
+
+        let text = self.input[content_start..self.position].trim().to_string();
+        Ok((kind, text))
     }
 
     fn skip_whitespace(&mut self) {
@@ -922,36 +1020,6 @@ impl Lexer {
                 }
                 _ => break,
             }
-        }
-    }
-
-    fn skip_line_comment(&mut self) {
-        while !self.is_at_end() && self.peek() != '\n' {
-            self.advance();
-        }
-    }
-
-    fn skip_block_comment(&mut self) -> Result<(), LexError> {
-        let start_pos = self.position - 2;
-        let mut depth = 1;
-
-        while !self.is_at_end() && depth > 0 {
-            let ch = self.advance();
-            if ch == '/' && !self.is_at_end() && self.peek() == '*' {
-                self.advance();
-                depth += 1;
-            } else if ch == '*' && !self.is_at_end() && self.peek() == '/' {
-                self.advance();
-                depth -= 1;
-            }
-        }
-
-        if depth > 0 {
-            Err(LexError::UnexpectedEof {
-                span: (start_pos, self.position),
-            })
-        } else {
-            Ok(())
         }
     }
 
@@ -1273,11 +1341,10 @@ mod tests {
         // Skip keywords as they should be tokenized as keywords, not identifiers
         let keywords = [
             "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "static", "volatile",
-            "if", "else", "while",
-            "for", "break", "continue", "return", "defer", "import", "comptime", "cast", "move",
-            "ref", "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64", "i128",
-            "u8", "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32", "c64", "c80",
-            "bool", "str", "char", "void", "Vec", "Optional",
+            "if", "else", "while", "for", "break", "continue", "return", "defer", "import",
+            "comptime", "cast", "move", "ref", "extern", "pub", "asm", "true", "false", "i8",
+            "i16", "i32", "i64", "i128", "u8", "private", "u16", "u32", "u64", "u128", "f32",
+            "f64", "f80", "c32", "c64", "c80", "bool", "str", "char", "void", "Vec", "Optional",
         ];
 
         if keywords.contains(&id_string.as_str()) {
@@ -1428,7 +1495,17 @@ mod tests {
     fn test_nested_block_comments() {
         let mut lexer = Lexer::new("/* outer /* inner */ outer */".to_string());
         let tokens = lexer.tokenize().unwrap();
-        assert_eq!(tokens, vec![Token::Eof]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Comment {
+                    kind: CommentKind::Block,
+                    text: "outer /* inner */ outer".to_string(),
+                },
+                Token::Eof
+            ],
+            "nested block comments are captured as a single token"
+        );
     }
 
     #[test]

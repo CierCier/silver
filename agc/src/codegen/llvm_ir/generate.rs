@@ -12,8 +12,8 @@ use inkwell::passes::PassBuilderOptions;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
 use crate::attributes::function_link_name;
-use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 pub(crate) fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveType {
@@ -114,7 +114,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             "__silver_leak_check_enabled",
         );
         global.set_constant(true);
-        let initializer = self.context.bool_type().const_int(self.leak_check as u64, false);
+        let initializer = self
+            .context
+            .bool_type()
+            .const_int(self.leak_check as u64, false);
         global.set_initializer(&initializer);
     }
 }
@@ -231,6 +234,19 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
 
         // Pass 2: emit item bodies/remaining lowering.
         for item in &program.items {
+            // Collect doc comments for functions so finish() can emit them as
+            // `;` comments in the printed IR (non-generic functions only —
+            // monomorphized instances would repeat the comment per instance).
+            if let ast::ItemKind::Function(func) = &item.kind {
+                if func.generics.is_none()
+                    && let Some(doc) = program.doc_comment_for(item)
+                {
+                    let name = function_link_name(&item.attributes)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| func.name.name.clone());
+                    self.doc_comments.push((name, doc));
+                }
+            }
             self.generate_item(item)?;
         }
         Ok(())
@@ -998,7 +1014,34 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         if let Some(debug) = self.debug {
             debug.finalize();
         }
-        self.module.print_to_string().to_string()
+        let ir = self.module.print_to_string().to_string();
+        let mut result = ir;
+        for (name, doc) in &self.doc_comments {
+            result = splice_doc_comment(&result, name, doc);
+        }
+        result
     }
 }
 
+/// Insert a `; <doc>` comment block into the printed LLVM IR immediately
+/// before the `define` line of the function `@name`.
+fn splice_doc_comment(ir: &str, name: &str, doc: &str) -> String {
+    let needle = format!("@{name}");
+    let mut lines: Vec<String> = ir.lines().map(str::to_string).collect();
+    let mut inserted = false;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("define") && line.contains(&needle) {
+            let mut comment_lines: Vec<String> =
+                doc.lines().map(|line| format!("; {line}")).collect();
+            comment_lines.insert(0, String::new()); // blank line for readability
+            lines.splice(i..i, comment_lines);
+            inserted = true;
+            break;
+        }
+    }
+    let mut out = lines.join("\n");
+    if inserted && !ir.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}

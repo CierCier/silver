@@ -196,11 +196,7 @@ impl ModuleLoader {
             }
             for dep in &module.module_deps {
                 let dep_module = self.load_cached_module(dep)?;
-                self.resolve_module_closure_dfs(
-                    std::slice::from_ref(&dep_module),
-                    seen,
-                    resolved,
-                )?;
+                self.resolve_module_closure_dfs(std::slice::from_ref(&dep_module), seen, resolved)?;
             }
             resolved.push(module.clone());
         }
@@ -431,6 +427,7 @@ mod tests {
     fn import_program(path: &[&str]) -> ast::Program {
         ast::Program {
             attributes: Vec::new(),
+            comments: Vec::new(),
             items: vec![ast::Item {
                 kind: ast::ItemKind::Import(ast::ImportItem {
                     path: path.iter().map(|segment| ident(segment)).collect(),
@@ -557,24 +554,17 @@ mod tests {
         let root = unique_temp_dir("conflict-non-function");
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
-        std::fs::write(
-            root.join("a").join("mod1.ag"),
-            "struct Thing { i32 x; }",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("b").join("mod2.ag"),
-            "struct Thing { i32 y; }",
-        )
-        .unwrap();
+        std::fs::write(root.join("a").join("mod1.ag"), "struct Thing { i32 x; }").unwrap();
+        std::fs::write(root.join("b").join("mod2.ag"), "struct Thing { i32 y; }").unwrap();
 
         let program = ast::Program {
             attributes: Vec::new(),
+            comments: Vec::new(),
             items: vec![
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
-                                            }),
+                    }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -582,7 +572,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
-                                            }),
+                    }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -619,11 +609,12 @@ mod tests {
 
         let program = ast::Program {
             attributes: Vec::new(),
+            comments: Vec::new(),
             items: vec![
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
-                                            }),
+                    }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
@@ -631,7 +622,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
-                                            }),
+                    }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),

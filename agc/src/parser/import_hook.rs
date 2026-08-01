@@ -6,8 +6,7 @@ use std::time::SystemTime;
 use crate::lexer;
 use crate::module_artifact::ModuleArtifact;
 use crate::module_loader::{
-    ModuleLoader, ResolvedSourceImportKind, import_path_to_string,
-    validate_import_conflicts,
+    ModuleLoader, ResolvedSourceImportKind, import_path_to_string, validate_import_conflicts,
 };
 use crate::parser::Parser;
 use crate::parser::ast;
@@ -121,7 +120,9 @@ impl<'a> FileImportResolverHook<'a> {
             // own lowering completes.
             if !self.seen_modules.insert(module_path.clone()) {
                 if crate::profiler::verbose() {
-                    crate::profiler::skip_phase(&format!("import {module_path} (already imported)"));
+                    crate::profiler::skip_phase(&format!(
+                        "import {module_path} (already imported)"
+                    ));
                 }
                 continue;
             }
@@ -189,6 +190,7 @@ impl<'a> FileImportResolverHook<'a> {
                         resolved.source_path.parent(),
                     )?;
                     lowered_program_attributes.extend(imported_program.attributes);
+                    program.comments.extend(imported_program.comments);
                     original_items.extend(imported_program.items);
                     if crate::profiler::verbose() {
                         crate::profiler::end_phase(&import_phase);
@@ -261,9 +263,10 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
 fn import_label(path: &Path) -> String {
     let s = path.display().to_string();
     let comps: Vec<&str> = s.split('/').collect();
-    let start = comps.iter().position(|c| *c == "std").unwrap_or_else(|| {
-        comps.len().saturating_sub(2)
-    });
+    let start = comps
+        .iter()
+        .position(|c| *c == "std")
+        .unwrap_or_else(|| comps.len().saturating_sub(2));
     let mut parts: Vec<&str> = comps[start..].to_vec();
     if let Some(last) = parts.last_mut() {
         *last = last.strip_suffix(".ag").unwrap_or(last);

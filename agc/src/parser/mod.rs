@@ -30,9 +30,33 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> (Program, Vec<ParseError>) {
+        // Comments are captured by the lexer as tokens; pull them out of the
+        // stream (the PRT and statement parsers never see them) and attach
+        // them to the program as CommentItem nodes, in source order.
+        let mut comments: Vec<ast::CommentItem> = Vec::new();
+        let code_tokens: Vec<LexToken> = self
+            .tokens
+            .iter()
+            .filter(|token| match &token.kind {
+                crate::lexer::Token::Comment { kind, text } => {
+                    comments.push(ast::CommentItem {
+                        kind: *kind,
+                        text: text.clone(),
+                        span: token.span.clone(),
+                    });
+                    false
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect();
+
         let mut parser = prt_parser::PRT_Parser::new(self.source_name.clone());
-        match parser.parse_program(&self.tokens) {
-            Ok(program) => (program, Vec::new()),
+        match parser.parse_program(&code_tokens) {
+            Ok(mut program) => {
+                program.comments = comments;
+                (program, Vec::new())
+            }
             Err(error) => {
                 let fallback_span = self
                     .tokens
@@ -43,6 +67,7 @@ impl Parser {
                     Program {
                         attributes: Vec::new(),
                         items: Vec::new(),
+                        comments,
                         span: fallback_span,
                     },
                     vec![error],

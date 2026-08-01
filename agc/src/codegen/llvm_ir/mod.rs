@@ -102,16 +102,20 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
     pub(crate) leak_check: bool,
+    /// (LLVM function name, doc comment text) pairs collected while
+    /// generating; spliced into the printed IR in `finish()` as `;` lines.
+    pub(crate) doc_comments: Vec<(String, String)>,
 }
 
-pub(crate) mod entry;
-pub(crate) mod types;
-pub(crate) mod scope;
-pub(crate) mod symbols;
-pub(crate) mod expr;
 pub(crate) mod call;
-pub(crate) mod operators;
-pub(crate) mod stmt;
+pub(crate) mod entry;
+pub(crate) mod expr;
 pub(crate) mod generate;
+pub(crate) mod operators;
+pub(crate) mod scope;
+pub(crate) mod stmt;
+pub(crate) mod symbols;
+pub(crate) mod types;
 
-#[cfg(test)] mod tests;
+#[cfg(test)]
+mod tests;

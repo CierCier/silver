@@ -1,13 +1,64 @@
 // Abstract Syntax Tree node definitions for Silver language
 
-use crate::lexer::Span;
+use crate::lexer::{CommentKind, Span};
 
 /// Top-level AST node representing a complete Silver program
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub attributes: Vec<Attribute>,
     pub items: Vec<Item>,
+    /// Comments captured by the lexer in source order, kept as a separate AST
+    /// node so tooling (LLVM IR comments, the aglsp docstrings) can dispatch
+    /// them without them interfering with parsing.
+    pub comments: Vec<CommentItem>,
     pub span: Span,
+}
+
+/// A comment captured from the source: line (`//`), doc line (`///`),
+/// block (`/* */`), or doc block (`/** */`), with the delimiter-stripped
+/// content and its source span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentItem {
+    pub kind: CommentKind,
+    pub text: String,
+    pub span: Span,
+}
+
+impl Program {
+    /// The doc comment (`///` or `/** */`) immediately preceding `item` in
+    /// source order, with consecutive doc lines joined by newlines. Returns
+    /// None when the item has no doc comment, when a non-doc comment or
+    /// another item separates them, or when the comment lives inside another
+    /// item (e.g. a body comment). Used by LLVM IR comment emission and by
+    /// tooling (aglsp) for hover docstrings.
+    pub fn doc_comment_for(&self, item: &Item) -> Option<String> {
+        let mut lines: Vec<&str> = Vec::new();
+        for comment in &self.comments {
+            if comment.span.end > item.span.start {
+                break; // comments are sorted in source order
+            }
+            let inside_item = self.items.iter().any(|other| {
+                !std::ptr::eq(other, item)
+                    && other.span.start <= comment.span.start
+                    && comment.span.end <= other.span.end
+            });
+            let separated = self.items.iter().any(|other| {
+                !std::ptr::eq(other, item)
+                    && other.span.start >= comment.span.end
+                    && other.span.start < item.span.start
+            });
+            if inside_item || separated || !comment.kind.is_doc() {
+                lines.clear();
+            } else {
+                lines.push(comment.text.trim());
+            }
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
 }
 
 /// Top-level items in a Silver program
@@ -734,4 +785,68 @@ pub enum MacroArg {
     Item(Item),
     Literal(Literal),
     Identifier(Identifier),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    #[test]
+    fn comments_are_captured_and_docs_attach_to_items() {
+        let source = "/// Adds two integers.\n/// Second line.\ni32 add(i32 a, i32 b) { return a + b; }\n\n// not a doc\ni32 main() { return add(1, 2); }\n";
+        let tokens = lex(source).expect("lex ok");
+        let mut parser = crate::parser::Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        assert_eq!(
+            program.comments.len(),
+            3,
+            "all comments captured: {:?}",
+            program.comments
+        );
+
+        let add = program
+            .items
+            .iter()
+            .find(|item| matches!(&item.kind, ItemKind::Function(f) if f.name.name == "add"))
+            .expect("add fn");
+        let main = program
+            .items
+            .iter()
+            .find(|item| matches!(&item.kind, ItemKind::Function(f) if f.name.name == "main"))
+            .expect("main fn");
+
+        assert_eq!(
+            program.doc_comment_for(add).as_deref(),
+            Some("Adds two integers.\nSecond line."),
+            "consecutive doc lines join"
+        );
+        assert_eq!(
+            program.doc_comment_for(main),
+            None,
+            "plain comment is not a doc"
+        );
+    }
+
+    #[test]
+    fn inner_comments_do_not_attach_to_following_items() {
+        let source =
+            "i32 f() {\n    /// inner\n    return 0;\n}\n/// real doc\ni32 g() { return 1; }\n";
+        let tokens = lex(source).expect("lex ok");
+        let mut parser = crate::parser::Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+
+        let g = program
+            .items
+            .iter()
+            .find(|item| matches!(&item.kind, ItemKind::Function(f) if f.name.name == "g"))
+            .expect("g fn");
+        assert_eq!(
+            program.doc_comment_for(g).as_deref(),
+            Some("real doc"),
+            "top-level doc attaches, inner body comment does not leak"
+        );
+    }
 }
