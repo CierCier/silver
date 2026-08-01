@@ -1,0 +1,65 @@
+// Test suite: user-defined casts applied to function call arguments.
+//
+// A struct with `cast T(self)` must be usable where T is expected — both as
+// a direct call argument and as a return/parameter for another struct type.
+import std.test;
+
+struct MyInt {
+    i64 v;
+}
+
+impl MyInt {
+    cast i32(MyInt self) {
+        return (i32)self.v;
+    }
+}
+
+i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+struct S {
+    i64 v;
+}
+
+struct A {
+    i64 v;
+}
+
+impl A {
+    cast S(A self) {
+        S s;
+        s.v = self.v;
+        return move s;
+    }
+}
+
+S combine(S a, S b) {
+    S r;
+    r.v = a.v + b.v;
+    return move r;
+}
+
+i32 main() {
+    test_start("struct cast to i32 as call arg");
+    {
+        MyInt a;
+        a.v = 1;
+        MyInt b;
+        b.v = 2;
+        i32 r = add(a, b);
+        assert_eq_i32(3, r, "add(MyInt, MyInt) casts both args to i32");
+    }
+
+    test_start("struct cast to struct as call arg");
+    {
+        A a1;
+        a1.v = 10;
+        A a2;
+        a2.v = 20;
+        S r = combine(a1, a2);
+        assert_eq_i64(30, r.v, "combine(A, A) casts both args to S");
+    }
+
+    return done();
+}

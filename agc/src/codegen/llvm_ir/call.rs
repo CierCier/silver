@@ -60,11 +60,20 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
         for (index, argument) in arguments.iter().enumerate() {
             let mut value = self.emit_expression_value(argument)?;
             if index < declared_param_count {
-                value = self.cast_value_to_ast_type(
+                if let Some(casted) = self.try_apply_user_cast(
                     value,
+                    argument,
                     &func_type.parameters[index],
                     &argument.span,
-                )?;
+                )? {
+                    value = casted;
+                } else {
+                    value = self.cast_value_to_ast_type(
+                        value,
+                        &func_type.parameters[index],
+                        &argument.span,
+                    )?;
+                }
             }
             args.push(BasicMetadataValueEnum::from(value));
         }
@@ -201,11 +210,22 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
             let mut value = self.emit_expression_value(argument)?;
             if index < declared_param_count {
                 if let Some(signature) = &signature {
-                    value = self.cast_value_to_ast_type(
+                    // Prefer a user-defined cast method (e.g. a struct arg that
+                    // `cast i32`s into an i32 parameter) over builtin casts.
+                    if let Some(casted) = self.try_apply_user_cast(
                         value,
+                        argument,
                         &signature.params[index],
                         &argument.span,
-                    )?;
+                    )? {
+                        value = casted;
+                    } else {
+                        value = self.cast_value_to_ast_type(
+                            value,
+                            &signature.params[index],
+                            &argument.span,
+                        )?;
+                    }
 
                     if let Some(linkage) = &signature.linkage {
                         value =
@@ -474,8 +494,17 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
 
             let receiver_arg = if let Some(signature) = &signature {
                 if let Some(first_param) = signature.params.first() {
-                    let cast_arg =
-                        self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?;
+                    // Prefer a user-defined cast method for the receiver.
+                    let cast_arg = if let Some(casted) = self.try_apply_user_cast(
+                        receiver_arg,
+                        receiver,
+                        first_param,
+                        &receiver.span,
+                    )? {
+                        casted
+                    } else {
+                        self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?
+                    };
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
                         self.coerce_value_to_abi(cast_arg, first_param, linkage)?
@@ -496,11 +525,21 @@ pub(crate) fn emit_expression_statement(&mut self, expr: &ast::Expression) -> Co
             let param_index = index + usize::from(inject_receiver);
             if param_index < declared_param_count {
                 if let Some(signature) = &signature {
-                    value = self.cast_value_to_ast_type(
+                    // Prefer a user-defined cast method over builtin casts.
+                    if let Some(casted) = self.try_apply_user_cast(
                         value,
+                        argument,
                         &signature.params[param_index],
                         &argument.span,
-                    )?;
+                    )? {
+                        value = casted;
+                    } else {
+                        value = self.cast_value_to_ast_type(
+                            value,
+                            &signature.params[param_index],
+                            &argument.span,
+                        )?;
+                    }
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
                         value = self.coerce_value_to_abi(

@@ -4,7 +4,7 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
 
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -1126,6 +1126,37 @@ pub(crate) fn emit_unary_expression(
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let target = self.lower_basic_type(target_type)?;
         self.cast_value_to_basic_type(value, target, span)
+    }
+
+    /// Apply a user-defined `cast Target(...)` impl method if one exists for
+    /// the source expression's type; otherwise return `None` so the caller can
+    /// fall back to builtin casts.
+    pub(crate) fn try_apply_user_cast(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        source_expr: &ast::Expression,
+        target_type: &ast::Type,
+        span: &Span,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let cast_method_name = Self::cast_method_name(target_type);
+        let owners = self.receiver_owner_candidates(source_expr);
+        let Some(cast_fn) = owners.iter().find_map(|owner| {
+            let name = Self::mangle_method_name(owner, &cast_method_name);
+            self.module.get_function(&name)
+        }) else {
+            return Ok(None);
+        };
+        let args = vec![BasicMetadataValueEnum::from(value)];
+        let call = self
+            .builder
+            .build_call(cast_fn, &args, "cast.arg")
+            .map_err(|e| {
+                CodegenError::with_span(format!("failed to call user-defined cast: {e}"), span.clone())
+            })?;
+        let result = call.try_as_basic_value().basic().ok_or_else(|| {
+            CodegenError::with_span("user-defined cast returned void".to_string(), span.clone())
+        })?;
+        Ok(Some(result))
     }
 
     /// Like `cast_value_to_ast_type`, but widens integer values from an
