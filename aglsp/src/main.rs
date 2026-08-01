@@ -1,7 +1,14 @@
-// Silver Language Server — diagnostics, hover (type + definition), go-to-definition, import resolution.
+// Silver Language Server — diagnostics, hover (type + definition + docs),
+// go-to-definition, find-references, rename, completion, signature help,
+// semantic highlighting, and import resolution.
 
+mod analysis;
+mod completion;
 mod diagnostics;
+mod doc;
 mod format;
+mod references;
+mod semantic_tokens;
 mod util;
 
 use agc::module_loader::ModuleLoader;
@@ -13,12 +20,13 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
+use analysis::Analysis;
 use util::*;
 
 pub(crate) struct Backend {
     pub(crate) client: Client,
-    /// Per‑URI: (source_text, expr_types, definitions, hover_texts)
-    pub(crate) cache: Mutex<HashMap<Uri, (String, ExprTypeMap, DefMap, HoverTextMap)>>,
+    /// Per‑URI analysis: source text, symbols, occurrences, expression types.
+    pub(crate) cache: Mutex<HashMap<Uri, Analysis>>,
     pub(crate) loader: ModuleLoader,
     /// Path → (mtime_nanos, fully-parsed program) for imported files.
     pub(crate) file_cache: parking_lot::Mutex<HashMap<PathBuf, (u128, ast::Program)>>,
@@ -33,6 +41,17 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".into(), ":".into()]),
+                    ..Default::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
+                    ..Default::default()
+                }),
+                semantic_tokens_provider: Some(semantic_tokens::server_capability()),
                 ..Default::default()
             },
             ..Default::default()
@@ -69,42 +88,40 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
 
         let cache = self.cache.lock();
-        let Some((text, expr_types, _defs, hover_texts)) = cache.get(uri) else {
+        let Some(analysis) = cache.get(uri) else {
             return Ok(None);
         };
+        let offset = position_to_byte(&analysis.text, pos);
 
-        let offset = position_to_byte(text, pos);
+        let mut parts: Vec<String> = Vec::new();
 
-        // Build hover parts: type info + formatted definition info.
-        let mut parts: Vec<MarkedString> = Vec::new();
-
-        // Type from expression.
-        if let Some(ty) = find_expr_type(offset, expr_types) {
-            parts.push(MarkedString::String(format!("type: {ty}")));
+        // Type of the expression under the cursor.
+        if let Some(ty) = find_expr_type(offset, &analysis.expr_types) {
+            parts.push(format!("**type:** `{ty}`"));
         }
 
-        // Pre-formatted hover text from definition (top-level items, imported items).
-        if let Some((_, _, name)) = extract_identifier(text, offset) {
-            if let Some(hover_text) = hover_texts.get(&name) {
-                parts.push(MarkedString::String(hover_text.clone()));
-            } else if is_builtin_type(&name) {
-                parts.push(MarkedString::String("builtin".to_string()));
+        // Symbol under the cursor: signature + documentation.
+        if let Some(sym) = references::symbol_under_cursor(analysis, offset) {
+            parts.push(format!("```silver\n{}\n```", sym.signature));
+            if let Some(doc) = &sym.doc {
+                parts.push(doc::doc_to_markdown(doc));
+            }
+        } else if let Some((_, _, name)) = extract_identifier(&analysis.text, offset) {
+            if is_builtin_type(&name) {
+                parts.push(format!("**type:** `{name}`"));
             } else if is_keyword(&name) {
-                parts.push(MarkedString::String("keyword".to_string()));
+                parts.push(format!("`{name}` — keyword"));
             }
         }
+
         if parts.is_empty() {
             return Ok(None);
         }
-
-        let contents = if parts.len() == 1 {
-            HoverContents::Scalar(parts.into_iter().next().unwrap())
-        } else {
-            HoverContents::Array(parts)
-        };
-
         Ok(Some(Hover {
-            contents,
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: parts.join("\n\n"),
+            }),
             range: None,
         }))
     }
@@ -117,22 +134,100 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
 
         let cache = self.cache.lock();
-        let Some((text, _expr_types, defs, _hover_texts)) = cache.get(uri) else {
+        let Some(analysis) = cache.get(uri) else {
             return Ok(None);
         };
+        let offset = position_to_byte(&analysis.text, pos);
+        let Some(sym) = references::symbol_under_cursor(analysis, offset) else {
+            return Ok(None);
+        };
+        let Some(location) = references::location_for_span(analysis, uri, &sym.span) else {
+            return Ok(None);
+        };
+        Ok(Some(GotoDefinitionResponse::Scalar(location)))
+    }
 
-        let offset = position_to_byte(text, pos);
-        let Some((_, _, name)) = extract_identifier(text, offset) else {
-            return Ok(None);
-        };
-        let Some(def_span) = defs.get(&name) else {
-            return Ok(None);
-        };
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
 
-        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: uri.clone(),
-            range: span_to_range(text, def_span),
-        })))
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let offset = position_to_byte(&analysis.text, pos);
+        let occurrences =
+            references::symbol_occurrences(analysis, offset, params.context.include_declaration);
+        let locations: Vec<Location> = occurrences
+            .iter()
+            .filter_map(|occ| references::location_for_span(analysis, uri, &occ.span))
+            .collect();
+        Ok(Some(locations))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        if !references::is_valid_identifier(&params.new_name) {
+            return Err(tower_lsp_server::jsonrpc::Error::invalid_params(format!(
+                "`{}` is not a valid identifier",
+                params.new_name
+            )));
+        }
+
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let offset = position_to_byte(&analysis.text, pos);
+        Ok(references::rename_edit(
+            analysis,
+            uri,
+            offset,
+            &params.new_name,
+        ))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let offset = position_to_byte(&analysis.text, pos);
+        let items = completion::completion(analysis, offset);
+        if items.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let offset = position_to_byte(&analysis.text, pos);
+        Ok(completion::signature_help(analysis, offset))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        Ok(Some(SemanticTokensResult::Tokens(
+            semantic_tokens::semantic_tokens(analysis),
+        )))
     }
 }
 

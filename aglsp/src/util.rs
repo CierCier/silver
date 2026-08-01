@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use tower_lsp_server::ls_types::*;
 
 pub(crate) type ExprTypeMap = HashMap<(usize, usize), String>;
-pub(crate) type DefMap = HashMap<String, Span>;
-pub(crate) type HoverTextMap = HashMap<String, String>;
 
 /// Convert byte offset to 0‑based line/col from source text.
 pub(crate) fn byte_to_position(text: &str, offset: usize) -> Position {
@@ -72,6 +70,26 @@ pub(crate) fn find_expr_type(
         }
     }
     best.map(|(_, ty)| ty.clone())
+}
+
+/// Find the tightest occurrence span containing `offset`.
+pub(crate) fn find_occurrence<'a>(
+    offset: usize,
+    occurrences: &'a [crate::analysis::Occurrence],
+) -> Option<&'a crate::analysis::Occurrence> {
+    let mut best: Option<&crate::analysis::Occurrence> = None;
+    for occ in occurrences {
+        if occ.span.start <= offset && offset <= occ.span.end {
+            match best {
+                Some(prev) if occ.span.end - occ.span.start < prev.span.end - prev.span.start => {
+                    best = Some(occ)
+                }
+                None => best = Some(occ),
+                _ => {}
+            }
+        }
+    }
+    best
 }
 
 /// Extract the identifier under `offset` from source text.
