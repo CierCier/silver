@@ -727,7 +727,7 @@ impl TypeChecker {
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
         let ty = match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected),
+            ast::ExpressionKind::Literal(literal) => self.literal_type(literal, expected, &expr.span),
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
                     if self.is_moved(&ident.name) {
@@ -778,24 +778,51 @@ impl TypeChecker {
             },
             ast::ExpressionKind::TypeName(ty) => Type::from_ast(ty),
             ast::ExpressionKind::Unary { operator, operand } => {
-                let operand_expected =
-                    expected.filter(|ty| self.is_numeric_type(ty) || is_bool(ty));
-                let operand_ty = self.check_expr(operand, operand_expected);
-                match operator {
-                    ast::UnaryOperator::Plus | ast::UnaryOperator::Minus => {
-                        if !self.is_numeric_type(&operand_ty) {
-                            // For Minus on non-primitive types, try __neg overload
-                            if *operator == ast::UnaryOperator::Minus
-                                && !self.is_primitive_type(&operand_ty)
-                            {
-                                if let Some(result_ty) = self.resolve_method_overload_types(
-                                    &operand_ty,
-                                    "__neg",
-                                    &[],
-                                    MethodCallStyle::Instance,
-                                    expr.span.clone(),
-                                ) {
-                                    result_ty
+                // Signed literals: `-n` / `+n` are range-checked as a single
+                // value (so `i8 x = -128` is legal while `u8 x = -5` errors)
+                // instead of checking the positive magnitude in isolation.
+                if matches!(
+                    operator,
+                    ast::UnaryOperator::Minus | ast::UnaryOperator::Plus
+                ) && let ast::ExpressionKind::Literal(ast::Literal::Integer(n)) =
+                    operand.kind.as_ref()
+                {
+                    let value = if *operator == ast::UnaryOperator::Minus {
+                        n.checked_neg().unwrap_or(i128::MIN)
+                    } else {
+                        *n
+                    };
+                    self.type_integer_literal_value(value, expected, &expr.span)
+                } else {
+                    let operand_expected =
+                        expected.filter(|ty| self.is_numeric_type(ty) || is_bool(ty));
+                    let operand_ty = self.check_expr(operand, operand_expected);
+                    match operator {
+                        ast::UnaryOperator::Plus | ast::UnaryOperator::Minus => {
+                            if !self.is_numeric_type(&operand_ty) {
+                                // For Minus on non-primitive types, try __neg overload
+                                if *operator == ast::UnaryOperator::Minus
+                                    && !self.is_primitive_type(&operand_ty)
+                                {
+                                    if let Some(result_ty) = self.resolve_method_overload_types(
+                                        &operand_ty,
+                                        "__neg",
+                                        &[],
+                                        None,
+                                        MethodCallStyle::Instance,
+                                        expr.span.clone(),
+                                    ) {
+                                        result_ty
+                                    } else {
+                                        self.error(
+                                            format!(
+                                                "unary +/- requires numeric operand, found {}",
+                                                operand_ty
+                                            ),
+                                            expr.span.clone(),
+                                        );
+                                        operand_ty
+                                    }
                                 } else {
                                     self.error(
                                         format!(
@@ -807,35 +834,27 @@ impl TypeChecker {
                                     operand_ty
                                 }
                             } else {
-                                self.error(
-                                    format!(
-                                        "unary +/- requires numeric operand, found {}",
-                                        operand_ty
-                                    ),
-                                    expr.span.clone(),
-                                );
                                 operand_ty
                             }
-                        } else {
-                            operand_ty
                         }
-                    }
-                    ast::UnaryOperator::Dereference => {
-                        let operand_ty_clone = operand_ty.clone();
-                        match operand_ty {
-                            Type::Pointer { inner, .. } | Type::Reference { inner, .. } => *inner,
-                            _ => {
-                                self.error(
-                                    format!(
-                                        "dereference requires pointer or reference operand, found {}",
-                                        operand_ty_clone
-                                    ),
-                                    expr.span.clone(),
-                                );
-                                Type::Unknown
+                        ast::UnaryOperator::Dereference => {
+                            let operand_ty_clone = operand_ty.clone();
+                            match operand_ty {
+                                Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+                                    *inner
+                                }
+                                _ => {
+                                    self.error(
+                                        format!(
+                                            "dereference requires pointer or reference operand, found {}",
+                                            operand_ty_clone
+                                        ),
+                                        expr.span.clone(),
+                                    );
+                                    operand_ty_clone
+                                }
                             }
                         }
-                    }
                     ast::UnaryOperator::Not => {
                         if is_bool(&operand_ty) {
                             Type::Primitive(ast::PrimitiveType::Bool)
@@ -844,6 +863,7 @@ impl TypeChecker {
                                 &operand_ty,
                                 "__not",
                                 &[],
+                                None,
                                 MethodCallStyle::Instance,
                                 expr.span.clone(),
                             ) {
@@ -871,6 +891,7 @@ impl TypeChecker {
                                 &operand_ty,
                                 "__bitnot",
                                 &[],
+                                None,
                                 MethodCallStyle::Instance,
                                 expr.span.clone(),
                             ) {
@@ -900,6 +921,7 @@ impl TypeChecker {
                         operand_ty
                     }
                 }
+            }
             }
             ast::ExpressionKind::Postfix { operator, operand } => {
                 let operand_ty = self.check_expr(operand, None);
@@ -1046,13 +1068,21 @@ impl TypeChecker {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty {
-                        self.error(
-                            format!(
-                                "bitwise operands must match, got {} and {}",
-                                left_ty, right_ty
-                            ),
-                            expr.span.clone(),
-                        );
+                        // Integer literals default to i128, so a literal
+                        // operand narrows to the other operand's type; mixed
+                        // integer widths share a common type (codegen casts).
+                        if !(self.is_integer_type(&left_ty)
+                            && self.is_integer_type(&right_ty)
+                            && self.common_numeric_type(&left_ty, &right_ty).is_some())
+                        {
+                            self.error(
+                                format!(
+                                    "bitwise operands must match, got {} and {}",
+                                    left_ty, right_ty
+                                ),
+                                expr.span.clone(),
+                            );
+                        }
                     }
                     if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
                         self.error(
@@ -1072,7 +1102,7 @@ impl TypeChecker {
                         }
                     }
 
-                    left_ty
+                    self.common_numeric_type(&left_ty, &right_ty).unwrap_or(left_ty)
                 }
                 ast::BinaryOperator::Assign
                 | ast::BinaryOperator::AddAssign
@@ -1346,7 +1376,7 @@ impl TypeChecker {
                         {
                             let arg_types: Vec<Type> = arguments
                                 .iter()
-                                .map(|arg| self.check_expr(arg, None))
+                                .map(|arg| self.check_expr_with_literal_naturals(arg))
                                 .collect();
                             if arguments.len() != params.len() {
                                 self.error(
@@ -1362,7 +1392,17 @@ impl TypeChecker {
                             for (i, (param_ty, arg_ty)) in
                                 params.iter().zip(arg_types.iter()).enumerate()
                             {
-                                if !self.is_assignable(param_ty, arg_ty) {
+                                // Integer literals narrow to the parameter type
+                                // when the value fits (overflow otherwise).
+                                let literal_ok = Self::literal_integer_value(&arguments[i])
+                                    .is_some_and(|value| {
+                                        matches!(param_ty, Type::Primitive(prim)
+                                            if Self::integer_value_fits(value, prim))
+                                    });
+                                if !literal_ok
+                                    && !self.is_assignable(param_ty, arg_ty)
+                                    && !self.is_implicitly_castable(arg_ty, param_ty)
+                                {
                                     self.error(
                                         format!(
                                             "mismatched argument type for parameter {}: expected {}, got {}",
@@ -1583,6 +1623,7 @@ impl TypeChecker {
                                 &object_ty,
                                 "__index_get",
                                 &[index_ty],
+                                None,
                                 MethodCallStyle::Instance,
                                 object.span.clone(),
                             ) {
@@ -1621,6 +1662,7 @@ impl TypeChecker {
                             &object_ty,
                             "__index_get",
                             &[index_ty],
+                            None,
                             MethodCallStyle::Instance,
                             object.span.clone(),
                         ) {
@@ -1976,6 +2018,7 @@ impl TypeChecker {
                                 &iterator_ty,
                                 "next",
                                 &[],
+                                None,
                                 MethodCallStyle::Instance,
                                 expr.span.clone(),
                             );
@@ -2079,7 +2122,7 @@ impl TypeChecker {
     ) -> Type {
         let arg_types = arguments
             .iter()
-            .map(|arg| self.check_expr(arg, None))
+            .map(|arg| self.check_expr_with_literal_naturals(arg))
             .collect::<Vec<_>>();
 
         let Some(candidate_ids) = self.functions.get(&ident.name).cloned() else {
@@ -2112,12 +2155,25 @@ impl TypeChecker {
                 }
             }
 
-            for (param_ty, arg_ty) in candidate.params.iter().zip(arg_types.iter()) {
+            for (i, (param_ty, arg_ty)) in candidate.params.iter().zip(arg_types.iter()).enumerate() {
                 let mut matched = false;
+
+                // Phase 0: integer literals cannot narrow into a parameter
+                // type they overflow (e.g. `foo(300)` cannot call `foo(u8)`);
+                // otherwise the natural-typed arg flows through the normal
+                // assignable/cast matching below.
+                if let Some(lit_value) = Self::literal_integer_value(&arguments[i])
+                    && let Type::Primitive(prim) = &self.substitute_type(param_ty, &mapping)
+                    && Self::integer_prim_range(prim).is_some()
+                    && !Self::integer_value_fits(lit_value, prim)
+                {
+                    ok = false;
+                    break;
+                }
 
                 // Phase 1: try with inferred type-parameter mapping
                 let mut inferred_mapping = mapping.clone();
-                if self.infer_type_params(
+                if !matched && self.infer_type_params(
                     param_ty,
                     &arg_ty,
                     &candidate.type_params,
@@ -2249,13 +2305,14 @@ impl TypeChecker {
     ) -> Type {
         let arg_types = arguments
             .iter()
-            .map(|arg| self.check_expr(arg, None))
+            .map(|arg| self.check_expr_with_literal_naturals(arg))
             .collect::<Vec<_>>();
 
         match self.resolve_method_overload_types(
             receiver_ty,
             &method.name,
             &arg_types,
+            Some(arguments),
             style,
             span.clone(),
         ) {
@@ -2299,6 +2356,7 @@ impl TypeChecker {
         receiver_ty: &Type,
         name: &str,
         arg_types: &[Type],
+        arg_exprs: Option<&[ast::Expression]>,
         style: MethodCallStyle,
         span: Span,
     ) -> Option<Type> {
@@ -2389,13 +2447,27 @@ impl TypeChecker {
                 {
                     iter.next();
                 }
-                for (param_ty, arg_ty) in iter.zip(arg_types.iter()) {
+                for (param_offset, (param_ty, arg_ty)) in iter.zip(arg_types.iter()).enumerate() {
                     let param_ty = self.substitute_self_type(param_ty, receiver_ty);
                     let mut matched = false;
 
+                    // Phase 0: integer literals cannot narrow into a parameter
+                    // type they overflow; otherwise the natural-typed arg flows
+                    // through the normal assignable/cast matching below.
+                    if let Some(exprs) = arg_exprs
+                        && let Some(lit_value) =
+                            exprs.get(param_offset).and_then(Self::literal_integer_value)
+                        && let Type::Primitive(prim) = &self.substitute_type(&param_ty, &mapping)
+                        && Self::integer_prim_range(prim).is_some()
+                        && !Self::integer_value_fits(lit_value, prim)
+                    {
+                        ok = false;
+                        break;
+                    }
+
                     // First try with inferred type-parameter mapping.
                     let mut inferred_mapping = mapping.clone();
-                    if self.infer_type_params(
+                    if !matched && self.infer_type_params(
                         &param_ty,
                         arg_ty,
                         &candidate.type_params,
@@ -2660,7 +2732,13 @@ impl TypeChecker {
         }
     }
 
-    fn literal_type(&mut self, literal: &ast::Literal, expected: Option<&Type>) -> Type {
+    fn literal_type(&mut self, literal: &ast::Literal, expected: Option<&Type>, span: &Span) -> Type {
+        // Integer literals default to the biggest integer type (i128) and
+        // decompose down to the expected type with an overflow check when a
+        // narrower integer type is expected (e.g. `u8 x = 300` errors).
+        if let ast::Literal::Integer(value) = literal {
+            return self.type_integer_literal_value(*value, expected, span);
+        }
         if let Some(expected_ty) = expected {
             if self.literal_matches_expected(literal, expected_ty) {
                 return expected_ty.clone();
@@ -2668,13 +2746,110 @@ impl TypeChecker {
         }
 
         match literal {
-            ast::Literal::Integer(_) => Type::Primitive(ast::PrimitiveType::I32),
+            ast::Literal::Integer(_) => unreachable!("handled above"),
             ast::Literal::Float(_) => Type::Primitive(ast::PrimitiveType::F64),
             ast::Literal::Complex(_, _) => Type::Primitive(ast::PrimitiveType::C64),
             ast::Literal::String(_) => Type::Primitive(ast::PrimitiveType::Str),
             ast::Literal::Char(_) => Type::Primitive(ast::PrimitiveType::Char),
             ast::Literal::Bool(_) => Type::Primitive(ast::PrimitiveType::Bool),
         }
+    }
+
+    /// Type an integer literal value against an optional expected type: the
+    /// biggest integer type (i128) by default, narrowed to the expected
+    /// integer type with an overflow error when it does not fit.
+    fn type_integer_literal_value(
+        &mut self,
+        value: i128,
+        expected: Option<&Type>,
+        span: &Span,
+    ) -> Type {
+        if let Some(expected_ty) = expected {
+            if let Type::Primitive(prim) = expected_ty {
+                if let Some((min, max)) = Self::integer_prim_range(prim) {
+                    if value < min || value > max {
+                        self.error(
+                            format!(
+                                "integer literal {} does not fit in type {:?}",
+                                value, prim
+                            ),
+                            span.clone(),
+                        );
+                    }
+                    return expected_ty.clone();
+                }
+            }
+        }
+        Type::Primitive(ast::PrimitiveType::I128)
+    }
+
+    /// Inclusive value range for an integer primitive, or None for non-ints.
+    fn integer_prim_range(prim: &ast::PrimitiveType) -> Option<(i128, i128)> {
+        Some(match prim {
+            ast::PrimitiveType::I8 => (i8::MIN as i128, i8::MAX as i128),
+            ast::PrimitiveType::I16 => (i16::MIN as i128, i16::MAX as i128),
+            ast::PrimitiveType::I32 => (i32::MIN as i128, i32::MAX as i128),
+            ast::PrimitiveType::I64 => (i64::MIN as i128, i64::MAX as i128),
+            ast::PrimitiveType::I128 => (i128::MIN, i128::MAX),
+            ast::PrimitiveType::U8 => (0, u8::MAX as i128),
+            ast::PrimitiveType::U16 => (0, u16::MAX as i128),
+            ast::PrimitiveType::U32 => (0, u32::MAX as i128),
+            ast::PrimitiveType::U64 => (0, u64::MAX as i128),
+            ast::PrimitiveType::U128 => (0, i128::MAX), // AST literal is i128
+            _ => return None,
+        })
+    }
+
+    /// True when an integer literal value fits the integer primitive.
+    fn integer_value_fits(value: i128, prim: &ast::PrimitiveType) -> bool {
+        Self::integer_prim_range(prim).is_some_and(|(min, max)| value >= min && value <= max)
+    }
+
+    /// Extract the effective integer value of a literal expression, honoring
+    /// unary +/- (so `-128` yields -128, not 128).
+    fn literal_integer_value(expr: &ast::Expression) -> Option<i128> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Literal(ast::Literal::Integer(n)) => Some(*n),
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Minus,
+                operand,
+            } => match operand.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::Integer(n)) => n.checked_neg(),
+                _ => None,
+            },
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Plus,
+                operand,
+            } => match operand.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::Integer(n)) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Natural integer type for a literal value: the smallest standard width
+    /// that holds it (i32, then i64, then i128). Used when resolution must
+    /// pick between candidates (overloads, generic inference) so that
+    /// `foo(1)` infers T = i32 rather than the i128 default.
+    fn literal_natural_type(value: i128) -> ast::PrimitiveType {
+        if value >= i32::MIN as i128 && value <= i32::MAX as i128 {
+            ast::PrimitiveType::I32
+        } else if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
+            ast::PrimitiveType::I64
+        } else {
+            ast::PrimitiveType::I128
+        }
+    }
+
+    /// Type-check an expression, but report integer literals at their natural
+    /// width (i32/i64/i128 by value) instead of the i128 default, so overload
+    /// and generic-parameter resolution sees the literal's intrinsic type.
+    fn check_expr_with_literal_naturals(&mut self, expr: &ast::Expression) -> Type {
+        if let Some(value) = Self::literal_integer_value(expr) {
+            return Type::Primitive(Self::literal_natural_type(value));
+        }
+        self.check_expr(expr, None)
     }
 
     fn literal_matches_expected(&self, literal: &ast::Literal, expected: &Type) -> bool {
@@ -3624,6 +3799,7 @@ impl TypeChecker {
             left,
             name,
             &[right.clone()],
+            None,
             MethodCallStyle::Instance,
             expr.span.clone(),
         );

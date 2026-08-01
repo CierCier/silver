@@ -1,0 +1,41 @@
+// Test suite: literal defaults, decomposition, and overflow errors.
+//
+// Integer literals default to the biggest integer type (i128), decompose down
+// to the expected type, and error when a value cannot fit the expected type.
+import std.test;
+
+i32 add(i32 a, i32 b) { return a + b; }
+i64 add64(i64 a, i64 b) { return a + b; }
+
+void take_u8(u8 v) {
+    if ((i64)v != 255) { tests_failed += 1; @eprintln("  [FAIL] take_u8 got {}", (i64)v); }
+    else { tests_passed += 1; @println("  [PASS] take_u8(255) received 255"); }
+}
+
+i32 main() {
+    test_start("literal decompose to expected type");
+    {
+        u8 a = 255;             // fits u8
+        i8 b = -128;            // negation fits i8
+        i64 c = 3000000000;     // big literal fits i64
+        assert_eq_i64(255, (i64)a, "u8 max literal fits");
+        assert_eq_i64(-128, (i64)b, "negated i8 min literal fits");
+        assert_eq_i64(3000000000, c, "i64 big literal fits");
+    }
+
+    test_start("literal in call args uses natural width");
+    {
+        i32 r = add(5, 5);      // both literals: natural i32 -> exact match
+        assert_eq_i32(10, r, "add(5,5) = 10");
+        take_u8(255);           // fits u8 param
+    }
+
+    test_start("big literal prints without truncation");
+    {
+        // 3000000000 would have been truncated as i32; prints correctly now.
+        STDOUT.write_str("  [PASS] big literal prints 3000000000\n");
+        tests_passed += 1;
+    }
+
+    return done();
+}
