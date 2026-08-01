@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt;
 use std::fs;
 use std::time::Instant;
@@ -10,6 +11,8 @@ pub struct PhaseRecord {
     pub elapsed_ms: f64,
     pub memory_before_kb: u64,
     pub memory_after_kb: u64,
+    /// Nesting depth; 0 = top-level phase, >0 = sub-phase (per-file detail).
+    pub depth: usize,
 }
 
 impl PhaseRecord {
@@ -18,21 +21,32 @@ impl PhaseRecord {
     }
 }
 
+#[derive(Debug)]
+struct PhaseFrame {
+    name: String,
+    start: Instant,
+    memory_before_kb: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct Profiler {
     pub enabled: bool,
+    pub verbose: bool,
     pub records: Vec<PhaseRecord>,
-    pub start_time: Option<Instant>,
-    pub total_memory_before_kb: u64,
+    start_time: Option<Instant>,
+    total_memory_before_kb: u64,
+    stack: Vec<PhaseFrame>,
 }
 
 impl Profiler {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, verbose: bool) -> Self {
         Self {
             enabled,
+            verbose,
             records: Vec::new(),
             start_time: None,
             total_memory_before_kb: 0,
+            stack: Vec::new(),
         }
     }
 
@@ -48,27 +62,47 @@ impl Profiler {
         if !self.enabled {
             return;
         }
-        let _ = name;
+        if self.start_time.is_none() {
+            self.begin();
+        }
+        self.stack.push(PhaseFrame {
+            name: name.to_string(),
+            start: Instant::now(),
+            memory_before_kb: read_rss_kb().unwrap_or(0),
+        });
     }
 
     pub fn end_phase(&mut self, name: &str) {
         if !self.enabled {
             return;
         }
-        let elapsed = self.start_time.map(|t| t.elapsed()).unwrap_or_default();
-        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
-        let memory_before_kb = self.total_memory_before_kb;
+        // Pop the frame for this phase; tolerate mismatched name (just pop top).
+        let frame = match self.stack.iter().rposition(|f| f.name == name) {
+            Some(idx) => self.stack.remove(idx),
+            None => match self.stack.pop() {
+                Some(f) => f,
+                None => return,
+            },
+        };
+        let elapsed_ms = frame.start.elapsed().as_secs_f64() * 1000.0;
         let memory_after_kb = read_rss_kb().unwrap_or(0);
-
         self.records.push(PhaseRecord {
-            name: name.to_string(),
+            name: frame.name,
             elapsed_ms,
-            memory_before_kb,
+            memory_before_kb: frame.memory_before_kb,
             memory_after_kb,
+            depth: self.stack.len(),
         });
+    }
 
-        self.start_time = Some(Instant::now());
-        self.total_memory_before_kb = memory_after_kb;
+    fn render_report_line(&self, name: &str, elapsed_ms: f64, before: u64, after: u64) -> String {
+        let delta = after as i64 - before as i64;
+        let delta_str = if delta >= 0 {
+            format!("+{delta}")
+        } else {
+            format!("{delta}")
+        };
+        format!("{name:<24} {elapsed_ms:>10.2} {before:>10} KB {after:>10} KB {delta_str:>10} KB")
     }
 
     pub fn print_report(&self) {
@@ -96,20 +130,19 @@ impl Profiler {
         eprintln!("{}", "-".repeat(74).bright_black());
 
         for record in &self.records {
-            let delta = record.memory_delta_kb();
-            let delta_str = if delta >= 0 {
-                format!("+{delta}")
-            } else {
-                format!("{delta}")
-            };
-            eprintln!(
-                "{:<24} {:>10.2} {:>10} KB {:>10} KB {:>10} KB",
-                record.name,
+            let indent = "  ".repeat(record.depth);
+            let line = self.render_report_line(
+                &format!("{indent}{}", record.name),
                 record.elapsed_ms,
                 record.memory_before_kb,
                 record.memory_after_kb,
-                delta_str,
             );
+            // Sub-phases get dimmed to keep the top-level phases readable.
+            if record.depth > 0 {
+                eprintln!("{}", line.bright_black());
+            } else {
+                eprintln!("{line}");
+            }
         }
 
         eprintln!("{}", "-".repeat(74).bright_black());
@@ -125,6 +158,50 @@ impl Profiler {
         );
         eprintln!();
     }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<Profiler>> = const { RefCell::new(None) };
+}
+
+/// Install the process-wide profiler (replaces any previous one).
+pub fn install(profiler: Profiler) {
+    CURRENT.with(|current| *current.borrow_mut() = Some(profiler));
+}
+
+/// Run `f` with the installed profiler; runs with a disabled default when
+/// none was installed (e.g. in tests or library embedding).
+fn with_profiler<R>(f: impl FnOnce(&mut Profiler) -> R) -> R {
+    CURRENT.with(|current| {
+        let mut guard = current.borrow_mut();
+        let profiler = guard.get_or_insert_with(|| Profiler::new(false, false));
+        f(profiler)
+    })
+}
+
+/// True when verbose profiling is active (--profile --verbose).
+pub fn verbose() -> bool {
+    with_profiler(|p| p.verbose)
+}
+
+pub fn enabled() -> bool {
+    with_profiler(|p| p.enabled)
+}
+
+pub fn begin() {
+    with_profiler(|p| p.begin());
+}
+
+pub fn begin_phase(name: &str) {
+    with_profiler(|p| p.begin_phase(name));
+}
+
+pub fn end_phase(name: &str) {
+    with_profiler(|p| p.end_phase(name));
+}
+
+pub fn print_report() {
+    with_profiler(|p| p.print_report());
 }
 
 pub fn read_rss_kb() -> Option<u64> {
@@ -154,6 +231,7 @@ impl fmt::Display for Profiler {
         }
 
         let total_time_ms: f64 = self.records.iter().map(|r| r.elapsed_ms).sum();
+        let total_mem_delta_kb: i64 = self.records.iter().map(|r| r.memory_delta_kb()).sum();
         let peak_mem_kb = self
             .records
             .iter()
@@ -170,21 +248,14 @@ impl fmt::Display for Profiler {
         writeln!(f, "{}", "-".repeat(74))?;
 
         for record in &self.records {
-            let delta = record.memory_delta_kb();
-            let delta_str = if delta >= 0 {
-                format!("+{delta}")
-            } else {
-                format!("{delta}")
-            };
-            writeln!(
-                f,
-                "{:<24} {:>10.2} {:>10} KB {:>10} KB {:>10} KB",
-                record.name,
+            let indent = "  ".repeat(record.depth);
+            let line = self.render_report_line(
+                &format!("{indent}{}", record.name),
                 record.elapsed_ms,
                 record.memory_before_kb,
                 record.memory_after_kb,
-                delta_str,
-            )?;
+            );
+            writeln!(f, "{line}")?;
         }
 
         writeln!(f, "{}", "-".repeat(74))?;
@@ -198,7 +269,7 @@ impl fmt::Display for Profiler {
             "{:<24} {:>36} {:>10} KB",
             "",
             "",
-            format!("net: {}:+", total_time_ms),
+            format!("net: {total_mem_delta_kb:+}"),
         )?;
         Ok(())
     }

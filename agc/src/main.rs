@@ -631,7 +631,10 @@ fn main() {
             }
 
             let loader = build_module_loader(&plan);
-            let mut profiler = profiler::Profiler::new(plan.profile);
+            profiler::install(profiler::Profiler::new(
+                plan.profile,
+                plan.profile && plan.verbose,
+            ));
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
             let mut exe_object_files: Vec<PathBuf> = Vec::new();
@@ -666,7 +669,7 @@ fn main() {
                 rustc_hash::FxHashSet::default();
 
             for input in &plan.inputs {
-                profiler.begin_phase("read source");
+                profiler::begin_phase("read source");
                 let src = match std::fs::read_to_string(input) {
                     Ok(s) => s,
                     Err(e) => {
@@ -678,14 +681,14 @@ fn main() {
                         std::process::exit(2);
                     }
                 };
-                profiler.end_phase("read source");
+                profiler::end_phase("read source");
 
                 // Register the input source so diagnostic spans resolve to this
                 // file (imported modules register their own files).
                 let input_path = input.display().to_string();
                 let input_file = lexer::register_source(&input_path, &src);
 
-                profiler.begin_phase("lex");
+                profiler::begin_phase("lex");
                 let tokens = match lexer::lex_with_source(&src, input_file) {
                     Ok(tokens) => tokens,
                     Err(errors) => {
@@ -707,13 +710,13 @@ fn main() {
                         std::process::exit(2);
                     }
                 };
-                profiler.end_phase("lex");
+                profiler::end_phase("lex");
 
-                profiler.begin_phase("parse");
+                profiler::begin_phase("parse");
                 let mut parser =
                     parser::Parser::new_with_source(tokens, input.display().to_string());
                 let (mut ast, errors) = parser.parse_program();
-                profiler.end_phase("parse");
+                profiler::end_phase("parse");
 
                 if !errors.is_empty() {
                     eprintln!("agc: parser errors:");
@@ -748,7 +751,7 @@ fn main() {
                 };
 
                 let base_dir = input.parent();
-                profiler.begin_phase("import lowering");
+                profiler::begin_phase("import lowering");
                 let import_lowering = match parser::FileImportResolverHook::new(&loader)
                     .lower_program_imports(&mut ast, base_dir, Some(input))
                 {
@@ -758,7 +761,7 @@ fn main() {
                         std::process::exit(2);
                     }
                 };
-                profiler.end_phase("import lowering");
+                profiler::end_phase("import lowering");
                 let module_dependencies = import_lowering.module_dependencies;
                 let transitive_module_deps = import_lowering.transitive_module_deps;
                 let imported_modules = import_lowering.module_artifacts;
@@ -773,10 +776,10 @@ fn main() {
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
                 symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
 
-                profiler.begin_phase("semantic");
+                profiler::begin_phase("semantic");
                 let semantic_errors =
                     run_semantic_hooks(&mut ast, &mut symbol_table, &imported_modules);
-                profiler.end_phase("semantic");
+                profiler::end_phase("semantic");
                 if !semantic_errors.is_empty() {
                     eprintln!("agc: semantic errors:");
                     for error in &semantic_errors {
@@ -792,7 +795,7 @@ fn main() {
                     std::process::exit(2);
                 }
 
-                profiler.begin_phase("type check");
+                profiler::begin_phase("type check");
                 TypeChecker::resolve_type_aliases_in_program(&mut ast);
                 let mut checker = TypeChecker::new().with_imported_modules(&imported_modules);
                 let (type_errors, mut monomorphs) =
@@ -906,9 +909,11 @@ fn main() {
                     }
                 }
 
-                profiler.begin_phase("monomorph");
+                profiler::end_phase("type check");
+
+                profiler::begin_phase("monomorph");
                 semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
-                profiler.end_phase("monomorph");
+                profiler::end_phase("monomorph");
                 symbol_table.touch_phase(
                     CompilerPhase::Monomorphize,
                     format!("monomorph requests applied: {}", monomorphs.len()),
@@ -1035,7 +1040,7 @@ fn main() {
                     symbol_table.touch_phase(CompilerPhase::Codegen, "LLVM codegen");
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
-                        profiler.begin_phase("codegen");
+                        profiler::begin_phase("codegen");
                         let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
@@ -1048,7 +1053,7 @@ fn main() {
                             plan.debug_info,
                             plan.leak_check,
                         );
-                        profiler.end_phase("codegen");
+                        profiler::end_phase("codegen");
                         if let Err(error) = result {
                             if let Some(span) = error.span {
                                 eprintln!(
@@ -1065,7 +1070,7 @@ fn main() {
                             std::process::exit(2);
                         }
                     } else if matches!(plan.emit, EmitKind::Asm) {
-                        profiler.begin_phase("codegen");
+                        profiler::begin_phase("codegen");
                         let result =
                             codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
                                 &ast,
@@ -1079,7 +1084,7 @@ fn main() {
                                 plan.debug_info,
                                 plan.leak_check,
                             );
-                        profiler.end_phase("codegen");
+                        profiler::end_phase("codegen");
                         if let Err(error) = result {
                             if let Some(span) = error.span {
                                 eprintln!(
@@ -1096,7 +1101,7 @@ fn main() {
                             std::process::exit(2);
                         }
                     } else if matches!(plan.emit, EmitKind::LlvmIr) {
-                        profiler.begin_phase("codegen");
+                        profiler::begin_phase("codegen");
                         let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source_with_leak_check(
                             &ast,
                             &imported_modules,
@@ -1106,7 +1111,7 @@ fn main() {
                             plan.debug_info,
                             plan.leak_check,
                         );
-                        profiler.end_phase("codegen");
+                        profiler::end_phase("codegen");
                         match output {
                             Ok(ir) => {
                                 llvm_units.push((
@@ -1131,7 +1136,7 @@ fn main() {
                             }
                         }
                     } else if matches!(plan.emit, EmitKind::Exe) {
-                        profiler.begin_phase("codegen");
+                        profiler::begin_phase("codegen");
                         let temp_dir = exe_temp_dir.as_ref().unwrap();
                         let stem = input
                             .file_stem()
@@ -1150,7 +1155,7 @@ fn main() {
                             plan.debug_info,
                             plan.leak_check,
                         );
-                        profiler.end_phase("codegen");
+                        profiler::end_phase("codegen");
                         if let Err(error) = result {
                             if let Some(span) = error.span {
                                 eprintln!(
@@ -1191,12 +1196,12 @@ fn main() {
                     );
                     std::process::exit(2);
                 }
-                profiler.print_report();
+                profiler::print_report();
                 return;
             }
 
             if matches!(plan.emit, EmitKind::Obj | EmitKind::Asm | EmitKind::Module) {
-                profiler.print_report();
+                profiler::print_report();
                 return;
             }
 
@@ -1205,7 +1210,7 @@ fn main() {
                     eprintln!("agc: {}: no object files to link", "error".red().bold());
                     std::process::exit(2);
                 }
-                profiler.begin_phase("link");
+                profiler::begin_phase("link");
                 if let Err(e) = link_exe(
                     &plan,
                     &exe_object_files,
@@ -1215,12 +1220,12 @@ fn main() {
                     eprintln!("agc: {}: {e}", "error".red().bold());
                     std::process::exit(2);
                 }
-                profiler.end_phase("link");
+                profiler::end_phase("link");
                 // Clean up temp dir
                 if let Some(dir) = &exe_temp_dir {
                     let _ = std::fs::remove_dir_all(dir);
                 }
-                profiler.print_report();
+                profiler::print_report();
                 return;
             }
 

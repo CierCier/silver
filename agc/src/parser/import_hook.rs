@@ -138,6 +138,15 @@ impl<'a> FileImportResolverHook<'a> {
                         continue;
                     }
 
+                    let import_label = resolved
+                        .source_path
+                        .display()
+                        .to_string();
+                    let import_phase = format!("import {import_label}");
+                    if crate::profiler::verbose() {
+                        crate::profiler::begin_phase(&import_phase);
+                    }
+
                     // Check file cache for pre-parsed program (mtime-based).
                     let cache_hit = self.file_cache.and_then(|cache| {
                         let mtime = std::fs::metadata(&resolved.source_path)
@@ -183,6 +192,9 @@ impl<'a> FileImportResolverHook<'a> {
                     self.pending_stack.pop();
                     lowered_program_attributes.extend(imported_program.attributes);
                     original_items.extend(imported_program.items);
+                    if crate::profiler::verbose() {
+                        crate::profiler::end_phase(&import_phase);
+                    }
                 }
                 ResolvedSourceImportKind::Module => {
                     let artifact = ModuleArtifact::from_path(&resolved.source_path)?;
@@ -206,14 +218,34 @@ impl<'a> FileImportResolverHook<'a> {
 }
 
 fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
+    let label = path.display().to_string();
+    let verbose = crate::profiler::verbose();
+    if verbose {
+        crate::profiler::begin_phase(&format!("read {label}"));
+    }
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    if verbose {
+        crate::profiler::end_phase(&format!("read {label}"));
+    }
     // Register the imported file so its diagnostic spans resolve to this file.
     let file_id = crate::lexer::register_source(&path.display().to_string(), &src);
+    if verbose {
+        crate::profiler::begin_phase(&format!("lex {label}"));
+    }
     let tokens = lexer::lex_with_source(&src, file_id)
         .map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
+    if verbose {
+        crate::profiler::end_phase(&format!("lex {label}"));
+    }
+    if verbose {
+        crate::profiler::begin_phase(&format!("parse {label}"));
+    }
     let mut parser = Parser::new_with_source(tokens, path.display().to_string());
     let (program, errors) = parser.parse_program();
+    if verbose {
+        crate::profiler::end_phase(&format!("parse {label}"));
+    }
     if errors.is_empty() {
         return Ok(program);
     }
