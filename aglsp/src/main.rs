@@ -4,27 +4,26 @@ mod diagnostics;
 mod format;
 mod util;
 
-use agc::parser::ast;
 use agc::module_loader::ModuleLoader;
+use agc::parser::ast;
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
-use parking_lot::Mutex;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 use util::*;
 
 pub(crate) struct Backend {
     pub(crate) client: Client,
     /// Per‑URI: (source_text, expr_types, definitions, hover_texts)
-    pub(crate) cache: Mutex<HashMap<Url, (String, ExprTypeMap, DefMap, HoverTextMap)>>,
+    pub(crate) cache: Mutex<HashMap<Uri, (String, ExprTypeMap, DefMap, HoverTextMap)>>,
     pub(crate) loader: ModuleLoader,
     /// Path → (mtime_nanos, fully-parsed program) for imported files.
     pub(crate) file_cache: parking_lot::Mutex<HashMap<PathBuf, (u128, ast::Program)>>,
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
@@ -65,7 +64,6 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {}
 
-
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
@@ -105,7 +103,10 @@ impl LanguageServer for Backend {
             HoverContents::Array(parts)
         };
 
-        Ok(Some(Hover { contents, range: None }))
+        Ok(Some(Hover {
+            contents,
+            range: None,
+        }))
     }
 
     async fn goto_definition(

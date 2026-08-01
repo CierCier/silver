@@ -2,7 +2,7 @@ use agc::lexer::Span;
 use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
 use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 pub(crate) type ExprTypeMap = HashMap<(usize, usize), String>;
 pub(crate) type DefMap = HashMap<String, Span>;
@@ -23,7 +23,10 @@ pub(crate) fn byte_to_position(text: &str, offset: usize) -> Position {
             col += 1;
         }
     }
-    Position { line, character: col }
+    Position {
+        line,
+        character: col,
+    }
 }
 
 pub(crate) fn span_to_range(text: &str, span: &Span) -> Range {
@@ -105,22 +108,60 @@ pub(crate) fn extract_identifier(text: &str, offset: usize) -> Option<(usize, us
 pub(crate) fn is_builtin_type(name: &str) -> bool {
     matches!(
         name,
-        "i8" | "i16" | "i32" | "i64" | "i128"
-            | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "f32" | "f64" | "f80"
-            | "c32" | "c64" | "c80"
-            | "bool" | "str" | "char" | "void"
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "f32"
+            | "f64"
+            | "f80"
+            | "c32"
+            | "c64"
+            | "c80"
+            | "bool"
+            | "str"
+            | "char"
+            | "void"
     )
 }
 
 pub(crate) fn is_keyword(name: &str) -> bool {
     matches!(
         name,
-        "struct" | "enum" | "impl" | "trait" | "fn" | "let" | "mut" | "const"
-            | "if" | "else" | "while" | "for" | "break" | "continue"
-            | "return" | "defer" | "import" | "comptime" | "cast"
-            | "move" | "ref" | "extern" | "pub" | "private" | "asm"
-            | "in" | "macro" | "true" | "false"
+        "struct"
+            | "enum"
+            | "impl"
+            | "trait"
+            | "fn"
+            | "let"
+            | "mut"
+            | "const"
+            | "if"
+            | "else"
+            | "while"
+            | "for"
+            | "break"
+            | "continue"
+            | "return"
+            | "defer"
+            | "import"
+            | "comptime"
+            | "cast"
+            | "move"
+            | "ref"
+            | "extern"
+            | "pub"
+            | "private"
+            | "asm"
+            | "in"
+            | "macro"
+            | "true"
+            | "false"
     )
 }
 
@@ -137,7 +178,11 @@ pub(crate) fn find_std_search_dirs() -> Vec<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            let candidate = parent.join("..").join("bootstrap").join("include").join("silver");
+            let candidate = parent
+                .join("..")
+                .join("bootstrap")
+                .join("include")
+                .join("silver");
             if candidate.is_dir() {
                 return vec![candidate];
             }

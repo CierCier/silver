@@ -5,14 +5,14 @@ use agc::parser::{FileImportResolverHook, Parser};
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_table::CompilerSymbolTable;
 use rustc_hash::FxHashMap as HashMap;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
+use crate::Backend;
 use crate::format::*;
 use crate::util::*;
-use crate::Backend;
 
 impl Backend {
-    pub(crate) async fn check_diagnostics(&self, uri: &Url, text: &str) {
+    pub(crate) async fn check_diagnostics(&self, uri: &Uri, text: &str) {
         let tokens = match lexer::lex(text) {
             Ok(t) => t,
             Err(errors) => {
@@ -27,7 +27,12 @@ impl Backend {
                     .collect();
                 self.cache.lock().insert(
                     uri.clone(),
-                    (text.to_string(), HashMap::default(), HashMap::default(), HashMap::default()),
+                    (
+                        text.to_string(),
+                        HashMap::default(),
+                        HashMap::default(),
+                        HashMap::default(),
+                    ),
                 );
                 self.client
                     .publish_diagnostics(uri.clone(), diags, None)
@@ -45,9 +50,7 @@ impl Backend {
                 range: span_to_range(text, e.span()),
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: match e {
-                    agc::parser::ParseError::InvalidSyntax { message, .. } => {
-                        message.clone()
-                    }
+                    agc::parser::ParseError::InvalidSyntax { message, .. } => message.clone(),
                     _ => format!("{:?}", e),
                 },
                 ..Default::default()
@@ -55,22 +58,32 @@ impl Backend {
             .collect();
 
         // Resolve imports with per-file caching via FileImportResolverHook.
-        let source_path = uri.to_file_path().ok();
+        let source_path = uri.to_file_path();
         let base_dir = source_path.as_ref().and_then(|p| p.parent());
-        let imported_modules = match FileImportResolverHook::with_cache(&self.loader, &self.file_cache)
-            .lower_program_imports(&mut program, base_dir, source_path.as_deref())
-        {
-            Ok(result) => result.module_artifacts,
-            Err(e) => {
-                diagnostics.push(Diagnostic {
-                    range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 0 } },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!("import error: {e}"),
-                    ..Default::default()
-                });
-                Vec::new()
-            }
-        };
+        let imported_modules =
+            match FileImportResolverHook::with_cache(&self.loader, &self.file_cache)
+                .lower_program_imports(&mut program, base_dir, source_path.as_deref())
+            {
+                Ok(result) => result.module_artifacts,
+                Err(e) => {
+                    diagnostics.push(Diagnostic {
+                        range: Range {
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                        },
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: format!("import error: {e}"),
+                        ..Default::default()
+                    });
+                    Vec::new()
+                }
+            };
         // Collect definitions for go‑to‑definition.
         let defs = collect_definitions(&program, text.len());
 
@@ -109,10 +122,7 @@ impl Backend {
                     let mut entries = Vec::new();
                     for method in &imp.items {
                         if let ast::ImplItemKind::Function(f) = method {
-                            entries.push((
-                                f.name.name.clone(),
-                                format_impl_function_sig(f),
-                            ));
+                            entries.push((f.name.name.clone(), format_impl_function_sig(f)));
                         }
                     }
                     return entries;
@@ -155,9 +165,10 @@ impl Backend {
             });
         }
 
-        self.cache
-            .lock()
-            .insert(uri.clone(), (text.to_string(), expr_types, defs, hover_texts));
+        self.cache.lock().insert(
+            uri.clone(),
+            (text.to_string(), expr_types, defs, hover_texts),
+        );
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
@@ -165,7 +176,10 @@ impl Backend {
 }
 
 /// Collect top‑level definition names and their spans (current file only).
-pub(crate) fn collect_definitions(program: &ast::Program, source_len: usize) -> HashMap<String, Span> {
+pub(crate) fn collect_definitions(
+    program: &ast::Program,
+    source_len: usize,
+) -> HashMap<String, Span> {
     let mut defs = HashMap::default();
     for item in &program.items {
         let (name, span) = match &item.kind {
