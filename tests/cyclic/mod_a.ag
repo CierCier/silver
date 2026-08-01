@@ -1,0 +1,16 @@
+// Mutually imports mod_b — cycle must resolve to a single inlined copy.
+import mod_b;
+
+struct A {
+    i64 x;
+}
+
+A make_a(i64 v) {
+    A a;
+    a.x = v;
+    return move a;
+}
+
+i64 sum_b(B b) {
+    return b.y + 1;
+}

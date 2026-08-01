@@ -1,0 +1,12 @@
+// Test suite: mutual imports resolve without a cyclic-import error.
+// mod_a and mod_b import each other and use each other's types.
+import cyclic.mod_a;
+import cyclic.mod_b;
+
+i32 main() {
+    A a = make_a(5);
+    B b = make_b(10);
+    i64 r = scale_a(a) + sum_b(b);
+    if (r != 21) { return 1; }
+    return 0;
+}

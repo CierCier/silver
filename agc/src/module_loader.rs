@@ -172,45 +172,36 @@ impl ModuleLoader {
         &self,
         roots: &[ModuleArtifact],
     ) -> Result<Vec<ModuleArtifact>, String> {
-        let mut resolved = Vec::new();
         let mut seen = HashSet::default();
-        let mut path = Vec::new(); // modules currently on the DFS path
+        let mut resolved = Vec::new();
 
-        self.resolve_module_closure_dfs(roots, &mut seen, &mut path, &mut resolved)?;
+        self.resolve_module_closure_dfs(roots, &mut seen, &mut resolved)?;
 
         Ok(resolved)
     }
 
-    /// Recursive DFS helper for `resolve_module_closure` with cycle detection.
+    /// Recursive DFS helper for `resolve_module_closure`. Every module path is
+    /// visited at most once (the seen set dedups), so dependency cycles — even
+    /// mutual ones — resolve to a single copy of each module rather than
+    /// recursing forever.
     fn resolve_module_closure_dfs(
         &self,
         modules: &[ModuleArtifact],
         seen: &mut HashSet<String>,
-        path: &mut Vec<String>,
         resolved: &mut Vec<ModuleArtifact>,
     ) -> Result<(), String> {
         for module in modules {
             if !seen.insert(module.module_path.clone()) {
                 continue;
             }
-            if path.contains(&module.module_path) {
-                return Err(format!(
-                    "cyclic module dependency: `{}` (resolution path: {})",
-                    module.module_path,
-                    path.join(" -> ")
-                ));
-            }
-            path.push(module.module_path.clone());
             for dep in &module.module_deps {
                 let dep_module = self.load_cached_module(dep)?;
                 self.resolve_module_closure_dfs(
                     std::slice::from_ref(&dep_module),
                     seen,
-                    path,
                     resolved,
                 )?;
             }
-            path.pop();
             resolved.push(module.clone());
         }
         Ok(())

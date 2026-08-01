@@ -28,8 +28,6 @@ pub struct FileImportResolverHook<'a> {
     seen_files: HashSet<PathBuf>,
     module_imports: Vec<(String, ModuleArtifact)>,
     file_cache: Option<&'a Mutex<FileItemCache>>,
-    /// Tracks the current recursion path for cycle detection.
-    pending_stack: Vec<String>,
 }
 
 // (ImportAliasPlan removed — import guards and aliases not supported)
@@ -41,7 +39,6 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: None,
-            pending_stack: Vec::new(),
         }
     }
 
@@ -52,7 +49,6 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: Some(file_cache),
-            pending_stack: Vec::new(),
         }
     }
 
@@ -118,13 +114,12 @@ impl<'a> FileImportResolverHook<'a> {
             };
 
             let module_path = import_path_to_string(&import_item.path);
+            // Every module path is resolved at most once. A re-import — even
+            // while the module is still being lowered further up the stack —
+            // is a no-op: the merged program is a single symbol space, so the
+            // in-progress module's items will already be included when its
+            // own lowering completes.
             if !self.seen_modules.insert(module_path.clone()) {
-                if self.pending_stack.contains(&module_path) {
-                    return Err(format!(
-                        "cyclic import: `{module_path}` (current resolution path: {})",
-                        self.pending_stack.join(" -> ")
-                    ));
-                }
                 continue;
             }
 
@@ -180,12 +175,10 @@ impl<'a> FileImportResolverHook<'a> {
                             prog
                         }
                     };
-                    self.pending_stack.push(module_path.clone());
                     self.lower_program_recursive(
                         &mut imported_program,
                         resolved.source_path.parent(),
                     )?;
-                    self.pending_stack.pop();
                     lowered_program_attributes.extend(imported_program.attributes);
                     original_items.extend(imported_program.items);
                     if crate::profiler::verbose() {
