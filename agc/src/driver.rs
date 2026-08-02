@@ -1,0 +1,1302 @@
+//! Compiler driver: CLI planning and pipeline orchestration.
+//!
+//! Owns [`EmitKind`], [`CompilePlan`] and the per-emit pipeline (lex,
+//! parse, import lowering, semantic analysis, type check, monomorph,
+//! codegen, link). The linker itself lives in `crate::link`.
+
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::env;
+
+use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
+use agc::module_artifact::{
+    ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
+};
+use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
+use agc::parser::ast;
+use agc::semantic::{
+    self,
+    analyzer::{Analyzer, SemanticAnalyzerHook},
+    comptime_cast_hook::ComptimeCastHook,
+    typeck::TypeChecker,
+};
+use agc::symbol_table::{CompilerPhase, CompilerSymbolTable};
+use agc::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
+use clap::ValueEnum;
+use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
+use owo_colors::OwoColorize;
+
+use crate::Cli;
+use crate::link::{link_exe, link_shared_module};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub(crate) enum EmitKind {
+    /// Link an executable.
+    Exe,
+    /// Emit an object file.
+    Obj,
+    /// Emit assembly.
+    Asm,
+    /// Emit LLVM IR (.ll).
+    LlvmIr,
+    /// (Future) Dump lexer tokens.
+    Tokens,
+    /// (Future) Dump parsed AST.
+    Ast,
+    /// Dump parser grammar.
+    Grammar,
+    /// Emit module interface artifact (.agm).
+    Module,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompilePlan {
+    pub(crate) emit: EmitKind,
+    pub(crate) inputs: Vec<PathBuf>,
+    pub(crate) output: PathBuf,
+    pub(crate) package_root: PathBuf,
+    pub(crate) include_dirs: Vec<PathBuf>,
+    pub(crate) defines: Vec<String>,
+    pub(crate) lib_dirs: Vec<PathBuf>,
+    pub(crate) libs: Vec<String>,
+    pub(crate) opt_level: Option<String>,
+    pub(crate) debug_info: bool,
+    pub(crate) target: Option<String>,
+    pub(crate) sysroot: Option<PathBuf>,
+    pub(crate) no_std: bool,
+    pub(crate) static_runtime: bool,
+    pub(crate) shared: bool,
+    pub(crate) verbose: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) profile: bool,
+    pub(crate) leak_check: bool,
+}
+
+impl CompilePlan {
+    fn describe_for_driver(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("emit={:?}", self.emit));
+        parts.push(format!("output={}", self.output.display()));
+        parts.push(format!("root={}", self.package_root.display()));
+
+        if let Some(t) = &self.target {
+            parts.push(format!("target={t}"));
+        }
+        if let Some(s) = &self.sysroot {
+            parts.push(format!("sysroot={}", s.display()));
+        }
+        if let Some(o) = &self.opt_level {
+            parts.push(format!("opt={o}"));
+        }
+        if self.debug_info {
+            parts.push("debug=true".to_string());
+        }
+        if self.no_std {
+            parts.push("no_std=true".to_string());
+        }
+        if self.static_runtime {
+            parts.push("static_runtime=true".to_string());
+        }
+        if self.leak_check {
+            parts.push("leak_check=true".to_string());
+        }
+        if self.shared {
+            parts.push("shared=true".to_string());
+        }
+        if !self.include_dirs.is_empty() {
+            parts.push(format!("I={}", self.include_dirs.len()));
+        }
+        if !self.defines.is_empty() {
+            parts.push(format!("D={}", self.defines.len()));
+        }
+        if !self.lib_dirs.is_empty() {
+            parts.push(format!("L={}", self.lib_dirs.len()));
+        }
+        if !self.libs.is_empty() {
+            parts.push(format!("l={}", self.libs.len()));
+        }
+
+        format!("agc {}", parts.join(" "))
+    }
+}
+
+fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
+    if let Some(e) = cli.emit {
+        return Ok(e);
+    }
+
+    let mut derived_flags = 0;
+    if cli.emit_llvm {
+        derived_flags += 1;
+    }
+    if cli.emit_asm {
+        derived_flags += 1;
+    }
+    if cli.compile_only {
+        derived_flags += 1;
+    }
+    if derived_flags > 1 {
+        return Err(
+            "conflicting flags: choose only one of --emit-llvm, -S, or -c (or use --emit=...)"
+                .to_string(),
+        );
+    }
+
+    let mut derived: Option<EmitKind> = None;
+    if cli.emit_llvm {
+        derived = Some(EmitKind::LlvmIr);
+    }
+    if cli.emit_asm {
+        derived = Some(EmitKind::Asm);
+    }
+    if cli.compile_only {
+        derived = Some(EmitKind::Obj);
+    }
+
+    Ok(derived.unwrap_or(EmitKind::Exe))
+}
+
+fn default_output_for(emit: EmitKind, inputs: &[PathBuf]) -> PathBuf {
+    match emit {
+        EmitKind::Exe => PathBuf::from("a.out"),
+        EmitKind::Obj => with_ext_or_default(inputs, "o"),
+        EmitKind::Asm => with_ext_or_default(inputs, "s"),
+        EmitKind::LlvmIr => with_ext_or_default(inputs, "ll"),
+        EmitKind::Tokens => with_ext_or_default(inputs, "tokens"),
+        EmitKind::Ast => with_ext_or_default(inputs, "ast"),
+        EmitKind::Grammar => with_ext_or_default(inputs, "grammar"),
+        EmitKind::Module => with_ext_or_default(inputs, "agm"),
+    }
+}
+
+fn with_ext_or_default(inputs: &[PathBuf], ext: &str) -> PathBuf {
+    let Some(first) = inputs.first() else {
+        return PathBuf::from(format!("out.{ext}"));
+    };
+    let stem = first.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    PathBuf::from(format!("{stem}.{ext}"))
+}
+
+fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
+    let emit = derive_emit(&cli)?;
+
+    if cli.inputs.is_empty() && emit != EmitKind::Grammar {
+        return Err("at least one input file is required (except for --emit=grammar)".to_string());
+    }
+
+    // For now keep multi-input support limited to link stage, like most compilers.
+    if cli.inputs.len() > 1 {
+        match emit {
+            EmitKind::Exe | EmitKind::Tokens | EmitKind::Ast | EmitKind::Grammar => {}
+            _ => {
+                if cli.output.is_some() {
+                    return Err("multiple input files with a single -o is not supported yet; omit -o or compile inputs individually".to_string());
+                }
+                return Err(
+                    "multiple input files are only supported for linking (no -c/-S/--emit-llvm)"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let output = cli
+        .output
+        .unwrap_or_else(|| default_output_for(emit, &cli.inputs));
+    let package_root = match cli.root {
+        Some(root) => root,
+        None => env::current_dir()
+            .map_err(|e| format!("failed to determine current working directory: {e}"))?,
+    };
+
+    Ok(CompilePlan {
+        emit,
+        inputs: cli.inputs,
+        output,
+        package_root,
+        include_dirs: cli.include_dirs,
+        defines: cli.defines,
+        lib_dirs: cli.lib_dirs,
+        libs: cli.libs,
+        opt_level: cli.opt_level,
+        debug_info: cli.debug_info,
+        target: cli.target,
+        sysroot: cli.sysroot,
+        no_std: cli.no_std || cli.static_runtime,
+        static_runtime: cli.static_runtime,
+        shared: cli.shared,
+        verbose: cli.verbose,
+        dry_run: cli.dry_run,
+        profile: cli.profile,
+        leak_check: cli.leak_check,
+    })
+}
+
+fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
+    let mut loader = ModuleLoader::new();
+    // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
+    loader.add_search_dir(&plan.package_root);
+
+    // Automatically search lib/silver/ under the package root for module artifacts.
+    let local_lib = plan.package_root.join("lib").join("silver");
+    if local_lib.is_dir() {
+        loader.add_search_dir(local_lib);
+    }
+
+    for dir in &plan.include_dirs {
+        loader.add_search_dir(dir);
+    }
+
+    for dir in module_loader_default_dirs(plan.sysroot.as_deref()) {
+        loader.add_search_dir(dir);
+    }
+
+    loader
+}
+
+fn module_path_from_source_path(plan: &CompilePlan, input: &Path) -> String {
+    let path = input.strip_prefix(&plan.package_root).unwrap_or(input);
+    let without_ext = path.with_extension("");
+    without_ext
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn module_binary_output_path(manifest_path: &Path, shared: bool) -> PathBuf {
+    manifest_path.with_extension(if shared { "so" } else { "o" })
+}
+
+fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> Option<String> {
+    let expected_target = plan.target.clone().unwrap_or_else(|| {
+        TargetMachine::get_default_triple()
+            .as_str()
+            .to_str()
+            .unwrap_or("<unknown>")
+            .to_string()
+    });
+
+    if module.target_triple != "unknown" && module.target_triple != expected_target {
+        return Some(format!(
+            "module `{}` target `{}` is incompatible with current build `{expected_target}`",
+            module.module_path, module.target_triple
+        ));
+    }
+
+    let expected_version = env!("CARGO_PKG_VERSION");
+    if module.compiler_version != expected_version {
+        return Some(format!(
+            "module `{}` was built by compiler version `{}` but current compiler is `{expected_version}`",
+            module.module_path, module.compiler_version
+        ));
+    }
+
+    for candidate in module.source_candidate_paths() {
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(source_text) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        let current_hash = hash_source_text(&source_text);
+        if current_hash != module.source_hash_fnv1a64 {
+            return Some(format!(
+                "module `{}` is stale: source at `{}` has changed since `{}` was built",
+                module.module_path,
+                candidate.display(),
+                module
+                    .artifact_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "its manifest".to_string())
+            ));
+        }
+        break;
+    }
+
+    None
+}
+
+fn collect_dependency_link_artifacts(
+    loader: &ModuleLoader,
+    roots: &[ModuleArtifact],
+    plan: &CompilePlan,
+    shared: bool,
+) -> Result<Vec<PathBuf>, String> {
+    let closure = loader.resolve_module_closure(roots)?;
+    let mut paths = Vec::new();
+    for module in closure {
+        if let Some(error) = artifact_compatibility_error(&module, plan) {
+            return Err(error);
+        }
+        let path = if shared {
+            module.shared_library_path()
+        } else {
+            module.static_library_path()
+        };
+        let Some(path) = path else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+/// Execute the full compile pipeline for a parsed CLI.
+pub(crate) fn run(cli: Cli) {
+    match derive_plan(cli) {
+        Ok(plan) => {
+            if plan.verbose || std::env::var_os("AGC_VERBOSE").is_some() {
+                eprintln!("{}", plan.describe_for_driver());
+                for input in &plan.inputs {
+                    eprintln!("  input: {}", input.display());
+                }
+                eprintln!("  --root {}", plan.package_root.display());
+                for inc in &plan.include_dirs {
+                    eprintln!("  -I {}", inc.display());
+                }
+                for def in &plan.defines {
+                    eprintln!("  -D {def}");
+                }
+                for dir in &plan.lib_dirs {
+                    eprintln!("  -L {}", dir.display());
+                }
+                for lib in &plan.libs {
+                    eprintln!("  -l {lib}");
+                }
+            }
+
+            // Temporary behavior: allow driver bring-up and scripting via -###/--dry-run.
+            // Once codegen exists, this becomes an actual compile.
+            if plan.dry_run || env::var_os("AGC_DRY_RUN").is_some() {
+                println!("{}", plan.describe_for_driver());
+                return;
+            }
+
+            if let Some(target) = plan.target.as_deref()
+                && matches!(
+                    plan.emit,
+                    EmitKind::Exe | EmitKind::Obj | EmitKind::Asm | EmitKind::LlvmIr
+                )
+                && let Err(e) = validate_target_triple_with_help(target)
+            {
+                eprintln!("agc: {}: {e}", "error".red().bold());
+                std::process::exit(2);
+            }
+
+            if plan.emit == EmitKind::Tokens {
+                for input in &plan.inputs {
+                    let src = match std::fs::read_to_string(input) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!(
+                                "agc: {}: failed to read {}: {e}",
+                                "error".red().bold(),
+                                input.display()
+                            );
+                            std::process::exit(2);
+                        }
+                    };
+
+                    match lexer::lex(&src) {
+                        Ok(tokens) => {
+                            if plan.inputs.len() > 1 {
+                                println!("== {} ==", input.display());
+                            }
+                            for t in tokens {
+                                // Compact, stable-ish output.
+                                println!(
+                                    "{:?} [{}..{}] {}",
+                                    t.kind, t.span.start, t.span.end, t.text
+                                );
+                            }
+                        }
+                        Err(errors) => {
+                            eprintln!(
+                                "agc: {}: lexer errors in {}",
+                                "error".red().bold(),
+                                input.display()
+                            );
+                            for e in errors {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        e.span,
+                                        &format!("{:?}", e.kind),
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            }
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                return;
+            }
+
+            if plan.emit == EmitKind::Grammar {
+                let prt_parser = parser::prt_parser::PRT_Parser::new(None);
+                let grammar = prt_parser.render_grammar_pretty();
+
+                if plan.inputs.len() > 1 {
+                    for input in &plan.inputs {
+                        println!("== {} ==", input.display());
+                        println!("{grammar}");
+                    }
+                } else {
+                    println!("{grammar}");
+                }
+                return;
+            }
+
+            if plan.emit == EmitKind::Ast {
+                for input in &plan.inputs {
+                    let src = match std::fs::read_to_string(input) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!(
+                                "agc: {}: failed to read {}: {e}",
+                                "error".red().bold(),
+                                input.display()
+                            );
+                            std::process::exit(2);
+                        }
+                    };
+
+                    match lexer::lex(&src) {
+                        Ok(tokens) => {
+                            let mut parser = parser::Parser::new_with_source(
+                                tokens,
+                                input.display().to_string(),
+                            );
+                            let (ast, errors) = parser.parse_program();
+
+                            if !errors.is_empty() {
+                                eprintln!("agc: parser errors:");
+                                for error in &errors {
+                                    eprintln!(
+                                        "{}",
+                                        diagnostics::render(
+                                            error.span().clone(),
+                                            &error.format_with_help(),
+                                            diagnostics::Severity::Error,
+                                        )
+                                    );
+                                }
+                                if ast.items.is_empty() {
+                                    std::process::exit(2);
+                                }
+                                eprintln!("agc: continuing with partial parse...");
+                            }
+
+                            let mut symbol_table = CompilerSymbolTable::new();
+                            symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
+                            symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
+
+                            if plan.inputs.len() > 1 {
+                                println!("== {} ==", input.display());
+                            }
+                            if plan.verbose {
+                                eprintln!(
+                                    "agc: symbol table [{}]: {}",
+                                    input.display(),
+                                    symbol_table.summary_line()
+                                );
+                            }
+                            println!("{}", ast_tree::render_program(&ast));
+                        }
+                        Err(errors) => {
+                            eprintln!(
+                                "agc: {}: lexer errors in {}",
+                                "error".red().bold(),
+                                input.display()
+                            );
+                            for e in errors {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        e.span,
+                                        &format!("{:?}", e.kind),
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            }
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                return;
+            }
+
+            let loader = build_module_loader(&plan);
+            profiler::install(profiler::Profiler::new(
+                plan.profile,
+                plan.profile && plan.verbose,
+            ));
+
+            let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
+            let mut exe_object_files: Vec<PathBuf> = Vec::new();
+            let exe_temp_dir = if plan.emit == EmitKind::Exe {
+                let pid = std::process::id();
+                let nonce = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(d) => d.as_nanos(),
+                    Err(e) => {
+                        eprintln!(
+                            "agc: {}: failed to compute temp dir nonce: {e}",
+                            "error".red().bold()
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                let dir = std::env::temp_dir().join(format!("agc-exe-{pid}-{nonce}"));
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    eprintln!(
+                        "agc: {}: failed to create temp dir {}: {e}",
+                        "error".red().bold(),
+                        dir.display()
+                    );
+                    std::process::exit(2);
+                }
+                Some(dir)
+            } else {
+                None
+            };
+            let mut native_libs = plan.libs.clone();
+            let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
+            let mut dependency_artifact_set: rustc_hash::FxHashSet<PathBuf> =
+                rustc_hash::FxHashSet::default();
+
+            for input in &plan.inputs {
+                profiler::begin_phase("read source");
+                let src = match std::fs::read_to_string(input) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "agc: {}: failed to read {}: {e}",
+                            "error".red().bold(),
+                            input.display()
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                profiler::end_phase("read source");
+
+                // Register the input source so diagnostic spans resolve to this
+                // file (imported modules register their own files).
+                let input_path = input.display().to_string();
+                let input_file = lexer::register_source(&input_path, &src);
+
+                profiler::begin_phase("lex");
+                let tokens = match lexer::lex_with_source(&src, input_file) {
+                    Ok(tokens) => tokens,
+                    Err(errors) => {
+                        eprintln!(
+                            "agc: {}: lexer errors in {}",
+                            "error".red().bold(),
+                            input.display()
+                        );
+                        for e in errors {
+                            eprintln!(
+                                "{}",
+                                diagnostics::render(
+                                    e.span,
+                                    &e.kind.to_string(),
+                                    diagnostics::Severity::Error,
+                                )
+                            );
+                        }
+                        std::process::exit(2);
+                    }
+                };
+                profiler::end_phase("lex");
+
+                profiler::begin_phase("parse");
+                let mut parser =
+                    parser::Parser::new_with_source(tokens, input.display().to_string());
+                let (mut ast, errors) = parser.parse_program();
+                profiler::end_phase("parse");
+
+                if !errors.is_empty() {
+                    eprintln!("agc: parser errors:");
+                    for error in &errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span().clone(),
+                                &error.format_with_help(),
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                    }
+                    if ast.items.is_empty() {
+                        std::process::exit(2);
+                    }
+                }
+
+                let pre_lowering_link_libs = match collect_program_link_libraries(&ast) {
+                    Ok(libs) => libs,
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                        std::process::exit(2);
+                    }
+                };
+
+                let base_dir = input.parent();
+                profiler::begin_phase("import lowering");
+                let import_lowering = match parser::FileImportResolverHook::new(&loader)
+                    .lower_program_imports(&mut ast, base_dir, Some(input))
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        eprintln!("agc: {}: {error}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                };
+                profiler::end_phase("import lowering");
+                let module_dependencies = import_lowering.module_dependencies;
+                let transitive_module_deps = import_lowering.transitive_module_deps;
+                let imported_modules = import_lowering.module_artifacts;
+                for module in &imported_modules {
+                    if let Some(error) = artifact_compatibility_error(module, &plan) {
+                        eprintln!("agc: {}: {error}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                }
+
+                let mut symbol_table = CompilerSymbolTable::new();
+                symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
+                symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
+
+                profiler::begin_phase("semantic");
+                let semantic_errors =
+                    run_semantic_hooks(&mut ast, &mut symbol_table, &imported_modules);
+                profiler::end_phase("semantic");
+                if !semantic_errors.is_empty() {
+                    eprintln!("agc: semantic errors:");
+                    for error in &semantic_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span.clone(),
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
+                profiler::begin_phase("type check");
+                TypeChecker::resolve_type_aliases_in_program(&mut ast);
+                let mut checker = TypeChecker::new().with_imported_modules(&imported_modules);
+                let (type_errors, mut monomorphs) =
+                    checker.check_program_with_table(&ast, &mut symbol_table);
+                // Populate ForIn iterator_type from typeck-resolved types
+                let resolved_iter_types = checker.take_resolved_iter_types();
+                if !resolved_iter_types.is_empty() {
+                    agc::semantic::typeck::populate_for_in_iterator_types(
+                        &mut ast,
+                        &resolved_iter_types,
+                    );
+                    // MonomorphRequest sources were captured before population,
+                    // so their ForIn nodes have iterator_type: None. Replace
+                    // the sources with the now-populated bodies from the AST.
+                    for request in &mut monomorphs {
+                        use agc::semantic::monomorph::MonomorphRequest;
+                        match request {
+                            MonomorphRequest::Function { source, .. } => {
+                                for item in &ast.items {
+                                    if let ast::ItemKind::Function(f) = &item.kind
+                                        && f.name.name == source.name.name
+                                    {
+                                        source.body = f.body.clone();
+                                        break;
+                                    }
+                                }
+                            }
+                            MonomorphRequest::ImplMethod {
+                                impl_item, method, ..
+                            } => {
+                                // Find matching impl in the populated AST and
+                                // replace the method body.
+                                for item in &ast.items {
+                                    if let ast::ItemKind::Impl(impl_item_ast) = &item.kind
+                                        && impl_item_ast.self_type == impl_item.self_type
+                                    {
+                                        for member in &impl_item_ast.items {
+                                            if let ast::ImplItemKind::Function(func) = member
+                                                && func.name.name == method.name.name
+                                            {
+                                                // Find matching method in our source impl
+                                                for source_member in &mut impl_item.items {
+                                                    if let ast::ImplItemKind::Function(source_func) =
+                                                        source_member
+                                                        && source_func.name.name == method.name.name
+                                                    {
+                                                        source_func.body = func.body.clone();
+                                                        break;
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !type_errors.is_empty() {
+                    eprintln!("agc: type errors:");
+                    for error in &type_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span.clone(),
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
+                let program_link_libs = match collect_program_link_libraries(&ast) {
+                    Ok(libs) => libs,
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                extend_unique_libs(&mut native_libs, &pre_lowering_link_libs);
+                extend_unique_libs(&mut native_libs, &program_link_libs);
+                for module in &imported_modules {
+                    extend_unique_libs(&mut native_libs, &module.native_libs);
+                }
+                match collect_dependency_link_artifacts(
+                    &loader,
+                    &imported_modules,
+                    &plan,
+                    plan.shared,
+                ) {
+                    Ok(paths) => {
+                        for path in paths {
+                            if dependency_artifact_set.insert(path.clone()) {
+                                dependency_link_artifacts.push(path);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("agc: {}: {error}", "error".red().bold());
+                        std::process::exit(2);
+                    }
+                }
+
+                profiler::end_phase("type check");
+
+                profiler::begin_phase("monomorph");
+                semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
+                profiler::end_phase("monomorph");
+                symbol_table.touch_phase(
+                    CompilerPhase::Monomorphize,
+                    format!("monomorph requests applied: {}", monomorphs.len()),
+                );
+
+                if matches!(plan.emit, EmitKind::Module) {
+                    let target_triple = plan.target.clone().unwrap_or_else(|| {
+                        TargetMachine::get_default_triple()
+                            .as_str()
+                            .to_str()
+                            .unwrap_or("<unknown>")
+                            .to_string()
+                    });
+                    let artifact = ModuleArtifact::from_program(
+                        module_name_from_path(input),
+                        module_path_from_source_path(&plan, input),
+                        input.display().to_string(),
+                        &src,
+                        &ast,
+                        target_triple,
+                        ModuleCodeArtifacts {
+                            has_static_library: !plan.shared,
+                            has_shared_library: plan.shared,
+                        },
+                        module_dependencies,
+                        transitive_module_deps,
+                        native_libs.clone(),
+                    );
+                    let bytes = match artifact.to_bytes() {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!(
+                                "agc: {}: failed to encode module artifact: {e}",
+                                "error".red().bold()
+                            );
+                            std::process::exit(2);
+                        }
+                    };
+                    if let Err(e) = std::fs::write(&plan.output, bytes) {
+                        eprintln!(
+                            "agc: {}: failed to write {}: {e}",
+                            "error".red().bold(),
+                            plan.output.display()
+                        );
+                        std::process::exit(2);
+                    }
+                    let binary_output = module_binary_output_path(&plan.output, plan.shared);
+                    if plan.shared {
+                        let temp_object = plan.output.with_extension("module.tmp.o");
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                &ast,
+                                &imported_modules,
+                                &temp_object,
+                                plan.target.as_deref(),
+                                plan.opt_level.as_deref(),
+                                &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
+                                plan.leak_check,
+                            );
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                        if let Err(error) = link_shared_module(
+                            &plan,
+                            &temp_object,
+                            &binary_output,
+                            &dependency_link_artifacts,
+                            &native_libs,
+                        ) {
+                            eprintln!("agc: {}: {error}", "error".red().bold());
+                            std::process::exit(2);
+                        }
+                        let _ = std::fs::remove_file(&temp_object);
+                    } else {
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                &ast,
+                                &imported_modules,
+                                &binary_output,
+                                plan.target.as_deref(),
+                                plan.opt_level.as_deref(),
+                                &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
+                                plan.leak_check,
+                            );
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                    }
+                    continue;
+                }
+
+                if matches!(
+                    plan.emit,
+                    EmitKind::LlvmIr | EmitKind::Exe | EmitKind::Obj | EmitKind::Asm
+                ) {
+                    symbol_table.touch_phase(CompilerPhase::Codegen, "LLVM codegen");
+                    symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
+                    if matches!(plan.emit, EmitKind::Obj) {
+                        profiler::begin_phase("codegen");
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                &ast,
+                                &imported_modules,
+                                &plan.output,
+                                plan.target.as_deref(),
+                                plan.opt_level.as_deref(),
+                                &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
+                                plan.leak_check,
+                            );
+                        profiler::end_phase("codegen");
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                    } else if matches!(plan.emit, EmitKind::Asm) {
+                        profiler::begin_phase("codegen");
+                        let result =
+                                codegen::llvm_ir::LlvmIrGenerator::emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
+                                    &ast,
+                                    &imported_modules,
+                                    &plan.output,
+                                    plan.target.as_deref(),
+                                    plan.opt_level.as_deref(),
+                                    &mut symbol_table,
+                                    Some(input),
+                                    Some(&src),
+                                    plan.debug_info,
+                                    plan.leak_check,
+                                );
+                        profiler::end_phase("codegen");
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                    } else if matches!(plan.emit, EmitKind::LlvmIr) {
+                        profiler::begin_phase("codegen");
+                        let output = codegen::llvm_ir::LlvmIrGenerator::generate_with_imports_and_table_and_source_with_leak_check(
+                                &ast,
+                                &imported_modules,
+                                &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
+                                plan.leak_check,
+                            );
+                        profiler::end_phase("codegen");
+                        match output {
+                            Ok(ir) => {
+                                llvm_units.push((
+                                    input.clone(),
+                                    apply_llvm_target_metadata(ir, plan.target.as_deref()),
+                                ));
+                            }
+                            Err(error) => {
+                                if let Some(span) = error.span {
+                                    eprintln!(
+                                        "{}",
+                                        diagnostics::render(
+                                            span,
+                                            &error.message,
+                                            diagnostics::Severity::Error,
+                                        )
+                                    );
+                                } else {
+                                    eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                                }
+                                std::process::exit(2);
+                            }
+                        }
+                    } else if matches!(plan.emit, EmitKind::Exe) {
+                        profiler::begin_phase("codegen");
+                        let temp_dir = exe_temp_dir.as_ref().unwrap();
+                        let stem = input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("input");
+                        let temp_o = temp_dir.join(format!("{stem}.o"));
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                &ast,
+                                &imported_modules,
+                                &temp_o,
+                                plan.target.as_deref(),
+                                plan.opt_level.as_deref(),
+                                &mut symbol_table,
+                                Some(input),
+                                Some(&src),
+                                plan.debug_info,
+                                plan.leak_check,
+                            );
+                        profiler::end_phase("codegen");
+                        if let Err(error) = result {
+                            if let Some(span) = error.span {
+                                eprintln!(
+                                    "{}",
+                                    diagnostics::render(
+                                        span,
+                                        &error.message,
+                                        diagnostics::Severity::Error,
+                                    )
+                                );
+                            } else {
+                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            }
+                            std::process::exit(2);
+                        }
+                        exe_object_files.push(temp_o);
+                    }
+                }
+                if plan.verbose {
+                    eprintln!(
+                        "agc: symbol table [{}]: {}",
+                        input.display(),
+                        symbol_table.summary_line()
+                    );
+                }
+            }
+
+            if plan.emit == EmitKind::LlvmIr {
+                let Some((_, ir)) = llvm_units.first() else {
+                    eprintln!("agc: {}: no LLVM IR units generated", "error".red().bold());
+                    std::process::exit(2);
+                };
+                if let Err(e) = std::fs::write(&plan.output, ir) {
+                    eprintln!(
+                        "agc: {}: failed to write {}: {e}",
+                        "error".red().bold(),
+                        plan.output.display()
+                    );
+                    std::process::exit(2);
+                }
+                profiler::print_report();
+                return;
+            }
+
+            if matches!(plan.emit, EmitKind::Obj | EmitKind::Asm | EmitKind::Module) {
+                profiler::print_report();
+                return;
+            }
+
+            if matches!(plan.emit, EmitKind::Exe) {
+                if exe_object_files.is_empty() {
+                    eprintln!("agc: {}: no object files to link", "error".red().bold());
+                    std::process::exit(2);
+                }
+                profiler::begin_phase("link");
+                if let Err(e) = link_exe(
+                    &plan,
+                    &exe_object_files,
+                    &dependency_link_artifacts,
+                    &native_libs,
+                ) {
+                    eprintln!("agc: {}: {e}", "error".red().bold());
+                    std::process::exit(2);
+                }
+                profiler::end_phase("link");
+                // Clean up temp dir
+                if let Some(dir) = &exe_temp_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                profiler::print_report();
+                return;
+            }
+
+            eprintln!(
+                "agc: {}: unsupported emit mode {:?}",
+                "error".red().bold(),
+                plan.emit
+            );
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("agc: {}: {e}", "error".red().bold());
+            std::process::exit(2);
+        }
+    }
+}
+#[allow(dead_code)]
+fn _is_ag_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("ag")
+}
+
+fn run_semantic_hooks(
+    program: &mut parser::Program,
+    symbol_table: &mut CompilerSymbolTable,
+    imported_modules: &[ModuleArtifact],
+) -> Vec<semantic::analyzer::SemanticError> {
+    let mut analyzer = Analyzer::new();
+    analyzer.inject_imported_modules(imported_modules);
+    let mut comptime_cast_hook = ComptimeCastHook::new();
+    let mut hooks: [&mut dyn SemanticAnalyzerHook; 1] = [&mut comptime_cast_hook];
+    analyzer.analyze_program_with_hooks_and_table(program, &mut hooks, symbol_table)
+}
+
+fn apply_llvm_target_metadata(ir: String, target: Option<&str>) -> String {
+    let Some(target) = target else {
+        return ir;
+    };
+    if ir.contains("target triple =") {
+        return ir;
+    }
+    let escaped_target = target.replace('\\', "\\\\").replace('"', "\\\"");
+    if let Some(first_newline) = ir.find('\n') {
+        let (first_line, rest) = ir.split_at(first_newline + 1);
+        format!("{first_line}target triple = \"{escaped_target}\"\n{rest}")
+    } else {
+        format!("target triple = \"{escaped_target}\"\n{ir}")
+    }
+}
+
+fn validate_target_triple_with_help(target: &str) -> Result<(), String> {
+    Target::initialize_all(&InitializationConfig::default());
+    let triple = TargetTriple::create(target);
+    if Target::from_triple(&triple).is_ok() {
+        return Ok(());
+    }
+
+    let host = TargetMachine::get_default_triple();
+    let host = host.as_str().to_str().unwrap_or("<unknown>");
+    let available = list_available_llvm_targets();
+    let available_text = if available.is_empty() {
+        "  - <none>".to_string()
+    } else {
+        format!("  - {}", available.join("\n  - "))
+    };
+    Err(format!(
+        "unknown target triple `{target}`.\n\
+         host triple: `{host}`\n\
+         available LLVM targets:\n{available_text}"
+    ))
+}
+
+fn list_available_llvm_targets() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = Target::get_first();
+    while let Some(target) = current {
+        let name = target.get_name().to_str().unwrap_or("<invalid>");
+        let desc = target.get_description().to_str().unwrap_or("");
+        if desc.is_empty() {
+            out.push(name.to_string());
+        } else {
+            out.push(format!("{name} ({desc})"));
+        }
+        current = target.get_next();
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_plan() -> CompilePlan {
+        CompilePlan {
+            emit: EmitKind::Exe,
+            inputs: Vec::new(),
+            output: PathBuf::from("a.out"),
+            package_root: PathBuf::from("."),
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            lib_dirs: Vec::new(),
+            libs: Vec::new(),
+            opt_level: None,
+            debug_info: false,
+            target: None,
+            sysroot: None,
+            no_std: false,
+            static_runtime: true,
+            shared: false,
+            verbose: false,
+            dry_run: false,
+            profile: false,
+            leak_check: false,
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("agc-main-{label}-{nonce}"))
+    }
+
+    fn test_module_artifact() -> ModuleArtifact {
+        ModuleArtifact {
+            module_name: "sample".to_string(),
+            module_path: "sample".to_string(),
+            source_path: String::new(),
+            source_hash_fnv1a64: hash_source_text("pub i32 answer() { return 42; }\n"),
+            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_triple: "unknown".to_string(),
+            code_artifacts: ModuleCodeArtifacts {
+                has_static_library: true,
+                has_shared_library: false,
+            },
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: Vec::new(),
+            native_libs: Vec::new(),
+            artifact_path: None,
+        }
+    }
+
+    #[test]
+    fn rejects_module_artifact_from_different_compiler_version() {
+        let mut artifact = test_module_artifact();
+        artifact.compiler_version = "0.0.0-test".to_string();
+
+        let error = artifact_compatibility_error(&artifact, &test_plan())
+            .expect("expected compiler version mismatch");
+        assert!(error.contains("compiler version"));
+    }
+
+    #[test]
+    fn rejects_stale_module_artifact_when_source_changed() {
+        let root = unique_temp_dir("stale-artifact");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("sample.ag");
+        let manifest_path = root.join("sample.agm");
+        std::fs::write(&source_path, "pub i32 answer() { return 7; }\n").unwrap();
+
+        let mut artifact = test_module_artifact();
+        artifact.artifact_path = Some(manifest_path);
+
+        let error = artifact_compatibility_error(&artifact, &test_plan())
+            .expect("expected stale source mismatch");
+        assert!(error.contains("is stale"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
