@@ -428,7 +428,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 } else {
                     let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
-                    self.emit_arith_values(&lhs, operator, &rhs, whole_expr)?
+                    let is_unsigned = type_is_unsigned(&target_ty);
+                    self.emit_arith_values(&lhs, operator, &rhs, whole_expr, is_unsigned)?
                 };
                 if self.lvalue_is_volatile(left) {
                     self.emit_volatile_store(target_ptr, updated)?;
@@ -730,6 +731,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         operator: &ast::BinaryOperator,
         rhs: &BasicValueEnum<'ctx>,
         whole_expr: &ast::Expression,
+        is_unsigned: bool,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
@@ -746,14 +748,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .builder
                         .build_int_mul(*lhs, *rhs, "imul")
                         .map_err(|e| CodegenError::new(format!("int mul failed: {e}")))?,
-                    ast::BinaryOperator::Divide | ast::BinaryOperator::DivideAssign => self
-                        .builder
-                        .build_int_signed_div(*lhs, *rhs, "idiv")
-                        .map_err(|e| CodegenError::new(format!("int div failed: {e}")))?,
-                    ast::BinaryOperator::Modulo | ast::BinaryOperator::ModuloAssign => self
-                        .builder
-                        .build_int_signed_rem(*lhs, *rhs, "irem")
-                        .map_err(|e| CodegenError::new(format!("int rem failed: {e}")))?,
+                    ast::BinaryOperator::Divide | ast::BinaryOperator::DivideAssign => {
+                        // Signed vs unsigned division matters once the high bit
+                        // is set (e.g. u64::MAX / 10 must not be -1 / 10).
+                        if is_unsigned {
+                            self.builder
+                                .build_int_unsigned_div(*lhs, *rhs, "idiv")
+                                .map_err(|e| CodegenError::new(format!("int div failed: {e}")))?
+                        } else {
+                            self.builder
+                                .build_int_signed_div(*lhs, *rhs, "idiv")
+                                .map_err(|e| CodegenError::new(format!("int div failed: {e}")))?
+                        }
+                    }
+                    ast::BinaryOperator::Modulo | ast::BinaryOperator::ModuloAssign => {
+                        if is_unsigned {
+                            self.builder
+                                .build_int_unsigned_rem(*lhs, *rhs, "irem")
+                                .map_err(|e| CodegenError::new(format!("int rem failed: {e}")))?
+                        } else {
+                            self.builder
+                                .build_int_signed_rem(*lhs, *rhs, "irem")
+                                .map_err(|e| CodegenError::new(format!("int rem failed: {e}")))?
+                        }
+                    }
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported arithmetic operation",
@@ -814,7 +832,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::BinaryOperator::Subtract
             | ast::BinaryOperator::Multiply
             | ast::BinaryOperator::Divide
-            | ast::BinaryOperator::Modulo => self.emit_arith_values(lhs, operator, rhs, whole_expr),
+            | ast::BinaryOperator::Modulo => {
+                self.emit_arith_values(lhs, operator, rhs, whole_expr, is_unsigned)
+            }
             ast::BinaryOperator::Equal
             | ast::BinaryOperator::NotEqual
             | ast::BinaryOperator::Less

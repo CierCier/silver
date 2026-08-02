@@ -1,0 +1,30 @@
+// Regression: i128/u128 integer literals must keep their full value in
+// codegen. They were previously truncated to the low 64 bits and
+// sign-extended (170141183460469231731687303715884105727 compiled as -1).
+import std.test;
+
+i32 main() {
+    test_start("i128/u128 literal codegen");
+
+    i128 max = (i128)170141183460469231731687303715884105727;
+    check(max == (i128)170141183460469231731687303715884105727, "i128::MAX literal round-trips");
+
+    i128 min = (i128)(-170141183460469231731687303715884105727) - (i128)1;
+    check(
+        min == (i128)(-170141183460469231731687303715884105727) - (i128)1,
+        "i128::MIN expression round-trips"
+    );
+
+    check(max / (i128)10 == (i128)17014118346046923173168730371588410572, "i128 division");
+    check(max % (i128)10 == (i128)7, "i128 modulo");
+    check(max - (i128)1 == (i128)170141183460469231731687303715884105726, "i128 subtraction");
+
+    u128 big = (u128)18446744073709551616; // 2^64: needs full 128 bits
+    check(big == (u128)18446744073709551616, "u128 literal above u64::MAX");
+
+    u128 all = (u128)-1;
+    check(all == (u128)-1, "u128::MAX via -1 cast");
+    check(all / (u128)10 == (u128)34028236692093846346337460743176821145, "u128 division");
+
+    return done();
+}

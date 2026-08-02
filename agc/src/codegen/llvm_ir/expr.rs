@@ -5,6 +5,7 @@ use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::module::Linkage;
 use inkwell::targets::TargetData;
+use inkwell::types::StringRadix;
 use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
     ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
@@ -338,11 +339,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let target = self.lower_basic_type(target_type)?;
         let value = match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => self
-                .context
-                .i64_type()
-                .const_int(*value as u64, true)
-                .as_basic_value_enum(),
+            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => {
+                // Emit at the target width; const_int_from_string preserves the
+                // full i128 value (const_int truncates through u64).
+                match target {
+                    BasicTypeEnum::IntType(int_ty) => int_ty
+                        .const_int_from_string(&value.to_string(), StringRadix::Decimal)
+                        .unwrap_or_else(|| int_ty.const_zero())
+                        .as_basic_value_enum(),
+                    _ => self
+                        .context
+                        .i64_type()
+                        .const_int(*value as u64, true)
+                        .as_basic_value_enum(),
+                }
+            }
             ast::ExpressionKind::Literal(ast::Literal::Float(value)) => self
                 .context
                 .f64_type()
@@ -518,11 +529,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         self.set_debug_location(&expr.span);
         match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => Ok(self
-                .context
-                .i64_type()
-                .const_int(*value as u64, true)
-                .as_basic_value_enum()),
+            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => {
+                if *value >= i64::MIN as i128 && *value <= i64::MAX as i128 {
+                    Ok(self
+                        .context
+                        .i64_type()
+                        .const_int(*value as u64, true)
+                        .as_basic_value_enum())
+                } else {
+                    // Values beyond i64 need their full width preserved:
+                    // const_int truncates through u64. Emit as i128 and let
+                    // the enclosing cast/let narrow to the expected type.
+                    self.context
+                        .i128_type()
+                        .const_int_from_string(&value.to_string(), StringRadix::Decimal)
+                        .map(|v| v.as_basic_value_enum())
+                        .ok_or_else(|| {
+                            CodegenError::with_span("invalid integer literal", expr.span.clone())
+                        })
+                }
+            }
             ast::ExpressionKind::Literal(ast::Literal::Float(value)) => Ok(self
                 .context
                 .f64_type()
@@ -1934,7 +1960,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::PatternKind::Literal(literal) => {
                     let cond = match (&scrutinee, literal) {
                         (BasicValueEnum::IntValue(lhs), ast::Literal::Integer(value)) => {
-                            let rhs = lhs.get_type().const_int(*value as u64, true);
+                            let rhs = lhs
+                                .get_type()
+                                .const_int_from_string(&value.to_string(), StringRadix::Decimal)
+                                .unwrap_or_else(|| lhs.get_type().const_int(*value as u64, true));
                             self.builder
                                 .build_int_compare(IntPredicate::EQ, *lhs, rhs, "match.expr.int")
                                 .map_err(|e| {
