@@ -159,6 +159,49 @@ i64 itoa(i64 v, u8* buf) {
     return utoa((u64)v, buf);
 }
 
+// ---------------------------------------------------------------------------
+// 128-bit integer formatting.
+// Buffer requirements: utoa128 <= 39 bytes, itoa128 <= 40 bytes (sign).
+// ---------------------------------------------------------------------------
+
+/// Format a u128 as decimal into `buf` (>= 40 bytes), returning the length.
+i64 utoa128(u128 v, u8* buf) {
+    if (v == (u128)0) {
+        buf[0] = (u8)48; // '0'
+        return 1;
+    }
+    i64 n = 0;
+    while (v != (u128)0) {
+        u128 q = v / (u128)10;
+        u128 r = v % (u128)10;
+        buf[n] = (u8)(48 + (i64)r);
+        n += 1;
+        v = q;
+    }
+    // Digits were produced least-significant first; reverse in place.
+    i64 lo = 0;
+    i64 hi = n - 1;
+    while (lo < hi) {
+        u8 t = buf[lo];
+        buf[lo] = buf[hi];
+        buf[hi] = t;
+        lo += 1;
+        hi -= 1;
+    }
+    return n;
+}
+
+/// Format an i128 as decimal into `buf` (>= 40 bytes), returning the length.
+i64 itoa128(i128 v, u8* buf) {
+    if (v < (i128)0) {
+        buf[0] = (u8)45; // '-'
+        // Two's-complement negation in u128 handles i128::MIN correctly.
+        u128 mag = (u128)0 - (u128)v;
+        return 1 + utoa128(mag, &buf[1]);
+    }
+    return utoa128((u128)v, buf);
+}
+
 i64 btoa(bool v, u8* buf) {
     if (v) {
         buf[0] = (u8)116; // 't'

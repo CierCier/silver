@@ -62,6 +62,7 @@ BufWriter* __buf_writer_list;
 // Scratch buffers for number formatting.
 struct __Buf32 { u8 data[32]; }
 struct __Buf64 { u8 data[64]; }
+struct __Buf40 { u8 data[40]; }
 
 impl BufWriter {
     /// Ensure internal buffer is initialized (lazy mmap).
@@ -149,6 +150,22 @@ impl BufWriter {
         __Buf32 tmp;
         u8* p = (u8*)&tmp;
         i64 n = utoa(v, p);
+        self.write(p, n);
+    }
+
+    /// Format and buffer a u128 value.
+    void write_u128(BufWriter* self, u128 v) {
+        __Buf40 tmp;
+        u8* p = (u8*)&tmp;
+        i64 n = utoa128(v, p);
+        self.write(p, n);
+    }
+
+    /// Format and buffer an i128 value.
+    void write_i128(BufWriter* self, i128 v) {
+        __Buf40 tmp;
+        u8* p = (u8*)&tmp;
+        i64 n = itoa128(v, p);
         self.write(p, n);
     }
 

@@ -46,12 +46,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 ast::PrimitiveType::Bool => Ok("write_bool".to_string()),
                 ast::PrimitiveType::Char => Ok("write_u8".to_string()),
-                ast::PrimitiveType::I128 => {
-                    Err("128-bit integer format is not supported yet".to_string())
-                }
-                ast::PrimitiveType::U128 => {
-                    Err("128-bit unsigned integer format is not supported yet".to_string())
-                }
+                ast::PrimitiveType::I128 => Ok("write_i128".to_string()),
+                ast::PrimitiveType::U128 => Ok("write_u128".to_string()),
                 _ => Err(format!(
                     "no BufWriter write method for primitive type {:?}",
                     p

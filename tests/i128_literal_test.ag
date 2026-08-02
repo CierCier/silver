@@ -2,6 +2,7 @@
 // codegen. They were previously truncated to the low 64 bits and
 // sign-extended (170141183460469231731687303715884105727 compiled as -1).
 import std.test;
+import std.io;
 
 i32 main() {
     test_start("i128/u128 literal codegen");
@@ -25,6 +26,12 @@ i32 main() {
     u128 all = (u128)-1;
     check(all == (u128)-1, "u128::MAX via -1 cast");
     check(all / (u128)10 == (u128)34028236692093846346337460743176821145, "u128 division");
+
+    test_start("i128/u128 println format");
+    i128 e = (i128)170141183460469231731687303715884105727;
+    u128 j = (u128)-1;
+    @println("i128={} u128={}", e, j);
+    check(true, "128-bit println compiles and runs");
 
     return done();
 }
