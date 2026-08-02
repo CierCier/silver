@@ -51,6 +51,27 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         }
     }
 
+    // Reference types: `&T` / `&mut T` inside casts (elided lifetime).
+    if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
+        cursor += 1;
+        let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
+            cursor += 1;
+            true
+        } else {
+            false
+        };
+        let inner = parse_type_in_parens(tokens, cursor, end)?;
+        let span = tokens[start].span.extend_to(&tokens[end - 1].span);
+        return Some(ast::Type {
+            kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
+                is_mutable,
+                lifetime: None,
+                inner: Box::new(inner),
+            })),
+            span,
+        });
+    }
+
     let base = match tokens.get(cursor)?.kind {
         Token::I8 => ast::TypeKind::Primitive(ast::PrimitiveType::I8),
         Token::I16 => ast::TypeKind::Primitive(ast::PrimitiveType::I16),
@@ -157,6 +178,27 @@ fn parse_simple_type_prefix(
         if cursor >= end {
             return None;
         }
+    }
+
+    // Reference types: `&T` / `&mut T` (elided lifetime); nested recurse.
+    if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
+        cursor += 1;
+        let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
+            cursor += 1;
+            true
+        } else {
+            false
+        };
+        let (inner, next) = parse_simple_type_prefix(tokens, cursor, end)?;
+        let ty = ast::Type {
+            kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
+                is_mutable,
+                lifetime: None,
+                inner: Box::new(inner),
+            })),
+            span: tokens[start].span.extend_to(&tokens[next - 1].span),
+        };
+        return Some((ty, next));
     }
 
     let mut ty = {
@@ -1249,6 +1291,12 @@ fn parse_unary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
 
     if matches!(token.kind, Token::BitwiseAnd | Token::And) {
         cursor.bump();
+        // `&mut x` explicitly marks a mutable reference; `&x` keeps the
+        // legacy always-mutable spelling (the type checker derives the
+        // effective mutability from the source variable).
+        if matches!(cursor.current().map(|t| &t.kind), Some(Token::Mut)) {
+            cursor.bump();
+        }
         let inner = parse_unary(cursor)?;
         return Ok(ast::Expression {
             kind: Box::new(ast::ExpressionKind::Reference {

@@ -774,6 +774,22 @@ pub(crate) fn run(cli: Cli) {
 
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
+                let escape_errors = agc::semantic::escape_check::check_program(&ast);
+                if !escape_errors.is_empty() {
+                    eprintln!("agc: escape errors:");
+                    for error in &escape_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
                 let move_errors = agc::semantic::move_check::check_program(&ast);
                 if !move_errors.is_empty() {
                     eprintln!("agc: move errors:");

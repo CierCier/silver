@@ -889,6 +889,29 @@ impl PRT_Parser {
             }
         }
 
+        // Reference types: `&T` / `&mut T` (elided lifetime — named `'a`
+        // syntax is a later phase). Nested references recurse.
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
+            cursor += 1;
+            let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
+                cursor += 1;
+                true
+            } else {
+                false
+            };
+            let (inner, next) = self.parse_type_prefix(tokens, cursor, end)?;
+            let start_span = tokens[start].span;
+            let reference = ast::Type {
+                kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
+                    is_mutable,
+                    lifetime: None,
+                    inner: Box::new(inner),
+                })),
+                span: start_span.extend_to(&tokens[next - 1].span),
+            };
+            return Some((reference, next));
+        }
+
         let mut ty = if matches!(tokens[cursor].kind, Token::LeftParen) {
             let open = cursor;
             cursor += 1;

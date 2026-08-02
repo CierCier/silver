@@ -3010,6 +3010,44 @@ impl TypeChecker {
             return true;
         }
 
+        // References and pointers share the same representation: a reference
+        // is accepted where a pointer is expected and vice versa (legacy `&x`
+        // expressions type as Pointer while `&T` params are Reference).
+        // Non-volatile pointers only (a volatile pointee must not silently
+        // become a plain reference).
+        let view_compatible = match (expected, found) {
+            (
+                Type::Reference { inner: e_inner, .. },
+                Type::Pointer {
+                    inner: f_inner,
+                    is_volatile,
+                    ..
+                },
+            ) => !is_volatile && e_inner == f_inner,
+            (
+                Type::Pointer {
+                    inner: e_inner,
+                    is_volatile,
+                    ..
+                },
+                Type::Reference { inner: f_inner, .. },
+            ) => !is_volatile && e_inner == f_inner,
+            // Mutable references coerce to immutable ones.
+            (
+                Type::Reference {
+                    is_mutable,
+                    inner: e_inner,
+                },
+                Type::Reference {
+                    is_mutable: f_mut,
+                    inner: f_inner,
+                },
+            ) => (!*is_mutable || *f_mut) && e_inner == f_inner,
+            _ => false,
+        };
+        if view_compatible {
+            return true;
+        }
         match (
             self.enum_backing_type(expected),
             self.enum_backing_type(found),
@@ -3091,9 +3129,22 @@ impl TypeChecker {
                     inner: found_inner,
                 },
             ) => {
-                is_mutable == found_mut
+                // Mutable references coerce to immutable ones.
+                (!*is_mutable || *found_mut)
                     && self.infer_type_params(inner, found_inner, type_params, mapping)
             }
+            (
+                Type::Reference { inner, .. },
+                Type::Pointer {
+                    inner: found_inner, ..
+                },
+            ) => self.infer_type_params(inner, found_inner, type_params, mapping),
+            (
+                Type::Pointer { inner, .. },
+                Type::Reference {
+                    inner: found_inner, ..
+                },
+            ) => self.infer_type_params(inner, found_inner, type_params, mapping),
             (
                 Type::Pointer {
                     is_mutable,
