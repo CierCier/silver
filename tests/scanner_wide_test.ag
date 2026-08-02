@@ -1,0 +1,82 @@
+// Test suite for the full Scanner numeric family: signed/unsigned widths,
+// floats, bool, overflow saturation, and the String -> str cast.
+//
+// Input (see test_stdin in tests/run_tests.sh):
+//   -5 -300 70000 -9000000000 170141183460469231731687303715884105727
+//   255 65000 4000000000 18446744073709551615
+//   340282366920938463463374607431768211455
+//   300 -40000 256 -1
+//   3.5 -2.25 1e3 true false hello
+import std.test;
+import std.io.scanner;
+import std.string;
+
+i32 main() {
+    test_start("scanner wide readers");
+
+    Scanner s = Scanner.stdin();
+
+    // Signed family, exact values.
+    check(s.next_i8() == (i8)-5, "next_i8 negative");
+    check(s.next_i16() == (i16)-300, "next_i16");
+    check(s.next_i32() == 70000, "next_i32");
+    check(s.next_i64() == -9000000000, "next_i64");
+    check(
+        s.next_i128() == (i128)170141183460469231731687303715884105727,
+        "next_i128 i128::MAX"
+    );
+
+    // Unsigned family, exact values.
+    check(s.next_u8() == (u8)255, "next_u8");
+    check(s.next_u16() == (u16)65000, "next_u16");
+    check(s.next_u32() == (u32)4000000000, "next_u32");
+    check(s.next_u64() == (u64)18446744073709551615, "next_u64 u64::MAX");
+    check(s.next_u128() == (u128)-1, "next_u128 u128::MAX");
+
+    // Overflow saturation. Each saturated read sets ok = false (sticky
+    // error latch), so reset before the next read.
+    check(s.next_i8() == (i8)127, "next_i8 saturates up");
+    s.ok = true;
+    check(s.next_i16() == (i16)-32768, "next_i16 saturates down");
+    s.ok = true;
+    check(s.next_u8() == (u8)255, "next_u8 saturates up");
+    s.ok = true;
+
+    // Negative token into an unsigned reader is rejected (ok = false).
+    u64 neg = s.next_u64();
+    check(neg == (u64)0 && !s.good(), "next_u64 rejects '-'");
+    s.ok = true;
+
+    // Floats: value, negative, exponent.
+    f32 fv = s.next_f32();
+    check(fv > (f32)3.49 && fv < (f32)3.51, "next_f32");
+    f64 dv = s.next_f64();
+    check(dv > -2.26 && dv < -2.24, "next_f64 negative");
+    f64 ev = s.next_f64();
+    check(ev > 999.9 && ev < 1000.1, "next_f64 exponent");
+
+    // Bools.
+    bool bt = s.next_bool();
+    check(bt, "next_bool true");
+    bool bf = s.next_bool();
+    check(!bf, "next_bool false");
+
+    // next_string plus the String -> str cast: borrowed view, ownership
+    // stays with the String.
+    String owned = s.next_string();
+    check(owned.equals("hello"), "next_string");
+    str view = (str)owned;
+    u8* q = (u8*)view;
+    check(
+        q[0] == (u8)'h' && q[4] == (u8)'o' && q[5] == (u8)0,
+        "String cast to str gives NUL-terminated view"
+    );
+    owned.push((u8)'!');
+    check(owned.equals("hello!"), "String still owns its buffer after cast");
+    owned.drop();
+
+    check(s.good(), "scanner good() at end");
+    s.drop();
+
+    return done();
+}

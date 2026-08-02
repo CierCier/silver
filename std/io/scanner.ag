@@ -116,10 +116,9 @@ impl Scanner {
         return String.from_str(tok);
     }
 
-    /// Parse the next token as a signed i64.
-    /// Overflow saturates to i64::MIN or i64::MAX and sets ok = false.
-    /// Non-numeric tokens set ok = false and return 0.
-    i64 next_i64(Scanner* self) {
+    /// Parse the next token as a signed integer, saturating to [lo, hi] on
+    /// overflow (ok = false). Non-numeric tokens set ok = false and return 0.
+    i64 _parse_signed(Scanner* self, i64 lo, i64 hi) {
         str tok = self.next();
         if (!self.ok) {
             return 0;
@@ -140,36 +139,29 @@ impl Scanner {
             return 0;
         }
         i64 val = 0;
-        // Pre-computed overflow thresholds:
-        //   i64::MAX / 10 = 922337203685477580
-        //   i64::MIN / 10 = -922337203685477580
+        // Thresholds: at every digit step val*10 +/- digit must stay within
+        // [lo, hi]. Truncating division and sign-preserving remainder work
+        // for negative bounds (e.g. i64::MIN: lo_div = -922337203685477580,
+        // lo_rem = -8, so digit > 8 overflows when val == lo_div).
+        i64 lo_div = lo / 10;
+        i64 hi_div = hi / 10;
+        i64 lo_rem = lo % 10;
+        i64 hi_rem = hi % 10;
         bool overflow = false;
         while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
             i64 digit = (i64)(p[i] - (u8)'0');
             if (!overflow) {
                 if (neg) {
-                    if (val < -922337203685477580) {
+                    if (val < lo_div || (val == lo_div && digit > (0 - lo_rem))) {
                         overflow = true;
                     } else {
-                        val = val * 10;
-                        // Check val - digit < i64::MIN
-                        if (val < -9223372036854775807 - 1 + digit) {
-                            overflow = true;
-                        } else {
-                            val = val - digit;
-                        }
+                        val = val * 10 - digit;
                     }
                 } else {
-                    if (val > 922337203685477580) {
+                    if (val > hi_div || (val == hi_div && digit > hi_rem)) {
                         overflow = true;
                     } else {
-                        val = val * 10;
-                        // Check val + digit > i64::MAX
-                        if (val > 9223372036854775807 - digit) {
-                            overflow = true;
-                        } else {
-                            val = val + digit;
-                        }
+                        val = val * 10 + digit;
                     }
                 }
             }
@@ -182,88 +174,16 @@ impl Scanner {
         if (overflow) {
             self.ok = false;
             if (neg) {
-                return -9223372036854775807 - 1;  // i64::MIN
+                return lo;
             }
-            return 9223372036854775807;  // i64::MAX
+            return hi;
         }
         return val;
     }
 
-    /// Parse the next token as a signed i32.
-    /// Overflow saturates to i32::MIN or i32::MAX and sets ok = false.
-    i32 next_i32(Scanner* self) {
-        str tok = self.next();
-        if (!self.ok) {
-            return 0;
-        }
-        u8* p = (u8*)tok;
-        i64 i = 0;
-        bool neg = false;
-        if (p[i] == (u8)'-') {
-            neg = true;
-            i = i + 1;
-        } else {
-            if (p[i] == (u8)'+') {
-                i = i + 1;
-            }
-        }
-        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
-            self.ok = false;
-            return 0;
-        }
-        i64 val = 0;
-        // i32 overflow thresholds:
-        //   i32::MAX / 10 = 214748364
-        //   i32::MIN / 10 = -214748364
-        bool overflow = false;
-        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
-            i64 digit = (i64)(p[i] - (u8)'0');
-            if (!overflow) {
-                if (neg) {
-                    if (val < -214748364) {
-                        overflow = true;
-                    } else {
-                        val = val * 10;
-                        // Check val - digit < i32::MIN
-                        if (val < -2147483647 - 1 + digit) {
-                            overflow = true;
-                        } else {
-                            val = val - digit;
-                        }
-                    }
-                } else {
-                    if (val > 214748364) {
-                        overflow = true;
-                    } else {
-                        val = val * 10;
-                        // Check val + digit > i32::MAX
-                        if (val > 2147483647 - digit) {
-                            overflow = true;
-                        } else {
-                            val = val + digit;
-                        }
-                    }
-                }
-            }
-            i = i + 1;
-        }
-        if (p[i] != (u8)0) {
-            self.ok = false;
-            return 0;
-        }
-        if (overflow) {
-            self.ok = false;
-            if (neg) {
-                return -2147483647 - 1;  // i32::MIN
-            }
-            return 2147483647;  // i32::MAX
-        }
-        return (i32)val;
-    }
-
-    /// Parse the next token as an unsigned u64.
-    /// Overflow sets ok = false and returns u64::MAX.
-    u64 next_u64(Scanner* self) {
+    /// Parse the next token as an unsigned integer, saturating to [0, hi] on
+    /// overflow (ok = false). A leading '-' sets ok = false and returns 0.
+    u64 _parse_unsigned(Scanner* self, u64 hi) {
         str tok = self.next();
         if (!self.ok) {
             return (u64)0;
@@ -283,14 +203,13 @@ impl Scanner {
             return (u64)0;
         }
         u64 val = (u64)0;
-        // u64 overflow thresholds: cutdiv = u64::MAX / 10, cutrem = u64::MAX % 10
-        u64 cutdiv = (u64)1844674407370955161;
-        u64 cutrem = (u64)5;
+        u64 hi_div = hi / (u64)10;
+        u64 hi_rem = hi % (u64)10;
         bool overflow = false;
         while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
             u64 digit = (u64)(p[i] - (u8)'0');
             if (!overflow) {
-                if (val > cutdiv || (val == cutdiv && digit > cutrem)) {
+                if (val > hi_div || (val == hi_div && digit > hi_rem)) {
                     overflow = true;
                 } else {
                     val = val * (u64)10 + digit;
@@ -304,9 +223,282 @@ impl Scanner {
         }
         if (overflow) {
             self.ok = false;
-            return (u64)-1;  // u64::MAX
+            return hi;
         }
         return val;
+    }
+
+    /// Parse the next token as a signed i8.
+    /// Overflow saturates to i8::MIN or i8::MAX and sets ok = false.
+    i8 next_i8(Scanner* self) {
+        return (i8)self._parse_signed(-128, 127);
+    }
+
+    /// Parse the next token as a signed i16.
+    /// Overflow saturates to i16::MIN or i16::MAX and sets ok = false.
+    i16 next_i16(Scanner* self) {
+        return (i16)self._parse_signed(-32768, 32767);
+    }
+
+    /// Parse the next token as a signed i32.
+    /// Overflow saturates to i32::MIN or i32::MAX and sets ok = false.
+    i32 next_i32(Scanner* self) {
+        return (i32)self._parse_signed(-2147483647 - 1, 2147483647);
+    }
+
+    /// Parse the next token as a signed i64.
+    /// Overflow saturates to i64::MIN or i64::MAX and sets ok = false.
+    i64 next_i64(Scanner* self) {
+        return self._parse_signed(-9223372036854775807 - 1, 9223372036854775807);
+    }
+
+    /// Parse the next token as a signed i128.
+    /// Overflow saturates to i128::MIN or i128::MAX and sets ok = false.
+    i128 next_i128(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return (i128)0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        bool neg = false;
+        if (p[i] == (u8)'-') {
+            neg = true;
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'+') {
+                i = i + 1;
+            }
+        }
+        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
+            self.ok = false;
+            return (i128)0;
+        }
+        i128 val = (i128)0;
+        i128 lo = (i128)(-170141183460469231731687303715884105727) - (i128)1;  // i128::MIN
+        i128 hi = (i128)170141183460469231731687303715884105727;              // i128::MAX
+        i128 lo_div = lo / (i128)10;
+        i128 hi_div = hi / (i128)10;
+        i128 lo_rem = lo % (i128)10;
+        i128 hi_rem = hi % (i128)10;
+        bool overflow = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            i128 digit = (i128)(p[i] - (u8)'0');
+            if (!overflow) {
+                if (neg) {
+                    if (val < lo_div || (val == lo_div && digit > ((i128)0 - lo_rem))) {
+                        overflow = true;
+                    } else {
+                        val = val * (i128)10 - digit;
+                    }
+                } else {
+                    if (val > hi_div || (val == hi_div && digit > hi_rem)) {
+                        overflow = true;
+                    } else {
+                        val = val * (i128)10 + digit;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if (p[i] != (u8)0) {
+            self.ok = false;
+            return (i128)0;
+        }
+        if (overflow) {
+            self.ok = false;
+            if (neg) {
+                return lo;
+            }
+            return hi;
+        }
+        return val;
+    }
+
+    /// Parse the next token as an unsigned u8.
+    /// Overflow sets ok = false and returns u8::MAX.
+    u8 next_u8(Scanner* self) {
+        return (u8)self._parse_unsigned(255);
+    }
+
+    /// Parse the next token as an unsigned u16.
+    /// Overflow sets ok = false and returns u16::MAX.
+    u16 next_u16(Scanner* self) {
+        return (u16)self._parse_unsigned(65535);
+    }
+
+    /// Parse the next token as an unsigned u32.
+    /// Overflow sets ok = false and returns u32::MAX.
+    u32 next_u32(Scanner* self) {
+        return (u32)self._parse_unsigned(4294967295);
+    }
+
+    /// Parse the next token as an unsigned u64.
+    /// Overflow sets ok = false and returns u64::MAX.
+    u64 next_u64(Scanner* self) {
+        return self._parse_unsigned(18446744073709551615);
+    }
+
+    /// Parse the next token as an unsigned u128.
+    /// Overflow sets ok = false and returns u128::MAX.
+    u128 next_u128(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return (u128)0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        if (p[i] == (u8)'+') {
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'-') {
+                self.ok = false;
+                return (u128)0;
+            }
+        }
+        if (p[i] < (u8)'0' || p[i] > (u8)'9') {
+            self.ok = false;
+            return (u128)0;
+        }
+        u128 val = (u128)0;
+        u128 hi = (u128)-1;  // u128::MAX
+        u128 hi_div = hi / (u128)10;
+        u128 hi_rem = hi % (u128)10;
+        bool overflow = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            u128 digit = (u128)(p[i] - (u8)'0');
+            if (!overflow) {
+                if (val > hi_div || (val == hi_div && digit > hi_rem)) {
+                    overflow = true;
+                } else {
+                    val = val * (u128)10 + digit;
+                }
+            }
+            i = i + 1;
+        }
+        if (p[i] != (u8)0) {
+            self.ok = false;
+            return (u128)0;
+        }
+        if (overflow) {
+            self.ok = false;
+            return hi;
+        }
+        return val;
+    }
+
+    /// Parse the next token as a 64-bit float.
+    /// Supports optional sign, fraction and exponent. Values that overflow
+    /// become infinity (IEEE semantics); malformed tokens set ok = false.
+    f64 next_f64(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return 0.0;
+        }
+        u8* p = (u8*)tok;
+        i64 i = 0;
+        bool neg = false;
+        if (p[i] == (u8)'-') {
+            neg = true;
+            i = i + 1;
+        } else {
+            if (p[i] == (u8)'+') {
+                i = i + 1;
+            }
+        }
+        f64 val = 0.0;
+        bool any = false;
+        while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+            val = val * 10.0 + (f64)(p[i] - (u8)'0');
+            i = i + 1;
+            any = true;
+        }
+        if (p[i] == (u8)'.') {
+            i = i + 1;
+            f64 scale = 1.0;
+            while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+                scale = scale * 10.0;
+                val = val + (f64)(p[i] - (u8)'0') / scale;
+                i = i + 1;
+                any = true;
+            }
+        }
+        if (p[i] == (u8)'e' || p[i] == (u8)'E') {
+            i = i + 1;
+            bool eneg = false;
+            if (p[i] == (u8)'-') {
+                eneg = true;
+                i = i + 1;
+            } else {
+                if (p[i] == (u8)'+') {
+                    i = i + 1;
+                }
+            }
+            i64 exp = 0;
+            bool eany = false;
+            while (p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+                exp = exp * 10 + (i64)(p[i] - (u8)'0');
+                i = i + 1;
+                eany = true;
+            }
+            if (!eany) {
+                self.ok = false;
+                return 0.0;
+            }
+            // Clamp absurd exponents to bound the scaling loop; beyond ~309
+            // multiplications the value is already +/-inf or 0.
+            i64 n = exp;
+            if (n > 400) {
+                n = 400;
+            }
+            f64 e = 1.0;
+            i64 j = 0;
+            while (j < n) {
+                e = e * 10.0;
+                j = j + 1;
+            }
+            if (eneg) {
+                val = val / e;
+            } else {
+                val = val * e;
+            }
+        }
+        if (!any || p[i] != (u8)0) {
+            self.ok = false;
+            return 0.0;
+        }
+        if (neg) {
+            val = 0.0 - val;
+        }
+        return val;
+    }
+
+    /// Parse the next token as a 32-bit float.
+    /// Same syntax as next_f64; the result is narrowed to f32.
+    f32 next_f32(Scanner* self) {
+        f64 v = self.next_f64();
+        if (!self.ok) {
+            return (f32)0;
+        }
+        return (f32)v;
+    }
+
+    /// Parse the next token as a boolean ("true" / "false").
+    /// Any other token sets ok = false and returns false.
+    bool next_bool(Scanner* self) {
+        str tok = self.next();
+        if (!self.ok) {
+            return false;
+        }
+        u8* q = (u8*)tok;
+        if (q[0] == (u8)'t' && q[1] == (u8)'r' && q[2] == (u8)'u' && q[3] == (u8)'e' && q[4] == (u8)0) {
+            return true;
+        }
+        if (q[0] == (u8)'f' && q[1] == (u8)'a' && q[2] == (u8)'l' && q[3] == (u8)'s' && q[4] == (u8)'e' && q[5] == (u8)0) {
+            return false;
+        }
+        self.ok = false;
+        return false;
     }
 
     /// Return the next line (bytes up to but not including LF or CRLF).

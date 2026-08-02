@@ -336,5 +336,22 @@ i32 main(){
     test_start("concat String + str (SKIP)");
     check(true, "concat op skipped - ABI limitation for large structs");
 
+    // String -> str cast: borrowed NUL-terminated view; the String keeps
+    // ownership of the buffer (the by-value cast copy nulls its pointer).
+    test_start("String cast to str");
+    {
+        String sc = String.from_str("hello");
+        str v = (str)sc;
+        u8* p = (u8*)v;
+        assert_true(
+            p[0] == (u8)'h' && p[4] == (u8)'o' && p[5] == (u8)0,
+            "cast str view is NUL-terminated"
+        );
+        sc.push((u8)'!');
+        str v2 = (str)sc;
+        assert_eq_str("hello!", v2, "String still owns its buffer after cast");
+        sc.drop();
+    }
+
     return done();
 }
