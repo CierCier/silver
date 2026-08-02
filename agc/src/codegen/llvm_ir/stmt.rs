@@ -6,7 +6,7 @@ use inkwell::values::{BasicValueEnum, FunctionValue};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
-use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, VarInfo};
+use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -95,45 +95,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 continue;
             }
             let ty_for_drop = param.param_type.clone();
-            if let Some(drop_fn_name) = self.get_drop_function_name(&ty_for_drop)? {
-                let function = self.current_fn.ok_or_else(|| {
-                    CodegenError::new("no active function for destructor".to_string())
+            let alloca = self
+                .variables
+                .last()
+                .and_then(|scope| scope.get(&param.name.name))
+                .map(|vi| vi.ptr)
+                .ok_or_else(|| {
+                    CodegenError::new(format!(
+                        "parameter alloca for `{}` not found",
+                        param.name.name
+                    ))
                 })?;
-                let flag_alloca = self.create_entry_alloca(
-                    function,
-                    &format!("{}.drop", param.name.name),
-                    self.context.bool_type().as_basic_type_enum(),
-                )?;
-                self.builder
-                    .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
-                    .map_err(|e| {
-                        CodegenError::new(format!("failed to init param drop flag: {e}"))
-                    })?;
-                self.drop_flags.insert(param.name.name.clone(), flag_alloca);
-
-                let alloca = self
-                    .variables
-                    .last()
-                    .and_then(|scope| scope.get(&param.name.name))
-                    .map(|vi| vi.ptr)
-                    .ok_or_else(|| {
-                        CodegenError::new(format!(
-                            "parameter alloca for `{}` not found",
-                            param.name.name
-                        ))
-                    })?;
-
-                // Register field drops before the parameter's own drop so the
-                // struct drop fires first (last-registered in LIFO).
-                self.register_field_drops(&ty_for_drop, alloca, flag_alloca)?;
-
-                if let Some(scope) = self.defers.last_mut() {
-                    scope.push(DeferredEntry {
-                        action: DeferAction::DropCall(drop_fn_name, alloca),
-                        flag: Some(flag_alloca),
-                    });
-                }
-            }
+            self.register_drop_flag(&param.name.name, &ty_for_drop, alloca)?;
         }
 
         self.generate_block(body)?;
@@ -828,33 +801,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Check if this variable's type implements Drop; if so, set up a
         // drop flag and register the cascade (field drops, then own drop).
-        if let Some(drop_fn_name) = self.get_drop_function_name(&ty_for_drop)? {
-            let function = self.current_fn.ok_or_else(|| {
-                CodegenError::new("no active function for destructor".to_string())
-            })?;
-            // Create a drop flag (i1), initialized to true
-            let flag_alloca = self.create_entry_alloca(
-                function,
-                &format!("{}.drop", identifier.name),
-                self.context.bool_type().as_basic_type_enum(),
-            )?;
-            self.builder
-                .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
-                .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
-            self.drop_flags.insert(identifier.name.clone(), flag_alloca);
-
-            // Register field drops BEFORE the struct's own drop, so they
-            // fire AFTER it in LIFO (struct drop is last-registered, fires first).
-            self.register_field_drops(&ty_for_drop, alloca, flag_alloca)?;
-
-            if let Some(scope) = self.defers.last_mut() {
-                scope.push(DeferredEntry {
-                    action: DeferAction::DropCall(drop_fn_name, alloca),
-                    flag: Some(flag_alloca),
-                });
-            }
-        }
-        Ok(())
+        self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)
     }
 
     pub(crate) fn infer_ast_type_from_value(

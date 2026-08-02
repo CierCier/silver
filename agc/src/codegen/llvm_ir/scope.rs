@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::module::Linkage;
+use inkwell::types::BasicType;
 use inkwell::values::{BasicMetadataValueEnum, PointerValue};
 
 use crate::codegen::SilverGenerator;
@@ -224,6 +225,46 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         // 3. No Drop trait impl
         Ok(None)
+    }
+
+    /// Allocate a 1-bit drop flag for `name`, initialize it to true, and
+    /// register `var_ptr`'s destructor (plus cascaded field drops) as a
+    /// deferred drop on the current scope. Records the flag so `move` and
+    /// by-value transfers can clear it. Shared by parameters and locals.
+    pub(crate) fn register_drop_flag(
+        &mut self,
+        name: &str,
+        ty: &ast::Type,
+        var_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        let Some(drop_fn_name) = self.get_drop_function_name(ty)? else {
+            return Ok(());
+        };
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
+        let flag_alloca = self.create_entry_alloca(
+            function,
+            &format!("{name}.drop"),
+            self.context.bool_type().as_basic_type_enum(),
+        )?;
+        self.builder
+            .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+            .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
+        self.drop_flags.insert(name.to_string(), flag_alloca);
+
+        // Field drops are registered BEFORE the struct's own drop so they
+        // fire AFTER it in LIFO order (the struct drop is last-registered,
+        // so it runs first).
+        self.register_field_drops(ty, var_ptr, flag_alloca)?;
+
+        if let Some(scope) = self.defers.last_mut() {
+            scope.push(DeferredEntry {
+                action: DeferAction::DropCall(drop_fn_name, var_ptr),
+                flag: Some(flag_alloca),
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn register_field_drops(
