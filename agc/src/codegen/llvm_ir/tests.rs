@@ -492,6 +492,73 @@ mod tests {
     }
 
     #[test]
+    fn volatile_array_lowers_to_volatile_element_ops() {
+        let ir = lower_to_llvm(
+            "i32 main() { volatile i32 buf[3]; buf[0] = 1; i32 x = buf[0]; buf[1] += 10; \
+             buf[2]++; return x + buf[1] + buf[2]; }",
+        );
+        assert!(
+            ir.contains("load volatile i32") && ir.contains("store volatile i32"),
+            "expected volatile element load and store in IR:\n{ir}"
+        );
+        assert!(
+            ir.contains("store volatile [3 x i32]"),
+            "expected volatile array zero-init in IR:\n{ir}"
+        );
+        assert!(
+            ir.contains("load volatile i32") && ir.contains("assign.load"),
+            "expected volatile compound-assign load in IR:\n{ir}"
+        );
+        assert!(
+            ir.contains("incdec.load") && ir.contains("load volatile i32"),
+            "expected volatile incdec load in IR:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn volatile_global_array_lowers_to_volatile_gep_ops() {
+        let ir = lower_to_llvm(
+            "volatile u32 regs[4] = {10, 20, 30, 40}; i32 main() { regs[2] = 99; return (i32)regs[2]; }",
+        );
+        assert!(
+            ir.contains("@regs = global [4 x i32] [i32 10, i32 20, i32 30, i32 40]"),
+            "expected const array initializer on volatile global:\n{ir}"
+        );
+        assert!(
+            ir.contains("store volatile i32") && ir.contains("@regs"),
+            "expected volatile store through the global GEP:\n{ir}"
+        );
+        assert!(
+            ir.contains("load volatile i32") && ir.contains("@regs"),
+            "expected volatile load through the global GEP:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn static_array_local_lowers_to_internal_global_with_initializer() {
+        let ir = lower_to_llvm(
+            "i32 main() { static i32 cache[2] = {7, 8}; return cache[0] + cache[1]; }",
+        );
+        assert!(
+            ir.contains("@main.cache.0 = internal global [2 x i32] [i32 7, i32 8]"),
+            "expected internal global with const array initializer:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn static_volatile_array_local_lowers_to_internal_global() {
+        let ir = lower_to_llvm("i32 main() { static volatile i32 reg = 0; reg++; return reg; }");
+        assert!(
+            ir.contains("@main.reg.0 = internal global i32 0"),
+            "expected internal global for static volatile local:\n{ir}"
+        );
+        assert!(
+            ir.contains("load volatile i32") && ir.contains("store volatile i32"),
+            "expected volatile ops on the static volatile local:\n{ir}"
+        );
+    }
+
+    #[test]
     fn static_global_lowers_to_internal_linkage() {
         let ir = lower_to_llvm("static i32 g = 42; i32 main() { return g; }");
         assert!(

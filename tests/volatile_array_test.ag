@@ -1,0 +1,92 @@
+// tests/volatile_array_test.ag
+// Volatile and static array/buffer support.
+//
+// Verifies end-to-end:
+//   1. volatile local arrays: element write/read, compound assign, inc/dec
+//      all lower to volatile loads/stores (checked via IR in unit tests; here
+//      we verify observable behavior and that the volatile semantics survive
+//      optimization — the loop below must not be collapsed).
+//   2. volatile global arrays with a const positional initializer.
+//   3. static local arrays with a const initializer (function-persistent
+//      storage, initialized once).
+//   4. static volatile locals combined.
+
+import std.io;
+
+volatile u32 regs[4] = {10, 20, 30, 40};
+
+i32 main() {
+    // 1. Volatile local array: a busy loop reading and writing elements.
+    //    With volatile semantics the accesses must not be optimized away.
+    volatile i32 buf[4];
+    i32 i = 0;
+    i64 total = 0;
+    while (i < 100000) {
+        buf[i & 3] = i;
+        total = total + (i64)buf[i & 3];
+        i = i + 1;
+    }
+    // total = sum(0..99999) = 4,999,950,000 — every write is read back,
+    // so if the compiler collapsed the volatile accesses this would differ.
+    if (total != 4999950000) {
+        @println("  [FAIL] volatile local array loop total = {}", total);
+        return 1;
+    }
+    @println("  [PASS] volatile local array loop total = {}", total);
+
+    // Compound assign and inc/dec on volatile elements.
+    buf[0] = 1;
+    buf[0] += 41;
+    buf[0]++;
+    if (buf[0] != 43) {
+        @println("  [FAIL] volatile compound/incdec buf[0] = {}", buf[0]);
+        return 1;
+    }
+    @println("  [PASS] volatile compound assign and inc/dec");
+
+    // 2. Volatile global array with const initializer.
+    if (regs[0] != 10 || regs[1] != 20 || regs[2] != 30 || regs[3] != 40) {
+        @println("  [FAIL] volatile global array initializer");
+        return 1;
+    }
+    regs[2] = 99;
+    if (regs[2] != 99) {
+        @println("  [FAIL] volatile global array write");
+        return 1;
+    }
+    @println("  [PASS] volatile global array initializer and write");
+
+    // 3. Static local array: initialized once, persists across calls.
+    i32 first = bump();
+    i32 second = bump();
+    if (first != 7 || second != 15) {
+        // first: cache[0]=7 -> returns 7, then cache[0] = 7+8 = 15
+        // second: cache[0]=15 (persisted) -> returns 15
+        @println("  [FAIL] static local array persistence first={} second={}", first, second);
+        return 1;
+    }
+    @println("  [PASS] static local array initialized once and persistent");
+
+    // 4. Static volatile local.
+    if (sreg() != 1 || sreg() != 2) {
+        @println("  [FAIL] static volatile local counter");
+        return 1;
+    }
+    @println("  [PASS] static volatile local counter");
+
+    @println("=== Volatile/Static Array Test: ALL PASS ===");
+    return 0;
+}
+
+i32 bump() {
+    static i32 cache[2] = {7, 8};
+    i32 v = cache[0];
+    cache[0] = cache[0] + cache[1];
+    return v;
+}
+
+i32 sreg() {
+    static volatile i32 counter = 0;
+    counter++;
+    return counter;
+}

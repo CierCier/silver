@@ -2188,7 +2188,8 @@ impl PRT_Parser {
         let mut initializer = None;
         let mut var_type = var_type;
 
-        // Check for array syntax `[N]` after the variable name (zero-initialized, no initializer).
+        // Check for array syntax `[N]` after the variable name; an optional
+        // initializer is allowed (positional or indexed constant items).
         if after_type + 2 < decl_end && matches!(tokens[after_type + 1].kind, Token::LeftBracket) {
             let array_size_pos = after_type + 2;
             let size_token = &tokens[array_size_pos];
@@ -2221,10 +2222,8 @@ impl PRT_Parser {
             if close_bracket + 1 < decl_end
                 && matches!(tokens[close_bracket + 1].kind, Token::Assign)
             {
-                return Err(ParseError::InvalidSyntax {
-                    message: "array global variables cannot have an initializer".to_string(),
-                    span: tokens[close_bracket + 1].span,
-                });
+                initializer =
+                    Some(self.parse_expression_reduction(tokens, close_bracket + 2, decl_end)?);
             }
         } else if after_type + 1 < decl_end {
             if !matches!(tokens[after_type + 1].kind, Token::Assign) {

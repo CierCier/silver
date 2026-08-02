@@ -221,6 +221,79 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 Ok(struct_ty.const_named_struct(&values).as_basic_value_enum())
             }
+            ast::TypeKind::Array(array) => {
+                let element_llvm_ty = self.lower_basic_type(&array.element_type)?;
+                let array_llvm_ty = element_llvm_ty.array_type(array.size as u32);
+                let n = array.size as usize;
+                let positional = items
+                    .iter()
+                    .all(|item| matches!(item, ast::InitializerItem::Positional(_)));
+                if positional {
+                    if items.len() != n {
+                        return Err(CodegenError::with_span(
+                            format!(
+                                "array initializer has {} elements but array size is {}",
+                                items.len(),
+                                array.size
+                            ),
+                            *span,
+                        ));
+                    }
+                    let mut values = Vec::with_capacity(n);
+                    for item in items {
+                        let ast::InitializerItem::Positional(expr) = item else {
+                            unreachable!("checked all-positional above")
+                        };
+                        values.push(self.emit_const_value_for_type(expr, &array.element_type)?);
+                    }
+                    // `const_array` requires ArrayValue elements; emit_const_value_for_type
+                    // returns BasicValueEnum, so build the constant directly
+                    // (safe: all elements were typed against element_llvm_ty).
+                    Ok(unsafe {
+                        inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &values)
+                            .as_basic_value_enum()
+                    })
+                } else {
+                    // Sparse indexed initializer: zero-fill, then overwrite
+                    // literal-indexed positions (indices must be constants).
+                    let mut values = vec![element_llvm_ty.const_zero(); n];
+                    for item in items {
+                        let ast::InitializerItem::Index { index, value } = item else {
+                            return Err(CodegenError::with_span(
+                                "cannot mix positional items with indexed array initializer",
+                                *span,
+                            ));
+                        };
+                        let ast::ExpressionKind::Literal(ast::Literal::Integer(idx)) =
+                            index.kind.as_ref()
+                        else {
+                            return Err(CodegenError::with_span(
+                                "array initializer index must be a constant integer",
+                                index.span,
+                            ));
+                        };
+                        let idx = *idx;
+                        if idx < 0 || idx as usize >= n {
+                            return Err(CodegenError::with_span(
+                                format!(
+                                    "array initializer index {idx} out of bounds for size {}",
+                                    array.size
+                                ),
+                                index.span,
+                            ));
+                        }
+                        values[idx as usize] =
+                            self.emit_const_value_for_type(value, &array.element_type)?;
+                    }
+                    // `const_array` requires ArrayValue elements; emit_const_value_for_type
+                    // returns BasicValueEnum, so build the constant directly
+                    // (safe: all elements were typed against element_llvm_ty).
+                    Ok(unsafe {
+                        inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &values)
+                            .as_basic_value_enum()
+                    })
+                }
+            }
             ast::TypeKind::Tuple(types) => {
                 if items.len() != types.len() {
                     return Err(CodegenError::with_span(
@@ -388,15 +461,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// True if the lvalue's root identifier names a volatile variable or global.
-    /// Only direct identifier roots and `FieldAccess` chains (volatile struct
-    /// variables are supported, e.g. MMIO register blocks) are checked — `Index`
-    /// is deliberately not walked because volatile arrays are rejected in typeck.
-    /// Accesses that codegen through method calls (__index_get/__index_set,
-    /// value receivers, for-in caches) and pointer dereferences are NOT volatile;
-    /// only loads/stores of the variable's own storage are guaranteed volatile.
+    /// `FieldAccess` chains (volatile struct variables, e.g. MMIO register
+    /// blocks) and `Index` expressions (volatile arrays) are walked to the
+    /// root, so element reads/writes/compound-ops/incdec of a volatile array
+    /// are all volatile. Accesses that codegen through method calls
+    /// (__index_get/__index_set, value receivers, for-in caches) and pointer
+    /// dereferences are NOT volatile — a decayed `T*` view of a volatile array
+    /// is a plain pointer (Silver has no volatile pointers); only loads/stores
+    /// of the variable's own storage are guaranteed volatile.
     pub(crate) fn lvalue_is_volatile(&self, expr: &ast::Expression) -> bool {
         let mut root = expr;
         while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
+            root = object;
+        }
+        while let ast::ExpressionKind::Index { object, .. } = root.kind.as_ref() {
             root = object;
         }
         let ast::ExpressionKind::Identifier(ident) = root.kind.as_ref() else {
@@ -678,6 +756,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 {
                     let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                     let llvm_ty = self.lower_basic_type(&ty)?;
+                    if self.lvalue_is_volatile(expr) {
+                        return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
+                    }
                     return self
                         .builder
                         .build_load(llvm_ty, ptr, "lvalue.load")

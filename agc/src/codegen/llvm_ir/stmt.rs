@@ -769,12 +769,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let alloca = self.create_entry_alloca(function, &identifier.name, storage_ty)?;
-        self.builder.build_store(alloca, init_value).map_err(|e| {
-            CodegenError::with_span(
-                format!("failed to store local `{}`: {e}", identifier.name),
-                identifier.span,
-            )
-        })?;
+        if let_stmt.is_volatile {
+            self.emit_volatile_store(alloca, init_value)?;
+        } else {
+            self.builder.build_store(alloca, init_value).map_err(|e| {
+                CodegenError::with_span(
+                    format!("failed to store local `{}`: {e}", identifier.name),
+                    identifier.span,
+                )
+            })?;
+        }
 
         let ty = inferred_ty;
         let ty_for_drop = ty.clone();

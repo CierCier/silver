@@ -581,10 +581,6 @@ impl TypeChecker {
                 let declared = Type::from_ast(annotation);
                 self.reject_plain_void_value_type(&declared, annotation.span);
 
-                if let_stmt.is_volatile && matches!(declared, Type::Array { .. }) {
-                    self.error("volatile arrays are not supported", stmt.span);
-                }
-
                 if let Some(init) = &let_stmt.initializer {
                     let init_type = self.check_expr(init, Some(&declared));
                     if !self.is_assignable(&declared, &init_type)
@@ -1272,8 +1268,13 @@ impl TypeChecker {
                 // Reject address-of on volatile variables (local or global):
                 // the pointee could be observed changing underneath, so a plain
                 // pointer view would bypass the volatile access guarantees.
+                // Field chains and array element accesses are walked to the
+                // root, so `&volatile_arr[0]` is rejected too.
                 let mut root = expression;
                 while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
+                    root = object;
+                }
+                while let ast::ExpressionKind::Index { object, .. } = root.kind.as_ref() {
                     root = object;
                 }
                 if let ast::ExpressionKind::Identifier(ident) = root.kind.as_ref() {
@@ -2622,9 +2623,6 @@ impl TypeChecker {
     fn check_global_variable(&mut self, var: &ast::GlobalVariableItem) {
         let declared = Type::from_ast(&var.var_type);
         self.reject_plain_void_value_type(&declared, var.var_type.span);
-        if var.is_volatile && matches!(declared, Type::Array { .. }) {
-            self.error("volatile arrays are not supported", var.var_type.span);
-        }
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
             if !self.is_assignable(&declared, &init_type)
@@ -5412,26 +5410,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_volatile_array_local() {
+    fn accepts_volatile_array_local() {
         let program = parse("i32 main() { volatile i32 arr[10]; arr[0] = 1; return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("volatile arrays are not supported")),
-            "expected volatile-array error, got {errors:?}"
-        );
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 
     #[test]
-    fn rejects_volatile_array_global() {
+    fn accepts_volatile_array_global() {
         let program = parse("volatile i32 arr[10]; i32 main() { return 0; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_address_of_volatile_array_element() {
+        let program = parse("i32 main() { volatile i32 arr[10]; i32* p = &arr[0]; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("volatile arrays are not supported")),
-            "expected volatile-array error, got {errors:?}"
+            errors.iter().any(|error| error
+                .message
+                .contains("cannot take the address of volatile variable")),
+            "expected address-of-volatile error, got {errors:?}"
         );
     }
 }
