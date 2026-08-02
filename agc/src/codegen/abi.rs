@@ -322,7 +322,9 @@ pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
     {
         // ARM64 support would go here
         // For now, fall back to AMD64 as a reasonable default
-        // TODO: Implement Arm64Abi
+        // TODO(#17): Implement Arm64Abi — AAPCS64 struct classification
+        // differs from AMD64; this fallback silently mis-compiles aarch64
+        // targets with struct arguments/returns.
         Box::new(Amd64Abi::new())
     } else {
         // Default to AMD64 for unknown targets
