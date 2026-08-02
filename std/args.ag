@@ -15,7 +15,7 @@ Args new() {
     Args a;
     a.argc = silver_argc();
     a.argv = silver_argv();
-    return move a;
+    return a;
 }
 
 i32 argc(Args* self) {

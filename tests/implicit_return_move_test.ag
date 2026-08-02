@@ -1,0 +1,99 @@
+// Regression: `return x;` for a droppable local implicitly moves — the
+// caller's drop flag is cleared on the return path, so the destructor runs
+// exactly once (in the caller) instead of twice (returned value + the local
+// at function-exit defers).
+//
+// Without the fix bare returns of droppable locals were a compile error
+// ("requires 'move x'"); with it, `return x;` is identical to `return move x;`.
+// `move` remains REQUIRED for computed return expressions (`return x + y;`,
+// `return x.field;`) — those still transfer nothing.
+import std.test;
+
+i64 drop_count = 0;
+
+struct Tracked {
+    i64 payload;
+}
+
+impl Drop<Tracked> for Tracked {
+    void drop(Tracked* self) {
+        drop_count = drop_count + 1;
+    }
+}
+
+impl Tracked {
+
+    /// Bare identifier return — implicit move, destructor runs once in caller.
+    Tracked make(i64 v) {
+        Tracked t;
+        t.payload = v;
+        return t;
+    }
+
+    /// Explicit move still works (idempotent flag clear).
+    Tracked make_explicit(i64 v) {
+        Tracked t;
+        t.payload = v;
+        return move t;
+    }
+
+    /// Computed return: the local is consumed by the expression and must
+    /// still drop normally; the value is built into a fresh result.
+    Tracked bump(Tracked self, i64 by) {
+        self.payload = self.payload + by;
+        return self;
+    }
+
+    /// Parameter return — params also have drop flags; returning one bare
+    /// transfers it.
+    Tracked forward(Tracked self) {
+        return self;
+    }
+}
+
+i32 main() {
+
+    drop_count = 0;
+    {
+        Tracked t = Tracked.make(7);
+        if (t.payload != 7) {
+            check(t.payload == 7, "make(7) payload");
+        }
+        t.drop();
+    }
+    check(drop_count == 1, "bare return: destructor ran exactly once");
+
+    drop_count = 0;
+    {
+        Tracked t = Tracked.make_explicit(9);
+        if (t.payload != 9) {
+            check(t.payload == 9, "make_explicit(9) payload");
+        }
+        t.drop();
+    }
+    check(drop_count == 1, "explicit move: destructor ran exactly once");
+
+    drop_count = 0;
+    {
+        Tracked t = Tracked.make(3);
+        Tracked u = t.bump(4);
+        if (u.payload != 7) {
+            check(u.payload == 7, "bump payload");
+        }
+        u.drop();
+    }
+    check(drop_count == 1, "computed return: destructor ran exactly once");
+
+    drop_count = 0;
+    {
+        Tracked t = Tracked.make(5);
+        Tracked u = t.forward();
+        if (u.payload != 5) {
+            check(u.payload == 5, "forward payload");
+        }
+        u.drop();
+    }
+    check(drop_count == 1, "bare return of parameter transfers it");
+
+    return done();
+}

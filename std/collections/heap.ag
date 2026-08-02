@@ -23,7 +23,7 @@ impl BinaryHeap<T> {
         h.data = (T*)0;
         h.len = 0;
         h.cap = 0;
-        return move h;
+        return h;
     }
 
     /// Reserve space for `capacity` elements up front.
@@ -36,7 +36,7 @@ impl BinaryHeap<T> {
         }
         h.len = 0;
         h.cap = capacity;
-        return move h;
+        return h;
     }
 
     // -- Size ------------------------------------------------------------
@@ -112,7 +112,7 @@ impl BinaryHeap<T> {
                 root = child;
             }
         }
-        return move result;
+        return result;
     }
 
     /// Return a copy of the greatest element without removing it.  Aborts if empty.

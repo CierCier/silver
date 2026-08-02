@@ -889,20 +889,23 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 // emit_defers (Bug A).
                 let saved_value = if let Some(expr) = expr {
                     let expr_span = expr.span;
-                    // Reject bare identifier return of droppable locals.
-                    // `return move x;` already clears the drop flag in expr.rs.
-                    if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
-                        && self.drop_flags.contains_key(&ident.name)
-                    {
-                        return Err(CodegenError::with_span(
-                            format!(
-                                "return of droppable local '{}' requires 'move {}'",
-                                ident.name, ident.name
-                            ),
-                            expr_span,
-                        ));
-                    }
                     let mut value = self.emit_expression_value(expr)?;
+                    // Implicit move: `return x;` for a droppable local transfers
+                    // ownership to the caller. Clear x's drop flag so the defers
+                    // below don't destroy the returned value — identical to
+                    // `return move x;` (which clears the flag in expr.rs).
+                    // Only direct identifier roots transfer; computed
+                    // expressions (`return x + y;`, `return x.field;`, ternaries)
+                    // leave the variable owned and still require explicit `move`.
+                    if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
+                        && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+                    {
+                        self.builder
+                            .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                            .map_err(|e| {
+                                CodegenError::new(format!("failed to clear drop flag: {e}"))
+                            })?;
+                    }
                     if let Some(return_ty) = self.current_return_type.clone() {
                         value = self.cast_value_to_ast_type(value, &return_ty, &expr_span)?;
                     }

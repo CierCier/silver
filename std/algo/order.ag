@@ -17,15 +17,15 @@ void swap<T>(T* a, T* b) {
 /// Return the smaller of two values.
 T min<T>(T a, T b) {
     if (a < b) {
-        return move a;
+        return a;
     }
-    return move b;
+    return b;
 }
 
 /// Return the larger of two values.
 T max<T>(T a, T b) {
     if (a > b) {
-        return move a;
+        return a;
     }
-    return move b;
+    return b;
 }

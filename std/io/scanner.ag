@@ -62,7 +62,7 @@ impl Scanner {
         if (s.len >= 3 && s.buf[0] == (u8)0xEF && s.buf[1] == (u8)0xBB && s.buf[2] == (u8)0xBF) {
             s.pos = 3;
         }
-        return move s;
+        return s;
     }
 
     /// Return true if more non-whitespace tokens are available.

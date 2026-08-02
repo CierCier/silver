@@ -27,7 +27,7 @@ impl HashMap<K, V> {
         m.state = (i64*)0;
         m.capacity = 0;
         m.len = 0;
-        return move m;
+        return m;
     }
 
     /// Number of live entries.
@@ -196,7 +196,7 @@ impl HashMap<K, V> {
         abort();
         // unreachable - dummy return to satisfy return type
         V dummy;
-        return move dummy;
+        return dummy;
     }
 
     /// Get pointer to value for key. Aborts if key not found.

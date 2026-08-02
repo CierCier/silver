@@ -25,7 +25,7 @@ impl Bytes {
         } else {
             b.data = (u8*)0;
         }
-        return move b;
+        return b;
     }
 
     i64 len(Bytes* self) {

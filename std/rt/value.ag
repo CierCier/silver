@@ -154,7 +154,7 @@ impl Value {
         v.inner = (Value*)0;
         v.has_inner = false;
         v.variant = 0;
-        return move v;
+        return v;
     }
 
     // Deep-copy helper used by clone() (Vec<T> elements are shallow, so
@@ -186,14 +186,14 @@ impl Value {
             *boxed = self.inner.clone();
             v.inner = boxed;
         }
-        return move v;
+        return v;
     }
 
     // -- Plain constructors (type tag is fixed or supplied by the caller) --
 
     Value unit() {
         Value v = Value.blank();
-        return move v;
+        return v;
     }
 
     Value from_bool(bool value) {
@@ -201,7 +201,7 @@ impl Value {
         v.kind = VALUE_KIND_BOOL;
         v.ty = TypeId.BOOL();
         v.bool_val = value;
-        return move v;
+        return v;
     }
 
     Value from_int(TypeId ty, i128 value) {
@@ -209,7 +209,7 @@ impl Value {
         v.kind = VALUE_KIND_INT;
         v.ty = ty;
         v.int_val = value;
-        return move v;
+        return v;
     }
 
     Value from_uint(TypeId ty, u128 value) {
@@ -217,7 +217,7 @@ impl Value {
         v.kind = VALUE_KIND_UINT;
         v.ty = ty;
         v.uint_val = value;
-        return move v;
+        return v;
     }
 
     Value from_float(TypeId ty, f64 value) {
@@ -225,25 +225,25 @@ impl Value {
         v.kind = VALUE_KIND_FLOAT;
         v.ty = ty;
         v.float_val = value;
-        return move v;
+        return v;
     }
 
     /// Value::i64 — Int value tagged I64.
     Value i64_val(i64 value) {
         Value v = Value.from_int(TypeId.I64(), (i128)value);
-        return move v;
+        return v;
     }
 
     /// Value::u64 — UInt value tagged U64.
     Value u64_val(u64 value) {
         Value v = Value.from_uint(TypeId.U64(), (u128)value);
-        return move v;
+        return v;
     }
 
     /// Value::f64 — Float value tagged F64.
     Value f64_val(f64 value) {
         Value v = Value.from_float(TypeId.F64(), value);
-        return move v;
+        return v;
     }
 
     /// Value::String — takes ownership of `text`.
@@ -252,7 +252,7 @@ impl Value {
         v.kind = VALUE_KIND_STRING;
         v.ty = TypeId.STRING();
         v.text = move text;
-        return move v;
+        return v;
     }
 
     /// Value::String from a borrowed str (deep-copied).
@@ -261,7 +261,7 @@ impl Value {
         v.kind = VALUE_KIND_STRING;
         v.ty = TypeId.STRING();
         v.text.push_str(text);
-        return move v;
+        return v;
     }
 
     // -- Accessors ----------------------------------------------------------
@@ -352,7 +352,7 @@ impl ValueResult {
         r.value = move value;
         r.err = (i32)VALUE_ERR.NONE;
         r.msg = String.new();
-        return move r;
+        return r;
     }
 
     ValueResult error(i32 err, String msg) {
@@ -361,7 +361,7 @@ impl ValueResult {
         r.value = Value.blank();
         r.err = err;
         r.msg = move msg;
-        return move r;
+        return r;
     }
 
     bool is_ok(ValueResult* self) {
@@ -445,7 +445,7 @@ ValueResult value_new_vec(TypeRegistry* reg, TypeId elem, Vec<Value> items) {
                 i += 1;
             }
             items.drop();
-            return move err;
+            return err;
         }
         i += 1;
     }
@@ -479,7 +479,7 @@ ValueResult value_new_optional(TypeRegistry* reg, TypeId inner, bool has_value, 
         if (!value.ty.eq(inner)) {
             ValueResult err = value_type_mismatch(reg, inner, value.ty);
             value.drop();
-            return move err;
+            return err;
         }
         Value* boxed = alloc_value();
         *boxed = move value;
@@ -556,7 +556,7 @@ ValueResult value_new_struct(TypeRegistry* reg, TypeId ty, Vec<Value> fields) {
                 i += 1;
             }
             fields.drop();
-            return move err;
+            return err;
         }
         i += 1;
     }
@@ -651,7 +651,7 @@ ValueResult value_new_enum_by_index(TypeRegistry* reg, TypeId ty, i64 variant, V
                 i += 1;
             }
             fields.drop();
-            return move err;
+            return err;
         }
         i += 1;
     }
@@ -818,5 +818,5 @@ void value_display_into(Value* v, TypeRegistry* reg, String* out) {
 String value_display(Value* v, TypeRegistry* reg) {
     String out = String.new();
     value_display_into(v, reg, &out);
-    return move out;
+    return out;
 }

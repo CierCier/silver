@@ -21,7 +21,7 @@ impl Deque<T> {
         d.len = 0;
         d.cap = 0;
         d.head = 0;
-        return move d;
+        return d;
     }
 
     /// Reserve space for `capacity` elements up front.
@@ -35,7 +35,7 @@ impl Deque<T> {
         d.len = 0;
         d.cap = capacity;
         d.head = 0;
-        return move d;
+        return d;
     }
 
     // -- Size ------------------------------------------------------------
@@ -114,7 +114,7 @@ impl Deque<T> {
         T result = self.data[self.head];
         self.head = (self.head + 1) % self.cap;
         self.len = self.len - 1;
-        return move result;
+        return result;
     }
 
     /// Remove and return the back element.  Aborts if empty.
@@ -125,7 +125,7 @@ impl Deque<T> {
         self.len = self.len - 1;
         i64 tail = (self.head + self.len) % self.cap;
         T result = self.data[tail];
-        return move result;
+        return result;
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.

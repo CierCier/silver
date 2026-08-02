@@ -82,7 +82,7 @@ impl SysResult {
             r.value = raw;
             r.errno = 0;
         }
-        return move r;
+        return r;
     }
 
     // Construct a success carrying `value`.
@@ -91,7 +91,7 @@ impl SysResult {
         r.ok = true;
         r.value = value;
         r.errno = 0;
-        return move r;
+        return r;
     }
 
     // Construct a failure carrying positive errno `err`.
@@ -100,7 +100,7 @@ impl SysResult {
         r.ok = false;
         r.value = 0;
         r.errno = err;
-        return move r;
+        return r;
     }
 
     bool is_ok(SysResult* self) {

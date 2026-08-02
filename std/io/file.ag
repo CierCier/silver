@@ -255,16 +255,16 @@ struct File {
 impl File {
     File from_fd(i32 fd) {
         File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true };
-        return move file;
+        return file;
     }
 
     File closed() {
         File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false };
-        return move file;
+        return file;
     }
     File borrow_fd(i32 fd) {
         File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false };
-        return move file;
+        return file;
     }
 
 

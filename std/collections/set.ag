@@ -15,7 +15,7 @@ impl HashSet<K> {
     HashSet<K> new() {
         HashSet<K> s;
         s.map = HashMap<K, bool>.new();
-        return move s;
+        return s;
     }
 
     /// Number of entries in the set.

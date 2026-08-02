@@ -255,7 +255,7 @@ impl CastResult {
         r.value = value;
         r.err = (i32)CAST_ERR.NONE;
         r.msg = String.new();
-        return move r;
+        return r;
     }
 
     CastResult error(i32 err, String msg) {
@@ -264,7 +264,7 @@ impl CastResult {
         r.value = CastValue.blank();
         r.err = err;
         r.msg = move msg;
-        return move r;
+        return r;
     }
 
     bool is_ok(CastResult* self) {
@@ -526,7 +526,7 @@ impl CastRegistry {
     CastRegistry new() {
         CastRegistry r;
         r.by_type = HashMap<u64, i32>.new();
-        return move r;
+        return r;
     }
 
     /// Registry prepopulated with the 156 numeric pairs
@@ -534,7 +534,7 @@ impl CastRegistry {
     CastRegistry with_builtin_casts() {
         CastRegistry r = CastRegistry.new();
         r.install_builtin_casts();
-        return move r;
+        return r;
     }
 
     /// Number of registered pairs.

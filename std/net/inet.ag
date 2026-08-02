@@ -35,7 +35,7 @@ impl SockAddrIn {
         sa.sin_addr = (u32)ntoh32(inet_addr(addr_str));
         sa.sin_zero_1 = (u32)0;
         sa.sin_zero_2 = (u32)0;
-        return move sa;
+        return sa;
     }
 }
 
@@ -145,7 +145,7 @@ impl SockAddrIn6 {
         inet_pton6(addr_str, &hi, &lo);
         sa.sin6_addr_hi = hi;
         sa.sin6_addr_lo = lo;
-        return move sa;
+        return sa;
     }
 
     /// Set address from colon-hex string. Returns true on success.

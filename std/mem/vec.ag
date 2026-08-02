@@ -31,7 +31,7 @@ impl Vec<T> {
         v.data = (T*)0;
         v.len = 0;
         v.cap = 0;
-        return move v;
+        return v;
     }
 
     /// Reserve space for `capacity` elements up front.
@@ -43,7 +43,7 @@ impl Vec<T> {
         }
         v.len = 0;
         v.cap = capacity;
-        return move v;
+        return v;
     }
 
     // -- Size / capacity ------------------------------------------------
@@ -103,13 +103,13 @@ impl Vec<T> {
     T pop(Vec<T>* self) {
         self.len = self.len - 1;
         T result = self.data[self.len];
-        return move result;
+        return result;
     }
 
     /// Move value out of position `index`.
     T take(Vec<T>* self, i64 index) {
         T result = self.data[index];
-        return move result;
+        return result;
     }
 
     /// Remove all elements without freeing the backing buffer.

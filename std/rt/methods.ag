@@ -80,7 +80,7 @@ impl MethodResult {
         r.value = value;
         r.err = (i32)RT_ERR.NONE;
         r.msg = String.new();
-        return move r;
+        return r;
     }
 
     MethodResult error(i32 err, String msg) {
@@ -89,7 +89,7 @@ impl MethodResult {
         r.value = RtValue.unit();
         r.err = err;
         r.msg = move msg;
-        return move r;
+        return r;
     }
 
     bool is_ok(MethodResult* self) {
@@ -124,7 +124,7 @@ impl MethodRegistry {
         r.global = HashMap<u32, MethodSpec>.new();
         r.intern_ids = HashMap<str, u32>.new();
         r.interned = Vec<String>.new();
-        return move r;
+        return r;
     }
 
     // -- Interning ---------------------------------------------------------

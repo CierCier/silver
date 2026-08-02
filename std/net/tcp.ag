@@ -19,7 +19,7 @@ impl TcpStream {
     // Sentinel — returns a closed (invalid) stream.
     TcpStream closed() {
         TcpStream s = { .fd = -1, .is_open = false };
-        return move s;
+        return s;
     }
 
     bool valid(TcpStream* self) { return self.is_open && self.fd >= 0; }
@@ -39,7 +39,7 @@ impl TcpStream {
             s.is_open = false;
             return TcpStream.closed();
         }
-        return move s;
+        return s;
     }
 
     // Read up to `len` bytes into `buf`. Retries on EINTR. Returns
@@ -116,7 +116,7 @@ impl TcpListener {
     // Sentinel — returns a closed (invalid) listener.
     TcpListener closed() {
         TcpListener l = { .fd = -1, .is_open = false };
-        return move l;
+        return l;
     }
 
     bool valid(TcpListener* self) { return self.is_open && self.fd >= 0; }
@@ -155,7 +155,7 @@ impl TcpListener {
             return TcpListener.closed();
         }
 
-        return move l;
+        return l;
     }
 
     // Accept a new connection. Returns SysResult so the caller can

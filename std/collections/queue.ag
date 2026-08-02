@@ -21,7 +21,7 @@ impl Queue<T> {
         q.len = 0;
         q.cap = 0;
         q.head = 0;
-        return move q;
+        return q;
     }
 
     /// Reserve space for `capacity` elements up front.
@@ -35,7 +35,7 @@ impl Queue<T> {
         q.len = 0;
         q.cap = capacity;
         q.head = 0;
-        return move q;
+        return q;
     }
 
     // -- Size ------------------------------------------------------------
@@ -89,7 +89,7 @@ impl Queue<T> {
         T result = self.data[self.head];
         self.head = (self.head + 1) % self.cap;
         self.len = self.len - 1;
-        return move result;
+        return result;
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.

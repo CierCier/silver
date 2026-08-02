@@ -129,7 +129,7 @@ impl StructType {
     StructType new() {
         StructType s;
         s.fields = Vec<Field>.new();
-        return move s;
+        return s;
     }
 }
 
@@ -166,7 +166,7 @@ impl EnumType {
     EnumType new() {
         EnumType e;
         e.variants = Vec<EnumVariant>.new();
-        return move e;
+        return e;
     }
 }
 
@@ -192,7 +192,7 @@ impl FunctionType {
         FunctionType f;
         f.params = Vec<TypeId>.new();
         f.ret = TypeId.none();
-        return move f;
+        return f;
     }
 }
 
@@ -232,7 +232,7 @@ impl Type {
         t.struct_data = StructType.new();
         t.enum_data = EnumType.new();
         t.fn_data = FunctionType.new();
-        return move t;
+        return t;
     }
 }
 
@@ -253,7 +253,7 @@ impl Drop<Type> for Type {
 String rt_type_str_owned(str text) {
     String s = String.new();
     s.push_str(text);
-    return move s;
+    return s;
 }
 
 /// Append the decimal representation of an unsigned 32-bit value.

@@ -32,7 +32,7 @@ impl Arena {
         a.base = (u8*)malloc(capacity);
         a.capacity = capacity;
         a.offset = 0;
-        return move a;
+        return a;
     }
 
     /// Reset the arena — all previous allocations become invalid.

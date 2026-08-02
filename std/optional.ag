@@ -50,7 +50,7 @@ impl Optional<T> {
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         T dummy;
-        return move dummy;
+        return dummy;
     }
 
     T unwrap_or(Optional<T> self, T fallback) {
@@ -99,7 +99,7 @@ impl Result<T, E> {
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         T dummy;
-        return move dummy;
+        return dummy;
     }
 
     T unwrap_or(Result<T, E> self, T fallback) {
@@ -118,6 +118,6 @@ impl Result<T, E> {
         __optional_abort();
         // unreachable - dummy return to satisfy return type
         E dummy;
-        return move dummy;
+        return dummy;
     }
 }

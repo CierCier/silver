@@ -16,7 +16,7 @@ struct Instant {
 Instant now() {
     Instant inst;
     sys_clock_gettime(CLOCK_MONOTONIC, (i64)&inst.ts);
-    return move inst;
+    return inst;
 }
 
 impl Instant {

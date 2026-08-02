@@ -67,7 +67,7 @@ impl TypeResult {
         r.id = id;
         r.err = (i32)TYPE_ERR.NONE;
         r.msg = String.new();
-        return move r;
+        return r;
     }
 
     TypeResult error(i32 err, String msg) {
@@ -76,7 +76,7 @@ impl TypeResult {
         r.id = TypeId.none();
         r.err = err;
         r.msg = move msg;
-        return move r;
+        return r;
     }
 
     bool is_ok(TypeResult* self) {
@@ -146,7 +146,7 @@ impl VariantDef {
         v.discriminant = 0;
         v.has_discriminant = false;
         v.payload = move payload;
-        return move v;
+        return v;
     }
 
     /// Variant with an explicit discriminant.
@@ -156,7 +156,7 @@ impl VariantDef {
         v.discriminant = discriminant;
         v.has_discriminant = true;
         v.payload = move payload;
-        return move v;
+        return v;
     }
 }
 
@@ -212,7 +212,7 @@ impl TypeRegistry {
         r.add_builtin_float("f32", (u16)32);
         r.add_builtin_float("f64", (u16)64);
         r.add_builtin("string", (i32)TYPE_KIND.STRING);
-        return move r;
+        return r;
     }
 
     // -- Internal helpers ------------------------------------------------
@@ -318,7 +318,7 @@ impl TypeRegistry {
         if (result.ok) {
             self.vec_cache.insert(elem.raw, result.id.raw);
         }
-        return move result;
+        return result;
     }
 
     /// optional<inner> — interned like vec_of.
@@ -339,7 +339,7 @@ impl TypeRegistry {
         if (result.ok) {
             self.optional_cache.insert(inner.raw, result.id.raw);
         }
-        return move result;
+        return result;
     }
 
     /// ret(params...) — interned by a canonical serialized key of the
@@ -403,7 +403,7 @@ impl TypeRegistry {
         } else {
             key.drop();
         }
-        return move result;
+        return result;
     }
 
     // -- User-defined types ----------------------------------------------

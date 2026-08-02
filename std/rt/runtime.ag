@@ -43,7 +43,7 @@ impl Runtime {
         rt.methods = MethodRegistry.new();
         rt.casts = CastRegistry.with_builtin_casts();
         rt.methods.install_builtin_methods();
-        return move rt;
+        return rt;
     }
 
     // -- Convenience wrappers -----------------------------------------------
