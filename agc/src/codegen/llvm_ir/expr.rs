@@ -143,6 +143,74 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Total element count of a (possibly nested) fixed-size array type.
+    fn array_total_len(ty: &ast::Type) -> i64 {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Array(arr) => arr.size * Self::array_total_len(&arr.element_type),
+            _ => 1,
+        }
+    }
+
+    /// The innermost (scalar) element type of a possibly nested array type.
+    fn innermost_element_type(ty: &ast::Type) -> &ast::Type {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Array(arr) => Self::innermost_element_type(&arr.element_type),
+            _ => ty,
+        }
+    }
+
+    /// Flat index vector for position `k` in a row-major shape `[s0, s1, ..]`
+    /// (C layout: `grid[2][3]`, flat 5 → indices [1, 2]).
+    fn flat_index_vector(k: usize, shape: &[i64]) -> Vec<u64> {
+        let mut idx = vec![0u64; shape.len()];
+        let mut rem = k as u64;
+        for d in (0..shape.len()).rev() {
+            let s = shape[d] as u64;
+            idx[d] = rem % s;
+            rem /= s;
+        }
+        idx
+    }
+
+    /// Dimension sizes of a (possibly nested) array type, outermost first.
+    fn array_shape(ty: &ast::Type) -> Vec<i64> {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Array(arr) => {
+                let mut shape = vec![arr.size];
+                shape.extend(Self::array_shape(&arr.element_type));
+                shape
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Build a constant nested-array value from a flat iterator of element
+    /// constants (C-style `{1,2,3,4,5,6}` for `[2][3]`), outermost-first.
+    fn build_const_array_flat(
+        &mut self,
+        ty: &ast::Type,
+        values: &mut impl Iterator<Item = BasicValueEnum<'ctx>>,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Array(arr) => {
+                let elem_llvm_ty = self.lower_basic_type(&arr.element_type)?;
+                let array_llvm_ty = elem_llvm_ty.array_type(arr.size as u32);
+                let mut elems = Vec::with_capacity(arr.size as usize);
+                for _ in 0..arr.size {
+                    elems.push(self.build_const_array_flat(&arr.element_type, values, span)?);
+                }
+                Ok(unsafe {
+                    inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &elems)
+                        .as_basic_value_enum()
+                })
+            }
+            _ => values.next().ok_or_else(|| {
+                CodegenError::with_span("array initializer has too few elements", *span)
+            }),
+        }
+    }
+
     pub(crate) fn emit_const_initializer_value(
         &mut self,
         items: &[ast::InitializerItem],
@@ -226,6 +294,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .iter()
                     .all(|item| matches!(item, ast::InitializerItem::Positional(_)));
                 if positional {
+                    // C-style flat initializer for multi-dimensional arrays:
+                    // `i32 table[2][3] = {1,2,3,4,5,6}` lays values out across
+                    // the nested shape in row-major order (partial lists are
+                    // zero-padded). Nested `{{1,2},{3,4}}` lists are handled by
+                    // the per-element recursion below.
+                    let full_array_ty = || ast::Type {
+                        kind: Box::new(ast::TypeKind::Array(array.clone())),
+                        span: *span,
+                    };
+                    let flat_total = Self::array_total_len(&full_array_ty());
+                    if matches!(array.element_type.kind.as_ref(), ast::TypeKind::Array(_))
+                        && items.len() as i64 != n as i64
+                        && (items.len() as i64) <= flat_total
+                    {
+                        let base_elem = Self::innermost_element_type(&full_array_ty()).clone();
+                        let mut values = Vec::with_capacity(flat_total as usize);
+                        for item in items {
+                            let ast::InitializerItem::Positional(expr) = item else {
+                                unreachable!("checked all-positional above")
+                            };
+                            values.push(self.emit_const_value_for_type(expr, &base_elem)?);
+                        }
+                        let base_llvm_ty = self.lower_basic_type(&base_elem)?;
+                        while (values.len() as i64) < flat_total {
+                            values.push(base_llvm_ty.const_zero().as_basic_value_enum());
+                        }
+                        return self.build_const_array_flat(
+                            &full_array_ty(),
+                            &mut values.into_iter(),
+                            span,
+                        );
+                    }
                     if items.len() != n {
                         return Err(CodegenError::with_span(
                             format!(
@@ -1615,7 +1715,58 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .all(|item| matches!(item, ast::InitializerItem::Positional(_)));
 
                 if positional {
-                    if (items.len() as i64) > array.size {
+                    // C-style flat initializer for multi-dimensional arrays:
+                    // `{1,2,3,4,5,6}` for `[2][3]` lays values out across the
+                    // nested shape in row-major order; the temp is zero-filled
+                    // first, so partial lists zero-pad automatically.
+                    let full_array_ty = || ast::Type {
+                        kind: Box::new(ast::TypeKind::Array(array.clone())),
+                        span: *span,
+                    };
+                    let flat_total = Self::array_total_len(&full_array_ty());
+                    let shape = Self::array_shape(&full_array_ty());
+                    if matches!(array.element_type.kind.as_ref(), ast::TypeKind::Array(_))
+                        && items.len() as i64 != array.size
+                        && (items.len() as i64) <= flat_total
+                    {
+                        let base_elem = Self::innermost_element_type(&full_array_ty()).clone();
+                        let base_llvm_ty = self.lower_basic_type(&base_elem)?;
+                        for (i, item) in items.iter().enumerate() {
+                            let ast::InitializerItem::Positional(expr) = item else {
+                                unreachable!()
+                            };
+                            let value =
+                                self.emit_expression_value_for_expected(expr, &base_elem)?;
+                            let value =
+                                self.cast_value_to_basic_type(value, base_llvm_ty, &expr.span)?;
+                            let mut indices = vec![self.context.i32_type().const_zero()];
+                            indices.extend(
+                                Self::flat_index_vector(i, &shape)
+                                    .into_iter()
+                                    .map(|idx| self.context.i32_type().const_int(idx, false)),
+                            );
+                            let ptr = unsafe {
+                                self.builder.build_in_bounds_gep(
+                                    array_llvm_ty,
+                                    temp,
+                                    &indices,
+                                    "arr.init.ptr",
+                                )
+                            }
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("GEP array initializer element {i}: {e}"),
+                                    expr.span,
+                                )
+                            })?;
+                            self.builder.build_store(ptr, value).map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("store array initializer element {i}: {e}"),
+                                    expr.span,
+                                )
+                            })?;
+                        }
+                    } else if (items.len() as i64) > array.size {
                         return Err(CodegenError::with_span(
                             format!(
                                 "array initializer has {} elements but array size is {}",
@@ -1624,39 +1775,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ),
                             *span,
                         ));
-                    }
-                    for (i, item) in items.iter().enumerate() {
-                        let ast::InitializerItem::Positional(expr) = item else {
-                            unreachable!()
-                        };
-                        let value =
-                            self.emit_expression_value_for_expected(expr, &array.element_type)?;
-                        let value =
-                            self.cast_value_to_basic_type(value, element_llvm_ty, &expr.span)?;
-                        let indices = [
-                            self.context.i32_type().const_zero(),
-                            self.context.i32_type().const_int(i as u64, false),
-                        ];
-                        let ptr = unsafe {
-                            self.builder.build_in_bounds_gep(
-                                array_llvm_ty,
-                                temp,
-                                &indices,
-                                "arr.init.ptr",
-                            )
+                    } else {
+                        for (i, item) in items.iter().enumerate() {
+                            let ast::InitializerItem::Positional(expr) = item else {
+                                unreachable!()
+                            };
+                            let value =
+                                self.emit_expression_value_for_expected(expr, &array.element_type)?;
+                            let value =
+                                self.cast_value_to_basic_type(value, element_llvm_ty, &expr.span)?;
+                            let indices = [
+                                self.context.i32_type().const_zero(),
+                                self.context.i32_type().const_int(i as u64, false),
+                            ];
+                            let ptr = unsafe {
+                                self.builder.build_in_bounds_gep(
+                                    array_llvm_ty,
+                                    temp,
+                                    &indices,
+                                    "arr.init.ptr",
+                                )
+                            }
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("GEP array initializer element {i}: {e}"),
+                                    expr.span,
+                                )
+                            })?;
+                            self.builder.build_store(ptr, value).map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("store array initializer element {i}: {e}"),
+                                    expr.span,
+                                )
+                            })?;
                         }
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("GEP array initializer element {i}: {e}"),
-                                expr.span,
-                            )
-                        })?;
-                        self.builder.build_store(ptr, value).map_err(|e| {
-                            CodegenError::with_span(
-                                format!("store array initializer element {i}: {e}"),
-                                expr.span,
-                            )
-                        })?;
                     }
                 } else {
                     for item in items {

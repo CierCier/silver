@@ -1211,8 +1211,11 @@ impl PRT_Parser {
             let mut declarator_end = name_token.span.end;
             cursor += 1;
 
-            // Parse array size suffix [N] for fixed-size array fields (C FFI compatible)
-            if cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
+            // Parse array size suffixes [N][M]... for fixed-size array fields
+            // (C FFI compatible, row-major: [N][M] = N rows of M elements —
+            // the first suffix is the outermost dimension).
+            let mut sizes = Vec::new();
+            while cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
                 cursor += 1;
                 let Token::IntLiteral(size_val) = &tokens[cursor].kind else {
                     return Err(ParseError::InvalidSyntax {
@@ -1230,9 +1233,14 @@ impl PRT_Parser {
                 }
                 cursor += 1;
                 declarator_end = tokens[cursor - 1].span.end;
+                sizes.push(size);
+            }
+            // The first suffix is the outermost dimension (C semantics):
+            // build from the innermost suffix outwards.
+            for &size in sizes.iter().rev() {
                 decl_ty = ast::Type {
                     kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                        element_type: Box::new(base_type.clone()),
+                        element_type: Box::new(decl_ty),
                         size,
                         span: base_type.span.extend_to(&tokens[cursor - 1].span),
                     }))),
@@ -2233,42 +2241,61 @@ impl PRT_Parser {
             is_volatile = false;
         }
 
-        // Check for array syntax `[N]` after the variable name; an optional
-        // initializer is allowed (positional or indexed constant items).
+        // Check for array syntax `[N][M]...` after the variable name; an
+        // optional initializer is allowed (positional or indexed constant
+        // items). Nested suffixes nest the array types ([N][M] = N rows of
+        // M elements, row-major).
         if after_type + 2 < decl_end && matches!(tokens[after_type + 1].kind, Token::LeftBracket) {
-            let array_size_pos = after_type + 2;
-            let size_token = &tokens[array_size_pos];
-            let size = match &size_token.kind {
-                Token::IntLiteral(val) => *val,
-                _ => {
+            let mut bracket_cursor = after_type + 1;
+            let mut sizes = Vec::new();
+            loop {
+                bracket_cursor += 1;
+                let size_token = &tokens[bracket_cursor];
+                let size = match &size_token.kind {
+                    Token::IntLiteral(val) => *val,
+                    _ => {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected integer array size".to_string(),
+                            span: size_token.span,
+                        });
+                    }
+                };
+                let close_bracket = bracket_cursor + 1;
+                if close_bracket >= decl_end
+                    || !matches!(tokens[close_bracket].kind, Token::RightBracket)
+                {
                     return Err(ParseError::InvalidSyntax {
-                        message: "expected integer array size".to_string(),
-                        span: size_token.span,
+                        message: "expected `]` after array size".to_string(),
+                        span: tokens[bracket_cursor + 1].span,
                     });
                 }
-            };
-            let close_bracket = array_size_pos + 1;
-            if close_bracket >= decl_end
-                || !matches!(tokens[close_bracket].kind, Token::RightBracket)
-            {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected `]` after array size".to_string(),
-                    span: tokens[array_size_pos + 1].span,
-                });
+                sizes.push(size as i64);
+                bracket_cursor = close_bracket + 1;
+                if bracket_cursor >= decl_end
+                    || !matches!(tokens[bracket_cursor].kind, Token::LeftBracket)
+                {
+                    break;
+                }
             }
-            var_type = ast::Type {
-                kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
-                    element_type: Box::new(var_type),
-                    size: size as i64,
-                    span: tokens[start].span.extend_to(&tokens[close_bracket].span),
-                }))),
-                span: tokens[start].span.extend_to(&tokens[close_bracket].span),
-            };
-            if close_bracket + 1 < decl_end
-                && matches!(tokens[close_bracket + 1].kind, Token::Assign)
-            {
+            // The first suffix is the outermost dimension (C semantics):
+            // build from the innermost suffix outwards.
+            for size in sizes.into_iter().rev() {
+                var_type = ast::Type {
+                    kind: Box::new(ast::TypeKind::Array(Box::new(ast::ArrayType {
+                        element_type: Box::new(var_type),
+                        size,
+                        span: tokens[start]
+                            .span
+                            .extend_to(&tokens[bracket_cursor - 1].span),
+                    }))),
+                    span: tokens[start]
+                        .span
+                        .extend_to(&tokens[bracket_cursor - 1].span),
+                };
+            }
+            if bracket_cursor < decl_end && matches!(tokens[bracket_cursor].kind, Token::Assign) {
                 initializer =
-                    Some(self.parse_expression_reduction(tokens, close_bracket + 2, decl_end)?);
+                    Some(self.parse_expression_reduction(tokens, bracket_cursor + 1, decl_end)?);
             }
         } else if after_type + 1 < decl_end {
             if !matches!(tokens[after_type + 1].kind, Token::Assign) {

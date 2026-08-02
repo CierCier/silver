@@ -1,0 +1,127 @@
+// tests/nested_array_test.ag
+// Multi-dimensional (nested) fixed-size arrays: C-compatible row-major
+// semantics — `grid[N][M]` is N rows of M columns, the first suffix is the
+// outermost dimension, and elements are contiguous in memory.
+//
+// Covers: 2D and 3D arrays, flat and nested initializers, partial flat
+// (zero-padded) initializers, static and volatile multi-dim arrays, and a
+// row-major memory-layout check through a byte pointer.
+
+import std.io;
+
+// Multi-dim global (declared before use).
+i32 grid[3][4];
+
+// Flat const global initializer: `table[2][3]` = 2 rows of 3.
+i32 table[2][3] = {1, 2, 3, 4, 5, 6};
+// Partial flat: missing elements are zero-filled.
+i32 partial[2][3] = {9};
+// 3D flat.
+i32 cube[2][2][2] = {1, 2, 3, 4, 5, 6, 7, 8};
+// Static multi-dim with flat initializer.
+static i64 stats[2][2] = {10, 20, 30, 40};
+
+i32 main() {
+    // Fill the 2D grid: row r, column c gets r*10 + c.
+    i64 r = 0;
+    while (r < 3) {
+        i64 c = 0;
+        while (c < 4) {
+            grid[r][c] = (i32)(r * 10 + c);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+
+    // 2D indexing, all elements: rows 0..2 of 10..13, 20..23, 30..33.
+    i64 total = 0;
+    r = 0;
+    while (r < 3) {
+        i64 c = 0;
+        while (c < 4) {
+            total = total + (i64)grid[r][c];
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    if (total != 138) {
+        // rows: 0..3, 10..13, 20..23 → 6 + 46 + 86
+        @println("  [FAIL] 2D loop total = {}", total);
+        return 1;
+    }
+    @println("  [PASS] 2D grid loop total = {}", total);
+
+    // Row-major memory layout: grid[1][0] must be 4 elements after grid[0][0].
+    i32* p = (i32*)&grid[0][0];
+    i64 first_row_last = (i64)p[3];
+    i64 second_row_first = (i64)p[4];
+    if (first_row_last != 3 || second_row_first != 10) {
+        // grid[0][3] = 3 (last of row 0), grid[1][0] = 10 (first of row 1)
+        @println("  [FAIL] row-major layout: off3={} off4={}", first_row_last, second_row_first);
+        return 1;
+    }
+    @println("  [PASS] row-major memory layout (grid[1][0] at offset 4)");
+
+    // 3D indexing.
+    // Flat / nested / partial const initializers — checked BEFORE the fill
+    // loop below overwrites the global cube.
+    if (table[0][0] != 1 || table[1][2] != 6 || partial[0][0] != 9 || partial[1][2] != 0) {
+        @println("  [FAIL] flat const initializers");
+        return 1;
+    }
+    @println("  [PASS] flat and partial-flat const initializers");
+    if (cube[1][1][1] != 8 || cube[0][0][1] != 2) {
+        @println("  [FAIL] 3D flat const initializer");
+        return 1;
+    }
+    @println("  [PASS] 3D flat const initializer");
+    if (stats[1][1] != 40) {
+        @println("  [FAIL] static 2D initializer");
+        return 1;
+    }
+    @println("  [PASS] static 2D flat initializer");
+
+    i64 cube_total = 0;
+    i64 a = 0;
+    while (a < 2) {
+        i64 b = 0;
+        while (b < 3) {
+            i64 c = 0;
+            while (c < 4) {
+                cube[a][b][c] = (i32)(a * 100 + b * 10 + c);
+                cube_total = cube_total + (i64)cube[a][b][c];
+                c = c + 1;
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    if (cube_total != 1476) {
+        @println("  [FAIL] 3D cube total = {}", cube_total);
+        return 1;
+    }
+    @println("  [PASS] 3D cube total = {}", cube_total);
+
+    // Nested and flat runtime initializers.
+    i32 nested[2][3] = {{1, 2, 3}, {4, 5, 6}};
+    i32 flat[2][3] = {1, 2, 3, 4, 5, 6};
+    i32 partial_rt[2][3] = {9};
+    if (nested[1][2] != 6 || flat[1][2] != 6 || partial_rt[0][0] != 9 || partial_rt[1][2] != 0) {
+        @println("  [FAIL] runtime multi-dim initializers");
+        return 1;
+    }
+    @println("  [PASS] nested, flat, and partial runtime initializers");
+
+    // Volatile multi-dim array: element writes/reads must be volatile.
+    volatile i32 regs[2][2] = {7, 8, 9, 10};
+    regs[1][1] = 99;
+    regs[0][1] += 1;
+    if (regs[1][1] != 99 || regs[0][1] != 9) {
+        @println("  [FAIL] volatile 2D element access");
+        return 1;
+    }
+    @println("  [PASS] volatile 2D element access");
+
+    @println("=== Nested Array Test: ALL PASS ===");
+    return 0;
+}

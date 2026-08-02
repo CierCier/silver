@@ -628,6 +628,33 @@ mod tests {
     }
 
     #[test]
+    fn nested_array_lowers_to_nested_llvm_array() {
+        let ir = lower_to_llvm("i32 main() { i32 grid[3][4]; grid[1][2] = 7; return grid[1][2]; }");
+        assert!(
+            ir.contains("alloca [3 x [4 x i32]]"),
+            "expected [3 x [4 x i32]] (C row-major, first suffix outermost):\n{ir}"
+        );
+        assert!(
+            ir.contains("getelementptr inbounds [3 x [4 x i32]], ptr %grid, i64 0, i64 1")
+                && ir.contains("getelementptr inbounds [4 x i32], ptr %arr.idx.ptr"),
+            "expected row-then-column GEP chain:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn flat_multidim_const_initializer() {
+        let ir = lower_to_llvm(
+            "i32 table[2][3] = {1, 2, 3, 4, 5, 6}; i32 main() { return table[1][2]; }",
+        );
+        assert!(
+            ir.contains(
+                "@table = global [2 x [3 x i32]] [[3 x i32] [i32 1, i32 2, i32 3], [3 x i32] [i32 4, i32 5, i32 6]]"
+            ),
+            "expected nested const array from flat initializer:\n{ir}"
+        );
+    }
+
+    #[test]
     fn static_global_lowers_to_internal_linkage() {
         let ir = lower_to_llvm("static i32 g = 42; i32 main() { return g; }");
         assert!(
