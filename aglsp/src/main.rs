@@ -2,11 +2,9 @@
 // go-to-definition, find-references, rename, completion, signature help,
 // semantic highlighting, and import resolution.
 
-mod analysis;
 mod completion;
 mod diagnostics;
 mod doc;
-mod format;
 mod references;
 mod semantic_tokens;
 mod util;
@@ -20,13 +18,13 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
-use analysis::Analysis;
+use agc::symbol_index::SymbolIndex;
 use util::*;
 
 pub(crate) struct Backend {
     pub(crate) client: Client,
     /// Per‑URI analysis: source text, symbols, occurrences, expression types.
-    pub(crate) cache: Mutex<HashMap<Uri, Analysis>>,
+    pub(crate) cache: Mutex<HashMap<Uri, SymbolIndex>>,
     pub(crate) loader: ModuleLoader,
     /// Path → (mtime_nanos, fully-parsed program) for imported files.
     pub(crate) file_cache: parking_lot::Mutex<HashMap<PathBuf, (u128, ast::Program)>>,

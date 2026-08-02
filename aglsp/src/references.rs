@@ -4,13 +4,13 @@ use agc::lexer::Span;
 use rustc_hash::FxHashMap as HashMap;
 use tower_lsp_server::ls_types::*;
 
-use crate::analysis::{Analysis, Occurrence};
 use crate::util::*;
+use agc::symbol_index::{Occurrence, SymbolIndex};
 
 /// All occurrences of the symbol under `offset`: every identifier use that
 /// resolved to the same symbol, plus (optionally) the definition.
 pub(crate) fn symbol_occurrences(
-    analysis: &Analysis,
+    analysis: &SymbolIndex,
     offset: usize,
     include_declaration: bool,
 ) -> Vec<&Occurrence> {
@@ -29,9 +29,9 @@ pub(crate) fn symbol_occurrences(
 
 /// The symbol definition under `offset`.
 pub(crate) fn symbol_under_cursor(
-    analysis: &Analysis,
+    analysis: &SymbolIndex,
     offset: usize,
-) -> Option<&crate::analysis::Symbol> {
+) -> Option<&agc::symbol_index::Symbol> {
     let occ = find_occurrence(offset, &analysis.occurrences)?;
     let id = occ.symbol?;
     analysis.symbols.get(id)
@@ -40,7 +40,7 @@ pub(crate) fn symbol_under_cursor(
 /// Convert a span to an LSP location, resolving foreign files (inlined
 /// imports) through the analysis snapshot.
 pub(crate) fn location_for_span(
-    analysis: &Analysis,
+    analysis: &SymbolIndex,
     buffer_uri: &Uri,
     span: &Span,
 ) -> Option<Location> {
@@ -75,7 +75,7 @@ pub(crate) fn is_valid_identifier(name: &str) -> bool {
 /// Build a workspace edit renaming the symbol under `offset` to `new_name`
 /// across the buffer and any inlined imported files that reference it.
 pub(crate) fn rename_edit(
-    analysis: &Analysis,
+    analysis: &SymbolIndex,
     buffer_uri: &Uri,
     offset: usize,
     new_name: &str,
@@ -96,7 +96,11 @@ pub(crate) fn rename_edit(
             new_text: new_name.to_string(),
         });
     }
-    // WorkspaceEdit.changes is a std HashMap (RandomState).
+    // WorkspaceEdit.changes is a std HashMap (RandomState) — required by lsp-types.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "WorkspaceEdit.changes requires std HashMap"
+    )]
     let std_changes: std::collections::HashMap<Uri, Vec<TextEdit>> = changes.into_iter().collect();
     Some(WorkspaceEdit {
         changes: Some(std_changes),

@@ -12,8 +12,8 @@ use tower_lsp_server::ls_types::{
     SemanticTokensServerCapabilities,
 };
 
-use crate::analysis::{Analysis, OccurrenceKind};
 use crate::util::byte_to_position;
+use agc::symbol_index::{OccurrenceKind, SymbolIndex};
 
 pub(crate) const TOKEN_TYPES: &[&str] = &[
     "namespace",
@@ -77,9 +77,10 @@ fn modifier_bit(name: &str) -> u32 {
     1u32 << TOKEN_MODIFIERS.iter().position(|m| *m == name).unwrap_or(0)
 }
 
-pub(crate) fn semantic_tokens(analysis: &Analysis) -> SemanticTokens {
+pub(crate) fn semantic_tokens(analysis: &SymbolIndex) -> SemanticTokens {
     // Map identifier token spans to their classified occurrences.
-    let mut occurrences: HashMap<(usize, usize), &crate::analysis::Occurrence> = HashMap::default();
+    let mut occurrences: HashMap<(usize, usize), &agc::symbol_index::Occurrence> =
+        HashMap::default();
     for occ in &analysis.occurrences {
         occurrences.insert((occ.span.start, occ.span.end), occ);
     }
@@ -123,7 +124,7 @@ pub(crate) fn semantic_tokens(analysis: &Analysis) -> SemanticTokens {
 fn classify(
     span: &agc::lexer::Span,
     token: &Token,
-    occurrences: &HashMap<(usize, usize), &crate::analysis::Occurrence>,
+    occurrences: &HashMap<(usize, usize), &agc::symbol_index::Occurrence>,
 ) -> Option<(u32, u32)> {
     match token {
         // Keywords

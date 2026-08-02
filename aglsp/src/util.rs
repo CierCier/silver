@@ -4,8 +4,6 @@ use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 use tower_lsp_server::ls_types::*;
 
-pub(crate) type ExprTypeMap = HashMap<(usize, usize), String>;
-
 /// Convert byte offset to 0‑based line/col from source text.
 pub(crate) fn byte_to_position(text: &str, offset: usize) -> Position {
     let mut line: u32 = 0;
@@ -73,11 +71,11 @@ pub(crate) fn find_expr_type(
 }
 
 /// Find the tightest occurrence span containing `offset`.
-pub(crate) fn find_occurrence<'a>(
+pub(crate) fn find_occurrence(
     offset: usize,
-    occurrences: &'a [crate::analysis::Occurrence],
-) -> Option<&'a crate::analysis::Occurrence> {
-    let mut best: Option<&crate::analysis::Occurrence> = None;
+    occurrences: &[agc::symbol_index::Occurrence],
+) -> Option<&agc::symbol_index::Occurrence> {
+    let mut best: Option<&agc::symbol_index::Occurrence> = None;
     for occ in occurrences {
         if occ.span.start <= offset && offset <= occ.span.end {
             match best {
@@ -185,25 +183,25 @@ pub(crate) fn is_keyword(name: &str) -> bool {
 
 /// Find the Silver std library search dirs (bootstrap/include/silver/ etc.).
 pub(crate) fn find_std_search_dirs() -> Vec<PathBuf> {
-    if let Ok(home) = std::env::var("SILVER_SYSROOT") {
-        if !home.is_empty() {
-            let root = PathBuf::from(home);
-            let dirs = module_loader_default_dirs(Some(&root));
-            if !dirs.is_empty() {
-                return dirs;
-            }
+    if let Ok(home) = std::env::var("SILVER_SYSROOT")
+        && !home.is_empty()
+    {
+        let root = PathBuf::from(home);
+        let dirs = module_loader_default_dirs(Some(&root));
+        if !dirs.is_empty() {
+            return dirs;
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent
-                .join("..")
-                .join("bootstrap")
-                .join("include")
-                .join("silver");
-            if candidate.is_dir() {
-                return vec![candidate];
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let candidate = parent
+            .join("..")
+            .join("bootstrap")
+            .join("include")
+            .join("silver");
+        if candidate.is_dir() {
+            return vec![candidate];
         }
     }
     Vec::new()

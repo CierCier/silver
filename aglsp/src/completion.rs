@@ -10,10 +10,9 @@ use agc::lexer::Token;
 use rustc_hash::FxHashSet as HashSet;
 use tower_lsp_server::ls_types::*;
 
-use crate::analysis::type_root_name_of_str;
-use crate::analysis::{Analysis, Symbol, SymbolKind};
 use crate::doc;
 use crate::util::*;
+use agc::symbol_index::{Symbol, SymbolIndex, SymbolKind, type_root_name_of_str};
 
 const KEYWORDS: &[&str] = &[
     "struct", "enum", "impl", "trait", "let", "mut", "const", "static", "if", "else", "while",
@@ -21,7 +20,7 @@ const KEYWORDS: &[&str] = &[
     "ref", "extern", "asm", "in", "macro", "true", "false",
 ];
 
-pub(crate) fn completion(analysis: &Analysis, offset: usize) -> Vec<CompletionItem> {
+pub(crate) fn completion(analysis: &SymbolIndex, offset: usize) -> Vec<CompletionItem> {
     if let Some(items) = import_completion(analysis, offset) {
         return items;
     }
@@ -33,7 +32,7 @@ pub(crate) fn completion(analysis: &Analysis, offset: usize) -> Vec<CompletionIt
 
 // ----- import path completion -----
 
-fn import_completion(analysis: &Analysis, offset: usize) -> Option<Vec<CompletionItem>> {
+fn import_completion(analysis: &SymbolIndex, offset: usize) -> Option<Vec<CompletionItem>> {
     let tokens = &analysis.tokens;
     let mut import_idx: Option<usize> = None;
     for (i, t) in tokens.iter().enumerate() {
@@ -90,24 +89,24 @@ fn import_completion(analysis: &Analysis, offset: usize) -> Option<Vec<Completio
     None
 }
 
-fn root_module_completion(analysis: &Analysis, prefix: &str) -> Vec<CompletionItem> {
+fn root_module_completion(analysis: &SymbolIndex, prefix: &str) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     for dir in find_std_search_dirs() {
         collect_module_entries(&dir, prefix, &mut items);
     }
     // Also offer the module roots of imports already used in this file.
     for path in &analysis.import_paths {
-        if let Some(root) = path.first() {
-            if root.starts_with(prefix) {
-                items.push(module_item(root, ""));
-            }
+        if let Some(root) = path.first()
+            && root.starts_with(prefix)
+        {
+            items.push(module_item(root, ""));
         }
     }
     sort_dedupe(items)
 }
 
 fn module_dir_completion(
-    analysis: &Analysis,
+    analysis: &SymbolIndex,
     segments: &[String],
     prefix: &str,
 ) -> Vec<CompletionItem> {
@@ -161,7 +160,7 @@ fn module_item(stem: &str, detail: &str) -> CompletionItem {
 
 // ----- member completion (`expr.` / `Type::`) -----
 
-fn member_completion(analysis: &Analysis, offset: usize) -> Option<Vec<CompletionItem>> {
+fn member_completion(analysis: &SymbolIndex, offset: usize) -> Option<Vec<CompletionItem>> {
     let tokens = &analysis.tokens;
     let trigger_idx = tokens
         .iter()
@@ -229,7 +228,7 @@ fn member_completion(analysis: &Analysis, offset: usize) -> Option<Vec<Completio
 
 // ----- identifier completion -----
 
-fn identifier_completion(analysis: &Analysis, offset: usize) -> Vec<CompletionItem> {
+fn identifier_completion(analysis: &SymbolIndex, offset: usize) -> Vec<CompletionItem> {
     let text = &analysis.text;
     let mut start = offset;
     let bytes = text.as_bytes();
@@ -252,10 +251,10 @@ fn identifier_completion(analysis: &Analysis, offset: usize) -> Vec<CompletionIt
         }
         // Locals/parameters only before their declaration point.
         match sym.kind {
-            SymbolKind::Local | SymbolKind::Parameter | SymbolKind::TypeParam => {
-                if sym.span.end > offset {
-                    continue;
-                }
+            SymbolKind::Local | SymbolKind::Parameter | SymbolKind::TypeParam
+                if sym.span.end > offset =>
+            {
+                continue;
             }
             _ => {}
         }
@@ -333,7 +332,7 @@ fn sort_dedupe(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
 
 // ----- signature help -----
 
-pub(crate) fn signature_help(analysis: &Analysis, offset: usize) -> Option<SignatureHelp> {
+pub(crate) fn signature_help(analysis: &SymbolIndex, offset: usize) -> Option<SignatureHelp> {
     let tokens = &analysis.tokens;
     // Last `(` before the cursor.
     let mut paren_idx: Option<usize> = None;

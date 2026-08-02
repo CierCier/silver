@@ -5,8 +5,8 @@ use agc::symbol_table::CompilerSymbolTable;
 use tower_lsp_server::ls_types::*;
 
 use crate::Backend;
-use crate::analysis::{Analysis, analyze};
 use crate::util::*;
+use agc::symbol_index::{SymbolIndex, analyze};
 
 impl Backend {
     pub(crate) async fn check_diagnostics(&self, uri: &Uri, text: &str) {
@@ -32,7 +32,7 @@ impl Backend {
                     .collect();
                 self.cache.lock().insert(
                     uri.clone(),
-                    Analysis {
+                    SymbolIndex {
                         text: text.to_string(),
                         symbols: Vec::new(),
                         occurrences: Vec::new(),

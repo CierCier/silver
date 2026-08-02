@@ -1,7 +1,7 @@
-use agc::parser::ast::{self};
+use crate::parser::ast::{self};
 use rustc_hash::FxHashMap as HashMap;
 
-pub(crate) fn format_primitive_type(p: &ast::PrimitiveType) -> &'static str {
+pub fn format_primitive_type(p: &ast::PrimitiveType) -> &'static str {
     match p {
         ast::PrimitiveType::I8 => "i8",
         ast::PrimitiveType::I16 => "i16",
@@ -26,7 +26,7 @@ pub(crate) fn format_primitive_type(p: &ast::PrimitiveType) -> &'static str {
     }
 }
 
-pub(crate) fn format_type(ty: &ast::Type) -> String {
+pub fn format_type(ty: &ast::Type) -> String {
     match &*ty.kind {
         ast::TypeKind::Primitive(p) => format_primitive_type(p).to_string(),
         ast::TypeKind::Named(n) => n
@@ -48,7 +48,7 @@ pub(crate) fn format_type(ty: &ast::Type) -> String {
         ast::TypeKind::Slice(s) => format!("[{}]", format_type(&s.element_type)),
         ast::TypeKind::Array(a) => format!("[{}; {}]", format_type(&a.element_type), a.size),
         ast::TypeKind::Function(f) => {
-            let params: Vec<String> = f.parameters.iter().map(|t| format_type(t)).collect();
+            let params: Vec<String> = f.parameters.iter().map(format_type).collect();
             format!(
                 "fn({}) -> {}",
                 params.join(", "),
@@ -56,13 +56,13 @@ pub(crate) fn format_type(ty: &ast::Type) -> String {
             )
         }
         ast::TypeKind::Tuple(t) => {
-            let items: Vec<String> = t.iter().map(|ty| format_type(ty)).collect();
+            let items: Vec<String> = t.iter().map(format_type).collect();
             format!("({})", items.join(", "))
         }
     }
 }
 
-pub(crate) fn format_params(params: &[ast::Parameter]) -> String {
+pub fn format_params(params: &[ast::Parameter]) -> String {
     params
         .iter()
         .map(|p| format!("{}: {}", p.name.name, format_type(&p.param_type)))
@@ -70,7 +70,7 @@ pub(crate) fn format_params(params: &[ast::Parameter]) -> String {
         .join(", ")
 }
 
-pub(crate) fn format_generics(g: &ast::Generics) -> String {
+pub fn format_generics(g: &ast::Generics) -> String {
     if g.params.is_empty() {
         return String::new();
     }
@@ -103,7 +103,7 @@ pub(crate) fn format_generics(g: &ast::Generics) -> String {
     format!("<{}>", items.join(", "))
 }
 
-pub(crate) fn primitive_size(p: &ast::PrimitiveType) -> Option<usize> {
+pub fn primitive_size(p: &ast::PrimitiveType) -> Option<usize> {
     match p {
         ast::PrimitiveType::I8
         | ast::PrimitiveType::U8
@@ -124,10 +124,7 @@ pub(crate) fn primitive_size(p: &ast::PrimitiveType) -> Option<usize> {
     }
 }
 
-pub(crate) fn field_type_size(
-    ty: &ast::Type,
-    struct_map: &HashMap<String, usize>,
-) -> Option<usize> {
+pub fn field_type_size(ty: &ast::Type, struct_map: &HashMap<String, usize>) -> Option<usize> {
     match &*ty.kind {
         ast::TypeKind::Primitive(p) => primitive_size(p),
         ast::TypeKind::Reference(_) | ast::TypeKind::Pointer(_) => Some(8),
@@ -145,7 +142,7 @@ pub(crate) fn field_type_size(
 }
 
 /// Check if a struct has the `#[packed]` or `#[repr(packed)]` attribute.
-pub(crate) fn is_repr_packed(attrs: &[ast::Attribute]) -> bool {
+pub fn is_repr_packed(attrs: &[ast::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.name.name == "packed"
             || (a.name.name == "repr"
@@ -155,7 +152,7 @@ pub(crate) fn is_repr_packed(attrs: &[ast::Attribute]) -> bool {
     })
 }
 
-pub(crate) fn compute_struct_size(
+pub fn compute_struct_size(
     s: &ast::StructItem,
     struct_map: &HashMap<String, usize>,
     packed: bool,
@@ -167,14 +164,14 @@ pub(crate) fn compute_struct_size(
             total += size;
         } else {
             let align = size.next_power_of_two().min(16);
-            total = (total + align - 1) / align * align;
+            total = total.div_ceil(align) * align;
             total += size;
         }
     }
     Some(total)
 }
 
-pub(crate) fn format_attribute(attr: &ast::Attribute) -> String {
+pub fn format_attribute(attr: &ast::Attribute) -> String {
     let name = attr.name.name.clone();
     let args: Vec<String> = attr
         .args
@@ -191,7 +188,7 @@ pub(crate) fn format_attribute(attr: &ast::Attribute) -> String {
     }
 }
 
-pub(crate) fn format_struct_hover(
+pub fn format_struct_hover(
     s: &ast::StructItem,
     attrs: &[ast::Attribute],
     name: &str,
@@ -220,7 +217,7 @@ pub(crate) fn format_struct_hover(
     parts.join("\n")
 }
 
-pub(crate) fn format_function_sig_from_parts(
+pub fn format_function_sig_from_parts(
     name: &str,
     generics: Option<&ast::Generics>,
     params: &[ast::Parameter],
@@ -229,12 +226,12 @@ pub(crate) fn format_function_sig_from_parts(
     let g = generics.map(format_generics).unwrap_or_default();
     let p = format_params(params);
     let ret = return_type
-        .map(|t| format_type(t))
+        .map(format_type)
         .unwrap_or_else(|| "void".to_string());
     format!("{ret} {name}{g}({p})")
 }
 
-pub(crate) fn format_function_sig(f: &ast::FunctionItem) -> String {
+pub fn format_function_sig(f: &ast::FunctionItem) -> String {
     format_function_sig_from_parts(
         &f.name.name,
         f.generics.as_ref(),
@@ -243,7 +240,7 @@ pub(crate) fn format_function_sig(f: &ast::FunctionItem) -> String {
     )
 }
 
-pub(crate) fn format_impl_function_sig(f: &ast::ImplFunction) -> String {
+pub fn format_impl_function_sig(f: &ast::ImplFunction) -> String {
     format_function_sig_from_parts(
         &f.name.name,
         f.generics.as_ref(),
@@ -252,7 +249,7 @@ pub(crate) fn format_impl_function_sig(f: &ast::ImplFunction) -> String {
     )
 }
 
-pub(crate) fn format_extern_function_sig(f: &ast::ExternFunctionItem) -> String {
+pub fn format_extern_function_sig(f: &ast::ExternFunctionItem) -> String {
     let linkage = match f.linkage {
         ast::ExternLinkage::C => "C",
         _ => "unknown",
@@ -262,7 +259,7 @@ pub(crate) fn format_extern_function_sig(f: &ast::ExternFunctionItem) -> String 
         .signature
         .return_type
         .as_ref()
-        .map(|t| format_type(t))
+        .map(format_type)
         .unwrap_or_else(|| "void".to_string());
     let variadic = if f.signature.is_variadic { ", ..." } else { "" };
     format!(

@@ -1,4 +1,9 @@
-//! Program analysis for the Silver language server.
+//! Shared symbol/occurrence index for tooling (the language server).
+//!
+//! A single AST walk over an import-lowered program produces every
+//! definition (with span, signature, doc comment and parameters) and every
+//! scope-resolved identifier occurrence, so tools do not maintain their
+//! own parallel walk of the AST.
 //!
 //! A single AST walk produces, from one parse + type-check pass:
 //! - `Symbol`s: every definition (functions, methods, structs, enums,
@@ -9,17 +14,20 @@
 //!   semantic tokens, find-references and rename.
 //! - Import paths for `import std.io;` style completion.
 
-use agc::lexer::{LexToken, Span};
-use agc::parser::ast::{self, ItemKind};
+use crate::lexer::{LexToken, Span};
+use crate::parser::ast::{self, ItemKind};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::format::*;
-use crate::util::*;
 
-pub(crate) type SymbolId = usize;
+pub type SymbolId = usize;
+
+/// Expression span (start, end) → formatted type string, from the type
+/// checker.
+pub type ExprTypeMap = rustc_hash::FxHashMap<(usize, usize), String>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SymbolKind {
+pub enum SymbolKind {
     Function,
     Method,
     Struct,
@@ -39,13 +47,13 @@ pub(crate) enum SymbolKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParamInfo {
+pub struct ParamInfo {
     pub name: String,
     pub type_str: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Symbol {
+pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
     /// Span of the identifier that names the symbol.
@@ -64,7 +72,7 @@ pub(crate) struct Symbol {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OccurrenceKind {
+pub enum OccurrenceKind {
     Function,
     Method,
     Struct,
@@ -83,7 +91,7 @@ pub(crate) enum OccurrenceKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Occurrence {
+pub struct Occurrence {
     /// Resolved symbol, when the identifier could be tied to a definition.
     pub symbol: Option<SymbolId>,
     pub kind: OccurrenceKind,
@@ -95,7 +103,7 @@ pub(crate) struct Occurrence {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Analysis {
+pub struct SymbolIndex {
     pub text: String,
     pub symbols: Vec<Symbol>,
     pub occurrences: Vec<Occurrence>,
@@ -117,13 +125,13 @@ pub(crate) struct Analysis {
 /// analysis. Occurrences whose spans come from other files (inlined imported
 /// programs carry distinct `Span.file` ids) are dropped; their symbols remain
 /// available for completion/hover.
-pub(crate) fn analyze(
+pub fn analyze(
     program: &ast::Program,
     text: &str,
     tokens: &[LexToken],
     expr_types: ExprTypeMap,
     buffer_file: u32,
-) -> Analysis {
+) -> SymbolIndex {
     // Precompute struct sizes for hover (recursive field sizes need the full
     // struct map first).
     let mut struct_map: HashMap<String, usize> = HashMap::default();
@@ -163,11 +171,11 @@ pub(crate) fn analyze(
         if file == 0 || file == buffer_file || foreign_files.contains_key(&file) {
             continue;
         }
-        if let Some(source) = agc::lexer::source_file(file) {
+        if let Some(source) = crate::lexer::source_file(file) {
             foreign_files.insert(file, (source.path, source.text));
         }
     }
-    Analysis {
+    SymbolIndex {
         text: text.to_string(),
         symbols: walker.symbols,
         occurrences: walker.occurrences,
@@ -176,6 +184,32 @@ pub(crate) fn analyze(
         tokens: current_tokens,
         foreign_files,
     }
+}
+
+/// True for builtin primitive type names (i8..u128, f32..f80, bool, ...).
+pub fn is_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "f32"
+            | "f64"
+            | "f80"
+            | "c32"
+            | "c64"
+            | "c80"
+            | "bool"
+            | "str"
+            | "char"
+            | "void"
+    )
 }
 
 struct Walker<'a> {
@@ -203,6 +237,10 @@ impl Walker<'_> {
         }
         span.file == 0 && span.start < self.text_len && span.end <= self.text_len
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "symbol registry context threading"
+    )]
     fn add_symbol(
         &mut self,
         name: &str,
@@ -222,7 +260,7 @@ impl Walker<'_> {
         self.symbols.push(Symbol {
             name: name.to_string(),
             kind,
-            span: span.clone(),
+            span,
             doc,
             signature,
             parameters,
@@ -252,6 +290,10 @@ impl Walker<'_> {
     }
 
     /// Push an occurrence if its span lies within the current buffer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "occurrence emission context threading"
+    )]
     fn emit(
         &mut self,
         symbol: Option<SymbolId>,
@@ -268,7 +310,7 @@ impl Walker<'_> {
         self.occurrences.push(Occurrence {
             symbol,
             kind,
-            span: span.clone(),
+            span: *span,
             is_definition,
             readonly,
             is_static,
@@ -314,7 +356,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &f.name.name,
                     SymbolKind::Function,
-                    f.name.span.clone(),
+                    f.name.span,
                     doc,
                     format_function_sig(f),
                     params_of(&f.parameters),
@@ -335,7 +377,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &g.name.name,
                     kind,
-                    g.name.span.clone(),
+                    g.name.span,
                     doc,
                     format!(
                         "{} {}: {}",
@@ -359,7 +401,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &s.name.name,
                     SymbolKind::Struct,
-                    s.name.span.clone(),
+                    s.name.span,
                     doc,
                     format_struct_hover(s, &item.attributes, &s.name.name, &self.struct_map),
                     Vec::new(),
@@ -374,7 +416,7 @@ impl Walker<'_> {
                     self.add_symbol(
                         &field.name.name,
                         SymbolKind::Field,
-                        field.name.span.clone(),
+                        field.name.span,
                         None,
                         format!("{}: {}", field.name.name, format_type(&field.field_type)),
                         Vec::new(),
@@ -391,7 +433,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &e.name.name,
                     SymbolKind::Enum,
-                    e.name.span.clone(),
+                    e.name.span,
                     doc,
                     format!("enum {}", e.name.name),
                     Vec::new(),
@@ -420,7 +462,7 @@ impl Walker<'_> {
                     self.add_symbol(
                         &variant.name.name,
                         SymbolKind::Variant,
-                        variant.name.span.clone(),
+                        variant.name.span,
                         None,
                         format!("{}{}", variant.name.name, payload),
                         Vec::new(),
@@ -446,7 +488,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &t.name.name,
                     SymbolKind::Trait,
-                    t.name.span.clone(),
+                    t.name.span,
                     doc,
                     format!("trait {}", t.name.name),
                     Vec::new(),
@@ -466,7 +508,7 @@ impl Walker<'_> {
                             self.add_symbol(
                                 &f.name.name,
                                 SymbolKind::Method,
-                                f.name.span.clone(),
+                                f.name.span,
                                 None,
                                 format_function_sig_from_parts(
                                     &f.name.name,
@@ -493,7 +535,7 @@ impl Walker<'_> {
                             self.add_symbol(
                                 &a.name.name,
                                 SymbolKind::TypeAlias,
-                                a.name.span.clone(),
+                                a.name.span,
                                 None,
                                 format!("type {} = ...", a.name.name),
                                 Vec::new(),
@@ -508,7 +550,7 @@ impl Walker<'_> {
                             self.add_symbol(
                                 &v.name.name,
                                 SymbolKind::Function,
-                                v.name.span.clone(),
+                                v.name.span,
                                 None,
                                 format!(
                                     "fn {} -> {}",
@@ -546,7 +588,7 @@ impl Walker<'_> {
                             self.add_symbol(
                                 &f.name.name,
                                 SymbolKind::Method,
-                                f.name.span.clone(),
+                                f.name.span,
                                 None,
                                 format_impl_function_sig(f),
                                 params_of(&f.parameters),
@@ -562,7 +604,7 @@ impl Walker<'_> {
                             self.add_symbol(
                                 &a.name.name,
                                 SymbolKind::TypeAlias,
-                                a.name.span.clone(),
+                                a.name.span,
                                 None,
                                 format!("type {} = {}", a.name.name, format_type(&a.type_def)),
                                 Vec::new(),
@@ -610,7 +652,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &f.name.name,
                     SymbolKind::ExternFunction,
-                    f.name.span.clone(),
+                    f.name.span,
                     doc,
                     format_extern_function_sig(f),
                     params_of(&f.signature.parameters),
@@ -625,7 +667,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &v.name.name,
                     SymbolKind::ExternVariable,
-                    v.name.span.clone(),
+                    v.name.span,
                     doc,
                     format!("extern {}: {}", v.name.name, format_type(&v.var_type)),
                     Vec::new(),
@@ -641,7 +683,7 @@ impl Walker<'_> {
                     self.add_symbol(
                         &f.name.name,
                         SymbolKind::ExternFunction,
-                        f.name.span.clone(),
+                        f.name.span,
                         None,
                         format_extern_function_sig(f),
                         params_of(&f.signature.parameters),
@@ -656,7 +698,7 @@ impl Walker<'_> {
                     self.add_symbol(
                         &v.name.name,
                         SymbolKind::ExternVariable,
-                        v.name.span.clone(),
+                        v.name.span,
                         None,
                         format!("extern {}: {}", v.name.name, format_type(&v.var_type)),
                         Vec::new(),
@@ -672,7 +714,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &m.name.name,
                     SymbolKind::Macro,
-                    m.name.span.clone(),
+                    m.name.span,
                     doc,
                     format!("macro {}({})", m.name.name, format_params(&m.parameters)),
                     Vec::new(),
@@ -688,7 +730,7 @@ impl Walker<'_> {
                 self.add_symbol(
                     &a.name.name,
                     SymbolKind::TypeAlias,
-                    a.name.span.clone(),
+                    a.name.span,
                     doc,
                     format!("type {} = {}", a.name.name, format_type(&a.type_def)),
                     Vec::new(),
@@ -707,7 +749,7 @@ impl Walker<'_> {
         self.locals.push(HashMap::default());
         for p in params {
             self.walk_type(&p.param_type);
-            self.declare_local(&p.name.name, p.name.span.clone(), SymbolKind::Parameter);
+            self.declare_local(&p.name.name, p.name.span, SymbolKind::Parameter);
         }
         self.walk_block(body);
         self.locals.pop();
@@ -721,8 +763,7 @@ impl Walker<'_> {
         let Some(generics) = generics else { return };
         for param in &generics.params {
             if let ast::GenericParam::Type(tp) = param {
-                let id =
-                    self.declare_local(&tp.name.name, tp.name.span.clone(), SymbolKind::TypeParam);
+                let id = self.declare_local(&tp.name.name, tp.name.span, SymbolKind::TypeParam);
                 let _ = id;
             }
         }
@@ -852,7 +893,7 @@ impl Walker<'_> {
     fn walk_pattern(&mut self, pattern: &ast::Pattern) {
         match &pattern.kind {
             ast::PatternKind::Identifier(id) => {
-                self.declare_local(&id.name, id.span.clone(), SymbolKind::Local);
+                self.declare_local(&id.name, id.span, SymbolKind::Local);
             }
             ast::PatternKind::Tuple(patterns) => {
                 for p in patterns {
@@ -961,7 +1002,7 @@ impl Walker<'_> {
                 let recv_type = self.type_of(receiver).map(str::to_string);
                 self.walk_expr(receiver);
                 self.emit_member_use(
-                    &method,
+                    method,
                     recv_type.as_deref(),
                     OccurrenceKind::Method,
                     SymbolKind::Method,
@@ -974,7 +1015,7 @@ impl Walker<'_> {
                 let recv_type = self.type_of(object).map(str::to_string);
                 self.walk_expr(object);
                 self.emit_member_use(
-                    &field,
+                    field,
                     recv_type.as_deref(),
                     OccurrenceKind::Property,
                     SymbolKind::Field,
@@ -1007,7 +1048,7 @@ impl Walker<'_> {
             } => {
                 self.walk_expr(iterable);
                 self.locals.push(HashMap::default());
-                self.declare_local(&binding.name, binding.span.clone(), SymbolKind::Local);
+                self.declare_local(&binding.name, binding.span, SymbolKind::Local);
                 self.walk_block(body);
                 self.locals.pop();
             }
@@ -1134,7 +1175,7 @@ impl Walker<'_> {
                 }
                 let enum_name = path.first().map(|i| i.name.as_str());
                 self.emit_member_by_container(
-                    &variant,
+                    variant,
                     enum_name,
                     SymbolKind::Variant,
                     OccurrenceKind::EnumMember,
@@ -1331,7 +1372,7 @@ fn type_root_name(ty: &ast::Type) -> Option<String> {
 
 /// Strip pointer/reference/generic suffixes from a formatted type string
 /// (`Point*`, `&mut Point`, `Vec<i32>` → `Point` / `Vec`).
-pub(crate) fn type_root_name_of_str(ty: &str) -> Option<String> {
+pub fn type_root_name_of_str(ty: &str) -> Option<String> {
     let trimmed = ty.trim();
     let base = trimmed
         .trim_start_matches('&')
@@ -1350,15 +1391,15 @@ pub(crate) fn type_root_name_of_str(ty: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agc::lexer::lex_with_source;
+    use crate::lexer::lex_with_source;
 
     #[test]
     fn walk_produces_symbols_and_occurrences() {
         let text = "/// Adds two integers.\ni32 add(i32 a, i32 b) {\n    return a + b;\n}\n\nstruct Point {\n    i32 x;\n    i32 y;\n}\n\nimpl Point {\n    i32 sum(Point* self) {\n        return (*self).x + (*self).y;\n    }\n}\n\ni32 main() {\n    i32 result = add(1, 2);\n    Point p = { .x = 3, .y = 4 };\n    i32 total = p.sum();\n    return result + total;\n}\n";
         // Mirror the server path: register the source, lex with its file id.
-        let file_id = agc::lexer::register_source("/tmp/unit_test.ag", text);
+        let file_id = crate::lexer::register_source("/tmp/unit_test.ag", text);
         let tokens = lex_with_source(text, file_id).unwrap();
-        let mut parser = agc::parser::Parser::new(tokens.clone());
+        let mut parser = crate::parser::Parser::new(tokens.clone());
         let (program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
 
