@@ -25,7 +25,9 @@ impl Buffer {
         live_count = live_count + 1;
         @println("  [create] Buffer(len={})  live={}", len, live_count);
     }
+}
 
+impl Drop<Buffer> for Buffer {
     void drop(Buffer* self) {
         if (self.data != (i32*)0) {
             free(self.data);

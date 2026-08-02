@@ -537,7 +537,10 @@ void* calloc(i64 count, i64 size) {
     return (void*)ptr;
 }
 
-void* realloc(void* ptr, i64 new_size) {
+/// Raw byte-oriented realloc shim (used by the generic element-count API
+/// and the containers; named distinctly so it cannot collide with the
+/// generic `realloc<T>` overload during monomorphization).
+void* realloc_bytes(void* ptr, i64 new_size) {
     return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
 }
 
@@ -560,7 +563,7 @@ T* try_alloc<T>(i64 count) {
 }
 
 T* try_realloc<T>(T* ptr, i64 count) {
-    return (T*)(realloc(ptr, @size(T) * count));
+    return (T*)(realloc_bytes(ptr, @size(T) * count));
 }
 
 // Abort-on-OOM variants (safe default). These call `abort()` from std.mem.memory

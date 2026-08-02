@@ -140,7 +140,7 @@ i32 main() {
         grow_buf[i] = i * 100;
     }
     
-    grow_buf = (i32*)(realloc(grow_buf, 10 * 4));
+    grow_buf = (i32*)(realloc_bytes(grow_buf, 10 * 4));
     
     bool realloc_preserved = true;
     for (i32 i = 0; i < 5; i = i + 1) {

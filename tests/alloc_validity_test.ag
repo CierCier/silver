@@ -96,7 +96,7 @@ i32 main() {
     STDOUT.write_str("\n--- Realloc ---\n");
     i64* rp = alloc<i64>(4);
     rp[0] = 10; rp[1] = 20; rp[2] = 30; rp[3] = 40;
-    rp = (i64*)realloc(rp, 8 * 8);
+    rp = (i64*)realloc_bytes(rp, 8 * 8);
     assert_true(rp[0] == 10, "realloc preserved first element");
     assert_true(rp[3] == 40, "realloc preserved last element");
     rp[7] = 99;

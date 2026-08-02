@@ -91,7 +91,7 @@ impl Vec<T> {
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
-            self.data = (T*)(realloc(self.data, @size(T) * new_cap));
+            self.data = (T*)(realloc_bytes(self.data, @size(T) * new_cap));
             self.cap = new_cap;
         }
         self.data[self.len] = move value;
@@ -122,7 +122,7 @@ impl Vec<T> {
         if (self.cap >= min_capacity) {
             return;
         }
-        self.data = (T*)(realloc(self.data, @size(T) * min_capacity));
+        self.data = (T*)(realloc_bytes(self.data, @size(T) * min_capacity));
         self.cap = min_capacity;
     }
 
@@ -136,7 +136,7 @@ impl Vec<T> {
             self.cap = 0;
         } else {
             if (self.len < self.cap) {
-                self.data = (T*)(realloc(self.data, @size(T) * self.len));
+                self.data = (T*)(realloc_bytes(self.data, @size(T) * self.len));
                 self.cap = self.len;
             }
         }

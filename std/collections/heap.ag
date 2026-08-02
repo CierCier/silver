@@ -60,7 +60,7 @@ impl BinaryHeap<T> {
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
-            self.data = (T*)(realloc(self.data, @size(T) * new_cap));
+            self.data = (T*)(realloc_bytes(self.data, @size(T) * new_cap));
             self.cap = new_cap;
         }
         self.data[self.len] = move value;

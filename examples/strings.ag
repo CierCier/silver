@@ -7,22 +7,22 @@ i32 main() {
     greeting.push((u8)32);       // space
     greeting.push_str("Silver");
     greeting.push((u8)33);       // '!'
-    @println("greeting: {}", greeting.to_str());
+    @println("greeting: {}", (str)greeting.to_str());
     @println("length: {}", greeting.len());
 
     // clone borrows greeting (by pointer), creates a deep copy
     String clone = greeting.clone();
-    @println("clone: {}", clone.to_str());
+    @println("clone: {}", (str)clone.to_str());
 
     // Show that modifying greeting does not affect clone
     greeting.push_str("!!");
-    @println("after append: {}", greeting.to_str());
-    @println("clone unchanged: {}", clone.to_str());
+    @println("after append: {}", (str)greeting.to_str());
+    @println("clone unchanged: {}", (str)clone.to_str());
 
     // Show that modifying clone does not affect greeting
     clone.clear();
     @println("after clear, len={}", clone.len());
-    @println("greeting still intact: {}", greeting.to_str());
+    @println("greeting still intact: {}", (str)greeting.to_str());
     // equals takes a C string — compare clone against "HelloSilver!"
     if (greeting.equals("HelloSilver!!")) {
         @println("greeting equals 'HelloSilver!!': true");
@@ -36,7 +36,7 @@ i32 main() {
         built.push((u8)(65 + i));  // A B C D E
     }
     built.push((u8)10);  // newline
-    @print("built: {}", built.to_str());
+    @print("built: {}", (str)built.to_str());
 
     // No need for explicit drop calls — the compiler handles
     // implicit destructors via the flag system.
