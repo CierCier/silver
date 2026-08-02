@@ -747,13 +747,19 @@ fn unify_type(
                 && unify_type(inner, found_inner, subst, impl_generics, impl_subst)
         }
         (
-            Type::Pointer { is_mutable, inner },
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            },
             Type::Pointer {
                 is_mutable: found_mut,
+                is_volatile: found_volatile,
                 inner: found_inner,
             },
         ) => {
             is_mutable == found_mut
+                && is_volatile == found_volatile
                 && unify_type(inner, found_inner, subst, impl_generics, impl_subst)
         }
         (

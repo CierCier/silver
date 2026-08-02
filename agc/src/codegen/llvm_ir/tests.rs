@@ -516,6 +516,57 @@ mod tests {
     }
 
     #[test]
+    fn volatile_pointer_param_lowers_to_volatile_ops() {
+        // The video-buffer case: a buffer reached only through a pointer, where
+        // the volatility must travel with the pointer (function parameter).
+        let ir = lower_to_llvm(
+            "void f(volatile u8* fb, i64 o, u8 c) { fb[o] = c; u8 v = fb[o]; fb[o]++; } i32 main() { return 0; }",
+        );
+        assert!(
+            ir.contains("store volatile i8"),
+            "expected volatile store through pointer param:\n{ir}"
+        );
+        assert!(
+            ir.contains("load volatile i8"),
+            "expected volatile load through pointer param:\n{ir}"
+        );
+        assert!(
+            ir.contains("incdec.load") && ir.contains("load volatile i8"),
+            "expected volatile compound access through pointer param:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn volatile_pointer_deref_lowers_to_volatile_ops() {
+        let ir = lower_to_llvm(
+            "i32 main() { volatile u8* p = (volatile u8*)0; u8 v = *p; *p = (u8)1; return (i32)v; }",
+        );
+        assert!(
+            ir.contains("load volatile i8") && ir.contains("deref.load"),
+            "expected volatile deref read:\n{ir}"
+        );
+        assert!(
+            ir.contains("store volatile i8"),
+            "expected volatile deref write:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn volatile_pointer_global_with_mmio_address() {
+        let ir = lower_to_llvm(
+            "volatile u8* vram = (volatile u8*)0xB8000; i32 main() { vram[0] = (u8)65; return (i32)vram[0]; }",
+        );
+        assert!(
+            ir.contains("@vram = global ptr inttoptr (i64 753664 to ptr)"),
+            "expected inttoptr MMIO address in global initializer:\n{ir}"
+        );
+        assert!(
+            ir.contains("store volatile i8") && ir.contains("load volatile i8"),
+            "expected volatile access through the video buffer pointer:\n{ir}"
+        );
+    }
+
+    #[test]
     fn volatile_global_array_lowers_to_volatile_gep_ops() {
         let ir = lower_to_llvm(
             "volatile u32 regs[4] = {10, 20, 30, 40}; i32 main() { regs[2] = 99; return (i32)regs[2]; }",
@@ -555,6 +606,24 @@ mod tests {
         assert!(
             ir.contains("load volatile i32") && ir.contains("store volatile i32"),
             "expected volatile ops on the static volatile local:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn large_zero_init_array_uses_memset() {
+        // Regression: a store of a huge constant aggregate (e.g.
+        // `store [100000 x i8] zeroinitializer`) crashes the LLVM SelectionDAG
+        // combiner; large zero-initialized arrays must zero-fill via memset.
+        let ir = lower_to_llvm(
+            "i32 main() { u8 backing[100000]; backing[0] = (u8)1; return (i32)backing[0]; }",
+        );
+        assert!(
+            ir.contains("@llvm.memset") && ir.contains("i64 100000"),
+            "expected memset of the full array size in IR:\n{ir}"
+        );
+        assert!(
+            !ir.contains("store [100000 x i8] zeroinitializer"),
+            "expected no huge constant store in IR:\n{ir}"
         );
     }
 

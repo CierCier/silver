@@ -97,11 +97,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ));
                 };
                 let inner_llvm_ty = self.lower_basic_type(inner_ty)?;
+                if self.lvalue_is_volatile(whole_expr) {
+                    return self.emit_volatile_load(inner_llvm_ty, ptr_value, "deref.load");
+                }
                 self.builder
                     .build_load(inner_llvm_ty, ptr_value, "deref.load")
                     .map_err(|e| {
                         CodegenError::with_span(
-                            format!("failed to dereference pointer: {e}"),
+                            format!("failed to load dereference result: {e}"),
                             whole_expr.span,
                         )
                     })

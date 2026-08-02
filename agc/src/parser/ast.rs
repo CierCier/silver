@@ -364,6 +364,10 @@ pub struct ReferenceType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointerType {
     pub is_mutable: bool,
+    /// Pointee volatility (`volatile T*`): loads/stores through this pointer
+    /// are emitted as volatile, so they cannot be reordered, cached, or
+    /// eliminated by the optimizer (MMIO/device memory, video buffers).
+    pub is_volatile: bool,
     pub inner: Box<Type>,
 }
 

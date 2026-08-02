@@ -451,6 +451,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    /// Emits a call to the llvm.memset intrinsic (zero-fill of `size` bytes).
+    ///
+    /// Used to zero-initialize large arrays: a store of a huge constant
+    /// aggregate (e.g. `store [100000 x i8] zeroinitializer`) crashes the LLVM
+    /// SelectionDAG combiner, while memset lowers to a plain libcall/inline
+    /// loop. `is_volatile` marks the memset volatile for volatile storage.
+    pub(crate) fn build_memset(
+        &self,
+        dest: PointerValue<'ctx>,
+        size: u64,
+        is_volatile: bool,
+    ) -> CodegenResult<()> {
+        let memset_fn = self
+            .module
+            .get_function("llvm.memset.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i8 = self.context.i8_type();
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), i8.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memset.p0.p0.i64", fn_type, None)
+            });
+
+        self.builder
+            .build_call(
+                memset_fn,
+                &[
+                    dest.into(),
+                    self.context.i8_type().const_zero().into(),
+                    self.context.i64_type().const_int(size, false).into(),
+                    self.context
+                        .bool_type()
+                        .const_int(u64::from(is_volatile), false)
+                        .into(),
+                ],
+                "memset",
+            )
+            .map_err(|e| CodegenError::new(format!("failed to emit memset: {e}")))?;
+
+        Ok(())
+    }
+
     pub(crate) fn apply_abi_attributes(
         &mut self,
         function: FunctionValue<'ctx>,

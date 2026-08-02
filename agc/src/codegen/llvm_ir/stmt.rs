@@ -1,7 +1,8 @@
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::module::Linkage;
-use inkwell::types::BasicType;
+use inkwell::targets::TargetData;
+use inkwell::types::{AnyType, BasicType};
 use inkwell::values::{BasicValueEnum, FunctionValue};
 
 use crate::codegen::SilverGenerator;
@@ -769,7 +770,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let alloca = self.create_entry_alloca(function, &identifier.name, storage_ty)?;
-        if let_stmt.is_volatile {
+        // Large zero-initialized arrays: a store of a huge constant aggregate
+        // (e.g. `store [100000 x i8] zeroinitializer`) crashes the LLVM
+        // SelectionDAG combiner, so zero-fill with llvm.memset instead.
+        let zero_fill_bytes = if let_stmt.initializer.is_none()
+            && matches!(inferred_ty.kind.as_ref(), ast::TypeKind::Array(_))
+        {
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+            Some(target_data.get_store_size(&storage_ty.as_any_type_enum()))
+        } else {
+            None
+        };
+        if let Some(size) = zero_fill_bytes.filter(|&size| size > 64) {
+            self.build_memset(alloca, size, let_stmt.is_volatile)?;
+        } else if let_stmt.is_volatile {
             self.emit_volatile_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, init_value).map_err(|e| {

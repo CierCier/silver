@@ -100,8 +100,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )
                 .as_basic_value_enum()),
             (BasicValueEnum::IntValue(int_val), BasicTypeEnum::PointerType(ptr_ty)) => {
-                // Integer-to-pointer constant cast (e.g., null pointer in global init).
-                // Only null (zero) is valid as a pointer constant in global initializers.
+                // Integer-to-pointer constant cast, valid in global initializers
+                // (e.g. a MMIO/video buffer base like `(volatile u8*)0xB8000`).
                 let raw: u64 = int_val
                     .get_sign_extended_constant()
                     .or_else(|| int_val.get_zero_extended_constant().map(|v| v as i64))
@@ -114,10 +114,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if raw == 0 {
                     Ok(ptr_ty.const_null().as_basic_value_enum())
                 } else {
-                    Err(CodegenError::with_span(
-                        "non-null integer-to-pointer cast is not supported in global initializers",
-                        *span,
-                    ))
+                    Ok(int_val.const_to_pointer(ptr_ty).as_basic_value_enum())
                 }
             }
             (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::FloatType(float_ty)) => {
@@ -464,19 +461,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// `FieldAccess` chains (volatile struct variables, e.g. MMIO register
     /// blocks) and `Index` expressions (volatile arrays) are walked to the
     /// root, so element reads/writes/compound-ops/incdec of a volatile array
-    /// are all volatile. Accesses that codegen through method calls
-    /// (__index_get/__index_set, value receivers, for-in caches) and pointer
-    /// dereferences are NOT volatile — a decayed `T*` view of a volatile array
-    /// is a plain pointer (Silver has no volatile pointers); only loads/stores
-    /// of the variable's own storage are guaranteed volatile.
-    pub(crate) fn lvalue_is_volatile(&self, expr: &ast::Expression) -> bool {
+    /// are all volatile. Accessing through a `volatile T*` pointee (via
+    /// `p[i]`, `p.field`, or `*p`) is also volatile, which is how volatile
+    /// buffers reached by pointer — function parameters, struct fields, or
+    /// globals holding a framebuffer address — get volatile semantics.
+    /// Accesses that codegen through method calls (__index_get/__index_set,
+    /// value receivers, for-in caches) are NOT volatile; only loads/stores of
+    /// the variable's own storage or through a volatile pointee are guaranteed
+    /// volatile.
+    pub(crate) fn lvalue_is_volatile(&mut self, expr: &ast::Expression) -> bool {
+        // Volatile pointee: any step of the lvalue chain that dereferences or
+        // indexes a `volatile T*` makes the whole access volatile.
         let mut root = expr;
-        while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
-            root = object;
+        loop {
+            match root.kind.as_ref() {
+                ast::ExpressionKind::FieldAccess { object, .. }
+                | ast::ExpressionKind::Index { object, .. } => {
+                    if self.pointee_is_volatile(object) {
+                        return true;
+                    }
+                    root = object;
+                }
+                ast::ExpressionKind::Unary {
+                    operator: ast::UnaryOperator::Dereference,
+                    operand,
+                } => {
+                    if self.pointee_is_volatile(operand) {
+                        return true;
+                    }
+                    root = operand;
+                }
+                _ => break,
+            }
         }
-        while let ast::ExpressionKind::Index { object, .. } = root.kind.as_ref() {
-            root = object;
-        }
+        // Declaration-level volatility of the root variable/global.
         let ast::ExpressionKind::Identifier(ident) = root.kind.as_ref() else {
             return false;
         };
@@ -484,6 +502,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return info.is_volatile;
         }
         self.volatile_globals.contains(&ident.name)
+    }
+
+    /// True if `expr`'s type is a `volatile T*` (pointee volatile).
+    fn pointee_is_volatile(&mut self, expr: &ast::Expression) -> bool {
+        self.resolve_receiver_type(expr).is_some_and(
+            |ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(p) if p.is_volatile),
+        )
     }
 
     /// build_load + as_instruction_value() + set_volatile(true).

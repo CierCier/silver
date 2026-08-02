@@ -53,6 +53,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::TypeKind::Pointer(pointer) => Box::new(ast::TypeKind::Pointer(ast::PointerType {
                 is_mutable: pointer.is_mutable,
+                is_volatile: pointer.is_volatile,
                 inner: Box::new(Self::substitute_generic_type(&pointer.inner, substitutions)),
             })),
             ast::TypeKind::Slice(slice) => {
@@ -819,6 +820,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
+                        is_volatile: false,
                     })),
                     span: expr.span,
                 })

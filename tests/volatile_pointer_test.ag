@@ -1,0 +1,98 @@
+// tests/volatile_pointer_test.ag
+// Volatile pointee types (`volatile T*`): the video-buffer pattern where a
+// buffer is reached ONLY through a pointer and the volatility must travel
+// with the pointer — function parameters, globals, and struct fields.
+//
+// A real framebuffer address (0xB8000) would fault in user space, so the
+// backing store here is a normal stack array; every access THROUGH the
+// volatile pointer must be emitted volatile (checked in IR unit tests), and
+// the semantics are exercised by a busy loop that must not collapse.
+
+import std.io;
+
+// Video-buffer-style global: a volatile pointer with an MMIO-ish address.
+// (0xB8000 is the classic VGA text framebuffer; kept as a constant address
+// here to prove the global-initializer form, but never dereferenced.)
+volatile u8* vram_base = (volatile u8*)0xB8000;
+
+// Driver function: receives the buffer by pointer, writes/reads/updates
+// through it. Every access must be volatile.
+void fill_pattern(volatile u8* fb, i64 len) {
+    i64 i = 0;
+    while (i < len) {
+        fb[i] = (u8)(i * 3 + 1);
+        i = i + 1;
+    }
+}
+
+i64 verify_pattern(volatile u8* fb, i64 len) {
+    i64 bad = 0;
+    i64 i = 0;
+    while (i < len) {
+        if (fb[i] != (u8)(i * 3 + 1)) {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
+// Struct field holding a volatile pointer (e.g. a driver context).
+struct Display {
+    volatile u8* base;
+    i64 width;
+    i64 height;
+}
+
+i32 main() {
+    if ((i64)vram_base != 0xB8000) {
+        @println("  [FAIL] volatile pointer global address = {}", (i64)vram_base);
+        return 1;
+    }
+    @println("  [PASS] volatile pointer global holds MMIO address");
+
+    u8 backing[100000];
+    volatile u8* vp = (volatile u8*)&backing[0];
+
+    fill_pattern(vp, 100000);
+    i64 bad = verify_pattern(vp, 100000);
+    if (bad != 0) {
+        @println("  [FAIL] volatile pointer loop: {} mismatches", bad);
+        return 1;
+    }
+    @println("  [PASS] volatile pointer driver loop (100000 elements)");
+
+    // Compound and inc/dec through the volatile pointer.
+    vp[0] = (u8)1;
+    vp[0] += (u8)41;
+    vp[0]++;
+    if (vp[0] != (u8)43) {
+        @println("  [FAIL] volatile pointer compound/incdec vp[0] = {}", (i32)vp[0]);
+        return 1;
+    }
+    @println("  [PASS] volatile pointer compound assign and inc/dec");
+
+    // Deref read/write.
+    u8 v = *vp;
+    *vp = (u8)99;
+    if (v != (u8)43 || *vp != (u8)99) {
+        @println("  [FAIL] volatile pointer deref v={} p0={}", (i32)v, (i32)*vp);
+        return 1;
+    }
+    @println("  [PASS] volatile pointer deref read/write");
+
+    // Struct field holding a volatile pointer.
+    Display disp;
+    disp.base = (volatile u8*)&backing[0];
+    disp.width = 100;
+    disp.height = 1000;
+    fill_pattern(disp.base, disp.width * disp.height);
+    if (verify_pattern(disp.base, 100000) != 0) {
+        @println("  [FAIL] struct-field volatile pointer pattern");
+        return 1;
+    }
+    @println("  [PASS] struct field with volatile pointer drives the buffer");
+
+    @println("=== Volatile Pointer Test: ALL PASS ===");
+    return 0;
+}

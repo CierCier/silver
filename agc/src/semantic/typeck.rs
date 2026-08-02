@@ -718,6 +718,7 @@ impl TypeChecker {
                         return Type::Pointer {
                             inner: element.clone(),
                             is_mutable: true,
+                            is_volatile: false,
                         };
                     }
                     ty
@@ -1310,6 +1311,7 @@ impl TypeChecker {
                     };
                 Type::Pointer {
                     is_mutable: source_is_mutable,
+                    is_volatile: false,
                     inner: Box::new(inner),
                 }
             }
@@ -3040,7 +3042,14 @@ impl TypeChecker {
             (Type::Primitive(_), _) | (Type::Unit, _) => {
                 expected == found || Self::void_compatible(expected, found)
             }
-            (Type::Pointer { is_mutable, inner }, Type::Primitive(ast::PrimitiveType::Str)) => {
+            (
+                Type::Pointer {
+                    is_mutable,
+                    is_volatile: _,
+                    inner,
+                },
+                Type::Primitive(ast::PrimitiveType::Str),
+            ) => {
                 if *is_mutable {
                     return false;
                 }
@@ -3086,13 +3095,19 @@ impl TypeChecker {
                     && self.infer_type_params(inner, found_inner, type_params, mapping)
             }
             (
-                Type::Pointer { is_mutable, inner },
+                Type::Pointer {
+                    is_mutable,
+                    is_volatile,
+                    inner,
+                },
                 Type::Pointer {
                     is_mutable: found_mut,
+                    is_volatile: found_volatile,
                     inner: found_inner,
                 },
             ) => {
                 is_mutable == found_mut
+                    && is_volatile == found_volatile
                     && self.infer_type_params(inner, found_inner, type_params, mapping)
             }
             (
@@ -3304,6 +3319,7 @@ impl TypeChecker {
         // Returns the destination pointer (u8*)
         Type::Pointer {
             is_mutable: true,
+            is_volatile: false,
             inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
         }
     }
@@ -3330,6 +3346,7 @@ impl TypeChecker {
         }
         Type::Pointer {
             is_mutable: true,
+            is_volatile: false,
             inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
         }
     }
@@ -3360,6 +3377,7 @@ impl TypeChecker {
         }
         Type::Pointer {
             is_mutable: true,
+            is_volatile: false,
             inner: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
         }
     }
@@ -3526,7 +3544,14 @@ impl TypeChecker {
         }
 
         match (from, to) {
-            (Type::Primitive(ast::PrimitiveType::Str), Type::Pointer { is_mutable, inner }) => {
+            (
+                Type::Primitive(ast::PrimitiveType::Str),
+                Type::Pointer {
+                    is_mutable,
+                    is_volatile: _,
+                    inner,
+                },
+            ) => {
                 if *is_mutable {
                     return false;
                 }
@@ -3539,6 +3564,7 @@ impl TypeChecker {
                 },
                 Type::Pointer {
                     is_mutable: to_mut,
+                    is_volatile: _,
                     inner,
                 },
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
@@ -3670,8 +3696,13 @@ impl TypeChecker {
                 is_mutable: *is_mutable,
                 inner: Box::new(self.substitute_self_type(inner, receiver)),
             },
-            Type::Pointer { is_mutable, inner } => Type::Pointer {
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            } => Type::Pointer {
                 is_mutable: *is_mutable,
+                is_volatile: *is_volatile,
                 inner: Box::new(self.substitute_self_type(inner, receiver)),
             },
             Type::Slice { element } => Type::Slice {

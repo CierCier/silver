@@ -1598,8 +1598,13 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
             lifetime: None,
             inner: Box::new(type_to_ast(inner, span)),
         }),
-        Type::Pointer { is_mutable, inner } => ast::TypeKind::Pointer(ast::PointerType {
+        Type::Pointer {
+            is_mutable,
+            is_volatile,
+            inner,
+        } => ast::TypeKind::Pointer(ast::PointerType {
             is_mutable: *is_mutable,
+            is_volatile: *is_volatile,
             inner: Box::new(type_to_ast(inner, span)),
         }),
         Type::Slice { element } => ast::TypeKind::Named(ast::NamedType {
@@ -2343,6 +2348,7 @@ mod tests {
             "deref",
             &[Type::Pointer {
                 is_mutable: false,
+                is_volatile: false,
                 inner: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
             }],
         );

@@ -543,6 +543,20 @@ impl PRT_Parser {
         )
     }
 
+    /// Route a declaration-level `volatile` qualifier onto the pointee when the
+    /// declared type is a pointer (`volatile T*` = pointer to volatile T,
+    /// C-style). Returns true when consumed by the type; the caller then clears
+    /// its own declaration-level flag. Non-pointer types (scalars, arrays,
+    /// structs) keep the declaration-level volatility.
+    fn route_volatile_to_pointee(&self, ty: &mut ast::Type) -> bool {
+        if let ast::TypeKind::Pointer(pointer) = ty.kind.as_mut() {
+            pointer.is_volatile = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Consume a run of declaration qualifiers (static, volatile, const), each at
     /// most once, in any order. Returns the new cursor and collected flags.
     /// Always returns Some((cursor, flags)) — flags are all-false when the first
@@ -853,9 +867,23 @@ impl PRT_Parser {
 
         let mut cursor = start;
         let mut is_const = false;
-        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Const)) {
-            is_const = true;
-            cursor += 1;
+        let mut type_volatile = false;
+        // Leading type qualifiers: `const T*` (immutable pointee) and
+        // `volatile T*` (volatile pointee), in either order. `volatile` is
+        // also accepted as a declaration qualifier elsewhere; when it appears
+        // here in type position it always qualifies the pointer's pointee.
+        loop {
+            match tokens.get(cursor).map(|t| &t.kind) {
+                Some(Token::Const) => {
+                    is_const = true;
+                    cursor += 1;
+                }
+                Some(Token::Volatile) => {
+                    type_volatile = true;
+                    cursor += 1;
+                }
+                _ => break,
+            }
             if cursor >= end {
                 return None;
             }
@@ -1002,11 +1030,20 @@ impl PRT_Parser {
             ty = ast::Type {
                 kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                     is_mutable,
+                    is_volatile: type_volatile,
                     inner: Box::new(ty),
                 })),
                 span: tokens[start].span.extend_to(&tokens[cursor].span),
             };
             cursor += 1;
+        }
+
+        // `volatile` in type position only makes sense on a pointer pointee
+        // (there is no volatile scalar/struct TYPE — volatility of those is a
+        // declaration-level property). Reject it elsewhere rather than
+        // silently dropping the qualifier.
+        if type_volatile && !matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
+            return None;
         }
 
         Some((ty, cursor))
@@ -1742,9 +1779,13 @@ impl PRT_Parser {
         let (_, declarators) = self.parse_declarator_group(tokens, decl_start, end - 1, true)?;
         let statement_end = tokens[end - 1].span.end;
         let mut statements = Vec::with_capacity(declarators.len());
-        for declarator in declarators {
+        for mut declarator in declarators {
             self.known_ident_names.insert(declarator.name.name.clone());
             let name_span = declarator.name.span;
+            let mut is_volatile = qualifiers.is_volatile;
+            if is_volatile && self.route_volatile_to_pointee(&mut declarator.ty) {
+                is_volatile = false;
+            }
             statements.push(ast::Statement {
                 kind: ast::StatementKind::Let(ast::LetStatement {
                     pattern: ast::Pattern {
@@ -1755,7 +1796,7 @@ impl PRT_Parser {
                     initializer: declarator.initializer,
                     is_mutable: !qualifiers.is_const,
                     is_static: qualifiers.is_static,
-                    is_volatile: qualifiers.is_volatile,
+                    is_volatile,
                 }),
                 span: declarator.span.with_end(statement_end),
             });
@@ -2187,6 +2228,10 @@ impl PRT_Parser {
 
         let mut initializer = None;
         let mut var_type = var_type;
+        let mut is_volatile = qualifiers.is_volatile;
+        if is_volatile && self.route_volatile_to_pointee(&mut var_type) {
+            is_volatile = false;
+        }
 
         // Check for array syntax `[N]` after the variable name; an optional
         // initializer is allowed (positional or indexed constant items).
@@ -2246,7 +2291,7 @@ impl PRT_Parser {
             initializer,
             is_mutable: true,
             is_static: qualifiers.is_static,
-            is_volatile: qualifiers.is_volatile,
+            is_volatile,
         })
     }
 

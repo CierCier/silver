@@ -33,9 +33,19 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
 
     let mut cursor = start;
     let mut is_const = false;
-    if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Const)) {
-        is_const = true;
-        cursor += 1;
+    let mut type_volatile = false;
+    loop {
+        match tokens.get(cursor).map(|t| &t.kind) {
+            Some(Token::Const) => {
+                is_const = true;
+                cursor += 1;
+            }
+            Some(Token::Volatile) => {
+                type_volatile = true;
+                cursor += 1;
+            }
+            _ => break,
+        }
         if cursor >= end {
             return None;
         }
@@ -99,6 +109,7 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         ty = ast::Type {
             kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                 is_mutable: !current_is_const,
+                is_volatile: type_volatile,
                 inner: Box::new(ty),
             })),
             span: tokens[start].span.extend_to(&tokens[cursor].span),
@@ -130,9 +141,19 @@ fn parse_simple_type_prefix(
 
     let mut cursor = start;
     let mut is_const = false;
-    if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Const)) {
-        is_const = true;
-        cursor += 1;
+    let mut type_volatile = false;
+    loop {
+        match tokens.get(cursor).map(|t| &t.kind) {
+            Some(Token::Const) => {
+                is_const = true;
+                cursor += 1;
+            }
+            Some(Token::Volatile) => {
+                type_volatile = true;
+                cursor += 1;
+            }
+            _ => break,
+        }
         if cursor >= end {
             return None;
         }
@@ -245,6 +266,7 @@ fn parse_simple_type_prefix(
         ty = ast::Type {
             kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                 is_mutable,
+                is_volatile: type_volatile,
                 inner: Box::new(ty),
             })),
             span: tokens[start].span.extend_to(&tokens[cursor].span),

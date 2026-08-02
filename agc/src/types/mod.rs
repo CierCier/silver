@@ -18,6 +18,8 @@ pub enum Type {
     },
     Pointer {
         is_mutable: bool,
+        /// Pointee volatility (`volatile T*`); mirror of `PointerType::is_volatile`.
+        is_volatile: bool,
         inner: Box<Type>,
     },
     Slice {
@@ -305,6 +307,7 @@ impl Type {
             },
             ast::TypeKind::Pointer(pointer) => Type::Pointer {
                 is_mutable: pointer.is_mutable,
+                is_volatile: pointer.is_volatile,
                 inner: Box::new(Type::from_ast(&pointer.inner)),
             },
             ast::TypeKind::Slice(slice) => Type::Slice {
@@ -362,8 +365,13 @@ impl Type {
                         inner: Box::new(inner.to_ast()),
                     })
                 }
-                Type::Pointer { is_mutable, inner } => ast::TypeKind::Pointer(ast::PointerType {
+                Type::Pointer {
+                    is_mutable,
+                    is_volatile,
+                    inner,
+                } => ast::TypeKind::Pointer(ast::PointerType {
                     is_mutable: *is_mutable,
+                    is_volatile: *is_volatile,
                     inner: Box::new(inner.to_ast()),
                 }),
                 Type::Slice { element } => ast::TypeKind::Named(ast::NamedType {
@@ -419,8 +427,13 @@ impl Type {
                 is_mutable: *is_mutable,
                 inner: Box::new(inner.substitute(mapping)),
             },
-            Type::Pointer { is_mutable, inner } => Type::Pointer {
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            } => Type::Pointer {
                 is_mutable: *is_mutable,
+                is_volatile: *is_volatile,
                 inner: Box::new(inner.substitute(mapping)),
             },
             Type::Slice { element } => Type::Slice {
@@ -462,9 +475,19 @@ impl Type {
 
     pub fn canonical_key(&self) -> String {
         match self {
-            Type::Pointer { is_mutable, inner } => {
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            } => {
                 if *is_mutable {
-                    format!("*mut {}", inner.canonical_key())
+                    if *is_volatile {
+                        format!("*mut volatile {}", inner.canonical_key())
+                    } else {
+                        format!("*mut {}", inner.canonical_key())
+                    }
+                } else if *is_volatile {
+                    format!("*const volatile {}", inner.canonical_key())
                 } else {
                     format!("*{}", inner.canonical_key())
                 }
@@ -538,11 +561,21 @@ impl fmt::Display for Type {
                     write!(f, "&{}", inner)
                 }
             }
-            Type::Pointer { is_mutable, inner } => {
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            } => {
                 if matches!(inner.as_ref(), Type::Unit) {
                     write!(f, "void*")
                 } else if *is_mutable {
-                    write!(f, "{}*", inner)
+                    if *is_volatile {
+                        write!(f, "volatile {}*", inner)
+                    } else {
+                        write!(f, "{}*", inner)
+                    }
+                } else if *is_volatile {
+                    write!(f, "const volatile {}*", inner)
                 } else {
                     write!(f, "const {}*", inner)
                 }
@@ -707,10 +740,17 @@ impl<'a> TypeParser<'a> {
     fn parse_type(&mut self) -> Result<Type, String> {
         self.skip_ws();
         if self.consume_byte(b'*') {
-            let is_mutable = self.consume_str("mut ");
+            let is_mutable = if self.consume_str("mut ") {
+                true
+            } else {
+                self.consume_str("const ");
+                false
+            };
+            let is_volatile = self.consume_str("volatile ");
             let inner = self.parse_type()?;
             return Ok(Type::Pointer {
                 is_mutable,
+                is_volatile,
                 inner: Box::new(inner),
             });
         }
