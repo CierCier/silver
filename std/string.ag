@@ -119,13 +119,11 @@ impl String {
 
     /// Borrow the contents as a NUL-terminated str view. The view is valid
     /// while the original String still owns its buffer (the same lifetime as
-    /// accessing `.data` directly); the String keeps ownership. The by-value
-    /// cast copy hands its buffer back by nulling the pointer so the copy's
-    /// implicit drop does not free memory the caller still owns.
+    /// accessing `.data` directly). Cast receivers are borrowed views: the
+    /// compiler does not run the by-value `self` copy's destructor, so the
+    /// String keeps ownership and no explicit hand-off is needed.
     cast str(String self) {
-        str view = (str)self.data;
-        self.data = (u8*)0;
-        return view;
+        return (str)self.data;
     }
 
     String trim(String* self) {

@@ -1,0 +1,58 @@
+// Regression: passing a Drop-typed value by value (value receiver / value
+// argument) transfers ownership to the callee. The callee's parameter
+// destructor runs on exit; the caller's drop flag must be cleared so the
+// original variable does not free the same resources a second time.
+//
+// Without the fix the destructor runs twice (callee copy + caller's
+// variable at scope exit); with it, exactly once.
+import std.test;
+
+i64 drop_count = 0;
+
+struct Tracked {
+    i64 payload;
+}
+
+impl Drop<Tracked> for Tracked {
+    void drop(Tracked* self) {
+        drop_count = drop_count + 1;
+    }
+}
+
+impl Tracked {
+
+    /// By-value receiver: the caller's variable is consumed.
+    i64 consume(Tracked self) {
+        return self.payload;
+    }
+
+    /// By-value argument.
+    i64 pass(Tracked other) {
+        return other.payload + 1;
+    }
+}
+
+i32 main() {
+    test_start("by-value receiver drop runs exactly once");
+    drop_count = 0;
+    {
+        Tracked t;
+        t.payload = 42;
+        i64 got = t.consume();
+        check(got == 42, "by-value receiver reads payload");
+    }
+    // t's scope-exit destructor (if the flag was not cleared) has now run.
+    check(drop_count == 1, "destructor runs once after by-value receiver");
+
+    test_start("by-value argument drop runs exactly once");
+    drop_count = 0;
+    {
+        Tracked u;
+        u.payload = 7;
+        i64 got2 = Tracked.pass(u);
+        check(got2 == 8, "by-value argument is readable");
+    }
+    check(drop_count == 1, "destructor runs once after by-value argument");
+
+    return done();
+}

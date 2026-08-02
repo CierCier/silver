@@ -294,6 +294,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Receiver is passed either by value or pointer depending on the
     /// collected impl metadata / function signature.
 
+    /// True when the callee runs a destructor on this by-value parameter at
+    /// function exit: a non-pointer/reference type with a Drop impl.
+    pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> bool {
+        if matches!(
+            ty.kind.as_ref(),
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+        ) {
+            return false;
+        }
+        self.get_drop_function_name(ty)
+            .map(|drop_fn| drop_fn.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Clear the tracked drop flag of `expr` when it names a local or
+    /// parameter: ownership of the value is being transferred to a by-value
+    /// callee that will run the destructor on its copy.
+    pub(crate) fn clear_drop_flag_of(&mut self, expr: &ast::Expression) -> CodegenResult<()> {
+        if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
+            && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+        {
+            self.builder
+                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn emit_method_call_expression(
         &mut self,
         receiver: &ast::Expression,
@@ -485,7 +513,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         receiver_value
                     }
                 } else {
-                    self.emit_expression_value(receiver)?
+                    let value = self.emit_expression_value(receiver)?;
+                    // By-value receiver of a Drop type: the callee's parameter
+                    // destructor runs on function exit, so ownership transfers
+                    // to the callee. Clear the caller's drop flag, otherwise
+                    // both the callee's copy and the original free the same
+                    // resources (double free). Extern functions never drop
+                    // their parameters and are excluded.
+                    if let Some(signature) = &signature
+                        && signature.linkage.is_none()
+                        && signature
+                            .params
+                            .first()
+                            .is_some_and(|ty| self.param_type_drops_on_exit(ty))
+                    {
+                        self.clear_drop_flag_of(receiver)?;
+                    }
+                    value
                 }
             };
 
@@ -522,6 +566,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let param_index = index + usize::from(inject_receiver);
             if param_index < declared_param_count {
                 if let Some(signature) = &signature {
+                    // By-value argument of a Drop type: the callee's
+                    // parameter destructor runs on exit, transferring
+                    // ownership. Clear the caller's flag to avoid a
+                    // double free; extern functions never drop params.
+                    if signature.linkage.is_none()
+                        && param_index < signature.params.len()
+                        && self.param_type_drops_on_exit(&signature.params[param_index])
+                    {
+                        self.clear_drop_flag_of(argument)?;
+                    }
                     // Prefer a user-defined cast method over builtin casts.
                     if let Some(casted) = self.try_apply_user_cast(
                         value,

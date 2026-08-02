@@ -396,6 +396,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             &func.body,
             llvm_name,
             &func.name.span,
+            false,
         )
     }
 
@@ -604,6 +605,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &func.body,
                         &mangled_name,
                         &func.name.span,
+                        false,
                     )?;
                 }
                 ast::ImplItemKind::Cast(cast) => {
@@ -634,6 +636,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     };
                     Self::apply_function_linkage(function, &effective_visibility);
 
+                    // Cast receivers are borrowed: skip the by-value self
+                    // param's destructor so it does not free the caller's
+                    // resources (see emit_function_body).
                     self.emit_function_body(
                         function,
                         &cast.parameters,
@@ -641,6 +646,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &cast.body,
                         &mangled_name,
                         &cast.span,
+                        true,
                     )?;
                 }
                 _ => {}

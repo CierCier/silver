@@ -20,6 +20,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         body: &ast::Block,
         fn_name: &str,
         fn_span: &Span,
+        skip_first_param_drop: bool,
     ) -> CodegenResult<()> {
         if function.count_basic_blocks() > 0 {
             return Ok(());
@@ -73,7 +74,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         // Set up drop flags and defers for parameters that implement Drop.
-        for param in parameters {
+        for (param_index, param) in parameters.iter().enumerate() {
+            // Cast receivers are borrowed views, not owned values: the caller
+            // retains ownership, so the cast's by-value `self` copy must NOT
+            // run the destructor on exit (it would free the caller's buffer
+            // and dangle any view the cast returned).
+            if skip_first_param_drop && param_index == 0 {
+                continue;
+            }
             // Skip pointer/reference types: the caller owns the pointee,
             // so we must NOT call the pointee's drop on function exit.
             if matches!(

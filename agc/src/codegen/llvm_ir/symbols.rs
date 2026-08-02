@@ -784,6 +784,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     &func.body,
                     &mangled_name,
                     &func.name.span,
+                    false,
                 )?;
 
                 self.defers = saved_defers;
