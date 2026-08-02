@@ -171,10 +171,10 @@ pub(crate) fn link_exe_with_ld_lld(
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }
-    if !plan.no_std {
-        if let Some(loader) = default_dynamic_linker(plan.target.as_deref()) {
-            link.arg("-dynamic-linker").arg(loader);
-        }
+    if !plan.no_std
+        && let Some(loader) = default_dynamic_linker(plan.target.as_deref())
+    {
+        link.arg("-dynamic-linker").arg(loader);
     }
 
     if !plan.no_std {

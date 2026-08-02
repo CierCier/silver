@@ -4,9 +4,9 @@
 //! parse, import lowering, semantic analysis, type check, monomorph,
 //! codegen, link). The linker itself lives in `crate::link`.
 
+use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::env;
 
 use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
 use agc::module_artifact::{
@@ -480,7 +480,7 @@ pub(crate) fn run(cli: Cli) {
                                     eprintln!(
                                         "{}",
                                         diagnostics::render(
-                                            error.span().clone(),
+                                            *error.span(),
                                             &error.format_with_help(),
                                             diagnostics::Severity::Error,
                                         )
@@ -625,7 +625,7 @@ pub(crate) fn run(cli: Cli) {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                error.span().clone(),
+                                *error.span(),
                                 &error.format_with_help(),
                                 diagnostics::Severity::Error,
                             )
@@ -687,7 +687,7 @@ pub(crate) fn run(cli: Cli) {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                error.span.clone(),
+                                error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
                             )
@@ -763,7 +763,7 @@ pub(crate) fn run(cli: Cli) {
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                error.span.clone(),
+                                error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
                             )

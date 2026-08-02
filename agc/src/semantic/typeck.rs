@@ -73,7 +73,6 @@ struct FunctionSig {
     params: Vec<Type>,
     return_type: Type,
     type_params: Vec<String>,
-    span: Span,
     bounds: Vec<TypeBoundPredicate>,
     source: ast::FunctionItem,
     is_variadic: bool,
@@ -93,14 +92,12 @@ struct StructDef {
 
 #[derive(Debug, Clone)]
 struct VariantInfo {
-    discriminant: i128,
     payload: Vec<ast::Type>,
 }
 
 #[derive(Debug, Clone)]
 struct EnumDef {
     backing_type: ast::PrimitiveType,
-    has_payload: bool,
     variants: HashMap<String, VariantInfo>,
 }
 
@@ -218,7 +215,6 @@ impl TypeChecker {
                             params,
                             return_type,
                             type_params: export.type_params.clone(),
-                            span: Span::default(),
                             bounds: Vec::new(),
                             source: ast::FunctionItem {
                                 name: ast::Identifier {
@@ -261,13 +257,13 @@ impl TypeChecker {
                             },
                         );
                     }
-                    if let Some(layout) = export.layout {
-                        if let (Some(size), Some(align)) = (layout.size, layout.align) {
-                            self.type_ctx.register_named(
-                                &[export.name.clone()],
-                                TypeLayout::known(size as usize, align as usize),
-                            );
-                        }
+                    if let Some(layout) = export.layout
+                        && let (Some(size), Some(align)) = (layout.size, layout.align)
+                    {
+                        self.type_ctx.register_named(
+                            std::slice::from_ref(&export.name),
+                            TypeLayout::known(size as usize, align as usize),
+                        );
                     }
                 }
                 crate::module_artifact::ExportKind::Enum => {
@@ -288,7 +284,6 @@ impl TypeChecker {
                             (
                                 variant.name.clone(),
                                 VariantInfo {
-                                    discriminant: variant.value,
                                     payload: variant
                                         .payload_types
                                         .iter()
@@ -299,15 +294,10 @@ impl TypeChecker {
                             )
                         })
                         .collect::<HashMap<_, _>>();
-                    let has_payload = export
-                        .enum_variants
-                        .iter()
-                        .any(|v| !v.payload_types.is_empty());
                     self.enum_defs.insert(
                         export.name.clone(),
                         EnumDef {
                             backing_type: backing_type.clone(),
-                            has_payload,
                             variants,
                         },
                     );
@@ -382,7 +372,7 @@ impl TypeChecker {
                     let type_id = table.intern_symbol(
                         format!("type::{}", struct_item.name.name),
                         SymbolKind::Struct,
-                        Some(struct_item.name.span.clone()),
+                        Some(struct_item.name.span),
                         CompilerPhase::TypeCheck,
                     );
                     self.known_type_ids.insert(type_id);
@@ -422,7 +412,7 @@ impl TypeChecker {
                     let type_id = table.intern_symbol(
                         format!("type::{}", enum_item.name.name),
                         SymbolKind::Enum,
-                        Some(enum_item.name.span.clone()),
+                        Some(enum_item.name.span),
                         CompilerPhase::TypeCheck,
                     );
                     self.known_type_ids.insert(type_id);
@@ -437,7 +427,7 @@ impl TypeChecker {
                     let type_id = table.intern_symbol(
                         format!("type::{}", trait_item.name.name),
                         SymbolKind::Trait,
-                        Some(trait_item.name.span.clone()),
+                        Some(trait_item.name.span),
                         CompilerPhase::TypeCheck,
                     );
                     self.known_type_ids.insert(type_id);
@@ -448,7 +438,7 @@ impl TypeChecker {
                     let type_id = table.intern_symbol(
                         format!("type::{}", alias.name.name),
                         SymbolKind::Struct,
-                        Some(alias.name.span.clone()),
+                        Some(alias.name.span),
                         CompilerPhase::TypeCheck,
                     );
                     self.known_type_ids.insert(type_id);
@@ -493,7 +483,7 @@ impl TypeChecker {
                 if attr.args.len() != 1 {
                     errors.push(TypeError {
                         message: "#[link_name] expects exactly one argument".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 } else if let Some(arg) = attr.args.first() {
                     match arg {
@@ -501,14 +491,14 @@ impl TypeChecker {
                             if s.is_empty() {
                                 errors.push(TypeError {
                                     message: "#[link_name] requires a non-empty string".to_string(),
-                                    span: attr.span.clone(),
+                                    span: attr.span,
                                 });
                             }
                         }
                         _ => {
                             errors.push(TypeError {
                                 message: "#[link_name] requires a string literal".to_string(),
-                                span: attr.span.clone(),
+                                span: attr.span,
                             });
                         }
                     }
@@ -529,13 +519,8 @@ impl TypeChecker {
         self.push_scope();
         for param in &func.parameters {
             let param_type = Type::from_ast(&param.param_type);
-            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(
-                &param.name.name,
-                param_type,
-                param.is_mutable,
-                param.span.clone(),
-            );
+            self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -553,13 +538,8 @@ impl TypeChecker {
         self.push_scope();
         for param in &func.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
-            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(
-                &param.name.name,
-                param_type,
-                param.is_mutable,
-                param.span.clone(),
-            );
+            self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&func.body);
         self.pop_scope();
@@ -573,13 +553,8 @@ impl TypeChecker {
         self.push_scope();
         for param in &cast.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
-            self.reject_plain_void_value_type(&param_type, param.param_type.span.clone());
-            self.bind(
-                &param.name.name,
-                param_type,
-                param.is_mutable,
-                param.span.clone(),
-            );
+            self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&cast.body);
         self.pop_scope();
@@ -599,18 +574,15 @@ impl TypeChecker {
             ast::StatementKind::Block(block) => self.check_block(block),
             ast::StatementKind::Let(let_stmt) => {
                 let Some(annotation) = let_stmt.type_annotation.as_ref() else {
-                    self.error(
-                        "local bindings must include a type annotation",
-                        stmt.span.clone(),
-                    );
+                    self.error("local bindings must include a type annotation", stmt.span);
                     return;
                 };
 
                 let declared = Type::from_ast(annotation);
-                self.reject_plain_void_value_type(&declared, annotation.span.clone());
+                self.reject_plain_void_value_type(&declared, annotation.span);
 
                 if let_stmt.is_volatile && matches!(declared, Type::Array { .. }) {
-                    self.error("volatile arrays are not supported", stmt.span.clone());
+                    self.error("volatile arrays are not supported", stmt.span);
                 }
 
                 if let Some(init) = &let_stmt.initializer {
@@ -620,7 +592,7 @@ impl TypeChecker {
                     {
                         self.error(
                             format!("type mismatch: expected {}, found {}", declared, init_type),
-                            init.span.clone(),
+                            init.span,
                         );
                     }
                 }
@@ -631,17 +603,17 @@ impl TypeChecker {
                             &ident.name,
                             declared.clone(),
                             let_stmt.is_mutable,
-                            let_stmt.pattern.span.clone(),
+                            let_stmt.pattern.span,
                         );
-                        if let Some(scope) = self.static_vars.last_mut() {
-                            if let_stmt.is_static {
-                                scope.insert(ident.name.clone());
-                            }
+                        if let Some(scope) = self.static_vars.last_mut()
+                            && let_stmt.is_static
+                        {
+                            scope.insert(ident.name.clone());
                         }
-                        if let Some(scope) = self.volatile_vars.last_mut() {
-                            if let_stmt.is_volatile {
-                                scope.insert(ident.name.clone());
-                            }
+                        if let Some(scope) = self.volatile_vars.last_mut()
+                            && let_stmt.is_volatile
+                        {
+                            scope.insert(ident.name.clone());
                         }
                         // Record for hover: variable name gets its declared type
                         self.expr_types.insert(
@@ -654,7 +626,7 @@ impl TypeChecker {
                             "let declarations must bind a single identifier; destructuring \
                             patterns are not supported"
                                 .to_string(),
-                            let_stmt.pattern.span.clone(),
+                            let_stmt.pattern.span,
                         );
                     }
                 }
@@ -666,7 +638,7 @@ impl TypeChecker {
                 if self.defer_depth > 0 {
                     self.error(
                         "return statement is not allowed inside a defer block",
-                        stmt.span.clone(),
+                        stmt.span,
                     );
                 }
                 let expected = self.current_return.clone().unwrap_or(Type::Unit);
@@ -674,7 +646,7 @@ impl TypeChecker {
                     Some(expr) => {
                         let found = self.check_expr(expr, Some(&expected));
                         if Self::is_void_like(&expected) {
-                            self.error("void function cannot return a value", expr.span.clone());
+                            self.error("void function cannot return a value", expr.span);
                         } else if !self.is_assignable(&expected, &found)
                             && !self.is_implicitly_castable(&found, &expected)
                         {
@@ -683,7 +655,7 @@ impl TypeChecker {
                                     "return type mismatch: expected {}, found {}",
                                     expected, found
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                     }
@@ -694,7 +666,7 @@ impl TypeChecker {
                                     "return type mismatch: expected {:?}, found unit",
                                     expected
                                 ),
-                                stmt.span.clone(),
+                                stmt.span,
                             );
                         }
                     }
@@ -704,7 +676,7 @@ impl TypeChecker {
                 if self.defer_depth > 0 {
                     self.error(
                         "break statement is not allowed inside a defer block",
-                        stmt.span.clone(),
+                        stmt.span,
                     );
                 }
                 if let Some(expr) = value {
@@ -715,7 +687,7 @@ impl TypeChecker {
                 if self.defer_depth > 0 {
                     self.error(
                         "continue statement is not allowed inside a defer block",
-                        stmt.span.clone(),
+                        stmt.span,
                     );
                 }
             }
@@ -728,6 +700,10 @@ impl TypeChecker {
     }
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
+        #[expect(
+            clippy::match_like_matches_macro,
+            reason = "two-column (primitive, literal) table reads better as a match than matches!"
+        )]
         let ty = match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(literal) => {
                 self.literal_type(literal, expected, &expr.span)
@@ -737,7 +713,7 @@ impl TypeChecker {
                     if self.is_moved(&ident.name) {
                         self.error(
                             format!("use of moved variable '{}'", ident.name),
-                            ident.span.clone(),
+                            ident.span,
                         );
                     }
                     // Array-to-pointer decay: `i64 arr[9]` as an expression
@@ -759,13 +735,13 @@ impl TypeChecker {
                             return_type: Box::new(sigs.return_type.clone()),
                         };
                     }
-                    if let Some(sigs) = self.imported_functions.get(&ident.name) {
-                        if let Some(sig) = sigs.first() {
-                            return Type::Function {
-                                params: sig.params.clone(),
-                                return_type: Box::new(sig.return_type.clone()),
-                            };
-                        }
+                    if let Some(sigs) = self.imported_functions.get(&ident.name)
+                        && let Some(sig) = sigs.first()
+                    {
+                        return Type::Function {
+                            params: sig.params.clone(),
+                            return_type: Box::new(sig.return_type.clone()),
+                        };
                     }
                     if self.known_types.contains_key(&ident.name) {
                         return Type::Named {
@@ -773,10 +749,7 @@ impl TypeChecker {
                             generics: Vec::new(),
                         };
                     }
-                    self.error(
-                        format!("unknown identifier '{}'", ident.name),
-                        ident.span.clone(),
-                    );
+                    self.error(format!("unknown identifier '{}'", ident.name), ident.span);
                     Type::Unknown
                 }
             },
@@ -814,7 +787,7 @@ impl TypeChecker {
                                         &[],
                                         None,
                                         MethodCallStyle::Instance,
-                                        expr.span.clone(),
+                                        expr.span,
                                     ) {
                                         result_ty
                                     } else {
@@ -823,7 +796,7 @@ impl TypeChecker {
                                                 "unary +/- requires numeric operand, found {}",
                                                 operand_ty
                                             ),
-                                            expr.span.clone(),
+                                            expr.span,
                                         );
                                         operand_ty
                                     }
@@ -833,7 +806,7 @@ impl TypeChecker {
                                             "unary +/- requires numeric operand, found {}",
                                             operand_ty
                                         ),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     operand_ty
                                 }
@@ -853,7 +826,7 @@ impl TypeChecker {
                                             "dereference requires pointer or reference operand, found {}",
                                             operand_ty_clone
                                         ),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     operand_ty_clone
                                 }
@@ -869,20 +842,20 @@ impl TypeChecker {
                                     &[],
                                     None,
                                     MethodCallStyle::Instance,
-                                    expr.span.clone(),
+                                    expr.span,
                                 ) {
                                     result_ty
                                 } else {
                                     self.error(
                                         format!("logical not requires bool, found {}", operand_ty),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     Type::Primitive(ast::PrimitiveType::Bool)
                                 }
                             } else {
                                 self.error(
                                     format!("logical not requires bool, found {}", operand_ty),
-                                    expr.span.clone(),
+                                    expr.span,
                                 );
                                 Type::Primitive(ast::PrimitiveType::Bool)
                             }
@@ -897,7 +870,7 @@ impl TypeChecker {
                                     &[],
                                     None,
                                     MethodCallStyle::Instance,
-                                    expr.span.clone(),
+                                    expr.span,
                                 ) {
                                     result_ty
                                 } else {
@@ -906,14 +879,14 @@ impl TypeChecker {
                                             "bitwise not requires integer, found {}",
                                             operand_ty
                                         ),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     operand_ty
                                 }
                             } else {
                                 self.error(
                                     format!("bitwise not requires integer, found {}", operand_ty),
-                                    expr.span.clone(),
+                                    expr.span,
                                 );
                                 operand_ty
                             }
@@ -922,7 +895,7 @@ impl TypeChecker {
                             if !self.is_incdec_type(&operand_ty) {
                                 self.error(
                                     "increment/decrement requires numeric or pointer operand",
-                                    expr.span.clone(),
+                                    expr.span,
                                 );
                             }
                             operand_ty
@@ -937,13 +910,13 @@ impl TypeChecker {
                         if !self.is_incdec_type(&operand_ty) {
                             self.error(
                                 format!("increment/decrement requires numeric or pointer operand, found {}", operand_ty),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                         operand_ty
                     }
                     _ => {
-                        self.error("invalid postfix operator", expr.span.clone());
+                        self.error("invalid postfix operator", expr.span);
                         Type::Unknown
                     }
                 }
@@ -961,10 +934,11 @@ impl TypeChecker {
                     let numeric_expected = expected.filter(|ty| self.is_numeric_type(ty));
                     let left_ty = self.check_expr(left, numeric_expected);
                     let right_ty = self.check_expr(right, numeric_expected);
-                    if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
-                        if let Some(common) = self.common_numeric_type(&left_ty, &right_ty) {
-                            return common;
-                        }
+                    if self.is_numeric_type(&left_ty)
+                        && self.is_numeric_type(&right_ty)
+                        && let Some(common) = self.common_numeric_type(&left_ty, &right_ty)
+                    {
+                        return common;
                     }
 
                     if let Some(ty) =
@@ -978,7 +952,7 @@ impl TypeChecker {
                             "binary operator requires numeric operands, got {} and {}",
                             left_ty, right_ty
                         ),
-                        expr.span.clone(),
+                        expr.span,
                     );
                     Type::Unknown
                 }
@@ -997,7 +971,7 @@ impl TypeChecker {
                                     "comparison operands must be compatible, got {} and {}",
                                     left_ty, right_ty
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                         return Type::Primitive(ast::PrimitiveType::Bool);
@@ -1011,15 +985,13 @@ impl TypeChecker {
 
                     // Matching generic type params: allow ==/!= without explicit overload.
                     // The concrete type comparison is checked at monomorphization time.
-                    if left_ty == right_ty {
-                        if let Type::Named { path, generics } = &left_ty {
-                            if path.len() == 1
-                                && generics.is_empty()
-                                && !self.known_types.contains_key(&path[0])
-                            {
-                                return Type::Primitive(ast::PrimitiveType::Bool);
-                            }
-                        }
+                    if left_ty == right_ty
+                        && let Type::Named { path, generics } = &left_ty
+                        && path.len() == 1
+                        && generics.is_empty()
+                        && !self.known_types.contains_key(&path[0])
+                    {
+                        return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
                     if let Some(ty) =
@@ -1029,7 +1001,7 @@ impl TypeChecker {
                         if !self.is_implicitly_castable(&ty, &bool_ty) {
                             self.error(
                                 format!("comparison operator must return bool, found {}", ty),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                         return bool_ty;
@@ -1041,7 +1013,7 @@ impl TypeChecker {
                                 "comparison operands must match, got {} and {}",
                                 left_ty, right_ty
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     Type::Primitive(ast::PrimitiveType::Bool)
@@ -1053,7 +1025,7 @@ impl TypeChecker {
                     if !is_bool(&left_ty) && !self.is_implicitly_castable(&left_ty, &bool_ty) {
                         self.error(
                             format!("logical operator requires bool operands, found {}", left_ty),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     if !is_bool(&right_ty) && !self.is_implicitly_castable(&right_ty, &bool_ty) {
@@ -1062,7 +1034,7 @@ impl TypeChecker {
                                 "logical operator requires bool operands, found {}",
                                 right_ty
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     Type::Primitive(ast::PrimitiveType::Bool)
@@ -1087,7 +1059,7 @@ impl TypeChecker {
                                     "bitwise operands must match, got {} and {}",
                                     left_ty, right_ty
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                     }
@@ -1097,16 +1069,15 @@ impl TypeChecker {
                                 "bitwise operator requires integer operands, got {} and {}",
                                 left_ty, right_ty
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     // Try operator overload for non-primitive types
-                    if !self.is_primitive_type(&left_ty) {
-                        if let Some(result_ty) =
+                    if !self.is_primitive_type(&left_ty)
+                        && let Some(result_ty) =
                             self.resolve_operator_overload(&left_ty, &right_ty, operator, expr)
-                        {
-                            return result_ty;
-                        }
+                    {
+                        return result_ty;
                     }
 
                     self.common_numeric_type(&left_ty, &right_ty)
@@ -1123,34 +1094,28 @@ impl TypeChecker {
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
                             format!("assignment type mismatch: {} = {}", left_ty, right_ty),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     // Check mutability of assignment target
-                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref() {
-                        if let Some((_, is_mut)) = self.lookup(&ident.name) {
-                            if !is_mut {
-                                self.error(
-                                    format!("cannot assign to const variable '{}'", ident.name),
-                                    ident.span.clone(),
-                                );
-                            }
-                        }
+                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
+                        && let Some((_, is_mut)) = self.lookup(&ident.name)
+                        && !is_mut
+                    {
+                        self.error(
+                            format!("cannot assign to const variable '{}'", ident.name),
+                            ident.span,
+                        );
                     }
-                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref() {
-                        if let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref() {
-                            if let Some((_, is_mut)) = self.lookup(&ident.name) {
-                                if !is_mut {
-                                    self.error(
-                                        format!(
-                                            "cannot assign to field of const variable '{}'",
-                                            ident.name
-                                        ),
-                                        ident.span.clone(),
-                                    );
-                                }
-                            }
-                        }
+                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref()
+                        && let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref()
+                        && let Some((_, is_mut)) = self.lookup(&ident.name)
+                        && !is_mut
+                    {
+                        self.error(
+                            format!("cannot assign to field of const variable '{}'", ident.name),
+                            ident.span,
+                        );
                     }
                     // Try operator overload for compound assignment
                     if !self.is_primitive_type(&left_ty)
@@ -1185,7 +1150,7 @@ impl TypeChecker {
                                 "range bounds must be integers, got {} and {}",
                                 left_ty, right_ty
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     } else if left_ty != right_ty {
                         self.error(
@@ -1193,7 +1158,7 @@ impl TypeChecker {
                                 "range bounds must be the same type, got {} and {}",
                                 left_ty, right_ty
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                     left_ty
@@ -1208,7 +1173,7 @@ impl TypeChecker {
                 if !is_bool(&cond_ty) {
                     self.error(
                         format!("if condition must be bool, found {}", cond_ty),
-                        condition.span.clone(),
+                        condition.span,
                     );
                 }
                 self.check_block(then_branch);
@@ -1222,7 +1187,7 @@ impl TypeChecker {
                 if !is_bool(&cond_ty) {
                     self.error(
                         format!("while condition must be bool, found {}", cond_ty),
-                        condition.span.clone(),
+                        condition.span,
                     );
                 }
                 self.check_block(body);
@@ -1237,14 +1202,14 @@ impl TypeChecker {
                 self.push_scope();
                 let init_stmt = ast::Statement {
                     kind: ast::StatementKind::Let(init.clone()),
-                    span: init.pattern.span.clone(),
+                    span: init.pattern.span,
                 };
                 self.check_statement(&init_stmt);
                 let cond_ty = self.check_expr(condition, None);
                 if !is_bool(&cond_ty) {
                     self.error(
                         format!("for condition must be bool, found {}", cond_ty),
-                        condition.span.clone(),
+                        condition.span,
                     );
                 }
                 self.check_expr(increment, None);
@@ -1266,7 +1231,7 @@ impl TypeChecker {
                                     "array element type mismatch: expected {}, found {}",
                                     element, item_ty
                                 ),
-                                element_expr.span.clone(),
+                                element_expr.span,
                             );
                         }
                     }
@@ -1295,10 +1260,7 @@ impl TypeChecker {
                 let from = self.check_expr(expression, None);
                 let to = Type::from_ast(target_type);
                 if !self.is_castable(&from, &to) {
-                    self.error(
-                        format!("invalid cast: {} -> {}", from, to),
-                        expr.span.clone(),
-                    );
+                    self.error(format!("invalid cast: {} -> {}", from, to), expr.span);
                 }
                 to
             }
@@ -1331,7 +1293,7 @@ impl TypeChecker {
                                 "cannot take the address of volatile variable '{}'",
                                 ident.name
                             ),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                 }
@@ -1357,11 +1319,11 @@ impl TypeChecker {
                     if self.is_static_var(&ident.name) {
                         self.error(
                             format!("cannot move out of static variable '{}'", ident.name),
-                            expr.span.clone(),
+                            expr.span,
                         );
                     }
                 } else {
-                    self.error("move operand must be an identifier", inner.span.clone());
+                    self.error("move operand must be an identifier", inner.span);
                 }
                 ty
             }
@@ -1373,7 +1335,7 @@ impl TypeChecker {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
                     // Check if this is a known function name first
                     if self.functions.contains_key(&ident.name) {
-                        self.resolve_overload(ident, arguments, expr.span.clone())
+                        self.resolve_overload(ident, arguments, expr.span)
                     } else {
                         // Type-check the function expression — may be a fn pointer variable
                         let fn_ty = self.check_expr(function, None);
@@ -1394,7 +1356,7 @@ impl TypeChecker {
                                         params.len(),
                                         arguments.len()
                                     ),
-                                    expr.span.clone(),
+                                    expr.span,
                                 );
                             }
                             for (i, (param_ty, arg_ty)) in
@@ -1416,16 +1378,13 @@ impl TypeChecker {
                                             "mismatched argument type for parameter {}: expected {}, got {}",
                                             i, param_ty, arg_ty
                                         ),
-                                        arguments[i].span.clone(),
+                                        arguments[i].span,
                                     );
                                 }
                             }
                             *return_type.clone()
                         } else {
-                            self.error(
-                                format!("'{}' is not callable", ident.name),
-                                expr.span.clone(),
-                            );
+                            self.error(format!("'{}' is not callable", ident.name), expr.span);
                             Type::Unknown
                         }
                     }
@@ -1437,13 +1396,13 @@ impl TypeChecker {
                                 let explicit_types: Vec<Type> = named
                                     .generics
                                     .as_ref()
-                                    .map(|gs| gs.iter().map(|t| Type::from_ast(t)).collect())
+                                    .map(|gs| gs.iter().map(Type::from_ast).collect())
                                     .unwrap_or_default();
                                 self.resolve_overload_with_explicit(
                                     ident,
                                     &explicit_types,
                                     arguments,
-                                    expr.span.clone(),
+                                    expr.span,
                                 )
                             } else {
                                 for arg in arguments {
@@ -1454,7 +1413,7 @@ impl TypeChecker {
                                         "type '{}' is not callable: no function with that name",
                                         named.path[0].name
                                     ),
-                                    expr.span.clone(),
+                                    expr.span,
                                 );
                                 Type::Unknown
                             }
@@ -1464,7 +1423,7 @@ impl TypeChecker {
                             }
                             self.error(
                                 "cannot call a namespaced type path; calls must use a single function name".to_string(),
-                                expr.span.clone(),
+                                expr.span,
                             );
                             Type::Unknown
                         }
@@ -1472,10 +1431,7 @@ impl TypeChecker {
                         for arg in arguments {
                             self.check_expr(arg, None);
                         }
-                        self.error(
-                            "type expression is not callable".to_string(),
-                            expr.span.clone(),
-                        );
+                        self.error("type expression is not callable".to_string(), expr.span);
                         Type::Unknown
                     }
                 } else {
@@ -1497,7 +1453,7 @@ impl TypeChecker {
                                     params.len(),
                                     arguments.len()
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                         }
                         *return_type.clone()
@@ -1507,7 +1463,7 @@ impl TypeChecker {
                         }
                         self.error(
                             format!("expression is not callable (type {})", fn_ty),
-                            expr.span.clone(),
+                            expr.span,
                         );
                         Type::Unknown
                     }
@@ -1521,46 +1477,37 @@ impl TypeChecker {
                 let style = self.method_call_style(receiver);
                 let receiver_ty = self.check_expr(receiver, None);
                 // Check if this is an enum variant construction first
-                if let Type::Named { path: ty_path, .. } = &receiver_ty {
-                    if ty_path.len() == 1 {
-                        let enum_name = &ty_path[0];
-                        if let Some(enum_def) = self.enum_defs.get(enum_name) {
-                            if let Some(variant_info) = enum_def.variants.get(&method.name) {
-                                let expected_count = variant_info.payload.len();
-                                if arguments.len() != expected_count {
-                                    self.error(
-                                        format!(
-                                            "variant '{}' expects {} arguments, got {}",
-                                            method.name,
-                                            expected_count,
-                                            arguments.len()
-                                        ),
-                                        expr.span.clone(),
-                                    );
-                                } else {
-                                    // Collect expected types upfront to release the immutable borrow
-                                    let expected_types: Vec<Type> = variant_info
-                                        .payload
-                                        .iter()
-                                        .map(|ast_ty| Type::from_ast(ast_ty))
-                                        .collect();
-                                    for (i, arg) in arguments.iter().enumerate() {
-                                        self.check_expr(arg, Some(&expected_types[i]));
-                                    }
-                                }
-                                return receiver_ty.clone();
+                if let Type::Named { path: ty_path, .. } = &receiver_ty
+                    && ty_path.len() == 1
+                {
+                    let enum_name = &ty_path[0];
+                    if let Some(enum_def) = self.enum_defs.get(enum_name)
+                        && let Some(variant_info) = enum_def.variants.get(&method.name)
+                    {
+                        let expected_count = variant_info.payload.len();
+                        if arguments.len() != expected_count {
+                            self.error(
+                                format!(
+                                    "variant '{}' expects {} arguments, got {}",
+                                    method.name,
+                                    expected_count,
+                                    arguments.len()
+                                ),
+                                expr.span,
+                            );
+                        } else {
+                            // Collect expected types upfront to release the immutable borrow
+                            let expected_types: Vec<Type> =
+                                variant_info.payload.iter().map(Type::from_ast).collect();
+                            for (i, arg) in arguments.iter().enumerate() {
+                                self.check_expr(arg, Some(&expected_types[i]));
                             }
                         }
+                        return receiver_ty.clone();
                     }
                 }
                 // Otherwise, resolve as normal method call
-                self.resolve_method_overload(
-                    &receiver_ty,
-                    method,
-                    arguments,
-                    style,
-                    expr.span.clone(),
-                )
+                self.resolve_method_overload(&receiver_ty, method, arguments, style, expr.span)
             }
             ast::ExpressionKind::Index { object, index } => {
                 let object_ty = self.check_expr(object, None);
@@ -1571,7 +1518,7 @@ impl TypeChecker {
                         if !is_integer(&index_ty) {
                             self.error(
                                 format!("slice index must be integer, found {}", index_ty),
-                                index.span.clone(),
+                                index.span,
                             );
                         }
                         (**element).clone()
@@ -1581,7 +1528,7 @@ impl TypeChecker {
                             if !is_integer(&index_ty) {
                                 self.error(
                                     format!("slice index must be integer, found {}", index_ty),
-                                    index.span.clone(),
+                                    index.span,
                                 );
                             }
                             (**element).clone()
@@ -1590,7 +1537,7 @@ impl TypeChecker {
                             if !is_integer(&index_ty) {
                                 self.error(
                                     format!("pointer index must be integer, found {}", index_ty),
-                                    index.span.clone(),
+                                    index.span,
                                 );
                             }
                             inner.as_ref().clone()
@@ -1601,7 +1548,7 @@ impl TypeChecker {
                             if !is_integer(&index_ty) {
                                 self.error(
                                     format!("slice index must be integer, found {}", index_ty),
-                                    index.span.clone(),
+                                    index.span,
                                 );
                             }
                             (**element).clone()
@@ -1611,7 +1558,7 @@ impl TypeChecker {
                                 if !is_integer(&index_ty) {
                                     self.error(
                                         format!("slice index must be integer, found {}", index_ty),
-                                        index.span.clone(),
+                                        index.span,
                                     );
                                 }
                                 (**element).clone()
@@ -1623,7 +1570,7 @@ impl TypeChecker {
                                             "pointer index must be integer, found {}",
                                             index_ty
                                         ),
-                                        index.span.clone(),
+                                        index.span,
                                     );
                                 }
                                 inner.as_ref().clone()
@@ -1636,7 +1583,7 @@ impl TypeChecker {
                                 &[index_ty],
                                 None,
                                 MethodCallStyle::Instance,
-                                object.span.clone(),
+                                object.span,
                             ) {
                                 result_ty
                             } else {
@@ -1645,7 +1592,7 @@ impl TypeChecker {
                                         "indexing requires array or pointer type with integer index, found {}",
                                         object_ty_display
                                     ),
-                                    object.span.clone(),
+                                    object.span,
                                 );
                                 Type::Unknown
                             }
@@ -1655,14 +1602,14 @@ impl TypeChecker {
                         if *size == 0 {
                             self.error(
                                 "cannot index into zero-size array".to_string(),
-                                object.span.clone(),
+                                object.span,
                             );
                             return Type::Unknown;
                         }
                         if !is_integer(&index_ty) {
                             self.error(
                                 format!("array index must be integer, found {}", index_ty),
-                                index.span.clone(),
+                                index.span,
                             );
                             return Type::Unknown;
                         }
@@ -1675,7 +1622,7 @@ impl TypeChecker {
                             &[index_ty],
                             None,
                             MethodCallStyle::Instance,
-                            object.span.clone(),
+                            object.span,
                         ) {
                             result_ty
                         } else {
@@ -1684,7 +1631,7 @@ impl TypeChecker {
                                     "indexing requires array or pointer type with integer index, found {}",
                                     object_ty_display
                                 ),
-                                object.span.clone(),
+                                object.span,
                             );
                             Type::Unknown
                         }
@@ -1693,19 +1640,20 @@ impl TypeChecker {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let object_ty = self.check_expr(object, None);
-                if let Type::Named { path, .. } = &object_ty {
-                    if path.len() == 1 && self.enum_defs.contains_key(&path[0]) {
-                        let is_type_scoped_access = matches!(
-                            object.kind.as_ref(),
-                            ast::ExpressionKind::Identifier(ident) if ident.name == path[0]
+                if let Type::Named { path, .. } = &object_ty
+                    && path.len() == 1
+                    && self.enum_defs.contains_key(&path[0])
+                {
+                    let is_type_scoped_access = matches!(
+                        object.kind.as_ref(),
+                        ast::ExpressionKind::Identifier(ident) if ident.name == path[0]
+                    );
+                    if !is_type_scoped_access {
+                        self.error(
+                            "enum members must be accessed through the enum type name",
+                            object.span,
                         );
-                        if !is_type_scoped_access {
-                            self.error(
-                                "enum members must be accessed through the enum type name",
-                                object.span.clone(),
-                            );
-                            return Type::Unknown;
-                        }
+                        return Type::Unknown;
                     }
                 }
                 if let Some(field_ty) = self.resolve_field_access_type(&object_ty, &field.name) {
@@ -1713,7 +1661,7 @@ impl TypeChecker {
                 } else {
                     self.error(
                         format!("unknown field '{}' on type {}", field.name, object_ty),
-                        field.span.clone(),
+                        field.span,
                     );
                     Type::Unknown
                 }
@@ -1745,7 +1693,7 @@ impl TypeChecker {
                                                         &binding.name,
                                                         Type::from_ast(pt),
                                                         false,
-                                                        binding.span.clone(),
+                                                        binding.span,
                                                     );
                                                 }
                                             }
@@ -1759,7 +1707,7 @@ impl TypeChecker {
                                                             &b.name,
                                                             Type::from_ast(pt),
                                                             false,
-                                                            b.span.clone(),
+                                                            b.span,
                                                         );
                                                     }
                                                 }
@@ -1768,7 +1716,7 @@ impl TypeChecker {
                                                 self.error(
                                                     "data pattern in match must bind identifiers"
                                                         .to_string(),
-                                                    data_pattern.span.clone(),
+                                                    data_pattern.span,
                                                 );
                                             }
                                         }
@@ -1780,7 +1728,7 @@ impl TypeChecker {
                                             "unsupported pattern in enum match arm; expected a variant pattern like '{}.Variant(...)', a binding, or '_'",
                                             enum_name
                                         ),
-                                        arm.pattern.span.clone(),
+                                        arm.pattern.span,
                                     );
                                 }
                             }
@@ -1806,7 +1754,7 @@ impl TypeChecker {
                                             other,
                                             unified
                                         ),
-                                        arms[i].span.clone(),
+                                        arms[i].span,
                                     );
                                 }
                             }
@@ -1815,10 +1763,7 @@ impl TypeChecker {
                             Type::Unit
                         }
                     } else {
-                        self.error(
-                            format!("unknown enum type '{}'", path[0]),
-                            expr.span.clone(),
-                        );
+                        self.error(format!("unknown enum type '{}'", path[0]), expr.span);
                         for arm in arms {
                             self.check_expr(&arm.body, None);
                         }
@@ -1881,7 +1826,7 @@ impl TypeChecker {
                                             "match pattern type does not match scrutinee type {}",
                                             scrutinee_ty
                                         ),
-                                        arm.pattern.span.clone(),
+                                        arm.pattern.span,
                                     );
                                 }
                             }
@@ -1891,7 +1836,7 @@ impl TypeChecker {
                                         "unsupported pattern in match on a {} value; expected a literal pattern, a binding, or '_'",
                                         scrutinee_ty
                                     ),
-                                    arm.pattern.span.clone(),
+                                    arm.pattern.span,
                                 );
                             }
                         }
@@ -1917,7 +1862,7 @@ impl TypeChecker {
                                         other,
                                         unified
                                     ),
-                                    arms[i].span.clone(),
+                                    arms[i].span,
                                 );
                             }
                         }
@@ -1928,7 +1873,7 @@ impl TypeChecker {
                 } else {
                     self.error(
                         "match expression requires an enum type or a primitive int/float/bool/char/str value".to_string(),
-                        expr.span.clone(),
+                        expr.span,
                     );
                     for arm in arms {
                         self.check_expr(&arm.body, None);
@@ -1941,7 +1886,7 @@ impl TypeChecker {
                     "struct literal expressions are not supported here; use a variable \
                     initializer ('Type id = { .field = value }') instead"
                         .to_string(),
-                    expr.span.clone(),
+                    expr.span,
                 );
                 Type::Unknown
             }
@@ -1949,10 +1894,7 @@ impl TypeChecker {
                 match crate::builtin_macros::handle_typeck(&name.name, self, expr, args) {
                     Some(ty) => ty,
                     None => {
-                        self.error(
-                            format!("unknown builtin macro '@{}'", name.name),
-                            expr.span.clone(),
-                        );
+                        self.error(format!("unknown builtin macro '@{}'", name.name), expr.span);
                         Type::Unknown
                     }
                 }
@@ -1980,7 +1922,7 @@ impl TypeChecker {
                                     "range bounds must be integers, got {} and {}",
                                     left_ty, right_ty
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                             Type::Unknown
                         } else if left_ty != right_ty {
@@ -1989,7 +1931,7 @@ impl TypeChecker {
                                     "range bounds must be the same type, got {} and {}",
                                     left_ty, right_ty
                                 ),
-                                expr.span.clone(),
+                                expr.span,
                             );
                             Type::Unknown
                         } else {
@@ -2006,14 +1948,14 @@ impl TypeChecker {
 
                         let method_ident = ast::Identifier {
                             name: method_name.to_string(),
-                            span: iterable.span.clone(),
+                            span: iterable.span,
                         };
                         let iterator_ty = self.resolve_method_overload(
                             &iterable_ty,
                             &method_ident,
                             &[],
                             MethodCallStyle::Instance,
-                            iterable.span.clone(),
+                            iterable.span,
                         );
 
                         // Store resolved iterator type for codegen
@@ -2028,7 +1970,7 @@ impl TypeChecker {
                                     "type {} cannot be iterated over: missing `impl IntoIterator for {}`",
                                     iterable_ty, iterable_ty
                                 ),
-                                iterable.span.clone(),
+                                iterable.span,
                             );
                             Type::Unknown
                         } else {
@@ -2038,7 +1980,7 @@ impl TypeChecker {
                                 &[],
                                 None,
                                 MethodCallStyle::Instance,
-                                expr.span.clone(),
+                                expr.span,
                             );
                             match next_ret {
                                 Some(Type::Named { path, generics })
@@ -2053,7 +1995,7 @@ impl TypeChecker {
                                             "'next' on iterator must return Optional<T>, found {}",
                                             other
                                         ),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     Type::Unknown
                                 }
@@ -2063,7 +2005,7 @@ impl TypeChecker {
                                             "type {} has no 'next' method returning Optional<T>",
                                             iterator_ty
                                         ),
-                                        expr.span.clone(),
+                                        expr.span,
                                     );
                                     Type::Unknown
                                 }
@@ -2071,7 +2013,7 @@ impl TypeChecker {
                         }
                     }
                 };
-                self.bind(&binding.name, item_ty, *is_mutable, binding.span.clone());
+                self.bind(&binding.name, item_ty, *is_mutable, binding.span);
                 self.check_block(body);
                 self.pop_scope();
                 Type::Unit
@@ -2093,26 +2035,26 @@ impl TypeChecker {
                 // Resolve to the enum type
                 let enum_name = if path.len() == 1 { &path[0].name } else { "" };
                 if let Some(enum_def) = self.enum_defs.get(enum_name) {
-                    if let Some(info) = enum_def.variants.get(&variant.name) {
-                        if info.payload.len() != fields.len() {
-                            self.error(
-                                format!(
-                                    "enum variant '{}' of '{}' expects {} fields, got {}",
-                                    variant.name,
-                                    enum_name,
-                                    info.payload.len(),
-                                    fields.len()
-                                ),
-                                expr.span.clone(),
-                            );
-                        }
+                    if let Some(info) = enum_def.variants.get(&variant.name)
+                        && info.payload.len() != fields.len()
+                    {
+                        self.error(
+                            format!(
+                                "enum variant '{}' of '{}' expects {} fields, got {}",
+                                variant.name,
+                                enum_name,
+                                info.payload.len(),
+                                fields.len()
+                            ),
+                            expr.span,
+                        );
                     }
                     Type::Named {
                         path: path.iter().map(|p| p.name.clone()).collect(),
                         generics: Vec::new(),
                     }
                 } else {
-                    self.error(format!("unknown enum '{}'", enum_name), expr.span.clone());
+                    self.error(format!("unknown enum '{}'", enum_name), expr.span);
                     Type::Unknown
                 }
             }
@@ -2195,16 +2137,16 @@ impl TypeChecker {
                 if !matched
                     && self.infer_type_params(
                         param_ty,
-                        &arg_ty,
+                        arg_ty,
                         &candidate.type_params,
                         &mut inferred_mapping,
                     )
                 {
                     let substituted = self.substitute_type(param_ty, &inferred_mapping);
-                    if self.is_assignable(&substituted, &arg_ty) {
+                    if self.is_assignable(&substituted, arg_ty) {
                         mapping = inferred_mapping;
                         matched = true;
-                    } else if self.is_implicitly_castable(&arg_ty, &substituted) {
+                    } else if self.is_implicitly_castable(arg_ty, &substituted) {
                         score += 1;
                         mapping = inferred_mapping;
                         matched = true;
@@ -2214,9 +2156,9 @@ impl TypeChecker {
                 // Phase 2: fallback for concrete types (e.g. f32 vs f64)
                 if !matched {
                     let substituted = self.substitute_type(param_ty, &mapping);
-                    if self.is_assignable(&substituted, &arg_ty) {
+                    if self.is_assignable(&substituted, arg_ty) {
                         matched = true;
-                    } else if self.is_implicitly_castable(&arg_ty, &substituted) {
+                    } else if self.is_implicitly_castable(arg_ty, &substituted) {
                         score += 1;
                         matched = true;
                     }
@@ -2229,7 +2171,7 @@ impl TypeChecker {
             }
 
             if ok {
-                if !self.bounds_satisfied(&candidate.bounds, &mapping, span.clone()) {
+                if !self.bounds_satisfied(&candidate.bounds, &mapping, span) {
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -2275,9 +2217,9 @@ impl TypeChecker {
             let mut msg = format!("ambiguous overload for '{}'", ident.name);
             let candidates: Vec<String> = best_matches
                 .iter()
-                .filter_map(|(_, _, _, c)| {
+                .map(|(_, _, _, c)| {
                     let params: Vec<String> = c.params.iter().map(|p| p.to_string()).collect();
-                    Some(format!("{}({})", ident.name, params.join(", ")))
+                    format!("{}({})", ident.name, params.join(", "))
                 })
                 .collect();
             if candidates.len() > 1 {
@@ -2289,7 +2231,7 @@ impl TypeChecker {
         }
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
-        self.record_function_monomorph(candidate, mapping, span.clone());
+        self.record_function_monomorph(candidate, mapping, span);
         return_type.clone()
     }
 
@@ -2304,10 +2246,10 @@ impl TypeChecker {
                         path,
                         generics: inner_gs,
                     } = g
+                        && path.len() == 1
+                        && inner_gs.is_empty()
                     {
-                        if path.len() == 1 && inner_gs.is_empty() {
-                            out.push(path[0].clone());
-                        }
+                        out.push(path[0].clone());
                     }
                 }
                 out
@@ -2335,7 +2277,7 @@ impl TypeChecker {
             &arg_types,
             Some(arguments),
             style,
-            span.clone(),
+            span,
         ) {
             Some(ty) => ty,
             None => {
@@ -2382,9 +2324,7 @@ impl TypeChecker {
         span: Span,
     ) -> Option<Type> {
         let key = (self.method_key(receiver_ty), name.to_string());
-        let Some(candidate_ids) = self.methods.get(&key).cloned() else {
-            return None;
-        };
+        let candidate_ids = self.methods.get(&key).cloned()?;
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, MethodSig)> = Vec::new();
         let owner_ty = Self::method_owner_type(receiver_ty);
@@ -2528,7 +2468,7 @@ impl TypeChecker {
             }
 
             if ok {
-                let sat = self.bounds_satisfied(&candidate.bounds, &mapping, span.clone());
+                let sat = self.bounds_satisfied(&candidate.bounds, &mapping, span);
                 if !sat {
                     continue;
                 }
@@ -2551,9 +2491,9 @@ impl TypeChecker {
             let mut msg = format!("ambiguous overload for '{}'", name);
             let candidates: Vec<String> = best_matches
                 .iter()
-                .filter_map(|(_, _, _, c)| {
+                .map(|(_, _, _, c)| {
                     let params: Vec<String> = c.params.iter().map(|p| p.to_string()).collect();
-                    Some(format!("{}({})", name, params.join(", ")))
+                    format!("{}({})", name, params.join(", "))
                 })
                 .collect();
             if candidates.len() > 1 {
@@ -2565,7 +2505,7 @@ impl TypeChecker {
         }
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
-        self.record_method_monomorph(candidate, mapping, span.clone());
+        self.record_method_monomorph(candidate, mapping, span);
         Some(return_type.clone())
     }
 
@@ -2593,7 +2533,7 @@ impl TypeChecker {
                         return_type: func.signature.return_type.clone(),
                         body: ast::Block {
                             statements: Vec::new(),
-                            span: func.name.span.clone(),
+                            span: func.name.span,
                         },
                     };
                     self.collect_function_item(&stub, func.signature.is_variadic, table);
@@ -2608,7 +2548,7 @@ impl TypeChecker {
                             return_type: func.signature.return_type.clone(),
                             body: ast::Block {
                                 statements: Vec::new(),
-                                span: func.name.span.clone(),
+                                span: func.name.span,
                             },
                         };
                         self.collect_function_item(&stub, func.signature.is_variadic, table);
@@ -2631,7 +2571,7 @@ impl TypeChecker {
                     table.intern_symbol(
                         symbol_key,
                         SymbolKind::ExternVariable,
-                        Some(var.name.span.clone()),
+                        Some(var.name.span),
                         CompilerPhase::TypeCheck,
                     );
                     self.extern_variables
@@ -2643,7 +2583,7 @@ impl TypeChecker {
                         table.intern_symbol(
                             symbol_key,
                             SymbolKind::ExternVariable,
-                            Some(var.name.span.clone()),
+                            Some(var.name.span),
                             CompilerPhase::TypeCheck,
                         );
                         self.extern_variables
@@ -2668,7 +2608,7 @@ impl TypeChecker {
             table.intern_symbol(
                 symbol_key,
                 SymbolKind::GlobalVariable,
-                Some(var.name.span.clone()),
+                Some(var.name.span),
                 CompilerPhase::TypeCheck,
             );
             self.global_variables
@@ -2681,12 +2621,9 @@ impl TypeChecker {
 
     fn check_global_variable(&mut self, var: &ast::GlobalVariableItem) {
         let declared = Type::from_ast(&var.var_type);
-        self.reject_plain_void_value_type(&declared, var.var_type.span.clone());
+        self.reject_plain_void_value_type(&declared, var.var_type.span);
         if var.is_volatile && matches!(declared, Type::Array { .. }) {
-            self.error(
-                "volatile arrays are not supported",
-                var.var_type.span.clone(),
-            );
+            self.error("volatile arrays are not supported", var.var_type.span);
         }
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
@@ -2698,7 +2635,7 @@ impl TypeChecker {
                         "type mismatch: expected {:?}, found {:?}",
                         declared, init_type
                     ),
-                    init.span.clone(),
+                    init.span,
                 );
             }
         }
@@ -2733,7 +2670,7 @@ impl TypeChecker {
         let symbol_id = table.intern_symbol(
             symbol_key.clone(),
             SymbolKind::Function,
-            Some(func.name.span.clone()),
+            Some(func.name.span),
             CompilerPhase::TypeCheck,
         );
         debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
@@ -2744,7 +2681,6 @@ impl TypeChecker {
                 params,
                 return_type,
                 type_params,
-                span: func.name.span.clone(),
                 bounds,
                 source: func.clone(),
                 is_variadic,
@@ -2771,10 +2707,10 @@ impl TypeChecker {
         if let ast::Literal::Integer(value) = literal {
             return self.type_integer_literal_value(*value, expected, span);
         }
-        if let Some(expected_ty) = expected {
-            if self.literal_matches_expected(literal, expected_ty) {
-                return expected_ty.clone();
-            }
+        if let Some(expected_ty) = expected
+            && self.literal_matches_expected(literal, expected_ty)
+        {
+            return expected_ty.clone();
         }
 
         match literal {
@@ -2796,18 +2732,17 @@ impl TypeChecker {
         expected: Option<&Type>,
         span: &Span,
     ) -> Type {
-        if let Some(expected_ty) = expected {
-            if let Type::Primitive(prim) = expected_ty {
-                if let Some((min, max)) = Self::integer_prim_range(prim) {
-                    if value < min || value > max {
-                        self.error(
-                            format!("integer literal {} does not fit in type {:?}", value, prim),
-                            span.clone(),
-                        );
-                    }
-                    return expected_ty.clone();
-                }
+        if let Some(expected_ty) = expected
+            && let Type::Primitive(prim) = expected_ty
+            && let Some((min, max)) = Self::integer_prim_range(prim)
+        {
+            if value < min || value > max {
+                self.error(
+                    format!("integer literal {} does not fit in type {:?}", value, prim),
+                    *span,
+                );
             }
+            return expected_ty.clone();
         }
         Type::Primitive(ast::PrimitiveType::I128)
     }
@@ -2882,10 +2817,10 @@ impl TypeChecker {
     }
 
     fn literal_matches_expected(&self, literal: &ast::Literal, expected: &Type) -> bool {
-        if let Some(backing) = self.enum_backing_type(expected) {
-            if !matches!(expected, Type::Primitive(_)) {
-                return self.literal_matches_expected(literal, &Type::Primitive(backing));
-            }
+        if let Some(backing) = self.enum_backing_type(expected)
+            && !matches!(expected, Type::Primitive(_))
+        {
+            return self.literal_matches_expected(literal, &Type::Primitive(backing));
         }
 
         match literal {
@@ -2914,16 +2849,16 @@ impl TypeChecker {
         };
         let mut bounds = Vec::new();
         for param in &generics.params {
-            if let ast::GenericParam::Type(type_param) = param {
-                if !type_param.bounds.is_empty() {
-                    bounds.push(TypeBoundPredicate {
-                        bounded: Type::Named {
-                            path: vec![type_param.name.name.clone()],
-                            generics: Vec::new(),
-                        },
-                        bounds: type_param.bounds.clone(),
-                    });
-                }
+            if let ast::GenericParam::Type(type_param) = param
+                && !type_param.bounds.is_empty()
+            {
+                bounds.push(TypeBoundPredicate {
+                    bounded: Type::Named {
+                        path: vec![type_param.name.name.clone()],
+                        generics: Vec::new(),
+                    },
+                    bounds: type_param.bounds.clone(),
+                });
             }
         }
         if let Some(where_clause) = &generics.where_clause {
@@ -2974,7 +2909,7 @@ impl TypeChecker {
                 if !has_impl {
                     self.error(
                         format!("missing impl for bound '{}' on {:?}", trait_name, bounded),
-                        span.clone(),
+                        span,
                     );
                     ok = false;
                 }
@@ -3091,14 +3026,16 @@ impl TypeChecker {
         type_params: &[String],
         mapping: &mut HashMap<String, Type>,
     ) -> bool {
-        if let Type::Named { path, generics } = expected {
-            if path.len() == 1 && type_params.contains(&path[0]) && generics.is_empty() {
-                if let Some(existing) = mapping.get(&path[0]) {
-                    return existing == found;
-                }
-                mapping.insert(path[0].clone(), found.clone());
-                return true;
+        if let Type::Named { path, generics } = expected
+            && path.len() == 1
+            && type_params.contains(&path[0])
+            && generics.is_empty()
+        {
+            if let Some(existing) = mapping.get(&path[0]) {
+                return existing == found;
             }
+            mapping.insert(path[0].clone(), found.clone());
+            return true;
         }
 
         match (expected, found) {
@@ -3234,11 +3171,9 @@ impl TypeChecker {
         }
         if let (Some(from_backing), Some(to_backing)) =
             (self.enum_backing_type(from), self.enum_backing_type(to))
+            && (!matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)))
         {
-            if !matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)) {
-                return self
-                    .is_castable(&Type::Primitive(from_backing), &Type::Primitive(to_backing));
-            }
+            return self.is_castable(&Type::Primitive(from_backing), &Type::Primitive(to_backing));
         }
         if self.is_primitive_type(from) && self.is_primitive_type(to) {
             return true;
@@ -3249,13 +3184,13 @@ impl TypeChecker {
 
     pub(crate) fn size_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@size expects exactly one argument", expr.span.clone());
+            self.error("@size expects exactly one argument", expr.span);
             return Type::Unknown;
         }
         let inner_expr = match args.first() {
             Some(ast::MacroArg::Expression(e)) => e,
             _ => {
-                self.error("@size requires an expression argument", expr.span.clone());
+                self.error("@size requires an expression argument", expr.span);
                 return Type::Unknown;
             }
         };
@@ -3270,7 +3205,7 @@ impl TypeChecker {
                 self.error(
                     "cannot determine size: argument is not a known type name or variable"
                         .to_string(),
-                    expr.span.clone(),
+                    expr.span,
                 );
                 return Type::Unknown;
             }
@@ -3284,7 +3219,7 @@ impl TypeChecker {
         } else {
             self.error(
                 format!("cannot determine size of type {}", sized_ty),
-                expr.span.clone(),
+                expr.span,
             );
             Type::Unknown
         }
@@ -3292,13 +3227,13 @@ impl TypeChecker {
 
     pub(crate) fn align_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@align expects exactly one argument", expr.span.clone());
+            self.error("@align expects exactly one argument", expr.span);
             return Type::Unknown;
         }
         let inner_expr = match args.first() {
             Some(ast::MacroArg::Expression(e)) => e,
             _ => {
-                self.error("@align requires an expression argument", expr.span.clone());
+                self.error("@align requires an expression argument", expr.span);
                 return Type::Unknown;
             }
         };
@@ -3313,7 +3248,7 @@ impl TypeChecker {
                 self.error(
                     "cannot determine alignment: argument is not a known type name or variable"
                         .to_string(),
-                    expr.span.clone(),
+                    expr.span,
                 );
                 return Type::Unknown;
             }
@@ -3327,7 +3262,7 @@ impl TypeChecker {
         } else {
             self.error(
                 format!("cannot determine alignment of type {}", aligned_ty),
-                expr.span.clone(),
+                expr.span,
             );
             Type::Unknown
         }
@@ -3335,11 +3270,11 @@ impl TypeChecker {
 
     pub(crate) fn hash_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@hash expects exactly one argument", expr.span.clone());
+            self.error("@hash expects exactly one argument", expr.span);
             return Type::Unknown;
         }
         let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
-            self.error("@hash requires an expression argument", expr.span.clone());
+            self.error("@hash requires an expression argument", expr.span);
             return Type::Unknown;
         };
         // Type-check the inner expression (emits errors if invalid, returns type)
@@ -3352,7 +3287,7 @@ impl TypeChecker {
         if args.len() != 3 {
             self.error(
                 "@memcpy expects exactly 3 arguments (dst, src, len)",
-                expr.span.clone(),
+                expr.span,
             );
             return Type::Unknown;
         }
@@ -3379,7 +3314,7 @@ impl TypeChecker {
         if args.len() != 3 {
             self.error(
                 "@memset expects exactly 3 arguments (dst, value, len)",
-                expr.span.clone(),
+                expr.span,
             );
             return Type::Unknown;
         }
@@ -3409,7 +3344,7 @@ impl TypeChecker {
         if args.len() != 3 {
             self.error(
                 "@memmove expects exactly 3 arguments (dst, src, len)",
-                expr.span.clone(),
+                expr.span,
             );
             return Type::Unknown;
         }
@@ -3444,7 +3379,7 @@ impl TypeChecker {
         if args.len() < min_args {
             self.error(
                 format!("`@{name}` requires at least {min_args} argument(s)"),
-                expr.span.clone(),
+                expr.span,
             );
             return Type::Unknown;
         }
@@ -3462,12 +3397,12 @@ impl TypeChecker {
                         .count()
                 }
                 _ => {
-                    self.error("format string must be a literal", e.span.clone());
+                    self.error("format string must be a literal", e.span);
                     return Type::Unknown;
                 }
             },
             _ => {
-                self.error("format string must be a literal", expr.span.clone());
+                self.error("format string must be a literal", expr.span);
                 return Type::Unknown;
             }
         };
@@ -3481,23 +3416,23 @@ impl TypeChecker {
                 format!(
                     "`@{name}` expected {placeholder_count} format argument(s), got {value_args_count}"
                 ),
-                expr.span.clone(),
+                expr.span,
             );
             return Type::Unknown;
         }
 
         // Type-check each value argument
-        for i in value_args_start..args.len() {
-            if let ast::MacroArg::Expression(e) = &args[i] {
+        for arg in &args[value_args_start..] {
+            if let ast::MacroArg::Expression(e) = arg {
                 self.check_expr(e, None);
             }
         }
 
         // For @fprint, also type-check the BufWriter argument
-        if name == "fprint" {
-            if let ast::MacroArg::Expression(e) = &args[0] {
-                self.check_expr(e, None);
-            }
+        if name == "fprint"
+            && let ast::MacroArg::Expression(e) = &args[0]
+        {
+            self.check_expr(e, None);
         }
 
         match name {
@@ -3564,13 +3499,12 @@ impl TypeChecker {
         }
         if let (Some(from_backing), Some(to_backing)) =
             (self.enum_backing_type(from), self.enum_backing_type(to))
+            && (!matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)))
         {
-            if !matches!(from, Type::Primitive(_)) || !matches!(to, Type::Primitive(_)) {
-                return self.is_implicitly_castable(
-                    &Type::Primitive(from_backing),
-                    &Type::Primitive(to_backing),
-                );
-            }
+            return self.is_implicitly_castable(
+                &Type::Primitive(from_backing),
+                &Type::Primitive(to_backing),
+            );
         }
         if from == to {
             return true;
@@ -3579,12 +3513,11 @@ impl TypeChecker {
             return true;
         }
         // Numeric and bool primitives are implicitly castable to each other
-        if let (Type::Primitive(from_p), Type::Primitive(to_p)) = (from, to) {
-            if Self::is_numeric_or_bool_primitive(from_p)
-                && Self::is_numeric_or_bool_primitive(to_p)
-            {
-                return true;
-            }
+        if let (Type::Primitive(from_p), Type::Primitive(to_p)) = (from, to)
+            && Self::is_numeric_or_bool_primitive(from_p)
+            && Self::is_numeric_or_bool_primitive(to_p)
+        {
+            return true;
         }
         // User-defined casts
         if self
@@ -3820,22 +3753,20 @@ impl TypeChecker {
             return None;
         }
 
-        let Some(name) = operator_method_name(operator) else {
-            return None;
-        };
+        let name = operator_method_name(operator)?;
 
         let result = self.resolve_method_overload_types(
             left,
             name,
-            &[right.clone()],
+            std::slice::from_ref(right),
             None,
             MethodCallStyle::Instance,
-            expr.span.clone(),
+            expr.span,
         );
         if result.is_none() {
             self.error(
                 format!("missing operator overload '{}' for {:?}", name, left),
-                expr.span.clone(),
+                expr.span,
             );
         }
         result
@@ -3918,7 +3849,7 @@ impl TypeChecker {
                         let symbol_id = table.intern_symbol(
                             symbol_key.clone(),
                             SymbolKind::ImplMethod,
-                            Some(func.name.span.clone()),
+                            Some(func.name.span),
                             CompilerPhase::TypeCheck,
                         );
                         debug_assert_eq!(table.symbol_id(&symbol_key), Some(symbol_id));
@@ -3950,57 +3881,6 @@ impl TypeChecker {
                     _ => {}
                 }
             }
-        }
-    }
-
-    fn collect_implicit_type_params(&self, ty: &ast::Type, params: &mut HashSet<String>) {
-        match ty.kind.as_ref() {
-            ast::TypeKind::Named(named) => {
-                if named.path.len() == 1 {
-                    let name = &named.path[0].name;
-                    if !self.known_types.contains_key(name) {
-                        params.insert(name.clone());
-                    }
-                }
-                if let Some(generics) = &named.generics {
-                    for arg in generics {
-                        self.collect_implicit_type_params(arg, params);
-                    }
-                }
-            }
-            ast::TypeKind::Generic(generic) => {
-                if !self.known_types.contains_key(&generic.name.name) {
-                    params.insert(generic.name.name.clone());
-                }
-                for arg in &generic.args {
-                    self.collect_implicit_type_params(arg, params);
-                }
-            }
-            ast::TypeKind::Reference(reference) => {
-                self.collect_implicit_type_params(&reference.inner, params)
-            }
-            ast::TypeKind::Pointer(pointer) => {
-                self.collect_implicit_type_params(&pointer.inner, params)
-            }
-            ast::TypeKind::Slice(slice) => {
-                self.collect_implicit_type_params(&slice.element_type, params)
-            }
-            ast::TypeKind::Array(array) => {
-                self.collect_implicit_type_params(&array.element_type, params)
-            }
-            ast::TypeKind::Optional(inner) => self.collect_implicit_type_params(inner, params),
-            ast::TypeKind::Tuple(items) => {
-                for item in items {
-                    self.collect_implicit_type_params(item, params);
-                }
-            }
-            ast::TypeKind::Function(func) => {
-                for param in &func.parameters {
-                    self.collect_implicit_type_params(param, params);
-                }
-                self.collect_implicit_type_params(&func.return_type, params)
-            }
-            ast::TypeKind::Primitive(_) => {}
         }
     }
 
@@ -4060,10 +3940,6 @@ impl TypeChecker {
             }
             ast::TypeKind::Primitive(_) => {}
         }
-    }
-
-    fn type_key(&self, ty: &Type) -> String {
-        ty.canonical_key()
     }
 
     fn function_symbol_key(&self, func: &ast::FunctionItem, is_variadic: bool) -> String {
@@ -4297,13 +4173,13 @@ impl TypeChecker {
 
     fn resolve_type_aliases_in_type(ty: &mut ast::Type, aliases: &HashMap<String, ast::Type>) {
         // Resolve top-level alias
-        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-            if named.path.len() == 1 && named.generics.is_none() {
-                if let Some(aliased) = aliases.get(&named.path[0].name) {
-                    *ty = aliased.clone();
-                    return;
-                }
-            }
+        if let ast::TypeKind::Named(named) = ty.kind.as_ref()
+            && named.path.len() == 1
+            && named.generics.is_none()
+            && let Some(aliased) = aliases.get(&named.path[0].name)
+        {
+            *ty = aliased.clone();
+            return;
         }
         // Recurse into child types
         match ty.kind.as_mut() {
@@ -4519,23 +4395,13 @@ impl TypeChecker {
         let mut min_value = 0i128;
         let mut max_value = 0i128;
         let mut saw_any = false;
-        let mut has_payload = false;
 
         for variant in &enum_item.variants {
             let payload = Self::variant_payload(&variant.data);
-            if !payload.is_empty() {
-                has_payload = true;
-            }
 
             let value = variant.discriminant.unwrap_or(next_value);
             if variants
-                .insert(
-                    variant.name.name.clone(),
-                    VariantInfo {
-                        discriminant: value,
-                        payload,
-                    },
-                )
+                .insert(variant.name.name.clone(), VariantInfo { payload })
                 .is_some()
             {
                 self.error(
@@ -4543,7 +4409,7 @@ impl TypeChecker {
                         "duplicate enum variant '{}' in '{}'",
                         variant.name.name, enum_item.name.name
                     ),
-                    variant.name.span.clone(),
+                    variant.name.span,
                 );
                 continue;
             }
@@ -4556,7 +4422,7 @@ impl TypeChecker {
                             "enum variant '{}' overflows automatic discriminant resolution",
                             variant.name.name
                         ),
-                        variant.span.clone(),
+                        variant.span,
                     );
                     value
                 }
@@ -4574,7 +4440,6 @@ impl TypeChecker {
 
         Some(EnumDef {
             backing_type: choose_enum_backing_type(min_value, max_value),
-            has_payload,
             variants,
         })
     }
@@ -4633,7 +4498,7 @@ impl TypeChecker {
             scope.insert(name.to_string(), (ty, is_mutable));
         }
         if duplicate {
-            self.error(format!("duplicate binding for '{}'", name), span.clone());
+            self.error(format!("duplicate binding for '{}'", name), span);
         }
     }
 
@@ -4960,11 +4825,8 @@ fn populate_expression_for_in_types(
         }
         ast::ExpressionKind::MacroCall { args, .. } => {
             for arg in args {
-                match arg {
-                    ast::MacroArg::Expression(expr) => {
-                        populate_expression_for_in_types(expr, resolved_iter_types);
-                    }
-                    _ => {}
+                if let ast::MacroArg::Expression(expr) = arg {
+                    populate_expression_for_in_types(expr, resolved_iter_types);
                 }
             }
         }

@@ -318,7 +318,7 @@ pub struct SourceFile {
 
 thread_local! {
     static SOURCE_REGISTRY: std::cell::RefCell<Vec<SourceFile>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Register a source file's path and text, returning its file id (1-based;

@@ -90,7 +90,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             Err(CodegenError::with_span(
                 "void function call cannot be used as a value",
-                span.clone(),
+                *span,
             ))
         }
     }
@@ -148,20 +148,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     } else {
                         return Err(CodegenError::with_span(
                             "only direct function calls are supported in LLVM IR codegen",
-                            function_expr.span.clone(),
+                            function_expr.span,
                         ));
                     }
                 } else {
                     return Err(CodegenError::with_span(
                         "only direct function calls are supported in LLVM IR codegen",
-                        function_expr.span.clone(),
+                        function_expr.span,
                     ));
                 }
             }
             _ => {
                 return Err(CodegenError::with_span(
                     "only direct function calls are supported in LLVM IR codegen",
-                    function_expr.span.clone(),
+                    function_expr.span,
                 ));
             }
         };
@@ -189,7 +189,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self.module.get_function(&llvm_name).ok_or_else(|| {
             CodegenError::with_span(
                 format!("unknown function `{}`", fn_name),
-                function_expr.span.clone(),
+                function_expr.span,
             )
         })?;
         let signature = self
@@ -280,7 +280,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             Err(CodegenError::with_span(
                 "void function call cannot be used as a value",
-                span.clone(),
+                *span,
             ))
         }
     }
@@ -293,7 +293,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ///
     /// Receiver is passed either by value or pointer depending on the
     /// collected impl metadata / function signature.
-
+    ///
     /// True when the callee runs a destructor on this by-value parameter at
     /// function exit: a non-pointer/reference type with a Drop impl.
     pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> bool {
@@ -361,19 +361,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 format!("failed to materialize method `{}`", method.name),
-                                method.span.clone(),
+                                method.span,
                             )
                         })?
                 } else {
                     return Err(CodegenError::with_span(
                         format!("unknown method `{}`", method.name),
-                        method.span.clone(),
+                        method.span,
                     ));
                 }
             } else {
                 return Err(CodegenError::with_span(
                     format!("unknown method `{}`", method.name),
-                    method.span.clone(),
+                    method.span,
                 ));
             }
         };
@@ -446,7 +446,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.builder.build_store(temp, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to spill receiver for method call: {e}"),
-                                receiver.span.clone(),
+                                receiver.span,
                             )
                         })?;
 
@@ -454,36 +454,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // register a deferred cleanup so it doesn't leak.  Without this,
                         // chained calls like s.trim().replace(...).split(...) leak the
                         // intermediate String buffers.
-                        if let Some(ref receiver_ty) = receiver_ty {
-                            if !receiver_is_pointer {
-                                if let Some(drop_fn_name) =
-                                    self.get_drop_function_name(receiver_ty)?
-                                {
-                                    let flag_name =
-                                        format!("method.recv.tmp.{}.drop", self.temp_counter);
-                                    self.temp_counter += 1;
-                                    let flag_alloca = self.create_entry_alloca(
-                                        function_ctx,
-                                        &flag_name,
-                                        self.context.bool_type().as_basic_type_enum(),
-                                    )?;
-                                    self.builder
-                                        .build_store(
-                                            flag_alloca,
-                                            self.context.bool_type().const_int(1, false),
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::new(format!(
-                                                "failed to init temp drop flag: {e}"
-                                            ))
-                                        })?;
-                                    if let Some(scope) = self.defers.last_mut() {
-                                        scope.push(DeferredEntry {
-                                            action: DeferAction::DropCall(drop_fn_name, temp),
-                                            flag: Some(flag_alloca),
-                                        });
-                                    }
-                                }
+                        if let Some(ref receiver_ty) = receiver_ty
+                            && !receiver_is_pointer
+                            && let Some(drop_fn_name) = self.get_drop_function_name(receiver_ty)?
+                        {
+                            let flag_name = format!("method.recv.tmp.{}.drop", self.temp_counter);
+                            self.temp_counter += 1;
+                            let flag_alloca = self.create_entry_alloca(
+                                function_ctx,
+                                &flag_name,
+                                self.context.bool_type().as_basic_type_enum(),
+                            )?;
+                            self.builder
+                                .build_store(
+                                    flag_alloca,
+                                    self.context.bool_type().const_int(1, false),
+                                )
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to init temp drop flag: {e}"))
+                                })?;
+                            if let Some(scope) = self.defers.last_mut() {
+                                scope.push(DeferredEntry {
+                                    action: DeferAction::DropCall(drop_fn_name, temp),
+                                    flag: Some(flag_alloca),
+                                });
                             }
                         }
 
@@ -496,7 +490,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let BasicValueEnum::PointerValue(receiver_ptr) = receiver_value else {
                         return Err(CodegenError::with_span(
                             "pointer receiver did not lower to a pointer",
-                            receiver.span.clone(),
+                            receiver.span,
                         ));
                     };
                     if let Some(expected_receiver_ty) = expected_receiver_llvm_ty {
@@ -506,7 +500,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load pointer receiver: {e}"),
-                                    receiver.span.clone(),
+                                    receiver.span,
                                 )
                             })?
                     } else {
@@ -660,7 +654,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             Err(CodegenError::with_span(
                 "void method call cannot be used as a value",
-                span.clone(),
+                *span,
             ))
         }
     }
@@ -679,7 +673,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed variadic float promotion: {e}"),
-                                span.clone(),
+                                *span,
                             )
                         })
                 } else {
@@ -694,7 +688,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed variadic integer promotion: {e}"),
-                                span.clone(),
+                                *span,
                             )
                         })
                 } else {

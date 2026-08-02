@@ -156,7 +156,7 @@ pub fn parse_struct_attributes(
                 if !attr.args.is_empty() {
                     return Err(StructAttrError {
                         message: "packed takes no arguments".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 }
                 out.packed = true;
@@ -165,7 +165,7 @@ pub fn parse_struct_attributes(
                 if attr.args.len() != 1 {
                     return Err(StructAttrError {
                         message: "repr expects one argument".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 }
                 match &attr.args[0] {
@@ -175,7 +175,7 @@ pub fn parse_struct_attributes(
                     _ => {
                         return Err(StructAttrError {
                             message: "repr only supports C".to_string(),
-                            span: attr.span.clone(),
+                            span: attr.span,
                         });
                     }
                 }
@@ -184,29 +184,29 @@ pub fn parse_struct_attributes(
                 if attr.args.len() != 1 {
                     return Err(StructAttrError {
                         message: "align expects one integer argument".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 }
                 let ast::AttributeArg::Literal(ast::Literal::Integer(value)) = &attr.args[0] else {
                     return Err(StructAttrError {
                         message: "align expects an integer literal".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 };
                 if *value <= 0 {
                     return Err(StructAttrError {
                         message: "align must be greater than zero".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 }
                 let align = usize::try_from(*value).map_err(|_| StructAttrError {
                     message: "align value is too large".to_string(),
-                    span: attr.span.clone(),
+                    span: attr.span,
                 })?;
                 if !align.is_power_of_two() {
                     return Err(StructAttrError {
                         message: "align must be a power of two".to_string(),
-                        span: attr.span.clone(),
+                        span: attr.span,
                     });
                 }
                 out.align = Some(align);
@@ -215,7 +215,7 @@ pub fn parse_struct_attributes(
             _ => {
                 return Err(StructAttrError {
                     message: format!("unknown struct attribute '{}'", attr.name.name),
-                    span: attr.span.clone(),
+                    span: attr.span,
                 });
             }
         }
@@ -227,8 +227,8 @@ pub fn parse_struct_attributes(
             span: attributes
                 .iter()
                 .find(|attr| attr.name.name == "packed")
-                .map(|attr| attr.span.clone())
-                .unwrap_or_else(|| Span::default()),
+                .map(|attr| attr.span)
+                .unwrap_or_else(Span::default),
         });
     }
 
@@ -673,20 +673,6 @@ impl<'a> TypeParser<'a> {
         Ok(self.text[start..self.pos].to_string())
     }
 
-    fn parse_usize(&mut self) -> Result<usize, String> {
-        self.skip_ws();
-        let start = self.pos;
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.pos += 1;
-        }
-        if start == self.pos {
-            return Err(format!("expected integer in type '{0}'", self.text));
-        }
-        self.text[start..self.pos]
-            .parse::<usize>()
-            .map_err(|_| format!("invalid integer in type '{0}'", self.text))
-    }
-
     fn parse_type_list(&mut self, terminator: u8) -> Result<Vec<Type>, String> {
         let mut items = Vec::new();
         self.skip_ws();
@@ -924,13 +910,6 @@ fn align_to(value: usize, align: usize) -> usize {
     }
 }
 
-fn literal_usize(expr: &ast::Expression) -> Option<usize> {
-    match expr.kind.as_ref() {
-        ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => usize::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,15 +991,6 @@ mod tests {
     fn canonical_parser_understands_void() {
         let ty = Type::from_canonical_key("void").expect("expected void type");
         assert_eq!(ty, Type::Primitive(ast::PrimitiveType::Void));
-    }
-    fn slice_layout_is_16_bytes() {
-        let ctx = TypeContext::default();
-        let ty = Type::Slice {
-            element: Box::new(Type::Primitive(ast::PrimitiveType::I32)),
-        };
-        let layout = ctx.layout_of(&ty);
-        assert_eq!(layout.align, Some(8));
-        assert_eq!(layout.size, Some(16));
     }
     #[test]
     fn void_layout_is_zero_sized() {

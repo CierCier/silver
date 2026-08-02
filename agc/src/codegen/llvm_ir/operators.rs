@@ -1,7 +1,7 @@
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
-use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -24,7 +24,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         {
             let method_ident = ast::Identifier {
                 name: method_name.to_string(),
-                span: whole_expr.span.clone(),
+                span: whole_expr.span,
             };
             let result = self.emit_method_call_expression(
                 operand,
@@ -49,7 +49,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed integer negation: {e}"),
-                                whole_expr.span.clone(),
+                                whole_expr.span,
                             )
                         }),
                     BasicValueEnum::FloatValue(float_value) => self
@@ -59,12 +59,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed float negation: {e}"),
-                                whole_expr.span.clone(),
+                                whole_expr.span,
                             )
                         }),
                     _ => Err(CodegenError::with_span(
                         "unary minus requires numeric operand",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     )),
                 }
             }
@@ -77,7 +77,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load dereference operand: {e}"),
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         )
                     })?;
                 let inner_ty = match operand_ty.kind.as_ref() {
@@ -86,14 +86,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "dereference requires pointer or reference operand",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
                 let BasicValueEnum::PointerValue(ptr_value) = loaded_ptr else {
                     return Err(CodegenError::with_span(
                         "dereference operand did not lower to a pointer",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 let inner_llvm_ty = self.lower_basic_type(inner_ty)?;
@@ -102,7 +102,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to dereference pointer: {e}"),
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         )
                     })
             }
@@ -113,10 +113,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_not(bool_value, "lnot")
                     .map(|v| v.as_basic_value_enum())
                     .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed logical not: {e}"),
-                            whole_expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("failed logical not: {e}"), whole_expr.span)
                     })
             }
             ast::UnaryOperator::BitwiseNot => {
@@ -124,17 +121,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let BasicValueEnum::IntValue(int_value) = value else {
                     return Err(CodegenError::with_span(
                         "bitwise not requires integer operand",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
                     .build_not(int_value, "bnot")
                     .map(|v| v.as_basic_value_enum())
                     .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed bitwise not: {e}"),
-                            whole_expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("failed bitwise not: {e}"), whole_expr.span)
                     })
             }
             ast::UnaryOperator::Increment => self.emit_inc_dec(operand, true, false, whole_expr),
@@ -153,7 +147,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::UnaryOperator::Decrement => self.emit_inc_dec(operand, false, true, whole_expr),
             _ => Err(CodegenError::with_span(
                 "unsupported postfix operator in LLVM IR codegen",
-                whole_expr.span.clone(),
+                whole_expr.span,
             )),
         }
     }
@@ -207,7 +201,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             _ => {
                 return Err(CodegenError::with_span(
                     "increment/decrement requires numeric operand",
-                    whole_expr.span.clone(),
+                    whole_expr.span,
                 ));
             }
         };
@@ -216,10 +210,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.emit_volatile_store(target_ptr, updated)?;
         } else {
             self.builder.build_store(target_ptr, updated).map_err(|e| {
-                CodegenError::with_span(
-                    format!("failed to update value: {e}"),
-                    whole_expr.span.clone(),
-                )
+                CodegenError::with_span(format!("failed to update value: {e}"), whole_expr.span)
             })?;
         }
 
@@ -228,7 +219,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     /// Check that an assignment target is mutable. Returns Ok(()) or a CodegenError
     /// with a message like "cannot assign to const variable 'x'".
-
     pub(crate) fn check_assignment_mutability(
         &mut self,
         target: &ast::Expression,
@@ -239,7 +229,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if !info.is_mutable {
                         return Err(CodegenError::with_span(
                             format!("cannot assign to const variable '{}'", ident.name),
-                            ident.span.clone(),
+                            ident.span,
                         ));
                     }
                     Ok(())
@@ -251,7 +241,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else {
                     Err(CodegenError::with_span(
                         format!("unknown variable `{}`", ident.name),
-                        ident.span.clone(),
+                        ident.span,
                     ))
                 }
             }
@@ -262,7 +252,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             if !ptr.is_mutable {
                                 return Err(CodegenError::with_span(
                                     "cannot write through immutable pointer",
-                                    object.span.clone(),
+                                    object.span,
                                 ));
                             }
                             return Ok(());
@@ -271,7 +261,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             if !r.is_mutable {
                                 return Err(CodegenError::with_span(
                                     "cannot write through immutable reference",
-                                    object.span.clone(),
+                                    object.span,
                                 ));
                             }
                             return Ok(());
@@ -293,13 +283,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ast::TypeKind::Pointer(ptr) if !ptr.is_mutable => {
                             return Err(CodegenError::with_span(
                                 "cannot write through immutable pointer",
-                                ident.span.clone(),
+                                ident.span,
                             ));
                         }
                         ast::TypeKind::Reference(r) if !r.is_mutable => {
                             return Err(CodegenError::with_span(
                                 "cannot write through immutable reference",
-                                ident.span.clone(),
+                                ident.span,
                             ));
                         }
                         _ => {}
@@ -340,7 +330,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let value = self.emit_expression_value(right)?;
                         let method_ident = ast::Identifier {
                             name: "__index_set".to_string(),
-                            span: left.span.clone(),
+                            span: left.span,
                         };
                         self.emit_method_call_expression(
                             object,
@@ -365,10 +355,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.emit_volatile_store(target_ptr, value)?;
                 } else {
                     self.builder.build_store(target_ptr, value).map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed assignment: {e}"),
-                            whole_expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("failed assignment: {e}"), whole_expr.span)
                     })?;
                 }
                 Ok(value)
@@ -403,7 +390,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if let Some(method_name) = operator_method_name(&bin_op) {
                         let method_ident = ast::Identifier {
                             name: method_name.to_string(),
-                            span: whole_expr.span.clone(),
+                            span: whole_expr.span,
                         };
                         let result = self.emit_method_call_expression(
                             left,
@@ -417,13 +404,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         } else {
                             return Err(CodegenError::with_span(
                                 "operator returned void",
-                                whole_expr.span.clone(),
+                                whole_expr.span,
                             ));
                         }
                     } else {
                         return Err(CodegenError::with_span(
                             "operator not found for struct type",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 } else {
@@ -435,10 +422,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.emit_volatile_store(target_ptr, updated)?;
                 } else {
                     self.builder.build_store(target_ptr, updated).map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed assignment: {e}"),
-                            whole_expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("failed assignment: {e}"), whole_expr.span)
                     })?;
                 }
                 Ok(updated)
@@ -462,7 +446,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 {
                     let method_ident = ast::Identifier {
                         name: method_name.to_string(),
-                        span: whole_expr.span.clone(),
+                        span: whole_expr.span,
                     };
                     let result = self.emit_method_call_expression(
                         left,
@@ -488,7 +472,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Check whether an expression evaluates to `str` type.
     /// Handles the most common expression forms; returns `false` for unhandled kinds
     /// (falling back to standard pointer comparison in those cases).
-
     pub(crate) fn expression_is_str_type(&mut self, expr: &ast::Expression) -> bool {
         let str_ty = ast::TypeKind::Primitive(ast::PrimitiveType::Str);
         match expr.kind.as_ref() {
@@ -514,7 +497,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ///
     /// If either operand is a null pointer, falls back to pointer equality
     /// (null check semantics like `other == (str)0`).
-
     pub(crate) fn emit_strcmp_comparison(
         &mut self,
         lhs: BasicValueEnum<'ctx>,
@@ -528,7 +510,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             _ => {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
-                    span.clone(),
+                    *span,
                 ));
             }
         };
@@ -537,7 +519,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             _ => {
                 return Err(CodegenError::with_span(
                     "strcmp requires pointer operands",
-                    span.clone(),
+                    *span,
                 ));
             }
         };
@@ -649,7 +631,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// - `||`: true short-circuits directly to `logic.cont`
     ///
     /// A PHI in `logic.cont` merges the short-circuit constant and RHS result.
-
     pub(crate) fn emit_short_circuit_logical(
         &mut self,
         left: &ast::Expression,
@@ -717,7 +698,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if incoming.len() < 2 {
             return Err(CodegenError::with_span(
                 "logical expression has no value-producing rhs path",
-                span.clone(),
+                *span,
             ));
         }
 
@@ -775,7 +756,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported arithmetic operation",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
@@ -806,7 +787,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported float arithmetic operation",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
@@ -814,7 +795,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => Err(CodegenError::with_span(
                 "binary arithmetic requires matching numeric types",
-                whole_expr.span.clone(),
+                whole_expr.span,
             )),
         }
     }
@@ -866,7 +847,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         "bitwise and requires integer operands",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
@@ -879,7 +860,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         "bitwise or requires integer operands",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
@@ -892,7 +873,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         "bitwise xor requires integer operands",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
@@ -905,7 +886,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         "left shift requires integer operands",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
@@ -918,7 +899,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         "right shift requires integer operands",
-                        whole_expr.span.clone(),
+                        whole_expr.span,
                     ));
                 };
                 self.builder
@@ -931,7 +912,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     "binary operator {:?} is not supported for these operand types",
                     operator
                 ),
-                whole_expr.span.clone(),
+                whole_expr.span,
             )),
         }
     }
@@ -980,7 +961,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported integer comparison",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
@@ -1001,7 +982,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported float comparison",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
@@ -1018,7 +999,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "pointer comparisons only support == and !=",
-                            whole_expr.span.clone(),
+                            whole_expr.span,
                         ));
                     }
                 };
@@ -1039,7 +1020,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => Err(CodegenError::with_span(
                 "comparison requires matching numeric types",
-                whole_expr.span.clone(),
+                whole_expr.span,
             )),
         }
     }
@@ -1068,7 +1049,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => Err(CodegenError::with_span(
                 "expression cannot be used as a boolean condition",
-                span.clone(),
+                *span,
             )),
         }
     }
@@ -1088,56 +1069,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .builder
                 .build_int_cast(int_val, int_ty, "cast.i2i")
                 .map(|v| v.as_basic_value_enum())
-                .map_err(|e| {
-                    CodegenError::with_span(format!("integer cast failed: {e}"), span.clone())
-                }),
+                .map_err(|e| CodegenError::with_span(format!("integer cast failed: {e}"), *span)),
             (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => self
                 .builder
                 .build_signed_int_to_float(int_val, float_ty, "cast.i2f")
                 .map(|v| v.as_basic_value_enum())
                 .map_err(|e| {
-                    CodegenError::with_span(format!("int-to-float cast failed: {e}"), span.clone())
+                    CodegenError::with_span(format!("int-to-float cast failed: {e}"), *span)
                 }),
             (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::IntType(int_ty)) => self
                 .builder
                 .build_float_to_signed_int(float_val, int_ty, "cast.f2i")
                 .map(|v| v.as_basic_value_enum())
                 .map_err(|e| {
-                    CodegenError::with_span(format!("float-to-int cast failed: {e}"), span.clone())
+                    CodegenError::with_span(format!("float-to-int cast failed: {e}"), *span)
                 }),
             (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::FloatType(float_ty)) => self
                 .builder
                 .build_float_cast(float_val, float_ty, "cast.f2f")
                 .map(|v| v.as_basic_value_enum())
-                .map_err(|e| {
-                    CodegenError::with_span(format!("float cast failed: {e}"), span.clone())
-                }),
+                .map_err(|e| CodegenError::with_span(format!("float cast failed: {e}"), *span)),
             (BasicValueEnum::PointerValue(ptr_val), BasicTypeEnum::PointerType(ptr_ty)) => self
                 .builder
                 .build_pointer_cast(ptr_val, ptr_ty, "cast.p2p")
                 .map(|v| v.as_basic_value_enum())
-                .map_err(|e| {
-                    CodegenError::with_span(format!("pointer cast failed: {e}"), span.clone())
-                }),
+                .map_err(|e| CodegenError::with_span(format!("pointer cast failed: {e}"), *span)),
             (BasicValueEnum::PointerValue(ptr_val), BasicTypeEnum::IntType(int_ty)) => self
                 .builder
                 .build_ptr_to_int(ptr_val, int_ty, "cast.p2i")
                 .map(|v| v.as_basic_value_enum())
                 .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("pointer-to-int cast failed: {e}"),
-                        span.clone(),
-                    )
+                    CodegenError::with_span(format!("pointer-to-int cast failed: {e}"), *span)
                 }),
             (BasicValueEnum::IntValue(int_val), BasicTypeEnum::PointerType(ptr_ty)) => self
                 .builder
                 .build_int_to_ptr(int_val, ptr_ty, "cast.i2p")
                 .map(|v| v.as_basic_value_enum())
                 .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("int-to-pointer cast failed: {e}"),
-                        span.clone(),
-                    )
+                    CodegenError::with_span(format!("int-to-pointer cast failed: {e}"), *span)
                 }),
             (source, _) => Err(CodegenError::with_span(
                 format!(
@@ -1145,7 +1114,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     source.get_type().print_to_string(),
                     target.print_to_string()
                 ),
-                span.clone(),
+                *span,
             )),
         }
     }
@@ -1183,13 +1152,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_call(cast_fn, &args, "cast.arg")
             .map_err(|e| {
-                CodegenError::with_span(
-                    format!("failed to call user-defined cast: {e}"),
-                    span.clone(),
-                )
+                CodegenError::with_span(format!("failed to call user-defined cast: {e}"), *span)
             })?;
         let result = call.try_as_basic_value().basic().ok_or_else(|| {
-            CodegenError::with_span("user-defined cast returned void".to_string(), span.clone())
+            CodegenError::with_span("user-defined cast returned void".to_string(), *span)
         })?;
         Ok(Some(result))
     }
@@ -1213,10 +1179,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .build_int_z_extend_or_bit_cast(int_val, int_ty, "cast.u2i")
                         .map(|v| v.as_basic_value_enum())
                         .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("unsigned int cast failed: {e}"),
-                                span.clone(),
-                            )
+                            CodegenError::with_span(format!("unsigned int cast failed: {e}"), *span)
                         })
                 } else {
                     self.cast_value_to_basic_type(value, target, span)

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::path::Path;
 
 use rustc_hash::FxHashMap as HashMap;
@@ -269,6 +269,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn emit_object_file_with_imports_and_table_and_source(
         program: &ast::Program,
         imported_modules: &[ModuleArtifact],
@@ -293,6 +297,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
         )
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check(
         program: &ast::Program,
         imported_modules: &[ModuleArtifact],
@@ -373,6 +381,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn emit_assembly_file_with_imports_and_table_and_source(
         program: &ast::Program,
         imported_modules: &[ModuleArtifact],
@@ -397,6 +409,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
         )
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
         program: &ast::Program,
         imported_modules: &[ModuleArtifact],
@@ -424,6 +440,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     fn emit_target_file(
         program: &ast::Program,
         path: &Path,
@@ -450,6 +470,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     fn emit_target_file_with_imports(
         program: &ast::Program,
         imported_modules: &[ModuleArtifact],
@@ -776,7 +800,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@size requires an expression argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let llvm_ty = match &inner_expr.kind.as_ref() {
@@ -790,7 +814,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 path: vec![ident.clone()],
                                 generics: None,
                             })),
-                            span: expr.span.clone(),
+                            span: expr.span,
                         };
                         let type_result = self.lower_basic_type(&named_ty);
                         match type_result {
@@ -823,7 +847,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@align requires an expression argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let llvm_ty = match &inner_expr.kind.as_ref() {
@@ -837,7 +861,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 path: vec![ident.clone()],
                                 generics: None,
                             })),
-                            span: expr.span.clone(),
+                            span: expr.span,
                         };
                         let type_result = self.lower_basic_type(&named_ty);
                         match type_result {
@@ -870,7 +894,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@hash requires an expression argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
 
@@ -1072,19 +1096,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@memcpy expects dst as first argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
             return Err(CodegenError::with_span(
                 "@memcpy expects src as second argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
             return Err(CodegenError::with_span(
                 "@memcpy expects len as third argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let dst_val = self.emit_expression_value(dst_expr)?;
@@ -1119,9 +1143,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ],
                 "memcpy",
             )
-            .map_err(|e| {
-                CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span.clone())
-            })?;
+            .map_err(|e| CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span))?;
         Ok(dst_val)
     }
 
@@ -1133,19 +1155,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@memset expects dst as first argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(val_expr)) = args.get(1) else {
             return Err(CodegenError::with_span(
                 "@memset expects value as second argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
             return Err(CodegenError::with_span(
                 "@memset expects len as third argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let dst_val = self.emit_expression_value(dst_expr)?;
@@ -1181,9 +1203,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ],
                 "memset",
             )
-            .map_err(|e| {
-                CodegenError::with_span(format!("@memset call failed: {e}"), expr.span.clone())
-            })?;
+            .map_err(|e| CodegenError::with_span(format!("@memset call failed: {e}"), expr.span))?;
         Ok(dst_val)
     }
 
@@ -1195,19 +1215,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
             return Err(CodegenError::with_span(
                 "@memmove expects dst as first argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
             return Err(CodegenError::with_span(
                 "@memmove expects src as second argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
             return Err(CodegenError::with_span(
                 "@memmove expects len as third argument".to_string(),
-                expr.span.clone(),
+                expr.span,
             ));
         };
         let dst_val = self.emit_expression_value(dst_expr)?;
@@ -1243,7 +1263,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "memmove",
             )
             .map_err(|e| {
-                CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span.clone())
+                CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span)
             })?;
         Ok(dst_val)
     }
@@ -1260,16 +1280,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let Some(ast::MacroArg::Expression(w)) = args.first() else {
                     return Err(CodegenError::with_span(
                         "@fprint expects a BufWriter* as first argument".to_string(),
-                        expr.span.clone(),
+                        expr.span,
                     ));
                 };
                 // Evaluate writer expression once and store in a temp
                 let writer_val = self.emit_expression_value(w)?;
                 let fn_ctx = self.current_fn.ok_or_else(|| {
-                    CodegenError::with_span(
-                        "@fprint requires an active function",
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span("@fprint requires an active function", expr.span)
                 })?;
                 let writer_tmp =
                     self.create_entry_alloca(fn_ctx, "fprint.writer", writer_val.get_type())?;
@@ -1278,7 +1295,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to spill fprint receiver: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 let ast_ty = self
@@ -1298,9 +1315,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let w_ident = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: "__fprint_writer".to_string(),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     })),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 };
                 (1, w_ident)
             }
@@ -1309,18 +1326,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                         path: vec![ast::Identifier {
                             name: "BufWriter".to_string(),
-                            span: expr.span.clone(),
+                            span: expr.span,
                         }],
                         generics: None,
                     })),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 };
                 let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
                 let fn_ctx = self.current_fn.ok_or_else(|| {
-                    CodegenError::with_span(
-                        "@sprint requires an active function",
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span("@sprint requires an active function", expr.span)
                 })?;
                 let writer_tmp =
                     self.create_entry_alloca(fn_ctx, "sprint.writer", buf_writer_llvm_ty)?;
@@ -1338,14 +1352,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("sprint struct gep 0 failed: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 self.builder.build_store(data_ptr, zero_i64).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint store data failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span)
                 })?;
 
                 let len_ptr = self
@@ -1354,14 +1365,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("sprint struct gep 1 failed: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 self.builder.build_store(len_ptr, zero_i64).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint store len failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint store len failed: {e}"), expr.span)
                 })?;
 
                 let cap_ptr = self
@@ -1370,14 +1378,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("sprint struct gep 2 failed: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 self.builder.build_store(cap_ptr, zero_i64).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint store cap failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span)
                 })?;
 
                 let fd_ptr = self
@@ -1386,14 +1391,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("sprint struct gep 3 failed: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 self.builder.build_store(fd_ptr, neg_one_i32).map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint store fd failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span)
                 })?;
 
                 // mode = IOMODE_BLOCK (2) — ensures the writer allocates a buffer
@@ -1406,16 +1408,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("sprint struct gep 6 failed: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 self.builder
                     .build_store(mode_ptr, self.context.i8_type().const_int(2, false))
                     .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("sprint store mode failed: {e}"),
-                            expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("sprint store mode failed: {e}"), expr.span)
                     })?;
 
                 if let Some(scope) = self.variables.last_mut() {
@@ -1432,9 +1431,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let w_ident = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: "__sprint_writer".to_string(),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     })),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 };
                 (0, w_ident)
             }
@@ -1448,9 +1447,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let w = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: writer_name.to_string(),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     })),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 };
                 (0, w)
             }
@@ -1463,14 +1462,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 _ => {
                     return Err(CodegenError::with_span(
                         "format string must be a literal".to_string(),
-                        e.span.clone(),
+                        e.span,
                     ));
                 }
             },
             _ => {
                 return Err(CodegenError::with_span(
                     "format string must be a literal".to_string(),
-                    expr.span.clone(),
+                    expr.span,
                 ));
             }
         };
@@ -1494,13 +1493,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 crate::builtin_macros::FormatSegment::Literal(text) => {
                     let method = ast::Identifier {
                         name: "write_str".to_string(),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     };
                     let lit_expr = ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
                             text.clone(),
                         ))),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     };
                     self.emit_method_call_expression(
                         &writer_expr,
@@ -1517,16 +1516,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // Determine the write method based on the value's type
                     let method_name = self
                         .value_write_method_name(val_expr)
-                        .map_err(|e| CodegenError::with_span(e, val_expr.span.clone()))?;
+                        .map_err(|e| CodegenError::with_span(e, val_expr.span))?;
 
                     let method = ast::Identifier {
                         name: method_name,
-                        span: expr.span.clone(),
+                        span: expr.span,
                     };
                     self.emit_method_call_expression(
                         &writer_expr,
                         &method,
-                        &[val_expr.clone()],
+                        std::slice::from_ref(val_expr),
                         true,
                         &expr.span,
                     )?;
@@ -1538,13 +1537,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if name == "println" || name == "eprintln" {
             let method = ast::Identifier {
                 name: "write_str".to_string(),
-                span: expr.span.clone(),
+                span: expr.span,
             };
             let nl_expr = ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
                     "\n".to_string(),
                 ))),
-                span: expr.span.clone(),
+                span: expr.span,
             };
             self.emit_method_call_expression(&writer_expr, &method, &[nl_expr], true, &expr.span)?;
         }
@@ -1553,11 +1552,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // Write a null terminator at the end of the buffer
             let method = ast::Identifier {
                 name: "write_u8".to_string(),
-                span: expr.span.clone(),
+                span: expr.span,
             };
             let zero_expr = ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
-                span: expr.span.clone(),
+                span: expr.span,
             };
             self.emit_method_call_expression(
                 &writer_expr,
@@ -1572,11 +1571,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                     path: vec![ast::Identifier {
                         name: "BufWriter".to_string(),
-                        span: expr.span.clone(),
+                        span: expr.span,
                     }],
                     generics: None,
                 })),
-                span: expr.span.clone(),
+                span: expr.span,
             };
             let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
             let writer_tmp = self
@@ -1585,28 +1584,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .and_then(|scope| scope.get("__sprint_writer"))
                 .map(|info| info.ptr)
                 .ok_or_else(|| {
-                    CodegenError::with_span(
-                        "sprint writer variable missing".to_string(),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span("sprint writer variable missing".to_string(), expr.span)
                 })?;
             let data_ptr = self
                 .builder
                 .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
                 .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint struct gep 0 failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint struct gep 0 failed: {e}"), expr.span)
                 })?;
             let data_val = self
                 .builder
                 .build_load(self.context.i64_type(), data_ptr, "sprint.data.val")
                 .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint load data failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint load data failed: {e}"), expr.span)
                 })?;
             let str_val = self
                 .builder
@@ -1616,10 +1606,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     "sprint.str",
                 )
                 .map_err(|e| {
-                    CodegenError::with_span(
-                        format!("sprint int to ptr failed: {e}"),
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span(format!("sprint int to ptr failed: {e}"), expr.span)
                 })?;
 
             Ok(str_val.as_basic_value_enum())

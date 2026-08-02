@@ -62,21 +62,21 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         Token::Identifier(ref name) => ast::TypeKind::Named(ast::NamedType {
             path: vec![ast::Identifier {
                 name: name.clone(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             }],
             generics: None,
         }),
         Token::Vec => ast::TypeKind::Named(ast::NamedType {
             path: vec![ast::Identifier {
                 name: "Vec".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             }],
             generics: None,
         }),
         Token::Optional => ast::TypeKind::Named(ast::NamedType {
             path: vec![ast::Identifier {
                 name: "Optional".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             }],
             generics: None,
         }),
@@ -85,7 +85,7 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
     let from_identifier = matches!(tokens[cursor].kind, Token::Identifier(_));
     let mut ty = ast::Type {
         kind: Box::new(base),
-        span: tokens[cursor].span.clone(),
+        span: tokens[cursor].span,
     };
     cursor += 1;
 
@@ -150,7 +150,7 @@ fn parse_simple_type_prefix(
         if let Some(name) = first_name {
             path.push(ast::Identifier {
                 name,
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
             cursor += 1;
             while cursor + 1 < end && matches!(tokens[cursor].kind, Token::DoubleColon) {
@@ -163,7 +163,7 @@ fn parse_simple_type_prefix(
                 };
                 path.push(ast::Identifier {
                     name: seg,
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
                 cursor += 1;
             }
@@ -235,7 +235,7 @@ fn parse_simple_type_prefix(
             cursor += 1;
             ast::Type {
                 kind: Box::new(base),
-                span: tokens[cursor - 1].span.clone(),
+                span: tokens[cursor - 1].span,
             }
         }
     };
@@ -301,7 +301,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
     })?;
     let pattern = match &token.kind {
         Token::IntLiteral(value) => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             if matches!(
                 cursor.current().map(|t| &t.kind),
@@ -312,18 +312,18 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                 cursor.bump();
                 let end_token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected range end in match pattern".to_string(),
-                    span: span.clone(),
+                    span,
                 })?;
                 let end_value = match &end_token.kind {
                     Token::IntLiteral(v) => *v,
                     _ => {
                         return Err(ParseError::InvalidSyntax {
                             message: "range patterns require integer literals".to_string(),
-                            span: end_token.span.clone(),
+                            span: end_token.span,
                         });
                     }
                 };
-                let end_span = end_token.span.clone();
+                let end_span = end_token.span;
                 cursor.bump();
                 ast::Pattern {
                     kind: ast::PatternKind::Range {
@@ -331,13 +331,13 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
                                 *value,
                             ))),
-                            span: span.clone(),
+                            span,
                         },
                         end: ast::Expression {
                             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
                                 end_value,
                             ))),
-                            span: end_span.clone(),
+                            span: end_span,
                         },
                         inclusive,
                     },
@@ -351,7 +351,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::FloatLiteral(value) => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Float(*value)),
@@ -359,7 +359,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::StringLiteral(value) => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::String(value.clone())),
@@ -367,7 +367,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::CharLiteral(value) => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Char(*value)),
@@ -375,7 +375,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::True => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Bool(true)),
@@ -383,7 +383,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::False => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Bool(false)),
@@ -391,7 +391,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             }
         }
         Token::Identifier(name) => {
-            let span = token.span.clone();
+            let span = token.span;
             cursor.bump();
             if name == "_" {
                 ast::Pattern {
@@ -404,23 +404,23 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                 // Enum type pattern: TypeName.Variant or TypeName.Variant(data)
                 let path = vec![ast::Identifier {
                     name: name.clone(),
-                    span: span.clone(),
+                    span,
                 }];
                 cursor.bump(); // consume dot
                 let variant_token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected variant name after '.' in enum pattern".to_string(),
-                    span: span.clone(),
+                    span,
                 })?;
                 let variant_name = match &variant_token.kind {
                     Token::Identifier(v) => v.clone(),
                     _ => {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected variant name in enum pattern".to_string(),
-                            span: variant_token.span.clone(),
+                            span: variant_token.span,
                         });
                     }
                 };
-                let variant_span = variant_token.span.clone();
+                let variant_span = variant_token.span;
                 cursor.bump();
                 let data = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
                     cursor.bump();
@@ -433,7 +433,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                     if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected ')' in enum variant pattern".to_string(),
-                            span: variant_span.clone(),
+                            span: variant_span,
                         });
                     }
                     cursor.bump();
@@ -465,7 +465,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                 ast::Pattern {
                     kind: ast::PatternKind::Identifier(ast::Identifier {
                         name: name.clone(),
-                        span: span.clone(),
+                        span,
                     }),
                     span,
                 }
@@ -474,7 +474,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
         _ => {
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported match pattern".to_string(),
-                span: token.span.clone(),
+                span: token.span,
             });
         }
     };
@@ -495,13 +495,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let Some(lbrace) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '{' after match expression".to_string(),
-                    span: scrutinee.span.clone(),
+                    span: scrutinee.span,
                 });
             };
             if !matches!(lbrace.kind, Token::LeftBrace) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '{' after match expression".to_string(),
-                    span: lbrace.span.clone(),
+                    span: lbrace.span,
                 });
             }
             cursor.bump();
@@ -511,13 +511,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let Some(colon) = cursor.current() else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ':' after match pattern".to_string(),
-                        span: pattern.span.clone(),
+                        span: pattern.span,
                     });
                 };
                 if !matches!(colon.kind, Token::Colon) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ':' after match pattern".to_string(),
-                        span: colon.span.clone(),
+                        span: colon.span,
                     });
                 }
                 cursor.bump();
@@ -527,7 +527,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                     else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated match arm block".to_string(),
-                            span: cursor.tokens[block_start].span.clone(),
+                            span: cursor.tokens[block_start].span,
                         });
                     };
                     cursor.pos = close + 1;
@@ -537,7 +537,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                     ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Block(ast::Block {
                             statements: Vec::new(),
-                            span: block_span.clone(),
+                            span: block_span,
                         })),
                         span: block_span,
                     }
@@ -578,15 +578,15 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 cursor.pos = next;
                 return Ok(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
-                    span: ty.span.clone(),
+                    span: ty.span,
                 });
             }
             ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                     name: name.clone(),
-                    span: token.span.clone(),
+                    span: token.span,
                 })),
-                span: token.span.clone(),
+                span: token.span,
             }
         }
         Token::Vec
@@ -617,7 +617,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 cursor.pos = next;
                 return Ok(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
-                    span: ty.span.clone(),
+                    span: ty.span,
                 });
             }
             let name = token
@@ -627,39 +627,39 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                     name: name.to_string(),
-                    span: token.span.clone(),
+                    span: token.span,
                 })),
-                span: token.span.clone(),
+                span: token.span,
             }
         }
         Token::IntLiteral(value) => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(*value))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::FloatLiteral(value) => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Float(*value))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::StringLiteral(value) => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
                 value.clone(),
             ))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::CharLiteral(value) => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Char(*value))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::True => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Bool(true))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::False => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Bool(false))),
-            span: token.span.clone(),
+            span: token.span,
         },
         Token::LeftParen => {
-            let left_span = token.span.clone();
+            let left_span = token.span;
             cursor.bump();
             let inner = parse_assignment(cursor)?;
             let Some(close) = cursor.current() else {
@@ -671,7 +671,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             if !matches!(close.kind, Token::RightParen) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ')'".to_string(),
-                    span: close.span.clone(),
+                    span: close.span,
                 });
             }
             let span = left_span.with_end(close.span.end);
@@ -687,26 +687,26 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let Some(open) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '(' after asm".to_string(),
-                    span: token.span.clone(),
+                    span: token.span,
                 });
             };
             if !matches!(open.kind, Token::LeftParen) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '(' after asm".to_string(),
-                    span: open.span.clone(),
+                    span: open.span,
                 });
             }
             cursor.bump();
             let Some(arg) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected asm string literal".to_string(),
-                    span: open.span.clone(),
+                    span: open.span,
                 });
             };
             let Token::StringLiteral(ref code) = arg.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "asm expects a string literal".to_string(),
-                    span: arg.span.clone(),
+                    span: arg.span,
                 });
             };
             cursor.bump();
@@ -720,13 +720,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let Some(open_bracket) = cursor.current() else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected '[' after ',' in asm inputs".to_string(),
-                        span: comma.span.clone(),
+                        span: comma.span,
                     });
                 };
                 if !matches!(open_bracket.kind, Token::LeftBracket) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected '[' after ',' in asm inputs".to_string(),
-                        span: open_bracket.span.clone(),
+                        span: open_bracket.span,
                     });
                 }
                 cursor.bump();
@@ -749,7 +749,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 if !matches!(close_bracket.kind, Token::RightBracket) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ']' after asm inputs".to_string(),
-                        span: close_bracket.span.clone(),
+                        span: close_bracket.span,
                     });
                 }
                 cursor.bump();
@@ -758,13 +758,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let Some(close) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ')' after asm string".to_string(),
-                    span: arg.span.clone(),
+                    span: arg.span,
                 });
             };
             if !matches!(close.kind, Token::RightParen) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ')' after asm string".to_string(),
-                    span: close.span.clone(),
+                    span: close.span,
                 });
             }
             let span = token.span.with_end(close.span.end);
@@ -784,7 +784,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let Some(item_start) = cursor.current() else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated initializer".to_string(),
-                        span: token.span.clone(),
+                        span: token.span,
                     });
                 };
                 match &item_start.kind {
@@ -794,31 +794,31 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                         let Some(name_token) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected field name in initializer".to_string(),
-                                span: item_start.span.clone(),
+                                span: item_start.span,
                             });
                         };
                         let Token::Identifier(field_name) = &name_token.kind else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected field name in initializer".to_string(),
-                                span: name_token.span.clone(),
+                                span: name_token.span,
                             });
                         };
                         let field_ident = ast::Identifier {
                             name: field_name.clone(),
-                            span: name_token.span.clone(),
+                            span: name_token.span,
                         };
                         cursor.bump();
 
                         let Some(assign) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected '=' in initializer field".to_string(),
-                                span: field_ident.span.clone(),
+                                span: field_ident.span,
                             });
                         };
                         if !matches!(assign.kind, Token::Assign) {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected '=' in initializer field".to_string(),
-                                span: assign.span.clone(),
+                                span: assign.span,
                             });
                         }
                         cursor.bump();
@@ -835,13 +835,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                         let Some(close) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected ']' in initializer index".to_string(),
-                                span: item_start.span.clone(),
+                                span: item_start.span,
                             });
                         };
                         if !matches!(close.kind, Token::RightBracket) {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected ']' in initializer index".to_string(),
-                                span: close.span.clone(),
+                                span: close.span,
                             });
                         }
                         cursor.bump();
@@ -849,13 +849,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                         let Some(assign) = cursor.current() else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected '=' in initializer index".to_string(),
-                                span: index.span.clone(),
+                                span: index.span,
                             });
                         };
                         if !matches!(assign.kind, Token::Assign) {
                             return Err(ParseError::InvalidSyntax {
                                 message: "expected '=' in initializer index".to_string(),
-                                span: assign.span.clone(),
+                                span: assign.span,
                             });
                         }
                         cursor.bump();
@@ -879,13 +879,13 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let Some(close) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated initializer".to_string(),
-                    span: token.span.clone(),
+                    span: token.span,
                 });
             };
             if !matches!(close.kind, Token::RightBrace) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '}' after initializer".to_string(),
-                    span: close.span.clone(),
+                    span: close.span,
                 });
             }
             let span = token.span.with_end(close.span.end);
@@ -917,7 +917,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             if !matches!(close.kind, Token::RightBracket) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ']' after array/tuple literal".to_string(),
-                    span: close.span.clone(),
+                    span: close.span,
                 });
             }
             let span = token.span.with_end(close.span.end);
@@ -941,11 +941,11 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 _ => {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected identifier as macro name".to_string(),
-                        span: name_token.span.clone(),
+                        span: name_token.span,
                     });
                 }
             };
-            let name_span = name_token.span.clone();
+            let name_span = name_token.span;
             cursor.bump();
             let mut args = Vec::new();
             if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
@@ -968,7 +968,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 if !matches!(close.kind, Token::RightParen) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ')' after macro arguments".to_string(),
-                        span: close.span.clone(),
+                        span: close.span,
                     });
                 }
                 cursor.bump();
@@ -993,7 +993,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
         _ => {
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported primary expression in bootstrap parser".to_string(),
-                span: token.span.clone(),
+                span: token.span,
             });
         }
     };
@@ -1025,10 +1025,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
 fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_primary(cursor)?;
 
-    loop {
-        let Some(token) = cursor.current() else {
-            break;
-        };
+    while let Some(token) = cursor.current() {
         match token.kind {
             Token::LeftParen => {
                 let call_start = expr.span.start;
@@ -1044,7 +1041,7 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                             Some(_) => {
                                 return Err(ParseError::InvalidSyntax {
                                     message: "expected ',' or ')' in call arguments".to_string(),
-                                    span: cursor.current().unwrap().span.clone(),
+                                    span: cursor.current().unwrap().span,
                                 });
                             }
                             None => {
@@ -1077,18 +1074,18 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let Some(field_token) = cursor.current() else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected identifier after '.'".to_string(),
-                        span: token.span.clone(),
+                        span: token.span,
                     });
                 };
                 let Token::Identifier(ref field_name) = field_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected identifier after '.'".to_string(),
-                        span: field_token.span.clone(),
+                        span: field_token.span,
                     });
                 };
                 let field_ident = ast::Identifier {
                     name: field_name.clone(),
-                    span: field_token.span.clone(),
+                    span: field_token.span,
                 };
                 cursor.bump();
 
@@ -1105,13 +1102,13 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                                     return Err(ParseError::InvalidSyntax {
                                         message: "expected ',' or ')' in method arguments"
                                             .to_string(),
-                                        span: cursor.current().unwrap().span.clone(),
+                                        span: cursor.current().unwrap().span,
                                     });
                                 }
                                 None => {
                                     return Err(ParseError::InvalidSyntax {
                                         message: "unterminated method call expression".to_string(),
-                                        span: field_ident.span.clone(),
+                                        span: field_ident.span,
                                     });
                                 }
                             }
@@ -1119,7 +1116,7 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                     }
                     let close = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
                         message: "expected ')' in method call".to_string(),
-                        span: field_ident.span.clone(),
+                        span: field_ident.span,
                     })?;
                     let span = expr.span.extend_to(&close.span);
                     cursor.bump();
@@ -1143,7 +1140,7 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 }
             }
             Token::LeftBracket => {
-                let open_span = token.span.clone();
+                let open_span = token.span;
                 cursor.bump();
                 let index = parse_assignment(cursor)?;
                 let Some(close) = cursor.current() else {
@@ -1155,7 +1152,7 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 if !matches!(close.kind, Token::RightBracket) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ']' in index expression".to_string(),
-                        span: close.span.clone(),
+                        span: close.span,
                     });
                 }
                 let span = expr.span.extend_to(&close.span);
@@ -1287,8 +1284,7 @@ fn parse_unary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
 
 fn parse_multiplicative(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_unary(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         let operator = match token.kind {
             Token::Star => Some(ast::BinaryOperator::Multiply),
             Token::Slash => Some(ast::BinaryOperator::Divide),
@@ -1313,8 +1309,7 @@ fn parse_multiplicative(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, 
 
 fn parse_additive(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_multiplicative(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         let operator = match token.kind {
             Token::Plus => Some(ast::BinaryOperator::Add),
             Token::Minus => Some(ast::BinaryOperator::Subtract),
@@ -1338,8 +1333,7 @@ fn parse_additive(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseE
 
 fn parse_shift(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_additive(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         let operator = match token.kind {
             Token::Less
                 if cursor.pos + 1 < cursor.end
@@ -1375,8 +1369,7 @@ fn parse_shift(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
 
 fn parse_relational(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_shift(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         let operator = match token.kind {
             Token::Less => Some(ast::BinaryOperator::Less),
             Token::Greater => Some(ast::BinaryOperator::Greater),
@@ -1407,8 +1400,7 @@ fn parse_relational(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
 
 fn parse_equality(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_relational(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         let operator = match token.kind {
             Token::Equal => Some(ast::BinaryOperator::Equal),
             Token::NotEqual => Some(ast::BinaryOperator::NotEqual),
@@ -1432,8 +1424,7 @@ fn parse_equality(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseE
 
 fn parse_bitwise_and(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_equality(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         if !matches!(token.kind, Token::BitwiseAnd) {
             break;
         }
@@ -1454,8 +1445,7 @@ fn parse_bitwise_and(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Par
 
 fn parse_bitwise_xor(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_bitwise_and(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         if !matches!(token.kind, Token::BitwiseXor) {
             break;
         }
@@ -1476,8 +1466,7 @@ fn parse_bitwise_xor(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Par
 
 fn parse_bitwise_or(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_bitwise_xor(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         if !matches!(token.kind, Token::BitwiseOr) {
             break;
         }
@@ -1498,8 +1487,7 @@ fn parse_bitwise_or(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
 
 fn parse_logical_and(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_bitwise_or(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         if !matches!(token.kind, Token::And) {
             break;
         }
@@ -1520,8 +1508,7 @@ fn parse_logical_and(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Par
 
 fn parse_logical_or(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let mut expr = parse_logical_and(cursor)?;
-    loop {
-        let Some(token) = cursor.current() else { break };
+    while let Some(token) = cursor.current() {
         if !matches!(token.kind, Token::Or) {
             break;
         }
@@ -1588,8 +1575,8 @@ pub(crate) fn parse_expression(
     if cursor.pos != end {
         let span = cursor
             .current()
-            .map(|t| t.span.clone())
-            .unwrap_or_else(|| expr.span.clone());
+            .map(|t| t.span)
+            .unwrap_or_else(|| expr.span);
         return Err(ParseError::InvalidSyntax {
             message: "unsupported expression form in bootstrap parser".to_string(),
             span,

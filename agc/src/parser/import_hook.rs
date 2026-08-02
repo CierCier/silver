@@ -250,7 +250,7 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
         return Ok(program);
     }
     Err(crate::diagnostics::render(
-        errors[0].span().clone(),
+        *errors[0].span(),
         &errors[0].format_with_help(),
         crate::diagnostics::Severity::Error,
     )

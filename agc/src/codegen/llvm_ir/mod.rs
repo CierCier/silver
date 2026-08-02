@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -54,6 +54,10 @@ pub(crate) struct VarInfo<'ctx> {
 }
 
 #[derive(Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "defer payloads are emitted once; boxing adds indirection for no benefit"
+)]
 pub(crate) enum DeferAction<'ctx> {
     /// Execute a parsed AST statement (from `defer { }` or `defer stmt;`)
     Statement(ast::Statement),

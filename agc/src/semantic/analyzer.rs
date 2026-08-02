@@ -219,7 +219,7 @@ impl Analyzer {
             };
             self.errors.push(SemanticError {
                 message,
-                span: ident.span.clone(),
+                span: ident.span,
             });
             return;
         }
@@ -309,7 +309,7 @@ impl Analyzer {
                 self.push_var_scope();
                 for param in &func.parameters {
                     self.check_type(&param.param_type);
-                    self.bind_var(&param.name, param.span.clone());
+                    self.bind_var(&param.name, param.span);
                 }
                 if let Some(return_type) = &func.return_type {
                     self.check_type(return_type);
@@ -346,7 +346,7 @@ impl Analyzer {
                     if self.has_symbol(&name).is_none() {
                         self.errors.push(SemanticError {
                             message: format!("unknown trait '{}'", name),
-                            span: trait_ref.span.clone(),
+                            span: trait_ref.span,
                         });
                     }
                 }
@@ -360,7 +360,7 @@ impl Analyzer {
                         {
                             self.errors.push(SemanticError {
                                 message: "inherent method 'drop' is not a Drop trait impl; consider 'impl Drop<T> for T' instead".to_string(),
-                                span: func.name.span.clone(),
+                                span: func.name.span,
                             });
                         }
                     }
@@ -373,7 +373,7 @@ impl Analyzer {
                             self.push_var_scope();
                             for param in &func.parameters {
                                 self.check_type(&param.param_type);
-                                self.bind_var(&param.name, param.span.clone());
+                                self.bind_var(&param.name, param.span);
                             }
                             if let Some(return_type) = &func.return_type {
                                 self.check_type(return_type);
@@ -390,7 +390,7 @@ impl Analyzer {
                             self.push_var_scope();
                             for param in &cast.parameters {
                                 self.check_type(&param.param_type);
-                                self.bind_var(&param.name, param.span.clone());
+                                self.bind_var(&param.name, param.span);
                             }
                             self.check_block(&cast.body);
                             self.pop_var_scope();
@@ -450,7 +450,7 @@ impl Analyzer {
                     if self.has_symbol(name).is_none() && !self.imported_types.contains(name) {
                         self.errors.push(SemanticError {
                             message: format!("unknown type '{}'", name),
-                            span: named.path[0].span.clone(),
+                            span: named.path[0].span,
                         });
                     }
                 } else {
@@ -468,8 +468,8 @@ impl Analyzer {
                             span: named
                                 .path
                                 .last()
-                                .map(|id| id.span.clone())
-                                .unwrap_or_else(|| Span::default()),
+                                .map(|id| id.span)
+                                .unwrap_or_else(Span::default),
                         });
                     }
                 }
@@ -487,7 +487,7 @@ impl Analyzer {
                 {
                     self.errors.push(SemanticError {
                         message: format!("unknown type '{}'", generic.name.name),
-                        span: generic.name.span.clone(),
+                        span: generic.name.span,
                     });
                 }
                 for arg in &generic.args {
@@ -666,7 +666,7 @@ impl Analyzer {
             } => {
                 self.check_expression(iterable);
                 self.push_var_scope();
-                self.bind_var(binding, binding.span.clone());
+                self.bind_var(binding, binding.span);
                 self.check_block(body);
                 self.pop_var_scope();
             }
@@ -722,13 +722,13 @@ impl Analyzer {
                     Some(_) => {
                         self.errors.push(SemanticError {
                             message: format!("'{}' is not a trait", name),
-                            span: path[0].span.clone(),
+                            span: path[0].span,
                         });
                     }
                     None => {
                         self.errors.push(SemanticError {
                             message: format!("unknown trait '{}'", name),
-                            span: path[0].span.clone(),
+                            span: path[0].span,
                         });
                     }
                 }
@@ -739,13 +739,13 @@ impl Analyzer {
                     Some(_) => {
                         self.errors.push(SemanticError {
                             message: format!("'{}' is not a trait", name),
-                            span: last.span.clone(),
+                            span: last.span,
                         });
                     }
                     None => {
                         self.errors.push(SemanticError {
                             message: format!("unknown trait '{}'", name),
-                            span: last.span.clone(),
+                            span: last.span,
                         });
                     }
                 }
@@ -838,7 +838,7 @@ impl Analyzer {
     }
 
     fn bind_var(&mut self, ident: &ast::Identifier, span: Span) {
-        let bind = self.table_backend.bind_var(&ident.name, span.clone());
+        let bind = self.table_backend.bind_var(&ident.name, span);
         if bind == BindVarResult::DuplicateInScope {
             self.errors.push(SemanticError {
                 message: format!("duplicate variable '{}'", ident.name),
@@ -849,7 +849,7 @@ impl Analyzer {
 
     fn bind_pattern(&mut self, pattern: &ast::Pattern) {
         match &pattern.kind {
-            ast::PatternKind::Identifier(ident) => self.bind_var(ident, pattern.span.clone()),
+            ast::PatternKind::Identifier(ident) => self.bind_var(ident, pattern.span),
             ast::PatternKind::Tuple(items) => {
                 for item in items {
                     self.bind_pattern(item);
@@ -890,7 +890,7 @@ impl Analyzer {
 
         self.errors.push(SemanticError {
             message: format!("unknown identifier '{}'", ident.name),
-            span: ident.span.clone(),
+            span: ident.span,
         });
     }
 
@@ -907,7 +907,7 @@ impl Analyzer {
             }
             self.errors.push(SemanticError {
                 message: format!("unknown identifier '{}'", name),
-                span: expr.span.clone(),
+                span: expr.span,
             });
         }
     }

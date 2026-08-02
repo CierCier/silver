@@ -261,13 +261,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.register_field_drops(field_ty, field_ptr, flag)?;
 
                 // Register this field's own drop if it implements Drop.
-                if let Some(drop_fn) = self.get_drop_function_name(field_ty)? {
-                    if let Some(scope) = self.defers.last_mut() {
-                        scope.push(DeferredEntry {
-                            action: DeferAction::DropCall(drop_fn, field_ptr),
-                            flag: Some(flag),
-                        });
-                    }
+                if let Some(drop_fn) = self.get_drop_function_name(field_ty)?
+                    && let Some(scope) = self.defers.last_mut()
+                {
+                    scope.push(DeferredEntry {
+                        action: DeferAction::DropCall(drop_fn, field_ptr),
+                        flag: Some(flag),
+                    });
                 }
             }
         }

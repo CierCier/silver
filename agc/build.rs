@@ -16,13 +16,13 @@ fn main() {
         }
     );
 
-    if let Some(git) = &git_dir {
-        if git.exists() {
-            println!("cargo:rerun-if-changed={}", git.join("HEAD").display());
-            let refs = git.join("refs");
-            if refs.exists() {
-                println!("cargo:rerun-if-changed={}", refs.display());
-            }
+    if let Some(git) = &git_dir
+        && git.exists()
+    {
+        println!("cargo:rerun-if-changed={}", git.join("HEAD").display());
+        let refs = git.join("refs");
+        if refs.exists() {
+            println!("cargo:rerun-if-changed={}", refs.display());
         }
     }
 }

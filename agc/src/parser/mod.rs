@@ -9,7 +9,7 @@ pub use ast::*;
 pub use error::ParseError;
 pub use import_hook::FileImportResolverHook;
 
-use crate::lexer::{LexToken, Span};
+use crate::lexer::LexToken;
 
 pub struct Parser {
     tokens: Vec<LexToken>,
@@ -44,7 +44,7 @@ impl Parser {
                     comments.push(ast::CommentItem {
                         kind: *kind,
                         text: text.clone(),
-                        span: token.span.clone(),
+                        span: token.span,
                     });
                     false
                 }
@@ -63,8 +63,8 @@ impl Parser {
                 let fallback_span = self
                     .tokens
                     .last()
-                    .map(|token| token.span.clone())
-                    .unwrap_or(Span::default());
+                    .map(|token| token.span)
+                    .unwrap_or_default();
                 (
                     Program {
                         attributes: Vec::new(),

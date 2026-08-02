@@ -28,7 +28,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 {
                     return ast::Type {
                         kind: mapped.kind.clone(),
-                        span: ty.span.clone(),
+                        span: ty.span,
                     };
                 }
                 let generics = named.generics.as_ref().map(|args| {
@@ -90,7 +90,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         ast::Type {
             kind,
-            span: ty.span.clone(),
+            span: ty.span,
         }
     }
 
@@ -491,7 +491,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// TypeName-style generic function calls (e.g. `alloc<i32>(4)`) to Identifier
     /// calls (e.g. `alloc__i32_i64(4)`). Uses the LLVM module to look up whether
     /// a monomorphized function with the expected mangled name was already declared.
-
     pub(crate) fn rewrite_call_sites_in_block(&self, block: &mut ast::Block) {
         for stmt in &mut block.statements {
             match &mut stmt.kind {
@@ -538,50 +537,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 arguments,
             } => {
                 // Check if this is a TypeName call that should be rewritten.
-                if let ast::ExpressionKind::TypeName(ty) = function.kind.as_mut() {
-                    if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
-                        if let Some(generics) = &named.generics {
-                            if !generics.is_empty()
-                                && generics.iter().all(|g| !Self::type_has_type_param(g))
-                            {
-                                // All concrete args -> this is a generic function call
-                                let fn_name = named
-                                    .path
-                                    .iter()
-                                    .map(|id| id.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(".");
-                                let rhs_args: Vec<Type> =
-                                    generics.iter().map(|g| Type::from_ast(g)).collect();
-                                let base_mangled = mangle_name(&fn_name, &rhs_args);
-                                // Check LLVM module: monomorphized functions are declared in Pass 1a
-                                if self.module.get_function(&base_mangled).is_some() {
-                                    *function = Box::new(ast::Expression {
-                                        kind: Box::new(ast::ExpressionKind::Identifier(
-                                            ast::Identifier {
-                                                name: base_mangled,
-                                                span: function.span.clone(),
-                                            },
-                                        )),
-                                        span: function.span.clone(),
-                                    });
-                                } else {
-                                    // Try with parameter suffix (e.g. alloc__i32 vs alloc__i32_i64)
-                                    for name in self.function_name_to_symbol.keys() {
-                                        if name.starts_with(&format!("{}_", base_mangled)) {
-                                            *function = Box::new(ast::Expression {
-                                                kind: Box::new(ast::ExpressionKind::Identifier(
-                                                    ast::Identifier {
-                                                        name: name.clone(),
-                                                        span: function.span.clone(),
-                                                    },
-                                                )),
-                                                span: function.span.clone(),
-                                            });
-                                            break;
-                                        }
-                                    }
-                                }
+                if let ast::ExpressionKind::TypeName(ty) = function.kind.as_mut()
+                    && let ast::TypeKind::Named(named) = ty.kind.as_mut()
+                    && let Some(generics) = &named.generics
+                    && !generics.is_empty()
+                    && generics.iter().all(|g| !Self::type_has_type_param(g))
+                {
+                    // All concrete args -> this is a generic function call
+                    let fn_name = named
+                        .path
+                        .iter()
+                        .map(|id| id.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    let rhs_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
+                    let base_mangled = mangle_name(&fn_name, &rhs_args);
+                    // Check LLVM module: monomorphized functions are declared in Pass 1a
+                    if self.module.get_function(&base_mangled).is_some() {
+                        **function = ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                name: base_mangled,
+                                span: function.span,
+                            })),
+                            span: function.span,
+                        };
+                    } else {
+                        // Try with parameter suffix (e.g. alloc__i32 vs alloc__i32_i64)
+                        for name in self.function_name_to_symbol.keys() {
+                            if name.starts_with(&format!("{}_", base_mangled)) {
+                                **function = ast::Expression {
+                                    kind: Box::new(ast::ExpressionKind::Identifier(
+                                        ast::Identifier {
+                                            name: name.clone(),
+                                            span: function.span,
+                                        },
+                                    )),
+                                    span: function.span,
+                                };
+                                break;
                             }
                         }
                     }
@@ -629,7 +622,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     /// Check if an AST type contains any unresolved type parameter (which would
     /// mean it's still a generic type, not a concrete instantiation).
-
     pub(crate) fn type_has_type_param(ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(_) => false,
@@ -640,7 +632,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let first = named.path[0].name.chars().next();
                     matches!(first, Some(c) if c.is_uppercase())
                 } else if let Some(generics) = &named.generics {
-                    generics.iter().any(|g| Self::type_has_type_param(g))
+                    generics.iter().any(Self::type_has_type_param)
                 } else {
                     false
                 }
@@ -828,7 +820,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
                     })),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 })
             }
             ast::ExpressionKind::Literal(lit) => {
@@ -842,14 +834,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(prim)),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 })
             }
             ast::ExpressionKind::Call { function, .. } => {
-                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
-                    if let Some(sig) = self.signature_for_name(&ident.name) {
-                        return sig.return_type.clone();
-                    }
+                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
+                    && let Some(sig) = self.signature_for_name(&ident.name)
+                {
+                    return sig.return_type.clone();
                 }
                 if let Some(func_ty) = self.resolve_receiver_type(function) {
                     match func_ty.kind.as_ref() {
@@ -879,10 +871,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         break;
                     }
                 }
-                if return_ty.is_none() {
-                    if let Some(sig) = self.signature_for_name(&method.name) {
-                        return_ty = sig.return_type.clone();
-                    }
+                if return_ty.is_none()
+                    && let Some(sig) = self.signature_for_name(&method.name)
+                {
+                    return_ty = sig.return_type.clone();
                 }
                 return_ty
             }
@@ -890,27 +882,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 }),
                 _ => self.resolve_receiver_type(operand),
             },
             _ => None,
-        }
-    }
-
-    pub(crate) fn receiver_owner_name(&mut self, expr: &ast::Expression) -> Option<String> {
-        match expr.kind.as_ref() {
-            ast::ExpressionKind::TypeName(ty) => Self::owner_name_from_type(ty),
-            ast::ExpressionKind::StructLiteral { path, .. } => Some(Self::path_name(path)),
-            _ => {
-                if let Some(ty) = self.resolve_receiver_type(expr) {
-                    Self::owner_name_from_type(&ty)
-                } else if let ast::ExpressionKind::Identifier(identifier) = expr.kind.as_ref() {
-                    Some(Self::sanitize_monomorph(&identifier.name))
-                } else {
-                    None
-                }
-            }
         }
     }
 
@@ -991,7 +967,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Pass-1 collection for impl methods.
     ///
     /// Registers receiver mode and declares mangled LLVM function signatures so
-
     pub(crate) fn is_drop_trait_impl(item: &ast::ImplItem) -> bool {
         item.trait_ref.as_ref().is_some_and(|trait_ref| {
             trait_ref.path.last().map(|id| id.name.as_str()) == Some("Drop")
@@ -999,7 +974,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// method calls can resolve before bodies are emitted.
-
     pub(crate) fn collect_impl_method_signatures(
         &mut self,
         item: &ast::ImplItem,
@@ -1055,7 +1029,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_variadic: func.is_variadic,
                             linkage: None,
                         },
-                        Some(func.name.span.clone()),
+                        Some(func.name.span),
                         SymbolKind::ImplMethod,
                     );
 
@@ -1101,7 +1075,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_variadic: false,
                             linkage: None,
                         },
-                        Some(cast.span.clone()),
+                        Some(cast.span),
                         SymbolKind::ImplMethod,
                     );
                     if self.module.get_function(&mangled_name).is_none() {

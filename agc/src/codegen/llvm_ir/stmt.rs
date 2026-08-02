@@ -12,6 +12,10 @@ use crate::lexer::Span;
 use crate::parser::ast;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub(crate) fn emit_function_body(
         &mut self,
         function: FunctionValue<'ctx>,
@@ -57,7 +61,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.builder.build_store(alloca, param_value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store parameter `{}`: {e}", param.name.name),
-                    param.span.clone(),
+                    param.span,
                 )
             })?;
             if let Some(scope) = self.variables.last_mut() {
@@ -155,7 +159,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if return_type.is_some_and(|ret| !Self::is_void_primitive(ret)) {
                 return Err(CodegenError::with_span(
                     format!("function `{fn_name}` may exit without returning a value"),
-                    fn_span.clone(),
+                    *fn_span,
                 ));
             }
             self.builder
@@ -346,6 +350,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub(crate) fn emit_for_in_statement(
         &mut self,
         binding: &ast::Identifier,
@@ -508,9 +516,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let iterable_expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: iterable_name.to_string(),
-                        span: dummy_span.clone(),
+                        span: dummy_span,
                     })),
-                    span: dummy_span.clone(),
+                    span: dummy_span,
                 };
                 let method_name = match mode {
                     ast::IterAccessMode::ByValue => "into_iter",
@@ -519,7 +527,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 let into_iter_ident = ast::Identifier {
                     name: method_name.to_string(),
-                    span: dummy_span.clone(),
+                    span: dummy_span,
                 };
                 let iterator_val = self
                     .emit_method_call_expression(
@@ -555,14 +563,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let next_ident = ast::Identifier {
                     name: "next".to_string(),
-                    span: dummy_span.clone(),
+                    span: dummy_span,
                 };
                 let iter_expr = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: iter_name.to_string(),
-                        span: dummy_span.clone(),
+                        span: dummy_span,
                     })),
-                    span: dummy_span.clone(),
+                    span: dummy_span,
                 };
                 let next_val = self
                     .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
@@ -691,7 +699,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let ast::PatternKind::Identifier(identifier) = &let_stmt.pattern.kind else {
             return Err(CodegenError::with_span(
                 "only identifier let-bindings are supported in LLVM IR codegen",
-                let_stmt.pattern.span.clone(),
+                let_stmt.pattern.span,
             ));
         };
 
@@ -701,7 +709,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let Some(annotation) = &let_stmt.type_annotation else {
                         return Err(CodegenError::with_span(
                             "initializer requires a type annotation in LLVM IR codegen",
-                            init_expr.span.clone(),
+                            init_expr.span,
                         ));
                     };
                     self.emit_typed_initializer_value(items, annotation, &init_expr.span)?
@@ -728,7 +736,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let Some(annotation) = &let_stmt.type_annotation else {
                 return Err(CodegenError::with_span(
                     "let binding without initializer requires a type annotation in LLVM IR codegen",
-                    span.clone(),
+                    *span,
                 ));
             };
             let storage_ty = self.lower_basic_type(annotation)?;
@@ -765,7 +773,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             {
                                 CodegenError::with_span(
                                     "static local initializer must be a compile-time constant",
-                                    init.span.clone(),
+                                    init.span,
                                 )
                             } else {
                                 e
@@ -791,7 +799,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.builder.build_store(alloca, init_value).map_err(|e| {
             CodegenError::with_span(
                 format!("failed to store local `{}`: {e}", identifier.name),
-                identifier.span.clone(),
+                identifier.span,
             )
         })?;
 
@@ -871,7 +879,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         ast::Type {
             kind: Box::new(kind),
-            span: span.clone(),
+            span: *span,
         }
     }
 
@@ -903,7 +911,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if arm.guard.is_some() {
                 return Err(CodegenError::with_span(
                     "match guards are not supported in LLVM IR codegen yet",
-                    arm.span.clone(),
+                    arm.span,
                 ));
             }
 
@@ -950,7 +958,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         _ => {
                             return Err(CodegenError::with_span(
                                 "unsupported match literal for scrutinee type",
-                                arm.pattern.span.clone(),
+                                arm.pattern.span,
                             ));
                         }
                     };
@@ -962,7 +970,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 _ => {
                     return Err(CodegenError::with_span(
                         "match pattern kind is not supported in LLVM IR codegen yet",
-                        arm.pattern.span.clone(),
+                        arm.pattern.span,
                     ));
                 }
             }
@@ -979,7 +987,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(alloca, scrutinee).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to bind match identifier `{}`: {e}", identifier.name),
-                        identifier.span.clone(),
+                        identifier.span,
                     )
                 })?;
 

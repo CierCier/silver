@@ -92,13 +92,11 @@ fn collect_generic_types(program: &ast::Program) -> HashMap<String, GenericTypeI
                     );
                 }
             }
-            ast::ItemKind::Enum(enum_item) => {
-                if enum_item.generics.is_some() {
-                    types.insert(
-                        enum_item.name.name.clone(),
-                        GenericTypeItem::Enum(enum_item.clone()),
-                    );
-                }
+            ast::ItemKind::Enum(enum_item) if enum_item.generics.is_some() => {
+                types.insert(
+                    enum_item.name.name.clone(),
+                    GenericTypeItem::Enum(enum_item.clone()),
+                );
             }
             _ => {}
         }
@@ -112,9 +110,7 @@ fn collect_generic_impls(program: &ast::Program) -> Vec<ast::ImplItem> {
         let ast::ItemKind::Impl(impl_item) = &item.kind else {
             continue;
         };
-        if impl_item.generics.is_some() {
-            impls.push(impl_item.clone());
-        } else if is_generic_self_type(&impl_item.self_type) {
+        if impl_item.generics.is_some() || is_generic_self_type(&impl_item.self_type) {
             impls.push(impl_item.clone());
         }
     }
@@ -210,10 +206,10 @@ fn collect_item_instantiations(
             push_type_params(scopes, trait_item.generics.as_ref());
             // Register associated type names so they're treated as type params
             for item in &trait_item.items {
-                if let ast::TraitItemKind::AssociatedType(assoc) = item {
-                    if let Some(scope) = scopes.last_mut() {
-                        scope.insert(assoc.name.name.clone());
-                    }
+                if let ast::TraitItemKind::AssociatedType(assoc) = item
+                    && let Some(scope) = scopes.last_mut()
+                {
+                    scope.insert(assoc.name.name.clone());
                 }
             }
             for item in &trait_item.items {
@@ -520,33 +516,33 @@ fn collect_type_instantiations(
     instantiations: &mut HashMap<String, TypeInstance>,
     scopes: &Vec<HashSet<String>>,
 ) {
-    if let Some((base, args)) = concrete_named_type(ty, scopes) {
-        if let Some(item) = generic_structs.get(&base) {
-            let (generics, instance_item) = match item {
-                GenericTypeItem::Struct(struct_item) => {
-                    let mapping = build_mapping_from_generics(struct_item.generics.as_ref(), &args);
-                    let mangled = mangle_name(&base, &args);
-                    let item = instantiate_struct(struct_item, &mangled, &mapping);
-                    (struct_item.generics.as_ref(), (mapping, mangled, item))
-                }
-                GenericTypeItem::Enum(enum_item) => {
-                    let mapping = build_mapping_from_generics(enum_item.generics.as_ref(), &args);
-                    let mangled = mangle_name(&base, &args);
-                    let item = instantiate_enum(enum_item, &mangled, &mapping);
-                    (enum_item.generics.as_ref(), (mapping, mangled, item))
-                }
-            };
-
-            let (mapping, mangled, item) = instance_item;
-            if generics.is_some() {
-                let key = format!("type::{base}::{mangled}");
-                instantiations.entry(key).or_insert_with(|| TypeInstance {
-                    base: base.clone(),
-                    mangled: mangled.clone(),
-                    mapping: mapping.clone(),
-                    item,
-                });
+    if let Some((base, args)) = concrete_named_type(ty, scopes)
+        && let Some(item) = generic_structs.get(&base)
+    {
+        let (generics, instance_item) = match item {
+            GenericTypeItem::Struct(struct_item) => {
+                let mapping = build_mapping_from_generics(struct_item.generics.as_ref(), &args);
+                let mangled = mangle_name(&base, &args);
+                let item = instantiate_struct(struct_item, &mangled, &mapping);
+                (struct_item.generics.as_ref(), (mapping, mangled, item))
             }
+            GenericTypeItem::Enum(enum_item) => {
+                let mapping = build_mapping_from_generics(enum_item.generics.as_ref(), &args);
+                let mangled = mangle_name(&base, &args);
+                let item = instantiate_enum(enum_item, &mangled, &mapping);
+                (enum_item.generics.as_ref(), (mapping, mangled, item))
+            }
+        };
+
+        let (mapping, mangled, item) = instance_item;
+        if generics.is_some() {
+            let key = format!("type::{base}::{mangled}");
+            instantiations.entry(key).or_insert_with(|| TypeInstance {
+                base: base.clone(),
+                mangled: mangled.clone(),
+                mapping: mapping.clone(),
+                item,
+            });
         }
     }
 
@@ -611,24 +607,23 @@ fn instantiate_struct(
             name: field.name.clone(),
             field_type: substitute_ast_type(&field.field_type, mapping),
             visibility: field.visibility.clone(),
-            span: field.span.clone(),
+            span: field.span,
         })
         .collect::<Vec<_>>();
 
-    let item = ast::Item {
+    ast::Item {
         kind: ast::ItemKind::Struct(ast::StructItem {
             name: ast::Identifier {
                 name: mangled.to_string(),
-                span: struct_item.name.span.clone(),
+                span: struct_item.name.span,
             },
             generics: None,
             fields,
         }),
-        span: struct_item.name.span.clone(),
+        span: struct_item.name.span,
         visibility: ast::Visibility::Private,
         attributes: Vec::new(),
-    };
-    item
+    }
 }
 
 fn instantiate_enum(
@@ -656,13 +651,13 @@ fn instantiate_enum(
                             name: field.name.clone(),
                             field_type: substitute_ast_type(&field.field_type, mapping),
                             visibility: field.visibility.clone(),
-                            span: field.span.clone(),
+                            span: field.span,
                         })
                         .collect(),
                 ),
             },
             discriminant: variant.discriminant,
-            span: variant.span.clone(),
+            span: variant.span,
         })
         .collect::<Vec<_>>();
 
@@ -670,12 +665,12 @@ fn instantiate_enum(
         kind: ast::ItemKind::Enum(ast::EnumItem {
             name: ast::Identifier {
                 name: mangled.to_string(),
-                span: enum_item.name.span.clone(),
+                span: enum_item.name.span,
             },
             generics: None,
             variants,
         }),
-        span: enum_item.name.span.clone(),
+        span: enum_item.name.span,
         visibility: ast::Visibility::Private,
         attributes: Vec::new(),
     }
@@ -719,7 +714,7 @@ fn instantiate_impls(
 
             items.push(ast::Item {
                 kind: ast::ItemKind::Impl(new_impl),
-                span: impl_item.self_type.span.clone(),
+                span: impl_item.self_type.span,
                 visibility: ast::Visibility::Private,
                 attributes: Vec::new(),
             });
@@ -768,7 +763,7 @@ fn instantiate_requests(
                 func.generics = None;
                 func.name = ast::Identifier {
                     name: mangled,
-                    span: func.name.span.clone(),
+                    span: func.name.span,
                 };
                 for param in &mut func.parameters {
                     param.param_type = substitute_ast_type(&param.param_type, mapping);
@@ -780,7 +775,7 @@ fn instantiate_requests(
 
                 items.push(ast::Item {
                     kind: ast::ItemKind::Function(func),
-                    span: source.name.span.clone(),
+                    span: source.name.span,
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 });
@@ -828,7 +823,7 @@ fn instantiate_requests(
 
                 items.push(ast::Item {
                     kind: ast::ItemKind::Impl(new_impl),
-                    span: impl_item.self_type.span.clone(),
+                    span: impl_item.self_type.span,
                     visibility: ast::Visibility::Private,
                     attributes: Vec::new(),
                 });
@@ -871,19 +866,17 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
         }
         ast::ExpressionKind::Identifier(ident) => {
             if let Some(rewrite) = mapping.get(&ident.name) {
-                let ty = type_to_ast(rewrite, ident.span.clone());
-                expr.kind = Box::new(ast::ExpressionKind::TypeName(ty));
+                let ty = type_to_ast(rewrite, ident.span);
+                *expr.kind = ast::ExpressionKind::TypeName(ty);
             }
         }
         ast::ExpressionKind::StructLiteral { path, fields } => {
-            if let Some(last) = path.last_mut() {
-                if let Some(rewrite) = mapping.get(&last.name) {
-                    if let Type::Named { path: new_path, .. } = rewrite {
-                        if let Some(new_name) = new_path.last() {
-                            last.name = new_name.clone();
-                        }
-                    }
-                }
+            if let Some(last) = path.last_mut()
+                && let Some(rewrite) = mapping.get(&last.name)
+                && let Type::Named { path: new_path, .. } = rewrite
+                && let Some(new_name) = new_path.last()
+            {
+                last.name = new_name.clone();
             }
             for field in fields {
                 substitute_expression_types(&mut field.value, mapping);
@@ -894,7 +887,7 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
             target_type,
         } => {
             let replaced = substitute_ast_type(target_type.as_ref(), mapping);
-            *target_type = Box::new(replaced);
+            **target_type = replaced;
             substitute_expression_types(expression, mapping);
         }
         ast::ExpressionKind::Call {
@@ -1026,7 +1019,7 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
 
 fn substitute_ast_type(ty: &ast::Type, mapping: &HashMap<String, Type>) -> ast::Type {
     let concrete = Type::from_ast(ty).substitute(mapping);
-    type_to_ast(&concrete, ty.span.clone())
+    type_to_ast(&concrete, ty.span)
 }
 
 fn rewrite_function_calls(
@@ -1141,9 +1134,9 @@ fn rewrite_expression_function_calls(
                         let generics_ok = match &named.generics {
                             Some(generics) => {
                                 let actual_args: Vec<Type> =
-                                    generics.iter().map(|g| Type::from_ast(g)).collect();
-                                let ok = actual_args == args;
-                                ok
+                                    generics.iter().map(Type::from_ast).collect();
+
+                                actual_args == args
                             }
                             None => args.is_empty(),
                         };
@@ -1155,13 +1148,13 @@ fn rewrite_expression_function_calls(
                 _ => false,
             };
             if should_rewrite {
-                *function = Box::new(ast::Expression {
+                **function = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: mangled.to_string(),
-                        span: function.span.clone(),
+                        span: function.span,
                     })),
-                    span: function.span.clone(),
-                });
+                    span: function.span,
+                };
             }
             for arg in arguments {
                 rewrite_expression_function_calls(arg, name, args, mangled, span, param_count);
@@ -1421,23 +1414,20 @@ fn rewrite_expression_method_calls(
                 let mut current_generics: Option<&Vec<ast::Type>> = None;
                 match receiver.kind.as_ref() {
                     ast::ExpressionKind::TypeName(ty) => {
-                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                            if let Some(last) = named.path.last() {
-                                if last.name == base {
-                                    base_name = Some(last.name.clone());
-                                    current_generics = named.generics.as_ref();
-                                }
-                            }
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                            && let Some(last) = named.path.last()
+                            && last.name == base
+                        {
+                            base_name = Some(last.name.clone());
+                            current_generics = named.generics.as_ref();
                         }
                     }
-                    ast::ExpressionKind::Identifier(ident) => {
-                        if ident.name == base {
-                            base_name = Some(ident.name.clone());
-                        }
+                    ast::ExpressionKind::Identifier(ident) if ident.name == base => {
+                        base_name = Some(ident.name.clone());
                     }
                     _ => {}
                 }
-                if let Some(_) = base_name {
+                if base_name.is_some() {
                     // For Identifier receivers (Rc.new(...)), current_generics is None and
                     // we always need to rewrite. For TypeName receivers (Rc<i32>.new(...)),
                     // skip if the generic count already matches.
@@ -1446,22 +1436,22 @@ fn rewrite_expression_method_calls(
                     if should_rewrite {
                         let new_args = args
                             .iter()
-                            .map(|arg| type_to_ast(arg, span.clone()))
+                            .map(|arg| type_to_ast(arg, *span))
                             .collect::<Vec<_>>();
                         let new_named = ast::NamedType {
                             path: vec![ast::Identifier {
                                 name: base.to_string(),
-                                span: span.clone(),
+                                span: *span,
                             }],
                             generics: Some(new_args),
                         };
-                        *receiver = Box::new(ast::Expression {
+                        **receiver = ast::Expression {
                             kind: Box::new(ast::ExpressionKind::TypeName(ast::Type {
                                 kind: Box::new(ast::TypeKind::Named(new_named)),
-                                span: receiver.span.clone(),
+                                span: receiver.span,
                             })),
-                            span: receiver.span.clone(),
-                        });
+                            span: receiver.span,
+                        };
                     }
                 }
             }
@@ -1589,7 +1579,7 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
                 .iter()
                 .map(|name| ast::Identifier {
                     name: name.clone(),
-                    span: span.clone(),
+                    span,
                 })
                 .collect(),
             generics: if generics.is_empty() {
@@ -1598,7 +1588,7 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
                 Some(
                     generics
                         .iter()
-                        .map(|inner| type_to_ast(inner, span.clone()))
+                        .map(|inner| type_to_ast(inner, span))
                         .collect(),
                 )
             },
@@ -1606,47 +1596,42 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
         Type::Reference { is_mutable, inner } => ast::TypeKind::Reference(ast::ReferenceType {
             is_mutable: *is_mutable,
             lifetime: None,
-            inner: Box::new(type_to_ast(inner, span.clone())),
+            inner: Box::new(type_to_ast(inner, span)),
         }),
         Type::Pointer { is_mutable, inner } => ast::TypeKind::Pointer(ast::PointerType {
             is_mutable: *is_mutable,
-            inner: Box::new(type_to_ast(inner, span.clone())),
+            inner: Box::new(type_to_ast(inner, span)),
         }),
         Type::Slice { element } => ast::TypeKind::Named(ast::NamedType {
             path: vec![ast::Identifier {
                 name: "Slice".to_string(),
-                span: span.clone(),
+                span,
             }],
-            generics: Some(vec![type_to_ast(element, span.clone())]),
+            generics: Some(vec![type_to_ast(element, span)]),
         }),
         Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
-            element_type: Box::new(type_to_ast(element, span.clone())),
+            element_type: Box::new(type_to_ast(element, span)),
             size: *size as i64,
-            span: span.clone(),
+            span,
         })),
-        Type::Optional { inner } => {
-            ast::TypeKind::Optional(Box::new(type_to_ast(inner, span.clone())))
+        Type::Optional { inner } => ast::TypeKind::Optional(Box::new(type_to_ast(inner, span))),
+        Type::Tuple(items) => {
+            ast::TypeKind::Tuple(items.iter().map(|inner| type_to_ast(inner, span)).collect())
         }
-        Type::Tuple(items) => ast::TypeKind::Tuple(
-            items
-                .iter()
-                .map(|inner| type_to_ast(inner, span.clone()))
-                .collect(),
-        ),
         Type::Function {
             params,
             return_type,
         } => ast::TypeKind::Function(ast::FunctionType {
             parameters: params
                 .iter()
-                .map(|inner| type_to_ast(inner, span.clone()))
+                .map(|inner| type_to_ast(inner, span))
                 .collect(),
-            return_type: Box::new(type_to_ast(return_type, span.clone())),
+            return_type: Box::new(type_to_ast(return_type, span)),
         }),
         Type::Unknown => ast::TypeKind::Named(ast::NamedType {
             path: vec![ast::Identifier {
                 name: "_".to_string(),
-                span: span.clone(),
+                span,
             }],
             generics: None,
         }),
@@ -1781,10 +1766,10 @@ fn mapping_covers_impl(mapping: &HashMap<String, Type>, generics: Option<&ast::G
         return true;
     };
     for param in &generics.params {
-        if let ast::GenericParam::Type(type_param) = param {
-            if !mapping.contains_key(&type_param.name.name) {
-                return false;
-            }
+        if let ast::GenericParam::Type(type_param) = param
+            && !mapping.contains_key(&type_param.name.name)
+        {
+            return false;
         }
     }
     true
@@ -1872,10 +1857,10 @@ fn mangle_function_instance(
 fn collect_generic_fns(program: &ast::Program) -> HashSet<String> {
     let mut fns = HashSet::default();
     for item in &program.items {
-        if let ast::ItemKind::Function(func) = &item.kind {
-            if func.generics.is_some() {
-                fns.insert(func.name.name.clone());
-            }
+        if let ast::ItemKind::Function(func) = &item.kind
+            && func.generics.is_some()
+        {
+            fns.insert(func.name.name.clone());
         }
     }
     fns
@@ -1888,13 +1873,12 @@ fn find_generic_fn<'a>(
     param_count: usize,
 ) -> Option<&'a ast::FunctionItem> {
     for item in &program.items {
-        if let ast::ItemKind::Function(func) = &item.kind {
-            if func.name.name == name
-                && func.generics.is_some()
-                && func.parameters.len() == param_count
-            {
-                return Some(func);
-            }
+        if let ast::ItemKind::Function(func) = &item.kind
+            && func.name.name == name
+            && func.generics.is_some()
+            && func.parameters.len() == param_count
+        {
+            return Some(func);
         }
     }
     None
@@ -1913,25 +1897,18 @@ fn collect_expression_remaining_calls(
             function,
             arguments,
         } => {
-            if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref() {
-                if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                    if named.path.len() == 1 {
-                        let fn_name = &named.path[0].name;
-                        if generic_fns.contains(fn_name) {
-                            if let Some(generics) = &named.generics {
-                                let concrete_args: Vec<Type> =
-                                    generics.iter().map(|g| Type::from_ast(g)).collect();
-                                // Only process if all type args are concrete
-                                if concrete_args.iter().all(|arg| is_concrete(arg)) {
-                                    results.push((
-                                        fn_name.clone(),
-                                        concrete_args,
-                                        expr.span.clone(),
-                                        arguments.len(),
-                                    ));
-                                }
-                            }
-                        }
+            if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref()
+                && let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                && named.path.len() == 1
+            {
+                let fn_name = &named.path[0].name;
+                if generic_fns.contains(fn_name)
+                    && let Some(generics) = &named.generics
+                {
+                    let concrete_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
+                    // Only process if all type args are concrete
+                    if concrete_args.iter().all(is_concrete) {
+                        results.push((fn_name.clone(), concrete_args, expr.span, arguments.len()));
                     }
                 }
             }
@@ -2105,17 +2082,17 @@ fn is_concrete(ty: &Type) -> bool {
         Type::Named { generics, .. } => {
             // In a monomorphized body, all type params are substituted.
             // A Named type is concrete if all its generic args are concrete.
-            generics.iter().all(|inner| is_concrete(inner))
+            generics.iter().all(is_concrete)
         }
         Type::Primitive(_) | Type::Unit => true,
         Type::Pointer { inner, .. } | Type::Reference { inner, .. } => is_concrete(inner),
         Type::Slice { element } => is_concrete(element),
         Type::Optional { inner } => is_concrete(inner),
-        Type::Tuple(items) => items.iter().all(|inner| is_concrete(inner)),
+        Type::Tuple(items) => items.iter().all(is_concrete),
         Type::Function {
             params,
             return_type,
-        } => params.iter().all(|inner| is_concrete(inner)) && is_concrete(return_type),
+        } => params.iter().all(is_concrete) && is_concrete(return_type),
         Type::Array { element, .. } => is_concrete(element),
         Type::Unknown => false,
     }
@@ -2425,122 +2402,6 @@ mod tests {
     }
 
     /// Helper: check if any item contains a call expression with the given function name.
-    fn has_call_named(program: &ast::Program, name: &str) -> bool {
-        for item in &program.items {
-            let body = match &item.kind {
-                ast::ItemKind::Function(f) => Some(&f.body),
-                ast::ItemKind::Impl(impl_item) => impl_item.items.iter().find_map(|m| {
-                    if let ast::ImplItemKind::Function(f) = m {
-                        Some(&f.body)
-                    } else {
-                        None
-                    }
-                }),
-                _ => None,
-            };
-            if let Some(body) = body
-                && has_call_in_block(body, name)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn has_call_in_block(block: &ast::Block, name: &str) -> bool {
-        for stmt in &block.statements {
-            if has_call_in_statement(stmt, name) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn has_call_in_statement(stmt: &ast::Statement, name: &str) -> bool {
-        match &stmt.kind {
-            ast::StatementKind::Block(block) => has_call_in_block(block, name),
-            ast::StatementKind::Let(let_stmt) => let_stmt
-                .initializer
-                .as_ref()
-                .is_some_and(|init| has_call_in_expression(init, name)),
-            ast::StatementKind::Expression(expr)
-            | ast::StatementKind::Return(Some(expr))
-            | ast::StatementKind::Break(Some(expr)) => has_call_in_expression(expr, name),
-            _ => false,
-        }
-    }
-
-    fn has_call_in_expression(expr: &ast::Expression, name: &str) -> bool {
-        match expr.kind.as_ref() {
-            ast::ExpressionKind::Call {
-                function,
-                arguments,
-            } => {
-                let matches = match function.kind.as_ref() {
-                    ast::ExpressionKind::Identifier(ident) => ident.name == name,
-                    ast::ExpressionKind::TypeName(ty) => {
-                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                            named.path.last().is_some_and(|id| id.name == name)
-                        } else {
-                            false
-                        }
-                    }
-                    _ => false,
-                };
-                matches
-                    || arguments
-                        .iter()
-                        .any(|arg| has_call_in_expression(arg, name))
-            }
-            ast::ExpressionKind::Identifier(_) => false,
-            ast::ExpressionKind::TypeName(_) => false,
-            ast::ExpressionKind::MacroCall { args, .. } => args.iter().any(|arg| {
-                if let ast::MacroArg::Expression(expr) = arg {
-                    has_call_in_expression(expr, name)
-                } else {
-                    false
-                }
-            }),
-            ast::ExpressionKind::Block(block) => has_call_in_block(block, name),
-            ast::ExpressionKind::Cast { expression, .. } => {
-                has_call_in_expression(expression, name)
-            }
-            ast::ExpressionKind::Unary { operand, .. } => has_call_in_expression(operand, name),
-            ast::ExpressionKind::Postfix { operand, .. } => has_call_in_expression(operand, name),
-            ast::ExpressionKind::Binary { left, right, .. } => {
-                has_call_in_expression(left, name) || has_call_in_expression(right, name)
-            }
-            ast::ExpressionKind::Index { object, index, .. } => {
-                has_call_in_expression(object, name) || has_call_in_expression(index, name)
-            }
-            ast::ExpressionKind::FieldAccess { object, .. } => has_call_in_expression(object, name),
-            ast::ExpressionKind::Initializer { items } => items.iter().any(|item| {
-                let expr = match item {
-                    ast::InitializerItem::Positional(expr) => expr,
-                    ast::InitializerItem::Field { value, .. } => value,
-                    ast::InitializerItem::Index { value, .. } => value,
-                };
-                has_call_in_expression(expr, name)
-            }),
-            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
-                items.iter().any(|item| has_call_in_expression(item, name))
-            }
-            ast::ExpressionKind::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|f| has_call_in_expression(&f.value, name)),
-            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
-                has_call_in_expression(inner, name)
-            }
-            ast::ExpressionKind::Reference {
-                expression: inner, ..
-            } => has_call_in_expression(inner, name),
-            ast::ExpressionKind::ForIn { iterable, body, .. } => {
-                has_call_in_expression(iterable, name) || has_call_in_block(body, name)
-            }
-            _ => false,
-        }
-    }
-
     #[test]
     fn monomorphizes_nested_generic_function_call_in_impl_body() {
         let mut program = parse(

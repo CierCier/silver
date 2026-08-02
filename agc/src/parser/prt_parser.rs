@@ -1,4 +1,4 @@
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::lexer::{LexToken, Span, Token};
 
@@ -366,7 +366,7 @@ impl PRT_Parser {
         if let Some(primitive) = primitive {
             return Some(ast::Type {
                 kind: Box::new(ast::TypeKind::Primitive(primitive)),
-                span: token.span.clone(),
+                span: token.span,
             });
         }
 
@@ -380,11 +380,11 @@ impl PRT_Parser {
                 kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                     path: vec![ast::Identifier {
                         name: name.clone(),
-                        span: token.span.clone(),
+                        span: token.span,
                     }],
                     generics: None,
                 })),
-                span: token.span.clone(),
+                span: token.span,
             });
         }
 
@@ -678,7 +678,7 @@ impl PRT_Parser {
                 let Some(body_open) = self.extern_block_body_open(tokens, item_start) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected extern block body".to_string(),
-                        span: tokens[item_start].span.clone(),
+                        span: tokens[item_start].span,
                     });
                 };
                 self.find_matching_token(
@@ -710,7 +710,7 @@ impl PRT_Parser {
                 else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected item body".to_string(),
-                        span: tokens[item_start].span.clone(),
+                        span: tokens[item_start].span,
                     });
                 };
                 self.find_matching_token(
@@ -735,8 +735,8 @@ impl PRT_Parser {
                             ),
                             span: tokens
                                 .get(item_start)
-                                .map(|t| t.span.clone())
-                                .unwrap_or(fallback_span.clone()),
+                                .map(|t| t.span)
+                                .unwrap_or(*fallback_span),
                         }
                     })?;
                 if !matches!(
@@ -747,8 +747,8 @@ impl PRT_Parser {
                         message: "expected item identifier after return type".to_string(),
                         span: tokens
                             .get(after_type)
-                            .map(|t| t.span.clone())
-                            .unwrap_or(fallback_span.clone()),
+                            .map(|t| t.span)
+                            .unwrap_or(*fallback_span),
                     });
                 }
                 let mut lparen = after_type + 1;
@@ -762,10 +762,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated generic parameter list".to_string(),
-                            span: tokens
-                                .get(lparen)
-                                .map(|t| t.span.clone())
-                                .unwrap_or(fallback_span.clone()),
+                            span: tokens.get(lparen).map(|t| t.span).unwrap_or(*fallback_span),
                         });
                     };
                     lparen = generics_close + 1;
@@ -779,10 +776,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated function parameter list".to_string(),
-                        span: tokens
-                            .get(lparen)
-                            .map(|t| t.span.clone())
-                            .unwrap_or(fallback_span.clone()),
+                        span: tokens.get(lparen).map(|t| t.span).unwrap_or(*fallback_span),
                     });
                 };
                 let lbrace = rparen + 1;
@@ -795,10 +789,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated function block".to_string(),
-                        span: tokens
-                            .get(lbrace)
-                            .map(|t| t.span.clone())
-                            .unwrap_or(fallback_span.clone()),
+                        span: tokens.get(lbrace).map(|t| t.span).unwrap_or(*fallback_span),
                     });
                 };
                 Some(rbrace + 1)
@@ -808,46 +799,46 @@ impl PRT_Parser {
     }
 
     fn is_type_like(token: &Token) -> bool {
-        match token {
+        matches!(
+            token,
             Token::I8
-            | Token::I16
-            | Token::I32
-            | Token::I64
-            | Token::I128
-            | Token::U8
-            | Token::U16
-            | Token::U32
-            | Token::U64
-            | Token::U128
-            | Token::F32
-            | Token::F64
-            | Token::F80
-            | Token::C32
-            | Token::C64
-            | Token::C80
-            | Token::Bool
-            | Token::Str
-            | Token::Char
-            | Token::Void
-            | Token::Vec
-            | Token::Optional
-            | Token::Identifier(_)
-            | Token::Comma
-            | Token::Star
-            | Token::DoubleColon
-            | Token::Less
-            | Token::Greater
-            | Token::LeftParen
-            | Token::RightParen
-            | Token::LeftBracket
-            | Token::RightBracket
-            | Token::IntLiteral(_)
-            | Token::Const
-            | Token::Mut
-            | Token::Ref
-            | Token::BitwiseAnd => true,
-            _ => false,
-        }
+                | Token::I16
+                | Token::I32
+                | Token::I64
+                | Token::I128
+                | Token::U8
+                | Token::U16
+                | Token::U32
+                | Token::U64
+                | Token::U128
+                | Token::F32
+                | Token::F64
+                | Token::F80
+                | Token::C32
+                | Token::C64
+                | Token::C80
+                | Token::Bool
+                | Token::Str
+                | Token::Char
+                | Token::Void
+                | Token::Vec
+                | Token::Optional
+                | Token::Identifier(_)
+                | Token::Comma
+                | Token::Star
+                | Token::DoubleColon
+                | Token::Less
+                | Token::Greater
+                | Token::LeftParen
+                | Token::RightParen
+                | Token::LeftBracket
+                | Token::RightBracket
+                | Token::IntLiteral(_)
+                | Token::Const
+                | Token::Mut
+                | Token::Ref
+                | Token::BitwiseAnd
+        )
     }
 
     fn parse_type_prefix(
@@ -902,7 +893,7 @@ impl PRT_Parser {
             if let Some(name) = first_name {
                 path.push(ast::Identifier {
                     name,
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
                 cursor += 1;
                 while cursor + 1 < end && matches!(tokens[cursor].kind, Token::DoubleColon) {
@@ -915,7 +906,7 @@ impl PRT_Parser {
                     };
                     path.push(ast::Identifier {
                         name: seg,
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                     cursor += 1;
                 }
@@ -956,57 +947,52 @@ impl PRT_Parser {
             }
         };
 
-        if cursor < end && matches!(tokens[cursor].kind, Token::LeftParen) {
-            if let Some(close) =
+        if cursor < end
+            && matches!(tokens[cursor].kind, Token::LeftParen)
+            && let Some(close) =
                 self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen)
-            {
-                let mut is_fn = false;
-                if close > cursor + 1 {
-                    let mut type_like = true;
-                    for idx in (cursor + 1)..close {
-                        if !Self::is_type_like(&tokens[idx].kind) {
-                            type_like = false;
-                            break;
+        {
+            let mut is_fn = false;
+            if close > cursor + 1 {
+                let type_like = tokens[(cursor + 1)..close]
+                    .iter()
+                    .all(|t| Self::is_type_like(&t.kind));
+                if type_like {
+                    is_fn = true;
+                }
+            }
+            if is_fn {
+                let mut parsed_types = Vec::new();
+                let mut arg_cursor = cursor + 1;
+                let mut ok = true;
+                while arg_cursor < close {
+                    if let Some((arg, next_arg)) = self.parse_type_prefix(tokens, arg_cursor, close)
+                    {
+                        parsed_types.push(arg);
+                        arg_cursor = next_arg;
+                        if arg_cursor < close {
+                            if matches!(tokens[arg_cursor].kind, Token::Comma) {
+                                arg_cursor += 1;
+                            } else {
+                                ok = false;
+                                break;
+                            }
                         }
-                    }
-                    if type_like {
-                        is_fn = true;
+                    } else {
+                        ok = false;
+                        break;
                     }
                 }
-                if is_fn {
-                    let mut parsed_types = Vec::new();
-                    let mut arg_cursor = cursor + 1;
-                    let mut ok = true;
-                    while arg_cursor < close {
-                        if let Some((arg, next_arg)) =
-                            self.parse_type_prefix(tokens, arg_cursor, close)
-                        {
-                            parsed_types.push(arg);
-                            arg_cursor = next_arg;
-                            if arg_cursor < close {
-                                if matches!(tokens[arg_cursor].kind, Token::Comma) {
-                                    arg_cursor += 1;
-                                } else {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                        } else {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    if ok {
-                        let start_span = ty.span.start;
-                        ty = ast::Type {
-                            kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
-                                parameters: parsed_types,
-                                return_type: Box::new(ty),
-                            })),
-                            span: Span::new(start_span, tokens[close].span.end),
-                        };
-                        cursor = close + 1;
-                    }
+                if ok {
+                    let start_span = ty.span.start;
+                    ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
+                            parameters: parsed_types,
+                            return_type: Box::new(ty),
+                        })),
+                        span: Span::new(start_span, tokens[close].span.end),
+                    };
+                    cursor = close + 1;
                 }
             }
         }
@@ -1163,8 +1149,8 @@ impl PRT_Parser {
                     message: "expected declaration type".to_string(),
                     span: tokens
                         .get(start)
-                        .map(|token| token.span.clone())
-                        .unwrap_or(Span::default()),
+                        .map(|token| token.span)
+                        .unwrap_or_default(),
                 }
             })?;
 
@@ -1175,12 +1161,12 @@ impl PRT_Parser {
                 .get(cursor)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected declaration name".to_string(),
-                    span: base_type.span.clone(),
+                    span: base_type.span,
                 })?;
             let Token::Identifier(name) = &name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected declaration name".to_string(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 });
             };
 
@@ -1194,7 +1180,7 @@ impl PRT_Parser {
                 let Token::IntLiteral(size_val) = &tokens[cursor].kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected integer literal for array size".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let size = *size_val as i64;
@@ -1202,7 +1188,7 @@ impl PRT_Parser {
                 if cursor >= end || !matches!(tokens[cursor].kind, Token::RightBracket) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ']' after array size".to_string(),
-                        span: tokens[cursor.min(end - 1)].span.clone(),
+                        span: tokens[cursor.min(end - 1)].span,
                     });
                 }
                 cursor += 1;
@@ -1222,7 +1208,7 @@ impl PRT_Parser {
                 if !allow_initializers {
                     return Err(ParseError::InvalidSyntax {
                         message: "initializer is not allowed in this declaration".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 }
                 let expr_start = cursor + 1;
@@ -1232,7 +1218,7 @@ impl PRT_Parser {
                 if expr_start >= expr_end {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected initializer expression".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 }
                 let expr = self.parse_expression_reduction(tokens, expr_start, expr_end)?;
@@ -1244,7 +1230,7 @@ impl PRT_Parser {
             declarators.push(ParsedDeclarator {
                 name: ast::Identifier {
                     name: name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 ty: decl_ty,
                 initializer,
@@ -1257,14 +1243,14 @@ impl PRT_Parser {
             if !matches!(tokens[cursor].kind, Token::Comma) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ',' or end of declaration".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             }
             cursor += 1;
             if cursor >= end {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected declaration name after ','".to_string(),
-                    span: tokens[cursor - 1].span.clone(),
+                    span: tokens[cursor - 1].span,
                 });
             }
         }
@@ -1284,7 +1270,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated if condition".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
         let condition = self.parse_expression_reduction(tokens, cond_open + 1, cond_close)?;
@@ -1295,7 +1281,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing if block".to_string(),
-                span: tokens[then_start.min(end - 1)].span.clone(),
+                span: tokens[then_start.min(end - 1)].span,
             });
         };
         let then_end = then_end_inclusive + 1;
@@ -1323,7 +1309,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated if condition".to_string(),
-                            span: tokens[pos].span.clone(),
+                            span: tokens[pos].span,
                         });
                     };
                     // then block
@@ -1336,7 +1322,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "missing if block".to_string(),
-                            span: tokens[pos].span.clone(),
+                            span: tokens[pos].span,
                         });
                     };
                     pos = te + 1;
@@ -1357,7 +1343,7 @@ impl PRT_Parser {
                         ) else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "missing else block".to_string(),
-                                span: tokens[pos.min(end - 1)].span.clone(),
+                                span: tokens[pos.min(end - 1)].span,
                             });
                         };
                         pos = ee + 1;
@@ -1367,11 +1353,11 @@ impl PRT_Parser {
                 let chain_end = pos;
                 let if_stmt = self.parse_if_statement_reduction(tokens, chain_start, chain_end)?;
                 if let ast::StatementKind::Expression(expr) = if_stmt.kind {
-                    let fake_brace_span = expr.span.clone();
+                    let fake_brace_span = expr.span;
                     else_branch = Some(ast::Block {
                         statements: vec![ast::Statement {
                             kind: ast::StatementKind::Expression(expr),
-                            span: fake_brace_span.clone(),
+                            span: fake_brace_span,
                         }],
                         span: fake_brace_span,
                     });
@@ -1387,7 +1373,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing else block".to_string(),
-                        span: tokens[cursor.min(end - 1)].span.clone(),
+                        span: tokens[cursor.min(end - 1)].span,
                     });
                 };
                 let else_end = else_end_inclusive + 1;
@@ -1399,7 +1385,7 @@ impl PRT_Parser {
         if cursor != end {
             return Err(ParseError::InvalidSyntax {
                 message: "unexpected tokens after if statement".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         }
 
@@ -1428,7 +1414,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated while condition".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
         let condition = self.parse_expression_reduction(tokens, cond_open + 1, cond_close)?;
@@ -1439,14 +1425,14 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing while block".to_string(),
-                span: tokens[body_start.min(end - 1)].span.clone(),
+                span: tokens[body_start.min(end - 1)].span,
             });
         };
         let body_end = body_end_inclusive + 1;
         if body_end != end {
             return Err(ParseError::InvalidSyntax {
                 message: "unexpected tokens after while statement".to_string(),
-                span: tokens[body_end].span.clone(),
+                span: tokens[body_end].span,
             });
         }
 
@@ -1479,7 +1465,7 @@ impl PRT_Parser {
         ) else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated for header".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
 
@@ -1487,13 +1473,13 @@ impl PRT_Parser {
             .find_semicolon_in_range(tokens, header_open + 1, header_close)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing first ';' in for header".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let semicolon2 = self
             .find_semicolon_in_range(tokens, semicolon1 + 1, header_close)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing second ';' in for header".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
 
         let init_stmt = self.parse_statement_reduction(tokens, header_open + 1, semicolon1 + 1)?;
@@ -1509,7 +1495,7 @@ impl PRT_Parser {
         } else {
             ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Bool(true))),
-                span: tokens[semicolon1].span.clone(),
+                span: tokens[semicolon1].span,
             }
         };
 
@@ -1518,7 +1504,7 @@ impl PRT_Parser {
         } else {
             ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
-                span: tokens[semicolon2].span.clone(),
+                span: tokens[semicolon2].span,
             }
         };
 
@@ -1528,14 +1514,14 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing for block".to_string(),
-                span: tokens[body_start.min(end - 1)].span.clone(),
+                span: tokens[body_start.min(end - 1)].span,
             });
         };
         let body_end = body_end_inclusive + 1;
         if body_end != end {
             return Err(ParseError::InvalidSyntax {
                 message: "unexpected tokens after for statement".to_string(),
-                span: tokens[body_end].span.clone(),
+                span: tokens[body_end].span,
             });
         }
         let body = self.parse_block_reduction(tokens, body_start, body_end)?;
@@ -1587,7 +1573,7 @@ impl PRT_Parser {
         if binding_token_idx >= end {
             return Err(ParseError::InvalidSyntax {
                 message: "expected identifier after for".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
 
@@ -1605,20 +1591,20 @@ impl PRT_Parser {
             _ => {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected identifier after for".to_string(),
-                    span: token.span.clone(),
+                    span: token.span,
                 });
             }
         };
         let binding = ast::Identifier {
             name: ident_name,
-            span: token.span.clone(),
+            span: token.span,
         };
 
         let Some(in_pos) = self.find_token_in_range(tokens, binding_token_idx + 1, end, Token::In)
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected 'in' after for binding".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
 
@@ -1626,7 +1612,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing for block".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
         let iterable = if in_pos + 1 < body_start {
@@ -1634,7 +1620,7 @@ impl PRT_Parser {
         } else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing iterable expression".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
 
@@ -1643,14 +1629,14 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing for block close".to_string(),
-                span: tokens[body_start].span.clone(),
+                span: tokens[body_start].span,
             });
         };
         let body_end = body_end_inclusive + 1;
         if body_end != end {
             return Err(ParseError::InvalidSyntax {
                 message: "unexpected tokens after for statement".to_string(),
-                span: tokens[body_end].span.clone(),
+                span: tokens[body_end].span,
             });
         }
         let body = self.parse_block_reduction(tokens, body_start, body_end)?;
@@ -1714,7 +1700,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "duplicate declaration qualifier".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
         if self.statement_type_start_is_unambiguous(tokens, qual_cursor, end - 1)
@@ -1758,7 +1744,7 @@ impl PRT_Parser {
         let mut statements = Vec::with_capacity(declarators.len());
         for declarator in declarators {
             self.known_ident_names.insert(declarator.name.name.clone());
-            let name_span = declarator.name.span.clone();
+            let name_span = declarator.name.span;
             statements.push(ast::Statement {
                 kind: ast::StatementKind::Let(ast::LetStatement {
                     pattern: ast::Pattern {
@@ -1786,10 +1772,7 @@ impl PRT_Parser {
         if end <= start + 1 {
             return Err(ParseError::InvalidSyntax {
                 message: "invalid block range".to_string(),
-                span: tokens
-                    .get(start)
-                    .map(|t| t.span.clone())
-                    .unwrap_or(Span::default()),
+                span: tokens.get(start).map(|t| t.span).unwrap_or_default(),
             });
         }
 
@@ -1811,7 +1794,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated if condition".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let then_start = cond_close + 1;
@@ -1824,7 +1807,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing if block".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let mut stmt_end = then_end_inclusive + 1;
@@ -1842,7 +1825,7 @@ impl PRT_Parser {
                         ) else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "unterminated if condition".to_string(),
-                                span: tokens[else_start].span.clone(),
+                                span: tokens[else_start].span,
                             });
                         };
                         let Some(te) = self.find_matching_token(
@@ -1854,7 +1837,7 @@ impl PRT_Parser {
                         ) else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "missing if block".to_string(),
-                                span: tokens[else_start].span.clone(),
+                                span: tokens[else_start].span,
                             });
                         };
                         stmt_end = te + 1;
@@ -1870,7 +1853,7 @@ impl PRT_Parser {
                         ) else {
                             return Err(ParseError::InvalidSyntax {
                                 message: "missing else block".to_string(),
-                                span: tokens[stmt_end].span.clone(),
+                                span: tokens[stmt_end].span,
                             });
                         };
                         stmt_end = ee + 1;
@@ -1893,7 +1876,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated while condition".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let body_start = cond_close + 1;
@@ -1906,7 +1889,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing while block".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let stmt_end = body_end_inclusive + 1;
@@ -1928,7 +1911,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated for header".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         });
                     };
                     let body_start = header_close + 1;
@@ -1941,7 +1924,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "missing for block".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         });
                     };
                     let stmt_end = body_end_inclusive + 1;
@@ -1957,7 +1940,7 @@ impl PRT_Parser {
                 if block_start >= end {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing for block".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 }
                 let Some(body_end_inclusive) = self.find_matching_token(
@@ -1969,7 +1952,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing for block".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let stmt_end = body_end_inclusive + 1;
@@ -1984,7 +1967,7 @@ impl PRT_Parser {
                     .find_statement_terminator(tokens, break_start, end)
                     .ok_or_else(|| ParseError::InvalidSyntax {
                         message: "missing ';' after break".to_string(),
-                        span: tokens[break_start].span.clone(),
+                        span: tokens[break_start].span,
                     })?;
                 let break_expr = if semicolon > break_start + 1 {
                     Some(self.parse_expression_reduction(tokens, break_start + 1, semicolon)?)
@@ -2004,7 +1987,7 @@ impl PRT_Parser {
                 let Some(semicolon) = self.find_statement_terminator(tokens, cursor, end) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "missing ';' after continue".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 statements.push(ast::Statement {
@@ -2030,7 +2013,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated defer block".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         });
                     };
                     let nested = self.parse_block_reduction(tokens, next, close + 1)?;
@@ -2047,7 +2030,7 @@ impl PRT_Parser {
                     let Some(semicolon) = self.find_statement_terminator(tokens, next, end) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "missing ';' after defer statement".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         });
                     };
                     let statement_end = semicolon + 1;
@@ -2071,7 +2054,7 @@ impl PRT_Parser {
                 ) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated nested block".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 let nested = self.parse_block_reduction(tokens, cursor, close + 1)?;
@@ -2086,7 +2069,7 @@ impl PRT_Parser {
             let Some(semicolon) = self.find_statement_terminator(tokens, cursor, end) else {
                 return Err(ParseError::InvalidSyntax {
                     message: "missing ';' for statement".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
             let statement_end = semicolon + 1;
@@ -2095,7 +2078,7 @@ impl PRT_Parser {
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "duplicate declaration qualifier".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
             if self.statement_type_start_is_unambiguous(tokens, qual_cursor, semicolon)
@@ -2138,12 +2121,12 @@ impl PRT_Parser {
             let Token::Identifier(name) = &token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "invalid import path segment".to_string(),
-                    span: token.span.clone(),
+                    span: token.span,
                 });
             };
             path.push(ast::Identifier {
                 name: name.clone(),
-                span: token.span.clone(),
+                span: token.span,
             });
             cursor += 1;
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Dot)) {
@@ -2156,7 +2139,7 @@ impl PRT_Parser {
         if path.is_empty() {
             return Err(ParseError::InvalidSyntax {
                 message: "import path cannot be empty".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
 
@@ -2175,14 +2158,14 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "duplicate declaration qualifier".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
         let (var_type, after_type) = self
             .parse_type_prefix(tokens, type_start, decl_end)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected global variable type".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         if !matches!(
             tokens.get(after_type).map(|token| &token.kind),
@@ -2192,8 +2175,8 @@ impl PRT_Parser {
                 message: "expected global variable name".to_string(),
                 span: tokens
                     .get(after_type)
-                    .map(|token| token.span.clone())
-                    .unwrap_or_else(|| tokens[start].span.clone()),
+                    .map(|token| token.span)
+                    .unwrap_or_else(|| tokens[start].span),
             });
         }
 
@@ -2214,7 +2197,7 @@ impl PRT_Parser {
                 _ => {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected integer array size".to_string(),
-                        span: size_token.span.clone(),
+                        span: size_token.span,
                     });
                 }
             };
@@ -2224,7 +2207,7 @@ impl PRT_Parser {
             {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected `]` after array size".to_string(),
-                    span: tokens[array_size_pos + 1].span.clone(),
+                    span: tokens[array_size_pos + 1].span,
                 });
             }
             var_type = ast::Type {
@@ -2240,14 +2223,14 @@ impl PRT_Parser {
             {
                 return Err(ParseError::InvalidSyntax {
                     message: "array global variables cannot have an initializer".to_string(),
-                    span: tokens[close_bracket + 1].span.clone(),
+                    span: tokens[close_bracket + 1].span,
                 });
             }
         } else if after_type + 1 < decl_end {
             if !matches!(tokens[after_type + 1].kind, Token::Assign) {
                 return Err(ParseError::InvalidSyntax {
                     message: "unsupported global variable declaration syntax".to_string(),
-                    span: tokens[after_type + 1].span.clone(),
+                    span: tokens[after_type + 1].span,
                 });
             }
             initializer =
@@ -2258,7 +2241,7 @@ impl PRT_Parser {
         Ok(ast::GlobalVariableItem {
             name: ast::Identifier {
                 name: name.clone(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             var_type,
             initializer,
@@ -2279,12 +2262,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing macro name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Token::Identifier(name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected macro identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -2300,25 +2283,25 @@ impl PRT_Parser {
                         .get(cursor)
                         .ok_or_else(|| ParseError::InvalidSyntax {
                             message: "expected macro parameter name".to_string(),
-                            span: tokens[cursor - 1].span.clone(),
+                            span: tokens[cursor - 1].span,
                         })?;
                 let Token::Identifier(param_name) = &param_name_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected parameter identifier".to_string(),
-                        span: param_name_token.span.clone(),
+                        span: param_name_token.span,
                     });
                 };
                 parameters.push(ast::Parameter {
                     name: ast::Identifier {
                         name: param_name.clone(),
-                        span: param_name_token.span.clone(),
+                        span: param_name_token.span,
                     },
                     param_type: ast::Type {
                         kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
-                        span: param_name_token.span.clone(),
+                        span: param_name_token.span,
                     },
                     is_mutable: false,
-                    span: param_name_token.span.clone(),
+                    span: param_name_token.span,
                 });
                 cursor += 1;
                 if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
@@ -2328,7 +2311,7 @@ impl PRT_Parser {
             if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated macro parameter list".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             }
             cursor += 1;
@@ -2337,7 +2320,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '{' for macro body".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         }
         let body_start = cursor;
@@ -2346,7 +2329,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated macro body".to_string(),
-                span: tokens[body_start].span.clone(),
+                span: tokens[body_start].span,
             });
         };
         let body = self.parse_block_reduction(tokens, body_start, body_end + 1)?;
@@ -2354,7 +2337,7 @@ impl PRT_Parser {
         Ok(ast::MacroDef {
             name: ast::Identifier {
                 name: name.clone(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             parameters,
             body,
@@ -2372,12 +2355,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing type alias name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Token::Identifier(name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected type alias identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -2385,7 +2368,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '=' in type alias".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -2394,7 +2377,7 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "expected type in type alias".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 }
             })?;
         cursor = after_type;
@@ -2402,14 +2385,14 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected ';' after type alias".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
 
         Ok(ast::TypeAliasItem {
             name: ast::Identifier {
                 name: name.clone(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             type_def,
         })
@@ -2424,10 +2407,7 @@ impl PRT_Parser {
         if start >= end {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait name".to_string(),
-                span: tokens
-                    .get(start)
-                    .map(|t| t.span.clone())
-                    .unwrap_or(Span::default()),
+                span: tokens.get(start).map(|t| t.span).unwrap_or_default(),
             });
         }
 
@@ -2436,12 +2416,12 @@ impl PRT_Parser {
         let Token::Identifier(first) = &tokens[cursor].kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "invalid trait path segment".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         };
         path.push(ast::Identifier {
             name: first.clone(),
-            span: tokens[cursor].span.clone(),
+            span: tokens[cursor].span,
         });
         cursor += 1;
         while cursor + 1 < end && matches!(tokens[cursor].kind, Token::DoubleColon) {
@@ -2449,12 +2429,12 @@ impl PRT_Parser {
             let Token::Identifier(segment) = &tokens[cursor].kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "invalid trait path segment".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
             path.push(ast::Identifier {
                 name: segment.clone(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
             cursor += 1;
         }
@@ -2466,7 +2446,7 @@ impl PRT_Parser {
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated trait generic arguments".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
             let mut args = Vec::new();
@@ -2476,7 +2456,7 @@ impl PRT_Parser {
                     .parse_type_prefix(tokens, arg_cursor, close)
                     .ok_or_else(|| ParseError::InvalidSyntax {
                         message: "invalid trait generic argument".to_string(),
-                        span: tokens[arg_cursor].span.clone(),
+                        span: tokens[arg_cursor].span,
                     })?;
                 args.push(arg);
                 arg_cursor = next_arg;
@@ -2484,7 +2464,7 @@ impl PRT_Parser {
                     if !matches!(tokens[arg_cursor].kind, Token::Comma) {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected ',' between trait generic arguments".to_string(),
-                            span: tokens[arg_cursor].span.clone(),
+                            span: tokens[arg_cursor].span,
                         });
                     }
                     arg_cursor += 1;
@@ -2497,7 +2477,7 @@ impl PRT_Parser {
         if cursor != end || path.is_empty() {
             return Err(ParseError::InvalidSyntax {
                 message: "invalid trait reference".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
 
@@ -2523,7 +2503,7 @@ impl PRT_Parser {
         if !matches!(tokens[start].kind, Token::Identifier(_)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
 
@@ -2541,7 +2521,7 @@ impl PRT_Parser {
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated trait generic arguments".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
             cursor = close + 1;
@@ -2565,7 +2545,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated generic parameter list".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         };
 
@@ -2579,7 +2559,7 @@ impl PRT_Parser {
                 _ => {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected generic parameter name".to_string(),
-                        span: name_token.span.clone(),
+                        span: name_token.span,
                     });
                 }
             };
@@ -2599,7 +2579,7 @@ impl PRT_Parser {
                     if bound_start == bound_end {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected trait bound after ':'".to_string(),
-                            span: tokens[cursor.min(close - 1)].span.clone(),
+                            span: tokens[cursor.min(close - 1)].span,
                         });
                     }
                     let trait_ref = self.parse_trait_ref_range(tokens, bound_start, bound_end)?;
@@ -2622,7 +2602,7 @@ impl PRT_Parser {
             params.push(ast::GenericParam::Type(ast::TypeParam {
                 name: ast::Identifier {
                     name: name.to_string(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 bounds,
                 default: None,
@@ -2667,7 +2647,7 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected where-clause type".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 })?;
             cursor = next_after_type;
             if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
@@ -2695,7 +2675,7 @@ impl PRT_Parser {
                 return Err(ParseError::InvalidSyntax {
                     message: "where-clause predicate must include at least one trait bound"
                         .to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
+                    span: tokens[cursor.min(end - 1)].span,
                 });
             }
 
@@ -2714,7 +2694,7 @@ impl PRT_Parser {
         if predicates.is_empty() {
             return Err(ParseError::InvalidSyntax {
                 message: "where clause requires at least one predicate".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
 
@@ -2759,7 +2739,7 @@ impl PRT_Parser {
                 Token::Identifier(name) => {
                     args.push(ast::AttributeArg::Identifier(ast::Identifier {
                         name: name.clone(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     }));
                     cursor += 1;
                 }
@@ -2784,7 +2764,7 @@ impl PRT_Parser {
                 _ => {
                     return Err(ParseError::InvalidSyntax {
                         message: "invalid attribute argument".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 }
             }
@@ -2792,7 +2772,7 @@ impl PRT_Parser {
                 if !matches!(tokens[cursor].kind, Token::Comma) {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ',' between attribute arguments".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 }
                 cursor += 1;
@@ -2814,7 +2794,7 @@ impl PRT_Parser {
             if !matches!(tokens[cursor + 1].kind, Token::LeftBracket) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected '[' after '#'".to_string(),
-                    span: tokens[cursor + 1].span.clone(),
+                    span: tokens[cursor + 1].span,
                 });
             }
             let bracket_start = cursor + 1;
@@ -2827,7 +2807,7 @@ impl PRT_Parser {
             ) else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated attribute list".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
 
@@ -2837,7 +2817,7 @@ impl PRT_Parser {
                 let Token::Identifier(name) = &name_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected attribute name".to_string(),
-                        span: name_token.span.clone(),
+                        span: name_token.span,
                     });
                 };
                 inner += 1;
@@ -2853,7 +2833,7 @@ impl PRT_Parser {
                     ) else {
                         return Err(ParseError::InvalidSyntax {
                             message: "unterminated attribute arguments".to_string(),
-                            span: tokens[inner].span.clone(),
+                            span: tokens[inner].span,
                         });
                     };
                     args = self.parse_attribute_args(tokens, inner + 1, arg_close)?;
@@ -2868,7 +2848,7 @@ impl PRT_Parser {
                 attributes.push(ast::Attribute {
                     name: ast::Identifier {
                         name: name.clone(),
-                        span: name_token.span.clone(),
+                        span: name_token.span,
                     },
                     args,
                     span: name_token.span.with_end(attr_end_span),
@@ -2912,12 +2892,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing struct name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Some(struct_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected struct identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -2932,7 +2912,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '{' after struct name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -2942,7 +2922,7 @@ impl PRT_Parser {
             let Some(semicolon) = self.find_statement_terminator(tokens, cursor, end - 1) else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ';' after struct field".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
+                    span: tokens[cursor.min(end - 1)].span,
                 });
             };
             let (_, declarators) = self.parse_declarator_group(tokens, cursor, semicolon, false)?;
@@ -2960,7 +2940,7 @@ impl PRT_Parser {
         Ok(ast::StructItem {
             name: ast::Identifier {
                 name: struct_name.to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             generics,
             fields,
@@ -2978,12 +2958,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing enum name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Some(enum_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected enum identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -2998,7 +2978,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '{' after enum name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -3010,12 +2990,12 @@ impl PRT_Parser {
                     .get(cursor)
                     .ok_or_else(|| ParseError::InvalidSyntax {
                         message: "expected enum variant".to_string(),
-                        span: name_token.span.clone(),
+                        span: name_token.span,
                     })?;
             let Token::Identifier(variant_name) = &variant_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected enum variant identifier".to_string(),
-                    span: variant_name_token.span.clone(),
+                    span: variant_name_token.span,
                 });
             };
             cursor += 1;
@@ -3031,7 +3011,7 @@ impl PRT_Parser {
                         .parse_type_prefix(tokens, cursor, end)
                         .ok_or_else(|| ParseError::InvalidSyntax {
                             message: "invalid tuple variant field type".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         })?;
                     fields.push(field_type);
                     cursor = after_type;
@@ -3042,7 +3022,7 @@ impl PRT_Parser {
                 let Some(_rparen) = tokens.get(cursor) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated tuple variant".to_string(),
-                        span: tokens[paren_open].span.clone(),
+                        span: tokens[paren_open].span,
                     });
                 };
                 cursor += 1;
@@ -3058,7 +3038,7 @@ impl PRT_Parser {
                         .parse_type_prefix(tokens, cursor, end)
                         .ok_or_else(|| ParseError::InvalidSyntax {
                             message: "invalid struct variant field type".to_string(),
-                            span: tokens[cursor].span.clone(),
+                            span: tokens[cursor].span,
                         })?;
                     cursor = after_type;
                     let name_token =
@@ -3066,19 +3046,19 @@ impl PRT_Parser {
                             .get(cursor)
                             .ok_or_else(|| ParseError::InvalidSyntax {
                                 message: "expected struct variant field name".to_string(),
-                                span: tokens[cursor - 1].span.clone(),
+                                span: tokens[cursor - 1].span,
                             })?;
                     let Token::Identifier(field_name) = &name_token.kind else {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected identifier as field name".to_string(),
-                            span: name_token.span.clone(),
+                            span: name_token.span,
                         });
                     };
                     let field_span = field_type.span.extend_to(&name_token.span);
                     fields.push(ast::Field {
                         name: ast::Identifier {
                             name: field_name.clone(),
-                            span: name_token.span.clone(),
+                            span: name_token.span,
                         },
                         field_type,
                         visibility: ast::Visibility::Private,
@@ -3092,7 +3072,7 @@ impl PRT_Parser {
                 let Some(_rbrace) = tokens.get(cursor) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "unterminated struct variant".to_string(),
-                        span: tokens[brace_open].span.clone(),
+                        span: tokens[brace_open].span,
                     });
                 };
                 cursor += 1;
@@ -3112,13 +3092,13 @@ impl PRT_Parser {
                 let Some(value_token) = tokens.get(cursor) else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected integer literal after '='".to_string(),
-                        span: variant_name_token.span.clone(),
+                        span: variant_name_token.span,
                     });
                 };
                 let Token::IntLiteral(value) = value_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "enum discriminant must be an integer literal".to_string(),
-                        span: value_token.span.clone(),
+                        span: value_token.span,
                     });
                 };
                 discriminant = Some(sign.saturating_mul(value));
@@ -3128,13 +3108,13 @@ impl PRT_Parser {
             let Some(semicolon_token) = tokens.get(cursor) else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ';' after enum variant".to_string(),
-                    span: variant_name_token.span.clone(),
+                    span: variant_name_token.span,
                 });
             };
             if !matches!(semicolon_token.kind, Token::Semicolon) {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ';' after enum variant".to_string(),
-                    span: semicolon_token.span.clone(),
+                    span: semicolon_token.span,
                 });
             }
             cursor += 1;
@@ -3142,7 +3122,7 @@ impl PRT_Parser {
             variants.push(ast::EnumVariant {
                 name: ast::Identifier {
                     name: variant_name.clone(),
-                    span: variant_name_token.span.clone(),
+                    span: variant_name_token.span,
                 },
                 data,
                 discriminant,
@@ -3153,7 +3133,7 @@ impl PRT_Parser {
         Ok(ast::EnumItem {
             name: ast::Identifier {
                 name: enum_name.to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             generics,
             variants,
@@ -3171,12 +3151,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing trait name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Some(trait_name) = Self::type_name_token_name(&name_token.kind) else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -3198,7 +3178,7 @@ impl PRT_Parser {
                 if bound_start == bound_end {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected super trait after ':'".to_string(),
-                        span: tokens[cursor.min(end - 1)].span.clone(),
+                        span: tokens[cursor.min(end - 1)].span,
                     });
                 }
                 let trait_ref = self.parse_trait_ref_range(tokens, bound_start, bound_end)?;
@@ -3223,7 +3203,7 @@ impl PRT_Parser {
         if cursor >= end || !matches!(tokens[cursor].kind, Token::LeftBrace) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait body".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
 
@@ -3272,139 +3252,19 @@ impl PRT_Parser {
             }
             return Err(ParseError::InvalidSyntax {
                 message: "unsupported trait item".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         }
 
         Ok(ast::TraitItem {
             name: ast::Identifier {
                 name: trait_name.to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             generics,
             super_traits,
             items,
         })
-    }
-
-    fn parse_trait_function_item(
-        &mut self,
-        tokens: &[LexToken],
-        start: usize,
-        end: usize,
-    ) -> Result<(ast::TraitFunction, usize), ParseError> {
-        let name_token = tokens
-            .get(start + 1)
-            .ok_or_else(|| ParseError::InvalidSyntax {
-                message: "missing trait method name".to_string(),
-                span: tokens[start].span.clone(),
-            })?;
-        let Token::Identifier(method_name) = &name_token.kind else {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected trait method name".to_string(),
-                span: name_token.span.clone(),
-            });
-        };
-
-        let mut cursor = start + 2;
-        if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected '(' after trait method name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
-            });
-        }
-        cursor += 1;
-
-        let mut parameters = Vec::new();
-        while cursor < end {
-            if matches!(tokens[cursor].kind, Token::RightParen) {
-                cursor += 1;
-                break;
-            }
-            let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
-                1
-            } else {
-                0
-            };
-            let (param_type, after_type) =
-                self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
-                    ParseError::InvalidSyntax {
-                        message: "invalid trait method parameter type".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    }
-                })?;
-            cursor = after_type;
-            let param_name_token = tokens
-                .get(cursor)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected trait method parameter name".to_string(),
-                    span: param_type.span.clone(),
-                })?;
-            let Token::Identifier(param_name) = &param_name_token.kind else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected trait method parameter name".to_string(),
-                    span: param_name_token.span.clone(),
-                });
-            };
-            parameters.push(ast::Parameter {
-                name: ast::Identifier {
-                    name: param_name.clone(),
-                    span: param_name_token.span.clone(),
-                },
-                param_type: param_type.clone(),
-                is_mutable: const_offset == 0,
-                span: param_type.span.extend_to(&param_name_token.span),
-            });
-            cursor += 1;
-            if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
-                cursor += 1;
-            }
-        }
-
-        let mut return_type = None;
-        if cursor < end && matches!(tokens[cursor].kind, Token::Arrow) {
-            cursor += 1;
-            let (ret, next_cursor) =
-                self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
-                    ParseError::InvalidSyntax {
-                        message: "invalid trait method return type".to_string(),
-                        span: tokens[cursor].span.clone(),
-                    }
-                })?;
-            return_type = Some(ret);
-            cursor = next_cursor;
-        }
-
-        let mut default_body = None;
-        let item_end = if cursor < end && matches!(tokens[cursor].kind, Token::Semicolon) {
-            cursor + 1
-        } else {
-            let Some(close) =
-                self.find_matching_token(tokens, cursor, end, Token::LeftBrace, Token::RightBrace)
-            else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "unterminated trait method body".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
-                });
-            };
-            default_body = Some(self.parse_block_reduction(tokens, cursor, close + 1)?);
-            close + 1
-        };
-
-        Ok((
-            ast::TraitFunction {
-                name: ast::Identifier {
-                    name: method_name.clone(),
-                    span: name_token.span.clone(),
-                },
-                generics: None,
-                parameters,
-                return_type,
-                default_body,
-                span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
-            },
-            item_end,
-        ))
     }
 
     fn parse_trait_function_item_from_return_type(
@@ -3417,7 +3277,7 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, start, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "invalid trait method return type".to_string(),
-                    span: tokens[start].span.clone(),
+                    span: tokens[start].span,
                 }
             })?;
         let mut cursor = after_type;
@@ -3425,19 +3285,19 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing trait method name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             })?;
         let Token::Identifier(method_name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected trait method name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' after trait method name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -3457,25 +3317,25 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid trait method parameter type".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 })?;
             cursor = after_param_type;
             let param_name_token = tokens
                 .get(cursor)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected trait method parameter name".to_string(),
-                    span: param_type.span.clone(),
+                    span: param_type.span,
                 })?;
             let Token::Identifier(param_name) = &param_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected trait method parameter name".to_string(),
-                    span: param_name_token.span.clone(),
+                    span: param_name_token.span,
                 });
             };
             parameters.push(ast::Parameter {
                 name: ast::Identifier {
                     name: param_name.clone(),
-                    span: param_name_token.span.clone(),
+                    span: param_name_token.span,
                 },
                 param_type: param_type.clone(),
                 is_mutable: const_offset == 0,
@@ -3496,7 +3356,7 @@ impl PRT_Parser {
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated trait method body".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
+                    span: tokens[cursor.min(end - 1)].span,
                 });
             };
             default_body = Some(self.parse_block_reduction(tokens, cursor, close + 1)?);
@@ -3507,7 +3367,7 @@ impl PRT_Parser {
             ast::TraitFunction {
                 name: ast::Identifier {
                     name: method_name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 generics: None,
                 parameters,
@@ -3529,12 +3389,12 @@ impl PRT_Parser {
             .get(start + 1)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing associated type name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Token::Identifier(type_name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected associated type name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
 
@@ -3574,7 +3434,7 @@ impl PRT_Parser {
                 self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                     ParseError::InvalidSyntax {
                         message: "invalid associated type default".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     }
                 })?;
             default = Some(value);
@@ -3584,7 +3444,7 @@ impl PRT_Parser {
         if cursor >= end || !matches!(tokens[cursor].kind, Token::Semicolon) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected ';' after associated type".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let item_end = cursor + 1;
@@ -3593,7 +3453,7 @@ impl PRT_Parser {
             ast::AssociatedType {
                 name: ast::Identifier {
                     name: type_name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 bounds,
                 default,
@@ -3613,7 +3473,7 @@ impl PRT_Parser {
         let Token::Identifier(name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected associated function value name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
 
@@ -3621,7 +3481,7 @@ impl PRT_Parser {
         if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected ':' after associated function value name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -3630,7 +3490,7 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "invalid associated function value type".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
+                    span: tokens[cursor.min(end - 1)].span,
                 }
             })?;
         cursor = next_cursor;
@@ -3638,7 +3498,7 @@ impl PRT_Parser {
         if cursor >= end || !matches!(tokens[cursor].kind, Token::Semicolon) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected ';' after associated function value".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let item_end = cursor + 1;
@@ -3657,7 +3517,7 @@ impl PRT_Parser {
             ast::AssociatedFunctionValue {
                 name: ast::Identifier {
                     name: name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 fn_type: func_type,
                 span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
@@ -3676,12 +3536,12 @@ impl PRT_Parser {
             .get(start + 1)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "missing associated type name".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
         let Token::Identifier(type_name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected associated type name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         let mut cursor = start + 2;
@@ -3689,7 +3549,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '=' for impl associated type".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         cursor += 1;
@@ -3698,7 +3558,7 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "invalid associated type value".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 }
             })?;
         cursor = after_type;
@@ -3706,7 +3566,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected ';' after associated type".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let item_end = cursor + 1;
@@ -3715,7 +3575,7 @@ impl PRT_Parser {
             ast::ImplAssociatedType {
                 name: ast::Identifier {
                     name: type_name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 type_def,
                 span: tokens[start].span.extend_to(&tokens[item_end - 1].span),
@@ -3752,7 +3612,7 @@ impl PRT_Parser {
             })
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected impl body".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             })?;
 
         let for_index = tokens
@@ -3774,12 +3634,12 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, for_idx + 1, body_open)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid impl self type".to_string(),
-                    span: tokens[for_idx].span.clone(),
+                    span: tokens[for_idx].span,
                 })?;
             if after_self != body_open {
                 return Err(ParseError::InvalidSyntax {
                     message: "unexpected tokens before impl body".to_string(),
-                    span: tokens[after_self].span.clone(),
+                    span: tokens[after_self].span,
                 });
             }
             (Some(trait_ref), self_ty)
@@ -3788,12 +3648,12 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, cursor, body_open)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid impl self type".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 })?;
             if after_self != body_open {
                 return Err(ParseError::InvalidSyntax {
                     message: "unexpected tokens before impl body".to_string(),
-                    span: tokens[after_self].span.clone(),
+                    span: tokens[after_self].span,
                 });
             }
             (None, self_ty)
@@ -3817,7 +3677,7 @@ impl PRT_Parser {
                 else {
                     return Err(ParseError::InvalidSyntax {
                         message: "invalid impl item".to_string(),
-                        span: tokens[cursor].span.clone(),
+                        span: tokens[cursor].span,
                     });
                 };
                 items.push(ast::ImplItemKind::Function(method));
@@ -3848,7 +3708,7 @@ impl PRT_Parser {
             .parse_type_prefix(tokens, item_start, end)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "invalid method return type".to_string(),
-                span: tokens[item_start.min(end - 1)].span.clone(),
+                span: tokens[item_start.min(end - 1)].span,
             })?;
         if !matches!(
             tokens.get(after_type).map(|t| &t.kind),
@@ -3856,7 +3716,7 @@ impl PRT_Parser {
         ) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected method identifier".to_string(),
-                span: tokens[after_type.min(end - 1)].span.clone(),
+                span: tokens[after_type.min(end - 1)].span,
             });
         }
 
@@ -3866,7 +3726,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' after method name".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let Some(rparen) =
@@ -3874,7 +3734,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated method parameter list".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         };
         let lbrace = rparen + 1;
@@ -3883,7 +3743,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated method block".to_string(),
-                span: tokens[lbrace.min(end - 1)].span.clone(),
+                span: tokens[lbrace.min(end - 1)].span,
             });
         };
         let method_end = rbrace + 1;
@@ -3916,14 +3776,14 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "invalid cast target type".to_string(),
-                    span: tokens[cursor.min(end - 1)].span.clone(),
+                    span: tokens[cursor.min(end - 1)].span,
                 }
             })?;
         cursor = after_type;
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' after cast target type".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let Some(rparen) =
@@ -3931,7 +3791,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated cast parameter list".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         };
         let mut parameters = Vec::new();
@@ -3950,18 +3810,18 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, pcursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid cast parameter type".to_string(),
-                    span: tokens[pcursor.min(end - 1)].span.clone(),
+                    span: tokens[pcursor.min(end - 1)].span,
                 })?;
             let Token::Identifier(ref param_name) = tokens[after_param_type].kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected cast parameter name".to_string(),
-                    span: tokens[after_param_type.min(end - 1)].span.clone(),
+                    span: tokens[after_param_type.min(end - 1)].span,
                 });
             };
             parameters.push(ast::Parameter {
                 name: ast::Identifier {
                     name: param_name.clone(),
-                    span: tokens[after_param_type].span.clone(),
+                    span: tokens[after_param_type].span,
                 },
                 param_type,
                 is_mutable: const_offset == 0,
@@ -3976,7 +3836,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(lbrace).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '{' after cast parameters".to_string(),
-                span: tokens[cursor.min(end - 1)].span.clone(),
+                span: tokens[cursor.min(end - 1)].span,
             });
         }
         let Some(rbrace) =
@@ -3984,7 +3844,7 @@ impl PRT_Parser {
         else {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated cast body".to_string(),
-                span: tokens[lbrace].span.clone(),
+                span: tokens[lbrace].span,
             });
         };
         cursor = rbrace + 1;
@@ -4102,19 +3962,19 @@ impl PRT_Parser {
             .parse_type_prefix(tokens, start, end)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "invalid function return type".to_string(),
-                span: return_type_token.span.clone(),
+                span: return_type_token.span,
             })?;
 
         let Some(name_token) = tokens.get(return_type_end) else {
             return Err(ParseError::InvalidSyntax {
                 message: "missing function name".to_string(),
-                span: return_type_token.span.clone(),
+                span: return_type_token.span,
             });
         };
         let Token::Identifier(ref function_name) = name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected function identifier".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
 
@@ -4128,7 +3988,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' after function name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         }
         cursor += 1;
@@ -4148,7 +4008,7 @@ impl PRT_Parser {
                 if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
                     return Err(ParseError::InvalidSyntax {
                         message: "variadic marker must be last parameter".to_string(),
-                        span: tokens[cursor - 1].span.clone(),
+                        span: tokens[cursor - 1].span,
                     });
                 }
                 continue;
@@ -4158,7 +4018,7 @@ impl PRT_Parser {
                 .get(cursor)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected parameter type".to_string(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 })?;
             let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
                 1
@@ -4169,7 +4029,7 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid parameter type".to_string(),
-                    span: param_type_token.span.clone(),
+                    span: param_type_token.span,
                 })?;
             cursor = next_after_type;
 
@@ -4177,12 +4037,12 @@ impl PRT_Parser {
                 .get(cursor)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected parameter identifier".to_string(),
-                    span: param_type_token.span.clone(),
+                    span: param_type_token.span,
                 })?;
             let Token::Identifier(ref parameter_name) = param_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected parameter identifier".to_string(),
-                    span: param_name_token.span.clone(),
+                    span: param_name_token.span,
                 });
             };
             cursor += 1;
@@ -4190,7 +4050,7 @@ impl PRT_Parser {
             parameters.push(ast::Parameter {
                 name: ast::Identifier {
                     name: parameter_name.clone(),
-                    span: param_name_token.span.clone(),
+                    span: param_name_token.span,
                 },
                 param_type: param_type.clone(),
                 is_mutable: const_offset == 0,
@@ -4209,8 +4069,8 @@ impl PRT_Parser {
                 message: "expected function block".to_string(),
                 span: tokens
                     .get(cursor)
-                    .map(|t| t.span.clone())
-                    .unwrap_or_else(|| name_token.span.clone()),
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| name_token.span),
             });
         };
         let block_end = block_end_inclusive + 1;
@@ -4219,8 +4079,8 @@ impl PRT_Parser {
                 message: "expected function block".to_string(),
                 span: tokens
                     .get(cursor)
-                    .map(|t| t.span.clone())
-                    .unwrap_or_else(|| name_token.span.clone()),
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| name_token.span),
             });
         }
         if block_end != end {
@@ -4228,8 +4088,8 @@ impl PRT_Parser {
                 message: "unexpected tokens after function block".to_string(),
                 span: tokens
                     .get(block_end)
-                    .map(|t| t.span.clone())
-                    .unwrap_or_else(|| tokens[end - 1].span.clone()),
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| tokens[end - 1].span),
             });
         }
         let body = self.parse_block_reduction(tokens, cursor, block_end)?;
@@ -4237,7 +4097,7 @@ impl PRT_Parser {
         Ok(ast::FunctionItem {
             name: ast::Identifier {
                 name: function_name.clone(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             generics,
             is_variadic,
@@ -4295,7 +4155,7 @@ impl PRT_Parser {
             self.parse_type_prefix(tokens, cursor, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
                     message: "invalid extern declaration type".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 }
             })?;
         cursor = after_decl_type;
@@ -4304,12 +4164,12 @@ impl PRT_Parser {
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
                 message: "expected extern declaration name".to_string(),
-                span: decl_type.span.clone(),
+                span: decl_type.span,
             })?;
         let Token::Identifier(decl_name) = &name_token.kind else {
             return Err(ParseError::InvalidSyntax {
                 message: "expected extern declaration name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         };
         cursor += 1;
@@ -4318,7 +4178,7 @@ impl PRT_Parser {
             return Ok(ParsedExternDeclaration::Variable(ast::ExternVariableItem {
                 name: ast::Identifier {
                     name: decl_name.clone(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 },
                 var_type: decl_type,
                 linkage,
@@ -4328,7 +4188,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' or ';' after extern declaration name".to_string(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             });
         }
         cursor += 1;
@@ -4348,7 +4208,7 @@ impl PRT_Parser {
                 if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
                     return Err(ParseError::InvalidSyntax {
                         message: "variadic marker must be last parameter".to_string(),
-                        span: tokens[cursor - 1].span.clone(),
+                        span: tokens[cursor - 1].span,
                     });
                 }
                 continue;
@@ -4358,7 +4218,7 @@ impl PRT_Parser {
                 .get(cursor)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected extern parameter type".to_string(),
-                    span: name_token.span.clone(),
+                    span: name_token.span,
                 })?;
             let const_offset = if matches!(tokens[cursor].kind, Token::Const) {
                 1
@@ -4369,7 +4229,7 @@ impl PRT_Parser {
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "invalid extern parameter type".to_string(),
-                    span: param_type_token.span.clone(),
+                    span: param_type_token.span,
                 })?;
             cursor = next_after_type;
 
@@ -4379,16 +4239,16 @@ impl PRT_Parser {
                         cursor += 1;
                         (
                             parameter_name.clone(),
-                            param_name_token.span.clone(),
+                            param_name_token.span,
                             param_name_token.span.end,
                         )
                     } else {
                         let generated = format!("__p{}", parameters.len());
-                        (generated, param_type.span.clone(), param_type.span.end)
+                        (generated, param_type.span, param_type.span.end)
                     }
                 } else {
                     let generated = format!("__p{}", parameters.len());
-                    (generated, param_type.span.clone(), param_type.span.end)
+                    (generated, param_type.span, param_type.span.end)
                 };
 
             parameters.push(ast::Parameter {
@@ -4411,15 +4271,15 @@ impl PRT_Parser {
                 message: "expected ';' after extern declaration".to_string(),
                 span: tokens
                     .get(cursor)
-                    .map(|t| t.span.clone())
-                    .unwrap_or_else(|| name_token.span.clone()),
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| name_token.span),
             });
         }
 
         Ok(ParsedExternDeclaration::Function(ast::ExternFunctionItem {
             name: ast::Identifier {
                 name: decl_name.clone(),
-                span: name_token.span.clone(),
+                span: name_token.span,
             },
             signature: ast::FunctionSignature {
                 parameters,
@@ -4440,7 +4300,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected 'extern'".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
         cursor += 1;
@@ -4459,7 +4319,7 @@ impl PRT_Parser {
         if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "extern block is not a declaration".to_string(),
-                span: tokens[cursor].span.clone(),
+                span: tokens[cursor].span,
             });
         }
 
@@ -4476,7 +4336,7 @@ impl PRT_Parser {
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Extern)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected 'extern'".to_string(),
-                span: tokens[start].span.clone(),
+                span: tokens[start].span,
             });
         }
         cursor += 1;
@@ -4497,8 +4357,8 @@ impl PRT_Parser {
                 message: "expected '{' after extern ABI".to_string(),
                 span: tokens
                     .get(cursor)
-                    .map(|t| t.span.clone())
-                    .unwrap_or_else(|| tokens[start].span.clone()),
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| tokens[start].span),
             });
         }
 
@@ -4514,7 +4374,7 @@ impl PRT_Parser {
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated extern block declaration".to_string(),
-                    span: tokens[cursor].span.clone(),
+                    span: tokens[cursor].span,
                 });
             };
 
@@ -4535,10 +4395,7 @@ impl PRT_Parser {
 
     pub fn parse_program(&mut self, tokens: &[LexToken]) -> Result<ast::Program, ParseError> {
         self.seed_known_types_from_tokens(tokens);
-        let span = tokens
-            .last()
-            .map(|token| token.span.clone())
-            .unwrap_or(Span::default());
+        let span = tokens.last().map(|token| token.span).unwrap_or_default();
         let source = self
             .source_name
             .clone()
@@ -4562,10 +4419,7 @@ impl PRT_Parser {
                     message: format!(
                         "no LL transition for item at token index {item_start} in source `{source}`"
                     ),
-                    span: tokens
-                        .get(item_start)
-                        .map(|t| t.span.clone())
-                        .unwrap_or(span.clone()),
+                    span: tokens.get(item_start).map(|t| t.span).unwrap_or(span),
                 });
             };
             let item_end = self.find_item_end(production, tokens, item_start, &source, &span)?;
@@ -4575,10 +4429,7 @@ impl PRT_Parser {
                     message: format!(
                         "PRT_Parser could not find item terminator at token index {position} in source `{source}`"
                     ),
-                    span: tokens
-                        .get(position)
-                        .map(|t| t.span.clone())
-                        .unwrap_or(span.clone()),
+                    span: tokens.get(position).map(|t| t.span).unwrap_or(span),
                 });
             };
 
@@ -4616,13 +4467,13 @@ impl PRT_Parser {
                     if matches!(tokens[item_start].kind, Token::Static) {
                         return Err(ParseError::InvalidSyntax {
                             message: "static functions are not supported".to_string(),
-                            span: tokens[item_start].span.clone(),
+                            span: tokens[item_start].span,
                         });
                     }
                     if matches!(tokens[item_start].kind, Token::Volatile) {
                         return Err(ParseError::InvalidSyntax {
                             message: "volatile functions are not supported".to_string(),
-                            span: tokens[item_start].span.clone(),
+                            span: tokens[item_start].span,
                         });
                     }
                     ast::ItemKind::Function(
@@ -4654,7 +4505,7 @@ impl PRT_Parser {
         }
 
         let program_span = if items.is_empty() {
-            span.clone()
+            span
         } else {
             Span::new(
                 items

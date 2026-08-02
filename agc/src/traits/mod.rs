@@ -42,7 +42,6 @@ struct TraitMethod {
     params: Vec<Type>,
     return_type: Option<Type>,
     has_default: bool,
-    span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -63,12 +62,12 @@ impl TraitRegistry {
                 ast::ItemKind::Struct(struct_item) => {
                     registry
                         .local_types
-                        .insert(struct_item.name.name.clone(), struct_item.name.span.clone());
+                        .insert(struct_item.name.name.clone(), struct_item.name.span);
                 }
                 ast::ItemKind::Enum(enum_item) => {
                     registry
                         .local_types
-                        .insert(enum_item.name.name.clone(), enum_item.name.span.clone());
+                        .insert(enum_item.name.name.clone(), enum_item.name.span);
                 }
                 ast::ItemKind::Trait(trait_item) => {
                     trait_names.insert(trait_item.name.name.clone());
@@ -87,7 +86,7 @@ impl TraitRegistry {
             if registry.traits.contains_key(&trait_item.name.name) {
                 errors.push(TraitError {
                     message: format!("duplicate trait definition '{}'", trait_item.name.name),
-                    span: trait_item.name.span.clone(),
+                    span: trait_item.name.span,
                 });
                 continue;
             }
@@ -100,7 +99,7 @@ impl TraitRegistry {
                 super_traits: Vec::new(),
                 type_params: Vec::new(),
                 type_param_bounds: HashMap::default(),
-                span: trait_item.name.span.clone(),
+                span: trait_item.name.span,
             };
 
             if let Some(generics) = &trait_item.generics {
@@ -120,7 +119,7 @@ impl TraitRegistry {
                 if super_name.is_empty() {
                     errors.push(TraitError {
                         message: "invalid super trait reference".to_string(),
-                        span: bound.trait_ref.span.clone(),
+                        span: bound.trait_ref.span,
                     });
                     continue;
                 }
@@ -130,7 +129,7 @@ impl TraitRegistry {
                             "unknown super trait '{}'",
                             trait_path_key(&bound.trait_ref.path)
                         ),
-                        span: bound.trait_ref.span.clone(),
+                        span: bound.trait_ref.span,
                     });
                     continue;
                 }
@@ -138,7 +137,7 @@ impl TraitRegistry {
                 {
                     errors.push(TraitError {
                         message: format!("unknown super trait '{}'", super_name),
-                        span: bound.trait_ref.span.clone(),
+                        span: bound.trait_ref.span,
                     });
                 }
                 def.super_traits.push(super_name);
@@ -163,7 +162,7 @@ impl TraitRegistry {
                                     "duplicate trait method '{}' in trait '{}'",
                                     name, trait_item.name.name
                                 ),
-                                span: func.name.span.clone(),
+                                span: func.name.span,
                             });
                             continue;
                         }
@@ -180,7 +179,6 @@ impl TraitRegistry {
                                 params,
                                 return_type,
                                 has_default: func.default_body.is_some(),
-                                span: func.span.clone(),
                             },
                         );
                     }
@@ -192,7 +190,7 @@ impl TraitRegistry {
                                     "duplicate associated type '{}' in trait '{}'",
                                     name, trait_item.name.name
                                 ),
-                                span: assoc.name.span.clone(),
+                                span: assoc.name.span,
                             });
                             continue;
                         }
@@ -201,7 +199,7 @@ impl TraitRegistry {
                             TraitAssocType {
                                 name,
                                 has_default: assoc.default.is_some(),
-                                span: assoc.span.clone(),
+                                span: assoc.name.span,
                             },
                         );
 
@@ -217,7 +215,7 @@ impl TraitRegistry {
                                     "duplicate associated function value '{}' in trait '{}'",
                                     name, trait_item.name.name
                                 ),
-                                span: fv.name.span.clone(),
+                                span: fv.name.span,
                             });
                             continue;
                         }
@@ -230,7 +228,7 @@ impl TraitRegistry {
                             TraitAssocFnValue {
                                 name,
                                 fn_type,
-                                span: fv.span.clone(),
+                                span: fv.span,
                             },
                         );
                     }
@@ -261,14 +259,14 @@ impl TraitRegistry {
             if trait_ref.path.len() > 1 {
                 errors.push(TraitError {
                     message: format!("unknown trait '{}'", trait_key),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
                 continue;
             }
             let Some(trait_def) = self.traits.get(&trait_name) else {
                 errors.push(TraitError {
                     message: format!("unknown trait '{}'", trait_key),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
                 continue;
             };
@@ -278,16 +276,16 @@ impl TraitRegistry {
             if impl_keys.contains_key(&impl_key) {
                 errors.push(TraitError {
                     message: format!("conflicting impl for '{}'", impl_key),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
             } else {
-                impl_keys.insert(impl_key.clone(), trait_ref.span.clone());
+                impl_keys.insert(impl_key.clone(), trait_ref.span);
             }
 
             if is_foreign_trait(trait_ref) && !self.is_local_type(&impl_item.self_type) {
                 errors.push(TraitError {
                     message: format!("orphan rule violation for '{}'", impl_key),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
             }
 
@@ -310,7 +308,7 @@ impl TraitRegistry {
                         "trait '{}' expects {} type parameters, found {}",
                         trait_def.name, expected_params, provided_params
                     ),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
             } else if let Some(generics) = &trait_ref.generics {
                 for (name, ty) in trait_def.type_params.iter().zip(generics.iter()) {
@@ -342,7 +340,7 @@ impl TraitRegistry {
                                 trait_name,
                                 type_key(arg_type)
                             ),
-                            span: bound.trait_ref.span.clone(),
+                            span: bound.trait_ref.span,
                         });
                     }
                 }
@@ -357,7 +355,7 @@ impl TraitRegistry {
                         "trait '{}' expects {} type parameters, found {}",
                         trait_def.name, expected_params, provided_params
                     ),
-                    span: trait_ref.span.clone(),
+                    span: trait_ref.span,
                 });
             } else if let Some(generics) = &trait_ref.generics {
                 for (name, ty) in trait_def.type_params.iter().zip(generics.iter()) {
@@ -393,7 +391,7 @@ impl TraitRegistry {
                             "missing super trait '{}' for trait '{}'",
                             super_name, trait_def.name
                         ),
-                        span: trait_ref.span.clone(),
+                        span: trait_ref.span,
                     });
                 }
             }
@@ -410,7 +408,7 @@ impl TraitRegistry {
                             "missing method '{}' for trait '{}'",
                             method.name, trait_def.name
                         ),
-                        span: trait_def.span.clone(),
+                        span: trait_def.span,
                     });
                     continue;
                 };
@@ -423,7 +421,7 @@ impl TraitRegistry {
                 if params.len() != method.params.len() {
                     errors.push(TraitError {
                         message: format!("method '{}' parameter count mismatch", method.name),
-                        span: impl_method.span.clone(),
+                        span: impl_method.span,
                     });
                     continue;
                 }
@@ -435,7 +433,7 @@ impl TraitRegistry {
                                 "method '{}' parameter {} type mismatch",
                                 method.name, idx
                             ),
-                            span: impl_method.span.clone(),
+                            span: impl_method.span,
                         });
                         break;
                     }
@@ -452,7 +450,7 @@ impl TraitRegistry {
                 if !matches {
                     errors.push(TraitError {
                         message: format!("method '{}' return type mismatch", method.name),
-                        span: impl_method.span.clone(),
+                        span: impl_method.span,
                     });
                 }
             }
@@ -467,7 +465,7 @@ impl TraitRegistry {
                             "missing associated type '{}' for trait '{}'",
                             assoc.name, trait_def.name
                         ),
-                        span: assoc.span.clone(),
+                        span: assoc.span,
                     });
                 }
             }
@@ -479,7 +477,7 @@ impl TraitRegistry {
                             "missing associated function value '{}' for trait '{}'",
                             fv.name, trait_def.name
                         ),
-                        span: fv.span.clone(),
+                        span: fv.span,
                     });
                     continue;
                 };
@@ -490,7 +488,7 @@ impl TraitRegistry {
                             "associated function value '{}' must be a static function (no self parameter)",
                             fv.name
                         ),
-                        span: impl_method.span.clone(),
+                        span: impl_method.span,
                     });
                     continue;
                 }
@@ -515,7 +513,7 @@ impl TraitRegistry {
                             "associated function value '{}' parameter count mismatch: expected {}, found {}",
                             fv.name, expected_params.len(), params.len()
                         ),
-                        span: impl_method.span.clone(),
+                        span: impl_method.span,
                     });
                     continue;
                 }
@@ -529,7 +527,7 @@ impl TraitRegistry {
                                 "associated function value '{}' parameter {} type mismatch",
                                 fv.name, idx
                             ),
-                            span: impl_method.span.clone(),
+                            span: impl_method.span,
                         });
                         break;
                     }
@@ -549,7 +547,7 @@ impl TraitRegistry {
                             "associated function value '{}' return type mismatch",
                             fv.name
                         ),
-                        span: impl_method.span.clone(),
+                        span: impl_method.span,
                     });
                 }
             }
@@ -580,21 +578,21 @@ fn validate_bound_trait(
     if name.is_empty() {
         errors.push(TraitError {
             message: "invalid trait bound".to_string(),
-            span: bound.trait_ref.span.clone(),
+            span: bound.trait_ref.span,
         });
         return;
     }
     if bound.trait_ref.path.len() > 1 {
         errors.push(TraitError {
             message: format!("unknown trait '{}'", trait_path_key(&bound.trait_ref.path)),
-            span: bound.trait_ref.span.clone(),
+            span: bound.trait_ref.span,
         });
         return;
     }
     if !trait_names.contains(&name) {
         errors.push(TraitError {
             message: format!("unknown trait '{}'", trait_path_key(&bound.trait_ref.path)),
-            span: bound.trait_ref.span.clone(),
+            span: bound.trait_ref.span,
         });
     }
 }
@@ -668,7 +666,7 @@ fn validate_impl_bounds(
                                 trait_name,
                                 type_key(&bounded)
                             ),
-                            span: bound.trait_ref.span.clone(),
+                            span: bound.trait_ref.span,
                         });
                     }
                 }

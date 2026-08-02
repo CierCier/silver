@@ -164,7 +164,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         is_variadic: function_item.is_variadic,
                         linkage: None,
                     },
-                    Some(function_item.name.span.clone()),
+                    Some(function_item.name.span),
                     SymbolKind::Function,
                 );
                 let fn_ty = self.lower_function_type(
@@ -237,15 +237,14 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             // Collect doc comments for functions so finish() can emit them as
             // `;` comments in the printed IR (non-generic functions only —
             // monomorphized instances would repeat the comment per instance).
-            if let ast::ItemKind::Function(func) = &item.kind {
-                if func.generics.is_none()
-                    && let Some(doc) = program.doc_comment_for(item)
-                {
-                    let name = function_link_name(&item.attributes)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| func.name.name.clone());
-                    self.doc_comments.push((name, doc));
-                }
+            if let ast::ItemKind::Function(func) = &item.kind
+                && func.generics.is_none()
+                && let Some(doc) = program.doc_comment_for(item)
+            {
+                let name = function_link_name(&item.attributes)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| func.name.name.clone());
+                self.doc_comments.push((name, doc));
             }
             self.generate_item(item)?;
         }
@@ -325,7 +324,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 is_variadic: func.is_variadic,
                 linkage: None,
             },
-            Some(func.name.span.clone()),
+            Some(func.name.span),
             SymbolKind::Function,
         );
         // Also register under source name so callers using it can resolve.
@@ -342,7 +341,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     is_variadic: func.is_variadic,
                     linkage: None,
                 },
-                Some(func.name.span.clone()),
+                Some(func.name.span),
                 SymbolKind::Function,
             );
         }
@@ -365,7 +364,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         let Some(function) = self.module.get_function(llvm_name) else {
             return Err(CodegenError::with_span(
                 format!("function `{}` declaration is missing", func.name.name),
-                func.name.span.clone(),
+                func.name.span,
             ));
         };
         Self::apply_function_linkage(function, visibility);
@@ -593,7 +592,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     let Some(function) = self.module.get_function(&mangled_name) else {
                         return Err(CodegenError::with_span(
                             format!("method `{mangled_name}` declaration is missing"),
-                            func.span.clone(),
+                            func.span,
                         ));
                     };
                     Self::apply_function_linkage(function, &effective_visibility);
@@ -631,7 +630,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     let Some(function) = self.module.get_function(&mangled_name) else {
                         return Err(CodegenError::with_span(
                             format!("cast function `{mangled_name}` declaration is missing"),
-                            cast.span.clone(),
+                            cast.span,
                         ));
                     };
                     Self::apply_function_linkage(function, &effective_visibility);
@@ -699,7 +698,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 is_variadic: item.signature.is_variadic,
                 linkage: Some(item.linkage.clone()),
             },
-            Some(item.name.span.clone()),
+            Some(item.name.span),
             SymbolKind::ExternFunction,
         );
         // Also register under source name so callers using it can resolve.
@@ -717,7 +716,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     is_variadic: item.signature.is_variadic,
                     linkage: Some(item.linkage.clone()),
                 },
-                Some(item.name.span.clone()),
+                Some(item.name.span),
                 SymbolKind::ExternFunction,
             );
         }
@@ -764,7 +763,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         self.symbol_table.intern_symbol(
             format!("codegen::extern_var::{}", item.name.name),
             SymbolKind::ExternVariable,
-            Some(item.name.span.clone()),
+            Some(item.name.span),
             CompilerPhase::Codegen,
         );
         Ok(())
@@ -818,10 +817,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         }
         self.pop_scope();
 
-        if has_debug_scope {
-            if let Some(debug) = &mut self.debug {
-                debug.pop_lexical_block();
-            }
+        if has_debug_scope && let Some(debug) = &mut self.debug {
+            debug.pop_lexical_block();
         }
 
         Ok(())
@@ -891,7 +888,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 // references a variable whose destructor would be fired by
                 // emit_defers (Bug A).
                 let saved_value = if let Some(expr) = expr {
-                    let expr_span = expr.span.clone();
+                    let expr_span = expr.span;
                     // Reject bare identifier return of droppable locals.
                     // `return move x;` already clears the drop flag in expr.rs.
                     if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
@@ -924,7 +921,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     self.builder.build_return(None).map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to emit return: {e}"),
-                            statement.span.clone(),
+                            statement.span,
                         )
                     })?;
                 }
@@ -937,7 +934,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 let Some((break_block, _)) = self.loop_stack.last().copied() else {
                     return Err(CodegenError::with_span(
                         "break used outside of a loop",
-                        statement.span.clone(),
+                        statement.span,
                     ));
                 };
                 self.builder
@@ -945,7 +942,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to emit break branch: {e}"),
-                            statement.span.clone(),
+                            statement.span,
                         )
                     })?;
                 Ok(())
@@ -957,7 +954,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 let Some((_, continue_block)) = self.loop_stack.last().copied() else {
                     return Err(CodegenError::with_span(
                         "continue used outside of a loop",
-                        statement.span.clone(),
+                        statement.span,
                     ));
                 };
                 self.builder
@@ -965,7 +962,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to emit continue branch: {e}"),
-                            statement.span.clone(),
+                            statement.span,
                         )
                     })?;
                 Ok(())
@@ -981,7 +978,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_pattern(&mut self, pattern: &ast::Pattern) -> CodegenResult<()> {
         Err(CodegenError::with_span(
             "patterns must be generated in context (let binding or match arm)",
-            pattern.span.clone(),
+            pattern.span,
         ))
     }
 
@@ -1007,11 +1004,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_literal(&mut self, literal: &ast::Literal) -> CodegenResult<()> {
         // Scalar literals are emitted inline by emit_expression_value;
         // standalone generation has no side effect for non-string types.
-        match literal {
-            ast::Literal::String(value) => {
-                let _ = self.intern_const_string_global(value);
-            }
-            _ => {}
+        if let ast::Literal::String(value) = literal {
+            let _ = self.intern_const_string_global(value);
         }
         Ok(())
     }

@@ -171,6 +171,10 @@ impl<'ctx> DebugContext<'ctx> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn create_function(
         &mut self,
         name: &str,

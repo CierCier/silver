@@ -1,6 +1,7 @@
 #[cfg(test)]
+#[expect(clippy::module_inception)]
 mod tests {
-    use super::*;
+
     use crate::codegen::llvm_ir::LlvmIrGenerator;
     use crate::codegen::llvm_ir::generate::run_module_optimization_passes;
     use crate::lexer::lex;
@@ -81,11 +82,11 @@ mod tests {
         let ast::ExpressionKind::Call { arguments, .. } = call_expr.kind.as_mut() else {
             panic!("expected call expression");
         };
-        let span = arguments[0].span.clone();
+        let span = arguments[0].span;
         arguments[0] = ast::Expression {
             kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                 name: "z".to_string(),
-                span: span.clone(),
+                span,
             })),
             span,
         };
@@ -107,20 +108,20 @@ mod tests {
         let span = let_stmt
             .initializer
             .as_ref()
-            .map(|e| e.span.clone())
+            .map(|e| e.span)
             .expect("missing initializer span");
         let_stmt.initializer = Some(ast::Expression {
             kind: Box::new(ast::ExpressionKind::Cast {
                 expression: Box::new(ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: "a".to_string(),
-                        span: span.clone(),
+                        span,
                     })),
-                    span: span.clone(),
+                    span,
                 }),
                 target_type: Box::new(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I32)),
-                    span: span.clone(),
+                    span,
                 }),
             }),
             span,

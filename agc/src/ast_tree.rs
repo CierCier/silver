@@ -317,7 +317,7 @@ fn trait_item_node(item: &ast::TraitItemKind) -> Node {
             let mut node = Node::new(format!("AssociatedFunctionValue {}", fv.name.name));
             node.children.push(type_node(&ast::Type {
                 kind: Box::new(ast::TypeKind::Function(fv.fn_type.clone())),
-                span: fv.span.clone(),
+                span: fv.span,
             }));
             node
         }
@@ -748,7 +748,7 @@ fn expression_node(expression: &ast::Expression) -> Node {
         } => {
             let mut n = Node::new(format!(
                 "Expr::EnumVariant {}::{}",
-                path_name(&path),
+                path_name(path),
                 variant.name
             ));
             for field in fields {

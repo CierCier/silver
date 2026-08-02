@@ -47,6 +47,8 @@ pub struct Profiler {
     stack: Vec<PhaseFrame>,
 }
 
+type ReportEntry = (String, f64, u64, u64, bool, bool);
+
 impl Profiler {
     pub fn new(enabled: bool, verbose: bool) -> Self {
         Self {
@@ -208,7 +210,7 @@ impl Profiler {
 
     /// Report entries plus the fixed width of the name column, so the time and
     /// memory columns align regardless of tree depth or name length.
-    fn report_entries(&self) -> (Vec<(String, f64, u64, u64, bool, bool)>, usize) {
+    fn report_entries(&self) -> (Vec<ReportEntry>, usize) {
         let mut entries = Vec::new();
         self.collect_tree(&Self::build_tree(&self.records), "", true, &mut entries);
         let width = entries

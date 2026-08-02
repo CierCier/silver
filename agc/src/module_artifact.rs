@@ -148,6 +148,10 @@ impl ModuleExport {
 }
 
 impl ModuleArtifact {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
     pub fn from_program(
         module_name: String,
         module_path: String,
@@ -392,7 +396,7 @@ impl ModuleArtifact {
 
         if !errors.is_empty() {
             return Err(diagnostics::render(
-                errors[0].span().clone(),
+                *errors[0].span(),
                 &errors[0].format_with_help(),
                 diagnostics::Severity::Error,
             )
@@ -676,7 +680,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                 let items = t
                     .items
                     .iter()
-                    .filter_map(|item| match item {
+                    .map(|item| match item {
                         ast::TraitItemKind::Function(func) => {
                             let params = func
                                 .parameters
@@ -690,15 +694,15 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                                 .map(Type::from_ast)
                                 .unwrap_or(Type::Unit)
                                 .canonical_key();
-                            Some(ModuleTraitItem {
+                            ModuleTraitItem {
                                 name: func.name.name.clone(),
                                 signature: format!("{ret}({params})"),
-                            })
+                            }
                         }
-                        ast::TraitItemKind::AssociatedType(assoc) => Some(ModuleTraitItem {
+                        ast::TraitItemKind::AssociatedType(assoc) => ModuleTraitItem {
                             name: assoc.name.name.clone(),
                             signature: "associated_type".to_string(),
-                        }),
+                        },
                         ast::TraitItemKind::AssociatedFunctionValue(fv) => {
                             let params = fv
                                 .fn_type
@@ -708,10 +712,10 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                                 .collect::<Vec<_>>()
                                 .join(",");
                             let ret = Type::from_ast(&fv.fn_type.return_type).canonical_key();
-                            Some(ModuleTraitItem {
+                            ModuleTraitItem {
                                 name: fv.name.name.clone(),
                                 signature: format!("{ret}({params})"),
-                            })
+                            }
                         }
                     })
                     .collect::<Vec<_>>();

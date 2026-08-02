@@ -104,6 +104,12 @@ pub trait AbiHandler {
 /// the `sret` (struct return) attribute on an implicit first parameter.
 pub struct Amd64Abi;
 
+impl Default for Amd64Abi {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl Amd64Abi {
     /// Creates a new AMD64 ABI handler.
     pub fn new() -> Self {

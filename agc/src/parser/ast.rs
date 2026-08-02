@@ -524,6 +524,10 @@ pub struct Statement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "variant sizes are inherent to the AST; boxing ripples through the compiler and LSP for no gain"
+)]
 pub enum StatementKind {
     Block(Block),
     Expression(Expression),

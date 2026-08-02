@@ -63,7 +63,7 @@ fn parse_link_attribute(attr: &ast::Attribute) -> Result<Option<String>, Attribu
     if attr.args.len() != 1 {
         return Err(AttributeError {
             message: "link expects exactly one library name".to_string(),
-            span: attr.span.clone(),
+            span: attr.span,
         });
     }
 
@@ -75,7 +75,7 @@ fn parse_link_attribute(attr: &ast::Attribute) -> Result<Option<String>, Attribu
         _ => {
             return Err(AttributeError {
                 message: "link expects a library name identifier or string literal".to_string(),
-                span: attr.span.clone(),
+                span: attr.span,
             });
         }
     };

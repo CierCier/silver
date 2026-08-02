@@ -121,7 +121,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ast::PrimitiveType::Void => {
                         return Err(CodegenError::with_span(
                             "`void` is not a first-class value type",
-                            ty.span.clone(),
+                            ty.span,
                         ));
                     }
                 };
@@ -129,15 +129,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::TypeKind::Named(named) => {
                 // Check payload enum layout first
-                if named.path.len() == 1 {
-                    if let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name) {
-                        return Ok(struct_ty.as_basic_type_enum());
-                    }
+                if named.path.len() == 1
+                    && let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name)
+                {
+                    return Ok(struct_ty.as_basic_type_enum());
                 }
                 if let Some(enum_backing) = self.enum_backing_type_for_named(named) {
                     return self.lower_basic_type(&ast::Type {
                         kind: Box::new(ast::TypeKind::Primitive(enum_backing)),
-                        span: ty.span.clone(),
+                        span: ty.span,
                     });
                 }
                 if named.path.len() == 1 && named.generics.is_none() {
@@ -218,7 +218,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::TypeKind::Generic(_) => Err(CodegenError::with_span(
                 "generic type parameters must be monomorphized before LLVM lowering",
-                ty.span.clone(),
+                ty.span,
             )),
         }
     }
@@ -234,7 +234,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if Self::is_void_primitive(ty) {
             return Err(CodegenError::with_span(
                 "void is not a valid type for ABI lowering",
-                ty.span.clone(),
+                ty.span,
             ));
         }
 

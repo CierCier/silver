@@ -93,7 +93,7 @@ impl CompilerSymbolTable {
             .entry(key.clone())
             .or_insert_with(|| SymbolEntry {
                 kinds: HashSet::default(),
-                first_span: span.clone(),
+                first_span: span,
                 touched_in: HashSet::default(),
                 touches: 0,
             });
@@ -154,13 +154,13 @@ impl CompilerSymbolTable {
                 .entry(key.clone())
                 .or_insert_with(|| SymbolEntry {
                     kinds: HashSet::default(),
-                    first_span: incoming.first_span.clone(),
+                    first_span: incoming.first_span,
                     touched_in: HashSet::default(),
                     touches: 0,
                 });
             entry.kinds.extend(incoming.kinds.iter().copied());
             if entry.first_span.is_none() {
-                entry.first_span = incoming.first_span.clone();
+                entry.first_span = incoming.first_span;
             }
             entry.touched_in.extend(incoming.touched_in.iter().copied());
             entry.touches += incoming.touches;
@@ -239,14 +239,14 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &func.name.name,
                     SymbolKind::Function,
-                    Some(func.name.span.clone()),
+                    Some(func.name.span),
                     phase,
                 );
                 for param in &func.parameters {
                     self.upsert(
                         format!("{}::{}", func.name.name, param.name.name),
                         SymbolKind::Parameter,
-                        Some(param.span.clone()),
+                        Some(param.span),
                         phase,
                     );
                 }
@@ -255,7 +255,7 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &var.name.name,
                     SymbolKind::GlobalVariable,
-                    Some(var.name.span.clone()),
+                    Some(var.name.span),
                     phase,
                 );
             }
@@ -263,14 +263,14 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &struct_item.name.name,
                     SymbolKind::Struct,
-                    Some(struct_item.name.span.clone()),
+                    Some(struct_item.name.span),
                     phase,
                 );
                 for field in &struct_item.fields {
                     self.upsert(
                         format!("{}::{}", struct_item.name.name, field.name.name),
                         SymbolKind::Field,
-                        Some(field.span.clone()),
+                        Some(field.span),
                         phase,
                     );
                 }
@@ -279,7 +279,7 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &enum_item.name.name,
                     SymbolKind::Enum,
-                    Some(enum_item.name.span.clone()),
+                    Some(enum_item.name.span),
                     phase,
                 );
             }
@@ -287,16 +287,16 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &trait_item.name.name,
                     SymbolKind::Trait,
-                    Some(trait_item.name.span.clone()),
+                    Some(trait_item.name.span),
                     phase,
                 );
                 for member in &trait_item.items {
                     let (name, span) = match member {
                         ast::TraitItemKind::Function(func) => {
-                            (&func.name.name, Some(func.name.span.clone()))
+                            (&func.name.name, Some(func.name.span))
                         }
                         ast::TraitItemKind::AssociatedFunctionValue(fv) => {
-                            (&fv.name.name, Some(fv.name.span.clone()))
+                            (&fv.name.name, Some(fv.name.span))
                         }
                         _ => continue,
                     };
@@ -318,7 +318,7 @@ impl CompilerSymbolTable {
                 self.upsert(
                     format!("impl:{owner}"),
                     SymbolKind::Impl,
-                    Some(item.span.clone()),
+                    Some(item.span),
                     phase,
                 );
                 for member in &impl_item.items {
@@ -326,7 +326,7 @@ impl CompilerSymbolTable {
                         self.upsert(
                             format!("{owner}::{}", func.name.name),
                             SymbolKind::ImplMethod,
-                            Some(func.name.span.clone()),
+                            Some(func.name.span),
                             phase,
                         );
                     }
@@ -339,13 +339,13 @@ impl CompilerSymbolTable {
                     .map(|segment| segment.name.as_str())
                     .collect::<Vec<_>>()
                     .join("::");
-                self.upsert(path, SymbolKind::Import, Some(item.span.clone()), phase);
+                self.upsert(path, SymbolKind::Import, Some(item.span), phase);
             }
             ast::ItemKind::ExternFunction(func) => {
                 self.upsert(
                     &func.name.name,
                     SymbolKind::ExternFunction,
-                    Some(func.name.span.clone()),
+                    Some(func.name.span),
                     phase,
                 );
             }
@@ -353,7 +353,7 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &var.name.name,
                     SymbolKind::ExternVariable,
-                    Some(var.name.span.clone()),
+                    Some(var.name.span),
                     phase,
                 );
             }
@@ -362,7 +362,7 @@ impl CompilerSymbolTable {
                     self.upsert(
                         &func.name.name,
                         SymbolKind::ExternFunction,
-                        Some(func.name.span.clone()),
+                        Some(func.name.span),
                         phase,
                     );
                 }
@@ -370,7 +370,7 @@ impl CompilerSymbolTable {
                     self.upsert(
                         &var.name.name,
                         SymbolKind::ExternVariable,
-                        Some(var.name.span.clone()),
+                        Some(var.name.span),
                         phase,
                     );
                 }
@@ -379,7 +379,7 @@ impl CompilerSymbolTable {
                 self.upsert(
                     &macro_def.name.name,
                     SymbolKind::Macro,
-                    Some(macro_def.name.span.clone()),
+                    Some(macro_def.name.span),
                     phase,
                 );
             }

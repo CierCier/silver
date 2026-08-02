@@ -199,7 +199,7 @@ fn fold_comptime_cast(inner: &ast::Expression) -> Option<ast::Expression> {
     let folded_literal = cast_literal(source_literal, target_primitive)?;
     Some(ast::Expression {
         kind: Box::new(ast::ExpressionKind::Literal(folded_literal)),
-        span: inner.span.clone(),
+        span: inner.span,
     })
 }
 

@@ -6,9 +6,9 @@ use inkwell::IntPredicate;
 use inkwell::module::Linkage;
 use inkwell::targets::TargetData;
 use inkwell::types::StringRadix;
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    ArrayValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
 
 use crate::codegen::SilverGenerator;
@@ -66,7 +66,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 "expected integer constant in global initializer",
-                                span.clone(),
+                                *span,
                             )
                         })? as u64,
                     true,
@@ -80,7 +80,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 "expected integer constant in global initializer",
-                                span.clone(),
+                                *span,
                             )
                         })? as f64,
                 )
@@ -93,7 +93,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 "expected float constant in global initializer",
-                                span.clone(),
+                                *span,
                             )
                         })? as u64,
                     true,
@@ -108,7 +108,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .ok_or_else(|| {
                         CodegenError::with_span(
                             "expected integer constant in global initializer",
-                            span.clone(),
+                            *span,
                         )
                     })? as u64;
                 if raw == 0 {
@@ -116,7 +116,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else {
                     Err(CodegenError::with_span(
                         "non-null integer-to-pointer cast is not supported in global initializers",
-                        span.clone(),
+                        *span,
                     ))
                 }
             }
@@ -129,7 +129,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .ok_or_else(|| {
                                 CodegenError::with_span(
                                     "expected float constant in global initializer",
-                                    span.clone(),
+                                    *span,
                                 )
                             })?,
                     )
@@ -141,89 +141,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     source.get_type().print_to_string(),
                     target.print_to_string()
                 ),
-                span.clone(),
-            )),
-        }
-    }
-
-    pub(crate) fn const_array_value_from_values(
-        &self,
-        element_ty: BasicTypeEnum<'ctx>,
-        values: &[BasicValueEnum<'ctx>],
-        span: &Span,
-    ) -> CodegenResult<ArrayValue<'ctx>> {
-        match element_ty {
-            BasicTypeEnum::ArrayType(array_ty) => {
-                let mut typed = Vec::with_capacity(values.len());
-                for value in values {
-                    let BasicValueEnum::ArrayValue(array_value) = *value else {
-                        return Err(CodegenError::with_span(
-                            "array initializer element type mismatch",
-                            span.clone(),
-                        ));
-                    };
-                    typed.push(array_value);
-                }
-                Ok(array_ty.const_array(&typed))
-            }
-            BasicTypeEnum::FloatType(float_ty) => {
-                let mut typed = Vec::with_capacity(values.len());
-                for value in values {
-                    let BasicValueEnum::FloatValue(float_value) = *value else {
-                        return Err(CodegenError::with_span(
-                            "array initializer element type mismatch",
-                            span.clone(),
-                        ));
-                    };
-                    typed.push(float_value);
-                }
-                Ok(float_ty.const_array(&typed))
-            }
-            BasicTypeEnum::IntType(int_ty) => {
-                let mut typed = Vec::with_capacity(values.len());
-                for value in values {
-                    let BasicValueEnum::IntValue(int_value) = *value else {
-                        return Err(CodegenError::with_span(
-                            "array initializer element type mismatch",
-                            span.clone(),
-                        ));
-                    };
-                    typed.push(int_value);
-                }
-                Ok(int_ty.const_array(&typed))
-            }
-            BasicTypeEnum::PointerType(ptr_ty) => {
-                let mut typed = Vec::with_capacity(values.len());
-                for value in values {
-                    let BasicValueEnum::PointerValue(ptr_value) = *value else {
-                        return Err(CodegenError::with_span(
-                            "array initializer element type mismatch",
-                            span.clone(),
-                        ));
-                    };
-                    typed.push(ptr_value);
-                }
-                Ok(ptr_ty.const_array(&typed))
-            }
-            BasicTypeEnum::StructType(struct_ty) => {
-                let mut typed = Vec::with_capacity(values.len());
-                for value in values {
-                    let BasicValueEnum::StructValue(struct_value) = *value else {
-                        return Err(CodegenError::with_span(
-                            "array initializer element type mismatch",
-                            span.clone(),
-                        ));
-                    };
-                    typed.push(struct_value);
-                }
-                Ok(struct_ty.const_array(&typed))
-            }
-            other => Err(CodegenError::with_span(
-                format!(
-                    "array global initializer is not supported for `{}`",
-                    other.print_to_string()
-                ),
-                span.clone(),
+                *span,
             )),
         }
     }
@@ -245,7 +163,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 format!("missing field metadata for struct `{struct_name}`"),
-                                span.clone(),
+                                *span,
                             )
                         })?;
                 let named_mode = items
@@ -261,14 +179,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 if by_name.insert(name.name.clone(), value).is_some() {
                                     return Err(CodegenError::with_span(
                                         format!("duplicate field `{}` in initializer", name.name),
-                                        name.span.clone(),
+                                        name.span,
                                     ));
                                 }
                             }
                             _ => {
                                 return Err(CodegenError::with_span(
                                     "cannot mix positional items with named struct initializer",
-                                    span.clone(),
+                                    *span,
                                 ));
                             }
                         }
@@ -278,7 +196,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let Some(value_expr) = by_name.get(&field_name) else {
                             return Err(CodegenError::with_span(
                                 format!("missing field `{field_name}` in initializer"),
-                                span.clone(),
+                                *span,
                             ));
                         };
                         values.push(self.emit_const_value_for_type(value_expr, &field_ty)?);
@@ -287,14 +205,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if items.len() != declared_fields.len() {
                         return Err(CodegenError::with_span(
                             "positional struct initializer field count mismatch",
-                            span.clone(),
+                            *span,
                         ));
                     }
                     for (item, (_, field_ty)) in items.iter().zip(declared_fields.iter()) {
                         let ast::InitializerItem::Positional(expr) = item else {
                             return Err(CodegenError::with_span(
                                 "struct positional initializer only supports positional items",
-                                span.clone(),
+                                *span,
                             ));
                         };
                         values.push(self.emit_const_value_for_type(expr, field_ty)?);
@@ -307,7 +225,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if items.len() != types.len() {
                     return Err(CodegenError::with_span(
                         "tuple initializer arity mismatch",
-                        span.clone(),
+                        *span,
                     ));
                 }
                 let mut values = Vec::with_capacity(types.len());
@@ -315,7 +233,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let ast::InitializerItem::Positional(expr) = item else {
                         return Err(CodegenError::with_span(
                             "tuple initializer only supports positional items",
-                            span.clone(),
+                            *span,
                         ));
                     };
                     values.push(self.emit_const_value_for_type(expr, ty)?);
@@ -327,7 +245,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             _ => Err(CodegenError::with_span(
                 "initializer is not supported for this global type",
-                target_type.span.clone(),
+                target_type.span,
             )),
         }
     }
@@ -389,7 +307,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .ok_or_else(|| {
                                     CodegenError::with_span(
                                         "expected float constant in global initializer",
-                                        expr.span.clone(),
+                                        expr.span,
                                     )
                                 })?,
                         )
@@ -401,7 +319,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported constant unary operator in global initializer",
-                            expr.span.clone(),
+                            expr.span,
                         ));
                     }
                 }
@@ -420,7 +338,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             _ => {
                 return Err(CodegenError::with_span(
                     "global initializer must be a compile-time constant expression",
-                    expr.span.clone(),
+                    expr.span,
                 ));
             }
         };
@@ -463,7 +381,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.symbol_table.intern_symbol(
             format!("codegen::global::{}", item.name.name),
             SymbolKind::GlobalVariable,
-            Some(item.name.span.clone()),
+            Some(item.name.span),
             CompilerPhase::Codegen,
         );
         Ok(())
@@ -545,7 +463,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .const_int_from_string(&value.to_string(), StringRadix::Decimal)
                         .map(|v| v.as_basic_value_enum())
                         .ok_or_else(|| {
-                            CodegenError::with_span("invalid integer literal", expr.span.clone())
+                            CodegenError::with_span("invalid integer literal", expr.span)
                         })
                 }
             }
@@ -585,7 +503,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to get array pointer `{}`: {e}", identifier.name),
-                                identifier.span.clone(),
+                                identifier.span,
                             )
                         })?;
                         return Ok(element_ptr.as_basic_value_enum());
@@ -600,23 +518,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to load variable `{}`: {e}", identifier.name),
-                                identifier.span.clone(),
+                                identifier.span,
                             )
                         });
                 }
                 let name = &identifier.name;
                 let mut func = self.module.get_function(name);
-                if func.is_none() {
-                    if let Some(mangled) = self.imported_function_links.get(name) {
-                        func = self.module.get_function(mangled);
-                    }
+                if func.is_none()
+                    && let Some(mangled) = self.imported_function_links.get(name)
+                {
+                    func = self.module.get_function(mangled);
                 }
                 if let Some(f) = func {
                     return Ok(f.as_global_value().as_pointer_value().as_basic_value_enum());
                 }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
-                    identifier.span.clone(),
+                    identifier.span,
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
@@ -637,10 +555,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder
                     .build_load(llvm_ty, ptr, "lvalue.load")
                     .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to load lvalue: {e}"),
-                            expr.span.clone(),
-                        )
+                        CodegenError::with_span(format!("failed to load lvalue: {e}"), expr.span)
                     })
             }
             ast::ExpressionKind::Binary {
@@ -662,7 +577,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 value.ok_or_else(|| {
                     CodegenError::with_span(
                         "void function call cannot be used as a value",
-                        expr.span.clone(),
+                        expr.span,
                     )
                 })
             }
@@ -672,25 +587,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 arguments,
             } => {
                 // Check if this is an enum variant construction
-                if let ast::ExpressionKind::Identifier(receiver_ident) = receiver.kind.as_ref() {
-                    if self.enum_payload_layouts.contains_key(&receiver_ident.name)
-                        || self.enum_variants.contains_key(&receiver_ident.name)
-                    {
-                        return self.emit_enum_construction_impl(
-                            receiver_ident,
-                            method,
-                            arguments,
-                            &expr.span,
-                        );
-                    }
+                if let ast::ExpressionKind::Identifier(receiver_ident) = receiver.kind.as_ref()
+                    && (self.enum_payload_layouts.contains_key(&receiver_ident.name)
+                        || self.enum_variants.contains_key(&receiver_ident.name))
+                {
+                    return self.emit_enum_construction_impl(
+                        receiver_ident,
+                        method,
+                        arguments,
+                        &expr.span,
+                    );
                 }
                 let value = self
                     .emit_method_call_expression(receiver, method, arguments, false, &expr.span)?;
                 value.ok_or_else(|| {
-                    CodegenError::with_span(
-                        "void method call cannot be used as a value",
-                        expr.span.clone(),
-                    )
+                    CodegenError::with_span("void method call cannot be used as a value", expr.span)
                 })
             }
             ast::ExpressionKind::Cast {
@@ -714,13 +625,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to call user-defined cast: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?;
                     call.try_as_basic_value().basic().ok_or_else(|| {
                         CodegenError::with_span(
                             "user-defined cast returned void".to_string(),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })
                 } else {
@@ -739,7 +650,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let Some(else_branch) = else_branch.as_ref() else {
                     return Err(CodegenError::with_span(
                         "if expression requires an else branch",
-                        expr.span.clone(),
+                        expr.span,
                     ));
                 };
                 self.emit_if_expression_value(condition, then_branch, else_branch, &expr.span)
@@ -754,7 +665,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Tuple(items) => self.emit_tuple_literal_value(items, &expr.span),
             ast::ExpressionKind::Initializer { .. } => Err(CodegenError::with_span(
                 "initializer expression requires a target type context",
-                expr.span.clone(),
+                expr.span,
             )),
             ast::ExpressionKind::Index { object, index } => {
                 // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
@@ -773,14 +684,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to load lvalue: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         });
                 }
                 // For non-pointer types (struct, slice), use the trait path (__index_get)
                 let method_ident = ast::Identifier {
                     name: "__index_get".to_string(),
-                    span: expr.span.clone(),
+                    span: expr.span,
                 };
                 let result = self.emit_method_call_expression(
                     object,
@@ -789,9 +700,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     false,
                     &expr.span,
                 )?;
-                result.ok_or_else(|| {
-                    CodegenError::with_span("__index_get returned void", expr.span.clone())
-                })
+                result
+                    .ok_or_else(|| CodegenError::with_span("__index_get returned void", expr.span))
             }
             ast::ExpressionKind::Reference { expression, .. } => {
                 let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
@@ -805,12 +715,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 Err(CodegenError::with_span(
                     format!("unknown builtin macro '@{}'", name.name),
-                    expr.span.clone(),
+                    expr.span,
                 ))
             }
             ast::ExpressionKind::ForIn { .. } => Err(CodegenError::with_span(
                 "for-in loop cannot be used as a value expression",
-                expr.span.clone(),
+                expr.span,
             )),
             ast::ExpressionKind::Move(inner) => {
                 let value = self.emit_expression_value(inner)?;
@@ -827,7 +737,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
             ast::ExpressionKind::Asm { code, inputs } => {
-                self.emit_asm_expression(&code, &inputs, &expr.span)
+                self.emit_asm_expression(code, inputs, &expr.span)
             }
             ast::ExpressionKind::EnumVariant {
                 path,
@@ -839,7 +749,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else {
                     return Err(CodegenError::with_span(
                         "enum type path must be a single name".to_string(),
-                        expr.span.clone(),
+                        expr.span,
                     ));
                 };
                 // Try payload enum layout first
@@ -959,7 +869,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     } else {
                         Err(CodegenError::with_span(
                             format!("unknown enum variant '{}::{}'", enum_name, variant.name),
-                            expr.span.clone(),
+                            expr.span,
                         ))
                     }
                 }
@@ -969,7 +879,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
                     expr.kind
                 ),
-                expr.span.clone(),
+                expr.span,
             )),
         }
     }
@@ -1080,7 +990,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } else {
                 Err(CodegenError::with_span(
                     format!("unknown enum variant '{}::{}'", enum_name, variant.name),
-                    span.clone(),
+                    *span,
                 ))
             }
         }
@@ -1099,7 +1009,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     "inline asm with {} input(s) unsupported: x86_64 syscall ABI has 1 syscall number register (rax) and 6 argument registers at most",
                     inputs.len()
                 ),
-                span.clone(),
+                *span,
             ));
         }
 
@@ -1111,7 +1021,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let value = self.emit_expression_value(input)?;
             let i64_ty_ast = ast::Type {
                 kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
-                span: span.clone(),
+                span: *span,
             };
             let i64_val = self.cast_value_to_ast_type(value, &i64_ty_ast, span)?;
             args.push(BasicMetadataValueEnum::from(i64_val));
@@ -1123,9 +1033,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Clobbers: ~{rcx}, ~{r11} — always destroyed by Linux syscall
         let regs = ["{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"];
         let mut constraints = String::from("={rax}");
-        for i in 0..inputs.len() {
+        for reg in regs.iter().take(inputs.len()) {
             constraints.push(',');
-            constraints.push_str(regs[i]);
+            constraints.push_str(reg);
         }
         constraints.push_str(",~{rcx},~{r11}");
 
@@ -1150,16 +1060,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let call = self
             .builder
             .build_indirect_call(fn_type, asm_fn, &args, "asm_result")
-            .map_err(|e| {
-                CodegenError::with_span(format!("inline asm call failed: {e}"), span.clone())
-            })?;
+            .map_err(|e| CodegenError::with_span(format!("inline asm call failed: {e}"), *span))?;
 
         // 6. Extract the i64 return value
         call.try_as_basic_value().basic().ok_or_else(|| {
-            CodegenError::with_span(
-                "inline asm returned void, expected i64".to_string(),
-                span.clone(),
-            )
+            CodegenError::with_span("inline asm returned void, expected i64".to_string(), *span)
         })
     }
 
@@ -1171,13 +1076,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let struct_name = Self::path_name(path);
         let struct_ty = *self.struct_types.get(&struct_name).ok_or_else(|| {
-            CodegenError::with_span(format!("unknown struct type `{struct_name}`"), span.clone())
+            CodegenError::with_span(format!("unknown struct type `{struct_name}`"), *span)
         })?;
 
         if struct_ty.is_opaque() {
             return Err(CodegenError::with_span(
                 format!("struct `{struct_name}` is not fully defined yet"),
-                span.clone(),
+                *span,
             ));
         }
 
@@ -1188,7 +1093,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| {
                 CodegenError::with_span(
                     format!("missing field metadata for struct `{struct_name}`"),
-                    span.clone(),
+                    *span,
                 )
             })?;
 
@@ -1200,7 +1105,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             {
                 return Err(CodegenError::with_span(
                     format!("duplicate field `{}` in struct literal", field.name.name),
-                    field.name.span.clone(),
+                    field.name.span,
                 ));
             }
         }
@@ -1212,7 +1117,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             {
                 return Err(CodegenError::with_span(
                     format!("unknown field `{}` on `{struct_name}`", field.name.name),
-                    field.name.span.clone(),
+                    field.name.span,
                 ));
             }
         }
@@ -1226,7 +1131,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let Some(field_init) = provided_by_name.get(field_name) else {
                 return Err(CodegenError::with_span(
                     format!("missing field `{field_name}` in struct literal"),
-                    span.clone(),
+                    *span,
                 ));
             };
             let field_value = self.emit_expression_value(&field_init.value)?;
@@ -1236,7 +1141,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .ok_or_else(|| {
                         CodegenError::with_span(
                             format!("missing LLVM field type for `{field_name}`"),
-                            field_init.name.span.clone(),
+                            field_init.name.span,
                         )
                     })?;
             let field_value =
@@ -1247,7 +1152,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to access struct literal field `{field_name}`: {e}"),
-                        field_init.name.span.clone(),
+                        field_init.name.span,
                     )
                 })?;
             self.builder
@@ -1255,14 +1160,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to store struct literal field `{field_name}`: {e}"),
-                        field_init.name.span.clone(),
+                        field_init.name.span,
                     )
                 })?;
         }
         self.builder
             .build_load(struct_ty.as_basic_type_enum(), temp, "struct.lit.value")
             .map_err(|e| {
-                CodegenError::with_span(format!("failed to load struct literal: {e}"), span.clone())
+                CodegenError::with_span(format!("failed to load struct literal: {e}"), *span)
             })
     }
 
@@ -1274,7 +1179,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if items.is_empty() {
             return Err(CodegenError::with_span(
                 "array literal cannot be empty without type context",
-                span.clone(),
+                *span,
             ));
         }
 
@@ -1286,7 +1191,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if value.get_type() != element_ty {
                 return Err(CodegenError::with_span(
                     "array literal elements must have the same type",
-                    item.span.clone(),
+                    item.span,
                 ));
             }
             values.push(value);
@@ -1301,10 +1206,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_alloca(array_llvm_ty, "arr.lit.buf")
             .map_err(|e| {
-                CodegenError::with_span(
-                    format!("failed to allocate array buffer: {e}"),
-                    span.clone(),
-                )
+                CodegenError::with_span(format!("failed to allocate array buffer: {e}"), *span)
             })?;
 
         // Store each element
@@ -1320,13 +1222,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to build array literal element pointer {index}: {e}"),
-                    span.clone(),
+                    *span,
                 )
             })?;
             self.builder.build_store(ptr, *value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store array literal element {index}: {e}"),
-                    span.clone(),
+                    *span,
                 )
             })?;
         }
@@ -1346,10 +1248,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_insert_value(slice, data_ptr, 0, "slice.data")
             .map_err(|e| {
-                CodegenError::with_span(
-                    format!("failed to build slice data field: {e}"),
-                    span.clone(),
-                )
+                CodegenError::with_span(format!("failed to build slice data field: {e}"), *span)
             })?
             .into_struct_value();
 
@@ -1359,10 +1258,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_insert_value(slice, len.as_basic_value_enum(), 1, "slice.len")
             .map_err(|e| {
-                CodegenError::with_span(
-                    format!("failed to build slice len field: {e}"),
-                    span.clone(),
-                )
+                CodegenError::with_span(format!("failed to build slice len field: {e}"), *span)
             })?
             .into_struct_value();
 
@@ -1391,7 +1287,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to build tuple literal element {index}: {e}"),
-                        span.clone(),
+                        *span,
                     )
                 })?
                 .into_struct_value();
@@ -1417,7 +1313,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 format!("missing field metadata for struct `{struct_name}`"),
-                                span.clone(),
+                                *span,
                             )
                         })?;
 
@@ -1441,14 +1337,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 if by_name.insert(name.name.clone(), value).is_some() {
                                     return Err(CodegenError::with_span(
                                         format!("duplicate field `{}` in initializer", name.name),
-                                        name.span.clone(),
+                                        name.span,
                                     ));
                                 }
                             }
                             _ => {
                                 return Err(CodegenError::with_span(
                                     "cannot mix positional/indexed items with named struct initializer",
-                                    span.clone(),
+                                    *span,
                                 ));
                             }
                         }
@@ -1458,7 +1354,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let Some(value_expr) = by_name.get(field_name) else {
                             return Err(CodegenError::with_span(
                                 format!("missing field `{field_name}` in initializer"),
-                                span.clone(),
+                                *span,
                             ));
                         };
                         let value =
@@ -1468,7 +1364,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .ok_or_else(|| {
                                 CodegenError::with_span(
                                     format!("missing LLVM field type for `{field_name}`"),
-                                    value_expr.span.clone(),
+                                    value_expr.span,
                                 )
                             })?;
                         let value =
@@ -1481,7 +1377,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     format!(
                                         "failed to access struct initializer field `{field_name}`: {e}"
                                     ),
-                                    value_expr.span.clone(),
+                                    value_expr.span,
                                 )
                             })?;
                         self.builder.build_store(field_ptr, value).map_err(|e| {
@@ -1489,7 +1385,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 format!(
                                     "failed to store struct initializer field `{field_name}`: {e}"
                                 ),
-                                value_expr.span.clone(),
+                                value_expr.span,
                             )
                         })?;
                     }
@@ -1497,20 +1393,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if items.len() != declared_fields.len() {
                         return Err(CodegenError::with_span(
                             "positional struct initializer field count mismatch",
-                            span.clone(),
+                            *span,
                         ));
                     }
                     for (index, item) in items.iter().enumerate() {
                         let ast::InitializerItem::Positional(expr) = item else {
                             return Err(CodegenError::with_span(
                                 "struct positional initializer only supports positional items",
-                                span.clone(),
+                                *span,
                             ));
                         };
                         let (_, field_ty) = declared_fields.get(index).ok_or_else(|| {
                             CodegenError::with_span(
                                 format!("missing field metadata at index {index}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?;
                         let value = self.emit_expression_value_for_expected(expr, field_ty)?;
@@ -1519,7 +1415,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .ok_or_else(|| {
                                 CodegenError::with_span(
                                     format!("missing LLVM field type at index {index}"),
-                                    expr.span.clone(),
+                                    expr.span,
                                 )
                             })?;
                         let value =
@@ -1530,13 +1426,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to access struct initializer field: {e}"),
-                                    expr.span.clone(),
+                                    expr.span,
                                 )
                             })?;
                         self.builder.build_store(field_ptr, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to store struct initializer field: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?;
                     }
@@ -1546,7 +1442,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load struct initializer: {e}"),
-                            span.clone(),
+                            *span,
                         )
                     })
             }
@@ -1554,7 +1450,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if items.len() != types.len() {
                     return Err(CodegenError::with_span(
                         "tuple initializer arity mismatch",
-                        span.clone(),
+                        *span,
                     ));
                 }
                 let mut field_types = Vec::with_capacity(types.len());
@@ -1567,7 +1463,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let ast::InitializerItem::Positional(expr) = item else {
                         return Err(CodegenError::with_span(
                             "tuple initializer only supports positional items",
-                            span.clone(),
+                            *span,
                         ));
                     };
                     let value = self.emit_expression_value_for_expected(expr, &types[index])?;
@@ -1579,7 +1475,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to build tuple initializer element {index}: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?
                         .into_struct_value();
@@ -1604,7 +1500,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to zero-init array initializer: {e}"),
-                            span.clone(),
+                            *span,
                         )
                     })?;
 
@@ -1620,7 +1516,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 items.len(),
                                 array.size
                             ),
-                            span.clone(),
+                            *span,
                         ));
                     }
                     for (i, item) in items.iter().enumerate() {
@@ -1646,13 +1542,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("GEP array initializer element {i}: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?;
                         self.builder.build_store(ptr, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("store array initializer element {i}: {e}"),
-                                expr.span.clone(),
+                                expr.span,
                             )
                         })?;
                     }
@@ -1664,7 +1560,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 let BasicValueEnum::IntValue(idx_int) = idx_val else {
                                     return Err(CodegenError::with_span(
                                         "array index must be an integer",
-                                        index.span.clone(),
+                                        index.span,
                                     ));
                                 };
                                 let elem_val = self.emit_expression_value_for_expected(
@@ -1686,7 +1582,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         .map_err(|e| {
                                             CodegenError::with_span(
                                                 format!("failed to cast array index: {e}"),
-                                                index.span.clone(),
+                                                index.span,
                                             )
                                         })?
                                 };
@@ -1701,20 +1597,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map_err(|e| {
                                     CodegenError::with_span(
                                         format!("GEP array initializer: {e}"),
-                                        value.span.clone(),
+                                        value.span,
                                     )
                                 })?;
                                 self.builder.build_store(ptr, elem_val).map_err(|e| {
                                     CodegenError::with_span(
                                         format!("store array initializer: {e}"),
-                                        value.span.clone(),
+                                        value.span,
                                     )
                                 })?;
                             }
                             _ => {
                                 return Err(CodegenError::with_span(
                                     "array initializer only supports positional and indexed items",
-                                    span.clone(),
+                                    *span,
                                 ));
                             }
                         }
@@ -1726,13 +1622,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load array initializer: {e}"),
-                            span.clone(),
+                            *span,
                         )
                     })
             }
             _ => Err(CodegenError::with_span(
                 "initializer is not supported for this target type",
-                target_type.span.clone(),
+                target_type.span,
             )),
         }
     }
@@ -1760,7 +1656,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if block.statements.is_empty() {
             return Err(CodegenError::with_span(
                 "value-producing block cannot be empty",
-                block.span.clone(),
+                block.span,
             ));
         }
 
@@ -1782,14 +1678,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .is_some();
             if terminated {
                 self.pop_scope();
-                if has_debug_scope {
-                    if let Some(debug) = &mut self.debug {
-                        debug.pop_lexical_block();
-                    }
+                if has_debug_scope && let Some(debug) = &mut self.debug {
+                    debug.pop_lexical_block();
                 }
                 return Err(CodegenError::with_span(
                     "value-producing block terminated before final expression",
-                    statement.span.clone(),
+                    statement.span,
                 ));
             }
         }
@@ -1799,23 +1693,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::StatementKind::Expression(expr) => self.emit_expression_value(expr)?,
             _ => {
                 self.pop_scope();
-                if has_debug_scope {
-                    if let Some(debug) = &mut self.debug {
-                        debug.pop_lexical_block();
-                    }
+                if has_debug_scope && let Some(debug) = &mut self.debug {
+                    debug.pop_lexical_block();
                 }
                 return Err(CodegenError::with_span(
                     "value-producing block must end with an expression",
-                    last.span.clone(),
+                    last.span,
                 ));
             }
         };
         self.pop_scope();
 
-        if has_debug_scope {
-            if let Some(debug) = &mut self.debug {
-                debug.pop_lexical_block();
-            }
+        if has_debug_scope && let Some(debug) = &mut self.debug {
+            debug.pop_lexical_block();
         }
 
         Ok(value)
@@ -1882,7 +1772,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if incoming.is_empty() {
             return Err(CodegenError::with_span(
                 "if expression has no value-producing path",
-                span.clone(),
+                *span,
             ));
         }
 
@@ -1891,7 +1781,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if value.get_type() != phi_ty {
                 return Err(CodegenError::with_span(
                     "if expression branches produce different types",
-                    span.clone(),
+                    *span,
                 ));
             }
         }
@@ -1947,7 +1837,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if arm.guard.is_some() {
                 return Err(CodegenError::with_span(
                     "match guards are not supported in LLVM IR codegen yet",
-                    arm.span.clone(),
+                    arm.span,
                 ));
             }
 
@@ -2008,7 +1898,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         _ => {
                             return Err(CodegenError::with_span(
                                 "unsupported match literal for scrutinee type",
-                                arm.pattern.span.clone(),
+                                arm.pattern.span,
                             ));
                         }
                     };
@@ -2027,7 +1917,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     } else {
                         return Err(CodegenError::with_span(
                             "enum type path must be a single name in match".to_string(),
-                            arm.pattern.span.clone(),
+                            arm.pattern.span,
                         ));
                     };
                     if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
@@ -2076,13 +1966,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         "unknown variant '{}' in enum '{}'",
                                         variant.name, enum_name
                                     ),
-                                    variant.span.clone(),
+                                    variant.span,
                                 ));
                             }
                         } else {
                             return Err(CodegenError::with_span(
                                 format!("unknown enum '{}' in match", enum_name),
-                                arm.pattern.span.clone(),
+                                arm.pattern.span,
                             ));
                         };
                         let cond = self
@@ -2207,13 +2097,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             "unknown variant '{}' in enum '{}'",
                                             variant.name, enum_name
                                         ),
-                                        variant.span.clone(),
+                                        variant.span,
                                     ));
                                 }
                             } else {
                                 return Err(CodegenError::with_span(
                                     format!("unknown enum '{}' in match", enum_name),
-                                    arm.pattern.span.clone(),
+                                    arm.pattern.span,
                                 ));
                             };
                             let cond = self
@@ -2237,7 +2127,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         } else {
                             return Err(CodegenError::with_span(
                                 "unit enum match requires integer scrutinee".to_string(),
-                                arm.pattern.span.clone(),
+                                arm.pattern.span,
                             ));
                         }
                     }
@@ -2245,7 +2135,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 _ => {
                     return Err(CodegenError::with_span(
                         "match pattern kind is not supported in LLVM IR codegen yet",
-                        arm.pattern.span.clone(),
+                        arm.pattern.span,
                     ));
                 }
             }
@@ -2262,7 +2152,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.builder.build_store(alloca, scrutinee).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to bind match identifier `{}`: {e}", identifier.name),
-                        identifier.span.clone(),
+                        identifier.span,
                     )
                 })?;
 
@@ -2337,7 +2227,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if incoming.is_empty() {
             return Err(CodegenError::with_span(
                 "match expression has no value-producing path",
-                span.clone(),
+                *span,
             ));
         }
 
@@ -2346,7 +2236,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if value.get_type() != phi_ty {
                 return Err(CodegenError::with_span(
                     "match expression arms produce different types",
-                    span.clone(),
+                    *span,
                 ));
             }
         }
@@ -2384,12 +2274,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let name = &identifier.name;
                 let mut func = self.module.get_function(name);
                 let mut llvm_name = name.clone();
-                if func.is_none() {
-                    if let Some(mangled) = self.imported_function_links.get(name) {
-                        func = self.module.get_function(mangled);
-                        if func.is_some() {
-                            llvm_name = mangled.clone();
-                        }
+                if func.is_none()
+                    && let Some(mangled) = self.imported_function_links.get(name)
+                {
+                    func = self.module.get_function(mangled);
+                    if func.is_some() {
+                        llvm_name = mangled.clone();
                     }
                 }
                 if let Some(f) = func {
@@ -2399,7 +2289,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .and_then(|s| s.return_type.clone())
                         .unwrap_or_else(|| ast::Type {
                             kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
-                            span: identifier.span.clone(),
+                            span: identifier.span,
                         });
                     let parameters = sig.as_ref().map(|s| s.params.clone()).unwrap_or_default();
                     let fn_ty = ast::Type {
@@ -2407,13 +2297,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             parameters,
                             return_type: Box::new(return_type),
                         })),
-                        span: identifier.span.clone(),
+                        span: identifier.span,
                     };
                     return Ok((f.as_global_value().as_pointer_value(), fn_ty));
                 }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
-                    identifier.span.clone(),
+                    identifier.span,
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
@@ -2424,7 +2314,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let ast::TypeKind::Named(named) = reference.inner.kind.as_ref() else {
                             return Err(CodegenError::with_span(
                                 "field access on reference requires a struct pointee",
-                                object.span.clone(),
+                                object.span,
                             ));
                         };
                         let ref_llvm_ty = self.lower_basic_type(&object_ty)?;
@@ -2434,13 +2324,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load reference receiver: {e}"),
-                                    object.span.clone(),
+                                    object.span,
                                 )
                             })?;
                         let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
                             return Err(CodegenError::with_span(
                                 "reference receiver did not lower to a pointer",
-                                object.span.clone(),
+                                object.span,
                             ));
                         };
                         (struct_ptr, named)
@@ -2449,7 +2339,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let ast::TypeKind::Named(named) = pointer.inner.kind.as_ref() else {
                             return Err(CodegenError::with_span(
                                 "field access on pointer requires a struct pointee",
-                                object.span.clone(),
+                                object.span,
                             ));
                         };
                         let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
@@ -2459,13 +2349,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load pointer receiver: {e}"),
-                                    object.span.clone(),
+                                    object.span,
                                 )
                             })?;
                         let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
                             return Err(CodegenError::with_span(
                                 "pointer receiver did not lower to a pointer",
-                                object.span.clone(),
+                                object.span,
                             ));
                         };
                         (struct_ptr, named)
@@ -2473,7 +2363,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "field access currently supports only struct values/references/pointers",
-                            object.span.clone(),
+                            object.span,
                         ));
                     }
                 };
@@ -2483,7 +2373,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let fields = self.struct_fields.get(&owner_name).ok_or_else(|| {
                     CodegenError::with_span(
                         format!("unknown struct type `{owner_name}`"),
-                        object.span.clone(),
+                        object.span,
                     )
                 })?;
                 let Some((field_index, (_, field_ty))) = fields
@@ -2493,14 +2383,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return Err(CodegenError::with_span(
                         format!("unknown field `{}` on `{owner_name}`", field.name),
-                        field.span.clone(),
+                        field.span,
                     ));
                 };
 
                 let struct_ty = *self.struct_types.get(&owner_name).ok_or_else(|| {
                     CodegenError::with_span(
                         format!("missing LLVM struct type for `{owner_name}`"),
-                        object.span.clone(),
+                        object.span,
                     )
                 })?;
 
@@ -2510,7 +2400,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed struct field access: {e}"),
-                            field.span.clone(),
+                            field.span,
                         )
                     })?;
 
@@ -2528,13 +2418,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load dereference operand for lvalue: {e}"),
-                            expr.span.clone(),
+                            expr.span,
                         )
                     })?;
                 let BasicValueEnum::PointerValue(ptr) = loaded_ptr else {
                     return Err(CodegenError::with_span(
                         "dereference operand must be a pointer value",
-                        expr.span.clone(),
+                        expr.span,
                     ));
                 };
                 let inner_ty = match operand_ty.kind.as_ref() {
@@ -2543,7 +2433,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => {
                         return Err(CodegenError::with_span(
                             "dereference requires pointer or reference type",
-                            expr.span.clone(),
+                            expr.span,
                         ));
                     }
                 };
@@ -2554,7 +2444,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 match object_ty.kind.as_ref() {
                     ast::TypeKind::Slice(_slice) => Err(CodegenError::with_span(
                         "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
-                        object.span.clone(),
+                        object.span,
                     )),
                     ast::TypeKind::Pointer(pointer) => {
                         let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
@@ -2564,20 +2454,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load pointer for indexing: {e}"),
-                                    object.span.clone(),
+                                    object.span,
                                 )
                             })?;
                         let BasicValueEnum::PointerValue(base_ptr) = loaded else {
                             return Err(CodegenError::with_span(
                                 "pointer indexing requires a pointer value",
-                                object.span.clone(),
+                                object.span,
                             ));
                         };
                         let index_value = self.emit_expression_value(index)?;
                         let BasicValueEnum::IntValue(index_int) = index_value else {
                             return Err(CodegenError::with_span(
                                 "pointer index must be an integer",
-                                index.span.clone(),
+                                index.span,
                             ));
                         };
                         let i64_ty = self.context.i64_type();
@@ -2589,7 +2479,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map_err(|e| {
                                     CodegenError::with_span(
                                         format!("failed to cast pointer index: {e}"),
-                                        index.span.clone(),
+                                        index.span,
                                     )
                                 })?
                         };
@@ -2605,7 +2495,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed pointer indexing: {e}"),
-                                index.span.clone(),
+                                index.span,
                             )
                         })?;
                         Ok((element_ptr, (*pointer.inner).clone()))
@@ -2615,7 +2505,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let BasicValueEnum::IntValue(index_int) = index_value else {
                             return Err(CodegenError::with_span(
                                 "array index must be an integer",
-                                index.span.clone(),
+                                index.span,
                             ));
                         };
                         let i64_ty = self.context.i64_type();
@@ -2627,7 +2517,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map_err(|e| {
                                     CodegenError::with_span(
                                         format!("failed to cast array index: {e}"),
-                                        index.span.clone(),
+                                        index.span,
                                     )
                                 })?
                         };
@@ -2644,20 +2534,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed array index GEP: {e}"),
-                                index.span.clone(),
+                                index.span,
                             )
                         })?;
                         Ok((element_ptr, (*array.element_type).clone()))
                     }
                     _ => Err(CodegenError::with_span(
                         "index access currently supports only array and pointer values",
-                        object.span.clone(),
+                        object.span,
                     )),
                 }
             }
             _ => Err(CodegenError::with_span(
                 "expression is not assignable",
-                expr.span.clone(),
+                expr.span,
             )),
         }
     }
