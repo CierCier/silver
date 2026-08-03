@@ -2,15 +2,15 @@
 //!
 //! A borrow of a function-local value (`&local`, `&param` of value type) dies
 //! with the frame. Such a reference must not escape: it cannot be returned
-//! from the function or stored into a global. Borrows of globals, reference
-//! parameters (whose lifetime the caller provides), and raw-pointer derefs
-//! outlive the function and may escape — the classic elision rule: an output
-//! reference traces back to an input reference or a global.
+//! from the function or stored into a global. A reference parameter (`&T` or
+//! `&mut T`) is a caller-owned borrow origin; the returned reference carries
+//! that parameter's name. Globals, heap values, and raw-pointer pointees are
+//! independent origins and may escape without a caller-lifetime constraint.
 //!
-//! v1 limitations (safe, no false positives, but incomplete): references
-//! stored into structs/containers are not tracked; cross-function global
-//! stores through a reference parameter are not detected; raw `T*` pointers
-//! are opaque (derefs are assumed to escape).
+//! The checker remains intentionally conservative at opaque expressions:
+//! references stored into structs/containers are not tracked, cross-function
+//! global stores through reference parameters are not detected, and unknown
+//! calls/casts are treated as independent outliving values.
 
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -23,12 +23,47 @@ pub struct EscapeError {
     pub span: Span,
 }
 
+/// The borrow origins for one valid returned reference.
+///
+/// `borrow_params` contains the `&T`/`&mut T` parameters whose referents may
+/// keep the returned reference alive. `borrow_param_indices` is the stable
+/// declaration-order form for caller-side mapping. An empty vector means the
+/// reference is independent of caller-owned borrows (for example, a known
+/// global or raw-pointer pointee). Entries are per return statement; callers
+/// should group by `function_span` and union the indices. Opaque or
+/// unclassified returns produce no entry rather than a false independent claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnOrigin {
+    pub function: String,
+    pub function_span: Span,
+    pub span: Span,
+    pub borrow_params: Vec<String>,
+    pub borrow_param_indices: Vec<usize>,
+}
+
+/// Escape-check output, including the origin metadata needed by caller-side
+/// lifetime checking.
+#[derive(Debug, Clone)]
+pub struct EscapeReport {
+    pub errors: Vec<EscapeError>,
+    pub return_origins: Vec<ReturnOrigin>,
+}
+
 /// Where a borrow points: a function-local value (dies with the frame) or
-/// something that outlives the function (global, reference param, heap).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// something that outlives the function. `Escapable` carries the set of
+/// borrow-origin parameter names the referent derives from; an empty set
+/// means the referent is truly independent (a global, or the pointee of a
+/// raw `T*` — heap/owned). A non-empty set means the returned reference is
+/// tied to those borrow params and the caller must keep them alive.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Local,
-    Escapable,
+    Escapable {
+        origins: FxHashSet<String>,
+    },
+    /// The old checker permits opaque expressions conservatively, but they
+    /// cannot be advertised as independent to caller-side checking.
+    Opaque,
 }
 
 /// Scope entry: (name, previous source) for shadow restore.
@@ -36,23 +71,63 @@ type ScopeEntry = (String, Option<Source>);
 
 struct Checker {
     errors: Vec<EscapeError>,
+    return_origins: Vec<ReturnOrigin>,
+    current_function: String,
+    current_function_span: Span,
+    current_param_indices: FxHashMap<String, usize>,
+    recorded_return_spans: FxHashSet<(u32, usize, usize)>,
+    globals: FxHashSet<String>,
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<EscapeError> {
-    let mut checker = Checker { errors: Vec::new() };
+    analyze_program(program).errors
+}
+
+pub fn analyze_program(program: &ast::Program) -> EscapeReport {
+    let globals = program
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ast::ItemKind::GlobalVariable(global) => Some(global.name.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut checker = Checker {
+        errors: Vec::new(),
+        return_origins: Vec::new(),
+        current_function: String::new(),
+        current_function_span: Span::default(),
+        current_param_indices: FxHashMap::default(),
+        recorded_return_spans: FxHashSet::default(),
+        globals,
+    };
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Function(func) => {
-                checker.check_function(&func.parameters, &func.return_type, &func.body);
+                checker.check_function(
+                    &func.name.name,
+                    func.name.span,
+                    &func.parameters,
+                    &func.return_type,
+                    &func.body,
+                );
             }
             ast::ItemKind::Impl(imp) => {
                 for member in &imp.items {
                     match member {
                         ast::ImplItemKind::Function(func) => {
-                            checker.check_function(&func.parameters, &func.return_type, &func.body);
+                            checker.check_function(
+                                &func.name.name,
+                                func.name.span,
+                                &func.parameters,
+                                &func.return_type,
+                                &func.body,
+                            );
                         }
                         ast::ImplItemKind::Cast(cast) => {
                             checker.check_function(
+                                "<cast>",
+                                cast.span,
                                 &cast.parameters,
                                 &Some(cast.target_type.clone()),
                                 &cast.body,
@@ -65,16 +140,29 @@ pub fn check_program(program: &ast::Program) -> Vec<EscapeError> {
             _ => {}
         }
     }
-    checker.errors
+    EscapeReport {
+        errors: checker.errors,
+        return_origins: checker.return_origins,
+    }
 }
 
 impl Checker {
     fn check_function(
         &mut self,
+        function_name: &str,
+        function_span: Span,
         parameters: &[ast::Parameter],
         return_type: &Option<ast::Type>,
         body: &ast::Block,
     ) {
+        self.current_function.clear();
+        self.current_function.push_str(function_name);
+        self.current_function_span = function_span;
+        self.current_param_indices.clear();
+        for (index, param) in parameters.iter().enumerate() {
+            self.current_param_indices
+                .insert(param.name.name.clone(), index);
+        }
         let _ = return_type;
         let mut scopes: Vec<Vec<ScopeEntry>> = vec![Vec::new()];
         let mut ref_sources: FxHashMap<String, Source> = FxHashMap::default();
@@ -84,7 +172,12 @@ impl Checker {
             match param.param_type.kind.as_ref() {
                 ast::TypeKind::Reference(_) => {
                     ref_params.insert(param.name.name.clone());
-                    ref_sources.insert(param.name.name.clone(), Source::Escapable);
+                    ref_sources.insert(
+                        param.name.name.clone(),
+                        Source::Escapable {
+                            origins: FxHashSet::from_iter([param.name.name.clone()]),
+                        },
+                    );
                 }
                 ast::TypeKind::Pointer(_) => {
                     ptr_locals.insert(param.name.name.clone());
@@ -122,8 +215,8 @@ impl Checker {
             for (name, old) in scope {
                 match old {
                     Some(source) => {
-                        ref_sources.insert(name.clone(), source);
-                        if source != Source::Local {
+                        ref_sources.insert(name.clone(), source.clone());
+                        if !matches!(source, Source::Local) {
                             ptr_locals.insert(name);
                         }
                     }
@@ -160,21 +253,32 @@ impl Checker {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if ref_params.contains(&ident.name) {
-                    Source::Escapable
+                    Source::Escapable {
+                        origins: FxHashSet::from_iter([ident.name.clone()]),
+                    }
                 } else if let Some(source) = ref_sources.get(&ident.name) {
-                    *source
+                    source.clone()
                 } else if self.is_local(ident, scopes) {
                     // Access through a pointer-typed local (`&p.x`, `&self.data[i]`)
-                    // reaches the pointee, which outlives the frame; a bare or
-                    // value-local root borrows the local's own storage.
+                    // reaches the pointee (heap/owned, independent), which outlives
+                    // the frame; a bare or value-local root borrows the local's own
+                    // storage.
                     if through_fields && ptr_locals.contains(&ident.name) {
-                        Source::Escapable
+                        Source::Escapable {
+                            origins: FxHashSet::default(),
+                        }
                     } else {
                         Source::Local
                     }
+                } else if self.globals.contains(&ident.name) {
+                    // A known global is independent of caller-owned borrows.
+                    Source::Escapable {
+                        origins: FxHashSet::default(),
+                    }
                 } else {
-                    // Global (or unknown) — lives forever.
-                    Source::Escapable
+                    // Unknown identifiers are conservatively allowed for
+                    // compatibility, but cannot be advertised as independent.
+                    Source::Opaque
                 }
             }
             ast::ExpressionKind::FieldAccess { object, .. }
@@ -184,10 +288,11 @@ impl Checker {
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 operand,
-            } => self.classify_deref(operand, ref_sources, ref_params),
-            // Heap allocations, casts, temporaries: unknown — assume they
-            // outlive the frame (lenient, no false positives).
-            _ => Source::Escapable,
+            } => self.classify_deref(operand, scopes, ref_sources, ptr_locals, ref_params),
+            // Heap allocations, casts, temporaries, and call results are
+            // unknown here; preserve the old permissive escape behavior, but
+            // do not claim they are independent caller-side origins.
+            _ => Source::Opaque,
         }
     }
 
@@ -196,25 +301,37 @@ impl Checker {
     fn classify_deref(
         &self,
         operand: &ast::Expression,
+        scopes: &[Vec<ScopeEntry>],
         ref_sources: &FxHashMap<String, Source>,
+        ptr_locals: &FxHashSet<String>,
         ref_params: &FxHashSet<String>,
     ) -> Source {
         match operand.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if ref_params.contains(&ident.name) {
-                    Source::Escapable
+                    Source::Escapable {
+                        origins: FxHashSet::from_iter([ident.name.clone()]),
+                    }
                 } else if let Some(source) = ref_sources.get(&ident.name) {
-                    *source
+                    source.clone()
                 } else {
-                    // Raw pointer (or unknown) — pointee outlives the frame.
-                    Source::Escapable
+                    // Raw pointer (or unknown) — pointee outlives the frame,
+                    // independent of any borrow param.
+                    Source::Escapable {
+                        origins: FxHashSet::default(),
+                    }
                 }
+            }
+            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+                self.classify_depth(operand, true, scopes, ref_sources, ptr_locals, ref_params)
             }
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 operand: inner,
-            } => self.classify_deref(inner, ref_sources, ref_params),
-            _ => Source::Escapable,
+            } => self.classify_deref(inner, scopes, ref_sources, ptr_locals, ref_params),
+            // An opaque dereference expression cannot be safely assigned a
+            // caller-origin identity.
+            _ => Source::Opaque,
         }
     }
 
@@ -239,7 +356,7 @@ impl Checker {
             ast::ExpressionKind::Reference { expression, .. } => {
                 Some(self.classify(expression, scopes, ref_sources, ptr_locals, ref_params))
             }
-            ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).copied(),
+            ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).cloned(),
             _ => None,
         }
     }
@@ -296,7 +413,7 @@ impl Checker {
                     declared_source = Some(Source::Local);
                 }
                 if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
-                    let old = ref_sources.get(&ident.name).copied();
+                    let old = ref_sources.get(&ident.name).cloned();
                     if let Some(source) = declared_source {
                         ref_sources.insert(ident.name.clone(), source);
                         scopes
@@ -317,15 +434,39 @@ impl Checker {
             ast::StatementKind::Return(Some(expr)) => {
                 if let Some(source) =
                     self.reference_source(expr, scopes, ref_sources, ptr_locals, ref_params)
-                    && source == Source::Local
                 {
-                    self.error(
-                        "returned reference does not outlive the function (it borrows a \
-                         local value; return a reference to a global or a reference \
-                         parameter instead)",
-                        expr.span,
-                    );
-                } else if !matches!(expr.kind.as_ref(), ast::ExpressionKind::Reference { .. }) {
+                    match source {
+                        Source::Local => {
+                            self.error(
+                                "returned reference does not outlive the function (it borrows a \
+                                 local value; return a reference to a global or a reference \
+                                 parameter instead)",
+                                expr.span,
+                            );
+                        }
+                        Source::Escapable { origins } => {
+                            let mut borrow_params: Vec<String> = origins.into_iter().collect();
+                            borrow_params.sort();
+                            let mut borrow_param_indices: Vec<usize> = borrow_params
+                                .iter()
+                                .filter_map(|name| self.current_param_indices.get(name).copied())
+                                .collect();
+                            borrow_param_indices.sort_unstable();
+                            let return_key = (expr.span.file, expr.span.start, expr.span.end);
+                            if self.recorded_return_spans.insert(return_key) {
+                                self.return_origins.push(ReturnOrigin {
+                                    function: self.current_function.clone(),
+                                    function_span: self.current_function_span,
+                                    span: expr.span,
+                                    borrow_params,
+                                    borrow_param_indices,
+                                });
+                            }
+                        }
+                        Source::Opaque => {}
+                    }
+                }
+                if !matches!(expr.kind.as_ref(), ast::ExpressionKind::Reference { .. }) {
                     self.check_expr(expr, scopes, ref_sources, ptr_locals, ref_params);
                 }
             }
@@ -574,6 +715,10 @@ mod tests {
             .map(|e| e.message)
             .collect()
     }
+    fn report(source: &str) -> EscapeReport {
+        let program = parse(source);
+        analyze_program(&program)
+    }
 
     fn parse(source: &str) -> ast::Program {
         let tokens = crate::lexer::lex(source).expect("lex failed");
@@ -650,5 +795,50 @@ mod tests {
     fn mut_reference_param_is_allowed() {
         let errs = errors("i64* f(&mut i64 r) { *r = *r + 1; return r; }");
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+    #[test]
+    fn return_origin_tracks_reference_parameter() {
+        let report = report("i64* f(&i64 r) { return r; }");
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.return_origins[0].function, "f");
+        assert_eq!(report.return_origins[0].borrow_params, ["r"]);
+        assert_eq!(report.return_origins[0].borrow_param_indices, [0]);
+    }
+
+    #[test]
+    fn return_origin_tracks_the_actual_reference_parameter() {
+        let report = report("i64* f(&i64 first, &i64 second) { return second; }");
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.return_origins[0].borrow_params, ["second"]);
+        assert_eq!(report.return_origins[0].borrow_param_indices, [1]);
+    }
+
+    #[test]
+    fn independent_return_origin_is_empty() {
+        let report = report("i64 g = 42; i64* f() { return &g; }");
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.return_origins[0].borrow_params, Vec::<String>::new());
+    }
+    #[test]
+    fn opaque_return_is_not_advertised_as_independent() {
+        let report = report("i64* f() { return &make_value(); }");
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(report.return_origins.is_empty());
     }
 }

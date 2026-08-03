@@ -63,6 +63,5 @@ i32 main() {
         @println("  early return triggered");
         return 0;
     }
-
     return 1; // unreachable
 }

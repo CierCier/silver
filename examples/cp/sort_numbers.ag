@@ -25,7 +25,5 @@ i32 main() {
         i = i + 1;
     }
 
-    v.drop();
-    s.drop();
     return 0;
 }

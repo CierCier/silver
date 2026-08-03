@@ -1,6 +1,7 @@
 import std.io;
+import std.mem;
 
 i32 main() {
-    println("Hello, World!");
+	@println("Hello, World!");
     return 0;
 }
