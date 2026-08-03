@@ -41,19 +41,19 @@ impl Queue<T> {
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the queue.
-    i64 len(Queue<T>* self) {
+    i64 len(&Queue<T> self) {
         return self.len;
     }
 
     /// True when `len` is zero.
-    bool is_empty(Queue<T>* self) {
+    bool is_empty(&Queue<T> self) {
         return self.len == 0;
     }
 
     // -- Mutation --------------------------------------------------------
 
     /// Push `value` to the back of the queue (O(1) amortized).
-    void push(Queue<T>* self, T value) {
+    void push(&mut Queue<T> self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
@@ -82,7 +82,7 @@ impl Queue<T> {
     }
 
     /// Remove and return the front element.  Aborts if empty.
-    T pop(Queue<T>* self) {
+    T pop(&mut Queue<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -93,7 +93,7 @@ impl Queue<T> {
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.
-    T front(Queue<T>* self) {
+    T front(&Queue<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -101,7 +101,7 @@ impl Queue<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
-    void clear(Queue<T>* self) {
+    void clear(&mut Queue<T> self) {
         self.len = 0;
         self.head = 0;
     }

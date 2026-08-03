@@ -3693,7 +3693,7 @@ impl TypeChecker {
     fn receiver_compatible(&self, param: &Type, receiver: &Type, score: &mut usize) -> bool {
         match param {
             Type::Reference { inner, .. } => {
-                if self.is_assignable(inner, receiver) {
+                if self.is_assignable(param, receiver) || self.is_assignable(inner, receiver) {
                     true
                 } else if self.is_implicitly_castable(receiver, inner) {
                     *score += 1;

@@ -400,13 +400,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let receiver_ty = self.resolve_receiver_type(receiver);
             let receiver_is_pointer = receiver_ty
                 .as_ref()
-                .map(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)))
+                .map(|ty| {
+                    matches!(
+                        ty.kind.as_ref(),
+                        ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                    )
+                })
                 .unwrap_or(false);
 
             let expects_ref = signature
                 .as_ref()
                 .and_then(|sig| sig.params.first())
-                .map(|first| matches!(first.kind.as_ref(), ast::TypeKind::Pointer(_)))
+                .map(|first| {
+                    matches!(
+                        first.kind.as_ref(),
+                        ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                    )
+                })
                 .unwrap_or_else(|| {
                     function
                         .get_type()

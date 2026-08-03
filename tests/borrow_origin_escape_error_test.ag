@@ -1,0 +1,9 @@
+// A reference to a local value cannot escape its defining function.
+i64* bad_borrow() {
+    i64 local = 5;
+    return &local;
+}
+
+i64 main() {
+    return 0;
+}

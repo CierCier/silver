@@ -49,17 +49,17 @@ impl Vec<T> {
     // -- Size / capacity ------------------------------------------------
 
     /// Number of elements currently in the vector.
-    i64 len(Vec<T>* self) {
+    i64 len(&Vec<T> self) {
         return self.len;
     }
 
     /// Total allocated capacity.
-    i64 capacity(Vec<T>* self) {
+    i64 capacity(&Vec<T> self) {
         return self.cap;
     }
 
     /// True when `len` is zero.
-    bool is_empty(Vec<T>* self) {
+    bool is_empty(&Vec<T> self) {
         return self.len == 0;
     }
 
@@ -68,24 +68,24 @@ impl Vec<T> {
     /// Read element at `index`.  Returns a COPY — for owned-element types
     /// this creates a shallow copy that shares resources with the backing
     /// buffer.  Prefer `get_ptr` or `take` for owned types.
-    T get(Vec<T>* self, i64 index) {
+    T get(&Vec<T> self, i64 index) {
         return self.data[index];
     }
 
     /// Pointer to element at `index`.
-    T* get_ptr(Vec<T>* self, i64 index) {
+    T* get_ptr(&Vec<T> self, i64 index) {
         return &(self.data[index]);
     }
 
     /// Overwrite element at `index`.
-    void set(Vec<T>* self, i64 index, T value) {
+    void set(&mut Vec<T> self, i64 index, T value) {
         self.data[index] = move value;
     }
 
     // -- Mutation -------------------------------------------------------
 
     /// Append `value` to the end (O(1) amortized).
-    void push(Vec<T>* self, T value) {
+    void push(&mut Vec<T> self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
@@ -100,25 +100,25 @@ impl Vec<T> {
 
     /// Remove and return the last element.  Assumes `len > 0`.
     /// The stale slot retains a copy; do NOT read a popped index.
-    T pop(Vec<T>* self) {
+    T pop(&mut Vec<T> self) {
         self.len = self.len - 1;
         T result = self.data[self.len];
         return result;
     }
 
     /// Move value out of position `index`.
-    T take(Vec<T>* self, i64 index) {
+    T take(&mut Vec<T> self, i64 index) {
         T result = self.data[index];
         return result;
     }
 
     /// Remove all elements without freeing the backing buffer.
-    void clear(Vec<T>* self) {
+    void clear(&mut Vec<T> self) {
         self.len = 0;
     }
 
     /// Reserve at least `min_capacity` elements, growing if needed.
-    void reserve(Vec<T>* self, i64 min_capacity) {
+    void reserve(&mut Vec<T> self, i64 min_capacity) {
         if (self.cap >= min_capacity) {
             return;
         }
@@ -127,7 +127,7 @@ impl Vec<T> {
     }
 
     /// Shrink capacity to match length.
-    void shrink_to_fit(Vec<T>* self) {
+    void shrink_to_fit(&mut Vec<T> self) {
         if (self.len == 0) {
             if (self.data != (T*)0) {
                 free(self.data);

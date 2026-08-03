@@ -1,0 +1,82 @@
+// End-to-end coverage for reference parameters and reference receivers.
+struct Pair {
+    i64 left;
+    i64 right;
+}
+
+i64* first(&Pair pair) {
+    return &pair.left;
+}
+
+i64* choose_second(&Pair first_pair, &Pair second_pair) {
+    return &second_pair.right;
+}
+
+impl Pair {
+    i64* right_ref(&Pair self) {
+        return &self.right;
+    }
+
+    void bump(&mut Pair self) {
+        self.left = self.left + 1;
+    }
+}
+
+i64 read_through_raw(Pair* pair) {
+    i64* right = pair.right_ref();
+    return *right;
+}
+
+i64 read_through_ref(&Pair pair) {
+    i64* right = pair.right_ref();
+    return *right;
+}
+
+void bump_through_ref(&mut Pair pair) {
+    pair.bump();
+}
+
+i64 main() {
+    Pair first_pair;
+    first_pair.left = 10;
+    first_pair.right = 11;
+
+    Pair second_pair;
+    second_pair.left = 20;
+    second_pair.right = 21;
+
+    i64* left = first(&first_pair);
+    if (*left != 10) {
+        return 1;
+    }
+
+    i64* chosen = choose_second(&first_pair, &second_pair);
+    if (*chosen != 21) {
+        return 2;
+    }
+
+    i64* method_result = second_pair.right_ref();
+
+    if (read_through_raw(&second_pair) != 21) {
+        return 5;
+    }
+
+    if (read_through_ref(&second_pair) != 21) {
+        return 6;
+    }
+    if (*method_result != 21) {
+        return 3;
+    }
+
+    bump_through_ref(&mut second_pair);
+    if (second_pair.left != 21) {
+        return 7;
+    }
+
+    first_pair.bump();
+    if (first_pair.left != 11) {
+        return 4;
+    }
+
+    return 0;
+}

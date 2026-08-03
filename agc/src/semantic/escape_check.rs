@@ -832,6 +832,35 @@ mod tests {
         assert_eq!(report.return_origins[0].borrow_params, Vec::<String>::new());
     }
     #[test]
+    fn return_origin_tracks_reference_method_receiver() {
+        let report =
+            report("struct T { i64 value; } impl T { i64* get(&T self) { return &self.value; } }");
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.return_origins[0].function, "get");
+        assert_eq!(report.return_origins[0].borrow_params, ["self"]);
+        assert_eq!(report.return_origins[0].borrow_param_indices, [0]);
+    }
+
+    #[test]
+    fn return_origin_tracks_mut_reference_method_receiver() {
+        let report = report(
+            "struct T { i64 value; } impl T { i64* get_mut(&mut T self) { return &self.value; } }",
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.return_origins[0].function, "get_mut");
+        assert_eq!(report.return_origins[0].borrow_params, ["self"]);
+        assert_eq!(report.return_origins[0].borrow_param_indices, [0]);
+    }
+
+    #[test]
     fn opaque_return_is_not_advertised_as_independent() {
         let report = report("i64* f() { return &make_value(); }");
         assert!(

@@ -8,7 +8,7 @@ trait IntoIterator<Self> {
     IntoIter into_iter(Self self);
 }
 
-// Iterator: types that yield values via next(&self).
+// Iterator: types that yield values via next(Self* self).
 trait Iterator<Self> {
     type Item;
     Optional<Item> next(Self* self);

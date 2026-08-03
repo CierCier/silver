@@ -41,19 +41,19 @@ impl Deque<T> {
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the deque.
-    i64 len(Deque<T>* self) {
+    i64 len(&Deque<T> self) {
         return self.len;
     }
 
     /// True when `len` is zero.
-    bool is_empty(Deque<T>* self) {
+    bool is_empty(&Deque<T> self) {
         return self.len == 0;
     }
 
     // -- Mutation --------------------------------------------------------
 
     /// Grow capacity to at least `min_cap`, linearizing the ring buffer.
-    void grow(Deque<T>* self, i64 min_cap) {
+    void grow(&mut Deque<T> self, i64 min_cap) {
         i64 new_cap = self.cap;
         if (new_cap == 0) {
             new_cap = 1;
@@ -79,7 +79,7 @@ impl Deque<T> {
     }
 
     /// Push `value` to the back (O(1) amortized).
-    void push_back(Deque<T>* self, T value) {
+    void push_back(&mut Deque<T> self, T value) {
         if (self.len >= self.cap) {
             i64 min_cap = 1;
             if (self.cap != 0) {
@@ -93,7 +93,7 @@ impl Deque<T> {
     }
 
     /// Push `value` to the front (O(1) amortized).
-    void push_front(Deque<T>* self, T value) {
+    void push_front(&mut Deque<T> self, T value) {
         if (self.len >= self.cap) {
             i64 min_cap = 1;
             if (self.cap != 0) {
@@ -107,7 +107,7 @@ impl Deque<T> {
     }
 
     /// Remove and return the front element.  Aborts if empty.
-    T pop_front(Deque<T>* self) {
+    T pop_front(&mut Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -118,7 +118,7 @@ impl Deque<T> {
     }
 
     /// Remove and return the back element.  Aborts if empty.
-    T pop_back(Deque<T>* self) {
+    T pop_back(&mut Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -129,7 +129,7 @@ impl Deque<T> {
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.
-    T front(Deque<T>* self) {
+    T front(&Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -137,7 +137,7 @@ impl Deque<T> {
     }
 
     /// Return a copy of the back element without removing it.  Aborts if empty.
-    T back(Deque<T>* self) {
+    T back(&Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -146,7 +146,7 @@ impl Deque<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
-    void clear(Deque<T>* self) {
+    void clear(&mut Deque<T> self) {
         self.len = 0;
         self.head = 0;
     }

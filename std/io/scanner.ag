@@ -67,7 +67,7 @@ impl Scanner {
 
     /// Return true if more non-whitespace tokens are available.
     /// Restores any saved delimiter and skips whitespace.
-    bool has_next(Scanner* self) {
+    bool has_next(&mut Scanner self) {
         if (self.has_saved) {
             self.buf[self.saved_end] = self.saved_byte;
             self.has_saved = false;
@@ -86,7 +86,7 @@ impl Scanner {
     /// Return the next whitespace-delimited token as a borrowed NUL-terminated str.
     /// The returned pointer is valid until the next mutating scanner call.
     /// Sets ok = false and returns (str)0 when no token remains.
-    str next(Scanner* self) {
+    str next(&mut Scanner self) {
         if (!self.has_next()) {
             self.ok = false;
             return (str)0;
@@ -108,7 +108,7 @@ impl Scanner {
 
     /// Return the next token as an owned String.
     /// Sets ok = false on failure.
-    String next_string(Scanner* self) {
+    String next_string(&mut Scanner self) {
         str tok = self.next();
         if (!self.ok) {
             return String.new();
@@ -118,7 +118,7 @@ impl Scanner {
 
     /// Parse the next token as a signed integer, saturating to [lo, hi] on
     /// overflow (ok = false). Non-numeric tokens set ok = false and return 0.
-    i64 _parse_signed(Scanner* self, i64 lo, i64 hi) {
+    i64 _parse_signed(&mut Scanner self, i64 lo, i64 hi) {
         str tok = self.next();
         if (!self.ok) {
             return 0;
@@ -183,7 +183,7 @@ impl Scanner {
 
     /// Parse the next token as an unsigned integer, saturating to [0, hi] on
     /// overflow (ok = false). A leading '-' sets ok = false and returns 0.
-    u64 _parse_unsigned(Scanner* self, u64 hi) {
+    u64 _parse_unsigned(&mut Scanner self, u64 hi) {
         str tok = self.next();
         if (!self.ok) {
             return (u64)0;
@@ -230,31 +230,31 @@ impl Scanner {
 
     /// Parse the next token as a signed i8.
     /// Overflow saturates to i8::MIN or i8::MAX and sets ok = false.
-    i8 next_i8(Scanner* self) {
+    i8 next_i8(&mut Scanner self) {
         return (i8)self._parse_signed(-128, 127);
     }
 
     /// Parse the next token as a signed i16.
     /// Overflow saturates to i16::MIN or i16::MAX and sets ok = false.
-    i16 next_i16(Scanner* self) {
+    i16 next_i16(&mut Scanner self) {
         return (i16)self._parse_signed(-32768, 32767);
     }
 
     /// Parse the next token as a signed i32.
     /// Overflow saturates to i32::MIN or i32::MAX and sets ok = false.
-    i32 next_i32(Scanner* self) {
+    i32 next_i32(&mut Scanner self) {
         return (i32)self._parse_signed(-2147483647 - 1, 2147483647);
     }
 
     /// Parse the next token as a signed i64.
     /// Overflow saturates to i64::MIN or i64::MAX and sets ok = false.
-    i64 next_i64(Scanner* self) {
+    i64 next_i64(&mut Scanner self) {
         return self._parse_signed(-9223372036854775807 - 1, 9223372036854775807);
     }
 
     /// Parse the next token as a signed i128.
     /// Overflow saturates to i128::MIN or i128::MAX and sets ok = false.
-    i128 next_i128(Scanner* self) {
+    i128 next_i128(&mut Scanner self) {
         str tok = self.next();
         if (!self.ok) {
             return (i128)0;
@@ -317,31 +317,31 @@ impl Scanner {
 
     /// Parse the next token as an unsigned u8.
     /// Overflow sets ok = false and returns u8::MAX.
-    u8 next_u8(Scanner* self) {
+    u8 next_u8(&mut Scanner self) {
         return (u8)self._parse_unsigned(255);
     }
 
     /// Parse the next token as an unsigned u16.
     /// Overflow sets ok = false and returns u16::MAX.
-    u16 next_u16(Scanner* self) {
+    u16 next_u16(&mut Scanner self) {
         return (u16)self._parse_unsigned(65535);
     }
 
     /// Parse the next token as an unsigned u32.
     /// Overflow sets ok = false and returns u32::MAX.
-    u32 next_u32(Scanner* self) {
+    u32 next_u32(&mut Scanner self) {
         return (u32)self._parse_unsigned(4294967295);
     }
 
     /// Parse the next token as an unsigned u64.
     /// Overflow sets ok = false and returns u64::MAX.
-    u64 next_u64(Scanner* self) {
+    u64 next_u64(&mut Scanner self) {
         return self._parse_unsigned(18446744073709551615);
     }
 
     /// Parse the next token as an unsigned u128.
     /// Overflow sets ok = false and returns u128::MAX.
-    u128 next_u128(Scanner* self) {
+    u128 next_u128(&mut Scanner self) {
         str tok = self.next();
         if (!self.ok) {
             return (u128)0;
@@ -390,7 +390,7 @@ impl Scanner {
     /// Parse the next token as a 64-bit float.
     /// Supports optional sign, fraction and exponent. Values that overflow
     /// become infinity (IEEE semantics); malformed tokens set ok = false.
-    f64 next_f64(Scanner* self) {
+    f64 next_f64(&mut Scanner self) {
         str tok = self.next();
         if (!self.ok) {
             return 0.0;
@@ -475,7 +475,7 @@ impl Scanner {
 
     /// Parse the next token as a 32-bit float.
     /// Same syntax as next_f64; the result is narrowed to f32.
-    f32 next_f32(Scanner* self) {
+    f32 next_f32(&mut Scanner self) {
         f64 v = self.next_f64();
         if (!self.ok) {
             return (f32)0;
@@ -485,7 +485,7 @@ impl Scanner {
 
     /// Parse the next token as a boolean ("true" / "false").
     /// Any other token sets ok = false and returns false.
-    bool next_bool(Scanner* self) {
+    bool next_bool(&mut Scanner self) {
         str tok = self.next();
         if (!self.ok) {
             return false;
@@ -504,7 +504,7 @@ impl Scanner {
     /// Return the next line (bytes up to but not including LF or CRLF).
     /// The returned str is a borrowed NUL-terminated view into the buffer.
     /// Sets ok = false at EOF.
-    str next_line(Scanner* self) {
+    str next_line(&mut Scanner self) {
         // Restore previous saved delimiter.
         if (self.has_saved) {
             self.buf[self.saved_end] = self.saved_byte;
@@ -551,7 +551,7 @@ impl Scanner {
     }
 
     /// Return true if no errors have been encountered.
-    bool good(Scanner* self) {
+    bool good(&Scanner self) {
         return self.ok;
     }
 }

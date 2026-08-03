@@ -31,22 +31,22 @@ impl String {
         return s;
     }
 
-    i64 len(String* self) {
+    i64 len(&String self) {
         return self.len;
     }
 
-    i64 capacity(String* self) {
+    i64 capacity(&String self) {
         return self.capacity;
     }
 
-    void clear(String* self) {
+    void clear(&mut String self) {
         self.len = 0;
         if (self.data != (u8*)0) {
             self.data[0] = (u8)0;
         }
     }
 
-    void push(String* self, u8 ch) {
+    void push(&mut String self, u8 ch) {
         // Need space for the character plus the null terminator
         if (self.len + 2 > self.capacity) {
             i64 new_cap = self.capacity * 2;
@@ -61,7 +61,7 @@ impl String {
         self.data[self.len] = (u8)0;
     }
 
-    void push_str(String* self, str text) {
+    void push_str(&mut String self, str text) {
         if (text == (str)0) {
             return;
         }
@@ -82,9 +82,9 @@ impl String {
         self.data[self.len] = (u8)0;
     }
 
-    // Clone borrows self (by pointer), creates a deep copy, and returns it.
+    // Clone borrows self by shared reference, creates a deep copy, and returns it.
     // The caller retains ownership of the original string.
-    String clone(String* self) {
+    String clone(&String self) {
         String s = String.with_capacity(self.capacity);
         s.len = self.len;
         if (self.len > 0) {
@@ -94,7 +94,7 @@ impl String {
         return s;
     }
 
-    bool equals(String* self, str other) {
+    bool equals(&String self, str other) {
         if (other == (str)0) {
             return false;
         }
@@ -104,7 +104,7 @@ impl String {
         return strcmp((const char*)self.data, other) == 0;
     }
 
-    const char* to_str(String* self) {
+    const char* to_str(&String self) {
         if (self.data == (u8*)0) {
             return "";
         }
@@ -126,7 +126,7 @@ impl String {
         return (str)self.data;
     }
 
-    String trim(String* self) {
+    String trim(&String self) {
         i64 start = 0;
         i64 end = self.len;
         while (start < self.len) {
@@ -153,7 +153,7 @@ impl String {
         return result;
     }
 
-    bool starts_with(String* self, str prefix) {
+    bool starts_with(&String self, str prefix) {
         if (prefix == (str)0) {
             return false;
         }
@@ -167,7 +167,7 @@ impl String {
         return memcmp((const void*)self.data, (const void*)prefix, prefix_len) == 0;
     }
 
-    bool ends_with(String* self, str suffix) {
+    bool ends_with(&String self, str suffix) {
         if (suffix == (str)0) {
             return false;
         }
@@ -181,7 +181,7 @@ impl String {
         return memcmp((const void*)&self.data[self.len - suffix_len], (const void*)suffix, suffix_len) == 0;
     }
 
-    bool contains(String* self, str needle) {
+    bool contains(&String self, str needle) {
         if (needle == (str)0) {
             return false;
         }
@@ -200,7 +200,7 @@ impl String {
         return false;
     }
 
-    i64 find(String* self, str needle) {
+    i64 find(&String self, str needle) {
         if (needle == (str)0) {
             return -1;
         }
@@ -219,7 +219,7 @@ impl String {
         return -1;
     }
 
-    String substr(String* self, i64 start, i64 len) {
+    String substr(&String self, i64 start, i64 len) {
         if (start < 0) {
             start = 0;
         }
@@ -241,7 +241,7 @@ impl String {
         return result;
     }
 
-    SplitIter split(String* self, str delimiter) {
+    SplitIter split(&String self, str delimiter) {
         SplitIter it;
         it.data = self.data;
         it.len = self.len;
@@ -285,7 +285,7 @@ impl String {
         return result;
     }
 
-    String replace(String* self, str needle, str replacement) {
+    String replace(&String self, str needle, str replacement) {
         if (needle == (str)0 || self.len == 0) {
             return self.clone();
         }
@@ -336,11 +336,11 @@ impl String {
         }
         return result;
     }
-    i64 byte_len(String* self) {
+    i64 byte_len(&String self) {
         return self.len;
     }
 
-    bool is_valid_utf8(String* self) {
+    bool is_valid_utf8(&String self) {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
         while (i < self.len) {
@@ -390,7 +390,7 @@ impl String {
         return true;
     }
 
-    i64 char_len(String* self) {
+    i64 char_len(&String self) {
         if (self.data == (u8*)0) { return 0; }
         i64 count = 0;
         i64 i = 0;
@@ -410,7 +410,7 @@ impl String {
         return count;
     }
 
-    bool push_codepoint(String* self, u32 cp) {
+    bool push_codepoint(&mut String self, u32 cp) {
         // Reject surrogates and out-of-range values
         if (cp >= (u32)0xD800 && cp <= (u32)0xDFFF) { return false; }
         if (cp > (u32)0x10FFFF) { return false; }

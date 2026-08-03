@@ -19,33 +19,33 @@ impl HashSet<K> {
     }
 
     /// Number of entries in the set.
-    i64 len(HashSet<K>* self) {
+    i64 len(&HashSet<K> self) {
         return self.map.len();
     }
 
     /// True when no entries.
-    bool is_empty(HashSet<K>* self) {
+    bool is_empty(&HashSet<K> self) {
         return self.map.is_empty();
     }
 
     /// Insert a key into the set.  If the key already exists, it is replaced
     /// (the set remains unchanged in logical value).
-    void insert(HashSet<K>* self, K key) {
+    void insert(&mut HashSet<K> self, K key) {
         self.map.insert(key, true);
     }
 
     /// Return true if the set contains the key.
-    bool contains(HashSet<K>* self, K key) {
+    bool contains(&HashSet<K> self, K key) {
         return self.map.contains_key(key);
     }
 
     /// Remove a key from the set.  Returns true if the key was present.
-    bool erase(HashSet<K>* self, K key) {
+    bool erase(&mut HashSet<K> self, K key) {
         return self.map.erase(key);
     }
 
     /// Remove all elements without releasing the backing memory.
-    void clear(HashSet<K>* self) {
+    void clear(&mut HashSet<K> self) {
         self.map.clear();
     }
 }

@@ -54,6 +54,7 @@ expected_compile_failure() {
         inherent_drop_error_test) return 0 ;;
         return_droppable_without_move_error_test) return 0 ;;
         static_volatile_negative_test) return 0 ;;
+        borrow_origin_escape_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

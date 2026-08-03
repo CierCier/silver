@@ -755,7 +755,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .parameters
                     .first()
                     .map(|param| {
-                        matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_))
+                        matches!(
+                            param.param_type.kind.as_ref(),
+                            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                        )
                     })
                     .unwrap_or(false);
                 self.method_receivers
@@ -1009,7 +1012,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .parameters
                         .first()
                         .map(|param| {
-                            matches!(param.param_type.kind.as_ref(), ast::TypeKind::Pointer(_))
+                            matches!(
+                                param.param_type.kind.as_ref(),
+                                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                            )
                         })
                         .unwrap_or(false);
                     self.method_receivers

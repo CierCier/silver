@@ -3969,12 +3969,13 @@ impl PRT_Parser {
             return ast::MethodKind::InstanceValue;
         }
 
-        if let ast::TypeKind::Pointer(pointer) = first_param.param_type.kind.as_ref()
-            && Self::same_type_shape(&pointer.inner, impl_self_type)
-        {
-            return ast::MethodKind::InstancePointer {
-                is_mutable: pointer.is_mutable,
-            };
+        let (inner, is_mutable) = match first_param.param_type.kind.as_ref() {
+            ast::TypeKind::Pointer(pointer) => (&pointer.inner, pointer.is_mutable),
+            ast::TypeKind::Reference(reference) => (&reference.inner, reference.is_mutable),
+            _ => return ast::MethodKind::Static,
+        };
+        if Self::same_type_shape(inner, impl_self_type) {
+            return ast::MethodKind::InstancePointer { is_mutable };
         }
 
         ast::MethodKind::Static

@@ -42,19 +42,19 @@ impl BinaryHeap<T> {
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the heap.
-    i64 len(BinaryHeap<T>* self) {
+    i64 len(&BinaryHeap<T> self) {
         return self.len;
     }
 
     /// True when `len` is zero.
-    bool is_empty(BinaryHeap<T>* self) {
+    bool is_empty(&BinaryHeap<T> self) {
         return self.len == 0;
     }
 
     // -- Mutation --------------------------------------------------------
 
     /// Push `value` onto the heap (O(log n)).
-    void push(BinaryHeap<T>* self, T value) {
+    void push(&mut BinaryHeap<T> self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
@@ -82,7 +82,7 @@ impl BinaryHeap<T> {
     }
 
     /// Remove and return the greatest element.  Aborts if empty.
-    T pop(BinaryHeap<T>* self) {
+    T pop(&mut BinaryHeap<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -116,7 +116,7 @@ impl BinaryHeap<T> {
     }
 
     /// Return a copy of the greatest element without removing it.  Aborts if empty.
-    T peek(BinaryHeap<T>* self) {
+    T peek(&BinaryHeap<T> self) {
         if (self.len == 0) {
             abort();
         }
@@ -124,7 +124,7 @@ impl BinaryHeap<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
-    void clear(BinaryHeap<T>* self) {
+    void clear(&mut BinaryHeap<T> self) {
         self.len = 0;
     }
 }

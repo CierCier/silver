@@ -28,15 +28,15 @@ impl Bytes {
         return b;
     }
 
-    i64 len(Bytes* self) {
+    i64 len(&Bytes self) {
         return self.len;
     }
 
-    i64 capacity(Bytes* self) {
+    i64 capacity(&Bytes self) {
         return self.cap;
     }
 
-    void push(Bytes* self, u8 byte) {
+    void push(&mut Bytes self, u8 byte) {
         if (self.len + 1 > self.cap) {
             i64 new_cap = self.cap * 2;
             if (new_cap < 16) {
@@ -49,7 +49,7 @@ impl Bytes {
         self.len = self.len + 1;
     }
 
-    void extend(Bytes* self, u8* src, i64 src_len) {
+    void extend(&mut Bytes self, u8* src, i64 src_len) {
         if (src_len <= 0) {
             return;
         }
@@ -72,25 +72,25 @@ impl Bytes {
         self.len = self.len + src_len;
     }
 
-    u8 get(Bytes* self, i64 index) {
+    u8 get(&Bytes self, i64 index) {
         if (index < 0 || index >= self.len) {
             abort();
         }
         return self.data[index];
     }
 
-    void set(Bytes* self, i64 index, u8 value) {
+    void set(&mut Bytes self, i64 index, u8 value) {
         if (index < 0 || index >= self.len) {
             abort();
         }
         self.data[index] = value;
     }
 
-    u8* as_ptr(Bytes* self) {
+    u8* as_ptr(&Bytes self) {
         return self.data;
     }
 
-    void clear(Bytes* self) {
+    void clear(&mut Bytes self) {
         self.len = 0;
     }
 }
