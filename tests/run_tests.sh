@@ -42,6 +42,7 @@ test_specific_flags() {
     case "$1" in
         static_link_test) echo "--static-runtime" ;;
         thread_test) echo "--static-runtime" ;;
+        launch_wait_test) echo "--static-runtime" ;;
         *) echo "" ;;
     esac
 }
@@ -56,6 +57,7 @@ expected_compile_failure() {
         return_droppable_without_move_error_test) return 0 ;;
         static_volatile_negative_test) return 0 ;;
         borrow_origin_escape_error_test) return 0 ;;
+        launch_wait_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

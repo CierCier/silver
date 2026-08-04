@@ -1,0 +1,15 @@
+// Negative test: a Task is consumed by `wait` — awaiting it a second time is
+// a use-after-move, rejected at compile time by the move checker.
+
+import std.sys.entry;
+
+i64 work(i64 x) {
+    return x;
+}
+
+i64 main() {
+    Task<i64> t = launch work(1);
+    i64 r = wait t;
+    i64 s = wait t; // ERROR: use of moved value 't'
+    return 0;
+}

@@ -25,6 +25,7 @@ struct TaskRecord {
     i64 arg;     // user argument
     u8* stack;   // child stack base (parent-owned mmap; see thread.ag)
     i64 done;    // atomic: 1 once the child fn returned (thread then exits)
+    i64 pack;    // launch pack ptr (compiler-owned); 0 for spawn(): freed by the waiter
 }
 
 // Thread table and its guard. .bss, zero-initialized by the OS loader.
@@ -68,6 +69,35 @@ i64 thread_join(TaskRecord* rec) {
     return tid;
 }
 
+/// Wait for a `launch`ed task (T1). Spins on the done flag, then atomically
+/// claims and returns its pack so the caller can read the result and free it.
+/// v1 has no lazy slot-reap (a slot is reclaimed only here or by join_all at
+/// process exit), so `rec` stays stable while any waiter may reference it and
+/// the returned pack is never freed concurrently.
+u8* __silver_wait_done(i64 rec) {
+    TaskRecord* r = (TaskRecord*)rec;
+    if (r == (TaskRecord*)0) {
+        return (u8*)0;
+    }
+    i64 spins = 0;
+    while (true) {
+        if (__atomic_load_i64(&r.done, ATOMIC_ACQUIRE) == 1) {
+            break;
+        }
+        spins = spins + 1;
+    }
+    thread_lock_acquire();
+    u8* pack = (u8*)r.pack;
+    r.tid = 0;
+    r.fn = 0;
+    r.arg = 0;
+    r.stack = (u8*)0;
+    r.done = 0;
+    r.pack = 0;
+    thread_lock_release();
+    return pack;
+}
+
 /// Join every live thread. Called by `_start` before I/O flush / exit.
 void __silver_thread_registry_join_all() {
     for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
@@ -77,6 +107,12 @@ void __silver_thread_registry_join_all() {
         i64 tid = __atomic_load_i64(&g_threads[i].tid, ATOMIC_ACQUIRE);
         if (tid > 0) {
             thread_join(&g_threads[i]);
+        }
+        // Free any pack a detached (never-waited) `launch` left behind.
+        u8* pack = (u8*)g_threads[i].pack;
+        if (pack != (u8*)0) {
+            mem_free_raw_impl(pack);
+            g_threads[i].pack = 0;
         }
     }
 }

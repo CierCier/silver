@@ -25,6 +25,10 @@ pub enum Type {
     Slice {
         element: Box<Type>,
     },
+    /// A handle to a detached OS thread (`launch f(...)`). Carries the
+    /// callee's return type; `wait` joins the thread and yields it. A Task is
+    /// a plain value (an i64 handle to a thread-registry slot) with no Drop.
+    Task(Box<Type>),
     Array {
         element: Box<Type>,
         size: usize,
@@ -122,6 +126,7 @@ impl TypeContext {
                 let overall_align = inner_layout.align.unwrap_or(1).max(1);
                 TypeLayout::known(total_size, overall_align)
             }
+            Type::Task(_) => TypeLayout::known(self.pointer_size, self.pointer_align),
             Type::Slice { .. } => TypeLayout::known(16, 8),
             Type::Array { element, size } => {
                 let elem_layout = self.layout_of(element);
@@ -295,6 +300,9 @@ impl Type {
                         element: Box::new(generics.into_iter().next().unwrap()),
                     };
                 }
+                if path.len() == 1 && path[0] == "Task" && generics.len() == 1 {
+                    return Type::Task(Box::new(generics.into_iter().next().unwrap()));
+                }
                 Type::Named { path, generics }
             }
             ast::TypeKind::Generic(generic) => Type::Named {
@@ -378,6 +386,10 @@ impl Type {
                     path: vec![ident("Slice")],
                     generics: Some(vec![element.to_ast()]),
                 }),
+                Type::Task(inner) => ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ident("Task")],
+                    generics: Some(vec![inner.to_ast()]),
+                }),
                 Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
                     element_type: Box::new(element.to_ast()),
                     size: *size as i64,
@@ -439,6 +451,7 @@ impl Type {
             Type::Slice { element } => Type::Slice {
                 element: Box::new(element.substitute(mapping)),
             },
+            Type::Task(inner) => Type::Task(Box::new(inner.substitute(mapping))),
             Type::Array { element, size } => Type::Array {
                 element: Box::new(element.substitute(mapping)),
                 size: *size,
@@ -511,6 +524,7 @@ impl Type {
                 format!("Array<{}, {}>", element.canonical_key(), size)
             }
             Type::Slice { element } => format!("Slice<{}>", element.canonical_key()),
+            Type::Task(inner) => format!("Task<{}>", inner.canonical_key()),
             Type::Optional { inner } => format!("Optional<{}>", inner.canonical_key()),
             Type::Tuple(items) => {
                 let args = items
@@ -581,6 +595,7 @@ impl fmt::Display for Type {
                 }
             }
             Type::Slice { element } => write!(f, "Slice<{}>", element),
+            Type::Task(inner) => write!(f, "Task<{}>", inner),
             Type::Array { element, size } => write!(f, "Array<{}, {}>", element, size),
             Type::Optional { inner } => write!(f, "Optional<{}>", inner),
             Type::Tuple(items) => {

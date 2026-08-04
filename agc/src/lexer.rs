@@ -63,6 +63,11 @@ pub enum Token {
     In,
     True,
     False,
+    // Spawn/join keywords (fearless concurrency): `launch` starts a detached
+    // OS thread running the wrapped call; `wait` joins a Task and reads its
+    // result.
+    Launch,
+    Wait,
 
     // Integer Types
     I8,
@@ -905,6 +910,8 @@ impl Lexer {
             "macro" => Token::Macro,
             "true" => Token::True,
             "false" => Token::False,
+            "launch" => Token::Launch,
+            "wait" => Token::Wait,
 
             // Integer types
             "i8" => Token::I8,
@@ -1345,6 +1352,7 @@ mod tests {
             "comptime", "cast", "move", "ref", "extern", "pub", "asm", "true", "false", "i8",
             "i16", "i32", "i64", "i128", "u8", "private", "u16", "u32", "u64", "u128", "f32",
             "f64", "f80", "c32", "c64", "c80", "bool", "str", "char", "void", "Vec", "Optional",
+            "launch", "wait",
         ];
 
         if keywords.contains(&id_string.as_str()) {
@@ -1448,6 +1456,8 @@ mod tests {
             ("volatile", Token::Volatile),
             ("true", Token::True),
             ("false", Token::False),
+            ("launch", Token::Launch),
+            ("wait", Token::Wait),
         ];
 
         for (keyword, expected_token) in &keywords {

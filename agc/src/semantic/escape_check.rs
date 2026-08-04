@@ -547,7 +547,9 @@ impl Checker {
                 ..
             }
             | ast::ExpressionKind::Comptime(operand)
-            | ast::ExpressionKind::Move(operand) => {
+            | ast::ExpressionKind::Move(operand)
+            | ast::ExpressionKind::Launch(operand)
+            | ast::ExpressionKind::Wait(operand) => {
                 self.check_expr(operand, scopes, ref_sources, ptr_locals, ref_params);
             }
             ast::ExpressionKind::MethodCall {

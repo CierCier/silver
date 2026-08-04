@@ -1,6 +1,7 @@
 // std/sys/entry.ag — Silver _start entry point for static (no-libc) binaries.
 import std.io.file;
 import std.rt.thread_registry;
+import std.thread;
 //
 // Importing this module inlines a `_start` symbol that:
 //   1. Zeroes %rbp (ABI: marks outermost stack frame).

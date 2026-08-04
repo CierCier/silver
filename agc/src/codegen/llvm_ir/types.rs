@@ -146,6 +146,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         return Ok(self.context.i64_type().as_basic_type_enum());
                     }
                 }
+                if named.path.len() == 1
+                    && named.path[0].name == "Task"
+                    && named.generics.as_ref().is_some_and(|gs| gs.len() == 1)
+                {
+                    // A Task<T> is a plain i64 handle to a thread-registry
+                    // slot (the launch pack pointer). It has no Drop and is
+                    // consumed by `wait`.
+                    return Ok(self.context.i64_type().as_basic_type_enum());
+                }
                 let struct_ty = self.ensure_named_struct_type(named)?;
                 Ok(struct_ty.as_basic_type_enum())
             }

@@ -335,6 +335,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::ExpressionKind::Postfix { operand, .. }
             | ast::ExpressionKind::Move(operand)
             | ast::ExpressionKind::Comptime(operand)
+            | ast::ExpressionKind::Launch(operand)
+            | ast::ExpressionKind::Wait(operand)
             | ast::ExpressionKind::Reference {
                 expression: operand,
                 ..

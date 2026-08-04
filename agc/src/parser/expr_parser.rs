@@ -1451,6 +1451,24 @@ fn parse_unary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
         });
     }
 
+    if matches!(token.kind, Token::Launch) {
+        cursor.bump();
+        let call = parse_unary(cursor)?;
+        return Ok(ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Launch(Box::new(call.clone()))),
+            span: token.span.with_end(call.span.end),
+        });
+    }
+
+    if matches!(token.kind, Token::Wait) {
+        cursor.bump();
+        let task = parse_unary(cursor)?;
+        return Ok(ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Wait(Box::new(task.clone()))),
+            span: token.span.with_end(task.span.end),
+        });
+    }
+
     if matches!(token.kind, Token::Comptime) {
         cursor.bump();
         let inner = parse_unary(cursor)?;
@@ -1883,5 +1901,75 @@ mod tests {
             panic!("expected pointer type");
         };
         assert!(matches!(&*ptr.inner.kind, ast::TypeKind::Function(_)));
+    }
+
+    #[test]
+    fn parses_launch_and_wait_expressions() {
+        // `launch f(args...)` wraps the call; `wait t` wraps its Task
+        // operand. Both are prefix expressions binding tighter than the
+        // surrounding statement.
+        let source = r#"
+            i64 work(i64 x) { return x + 1; }
+            i64 main() {
+                Task<i64> t = launch work(40);
+                defer wait t;
+                return 0;
+            }
+        "#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 2);
+
+        let ast::ItemKind::Function(main) = &program.items[1].kind else {
+            panic!("expected function item");
+        };
+        let stmts = &main.body.statements;
+        assert_eq!(stmts.len(), 3);
+
+        // `Task<i64> t = launch work(40);` — the initializer is Launch
+        // wrapping a Call whose callee is the bare identifier `work`.
+        let ast::StatementKind::Let(first) = &stmts[0].kind else {
+            panic!("expected let statement");
+        };
+        let declared = first.type_annotation.as_ref().expect("type annotation");
+        let ast::TypeKind::Named(named) = &*declared.kind else {
+            panic!("expected named type annotation");
+        };
+        assert_eq!(named.path.len(), 1);
+        assert_eq!(named.path[0].name, "Task");
+        assert_eq!(named.generics.as_ref().expect("generics").len(), 1);
+
+        let init = first.initializer.as_ref().expect("initializer");
+        let ast::ExpressionKind::Launch(call) = &*init.kind else {
+            panic!("expected launch initializer");
+        };
+        let ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } = &*call.kind
+        else {
+            panic!("expected call inside launch");
+        };
+        let ast::ExpressionKind::Identifier(callee) = &*function.kind else {
+            panic!("expected identifier callee");
+        };
+        assert_eq!(callee.name, "work");
+        assert_eq!(arguments.len(), 1);
+
+        // `defer wait t;` — the deferred statement's expression is Wait.
+        let ast::StatementKind::Defer(deferred) = &stmts[1].kind else {
+            panic!("expected defer statement");
+        };
+        let ast::StatementKind::Expression(wait_expr) = &deferred.kind else {
+            panic!("expected expression statement inside defer");
+        };
+        let ast::ExpressionKind::Wait(task) = &*wait_expr.kind else {
+            panic!("expected wait expression");
+        };
+        let ast::ExpressionKind::Identifier(task_id) = &*task.kind else {
+            panic!("expected task identifier");
+        };
+        assert_eq!(task_id.name, "t");
     }
 }

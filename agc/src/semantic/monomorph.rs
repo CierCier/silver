@@ -480,6 +480,8 @@ fn collect_expression_instantiations(
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Launch(inner)
+        | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => collect_expression_instantiations(inner, generic_structs, instantiations, scopes),
@@ -977,6 +979,8 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Launch(inner)
+        | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => substitute_expression_types(inner, mapping),
@@ -1290,6 +1294,8 @@ fn rewrite_expression_function_calls(
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Launch(inner)
+        | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => rewrite_expression_function_calls(inner, name, args, mangled, span, param_count),
@@ -1550,6 +1556,8 @@ fn rewrite_expression_method_calls(
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Launch(inner)
+        | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => rewrite_expression_method_calls(inner, base, method, args, span),
@@ -1613,6 +1621,13 @@ fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
                 span,
             }],
             generics: Some(vec![type_to_ast(element, span)]),
+        }),
+        Type::Task(inner) => ast::TypeKind::Named(ast::NamedType {
+            path: vec![ast::Identifier {
+                name: "Task".to_string(),
+                span,
+            }],
+            generics: Some(vec![type_to_ast(inner, span)]),
         }),
         Type::Array { element, size } => ast::TypeKind::Array(Box::new(ast::ArrayType {
             element_type: Box::new(type_to_ast(element, span)),
@@ -1734,6 +1749,7 @@ fn is_concrete_type(ty: &Type, scopes: &Vec<HashSet<String>>) -> bool {
         }
         Type::Array { element, .. } => is_concrete_type(element, scopes),
         Type::Slice { element } => is_concrete_type(element, scopes),
+        Type::Task(inner) => is_concrete_type(inner, scopes),
         Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
             is_concrete_type(inner, scopes)
         }
@@ -2013,6 +2029,8 @@ fn collect_expression_remaining_calls(
         }
         ast::ExpressionKind::Move(inner)
         | ast::ExpressionKind::Comptime(inner)
+        | ast::ExpressionKind::Launch(inner)
+        | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
         } => {
@@ -2092,6 +2110,7 @@ fn is_concrete(ty: &Type) -> bool {
         Type::Primitive(_) | Type::Unit => true,
         Type::Pointer { inner, .. } | Type::Reference { inner, .. } => is_concrete(inner),
         Type::Slice { element } => is_concrete(element),
+        Type::Task(inner) => is_concrete(inner),
         Type::Optional { inner } => is_concrete(inner),
         Type::Tuple(items) => items.iter().all(is_concrete),
         Type::Function {

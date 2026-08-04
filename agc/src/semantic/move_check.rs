@@ -204,10 +204,16 @@ impl MoveChecker {
     }
 
     /// True if `ty` can own resources (has a Drop impl, possibly nested).
+    /// `Task<T>` handles are tracked too: `wait` consumes the handle, so a
+    /// second `wait` on the same identifier is a use-after-move.
     fn is_tracked(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),
             ast::TypeKind::Tuple(types) => types.iter().any(|t| self.is_tracked(t)),
+            ast::TypeKind::Named(named) => {
+                (named.path.len() == 1 && named.path[0].name == "Task")
+                    || self.facts.drop_owners.contains(&Facts::owner_key(ty))
+            }
             _ => self.facts.drop_owners.contains(&Facts::owner_key(ty)),
         }
     }
@@ -425,6 +431,53 @@ impl MoveChecker {
                     }
                 }
                 self.check_expr(function, state, scopes, var_types);
+            }
+            ast::ExpressionKind::Launch(inner) => {
+                // Every launch argument is moved into the child thread.
+                match inner.kind.as_ref() {
+                    ast::ExpressionKind::Call {
+                        function,
+                        arguments,
+                    } => {
+                        for arg in arguments {
+                            // Pure-identifier arguments transfer the whole
+                            // variable; anything else is an evaluated value.
+                            if let ast::ExpressionKind::Identifier(ident) = arg.kind.as_ref()
+                                && state.contains_key(&ident.name)
+                            {
+                                if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
+                                    self.error(
+                                        format!("use of moved value '{}'", ident.name),
+                                        ident.span,
+                                    );
+                                }
+                                if let Some(moved) = state.get_mut(&ident.name) {
+                                    *moved = 2;
+                                }
+                            } else {
+                                self.check_expr(arg, state, scopes, var_types);
+                            }
+                        }
+                        self.check_expr(function, state, scopes, var_types);
+                    }
+                    _ => self.check_expr(inner, state, scopes, var_types),
+                }
+            }
+            ast::ExpressionKind::Wait(inner) => {
+                // `wait t` consumes the Task handle: a second `wait t` is a
+                // use of a moved value. Non-identifier tasks (e.g. `wait
+                // tasks[0]`) cannot be tracked per-element in v1.
+                match inner.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(ident) => {
+                        if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
+                            self.error(format!("use of moved value '{}'", ident.name), ident.span);
+                        }
+                        if let Some(moved) = state.get_mut(&ident.name) {
+                            *moved = 2;
+                        }
+                    }
+                    _ => self.check_expr(inner, state, scopes, var_types),
+                }
             }
             ast::ExpressionKind::FieldAccess { object, .. }
             | ast::ExpressionKind::Index { object, .. } => {

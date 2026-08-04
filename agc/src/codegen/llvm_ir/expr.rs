@@ -954,6 +954,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(value)
             }
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
+            ast::ExpressionKind::Launch(_) => self.emit_launch_expression(expr),
+            ast::ExpressionKind::Wait(_) => self.emit_wait_expression(expr),
             ast::ExpressionKind::Asm { code, inputs } => {
                 self.emit_asm_expression(code, inputs, &expr.span)
             }

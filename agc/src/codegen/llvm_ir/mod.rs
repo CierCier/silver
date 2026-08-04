@@ -110,6 +110,8 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) debug: Option<DebugContext<'ctx>>,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
+    /// Monotonic counter for per-launch-site trampoline function names.
+    pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,
     /// (LLVM function name, doc comment text) pairs collected while
     /// generating; spliced into the printed IR in `finish()` as `;` lines.
@@ -124,6 +126,7 @@ pub(crate) mod operators;
 pub(crate) mod scope;
 pub(crate) mod stmt;
 pub(crate) mod symbols;
+pub(crate) mod tasks;
 pub(crate) mod types;
 
 #[cfg(test)]

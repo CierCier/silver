@@ -708,6 +708,16 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children.push(expression_node(inner));
             n
         }
+        ast::ExpressionKind::Launch(inner) => {
+            let mut n = Node::new("Expr::Launch");
+            n.children.push(expression_node(inner));
+            n
+        }
+        ast::ExpressionKind::Wait(inner) => {
+            let mut n = Node::new("Expr::Wait");
+            n.children.push(expression_node(inner));
+            n
+        }
         ast::ExpressionKind::Reference {
             is_mutable,
             expression,

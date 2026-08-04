@@ -79,6 +79,8 @@ fn rewrite_expression(expression: &mut ast::Expression) {
         ast::ExpressionKind::Unary { operand, .. }
         | ast::ExpressionKind::Postfix { operand, .. }
         | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand)
         | ast::ExpressionKind::Reference {
             expression: operand,
             ..

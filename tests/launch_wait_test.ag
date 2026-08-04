@@ -1,0 +1,83 @@
+// T1 `launch`/`wait` task integration test on real 1:1 OS threads.
+//
+// Covers: void-task launch + statement wait, Task<T> with a result read out
+// by `wait`, multi-argument launch, `defer wait t;` scope-exit semantics
+// (including an early-return helper so the defer runs on the return path),
+// and a detached task reaped by the _start join-all hook. Every `wait`
+// consumes its Task exactly once (the move checker rejects a second wait).
+
+import std.atomic;
+import std.sys.entry;
+
+i64 g_sum;
+
+void work_void(i64 x) {
+    __atomic_fetch_add_i64(&g_sum, x, ATOMIC_RELEASE);
+}
+
+i64 work_result(i64 x) {
+    return x * 2;
+}
+
+i64 work_multi(i64 a, i64 b, i64 c) {
+    return a + b + c;
+}
+
+i64 work_triple(i64 a) {
+    return a * 3;
+}
+
+// The `defer wait t;` must run before this function returns, so the worker's
+// increment is visible to the caller as soon as the call site resumes.
+i64 run_deferred(i64 x) {
+    Task<void> t = launch work_void(x);
+    defer wait t;
+    return 0;
+}
+
+i64 main() {
+    // 1. Void task, awaited as a statement.
+    Task<void> t0 = launch work_void(10);
+    wait t0;
+    if (__atomic_load_i64(&g_sum, ATOMIC_ACQUIRE) != 10) {
+        return 1;
+    }
+
+    // 2. Task<i64> whose result is read out by wait.
+    Task<i64> t1 = launch work_result(21);
+    i64 r1 = wait t1;
+    if (r1 != 42) {
+        return 2;
+    }
+
+    // 3. Multi-argument launch.
+    Task<i64> t2 = launch work_multi(1, 2, 3);
+    if (wait t2 != 6) {
+        return 3;
+    }
+
+    // 4. `defer wait` runs at scope exit; the worker's side effect must be
+    //    complete once the scope closes.
+    g_sum = 0;
+    Task<void> t4 = launch work_void(7);
+    {
+        defer wait t4;
+    }
+    if (__atomic_load_i64(&g_sum, ATOMIC_ACQUIRE) != 7) {
+        return 4;
+    }
+
+    // 5. Deferred wait on an early-return path.
+    g_sum = 0;
+    if (run_deferred(3) != 0) {
+        return 5;
+    }
+    if (__atomic_load_i64(&g_sum, ATOMIC_ACQUIRE) != 3) {
+        return 6;
+    }
+
+    // 6. Detached task: never waited; _start's join-all joins it and frees
+    //    its pack before exit.
+    Task<i64> t6 = launch work_result(100);
+    return 0;
+}

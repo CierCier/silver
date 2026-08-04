@@ -113,6 +113,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             temp_counter: 0,
+            task_trampoline_counter: 0,
             debug,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             leak_check: false,
@@ -210,6 +211,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             temp_counter: 0,
+            task_trampoline_counter: 0,
             leak_check,
         };
         generator.declare_imported_modules(imported_modules)?;
@@ -535,6 +537,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
             temp_counter: 0,
+            task_trampoline_counter: 0,
             leak_check,
         };
         generator.declare_imported_modules(imported_modules)?;

@@ -688,6 +688,12 @@ pub enum ExpressionKind {
         is_mutable: bool,
         expression: Box<Expression>,
     },
+    /// `launch f(args...)` — spawn a detached OS thread running the wrapped
+    /// call, moving every argument into the child. Yields a `Task<T>` handle
+    /// (T = callee return type).
+    Launch(Box<Expression>),
+    /// `wait t` — join the Task `t` (consuming it) and yield its result.
+    Wait(Box<Expression>),
     EnumVariant {
         path: Vec<Identifier>,
         variant: Identifier,

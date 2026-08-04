@@ -92,3 +92,63 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     rec.tid = tid;
     return rec;
 }
+
+/// Launch a `launch` expression's trampoline on a fresh thread (T1). `tramp`
+/// is a per-site `void(i64)` marshaller; `pack` is the compiler-owned
+/// argument/result block. Returns the TaskRecord* (as i64) to `wait` on, or 0
+/// on failure (registry full, stack mmap failure, or clone error) — in which
+/// case `pack` is freed here and a subsequent `wait` yields a zeroed result.
+/// v1: no lazy slot-reap — a slot is reclaimed only by `__silver_wait_done`
+/// or `join_all` at process exit, keeping the returned rec stable.
+i64 __silver_launch(void(i64) tramp, u8* pack) {
+    if ((i64)tramp == 0 || (i64)pack == 0) {
+        return 0;
+    }
+    thread_lock_acquire();
+    i64 slot = -1;
+    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+        if (g_threads[i].tid == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        thread_lock_release();
+        mem_free_raw_impl(pack);
+        return 0;
+    }
+    TaskRecord* rec = &g_threads[slot];
+    rec.tid = -1; // claimed, child not yet running
+    rec.fn = (i64)tramp;
+    rec.arg = (i64)pack;
+    rec.stack = (u8*)0;
+    rec.done = 0;
+    rec.pack = (i64)pack;
+    thread_lock_release();
+
+    // mmap a dedicated stack (16-byte aligned top).
+    u8* stack = mem_sys_alloc(THREAD_STACK_SIZE);
+    if (stack == (u8*)0) {
+        thread_lock_acquire();
+        rec.tid = 0;
+        rec.pack = 0;
+        thread_lock_release();
+        mem_free_raw_impl(pack);
+        return 0;
+    }
+    rec.stack = stack;
+    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
+
+    i64 tid = thread_clone_shim(THREAD_CLONE_FLAGS, top, (i64)thread_entry, (i64)rec);
+    if (tid < 0) {
+        mem_sys_free(stack, THREAD_STACK_SIZE);
+        thread_lock_acquire();
+        rec.tid = 0;
+        rec.pack = 0;
+        thread_lock_release();
+        mem_free_raw_impl(pack);
+        return 0;
+    }
+    rec.tid = tid;
+    return (i64)rec;
+}

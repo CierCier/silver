@@ -1155,7 +1155,10 @@ impl Walker<'_> {
                 self.walk_expr(expression);
                 self.walk_type(target_type);
             }
-            ast::ExpressionKind::Move(e) | ast::ExpressionKind::Comptime(e) => self.walk_expr(e),
+            ast::ExpressionKind::Move(e)
+            | ast::ExpressionKind::Comptime(e)
+            | ast::ExpressionKind::Launch(e)
+            | ast::ExpressionKind::Wait(e) => self.walk_expr(e),
             ast::ExpressionKind::Reference { expression, .. } => self.walk_expr(expression),
             ast::ExpressionKind::EnumVariant {
                 path,

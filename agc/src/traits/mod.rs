@@ -820,7 +820,8 @@ fn contains_impl_generic(ty: &Type, impl_generics: &HashSet<String>) -> bool {
         | Type::Pointer { inner, .. }
         | Type::Slice { element: inner, .. }
         | Type::Array { element: inner, .. }
-        | Type::Optional { inner } => contains_impl_generic(inner, impl_generics),
+        | Type::Optional { inner }
+        | Type::Task(inner) => contains_impl_generic(inner, impl_generics),
         Type::Tuple(items) => items
             .iter()
             .any(|inner| contains_impl_generic(inner, impl_generics)),

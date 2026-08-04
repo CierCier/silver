@@ -655,6 +655,8 @@ impl Analyzer {
             ast::ExpressionKind::Cast { expression, .. } => self.check_expression(expression),
             ast::ExpressionKind::Move(expr)
             | ast::ExpressionKind::Comptime(expr)
+            | ast::ExpressionKind::Launch(expr)
+            | ast::ExpressionKind::Wait(expr)
             | ast::ExpressionKind::Reference {
                 expression: expr, ..
             } => self.check_expression(expr),

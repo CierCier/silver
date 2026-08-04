@@ -1331,6 +1331,40 @@ impl TypeChecker {
                 ty
             }
             ast::ExpressionKind::Comptime(inner) => self.check_expr(inner, None),
+            ast::ExpressionKind::Launch(inner) => {
+                // `launch f(args...)`: the callee must be a directly-named
+                // function (no indirect/fn-pointer launch in v1). The wrapped
+                // call is validated through the normal Call path, which
+                // resolves overloads, checks argument types, and records
+                // monomorph requests. The result is a Task<ret>.
+                let call_ty = self.check_expr(inner, None);
+                let is_named_call = matches!(
+                    inner.kind.as_ref(),
+                    ast::ExpressionKind::Call { function, .. }
+                        if matches!(function.kind.as_ref(), ast::ExpressionKind::Identifier(_))
+                );
+                if is_named_call {
+                    Type::Task(Box::new(call_ty))
+                } else {
+                    self.error(
+                        "launch operand must be a call to a named function ".to_string()
+                            + "(function pointers are not supported in v1)",
+                        inner.span,
+                    );
+                    Type::Unknown
+                }
+            }
+            ast::ExpressionKind::Wait(inner) => {
+                // `wait t` joins the Task t (consuming it) and yields its
+                // result type. Non-Task operands are rejected.
+                match self.check_expr(inner, None) {
+                    Type::Task(inner_ty) => *inner_ty,
+                    other => {
+                        self.error(format!("'wait' requires a Task, got {}", other), expr.span);
+                        Type::Unknown
+                    }
+                }
+            }
             ast::ExpressionKind::Call {
                 function,
                 arguments,
@@ -3124,6 +3158,7 @@ impl TypeChecker {
                 self.is_concrete_type(inner)
             }
             Type::Slice { element } => self.is_concrete_type(element),
+            Type::Task(inner) => self.is_concrete_type(inner),
             Type::Array { element, .. } => self.is_concrete_type(element),
             Type::Optional { inner } => self.is_concrete_type(inner),
             Type::Tuple(items) => items.iter().all(|inner| self.is_concrete_type(inner)),
