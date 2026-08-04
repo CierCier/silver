@@ -17,6 +17,10 @@ impl Pair {
         return &self.right;
     }
 
+    i64* get_mut(&mut Pair self) {
+        return &self.left;
+    }
+
     void bump(&mut Pair self) {
         self.left = self.left + 1;
     }
@@ -71,6 +75,15 @@ i64 main() {
     bump_through_ref(&mut second_pair);
     if (second_pair.left != 21) {
         return 7;
+    }
+
+    i64* mutable_origin = second_pair.get_mut();
+    if (*mutable_origin != 21) {
+        return 8;
+    }
+    *mutable_origin = 25; // write through the &mut-receiver borrow
+    if (second_pair.left != 25) {
+        return 9;
     }
 
     first_pair.bump();
