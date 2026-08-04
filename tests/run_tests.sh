@@ -43,6 +43,7 @@ test_specific_flags() {
         static_link_test) echo "--static-runtime" ;;
         thread_test) echo "--static-runtime" ;;
         launch_wait_test) echo "--static-runtime" ;;
+        channel_test) echo "--static-runtime" ;;
         *) echo "" ;;
     esac
 }

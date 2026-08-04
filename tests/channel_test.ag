@@ -1,0 +1,124 @@
+// Channel + sync primitives integration test (static runtime, real threads).
+//
+// Exercises std.sync (Mutex, WaitGroup, futex helpers) and std.channel
+// (MPSC FIFO channel) on the 1:1 thread runtime:
+//   1. Single-producer FIFO with compaction: one thread sends 0..2047, the
+//      consumer recv's each in order (the head index crosses the compaction
+//      threshold, so the in-place compaction path runs and must preserve
+//      order).
+//   2. Multi-producer: 4 threads each send one unique tag 250 times; the
+//      consumer receives exactly 1000 values and verifies 250 per tag.
+//   3. Blocking recv: the consumer recv's before the producer has sent, so
+//      it must actually block on the futex and wake when the value arrives.
+//   4. Mutex + WaitGroup: 4 threads each do 10000 Mutex-guarded increments
+//      of a shared counter, then done(); the coordinator wait_all()s and
+//      verifies the exact total (any lost update would read less).
+//
+// Synchronization failures (lost wake, lost update, out-of-order recv,
+// unfreed channel buffer) surface as a non-zero exit code; leak-check and
+// join-all still run at exit.
+
+import std.thread;
+import std.atomic;
+import std.sync;
+import std.channel;
+import std.sys.linux;
+import std.sys.entry;
+
+// Shared channels (zero-initialized, which is a valid empty channel).
+Channel<i64> g_ch;    // FIFO / compaction
+Channel<i64> g_ch2;   // multi-producer
+Channel<i64> g_ch3;   // blocking recv
+
+Mutex g_mu;
+i64 g_shared;         // guarded by g_mu
+WaitGroup g_wg;       // counts the four increment workers
+
+i64 g_next_id;        // hands each producer a unique tag
+i64 g_counts[4];      // per-tag receive tallies
+
+// -- Test 1: single-producer FIFO + compaction -----------------------------
+
+void producer_seq(i64 arg) {
+    for (i64 i = 0; i < 2048; i = i + 1) {
+        g_ch.send(i);
+    }
+}
+
+// -- Test 2: multi-producer ------------------------------------------------
+
+void producer_tag(i64 arg) {
+    i64 me = __atomic_fetch_add_i64(&g_next_id, 1, ATOMIC_SEQ_CST);
+    for (i64 i = 0; i < 250; i = i + 1) {
+        g_ch2.send(me);
+    }
+}
+
+// -- Test 3: blocking recv -------------------------------------------------
+
+void producer_slow(i64 arg) {
+    // Give the consumer time to block on an empty channel first.
+    for (i64 i = 0; i < 2000; i = i + 1) {
+        sys_sched_yield();
+    }
+    g_ch3.send(777);
+}
+
+// -- Test 4: Mutex + WaitGroup ---------------------------------------------
+
+void producer_count(i64 arg) {
+    for (i64 i = 0; i < 10000; i = i + 1) {
+        g_mu.lock();
+        g_shared = g_shared + 1;
+        g_mu.unlock();
+    }
+    g_wg.done();
+}
+
+i64 main() {
+    // Test 4: Mutex + WaitGroup (run first; it stresses contention).
+    g_wg.add(4);
+    for (i64 t = 0; t < 4; t = t + 1) {
+        TaskRecord* h = thread_spawn(producer_count, 0);
+        if (h == (TaskRecord*)0) { return 1; }
+    }
+    g_wg.wait_all();
+    if (g_shared != 40000) { return 2; }
+
+    // Test 1: FIFO + compaction.
+    TaskRecord* h1 = thread_spawn(producer_seq, 0);
+    if (h1 == (TaskRecord*)0) { return 3; }
+    if (thread_join(h1) < 0) { return 4; }
+    for (i64 i = 0; i < 2048; i = i + 1) {
+        i64 v = g_ch.recv();
+        if (v != i) { return 5; }
+    }
+    if (g_ch.len() != 0) { return 6; }
+
+    // Test 2: multi-producer.
+    for (i64 t = 0; t < 4; t = t + 1) {
+        TaskRecord* h = thread_spawn(producer_tag, 0);
+        if (h == (TaskRecord*)0) { return 7; }
+    }
+    for (i64 k = 0; k < 1000; k = k + 1) {
+        i64 v = g_ch2.recv();
+        if (v < 0 || v >= 4) { return 8; }
+        g_counts[v] = g_counts[v] + 1;
+    }
+    if (g_counts[0] != 250 || g_counts[1] != 250 || g_counts[2] != 250 || g_counts[3] != 250) {
+        return 9;
+    }
+
+    // Test 3: blocking recv (consumer waits, then producer delivers).
+    TaskRecord* h3 = thread_spawn(producer_slow, 0);
+    if (h3 == (TaskRecord*)0) { return 10; }
+    i64 v3 = g_ch3.recv();   // blocks until producer_slow sends
+    if (v3 != 777) { return 11; }
+    if (thread_join(h3) < 0) { return 12; }
+
+    // Free the channel buffers so leak-check sees a clean exit.
+    g_ch.close();
+    g_ch2.close();
+    g_ch3.close();
+    return 0;
+}

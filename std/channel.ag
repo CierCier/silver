@@ -1,0 +1,114 @@
+// std/channel.ag — Multi-producer, single-consumer FIFO channels.
+//
+// Channel<T> is an unbounded FIFO queue with a blocking recv():
+//   - send(T) pushes a value (ownership moves in) and wakes one blocked
+//     receiver; it never blocks and may be called from any thread.
+//   - recv() blocks until a value is available, then returns it (ownership
+//     moves out).
+//
+// The queue is a Vec<T> guarded by a Mutex, with a head index for O(1) FIFO
+// pops; the buffer compacts in place once the consumed prefix grows large.
+// A separate seq_cst futex word (`sigs`) counts sends and is the sleep/wake
+// mechanism for blocked receivers.  recv reads the counter under the lock,
+// then futex_waits on it after unlocking: a send racing in between bumps the
+// counter, so the wait returns EAGAIN immediately and recv re-checks the
+// queue — no wake-up can be lost, and a blocked recv is woken by every send
+// until it drains the queue.
+//
+// Channel<T> owns its queue; dropping it frees the buffer.  As with all std
+// containers, elements are not individually destroyed on drop, so owned
+// element types should be fully drained before the channel goes away.
+//
+// The mutex-based queue means this is also correct (though not optimized)
+// for multiple consumers; the single-consumer contract is what v1 promises.
+
+import std.atomic;
+import std.mem.vec;
+import std.sync;
+
+struct Channel<T> {
+    Mutex mu;
+    Vec<T> queue;
+    i64 head;   // index of the front element (consumed prefix before it)
+    i32 sigs;   // send counter; the futex word receivers sleep on
+}
+
+impl Channel<T> {
+    /// A fresh, empty channel.
+    Channel<T> new() {
+        Channel<T> c;
+        c.mu = Mutex.new();
+        c.queue = Vec<T>.new();
+        c.head = 0;
+        c.sigs = 0;
+        return c;
+    }
+
+    /// Send `value` (ownership moves in).  Never blocks.
+    void send(&mut Channel<T> self, T value) {
+        self.mu.lock();
+        self.queue.push(move value);
+        self.mu.unlock();
+        __atomic_fetch_add_i32(&self.sigs, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.sigs, 1);
+    }
+
+    /// Block until a value is available, then return it (ownership moves
+    /// out).  FIFO order: values are received in the order they were sent.
+    T recv(&mut Channel<T> self) {
+        T result;
+        while (true) {
+            self.mu.lock();
+            if (self.head < self.queue.len()) {
+                T value = self.queue.take(self.head);
+                self.head = self.head + 1;
+                self.compact();
+                self.mu.unlock();
+                result = move value;
+                break;
+            }
+            // Queue empty: sleep until a send bumps the counter.  If a send
+            // raced in between the load and the syscall, futex_wait returns
+            // EAGAIN immediately and the loop re-checks under the lock.
+            i32 expected = __atomic_load_i32(&self.sigs, ATOMIC_SEQ_CST);
+            self.mu.unlock();
+            futex_wait(&self.sigs, expected);
+        }
+        return result;
+    }
+
+    /// Number of values currently buffered (approximate; for diagnostics).
+    i64 len(&Channel<T> self) {
+        self.mu.lock();
+        i64 n = self.queue.len() - self.head;
+        self.mu.unlock();
+        return n;
+    }
+
+    /// Free the backing queue (no sends/recvs after this).  The queue
+    /// buffer is heap-allocated, so closing is required for leak-check-clean
+    /// exits of long-lived (e.g. global) channels.
+    void close(&mut Channel<T> self) {
+        self.mu.lock();
+        self.queue.drop();
+        self.mu.unlock();
+    }
+
+    // Shift the live suffix to the front once the consumed prefix grows
+    // large, so a long-running producer/consumer pair does not grow the
+    // backing buffer without bound.
+    void compact(&mut Channel<T> self) {
+        if (self.head < 1024) {
+            return;
+        }
+        i64 n = self.queue.len() - self.head;
+        i64 i = 0;
+        while (i < n) {
+            T tmp = self.queue.take(self.head + i);
+            self.queue.set(i, move tmp);
+            i = i + 1;
+        }
+        self.queue.len = n;
+        self.head = 0;
+    }
+}

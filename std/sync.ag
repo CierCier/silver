@@ -1,0 +1,140 @@
+// std/sync.ag — Synchronization primitives for concurrent code.
+//
+// Building blocks for sharing state between threads: a futex-based Mutex, a
+// WaitGroup counter, and the raw futex wait/wake helpers they are built on.
+//
+// Everything here is seq_cst by default.  The futex slow-path protocol
+// (check state under the word, sleep, re-check) is only sound with strong
+// ordering — relaxed futex wait/wake can miss a wake-up — and the atomics
+// that decide whether to sleep or wake must agree with the futex word.
+//
+// The wait/wake helpers use the classic `futex` syscall (nr 202) with the
+// FUTEX_WAIT/FUTEX_WAKE opcodes, available on every Linux kernel, rather
+// than the newer split futex_wait/futex_wake syscalls (Linux >= 6.7).
+
+import std.atomic;
+import std.sys.linux;
+import std.sys.errno;
+
+// futex(2) opcodes for the classic sys_futex syscall.
+const i64 FUTEX_WAIT = 0;
+const i64 FUTEX_WAKE = 1;
+
+/// Sleep until the word at `addr` differs from `expected` or a futex_wake
+/// fires on it.  Returns as soon as the kernel reports a result (woken,
+/// value changed, or EAGAIN); callers re-check their state in a loop.  Only
+/// EINTR is retried — a signal interruption must not lose the wait.
+void futex_wait(i32* addr, i32 expected) {
+    while (true) {
+        i64 r = sys_futex((i64)addr, FUTEX_WAIT, (i64)expected, 0, 0, 0);
+        if (r != -EINTR) {
+            return;
+        }
+    }
+}
+
+/// Wake up to `nr_wake` threads blocked in futex_wait on `addr`.
+/// Returns the number of threads actually woken.
+i64 futex_wake(i32* addr, i64 nr_wake) {
+    return sys_futex((i64)addr, FUTEX_WAKE, nr_wake, 0, 0, 0);
+}
+
+// -- Mutex -----------------------------------------------------------------
+
+/// A blocking mutual-exclusion lock (futex-based).
+///
+/// state is one of:
+///   0  unlocked
+///   1  locked, no waiters parked
+///   2  locked, waiters parked on the futex word
+///
+/// `lock` fast-paths an uncontended CAS (0 -> 1), then marks the lock as
+/// contended and sleeps on `state` until the owner unlocks.  `unlock`
+/// releases with an exchange and wakes one waiter when any were parked.
+/// spurious / lost wake-ups are impossible: a waiter always re-checks the
+/// lock state after the futex returns, and a waker always exchanges the
+/// state before waking.
+struct Mutex {
+    i32 state;
+}
+
+impl Mutex {
+    /// A fresh, unlocked mutex.
+    Mutex new() {
+        Mutex m;
+        m.state = 0;
+        return m;
+    }
+
+    /// Acquire the lock, blocking until it is free.
+    void lock(&mut Mutex self) {
+        // Fast path: uncontended acquisition.
+        bool acquired = __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+        if (acquired) {
+            return;
+        }
+        // Slow path: mark waiters present, then sleep until the lock is
+        // observed free.  Exchanging to 2 (instead of just reading) is what
+        // both claims and re-claims the lock after a wake.
+        i32 old = __atomic_exchange_i32(&self.state, 2, ATOMIC_SEQ_CST);
+        while (old != 0) {
+            futex_wait(&self.state, 2);
+            old = __atomic_exchange_i32(&self.state, 2, ATOMIC_SEQ_CST);
+        }
+    }
+
+    /// Release the lock, waking one waiter if any were parked.
+    void unlock(&mut Mutex self) {
+        i32 old = __atomic_exchange_i32(&self.state, 0, ATOMIC_SEQ_CST);
+        if (old == 2) {
+            futex_wake(&self.state, 1);
+        }
+    }
+
+    /// Try to acquire the lock without blocking; true on success.
+    bool try_lock(&mut Mutex self) {
+        return __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+}
+
+// -- WaitGroup -------------------------------------------------------------
+
+/// A counter that threads decrement as work completes; `wait` blocks until
+/// it reaches zero.  Idiom: `add(1)` per unit of work before handing it to a
+/// thread, `done()` when that unit finishes, and a single `wait` in the
+/// coordinator.  The final `done` that reaches zero wakes every waiter.
+struct WaitGroup {
+    i32 count;
+}
+
+impl WaitGroup {
+    /// A fresh, zeroed wait group.
+    WaitGroup new() {
+        WaitGroup w;
+        w.count = 0;
+        return w;
+    }
+
+    /// Add `delta` units of outstanding work.  Typically 1.
+    void add(&mut WaitGroup self, i64 delta) {
+        __atomic_fetch_add_i32(&self.count, (i32)delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Mark one unit of work complete.  When the count reaches zero, wake
+    /// all waiters so a coordinator blocked in `wait_all` can proceed.
+    void done(&mut WaitGroup self) {
+        i32 prev = __atomic_fetch_sub_i32(&self.count, 1, ATOMIC_SEQ_CST);
+        if (prev == 1) {
+            futex_wake(&self.count, 2147483647);
+        }
+    }
+
+    /// Block until the count reaches zero.
+    void wait_all(&WaitGroup self) {
+        i32 c = __atomic_load_i32(&self.count, ATOMIC_SEQ_CST);
+        while (c != 0) {
+            futex_wait(&self.count, c);
+            c = __atomic_load_i32(&self.count, ATOMIC_SEQ_CST);
+        }
+    }
+}
