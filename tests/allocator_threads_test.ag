@@ -1,0 +1,103 @@
+// Multi-threaded allocator stress test.
+//
+// Spawns 4 real OS threads (raw `clone` via an asm shim, 1:1 threads sharing
+// the process address space) that hammer the allocator: size-class alloc/free
+// round trips with per-thread data patterns plus occasional huge (mmap-path)
+// allocations. The parent joins by spinning on an atomic done-counter, then
+// verifies the allocator is still coherent.
+//
+// Without the allocator spinlock (std/mem/alloc.ag) this corrupts the shared
+// free-list heads and fails — with it, all threads make progress and the
+// post-fray check passes.
+
+import std.sys.linux;
+import std.mem.alloc;
+import std.atomic;
+
+// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM
+const i64 CLONE_FLAGS = 331520;
+
+i64 g_done;
+i64 g_failed;
+
+// Raw clone shim: spawn a thread running fn(arg) on a fresh stack_top.
+// Parent: returns the child tid. Child: never returns (exits via sys_exit).
+// Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
+// arg->r10 (matching the asm("syscall") wrapper convention).
+i64 clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
+    return asm("syscall\ntest %rax, %rax\njnz 1f\nmov %r10, %rdi\ncall *%rdx\nmov $$0, %rdi\nmov $$60, %eax\nsyscall\n1:", [56, flags, stack_top, fn, arg]);
+}
+
+void worker(i64 tid) {
+    u8 pat = (u8)(tid + 1);
+    for (i64 i = 0; i < 20000; i = i + 1) {
+        i64 sz = 16 + ((i * 131 + tid * 7) % 64) * 16;
+        u8* p = alloc<u8>(sz);
+        if (p == (u8*)0) {
+            __atomic_store_i64(&g_failed, 1, ATOMIC_RELEASE);
+            break;
+        }
+        for (i64 j = 0; j < sz; j = j + 1) {
+            p[j] = pat;
+        }
+        for (i64 j = 0; j < sz; j = j + 1) {
+            if (p[j] != pat) {
+                __atomic_store_i64(&g_failed, 1, ATOMIC_RELEASE);
+                break;
+            }
+        }
+        free((void*)p);
+        // Occasional huge allocation (dedicated mmap path, no lock held).
+        if ((i & (i64)1023) == 0) {
+            u8* big = alloc<u8>(20000 + tid * 31);
+            if (big != (u8*)0) {
+                big[0] = pat;
+                big[19999] = pat;
+                free((void*)big);
+            }
+        }
+    }
+    __atomic_fetch_add_i64(&g_done, 1, ATOMIC_RELEASE);
+    sys_exit(0);
+}
+
+i64 main() {
+    i64 nthreads = 4;
+    for (i64 t = 0; t < nthreads; t = t + 1) {
+        u8* stack = mem_sys_alloc(65536);
+        if (stack == (u8*)0) {
+            return 1;
+        }
+        u8* top = (u8*)((i64)stack + 65536);
+        i64 tid = clone_shim(CLONE_FLAGS, top, (i64)worker, t);
+        if (tid < 0) {
+            return 2;
+        }
+    }
+    i64 spins = 0;
+    while (true) {
+        if (__atomic_load_i64(&g_done, ATOMIC_ACQUIRE) == nthreads) {
+            break;
+        }
+        spins = spins + 1;
+        if (spins > 500000000) {
+            return 3; // join timeout
+        }
+    }
+    if (__atomic_load_i64(&g_failed, ATOMIC_ACQUIRE) != 0) {
+        return 4;
+    }
+    // Post-fray sanity: the allocator must still hand out coherent blocks.
+    for (i64 i = 0; i < 1000; i = i + 1) {
+        u8* p = alloc<u8>(256);
+        if (p == (u8*)0) {
+            return 5;
+        }
+        p[0] = (u8)7;
+        if (p[0] != (u8)7) {
+            return 6;
+        }
+        free((void*)p);
+    }
+    return 0;
+}

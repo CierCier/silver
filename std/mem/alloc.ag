@@ -30,6 +30,7 @@
 
 import std.sys.linux;
 import std.mem.memory;
+import std.atomic;
 // Static free-list head table in .bss — eliminates lazy-init branch on every
 // alloc/free. Zero-initialized by the OS loader at program startup.
 i64 g_mem_heads[9];
@@ -140,6 +141,35 @@ void mem_refill(i64* heads, i64 idx) {
     heads[idx] = head;
 }
 
+// -- Thread safety ----------------------------------------------------------
+//
+// The free-list head table (g_mem_heads) and the leak-check tables are shared
+// mutable state. v0 makes the size-class paths of alloc/free mutually
+// exclusive with a whole-allocator spinlock so multiple 1:1 OS threads can
+// allocate and free concurrently (huge allocations talk only to the kernel via
+// mmap/munmap and touch no shared state, so they take no lock).
+//
+// The lock is a plain i32 in .bss (0 = free, 1 = held) guarded by the
+// `__atomic_cmpxchg_i32` / `__atomic_store_i32` intrinsics.
+
+/// Allocator spinlock state. 0 = free, 1 = held.
+i32 g_mem_lock;
+
+/// Acquire the allocator spinlock, spinning until the CAS succeeds.
+void mem_lock_acquire() {
+    while (true) {
+        bool acquired = __atomic_cmpxchg_i32(&g_mem_lock, 0, 1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
+        if (acquired) {
+            return;
+        }
+    }
+}
+
+/// Release the allocator spinlock.
+void mem_lock_release() {
+    __atomic_store_i32(&g_mem_lock, 0, ATOMIC_RELEASE);
+}
+
 // -- Raw allocator core -----------------------------------------------------
 
 /// Core allocation: `size` bytes with at least `align` alignment.
@@ -149,6 +179,7 @@ u8* mem_alloc_raw_impl(i64 size, i64 align) {
         return mem_dangling(align);
     }
     if (align <= MEM_HEADER_SIZE && size <= MEM_MAX_CLASS_SIZE) {
+        mem_lock_acquire();
         i64* heads = mem_heads();
         i64 idx = mem_class_index(size);
         if (heads[idx] == 0) {
@@ -156,13 +187,15 @@ u8* mem_alloc_raw_impl(i64 size, i64 align) {
         }
         i64 h = heads[idx];
         if (h == 0) {
+            mem_lock_release();
             return (u8*)0;
         }
         i64* link = (i64*)(h + MEM_HEADER_SIZE);
         heads[idx] = link[0];
+        mem_lock_release();
         return (u8*)(h + MEM_HEADER_SIZE);
     }
-    // Huge (or over-aligned) allocation: dedicated mapping.
+    // Huge (or over-aligned) allocation: dedicated mapping, no shared state.
     i64 extra = 0;
     if (align > MEM_HEADER_SIZE) {
         extra = align;
@@ -191,6 +224,7 @@ void mem_free_raw_impl(u8* ptr) {
         // Null or dangling (zero-page) pointer: no-op.
         return;
     }
+    mem_lock_acquire();
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
     i64 tag = header[1];
     if (tag >= 0 && tag < MEM_NUM_CLASSES) {
@@ -198,8 +232,10 @@ void mem_free_raw_impl(u8* ptr) {
         i64* link = (i64*)a;
         link[0] = heads[tag];
         heads[tag] = a - MEM_HEADER_SIZE;
+        mem_lock_release();
         return;
     }
+    mem_lock_release();
     if (tag < 0) {
         i64 offset = 0 - 1 - tag;
         i64 total = offset + MEM_HEADER_SIZE + header[0];
