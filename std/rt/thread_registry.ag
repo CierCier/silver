@@ -1,0 +1,82 @@
+// std/rt/thread_registry.ag — always-linked thread bookkeeping for static
+// (no-libc) runtimes that use the thread runtime (std/thread.ag).
+//
+// The registry owns the thread table and the join-all entry point called by
+// `_start` (std/sys/entry.ag) after `main` returns but before I/O flush, so
+// every spawned thread has finished before the process calls exit_group.
+// Because this module is imported by entry.ag it is present in every static
+// binary; it is a read-mostly, low-fixed-cost table (g_threads is in .bss, so
+// zero pages with no binary footprint) and join-all is a no-op when no threads
+// were ever spawned.
+
+// Imported transitively by std.sys.entry and directly by std.thread.
+import std.mem.alloc;
+import std.atomic;
+
+// Maximum concurrently live threads (slots are reclaimed by thread_join).
+const i64 MAX_THREADS = 64;
+
+// Per-thread bookkeeping. `tid` doubles as the slot liveness flag:
+//   0  = free slot,   <0 = slot claimed but child not yet running,
+//   >0 = child thread running/done (raw clone tid).
+struct TaskRecord {
+    i64 tid;     // raw clone tid; 0 = free slot (see above)
+    i64 fn;      // user function address
+    i64 arg;     // user argument
+    u8* stack;   // child stack base (parent-owned mmap; see thread.ag)
+    i64 done;    // atomic: 1 once the child fn returned (thread then exits)
+}
+
+// Thread table and its guard. .bss, zero-initialized by the OS loader.
+TaskRecord g_threads[64];
+i32 g_thread_lock;
+
+/// Acquire the registry spinlock (CAS on i32; same pattern as the allocator).
+void thread_lock_acquire() {
+    while (true) {
+        bool acquired = __atomic_cmpxchg_i32(&g_thread_lock, 0, 1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
+        if (acquired) {
+            return;
+        }
+    }
+}
+
+/// Release the registry spinlock.
+void thread_lock_release() {
+    __atomic_store_i32(&g_thread_lock, 0, ATOMIC_RELEASE);
+}
+
+/// Join one task: wait until the child fn returned, then reclaim the slot.
+/// Returns the child's tid. Silently returns -1 for a null record.
+i64 thread_join(TaskRecord* rec) {
+    if (rec == (TaskRecord*)0) {
+        return -1;
+    }
+    // Spin on the child's done flag. (A futex-based wait replaces the spin in
+    // the T1 scheduler pass; the child never exits without setting done.)
+    i64 spins = 0;
+    while (true) {
+        if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
+            break;
+        }
+        spins = spins + 1;
+    }
+    i64 tid = rec.tid;
+    thread_lock_acquire();
+    rec.tid = 0;
+    thread_lock_release();
+    return tid;
+}
+
+/// Join every live thread. Called by `_start` before I/O flush / exit.
+void __silver_thread_registry_join_all() {
+    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+        // Snapshot tid without taking the lock; a concurrent spawn only ever
+        // transitions a slot 0 -> -1 -> tid, and at this stage (process exit)
+        // no spawns remain. >0 means a child exists.
+        i64 tid = __atomic_load_i64(&g_threads[i].tid, ATOMIC_ACQUIRE);
+        if (tid > 0) {
+            thread_join(&g_threads[i]);
+        }
+    }
+}

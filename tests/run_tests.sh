@@ -41,6 +41,7 @@ expected_exit() {
 test_specific_flags() {
     case "$1" in
         static_link_test) echo "--static-runtime" ;;
+        thread_test) echo "--static-runtime" ;;
         *) echo "" ;;
     esac
 }

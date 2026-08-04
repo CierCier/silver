@@ -1,0 +1,94 @@
+// std/thread.ag — 1:1 OS-thread runtime on raw `clone` for static (no-libc)
+// Silver programs.
+//
+// The whole-allocator spinlock (std/mem/alloc.ag) makes it safe for these
+// threads to allocate/free concurrently. Synchronization is the atomics-based
+// done-flag in each TaskRecord: spawn hands the child a stack + function, the
+// child runs fn(arg), stores its done flag, and exits via sys_exit (which with
+// CLONE_THREAD ends only that thread). Callers join by spinning on the flag.
+//
+// Model: `spawn(fn, arg)` — no closures; a function (or fn pointer) plus one
+// machine word of argument. This is the M3 "threads pass addresses" core that
+// the T1 `Task<T>` message layer and channels build on.
+
+import std.sys.linux;
+import std.rt.thread_registry;
+import std.mem.alloc;
+
+// Raw clone flags for a thread that shares the process address space:
+// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM.
+const i64 THREAD_CLONE_FLAGS = 331520;
+
+// Dedicated stack size per thread (16-byte aligned top).
+const i64 THREAD_STACK_SIZE = 65536;
+
+// Raw clone shim. Spawns a thread running fn(arg) on a fresh stack_top.
+// Parent path returns the child tid in %rax. Child resumes after `syscall`
+// with rsp = stack_top and, taking the `jnz` fall-through, `call`s fn(arg)
+// then exits via sys_exit(60) (CLONE_THREAD ⇒ only this thread exits).
+// Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
+// arg->r10 (the asm("syscall") wrapper convention).
+i64 thread_clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
+    return asm("syscall\ntest %rax, %rax\njnz 1f\nmov %r10, %rdi\ncall *%rdx\nmov $$0, %rdi\nmov $$60, %eax\nsyscall\n1:", [56, flags, stack_top, fn, arg]);
+}
+
+// Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
+// user function, signals completion, then exits the thread.
+void thread_entry(i64 arg) {
+    TaskRecord* rec = (TaskRecord*)arg;
+    void(i64) fn = (void(i64))rec.fn;
+    fn(rec.arg);
+    __atomic_store_i64(&rec.done, 1, ATOMIC_RELEASE);
+    sys_exit(0);
+}
+
+/// Spawn a thread running `fn(arg)`. Returns the TaskRecord handle to join, or
+/// null on failure (registry full, stack mmap failure, or clone error).
+TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
+    if ((i64)fn == 0) {
+        return (TaskRecord*)0;
+    }
+    // Claim a registry slot under the lock.
+    thread_lock_acquire();
+    i64 slot = -1;
+    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+        if (g_threads[i].tid == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        thread_lock_release();
+        return (TaskRecord*)0;
+    }
+    TaskRecord* rec = &g_threads[slot];
+    rec.tid = -1; // claimed, child not yet running
+    rec.fn = (i64)fn;
+    rec.arg = arg;
+    rec.stack = (u8*)0;
+    rec.done = 0;
+    thread_lock_release();
+
+    // mmap a dedicated stack (16-byte aligned top; base is page-aligned and
+    // THREAD_STACK_SIZE is a multiple of 16).
+    u8* stack = mem_sys_alloc(THREAD_STACK_SIZE);
+    if (stack == (u8*)0) {
+        thread_lock_acquire();
+        rec.tid = 0;
+        thread_lock_release();
+        return (TaskRecord*)0;
+    }
+    rec.stack = stack;
+    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
+
+    i64 tid = thread_clone_shim(THREAD_CLONE_FLAGS, top, (i64)thread_entry, (i64)rec);
+    if (tid < 0) {
+        mem_sys_free(stack, THREAD_STACK_SIZE);
+        thread_lock_acquire();
+        rec.tid = 0;
+        thread_lock_release();
+        return (TaskRecord*)0;
+    }
+    rec.tid = tid;
+    return rec;
+}
