@@ -120,6 +120,48 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
     };
     cursor += 1;
 
+    // Function-pointer cast target: `void(i64)*`, `(i32(i64, bool))*`, etc.
+    // After the base (return) type, a `(` group of type-like tokens forms a
+    // function type; the `*` loop below then wraps it in a pointer type.
+    if cursor < end
+        && matches!(tokens[cursor].kind, Token::LeftParen)
+        && let Some(close) = find_matching_paren(tokens, cursor, end)
+        && close > cursor + 1
+        && tokens[(cursor + 1)..close]
+            .iter()
+            .all(|t| is_type_like(&t.kind))
+    {
+        let mut parsed_types = Vec::new();
+        let mut arg_cursor = cursor + 1;
+        let mut ok = true;
+        while arg_cursor < close {
+            if let Some((arg, next_arg)) = parse_paren_fn_arg(tokens, arg_cursor, close) {
+                parsed_types.push(arg);
+                arg_cursor = next_arg;
+                if arg_cursor < close && matches!(tokens[arg_cursor].kind, Token::Comma) {
+                    arg_cursor += 1;
+                } else if arg_cursor < close {
+                    ok = false;
+                    break;
+                }
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            let start_span = ty.span.start;
+            ty = ast::Type {
+                kind: Box::new(ast::TypeKind::Function(ast::FunctionType {
+                    parameters: parsed_types,
+                    return_type: Box::new(ty),
+                })),
+                span: Span::new(start_span, tokens[close].span.end),
+            };
+            cursor = close + 1;
+        }
+    }
+
     let mut current_is_const = is_const;
     let mut has_pointer = false;
     while cursor < end {
@@ -149,6 +191,99 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
     }
 
     Some(ty)
+}
+
+/// Parse a single function-parameter type up to a top-level comma inside a
+/// function-type cast target like `void(i64, bool)*`. `start`/`end` bound the
+/// whole parenthesized parameter list; the returned `usize` is the index just
+/// past the parsed parameter type (before any trailing comma).
+fn parse_paren_fn_arg(tokens: &[LexToken], start: usize, end: usize) -> Option<(ast::Type, usize)> {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < end {
+        match tokens[i].kind {
+            Token::Less | Token::LeftParen | Token::LeftBracket => depth += 1,
+            Token::Greater | Token::RightParen | Token::RightBracket => {
+                depth = depth.saturating_sub(1)
+            }
+            Token::Comma if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let ty = parse_type_in_parens(tokens, start, i)?;
+    Some((ty, i))
+}
+
+/// True when a token can appear inside a function-type cast target
+/// (mirrors `PrdParser::is_type_like`).
+fn is_type_like(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::I8
+            | Token::I16
+            | Token::I32
+            | Token::I64
+            | Token::I128
+            | Token::U8
+            | Token::U16
+            | Token::U32
+            | Token::U64
+            | Token::U128
+            | Token::F32
+            | Token::F64
+            | Token::F80
+            | Token::C32
+            | Token::C64
+            | Token::C80
+            | Token::Bool
+            | Token::Str
+            | Token::Char
+            | Token::Void
+            | Token::Vec
+            | Token::Optional
+            | Token::Identifier(_)
+            | Token::Comma
+            | Token::Star
+            | Token::DoubleColon
+            | Token::Less
+            | Token::Greater
+            | Token::LeftParen
+            | Token::RightParen
+            | Token::LeftBracket
+            | Token::RightBracket
+            | Token::IntLiteral(_)
+            | Token::Const
+            | Token::Mut
+            | Token::Ref
+            | Token::BitwiseAnd
+    )
+}
+
+/// Index of the matching closing paren for an opening paren at `start`.
+fn find_matching_paren(tokens: &[LexToken], start: usize, end: usize) -> Option<usize> {
+    if start >= end || !matches!(tokens[start].kind, Token::LeftParen) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < end {
+        match tokens[i].kind {
+            Token::LeftParen => depth += 1,
+            Token::RightParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn parse_simple_type_prefix(
@@ -1326,18 +1461,31 @@ fn parse_unary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
     }
 
     if matches!(token.kind, Token::LeftParen) {
+        // Find the matching closing paren (nesting-aware) so nested function
+        // types like `(void(i64)*)expr` work; a naive first-`)` scan would
+        // truncate at the inner `(i64)` group.
         let mut i = cursor.pos + 1;
+        let mut depth = 1usize;
+        let mut close_paren = None;
         while i < cursor.end {
-            if matches!(cursor.tokens[i].kind, Token::RightParen) {
-                break;
+            match cursor.tokens[i].kind {
+                Token::LeftParen => depth += 1,
+                Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_paren = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
             }
             i += 1;
         }
-        if i < cursor.end
-            && i > cursor.pos + 1
-            && let Some(target_type) = parse_type_in_parens(cursor.tokens, cursor.pos + 1, i)
+        if let Some(end) = close_paren
+            && end > cursor.pos + 1
+            && let Some(target_type) = parse_type_in_parens(cursor.tokens, cursor.pos + 1, end)
         {
-            cursor.pos = i + 1;
+            cursor.pos = end + 1;
             let operand = parse_unary(cursor)?;
             return Ok(ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Cast {
@@ -1653,4 +1801,87 @@ pub(crate) fn parse_expression(
         });
     }
     Ok(expr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::prt_parser::PRT_Parser;
+
+    #[test]
+    fn parses_function_pointer_type_and_cast() {
+        // The fn-pointer type `void(i64)` in a cast `(void(i64))worker` must
+        // parse as a Function type — including the cast of a plain identifier
+        // (no inner parens), a nested-args case, and a trailing `*` (pointer
+        // to fn-pointer).
+        let source = r#"
+            void worker(i64 x) { }
+            i64 main() {
+                void(i64) fn = (void(i64))worker;
+                void(i64, i64) fn2 = (void(i64, i64))worker;
+                void(i64)* fn3 = (void(i64)*)fn;
+                fn(7);
+                return 0;
+            }
+        "#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 2);
+
+        let ast::ItemKind::Function(main) = &program.items[1].kind else {
+            panic!("expected function item");
+        };
+        let stmts = &main.body.statements;
+        assert_eq!(stmts.len(), 5);
+
+        // First let: declared type is Function([I64] -> Void).
+        let ast::StatementKind::Let(first) = &stmts[0].kind else {
+            panic!("expected let statement");
+        };
+        let declared = first.type_annotation.as_ref().expect("type annotation");
+        let ast::TypeKind::Function(fnty) = &*declared.kind else {
+            panic!("expected function type annotation");
+        };
+        assert_eq!(fnty.parameters.len(), 1);
+        assert!(matches!(
+            &*fnty.parameters[0].kind,
+            ast::TypeKind::Primitive(ast::PrimitiveType::I64)
+        ));
+        assert!(matches!(
+            &*fnty.return_type.kind,
+            ast::TypeKind::Primitive(ast::PrimitiveType::Void)
+        ));
+
+        // The initializer of the first let is the cast; its target type must
+        // be the same Function type.
+        let init = first.initializer.as_ref().expect("initializer");
+        let ast::ExpressionKind::Cast { target_type, .. } = &*init.kind else {
+            panic!("expected cast initializer");
+        };
+        assert!(matches!(&*target_type.kind, ast::TypeKind::Function(_)));
+
+        // Second let: multi-argument function type via the comma-aware split.
+        let ast::StatementKind::Let(second) = &stmts[1].kind else {
+            panic!("expected let statement");
+        };
+        let declared2 = second.type_annotation.as_ref().expect("type annotation");
+        let ast::TypeKind::Function(fnty2) = &*declared2.kind else {
+            panic!("expected function type");
+        };
+        assert_eq!(fnty2.parameters.len(), 2);
+
+        // Third let: `void(i64)*` is a pointer to the function type — the `*`
+        // loop must still apply after the paren group.
+        let ast::StatementKind::Let(third) = &stmts[2].kind else {
+            panic!("expected let statement");
+        };
+        let declared3 = third.type_annotation.as_ref().expect("type annotation");
+        assert!(matches!(&*declared3.kind, ast::TypeKind::Pointer(_)));
+        let ast::TypeKind::Pointer(ptr) = &*declared3.kind else {
+            panic!("expected pointer type");
+        };
+        assert!(matches!(&*ptr.inner.kind, ast::TypeKind::Function(_)));
+    }
 }
