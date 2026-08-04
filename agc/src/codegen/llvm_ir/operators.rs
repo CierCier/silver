@@ -17,55 +17,93 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         operand: &ast::Expression,
         whole_expr: &ast::Expression,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        // Check for operator overload on struct types
-        let operand_val = self.emit_expression_value(operand)?;
-        if operand_val.get_type().is_struct_type()
-            && let Some(method_name) = unary_operator_method_name(operator)
-        {
-            let method_ident = ast::Identifier {
-                name: method_name.to_string(),
-                span: whole_expr.span,
-            };
-            let result = self.emit_method_call_expression(
-                operand,
-                &method_ident,
-                &[],
-                false,
-                &whole_expr.span,
-            )?;
-            if let Some(val) = result {
-                return Ok(val);
-            }
-        }
+        // Value-using operators emit the operand exactly ONCE, then either
+        // dispatch to an operator overload (struct types) or apply the built-in
+        // operation to that same value. Re-emitting the operand inside each arm
+        // would evaluate side-effecting operands (e.g. `a.compare_exchange(..)`)
+        // twice, corrupting atomic and other stateful operations.
         match operator {
-            ast::UnaryOperator::Plus => self.emit_expression_value(operand),
-            ast::UnaryOperator::Minus => {
-                let value = self.emit_expression_value(operand)?;
-                match value {
-                    BasicValueEnum::IntValue(int_value) => self
-                        .builder
-                        .build_int_neg(int_value, "ineg")
-                        .map(|v| v.as_basic_value_enum())
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed integer negation: {e}"),
+            ast::UnaryOperator::Plus
+            | ast::UnaryOperator::Minus
+            | ast::UnaryOperator::Not
+            | ast::UnaryOperator::BitwiseNot => {
+                let operand_val = self.emit_expression_value(operand)?;
+                if operand_val.get_type().is_struct_type()
+                    && let Some(method_name) = unary_operator_method_name(operator)
+                {
+                    let method_ident = ast::Identifier {
+                        name: method_name.to_string(),
+                        span: whole_expr.span,
+                    };
+                    let result = self.emit_method_call_expression(
+                        operand,
+                        &method_ident,
+                        &[],
+                        false,
+                        &whole_expr.span,
+                    )?;
+                    if let Some(val) = result {
+                        return Ok(val);
+                    }
+                }
+                match operator {
+                    ast::UnaryOperator::Plus => Ok(operand_val),
+                    ast::UnaryOperator::Minus => match operand_val {
+                        BasicValueEnum::IntValue(int_value) => self
+                            .builder
+                            .build_int_neg(int_value, "ineg")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed integer negation: {e}"),
+                                    whole_expr.span,
+                                )
+                            }),
+                        BasicValueEnum::FloatValue(float_value) => self
+                            .builder
+                            .build_float_neg(float_value, "fneg")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed float negation: {e}"),
+                                    whole_expr.span,
+                                )
+                            }),
+                        _ => Err(CodegenError::with_span(
+                            "unary minus requires numeric operand",
+                            whole_expr.span,
+                        )),
+                    },
+                    ast::UnaryOperator::Not => {
+                        let bool_value = self.emit_as_bool(&operand_val, &operand.span)?;
+                        self.builder
+                            .build_not(bool_value, "lnot")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed logical not: {e}"),
+                                    whole_expr.span,
+                                )
+                            })
+                    }
+                    ast::UnaryOperator::BitwiseNot => {
+                        let BasicValueEnum::IntValue(int_value) = operand_val else {
+                            return Err(CodegenError::with_span(
+                                "bitwise not requires integer operand",
                                 whole_expr.span,
-                            )
-                        }),
-                    BasicValueEnum::FloatValue(float_value) => self
-                        .builder
-                        .build_float_neg(float_value, "fneg")
-                        .map(|v| v.as_basic_value_enum())
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed float negation: {e}"),
-                                whole_expr.span,
-                            )
-                        }),
-                    _ => Err(CodegenError::with_span(
-                        "unary minus requires numeric operand",
-                        whole_expr.span,
-                    )),
+                            ));
+                        };
+                        self.builder
+                            .build_not(int_value, "bnot")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed bitwise not: {e}"),
+                                    whole_expr.span,
+                                )
+                            })
+                    }
+                    _ => unreachable!("value-using unary arms are exhaustive above"),
                 }
             }
             ast::UnaryOperator::Dereference => {
@@ -107,31 +145,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             format!("failed to load dereference result: {e}"),
                             whole_expr.span,
                         )
-                    })
-            }
-            ast::UnaryOperator::Not => {
-                let value = self.emit_expression_value(operand)?;
-                let bool_value = self.emit_as_bool(&value, &operand.span)?;
-                self.builder
-                    .build_not(bool_value, "lnot")
-                    .map(|v| v.as_basic_value_enum())
-                    .map_err(|e| {
-                        CodegenError::with_span(format!("failed logical not: {e}"), whole_expr.span)
-                    })
-            }
-            ast::UnaryOperator::BitwiseNot => {
-                let value = self.emit_expression_value(operand)?;
-                let BasicValueEnum::IntValue(int_value) = value else {
-                    return Err(CodegenError::with_span(
-                        "bitwise not requires integer operand",
-                        whole_expr.span,
-                    ));
-                };
-                self.builder
-                    .build_not(int_value, "bnot")
-                    .map(|v| v.as_basic_value_enum())
-                    .map_err(|e| {
-                        CodegenError::with_span(format!("failed bitwise not: {e}"), whole_expr.span)
                     })
             }
             ast::UnaryOperator::Increment => self.emit_inc_dec(operand, true, false, whole_expr),
