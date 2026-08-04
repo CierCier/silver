@@ -1336,6 +1336,14 @@ impl TypeChecker {
                 arguments,
             } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
+                    // Atomic intrinsics (`__atomic_*`) are recognized by name and
+                    // type-checked by a dedicated hook; they never live in the
+                    // symbol table.
+                    if let Some(result) =
+                        self.try_resolve_atomic_intrinsic(&ident.name, arguments, expr.span)
+                    {
+                        return result;
+                    }
                     // Check if this is a known function name first
                     if self.functions.contains_key(&ident.name) {
                         self.resolve_overload(ident, arguments, expr.span)
@@ -2074,6 +2082,132 @@ impl TypeChecker {
         span: Span,
     ) -> Type {
         self.resolve_overload_with_explicit(ident, &[], arguments, span)
+    }
+
+    /// Recognizes compiler intrinsics of the form `__atomic_<op>_<width>` and
+    /// returns the type of the call site, or `None` if `name` is not an atomic
+    /// intrinsic. Atomic intrinsics are always bare identifiers (never generic),
+    /// so only the plain-call path consults this hook.
+    ///
+    /// Widths: i8/i32/i64 for load/store/exchange (byte flags are i8), i32/i64
+    /// for fetch_add/fetch_sub/cmpxchg, plus the width-less `__atomic_fence`.
+    fn try_resolve_atomic_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[ast::Expression],
+        span: Span,
+    ) -> Option<Type> {
+        let body = name.strip_prefix("__atomic_")?;
+
+        // (op, optional element width). Unknown suffix -> None (not an intrinsic).
+        let (op, width): (&str, Option<ast::PrimitiveType>) = match body {
+            "load_i8" => ("load", Some(ast::PrimitiveType::I8)),
+            "load_i32" => ("load", Some(ast::PrimitiveType::I32)),
+            "load_i64" => ("load", Some(ast::PrimitiveType::I64)),
+            "store_i8" => ("store", Some(ast::PrimitiveType::I8)),
+            "store_i32" => ("store", Some(ast::PrimitiveType::I32)),
+            "store_i64" => ("store", Some(ast::PrimitiveType::I64)),
+            "exchange_i8" => ("exchange", Some(ast::PrimitiveType::I8)),
+            "exchange_i32" => ("exchange", Some(ast::PrimitiveType::I32)),
+            "exchange_i64" => ("exchange", Some(ast::PrimitiveType::I64)),
+            "fetch_add_i8" => ("fetch_add", Some(ast::PrimitiveType::I8)),
+            "fetch_add_i32" => ("fetch_add", Some(ast::PrimitiveType::I32)),
+            "fetch_add_i64" => ("fetch_add", Some(ast::PrimitiveType::I64)),
+            "fetch_sub_i8" => ("fetch_sub", Some(ast::PrimitiveType::I8)),
+            "fetch_sub_i32" => ("fetch_sub", Some(ast::PrimitiveType::I32)),
+            "fetch_sub_i64" => ("fetch_sub", Some(ast::PrimitiveType::I64)),
+            "cmpxchg_i8" => ("cmpxchg", Some(ast::PrimitiveType::I8)),
+            "cmpxchg_i32" => ("cmpxchg", Some(ast::PrimitiveType::I32)),
+            "cmpxchg_i64" => ("cmpxchg", Some(ast::PrimitiveType::I64)),
+            "fence" => ("fence", None),
+            _ => return None,
+        };
+
+        let elem = width.map(Type::Primitive);
+        let order = Type::Primitive(ast::PrimitiveType::I32);
+        let addr = |inner: &Type| Type::Pointer {
+            is_mutable: true,
+            is_volatile: false,
+            inner: Box::new(inner.clone()),
+        };
+        // Only the elemental ops carry an element width; `fence` is standalone.
+        let elem_ty = || elem.as_ref().expect("atomic intrinsic without width");
+
+        let (params, result): (Vec<Type>, Type) = match op {
+            "load" => (vec![addr(elem_ty()), order.clone()], elem_ty().clone()),
+            "store" => (
+                vec![addr(elem_ty()), elem_ty().clone(), order.clone()],
+                Type::Unit,
+            ),
+            "exchange" => (
+                vec![addr(elem_ty()), elem_ty().clone(), order.clone()],
+                elem_ty().clone(),
+            ),
+            "fetch_add" | "fetch_sub" => (
+                vec![addr(elem_ty()), elem_ty().clone(), order.clone()],
+                elem_ty().clone(),
+            ),
+            "cmpxchg" => (
+                vec![
+                    addr(elem_ty()),
+                    elem_ty().clone(),
+                    elem_ty().clone(),
+                    order.clone(),
+                    order.clone(),
+                ],
+                Type::Primitive(ast::PrimitiveType::Bool),
+            ),
+            "fence" => (vec![order.clone()], Type::Unit),
+            _ => return None,
+        };
+
+        // Type-check each argument. Integer literals (e.g. the ordering
+        // constant) are accepted when they fit the expected width.
+        let arg_types = arguments
+            .iter()
+            .map(|arg| self.check_expr_with_literal_naturals(arg))
+            .collect::<Vec<_>>();
+        if arguments.len() != params.len() {
+            self.error(
+                format!(
+                    "atomic intrinsic '{}' expected {} arguments, got {}",
+                    name,
+                    params.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+        }
+        for (i, (param_ty, arg_ty)) in params.iter().zip(arg_types.iter()).enumerate() {
+            let literal_ok = Self::literal_integer_value(&arguments[i]).is_some_and(|value| {
+                matches!(param_ty, Type::Primitive(prim)
+                    if Self::integer_value_fits(value, prim))
+            });
+            // The address parameter accepts a pointer of any mutability: LLVM
+            // atomic operations do not distinguish constness at runtime, and
+            // wrappers hand over `&self.value` through a const `&Self` receiver.
+            let addr_ok = i == 0
+                && matches!(
+                    (param_ty, arg_ty),
+                    (Type::Pointer { inner: pe, .. }, Type::Pointer { inner: ae, .. })
+                        if self.is_assignable(pe, ae)
+                );
+            if !literal_ok
+                && !addr_ok
+                && !self.is_assignable(param_ty, arg_ty)
+                && !self.is_implicitly_castable(arg_ty, param_ty)
+            {
+                self.error(
+                    format!(
+                        "atomic intrinsic '{}' parameter {}: expected {}, got {}",
+                        name, i, param_ty, arg_ty
+                    ),
+                    arguments[i].span,
+                );
+            }
+        }
+
+        Some(result)
     }
 
     fn resolve_overload_with_explicit(

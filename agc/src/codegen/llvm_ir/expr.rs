@@ -548,6 +548,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         self.global_variables
             .insert(item.name.name.clone(), item.var_type.clone());
+        if !item.is_mutable && !item.is_volatile {
+            // Record an immutable constant that holds a single integer literal
+            // so `__atomic_*` ops can name a constant (e.g. `seq_cst`) and have
+            // it folded to a compile-time value, since LLVM atomic instructions
+            // require a compile-time ordering.
+            if let Some(ast::ExpressionKind::Literal(ast::Literal::Integer(value))) =
+                item.initializer.as_ref().map(|init| init.kind.as_ref())
+            {
+                self.global_const_values
+                    .insert(item.name.name.clone(), *value);
+            }
+        }
         self.symbol_table.intern_symbol(
             format!("codegen::global::{}", item.name.name),
             SymbolKind::GlobalVariable,

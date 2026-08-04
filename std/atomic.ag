@@ -1,0 +1,310 @@
+// Atomic integer and boolean types for concurrent code.
+//
+// These wrap the compiler's `__atomic_*` intrinsics, which lower to LLVM
+// atomic instructions (`load atomic`, `store atomic`, `atomicrmw`, `cmpxchg`,
+// `fence`). An operation on an `Atomic*` value is always atomic with respect
+// to every other atomic operation on the same memory location.
+//
+// ORDERINGS
+// ─────────
+// The memory-ordering constants below (0..=4) are accepted directly by the
+// low-level `__atomic_*` intrinsics. The methods on the atomic types bake a
+// fixed ordering into the call (LLVM requires the ordering to be a literal
+// constant, so it cannot be forwarded through a runtime parameter):
+//
+//   `ATOMIC_RELAXED`  — no ordering constraints, only atomicity (0)
+//   `ATOMIC_ACQUIRE`  — subsequent reads/writes cannot be reordered before (1)
+//   `ATOMIC_RELEASE`  — prior reads/writes cannot be reordered after (2)
+//   `ATOMIC_ACQ_REL`  — acquire + release for read-modify-write ops (3)
+//   `ATOMIC_SEQ_CST`  — sequentially consistent; the default (4)
+//
+// The default methods use `ATOMIC_SEQ_CST`; `*_monotonic` variants use
+// `ATOMIC_RELAXED`.
+//
+// Atomic types are plain value types (no drop, no allocation); they may live
+// in globals, structs, or heap objects shared between threads.
+
+const i32 ATOMIC_RELAXED = 0;
+const i32 ATOMIC_ACQUIRE = 1;
+const i32 ATOMIC_RELEASE = 2;
+const i32 ATOMIC_ACQ_REL = 3;
+const i32 ATOMIC_SEQ_CST = 4;
+
+/// A lock-free 8-bit integer.
+struct AtomicI8 {
+    i8 value;
+}
+
+impl AtomicI8 {
+    AtomicI8 new(i8 value) {
+        AtomicI8 a;
+        a.value = value;
+        return a;
+    }
+
+    /// Sequentially-consistent load.
+    i8 get(&AtomicI8 self) {
+        return __atomic_load_i8(&self.value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) load — atomic, but no ordering guarantees.
+    i8 get_monotonic(&AtomicI8 self) {
+        return __atomic_load_i8(&self.value, ATOMIC_RELAXED);
+    }
+
+    /// Sequentially-consistent store.
+    void set(&mut AtomicI8 self, i8 value) {
+        __atomic_store_i8(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) store.
+    void set_monotonic(&mut AtomicI8 self, i8 value) {
+        __atomic_store_i8(&self.value, value, ATOMIC_RELAXED);
+    }
+
+    /// Atomically replace the value; returns the previous value.
+    i8 swap(&mut AtomicI8 self, i8 value) {
+        return __atomic_exchange_i8(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically add `delta`; returns the previous value.
+    i8 fetch_add(&mut AtomicI8 self, i8 delta) {
+        return __atomic_fetch_add_i8(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically subtract `delta`; returns the previous value.
+    i8 fetch_sub(&mut AtomicI8 self, i8 delta) {
+        return __atomic_fetch_sub_i8(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed atomic add; returns the previous value.
+    i8 fetch_add_monotonic(&mut AtomicI8 self, i8 delta) {
+        return __atomic_fetch_add_i8(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// Relaxed atomic subtract; returns the previous value.
+    i8 fetch_sub_monotonic(&mut AtomicI8 self, i8 delta) {
+        return __atomic_fetch_sub_i8(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// If the current value equals `expected`, replace it with `desired` and
+    /// return true; otherwise leaves the value unchanged and returns false.
+    bool compare_exchange(&mut AtomicI8 self, i8 expected, i8 desired) {
+        return __atomic_cmpxchg_i8(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed compare-and-swap.
+    bool compare_exchange_monotonic(&mut AtomicI8 self, i8 expected, i8 desired) {
+        return __atomic_cmpxchg_i8(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
+    }
+}
+
+/// A lock-free 32-bit integer.
+struct AtomicI32 {
+    i32 value;
+}
+
+impl AtomicI32 {
+    AtomicI32 new(i32 value) {
+        AtomicI32 a;
+        a.value = value;
+        return a;
+    }
+
+    /// Sequentially-consistent load.
+    i32 get(&AtomicI32 self) {
+        return __atomic_load_i32(&self.value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) load — atomic, but no ordering guarantees.
+    i32 get_monotonic(&AtomicI32 self) {
+        return __atomic_load_i32(&self.value, ATOMIC_RELAXED);
+    }
+
+    /// Sequentially-consistent store.
+    void set(&mut AtomicI32 self, i32 value) {
+        __atomic_store_i32(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) store.
+    void set_monotonic(&mut AtomicI32 self, i32 value) {
+        __atomic_store_i32(&self.value, value, ATOMIC_RELAXED);
+    }
+
+    /// Atomically replace the value; returns the previous value.
+    i32 swap(&mut AtomicI32 self, i32 value) {
+        return __atomic_exchange_i32(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically add `delta`; returns the previous value.
+    i32 fetch_add(&mut AtomicI32 self, i32 delta) {
+        return __atomic_fetch_add_i32(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically subtract `delta`; returns the previous value.
+    i32 fetch_sub(&mut AtomicI32 self, i32 delta) {
+        return __atomic_fetch_sub_i32(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed atomic add; returns the previous value.
+    i32 fetch_add_monotonic(&mut AtomicI32 self, i32 delta) {
+        return __atomic_fetch_add_i32(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// Relaxed atomic subtract; returns the previous value.
+    i32 fetch_sub_monotonic(&mut AtomicI32 self, i32 delta) {
+        return __atomic_fetch_sub_i32(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// If the current value equals `expected`, replace it with `desired` and
+    /// return true; otherwise leaves the value unchanged and returns false.
+    bool compare_exchange(&mut AtomicI32 self, i32 expected, i32 desired) {
+        return __atomic_cmpxchg_i32(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed compare-and-swap.
+    bool compare_exchange_monotonic(&mut AtomicI32 self, i32 expected, i32 desired) {
+        return __atomic_cmpxchg_i32(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
+    }
+}
+
+/// A lock-free 64-bit integer.
+struct AtomicI64 {
+    i64 value;
+}
+
+impl AtomicI64 {
+    AtomicI64 new(i64 value) {
+        AtomicI64 a;
+        a.value = value;
+        return a;
+    }
+
+    /// Sequentially-consistent load.
+    i64 get(&AtomicI64 self) {
+        return __atomic_load_i64(&self.value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) load — atomic, but no ordering guarantees.
+    i64 get_monotonic(&AtomicI64 self) {
+        return __atomic_load_i64(&self.value, ATOMIC_RELAXED);
+    }
+
+    /// Sequentially-consistent store.
+    void set(&mut AtomicI64 self, i64 value) {
+        __atomic_store_i64(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) store.
+    void set_monotonic(&mut AtomicI64 self, i64 value) {
+        __atomic_store_i64(&self.value, value, ATOMIC_RELAXED);
+    }
+
+    /// Atomically replace the value; returns the previous value.
+    i64 swap(&mut AtomicI64 self, i64 value) {
+        return __atomic_exchange_i64(&self.value, value, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically add `delta`; returns the previous value.
+    i64 fetch_add(&mut AtomicI64 self, i64 delta) {
+        return __atomic_fetch_add_i64(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Atomically subtract `delta`; returns the previous value.
+    i64 fetch_sub(&mut AtomicI64 self, i64 delta) {
+        return __atomic_fetch_sub_i64(&self.value, delta, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed atomic add; returns the previous value.
+    i64 fetch_add_monotonic(&mut AtomicI64 self, i64 delta) {
+        return __atomic_fetch_add_i64(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// Relaxed atomic subtract; returns the previous value.
+    i64 fetch_sub_monotonic(&mut AtomicI64 self, i64 delta) {
+        return __atomic_fetch_sub_i64(&self.value, delta, ATOMIC_RELAXED);
+    }
+
+    /// If the current value equals `expected`, replace it with `desired` and
+    /// return true; otherwise leaves the value unchanged and returns false.
+    bool compare_exchange(&mut AtomicI64 self, i64 expected, i64 desired) {
+        return __atomic_cmpxchg_i64(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed compare-and-swap.
+    bool compare_exchange_monotonic(&mut AtomicI64 self, i64 expected, i64 desired) {
+        return __atomic_cmpxchg_i64(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
+    }
+}
+
+/// A lock-free boolean, stored as 0/1.
+struct AtomicBool {
+    i8 value;
+}
+
+impl AtomicBool {
+    AtomicBool new(bool value) {
+        AtomicBool a;
+        a.value = bool_to_i8(value);
+        return a;
+    }
+
+    /// Sequentially-consistent load.
+    bool get(&AtomicBool self) {
+        return __atomic_load_i8(&self.value, ATOMIC_SEQ_CST) != 0;
+    }
+
+    /// Relaxed (monotonic) load.
+    bool get_monotonic(&AtomicBool self) {
+        return __atomic_load_i8(&self.value, ATOMIC_RELAXED) != 0;
+    }
+
+    /// Sequentially-consistent store.
+    void set(&mut AtomicBool self, bool value) {
+        __atomic_store_i8(&self.value, bool_to_i8(value), ATOMIC_SEQ_CST);
+    }
+
+    /// Relaxed (monotonic) store.
+    void set_monotonic(&mut AtomicBool self, bool value) {
+        __atomic_store_i8(&self.value, bool_to_i8(value), ATOMIC_RELAXED);
+    }
+
+    /// Atomically replace the value; returns the previous value.
+    bool swap(&mut AtomicBool self, bool value) {
+        return __atomic_exchange_i8(&self.value, bool_to_i8(value), ATOMIC_SEQ_CST) != 0;
+    }
+
+    /// If the current value equals `expected`, replace it with `desired` and
+    /// return true; otherwise leaves the value unchanged and returns false.
+    bool compare_exchange(&mut AtomicBool self, bool expected, bool desired) {
+        return __atomic_cmpxchg_i8(&self.value, bool_to_i8(expected), bool_to_i8(desired), ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+}
+
+/// Atomic fence with acquire semantics.
+void fence_acquire() {
+    __atomic_fence(ATOMIC_ACQUIRE);
+}
+
+/// Atomic fence with release semantics.
+void fence_release() {
+    __atomic_fence(ATOMIC_RELEASE);
+}
+
+/// Atomic fence with acquire+release semantics.
+void fence_acq_rel() {
+    __atomic_fence(ATOMIC_ACQ_REL);
+}
+
+/// Atomic fence with sequentially-consistent semantics.
+void fence_seq_cst() {
+    __atomic_fence(ATOMIC_SEQ_CST);
+}
+
+/// Internal: boolean to 0/1 byte.
+i8 bool_to_i8(bool b) {
+    if (b) {
+        return 1;
+    }
+    return 0;
+}

@@ -84,6 +84,11 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) imported_function_links: HashMap<String, String>,
     pub(crate) extern_globals: HashMap<String, ast::Type>,
     pub(crate) global_variables: HashMap<String, ast::Type>,
+    /// Immutable global constants that hold a single integer literal, keyed by
+    /// name; used by `__atomic_*` to fold an ordering argument that names a
+    /// constant (e.g. `seq_cst`) into a literal, since LLVM atomic instructions
+    /// require a compile-time ordering.
+    pub(crate) global_const_values: HashMap<String, i128>,
     pub(crate) struct_types: HashMap<String, StructType<'ctx>>,
     pub(crate) struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     pub(crate) enum_backing_types: HashMap<String, ast::PrimitiveType>,

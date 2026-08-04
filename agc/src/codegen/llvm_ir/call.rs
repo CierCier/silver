@@ -2,6 +2,7 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
+use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
@@ -165,6 +166,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ));
             }
         };
+
+        // Atomic intrinsics (`__atomic_*`) lower to LLVM atomic instructions
+        // directly; they never exist as LLVM functions.
+        if let Some(emitted) =
+            self.try_emit_atomic_intrinsic(&fn_name, arguments, allow_void, span)?
+        {
+            return Ok(emitted);
+        }
 
         let llvm_name = if let Some(generics) = explicit_generics {
             if !generics.is_empty() {
@@ -706,6 +715,223 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             _ => Ok(value),
+        }
+    }
+
+    /// Lowers a call to a `__atomic_*` intrinsic into the matching LLVM atomic
+    /// instruction. Returns `Ok(None)` when `name` is not an atomic intrinsic;
+    /// `Ok(Some(None))` for a successfully emitted void intrinsic; and
+    /// `Ok(Some(Some(v)))` for a value-producing intrinsic.
+    ///
+    /// The element width is encoded in the name suffix (`_i8`/`_i32`/`_i64`),
+    /// since Silver emits opaque LLVM pointers and the pointee type is not
+    /// recoverable from the pointer value. The ordering argument must be an
+    /// integer literal: LLVM requires a constant ordering in the instruction.
+    fn try_emit_atomic_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[ast::Expression],
+        allow_void: bool,
+        span: &Span,
+    ) -> CodegenResult<Option<Option<BasicValueEnum<'ctx>>>> {
+        let Some(body) = name.strip_prefix("__atomic_") else {
+            return Ok(None);
+        };
+        let (op, width): (&str, u32) = match body {
+            "load_i8" => ("load", 8),
+            "load_i32" => ("load", 32),
+            "load_i64" => ("load", 64),
+            "store_i8" => ("store", 8),
+            "store_i32" => ("store", 32),
+            "store_i64" => ("store", 64),
+            "exchange_i8" => ("exchange", 8),
+            "exchange_i32" => ("exchange", 32),
+            "exchange_i64" => ("exchange", 64),
+            "fetch_add_i8" => ("fetch_add", 8),
+            "fetch_add_i32" => ("fetch_add", 32),
+            "fetch_add_i64" => ("fetch_add", 64),
+            "fetch_sub_i8" => ("fetch_sub", 8),
+            "fetch_sub_i32" => ("fetch_sub", 32),
+            "fetch_sub_i64" => ("fetch_sub", 64),
+            "cmpxchg_i8" => ("cmpxchg", 8),
+            "cmpxchg_i32" => ("cmpxchg", 32),
+            "cmpxchg_i64" => ("cmpxchg", 64),
+            "fence" => ("fence", 0),
+            _ => return Ok(None),
+        };
+
+        let int_ty = match width {
+            8 => Some(self.context.i8_type()),
+            32 => Some(self.context.i32_type()),
+            64 => Some(self.context.i64_type()),
+            _ => None,
+        };
+
+        // Emit all argument values; arity/type correctness is enforced by typeck.
+        let values: Vec<BasicValueEnum<'ctx>> = arguments
+            .iter()
+            .map(|a| self.emit_expression_value(a))
+            .collect::<CodegenResult<_>>()?;
+
+        // `order` (and the two cmpxchg orders) must be compile-time constants.
+        // Accept an integer literal or a reference to an immutable global
+        // constant that holds a single integer literal (e.g. `seq_cst`).
+        let order_of = |consts: &rustc_hash::FxHashMap<String, i128>,
+                        idx: usize|
+         -> CodegenResult<AtomicOrdering> {
+            let int = values[idx].into_int_value();
+            let mut value = int.get_zero_extended_constant();
+            if value.is_none()
+                && let ast::ExpressionKind::Identifier(ident) = &arguments[idx].kind.as_ref()
+            {
+                value = consts.get(&ident.name).copied().map(|v| v as u64);
+            }
+            let Some(value) = value else {
+                return Err(CodegenError::with_span(
+                    format!(
+                        "atomic intrinsic '{}': ordering must be a literal constant",
+                        name
+                    ),
+                    *span,
+                ));
+            };
+            Ok(match value {
+                0 => AtomicOrdering::Monotonic,
+                1 => AtomicOrdering::Acquire,
+                2 => AtomicOrdering::Release,
+                3 => AtomicOrdering::AcquireRelease,
+                4 => AtomicOrdering::SequentiallyConsistent,
+                _ => {
+                    return Err(CodegenError::with_span(
+                        format!(
+                            "atomic intrinsic '{}': invalid ordering {} (expected 0..=4)",
+                            name, value
+                        ),
+                        *span,
+                    ));
+                }
+            })
+        };
+
+        let void_err = || {
+            Err(CodegenError::with_span(
+                "void function call cannot be used as a value",
+                *span,
+            ))
+        };
+
+        // Silver integer literals default to i64, so a value argument must be
+        // coerced to the width named in the intrinsic suffix (truncate when
+        // wider, zero-extend when narrower) before it can drive an atomic op.
+        let coerce = |v: BasicValueEnum<'ctx>, ty: inkwell::types::IntType<'ctx>| {
+            let int = v.into_int_value();
+            let from = int.get_type().get_bit_width();
+            let to = ty.get_bit_width();
+            let coerced = if from == to {
+                int
+            } else if from > to {
+                self.builder
+                    .build_int_truncate(int, ty, "atomic.trunc")
+                    .map_err(|e| CodegenError::new(format!("atomic width truncate: {e}")))?
+            } else {
+                self.builder
+                    .build_int_z_extend(int, ty, "atomic.zext")
+                    .map_err(|e| CodegenError::new(format!("atomic width extend: {e}")))?
+            };
+            Ok(coerced)
+        };
+        let elem_ty = || int_ty.expect("elemental atomic op carries a width");
+
+        match op {
+            "load" => {
+                let addr = values[0].into_pointer_value();
+                let ordering = order_of(&self.global_const_values, 1)?;
+                let int_ty = int_ty.expect("load carries an element width");
+                let value = self
+                    .builder
+                    .build_load(int_ty, addr, "atomic.load")
+                    .map_err(|e| CodegenError::new(format!("atomic load failed: {e}")))?;
+                value
+                    .as_instruction_value()
+                    .expect("load produces an instruction")
+                    .set_atomic_ordering(ordering)
+                    .map_err(|e| CodegenError::new(format!("atomic load ordering: {e}")))?;
+                Ok(Some(Some(value)))
+            }
+            "store" => {
+                if !allow_void {
+                    return void_err();
+                }
+                let addr = values[0].into_pointer_value();
+                let val = coerce(values[1], elem_ty())?;
+                let ordering = order_of(&self.global_const_values, 2)?;
+                self.builder
+                    .build_store(addr, val)
+                    .map_err(|e| CodegenError::new(format!("atomic store failed: {e}")))?
+                    .set_atomic_ordering(ordering)
+                    .map_err(|e| CodegenError::new(format!("atomic store ordering: {e}")))?;
+                Ok(Some(None))
+            }
+            "exchange" | "fetch_add" | "fetch_sub" => {
+                let addr = values[0].into_pointer_value();
+                let val = coerce(values[1], elem_ty())?;
+                let ordering = order_of(&self.global_const_values, 2)?;
+                let rmw = match op {
+                    "exchange" => AtomicRMWBinOp::Xchg,
+                    "fetch_add" => AtomicRMWBinOp::Add,
+                    "fetch_sub" => AtomicRMWBinOp::Sub,
+                    _ => unreachable!(),
+                };
+                let result = self
+                    .builder
+                    .build_atomicrmw(rmw, addr, val, ordering)
+                    .map_err(|e| CodegenError::new(format!("atomicrmw failed: {e}")))?;
+                Ok(Some(Some(result.as_basic_value_enum())))
+            }
+            "cmpxchg" => {
+                let addr = values[0].into_pointer_value();
+                let expected = coerce(values[1], elem_ty())?;
+                let desired = coerce(values[2], elem_ty())?;
+                let success = order_of(&self.global_const_values, 3)?;
+                let failure = order_of(&self.global_const_values, 4)?;
+                let pair = self
+                    .builder
+                    .build_cmpxchg(addr, expected, desired, success, failure)
+                    .map_err(|e| CodegenError::new(format!("cmpxchg failed: {e}")))?;
+                // cmpxchg yields `{T old, i1 success}` on this LLVM; the flag
+                // is a real extractvalue (operand access would return the address).
+                let flag = self
+                    .builder
+                    .build_extract_value(pair, 1, "cmpxchg.ok")
+                    .map_err(|e| CodegenError::new(format!("cmpxchg flag: {e}")))?;
+                Ok(Some(Some(flag)))
+            }
+            "fence" => {
+                if !allow_void {
+                    return void_err();
+                }
+                let ordering = order_of(&self.global_const_values, 0)?;
+                if !matches!(
+                    ordering,
+                    AtomicOrdering::Acquire
+                        | AtomicOrdering::Release
+                        | AtomicOrdering::AcquireRelease
+                        | AtomicOrdering::SequentiallyConsistent
+                ) {
+                    return Err(CodegenError::with_span(
+                        format!(
+                            "atomic intrinsic '{}': fence requires an acquire, release, acq_rel, or seq_cst ordering",
+                            name
+                        ),
+                        *span,
+                    ));
+                }
+                self.builder
+                    .build_fence(ordering, false, "atomic.fence")
+                    .map_err(|e| CodegenError::new(format!("fence failed: {e}")))?;
+                Ok(Some(None))
+            }
+            _ => unreachable!("atomic op table covers load/store/exchange/fetch/cmpxchg/fence"),
         }
     }
 }

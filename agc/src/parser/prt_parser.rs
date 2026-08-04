@@ -2339,7 +2339,7 @@ impl PRT_Parser {
             },
             var_type,
             initializer,
-            is_mutable: true,
+            is_mutable: !qualifiers.is_const,
             is_static: qualifiers.is_static,
             is_volatile,
         })

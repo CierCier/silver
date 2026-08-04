@@ -6,6 +6,7 @@ pub mod codegen;
 pub mod debug_info;
 pub mod diagnostics;
 pub mod format;
+pub mod intrinsics;
 pub mod lexer;
 pub mod module_artifact;
 pub mod module_loader;

@@ -878,6 +878,12 @@ impl Analyzer {
             return;
         }
 
+        // Compiler intrinsics (e.g. `__atomic_*`) are recognized by name and
+        // handled by later pipeline stages; they never live in the symbol table.
+        if crate::intrinsics::is_atomic_intrinsic_name(&ident.name) {
+            return;
+        }
+
         match self.has_symbol(&ident.name) {
             Some(SymbolKind::Function)
             | Some(SymbolKind::GlobalVariable)
