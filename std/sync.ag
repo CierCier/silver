@@ -1,6 +1,6 @@
 // std/sync.ag — Synchronization primitives for concurrent code.
 //
-// Building blocks for sharing state between threads: a futex-based Mutex, a
+// Building blocks for sharing state between threads: a futex-based RawMutex, a
 // WaitGroup counter, and the raw futex wait/wake helpers they are built on.
 //
 // Everything here is seq_cst by default.  The futex slow-path protocol
@@ -13,6 +13,7 @@
 // than the newer split futex_wait/futex_wake syscalls (Linux >= 6.7).
 
 import std.atomic;
+import std.mem.drop;
 import std.sys.linux;
 import std.sys.errno;
 
@@ -39,9 +40,12 @@ i64 futex_wake(i32* addr, i64 nr_wake) {
     return sys_futex((i64)addr, FUTEX_WAKE, nr_wake, 0, 0, 0);
 }
 
-// -- Mutex -----------------------------------------------------------------
+// -- RawMutex --------------------------------------------------------------
 
 /// A blocking mutual-exclusion lock (futex-based).
+///
+/// This is the low-level lock primitive; `Mutex<T>` below wraps a value
+/// with an RAII guard on top of it.  (Named RawMutex to mirror that split.)
 ///
 /// state is one of:
 ///   0  unlocked
@@ -54,20 +58,20 @@ i64 futex_wake(i32* addr, i64 nr_wake) {
 /// spurious / lost wake-ups are impossible: a waiter always re-checks the
 /// lock state after the futex returns, and a waker always exchanges the
 /// state before waking.
-struct Mutex {
+struct RawMutex {
     i32 state;
 }
 
-impl Mutex {
+impl RawMutex {
     /// A fresh, unlocked mutex.
-    Mutex new() {
-        Mutex m;
+    RawMutex new() {
+        RawMutex m;
         m.state = 0;
         return m;
     }
 
     /// Acquire the lock, blocking until it is free.
-    void lock(&mut Mutex self) {
+    void lock(&mut RawMutex self) {
         // Fast path: uncontended acquisition.
         bool acquired = __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
         if (acquired) {
@@ -84,7 +88,7 @@ impl Mutex {
     }
 
     /// Release the lock, waking one waiter if any were parked.
-    void unlock(&mut Mutex self) {
+    void unlock(&mut RawMutex self) {
         i32 old = __atomic_exchange_i32(&self.state, 0, ATOMIC_SEQ_CST);
         if (old == 2) {
             futex_wake(&self.state, 1);
@@ -92,8 +96,76 @@ impl Mutex {
     }
 
     /// Try to acquire the lock without blocking; true on success.
-    bool try_lock(&mut Mutex self) {
+    bool try_lock(&mut RawMutex self) {
         return __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+    }
+}
+
+// -- Mutex<T> + Guard<T> (RAII) -----------------------------------------------
+
+/// A mutex-protected value.  `lock` returns a Guard<T> that grants access to
+/// the value and unlocks the underlying RawMutex when it is dropped — at
+/// scope exit, on early return, or when ownership is `move`d.  The guard is
+/// the only way to touch the value, so accesses/updates are serialized.
+///
+/// A zero-initialized `Mutex<T>` is a valid unlocked mutex holding a zero
+/// value, so globals need no constructor:
+///     Mutex<i64> g_counter;
+/// Locals should use `Mutex<i64>.new(initial)`.
+struct Mutex<T> {
+    RawMutex mu;
+    T value;
+}
+
+impl<T> Mutex<T> {
+    /// A fresh, unlocked mutex holding `value`.
+    Mutex<T> new(T value) {
+        Mutex<T> m;
+        m.mu = RawMutex.new();
+        m.value = move value;
+        return m;
+    }
+
+    /// Acquire the lock (blocking) and return a guard granting access to the
+    /// value.  The guard unlocks on drop.  Takes a raw-pointer receiver so
+    /// the guard can hold the same address.
+    Guard<T> lock(Mutex<T>* self) {
+        self.mu.lock();
+        Guard<T> g;
+        g.owner = self;
+        return g;
+    }
+}
+
+/// RAII guard returned by Mutex<T>::lock.  The compiler runs its drop on
+/// every exit path (scope end, early return), so the lock can never be left
+/// held.  Access the value through get_ptr / get / set.
+struct Guard<T> {
+    Mutex<T>* owner;
+}
+
+impl<T> Guard<T> {
+    /// Mutable pointer to the guarded value (valid while the guard lives).
+    T* get_ptr(&Guard<T> self) {
+        return &self.owner.value;
+    }
+
+    /// Copy of the guarded value.  For owned element types prefer get_ptr —
+    /// a copy shares resources with the guarded value (std-wide caveat).
+    T get(&Guard<T> self) {
+        return self.owner.value;
+    }
+
+    /// Overwrite the guarded value.
+    void set(&mut Guard<T> self, T value) {
+        self.owner.value = move value;
+    }
+}
+
+impl<T> Drop<Guard<T>> for Guard<T> {
+    /// Release the lock.  Runs automatically at scope exit / early return.
+    void drop(Guard<T>* self) {
+        self.owner.mu.unlock();
     }
 }
 

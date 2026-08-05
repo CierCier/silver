@@ -1,0 +1,99 @@
+// RAII guard (Mutex<T>/Guard<T>) + Task scope policy integration test.
+//
+// Covers:
+//   1. Guarded shared counter across `launch`ed tasks: 4 tasks each do 5000
+//      guard-guarded increments of a global Mutex<i64>; `wait` joins each;
+//      the exact total proves the guard serializes access (lost updates
+//      would read strictly less than 20000).
+//   2. Drop-on-scope-exit: a guard held inside a nested block releases the
+//      lock when the block ends — a subsequent lock succeeds immediately
+//      (it would deadlock against the harness timeout if the guard leaked
+//      the lock).
+//   3. Drop-on-early-return: a helper locks, returns early; the caller locks
+//      again deterministically (proof the drop ran on the return path).
+//   4. Task scope policy: a Task launched inside a nested block and NOT
+//      waited keeps running after the block exits — the compiler does NOT
+//      auto-join at scope end.  Its completion is observed, and _start's
+//      join-all reaps it at process exit.
+//
+// Exit 0 on success; distinct non-zero codes per failure.
+
+import std.thread;
+import std.atomic;
+import std.sync;
+import std.sys.entry;
+
+Mutex<i64> g_counter;   // zero-init: unlocked, value 0
+
+void worker_inc(i64 arg) {
+    for (i64 i = 0; i < 5000; i = i + 1) {
+        Guard<i64> g = g_counter.lock();
+        g.set(g.get() + 1);
+    }
+}
+
+// Lock, then take the early-return path; the guard must still release.
+i64 guarded_early(Mutex<i64>* m, i64 v) {
+    Guard<i64> g = m.lock();
+    if (v < 0) {
+        return -1;
+    }
+    g.set(v);
+    return 0;
+}
+
+i64 g_flag;
+
+void worker_flag(i64 arg) {
+    __atomic_store_i64(&g_flag, 1, ATOMIC_RELEASE);
+}
+
+i64 main() {
+    // 1. Guarded increments across launched tasks.
+    Task<void> t0 = launch worker_inc(0);
+    Task<void> t1 = launch worker_inc(0);
+    Task<void> t2 = launch worker_inc(0);
+    Task<void> t3 = launch worker_inc(0);
+    wait t0;
+    wait t1;
+    wait t2;
+    wait t3;
+    {
+        Guard<i64> g = g_counter.lock();
+        if (g.get() != 20000) { return 1; }
+    }
+
+    // 2. Drop on scope exit: the guard above dropped at its block's end, so
+    //    locking again here must not block.
+    {
+        Guard<i64> g = g_counter.lock();
+        g.set(0);
+    }
+    {
+        Guard<i64> h = g_counter.lock();
+        if (h.get() != 0) { return 2; }
+        h.set(123);
+    }
+
+    // 3. Drop on early return.
+    if (guarded_early(&g_counter, -1) != -1) { return 3; }
+    Guard<i64> g3 = g_counter.lock();   // must not deadlock
+    if (g3.get() != 123) { return 4; }  // early-return path left value untouched
+    g3.set(456);
+
+    // 4. Task launched in a scope, NOT waited: it keeps running past the
+    //    block (no auto-join); the bounded spin observes completion, and
+    //    join-all reaps it at exit.
+    g_flag = 0;
+    {
+        Task<void> t = launch worker_flag(0);
+        // Scope exits here with no wait — the task is NOT cancelled.
+    }
+    i64 spins = 0;
+    while (true) {
+        if (__atomic_load_i64(&g_flag, ATOMIC_ACQUIRE) == 1) { break; }
+        spins = spins + 1;
+        if (spins > 500000000) { return 5; }
+    }
+    return 0;
+}

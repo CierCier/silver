@@ -44,6 +44,7 @@ test_specific_flags() {
         thread_test) echo "--static-runtime" ;;
         launch_wait_test) echo "--static-runtime" ;;
         channel_test) echo "--static-runtime" ;;
+        guard_test) echo "--static-runtime" ;;
         *) echo "" ;;
     esac
 }

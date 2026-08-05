@@ -1,6 +1,6 @@
 // Channel + sync primitives integration test (static runtime, real threads).
 //
-// Exercises std.sync (Mutex, WaitGroup, futex helpers) and std.channel
+// Exercises std.sync (RawMutex, WaitGroup, futex helpers) and std.channel
 // (MPSC FIFO channel) on the 1:1 thread runtime:
 //   1. Single-producer FIFO with compaction: one thread sends 0..2047, the
 //      consumer recv's each in order (the head index crosses the compaction
@@ -10,7 +10,7 @@
 //      consumer receives exactly 1000 values and verifies 250 per tag.
 //   3. Blocking recv: the consumer recv's before the producer has sent, so
 //      it must actually block on the futex and wake when the value arrives.
-//   4. Mutex + WaitGroup: 4 threads each do 10000 Mutex-guarded increments
+//   4. Mutex + WaitGroup: 4 threads each do 10000 RawMutex-guarded increments
 //      of a shared counter, then done(); the coordinator wait_all()s and
 //      verifies the exact total (any lost update would read less).
 //
@@ -30,7 +30,7 @@ Channel<i64> g_ch;    // FIFO / compaction
 Channel<i64> g_ch2;   // multi-producer
 Channel<i64> g_ch3;   // blocking recv
 
-Mutex g_mu;
+RawMutex g_mu;
 i64 g_shared;         // guarded by g_mu
 WaitGroup g_wg;       // counts the four increment workers
 

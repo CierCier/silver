@@ -6,7 +6,7 @@
 //   - recv() blocks until a value is available, then returns it (ownership
 //     moves out).
 //
-// The queue is a Vec<T> guarded by a Mutex, with a head index for O(1) FIFO
+// The queue is a Vec<T> guarded by a RawMutex, with a head index for O(1) FIFO
 // pops; the buffer compacts in place once the consumed prefix grows large.
 // A separate seq_cst futex word (`sigs`) counts sends and is the sleep/wake
 // mechanism for blocked receivers.  recv reads the counter under the lock,
@@ -27,7 +27,7 @@ import std.mem.vec;
 import std.sync;
 
 struct Channel<T> {
-    Mutex mu;
+    RawMutex mu;
     Vec<T> queue;
     i64 head;   // index of the front element (consumed prefix before it)
     i32 sigs;   // send counter; the futex word receivers sleep on
@@ -37,7 +37,7 @@ impl Channel<T> {
     /// A fresh, empty channel.
     Channel<T> new() {
         Channel<T> c;
-        c.mu = Mutex.new();
+        c.mu = RawMutex.new();
         c.queue = Vec<T>.new();
         c.head = 0;
         c.sigs = 0;
