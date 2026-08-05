@@ -45,6 +45,7 @@ test_specific_flags() {
         launch_wait_test) echo "--static-runtime" ;;
         channel_test) echo "--static-runtime" ;;
         guard_test) echo "--static-runtime" ;;
+        launch_send_test) echo "--static-runtime" ;;
         *) echo "" ;;
     esac
 }
@@ -60,6 +61,7 @@ expected_compile_failure() {
         static_volatile_negative_test) return 0 ;;
         borrow_origin_escape_error_test) return 0 ;;
         launch_wait_error_test) return 0 ;;
+        launch_send_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

@@ -1,0 +1,43 @@
+// Positive launch Send-gate test: value types, owned containers, and user
+// structs with value fields may be MOVED into a task. The worker sums every
+// payload so a corrupted or mis-delivered transfer fails the assertion.
+//
+// Exit 0; non-zero on payload mismatch.
+
+import std.thread;
+import std.mem.vec;
+import std.mem.box;
+import std.optional;
+import std.sys.entry;
+
+struct Point {
+    i64 x;
+    i64 y;
+}
+
+// Sums all payloads to prove every moved value crossed the boundary intact.
+i64 worker_agg(i64 a, str s, Vec<i64> v, Point p, Optional<i64> o, Box<i64> b) {
+    i64 vsum = 0;
+    for (i64 i = 0; i < v.len(); i = i + 1) {
+        vsum = vsum + v.get(i);
+    }
+    i64* bp = b.get();
+    i64 bval = *bp;
+    return a + vsum + p.x + p.y + o.unwrap() + bval;
+}
+
+i64 main() {
+    Vec<i64> v = Vec<i64>.new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    Point p = { .x = 10, .y = 20 };
+    Optional<i64> o = Optional<i64>.some(42);
+    Box<i64> b = Box<i64>.new(7);
+
+    Task<i64> t = launch worker_agg(100, "hi", move v, move p, move o, move b);
+    i64 r = wait t;
+    // 100 + (1+2+3) + 10 + 20 + 42 + 7 = 185
+    if (r != 185) { return 1; }
+    return 0;
+}

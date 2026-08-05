@@ -6,6 +6,7 @@ use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
 use crate::semantic::analyzer::Analyzer;
 use crate::semantic::monomorph::MonomorphRequest;
+use crate::semantic::send_check::{self, DefView};
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolId, SymbolKind};
 use crate::traits::validate_traits_with_imports;
 use crate::types::{
@@ -99,6 +100,7 @@ struct VariantInfo {
 struct EnumDef {
     backing_type: ast::PrimitiveType,
     variants: HashMap<String, VariantInfo>,
+    type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +301,7 @@ impl TypeChecker {
                         EnumDef {
                             backing_type: backing_type.clone(),
                             variants,
+                            type_params: Vec::new(),
                         },
                     );
                     self.register_enum_layout(&export.name, &backing_type);
@@ -1334,25 +1337,45 @@ impl TypeChecker {
             ast::ExpressionKind::Launch(inner) => {
                 // `launch f(args...)`: the callee must be a directly-named
                 // function (no indirect/fn-pointer launch in v1). The wrapped
-                // call is validated through the normal Call path, which
+                // call is validated through the normal overload path, which
                 // resolves overloads, checks argument types, and records
                 // monomorph requests. The result is a Task<ret>.
-                let call_ty = self.check_expr(inner, None);
-                let is_named_call = matches!(
-                    inner.kind.as_ref(),
-                    ast::ExpressionKind::Call { function, .. }
-                        if matches!(function.kind.as_ref(), ast::ExpressionKind::Identifier(_))
-                );
-                if is_named_call {
-                    Type::Task(Box::new(call_ty))
-                } else {
+                //
+                // The structural Send gate runs on every argument: launch
+                // MOVES its args into the child thread, so shared-ownership
+                // (Rc), GC-handle, raw-pointer, and reference types are
+                // rejected here.
+                let ast::ExpressionKind::Call {
+                    function,
+                    arguments,
+                } = inner.kind.as_ref()
+                else {
                     self.error(
                         "launch operand must be a call to a named function ".to_string()
                             + "(function pointers are not supported in v1)",
                         inner.span,
                     );
-                    Type::Unknown
+                    return Type::Unknown;
+                };
+                let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() else {
+                    self.error(
+                        "launch operand must be a call to a named function ".to_string()
+                            + "(function pointers are not supported in v1)",
+                        inner.span,
+                    );
+                    return Type::Unknown;
+                };
+                let (call_ty, arg_types) =
+                    self.resolve_overload_with_explicit(ident, &[], arguments, inner.span);
+                for (arg, arg_ty) in arguments.iter().zip(arg_types.iter()) {
+                    if let Err(reason) = self.check_send(arg_ty) {
+                        self.error(
+                            format!("launch argument of type {arg_ty} is not Send: {reason}"),
+                            arg.span,
+                        );
+                    }
                 }
+                Type::Task(Box::new(call_ty))
             }
             ast::ExpressionKind::Wait(inner) => {
                 // `wait t` joins the Task t (consuming it) and yields its
@@ -1449,6 +1472,7 @@ impl TypeChecker {
                                     arguments,
                                     expr.span,
                                 )
+                                .0
                             } else {
                                 for arg in arguments {
                                     self.check_expr(arg, None);
@@ -2116,6 +2140,42 @@ impl TypeChecker {
         span: Span,
     ) -> Type {
         self.resolve_overload_with_explicit(ident, &[], arguments, span)
+            .0
+    }
+
+    /// Structural Send gate: returns `Err(reason)` if `ty` cannot be MOVED
+    /// across a thread boundary (used for `launch` arguments).  See
+    /// `send_check` for the walk's rules.
+    fn check_send(&self, ty: &Type) -> Result<(), String> {
+        send_check::structural_send(ty, &|name: &str| {
+            if let Some(def) = self.struct_defs.get(name) {
+                return Some(DefView::Struct {
+                    type_params: def.type_params.clone(),
+                    fields: def
+                        .fields
+                        .iter()
+                        .map(|(field, ty)| (field.clone(), ty.clone()))
+                        .collect(),
+                });
+            }
+            if let Some(def) = self.enum_defs.get(name) {
+                return Some(DefView::Enum {
+                    type_params: def.type_params.clone(),
+                    variants: def
+                        .variants
+                        .values()
+                        .map(|variant| {
+                            variant
+                                .payload
+                                .iter()
+                                .map(Type::from_ast)
+                                .collect::<Vec<_>>()
+                        })
+                        .collect(),
+                });
+            }
+            None
+        })
     }
 
     /// Recognizes compiler intrinsics of the form `__atomic_<op>_<width>` and
@@ -2244,13 +2304,16 @@ impl TypeChecker {
         Some(result)
     }
 
+    /// Resolves `ident` to the best matching overload and returns the call's
+    /// return type together with the (already type-checked) argument types,
+    /// so callers can run the Send gate on `launch` arguments.
     fn resolve_overload_with_explicit(
         &mut self,
         ident: &ast::Identifier,
         explicit_types: &[Type],
         arguments: &[ast::Expression],
         span: Span,
-    ) -> Type {
+    ) -> (Type, Vec<Type>) {
         let arg_types = arguments
             .iter()
             .map(|arg| self.check_expr_with_literal_naturals(arg))
@@ -2258,7 +2321,7 @@ impl TypeChecker {
 
         let Some(candidate_ids) = self.functions.get(&ident.name).cloned() else {
             self.error(format!("unknown function '{}'", ident.name), span);
-            return Type::Unknown;
+            return (Type::Unknown, arg_types);
         };
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, FunctionSig)> = Vec::new();
@@ -2375,7 +2438,7 @@ impl TypeChecker {
                 msg.push_str(&candidates.join(", "));
             }
             self.error(msg, span);
-            return Type::Unknown;
+            return (Type::Unknown, arg_types);
         }
         matches.sort_by_key(|(score, _, _, _)| *score);
         let best_score = matches[0].0;
@@ -2398,12 +2461,12 @@ impl TypeChecker {
                 msg.push_str(&candidates.join(", "));
             }
             self.error(msg, span);
-            return Type::Unknown;
+            return (Type::Unknown, arg_types);
         }
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
         self.record_function_monomorph(candidate, mapping, span);
-        return_type.clone()
+        (return_type.clone(), arg_types)
     }
 
     /// Collect type-parameter-like names from an owner type — the set of bare
@@ -4690,6 +4753,23 @@ impl TypeChecker {
         Some(EnumDef {
             backing_type: choose_enum_backing_type(min_value, max_value),
             variants,
+            type_params: enum_item
+                .generics
+                .as_ref()
+                .map(|generics| {
+                    generics
+                        .params
+                        .iter()
+                        .filter_map(|param| {
+                            if let ast::GenericParam::Type(type_param) = param {
+                                Some(type_param.name.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         })
     }
 

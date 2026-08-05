@@ -1,0 +1,28 @@
+// Negative launch Send-gate test: shared-ownership, GC-handle, raw-pointer,
+// and reference types must be REJECTED as launch arguments (they are moved
+// into the child thread, where they would race or dangle). Compile failure
+// is the expected outcome.
+
+import std.thread;
+import std.mem.rc;
+import std.sys.entry;
+
+void worker_rc(Rc<i64> rc) {
+}
+
+void worker_ptr(i64* p) {
+}
+
+void worker_ref(&i64 x) {
+}
+
+i64 main() {
+    Rc<i64> rc = Rc<i64>.new(1);
+    launch worker_rc(rc);   // ERROR: Rc<i64> is not Send (shared non-atomic count)
+
+    i64 x = 5;
+    launch worker_ptr(&x);  // ERROR: raw pointer is not Send
+
+    launch worker_ref(&x);  // ERROR: references cannot cross a thread boundary
+    return 0;
+}
