@@ -17,7 +17,8 @@ the compiler source.  Features not yet implemented are explicitly marked as
 6. [Operator Precedence & Associativity](#6-operator-precedence--associativity)
 7. [Operator Overloading & Custom Protocols](#7-operator-overloading--custom-protocols)
 8. [Memory Management & Ownership Model](#8-memory-management--ownership-model)
-9. [Standard Library & Patterns](#9-standard-library--patterns)
+9. [Concurrency & Threading](#9-concurrency--threading)
+10. [Standard Library & Patterns](#10-standard-library--patterns)
 
 ---
 
@@ -61,6 +62,7 @@ These are hard keywords — they cannot be used as identifiers:
 | `break` | Loop termination (with optional value) | `continue` | Loop iteration skip |
 | `return` | Early return | `defer` | Scope-exit deferred action |
 | `import` | Module import directive | `comptime` | Compile-time evaluation |
+| `launch` | Spawn a detached thread, returning a `Task<T>` | `wait` | Join a `Task`, moving out its result |
 | `cast` | Type cast declaration/expr | `move` | Ownership transfer |
 | `ref` | Reference (aliasing) | `extern` | External symbol binding |
 | `pub` | Public visibility modifier | `private` | Private visibility modifier |
@@ -748,7 +750,79 @@ semantics and drop flags.
 
 ---
 
-## 9. Standard Library & Patterns
+## 9. Concurrency & Threading
+
+Threads are 1:1 OS threads running on the pure-Silver static runtime
+(no libc; `--static-runtime` is the default and only mode).
+
+### Launching Tasks
+
+`launch f(args...)` spawns a thread that calls `f`, returning a `Task<T>`
+handle where `T` is `f`'s return type.  Every argument is **moved** into
+ the child thread.
+
+```silver
+Task<i64> t = launch compute(21);   // Task<i64>: the callee's return type
+Task<void> u = launch worker();     // void tasks are fine
+```
+
+The handle is a plain value with no `Drop`: dropping an unwaited `Task`
+does **not** join it — the thread keeps running and is reaped by the
+exit-time join-all.  Joining is always explicit:
+
+```silver
+i64 r = wait t;          // join, move out the result, consume the handle
+defer wait t;            // join on every exit path of the scope
+```
+
+A second `wait` on the same handle is a move error.
+
+### Send gate
+
+Because launch arguments are moved across the thread boundary, every
+argument type must be **Send**.  The check is a structural field walk:
+
+- **Send**: primitives (`i64`, `str`, `bool`, …), function values, `Task<T>`
+  handles, arrays, `Optional<T>`, tuples; owned containers (`Vec<T>`,
+  `Box<T>`, `String`, `Bytes`, `HashMap<K, V>`) iff their owned type
+  arguments are Send; structs/enums whose fields/variant payloads are all
+  Send (generic parameters substituted from the instantiation).
+- **Not Send** (compile error at the launch site): `Rc<T>` (shared,
+  non-atomic refcount), GC heap `Handle`s, raw pointers (`T*`), references
+  (`&T`/`&mut T`), slices, and any struct holding an unmarked raw pointer.
+
+### Synchronization primitives
+
+- **`Mutex<T>`** + **`Guard<T>`** (RAII): `g.lock()` returns a guard granting
+  access to the value (`get`/`set`/`get_ptr`) and unlocking the underlying
+  `RawMutex` when the guard drops — at scope exit, on early return, or when
+  moved.  A zero-initialized global `Mutex<T>` is a valid unlocked mutex
+  holding a zero value.
+- **`RawMutex`**: the low-level futex lock (`lock`/`unlock`/`try_lock`)
+  underneath `Mutex<T>` and `Channel<T>`.
+- **`Channel<T>`**: unbounded MPSC FIFO.  `send(T)` moves a value in
+  (non-blocking), `recv()` blocks until a value is available, and `close()`
+  frees the queue buffer (needed for a leak-check-clean exit).
+- **`WaitGroup`**: `add(n)` / `done()` / `wait_all()` — a counter that
+  blocks `wait_all()` until `done()` brings it to zero.
+- **Atomics**: the `__atomic_*` intrinsic layer (`__atomic_load_i64`,
+  `__atomic_fetch_add_i64`, …) wrapped by `std.atomic` value types
+  (`AtomicI8`/`AtomicI32`/`AtomicI64`/`AtomicBool`).
+
+All futex-based primitives are seq_cst by default.
+
+### Runtime model
+
+- Threads are 1:1 OS threads registered in a fixed-size (64-slot) registry;
+  a detached task keeps its slot until a waiter or the exit-time join-all
+  reaps it.
+- The runtime entry (`std.sys.entry`) is imported automatically and provides
+  `_start`; every binary links statically against the pure-Silver runtime —
+  there is no libc, and `--dynamic-runtime` no longer exists.
+
+---
+
+## 10. Standard Library & Patterns
 
 ### Error Handling
 
