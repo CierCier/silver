@@ -1,6 +1,6 @@
 // Test suite for pure-Silver integer math helpers.
 import std.test;
-import std.math;
+import std.math_int;
 
 i32 main() {
     STDOUT.write_str("=== Math Int Tests ===\n\n");

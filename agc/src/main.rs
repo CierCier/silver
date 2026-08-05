@@ -88,13 +88,10 @@ struct Cli {
     #[arg(long = "no-std", action = ArgAction::SetTrue)]
     no_std: bool,
 
-    /// Link dynamically (with libc runtime support) instead of producing a
-    /// fully static binary.  Default is static (no libc needed).
-    #[arg(long = "dynamic-runtime", action = ArgAction::SetTrue)]
-    dynamic_runtime: bool,
-
-    /// Link statically (no libc runtime support). This is the default.
-    #[arg(long = "static-runtime", action = ArgAction::SetTrue)]
+    /// Link statically with the no-libc runtime. Always enabled: Silver never
+    /// links against libc, so every binary is fully static by default. The
+    /// flag exists for explicitness and backwards compatibility.
+    #[arg(long = "static-runtime", action = ArgAction::SetTrue, default_value_t = true)]
     static_runtime: bool,
 
     /// Prefer shared module artifacts and emit shared libraries for module packaging

@@ -1,5 +1,6 @@
 // std/sys/entry.ag — Silver _start entry point for static (no-libc) binaries.
 import std.io.file;
+import std.rt.builtins;
 import std.rt.thread_registry;
 import std.thread;
 //
@@ -15,7 +16,7 @@ import std.thread;
 //   7. Restores the return value into %rdi and invokes exit_group via syscall 231.
 //
 // Usage:
-//   import std.sys.entry;       // in any Silver program compiled with --static-runtime
+//   import std.sys.entry;       // in any Silver program (linking is always static; no libc)
 //   i32 main() { return 0; }
 //
 // The module's _start is inlined into the consumer's object file by the import

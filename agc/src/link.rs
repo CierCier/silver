@@ -32,16 +32,6 @@ pub(crate) fn run_tool(mut command: Command, label: &str) -> Result<(), String> 
 }
 // ---- Cached cc queries — each arg is a LazyLock, spawned once ----
 
-static CRT1_O: LazyLock<String> =
-    LazyLock::new(|| cc_query_raw("-print-file-name=crt1.o").unwrap_or_default());
-static CRTI_O: LazyLock<String> =
-    LazyLock::new(|| cc_query_raw("-print-file-name=crti.o").unwrap_or_default());
-static CRTBEGIN_O: LazyLock<String> =
-    LazyLock::new(|| cc_query_raw("-print-file-name=crtbegin.o").unwrap_or_default());
-static CRTEND_O: LazyLock<String> =
-    LazyLock::new(|| cc_query_raw("-print-file-name=crtend.o").unwrap_or_default());
-static CRTN_O: LazyLock<String> =
-    LazyLock::new(|| cc_query_raw("-print-file-name=crtn.o").unwrap_or_default());
 static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     cc_query_raw("-print-search-dirs")
         .ok()
@@ -75,17 +65,6 @@ pub(crate) fn cc_query_raw(arg: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub(crate) fn cc_query_crt(arg: &str) -> Result<String, String> {
-    match arg {
-        "crt1.o" => Ok(CRT1_O.to_string()),
-        "crti.o" => Ok(CRTI_O.to_string()),
-        "crtbegin.o" => Ok(CRTBEGIN_O.to_string()),
-        "crtend.o" => Ok(CRTEND_O.to_string()),
-        "crtn.o" => Ok(CRTN_O.to_string()),
-        _ => cc_query_raw(&format!("-print-file-name={arg}")),
-    }
-}
-
 pub(crate) fn cc_library_dirs() -> Vec<PathBuf> {
     CC_LIB_DIRS.clone()
 }
@@ -110,14 +89,6 @@ pub(crate) fn link_exe(
             format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
         })
     })
-}
-
-pub(crate) fn default_dynamic_linker(target: Option<&str>) -> Option<&'static str> {
-    match target.unwrap_or("") {
-        t if t.contains("aarch64") => Some("/lib/ld-linux-aarch64.so.1"),
-        t if t.contains("x86_64") || t.is_empty() => Some("/lib64/ld-linux-x86-64.so.2"),
-        _ => None,
-    }
 }
 
 pub(crate) fn should_force_non_pie(target: Option<&str>) -> bool {
@@ -171,20 +142,6 @@ pub(crate) fn link_exe_with_ld_lld(
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }
-    if !plan.no_std
-        && let Some(loader) = default_dynamic_linker(plan.target.as_deref())
-    {
-        link.arg("-dynamic-linker").arg(loader);
-    }
-
-    if !plan.no_std {
-        for crt in ["crt1.o", "crti.o", "crtbegin.o"] {
-            let path = cc_query_crt(crt)?;
-            if path != crt {
-                link.arg(path);
-            }
-        }
-    }
 
     for obj in object_paths {
         link.arg(obj);
@@ -204,15 +161,6 @@ pub(crate) fn link_exe_with_ld_lld(
         link.arg("-rpath").arg(&dir);
     }
 
-    if !plan.no_std {
-        link.arg("-lc").arg("-lgcc_s").arg("-lgcc");
-        for crt in ["crtend.o", "crtn.o"] {
-            let path = cc_query_crt(crt)?;
-            if path != crt {
-                link.arg(path);
-            }
-        }
-    }
     for lib in native_libs {
         link.arg(format!("-l{lib}"));
     }
@@ -243,12 +191,9 @@ pub(crate) fn link_exe_with_cc(
     if plan.debug_info {
         link.arg("-g");
     }
-    if plan.no_std {
-        link.arg("-nostdlib");
-    }
-    if plan.static_runtime {
-        link.arg("-static");
-    }
+    // Silver never links libc: no CRT startup, no libc/libgcc, fully static.
+    link.arg("-nostdlib");
+    link.arg("-static");
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
     }

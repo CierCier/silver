@@ -212,7 +212,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // __silver_launch(void(i64) tramp, u8* pack) -> i64 (TaskRecord*).
         let launch_fn = self.module.get_function("__silver_launch").ok_or_else(|| {
             CodegenError::with_span(
-                "launch requires the thread runtime (`import std.sys.entry;` + --static-runtime)",
+                "launch requires the thread runtime (`import std.sys.entry;`)",
                 expr.span,
             )
         })?;
@@ -299,7 +299,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .get_function("__silver_wait_done")
             .ok_or_else(|| {
                 CodegenError::with_span(
-                    "wait requires the thread runtime (`import std.sys.entry;` + --static-runtime)",
+                    "wait requires the thread runtime (`import std.sys.entry;`)",
                     expr.span,
                 )
             })?;

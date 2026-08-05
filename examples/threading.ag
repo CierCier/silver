@@ -20,8 +20,6 @@
 // is reaped by the exit-time join-all.  `wait` (or `defer wait`) is the
 // only way to observe completion.
 //
-// The runtime entry point (std.sys.entry) is imported automatically; every
-// binary links statically against the pure-Silver runtime (no libc).
 
 import std.thread;   // launch/wait runtime (threads are joined at exit)
 import std.sync;     // Mutex<T>, Guard<T>, WaitGroup

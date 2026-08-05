@@ -1,3 +1,6 @@
+// Regression: a function may return while a Drop value is still live — the
+// value is dropped on the return path (RAII). `return x;` for a droppable is
+// an implicit move, so no explicit move is required.
 import std.mem;
 import std.sys.entry;
 struct OwnedBuf { i8* data; }

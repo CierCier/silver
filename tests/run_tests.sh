@@ -57,7 +57,6 @@ expected_compile_failure() {
     case "$1" in
         enum_arity_error_test) return 0 ;;
         inherent_drop_error_test) return 0 ;;
-        return_droppable_without_move_error_test) return 0 ;;
         static_volatile_negative_test) return 0 ;;
         borrow_origin_escape_error_test) return 0 ;;
         launch_wait_error_test) return 0 ;;

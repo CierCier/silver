@@ -1,0 +1,150 @@
+// std/rt/i128.ag — compiler-rt compatible 128-bit builtins, in pure Silver.
+//
+// LLVM lowers 128-bit division/remainder (`sdiv`/`srem`/`udiv`/`urem i128`)
+// and i128 <-> f64 conversions (`fptosi`/`sitofp`) to calls into these
+// symbols. Silver never links libc or libgcc, so the pure-Silver runtime
+// provides them itself. The bodies deliberately use only 64-bit arithmetic
+// and bit manipulation: an i128 division or an f64 <-> i128 cast inside one
+// of these functions would lower to the very libcall it defines.
+
+// ---------------------------------------------------------------------------
+// Unsigned 128-bit division core: q = n / d, *r_out = n % d.
+// Binary long division, one quotient bit per iteration (128 total).
+// ---------------------------------------------------------------------------
+u128 __udivmod_core(u128 n, u128 d, u128* r_out) {
+    if (d == (u128)0) {
+        // Division by zero is UB in the compiler-rt contract; stay finite.
+        *r_out = (u128)0;
+        return (u128)0;
+    }
+    u128 q = (u128)0;
+    u128 r = (u128)0;
+    u128 i = (u128)128;
+    while (i > (u128)0) {
+        i -= (u128)1;
+        r = r << (u128)1;
+        u128 top = n >> (u128)127;
+        r = r | (top & (u128)1);
+        n = n << (u128)1;
+        if (r >= d) {
+            r = r - d;
+            q = q | ((u128)1 << i);
+        }
+    }
+    *r_out = r;
+    return q;
+}
+
+u128 __udivti3(u128 a, u128 b) {
+    u128 r = (u128)0;
+    return __udivmod_core(a, b, &r);
+}
+
+u128 __umodti3(u128 a, u128 b) {
+    u128 r = (u128)0;
+    __udivmod_core(a, b, &r);
+    return r;
+}
+
+i128 __divti3(i128 a, i128 b) {
+    if (b == (i128)0) {
+        return (i128)0;
+    }
+    u128 ua = (u128)a;
+    u128 ub = (u128)b;
+    if (a < (i128)0) {
+        ua = (u128)0 - ua;
+    }
+    if (b < (i128)0) {
+        ub = (u128)0 - ub;
+    }
+    u128 r = (u128)0;
+    u128 q = __udivmod_core(ua, ub, &r);
+    i32 neg = 0;
+    if (a < (i128)0) {
+        neg = 1 - neg;
+    }
+    if (b < (i128)0) {
+        neg = 1 - neg;
+    }
+    if (neg == 1) {
+        q = (u128)0 - q;
+    }
+    return (i128)q;
+}
+
+i128 __modti3(i128 a, i128 b) {
+    if (b == (i128)0) {
+        return (i128)0;
+    }
+    u128 ua = (u128)a;
+    u128 ub = (u128)b;
+    if (a < (i128)0) {
+        ua = (u128)0 - ua;
+    }
+    if (b < (i128)0) {
+        ub = (u128)0 - ub;
+    }
+    u128 r = (u128)0;
+    __udivmod_core(ua, ub, &r);
+    if (a < (i128)0) {
+        r = (u128)0 - r;
+    }
+    return (i128)r;
+}
+
+// ---------------------------------------------------------------------------
+// f64 <-> i128 conversions. Convert through the u64 hi/lo split so the body
+// never contains an f64 <-> i128 cast (which would recurse into this file).
+// Out-of-range f64 inputs saturate; the compiler-rt contract leaves them UB.
+// ---------------------------------------------------------------------------
+i128 __fixdfti(f64 d) {
+    if (d == 0.0) {
+        return (i128)0;
+    }
+    i32 neg = 0;
+    f64 x = d;
+    if (d < 0.0) {
+        neg = 1;
+        x = -x;
+    }
+    if (x >= 170141183460469231731687303715884105728.0) { // 2^127
+        if (neg == 1) {
+            return (i128)(-170141183460469231731687303715884105727) - (i128)1;
+        }
+        return (i128)170141183460469231731687303715884105727;
+    }
+    u64 hi = (u64)0;
+    u64 lo = (u64)0;
+    if (x >= 18446744073709551616.0) { // 2^64
+        f64 scaled = x / 18446744073709551616.0;
+        hi = (u64)scaled;
+        x = x - (f64)hi * 18446744073709551616.0;
+    }
+    lo = (u64)x;
+    u128 mag = ((u128)hi << (u128)64) | (u128)lo;
+    if (neg == 1) {
+        mag = (u128)0 - mag;
+    }
+    return (i128)mag;
+}
+
+f64 __floattidf(i128 a) {
+    if (a == (i128)0) {
+        return 0.0;
+    }
+    i32 neg = 0;
+    u128 mag = (u128)a;
+    if (a < (i128)0) {
+        neg = 1;
+        mag = (u128)0 - mag;
+    }
+    u64 hi = (u64)(mag >> (u128)64);
+    u64 lo = (u64)mag;
+    f64 result = (f64)hi * 18446744073709551616.0;
+    result = result + (f64)lo;
+    if (neg == 1) {
+        result = -result;
+    }
+    return result;
+}

@@ -61,6 +61,35 @@ impl<'a> FileImportResolverHook<'a> {
             let _ = self.mark_file_seen(root);
         }
 
+        // Default import: every program gets `std.sys.entry`, which supplies
+        // the `_start` entry point. Silver never links libc/crt0, so without
+        // it no executable would have an entry symbol. `seen_modules` dedupes
+        // this against an explicit `import std.sys.entry;` or `import std.sys;`.
+        program.items.insert(
+            0,
+            ast::Item {
+                kind: ast::ItemKind::Import(ast::ImportItem {
+                    path: vec![
+                        ast::Identifier {
+                            name: "std".to_string(),
+                            span: lexer::Span::default(),
+                        },
+                        ast::Identifier {
+                            name: "sys".to_string(),
+                            span: lexer::Span::default(),
+                        },
+                        ast::Identifier {
+                            name: "entry".to_string(),
+                            span: lexer::Span::default(),
+                        },
+                    ],
+                }),
+                span: lexer::Span::default(),
+                visibility: ast::Visibility::Private,
+                attributes: Vec::new(),
+            },
+        );
+
         self.lower_program_recursive(program, base_dir)?;
         validate_import_conflicts(
             self.module_imports
