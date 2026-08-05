@@ -44,7 +44,7 @@ silver/
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
 │   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch, Runtime aggregate
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
-├── bootstrap/                   # Generated locally — NOT committed to git (see Build & Test)
+├── bootstrap/                   # Generated locally — NOT committed to git
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```
@@ -63,14 +63,7 @@ silver/
    ```bash
    cargo test -p agc
    ```
-3. **Rebuild the Bootstrap Artifacts**:
-   ```bash
-   bash ./update-bootstrap.sh
-   ```
-   *Note: This is the ONLY correct way to update bootstrap. The script compiles `agc` in release mode, copies it to `bootstrap/bin/`, copies library files (`std/`) to `bootstrap/include/silver/`, and generates compiled module packages (`.agm` artifacts) in `bootstrap/lib/silver/`. Manual `cp` commands will miss the module packaging step and produce inconsistent bootstrap artifacts. Always run this script after compiler changes or std lib changes.*
-
-   **IMPORTANT**: `bootstrap/` is **git-ignored and not committed** (the repo history was pruned of it). It is a generated cache: after a fresh clone, run `bash ./update-bootstrap.sh` once before compiling Silver code. Re-run it after any compiler or std-lib change so the prebuilt compiler and module packages stay in sync.
-4. **Compile a Silver file**:
+3. **Compile a Silver file**:
    ```bash
    cargo run -p agc -- path/to/file.ag
    ```
@@ -254,4 +247,3 @@ When introducing a new syntax item or language capability, follow this checklist
 - **DO NOT** assume struct fields are recursively dropped. You must write explicit drops inside custom destructors.
 - **DO NOT** guess platform layout dimensions. Always use target data classification interfaces provided by System V AMD64 ABI specifications in `codegen/abi.rs`.
 - **DO NOT** modify the runtime (`std/rt/') in a way that breaks compatibility with existing test suite expectations. Always run 'bash tests/run_tests.sh' after changes.
-- **DO NOT** squash bootstrap updates into feature commits. Bootstrap artifacts MUST be committed as a separate, dedicated commit — never mixed with source changes. This keeps the binary and module artifacts independently reviewable and revertable.

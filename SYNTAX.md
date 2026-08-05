@@ -115,17 +115,40 @@ generics, and algebraic data types.
 | String & Character | `str`, `char` | NUL-terminated byte pointer, 32-bit codepoint |
 | Boolean & Void | `bool`, `void` | `true`/`false`, unit return |
 
-### Pointers
+### References & Borrowing
 
-Pointers are the primary indirection mechanism.
+References are the **enforced** indirection mechanism.  A parameter declared
+`&T` or `&mut T` is a **borrow origin**: the escape checker proves that any
+pointer a function returns derives only from its `&`-marked parameters or
+from independent data (globals, heap values, raw-pointer pointees).
+Returning a reference to a local is a compile error.
 
 ```silver
-i32* p_mut;         // mutable pointer to i32
-const i32* p_const; // pointer to const i32 (read-only target)
-i32** pp_mut;       // double pointer
+i64 read(&Pair p) { return *p.method(); }   // &T borrow origin
+void update(&mut Pair p) { p.set(42); }     // &mut T borrow origin
+Pair* borrow_first(&Pair a, &Pair b) { ... } // returned ref may borrow a or b
+```
+
+Reference receivers (`&T self`, `&mut T self`) behave like pointer receivers
+in codegen but carry borrow-origin semantics.
+
+### Raw Pointers
+
+Raw pointers (`T*`, `const T*`, `mut T*`) are the **unchecked escape
+hatch**: non-owning views that are never automatically dropped and create
+**no** borrow constraints.
+
+```silver
+i32* p_mut;         // raw pointer to i32 (no borrow check)
+const i32* p_const; // raw pointer to const i32 (read-only target)
+i32** pp_mut;       // double raw pointer
 ```
 
 Pointer field access auto-derefs: `p.x` is equivalent to `(*p).x`.
+
+Prefer `&T`/`&mut T` whenever the callee borrows caller-owned data; reserve
+raw pointers for FFI, manual address arithmetic, and state owned by the
+callee (heap-backed).
 
 ### Arrays
 
@@ -491,15 +514,20 @@ Buffer b1 = create_buffer();
 Buffer b2 = move b1;    // b1's drop flag cleared; only b2 drops
 ```
 
-**Reference aliases** are created with `&var` (address-of).  The `ref` keyword
-is reserved by the lexer but the bootstrap parser does **not** parse `ref` as
-an expression — use `&` to create pointers.
+**References** are created with `&var` (address-of).  The `ref` keyword is
+reserved by the lexer but the bootstrap parser does **not** parse `ref` as an
+expression — use `&`.  A `&` expression passed as an argument or receiver is a
+**borrow**: the escape checker verifies it does not escape its source (see
+[§8](#8-memory-management--ownership-model)).
 
 ```silver
-Buffer* r1 = &b2;     // pointer to b2 (auto-derefs on field access)
+Buffer* r1 = &b2;     // raw pointer view of b2 (auto-derefs on field access)
+void take(&Buffer b) { ... }
+take(&b2);            // borrow of b2 — escape-checked
 ```
 
-`ref mut` is **not** a distinct syntax.
+`ref mut` is **not** a distinct syntax; `&mut` appears only in parameter
+types (`&mut Buffer b`), never as an expression prefix.
 
 ### Cast & Conversion Expressions
 
@@ -705,8 +733,15 @@ semantics and drop flags.
 2. **Move semantics**: `move x` clears the source variable's drop flag.  At
    scope exit, destructors only fire if the drop flag is `true (1)`.
 
-3. **Pointer immunity**: Raw pointers (`T*`) and reference aliases (`ref T`)
-   are never automatically dropped — they are non-owning views.
+3. **Borrows are enforced, raw pointers are not**: A parameter of type
+   `&T` or `&mut T` is a borrow origin.  The escape checker proves that any
+   pointer a function returns derives only from its `&`-marked parameters or
+   from independent data (globals, heap values, raw-pointer pointees);
+   returning a reference to a local is a compile error, as is storing a
+   reference to a local into a global.  Raw pointers (`T*`, `const T*`,
+   `mut T*`) create no borrow constraints and are never automatically
+   dropped — they are non-owning escape hatches for FFI and address
+   arithmetic.
 
 4. **Defer stack**: `defer` statements execute in **LIFO** order at scope exit,
    including before `return`.
@@ -747,10 +782,14 @@ The allocator (`std.mem.alloc`) provides three tiers:
 
 | Receiver | When |
 |---|---|
-| `T* self` | Mutating or inspecting state |
+| `&T self` / `&mut T self` | Borrowing receivers — inspect/mutate caller-owned state; the borrow is escape-checked and may be returned (deriving from this origin) |
+| `T* self` | Raw-pointer receiver — escape hatch (FFI, heap-backed state); creates no borrow constraint |
 | `T self` | Consuming transfer or copy semantics |
 
 Constructors return by value: `pub Vec<T> new() { ... return move v; }`.
+Prefer `&T`/`&mut T` receivers for methods that inspect or mutate
+caller-owned state; keep `T*` for methods whose state lives on the heap or
+behind an FFI boundary.
 
 ### Test Framework
 
