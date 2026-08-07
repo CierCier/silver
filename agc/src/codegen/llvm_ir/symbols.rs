@@ -227,7 +227,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let Some(args) = &named.generics {
             let parts = args
                 .iter()
-                .map(|arg| Self::sanitize_monomorph(&Type::from_ast(arg).canonical_key()))
+                .map(|arg| {
+                    crate::semantic::monomorph::sanitize_type_key(
+                        &Type::from_ast(arg).canonical_key(),
+                    )
+                })
                 .collect::<Vec<_>>();
             if parts.is_empty() {
                 base
@@ -306,7 +310,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 **target_type = Self::substitute_generic_type(target_type, mapping);
             }
             ast::ExpressionKind::TypeName(ty) => {
-                *ty = Self::substitute_generic_type(ty, mapping);
+                // A whole-enum rewrite (e.g. base `Optional` -> concrete
+                // `Optional__i32` in a monomorphized impl body) replaces the
+                // entire type; otherwise substitute generics normally.
+                if let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                    && named.path.len() == 1
+                    && named.generics.is_none()
+                    && let Some(concrete_ty) = mapping.get(&named.path[0].name)
+                    && let ast::TypeKind::Named(concrete_named) = concrete_ty.kind.as_ref()
+                    && concrete_named.path.last().map(|id| id.name.as_str())
+                        != Some(named.path[0].name.as_str())
+                {
+                    *ty = concrete_ty.clone();
+                } else {
+                    *ty = Self::substitute_generic_type(ty, mapping);
+                }
             }
             ast::ExpressionKind::Call {
                 function,
@@ -649,6 +667,106 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Register a monomorphized generic enum (`Optional__i32`) from its base
+    /// definition + concrete type-arg mapping: variant tag values, substituted
+    /// payload types, and the `{i16, [N x i8]}` payload layout. Called when a
+    /// generic enum-impl method is materialized on the fly and the concrete
+    /// enum was not yet registered by monomorph.
+    fn register_monomorphized_enum(
+        &mut self,
+        base_name: &str,
+        mangled_name: &str,
+        mapping: &HashMap<String, ast::Type>,
+    ) -> CodegenResult<()> {
+        let variants = self
+            .enum_variants
+            .get(base_name)
+            .cloned()
+            .unwrap_or_default();
+        self.enum_variants
+            .insert(mangled_name.to_string(), variants);
+
+        if let Some(backing) = self.enum_backing_types.get(base_name) {
+            self.enum_backing_types
+                .insert(mangled_name.to_string(), backing.clone());
+        }
+
+        let base_payloads = self
+            .enum_variant_payload_types
+            .get(base_name)
+            .cloned()
+            .unwrap_or_default();
+        let mut substituted: HashMap<String, Vec<ast::Type>> = HashMap::default();
+        let mut max_payload_size: u64 = 0;
+        for (variant, payload) in base_payloads {
+            let concrete: Vec<ast::Type> = payload
+                .iter()
+                .map(|pt| Self::substitute_generic_type(pt, mapping))
+                .collect();
+            let mut variant_size: u64 = 0;
+            for pt in &concrete {
+                variant_size += self.ast_type_size(pt);
+            }
+            max_payload_size = max_payload_size.max(variant_size);
+            substituted.insert(variant, concrete);
+        }
+        self.enum_variant_payload_types
+            .insert(mangled_name.to_string(), substituted);
+
+        if max_payload_size > 0 {
+            let i16_ty = self.context.i16_type();
+            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
+            let struct_ty = self
+                .context
+                .struct_type(&[i16_ty.into(), array_ty.into()], false);
+            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+            self.enum_payload_layouts
+                .insert(mangled_name.to_string(), struct_ty);
+            self.struct_types
+                .insert(mangled_name.to_string(), struct_ty);
+        }
+        Ok(())
+    }
+
+    /// The base name of a type if it is a `Named` with generics, else the type's
+    /// own name (single-segment Named) or empty.
+    fn named_base_name(ty: &ast::Type) -> String {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) if named.generics.is_some() => Self::named_type_name(named),
+            ast::TypeKind::Named(named) if named.path.len() == 1 => named.path[0].name.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The mangled owner name for a type (e.g. `Optional__i32` for
+    /// `Optional<i32>`), or the bare name when not generic.
+    fn mangled_name_for_type(ty: &ast::Type) -> String {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => Self::monomorph_owner_name_from_named(named),
+            _ => Self::named_base_name(ty),
+        }
+    }
+
+    /// Byte size of an AST type for payload-layout sizing (mirrors
+    /// generate_enum_item's sizing rules).
+    fn ast_type_size(&self, ty: &ast::Type) -> u64 {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Primitive(p) => match p {
+                ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,
+                ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
+                ast::PrimitiveType::I32
+                | ast::PrimitiveType::U32
+                | ast::PrimitiveType::Char
+                | ast::PrimitiveType::F32 => 4,
+                ast::PrimitiveType::I64 | ast::PrimitiveType::U64 | ast::PrimitiveType::F64 => 8,
+                ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
+                _ => 8,
+            },
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => 8,
+            _ => 8,
+        }
+    }
+
     pub(crate) fn try_instantiate_generic_impl_method_for_type(
         &mut self,
         receiver_type: &ast::Type,
@@ -737,8 +855,62 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(return_ty) = &mut func.return_type {
                     *return_ty = Self::substitute_generic_type(return_ty, &mapping);
                 }
-                Self::substitute_block_types(&mut func.body, &mapping);
+                // Rewrite bare references to the enum's own base name inside
+                // the method body (e.g. `Optional.Some(x)` in `impl Optional<T>`
+                // instantiated for `Optional<i32>`) so variant construction
+                // targets the concrete monomorphized enum.
+                let mut body_mapping = mapping.clone();
+                body_mapping.insert(
+                    base_name.clone(),
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                            path: vec![ast::Identifier {
+                                name: owner.clone(),
+                                span: func.name.span,
+                            }],
+                            generics: None,
+                        })),
+                        span: func.name.span,
+                    },
+                );
+                Self::substitute_block_types(&mut func.body, &body_mapping);
                 self.rewrite_call_sites_in_block(&mut func.body);
+
+                // If the owner is a generic enum being instantiated on the fly
+                // (method call reached before monomorph registered the concrete
+                // enum), register the mangled enum's variants, payload types,
+                // and layout so enum construction inside the method body can
+                // resolve `Optional__i32.Some(...)`.
+                if base_name != owner
+                    && (self.enum_variants.contains_key(&base_name)
+                        || self.enum_variant_payload_types.contains_key(&base_name))
+                    && !self.enum_variants.contains_key(&owner)
+                {
+                    self.register_monomorphized_enum(&base_name, &owner, &mapping)?;
+                }
+                // Also register any generic enum referenced in the signature
+                // (e.g. `next() -> Optional<T>` for a struct impl): the return
+                // type's concrete enum (`Optional__i32`) must exist before the
+                // signature is lowered so it resolves to the 4-byte layout.
+                let mut signature_types: Vec<ast::Type> = func
+                    .parameters
+                    .iter()
+                    .map(|p| p.param_type.clone())
+                    .collect();
+                if let Some(ret) = &func.return_type {
+                    signature_types.push(ret.clone());
+                }
+                for sig_ty in signature_types {
+                    let sig_base = Self::named_base_name(&sig_ty);
+                    let sig_owner = Self::mangled_name_for_type(&sig_ty);
+                    if sig_base != sig_owner
+                        && (self.enum_variants.contains_key(&sig_base)
+                            || self.enum_variant_payload_types.contains_key(&sig_base))
+                        && !self.enum_variants.contains_key(&sig_owner)
+                    {
+                        self.register_monomorphized_enum(&sig_base, &sig_owner, &mapping)?;
+                    }
+                }
 
                 let fn_ty = self.lower_function_type(
                     &func

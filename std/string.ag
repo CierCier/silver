@@ -527,14 +527,9 @@ impl Iterator<SplitIter> for SplitIter {
         if (self.data == (u8*)0) {
             if (!self.done && self.pos == 0) {
                 self.done = true;
-                Optional<str> result;
-                result.present = true;
-                result.thing = (str)"";
-                return result;
+                return Optional<str>.some((str)"");
             }
-            Optional<str> result;
-            result.present = false;
-            return result;
+            return Optional<str>.none();
         }
         if (self.has_saved) {
             self.data[self.saved_end] = self.saved_byte;
@@ -542,9 +537,7 @@ impl Iterator<SplitIter> for SplitIter {
             self.pos = self.saved_end + self.delim_len;
         }
         if (self.done && self.pos >= self.len) {
-            Optional<str> result;
-            result.present = false;
-            return result;
+            return Optional<str>.none();
         }
         if (self.delim_len == 0 || self.delim == (str)0) {
             if (self.pos == 0 && !self.done) {
@@ -553,14 +546,9 @@ impl Iterator<SplitIter> for SplitIter {
                 self.saved_byte = self.data[self.len];
                 self.data[self.len] = (u8)0;
                 self.has_saved = true;
-                Optional<str> result;
-                result.present = true;
-                result.thing = (str)&self.data[0];
-                return result;
+                return Optional<str>.some((str)&self.data[0]);
             }
-            Optional<str> result;
-            result.present = false;
-            return result;
+            return Optional<str>.none();
         }
         i64 start = self.pos;
         i64 end = self.len;
@@ -580,9 +568,6 @@ impl Iterator<SplitIter> for SplitIter {
         self.saved_byte = self.data[end];
         self.data[end] = (u8)0;
         self.has_saved = true;
-        Optional<str> result;
-        result.present = true;
-        result.thing = (str)&self.data[start];
-        return result;
+        return Optional<str>.some((str)&self.data[start]);
     }
 }

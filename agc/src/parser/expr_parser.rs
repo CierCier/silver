@@ -258,7 +258,6 @@ fn is_type_like(token: &Token) -> bool {
             | Token::IntLiteral(_)
             | Token::Const
             | Token::Mut
-            | Token::Ref
             | Token::BitwiseAnd
     )
 }
@@ -498,7 +497,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
         message: "expected match pattern".to_string(),
         span: Span::default(),
     })?;
-    let pattern = match &token.kind {
+    match &token.kind {
         Token::IntLiteral(value) => {
             let span = token.span;
             cursor.bump();
@@ -524,7 +523,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                 };
                 let end_span = end_token.span;
                 cursor.bump();
-                ast::Pattern {
+                Ok(ast::Pattern {
                     kind: ast::PatternKind::Range {
                         start: ast::Expression {
                             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(
@@ -541,90 +540,77 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                         inclusive,
                     },
                     span: span.extend_to(&end_span),
-                }
+                })
             } else {
-                ast::Pattern {
+                Ok(ast::Pattern {
                     kind: ast::PatternKind::Literal(ast::Literal::Integer(*value)),
                     span,
-                }
+                })
             }
         }
         Token::FloatLiteral(value) => {
             let span = token.span;
             cursor.bump();
-            ast::Pattern {
+            Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Float(*value)),
                 span,
-            }
+            })
         }
         Token::StringLiteral(value) => {
             let span = token.span;
             cursor.bump();
-            ast::Pattern {
+            Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::String(value.clone())),
                 span,
-            }
+            })
         }
         Token::CharLiteral(value) => {
             let span = token.span;
             cursor.bump();
-            ast::Pattern {
+            Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Char(*value)),
                 span,
-            }
+            })
         }
         Token::True => {
             let span = token.span;
             cursor.bump();
-            ast::Pattern {
+            Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Bool(true)),
                 span,
-            }
+            })
         }
         Token::False => {
             let span = token.span;
             cursor.bump();
-            ast::Pattern {
+            Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Bool(false)),
                 span,
-            }
+            })
         }
         Token::Identifier(name) => {
             let span = token.span;
+            let name = name.clone();
             cursor.bump();
             if name == "_" {
-                ast::Pattern {
+                Ok(ast::Pattern {
                     kind: ast::PatternKind::Wildcard,
                     span,
-                }
+                })
             } else if name.starts_with(|c: char| c.is_uppercase())
                 && matches!(cursor.current().map(|t| &t.kind), Some(Token::Dot))
             {
                 // Enum type pattern: TypeName.Variant or TypeName.Variant(data)
-                let path = vec![ast::Identifier {
-                    name: name.clone(),
-                    span,
-                }];
-                cursor.bump(); // consume dot
-                let variant_token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected variant name after '.' in enum pattern".to_string(),
-                    span,
-                })?;
-                let variant_name = match &variant_token.kind {
-                    Token::Identifier(v) => v.clone(),
-                    _ => {
-                        return Err(ParseError::InvalidSyntax {
-                            message: "expected variant name in enum pattern".to_string(),
-                            span: variant_token.span,
-                        });
-                    }
-                };
-                let variant_span = variant_token.span;
-                cursor.bump();
+                // (handles bare identifiers plus the dedicated type tokens
+                // `Optional` / `Vec`, which lex as keywords).
+                parse_enum_type_pattern(name, span, cursor)
+            } else if name.starts_with(|c: char| c.is_uppercase()) {
+                // Bare variant pattern: `Variant` or `Variant(data)`. The enum
+                // type is inferred from the scrutinee during type checking; an
+                // empty path marks this as infer-from-scrutinee.
                 let data = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
                     cursor.bump();
                     let mut data_patterns = vec![parse_match_pattern(cursor)?];
-                    // Multiple payload bindings: Variant(a, b, c)
                     while matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
                         cursor.bump();
                         data_patterns.push(parse_match_pattern(cursor)?);
@@ -632,7 +618,7 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                     if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
                         return Err(ParseError::InvalidSyntax {
                             message: "expected ')' in enum variant pattern".to_string(),
-                            span: variant_span,
+                            span,
                         });
                     }
                     cursor.bump();
@@ -641,43 +627,135 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                     } else {
                         ast::Pattern {
                             kind: ast::PatternKind::Tuple(data_patterns),
-                            span: span.extend_to(&variant_span),
+                            span: span.extend_to(&cursor.tokens[cursor.pos - 1].span),
                         }
                     };
                     Some(Box::new(data_pattern))
                 } else {
                     None
                 };
-                ast::Pattern {
+                Ok(ast::Pattern {
                     kind: ast::PatternKind::Enum {
-                        path,
+                        path: vec![],
                         variant: ast::Identifier {
-                            name: variant_name,
-                            span: variant_span,
+                            name: name.clone(),
+                            span,
                         },
                         data,
                     },
                     span: span
                         .with_end(cursor.current().map(|t| t.span.start).unwrap_or(span.start)),
-                }
+                })
             } else {
-                ast::Pattern {
+                Ok(ast::Pattern {
                     kind: ast::PatternKind::Identifier(ast::Identifier {
                         name: name.clone(),
                         span,
                     }),
                     span,
-                }
+                })
             }
         }
+        Token::Optional | Token::Vec => {
+            let span = token.span;
+            let name = match &token.kind {
+                Token::Optional => "Optional".to_string(),
+                Token::Vec => "Vec".to_string(),
+                _ => unreachable!(),
+            };
+            cursor.bump();
+            if matches!(cursor.current().map(|t| &t.kind), Some(Token::Dot)) {
+                // Enum type pattern: Optional.Some(...) / Vec.Empty(...)
+                parse_enum_type_pattern(name, span, cursor)
+            } else {
+                // A bare `Optional` / `Vec` type name used as a binding is
+                // unusual; fall through to an identifier pattern.
+                Ok(ast::Pattern {
+                    kind: ast::PatternKind::Identifier(ast::Identifier {
+                        name: name.clone(),
+                        span,
+                    }),
+                    span,
+                })
+            }
+        }
+        _ => Err(ParseError::InvalidSyntax {
+            message: "unsupported match pattern".to_string(),
+            span: token.span,
+        }),
+    }
+}
+
+/// Parse an `EnumType.Variant` / `EnumType.Variant(data)` match pattern after
+/// the enum type name has already been consumed. `cursor` sits on the `.`.
+fn parse_enum_type_pattern(
+    type_name: String,
+    type_span: Span,
+    cursor: &mut ExprCursor<'_>,
+) -> Result<ast::Pattern, ParseError> {
+    let path = vec![ast::Identifier {
+        name: type_name,
+        span: type_span,
+    }];
+    cursor.bump(); // consume dot
+    let variant_token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
+        message: "expected variant name after '.' in enum pattern".to_string(),
+        span: type_span,
+    })?;
+    let variant_name = match &variant_token.kind {
+        Token::Identifier(v) => v.clone(),
         _ => {
             return Err(ParseError::InvalidSyntax {
-                message: "unsupported match pattern".to_string(),
-                span: token.span,
+                message: "expected variant name in enum pattern".to_string(),
+                span: variant_token.span,
             });
         }
     };
-    Ok(pattern)
+    let variant_span = variant_token.span;
+    cursor.bump();
+    let data = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
+        cursor.bump();
+        let mut data_patterns = vec![parse_match_pattern(cursor)?];
+        // Multiple payload bindings: Variant(a, b, c)
+        while matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+            cursor.bump();
+            data_patterns.push(parse_match_pattern(cursor)?);
+        }
+        if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ')' in enum variant pattern".to_string(),
+                span: variant_span,
+            });
+        }
+        cursor.bump();
+        let data_pattern = if data_patterns.len() == 1 {
+            data_patterns.pop().unwrap()
+        } else {
+            ast::Pattern {
+                kind: ast::PatternKind::Tuple(data_patterns),
+                span: type_span.extend_to(&variant_span),
+            }
+        };
+        Some(Box::new(data_pattern))
+    } else {
+        None
+    };
+    Ok(ast::Pattern {
+        kind: ast::PatternKind::Enum {
+            path,
+            variant: ast::Identifier {
+                name: variant_name,
+                span: variant_span,
+            },
+            data,
+        },
+        span: type_span.with_end(
+            cursor
+                .current()
+                .map(|t| t.span.start)
+                .unwrap_or(type_span.start),
+        ),
+    })
 }
 
 fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {

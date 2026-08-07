@@ -35,7 +35,6 @@ pub enum Token {
     Impl,
     Trait,
     // (Fn removed — trait methods use C-style syntax)
-    Let,
     Mut,
     Const,
     Static,
@@ -55,7 +54,6 @@ pub enum Token {
     Comptime,
     Cast,
     Move,
-    Ref,
     Extern,
     // (Pub removed — items public by default, Private to opt out)
     Private,
@@ -115,7 +113,6 @@ pub enum Token {
     Or,
     Not,
     Assign,
-    Arrow,
     PlusAssign,
     MinusAssign,
     StarAssign,
@@ -523,8 +520,6 @@ impl Lexer {
                     Ok(Token::Decrement)
                 } else if self.match_char('=') {
                     Ok(Token::MinusAssign)
-                } else if self.match_char('>') {
-                    Ok(Token::Arrow)
                 } else {
                     Ok(Token::Minus)
                 }
@@ -881,7 +876,6 @@ impl Lexer {
             "impl" => Token::Impl,
             "trait" => Token::Trait,
             // (fn keyword removed — trait methods use C-style)
-            "let" => Token::Let,
             "mut" => Token::Mut,
             "const" => Token::Const,
             "static" => Token::Static,
@@ -901,7 +895,6 @@ impl Lexer {
             "move" => Token::Move,
             "type" => Token::Type,
             "Self" => Token::SelfType,
-            "ref" => Token::Ref,
             "extern" => Token::Extern,
             // (pub keyword removed — items public by default)
             "private" => Token::Private,
@@ -1347,12 +1340,11 @@ mod tests {
 
         // Skip keywords as they should be tokenized as keywords, not identifiers
         let keywords = [
-            "struct", "enum", "impl", "trait", "fn", "let", "mut", "const", "static", "volatile",
-            "if", "else", "while", "for", "break", "continue", "return", "defer", "import",
-            "comptime", "cast", "move", "ref", "extern", "pub", "asm", "true", "false", "i8",
-            "i16", "i32", "i64", "i128", "u8", "private", "u16", "u32", "u64", "u128", "f32",
-            "f64", "f80", "c32", "c64", "c80", "bool", "str", "char", "void", "Vec", "Optional",
-            "launch", "wait",
+            "struct", "enum", "impl", "trait", "fn", "mut", "const", "static", "volatile", "if",
+            "else", "while", "for", "break", "continue", "return", "defer", "import", "comptime",
+            "cast", "move", "extern", "pub", "asm", "true", "false", "i8", "i16", "i32", "i64",
+            "i128", "u8", "private", "u16", "u32", "u64", "u128", "f32", "f64", "f80", "c32",
+            "c64", "c80", "bool", "str", "char", "void", "Vec", "Optional", "launch", "wait",
         ];
 
         if keywords.contains(&id_string.as_str()) {
@@ -1427,7 +1419,6 @@ mod tests {
             ("impl", Token::Impl),
             ("trait", Token::Trait),
             // (fn removed)
-            ("let", Token::Let),
             ("mut", Token::Mut),
             ("const", Token::Const),
             ("static", Token::Static),
@@ -1535,5 +1526,26 @@ mod tests {
             Token::Eof,
         ];
         assert_eq!(tokens, expected);
+    }
+    #[test]
+    fn test_let_and_ref_are_identifiers() {
+        let mut lexer = Lexer::new("i32 let = 1; i32 ref = 2;".to_string());
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::I32,
+                Token::Identifier("let".to_string()),
+                Token::Assign,
+                Token::IntLiteral(1),
+                Token::Semicolon,
+                Token::I32,
+                Token::Identifier("ref".to_string()),
+                Token::Assign,
+                Token::IntLiteral(2),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
     }
 }

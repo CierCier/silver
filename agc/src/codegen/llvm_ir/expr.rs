@@ -753,14 +753,52 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
-                if let ast::ExpressionKind::Identifier(owner) = object.kind.as_ref()
-                    && let Some(_value) = self.enum_member_constant(&owner.name, &field.name)
-                {
-                    // If this enum has a payload layout, wrap discriminant in struct
-                    if let Some(_struct_ty) = self.enum_payload_layouts.get(&owner.name) {
-                        return self.emit_enum_construction_impl(owner, field, &[], &expr.span);
+                // Unit-variant construction without parens: `OptInt.None` or
+                // `Optional.None` (the latter has a TypeName object because
+                // `Optional` lexes as a dedicated type token).
+                let enum_name = match object.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(owner)
+                        if self
+                            .enum_member_constant(&owner.name, &field.name)
+                            .is_some() =>
+                    {
+                        Some(owner.name.clone())
                     }
-                    return Ok(_value);
+                    ast::ExpressionKind::TypeName(ty) => {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                            && named.path.len() == 1
+                            && self
+                                .enum_member_constant(&named.path[0].name, &field.name)
+                                .is_some()
+                        {
+                            // Prefer the monomorphized concrete instantiation
+                            // (e.g. `Optional__i32` for `Optional<i32>`) so the
+                            // payload layout matches the concrete type.
+                            let monomorph = Self::monomorph_owner_name_from_named(named);
+                            if self.enum_payload_layouts.contains_key(&monomorph)
+                                || self.enum_variants.contains_key(&monomorph)
+                            {
+                                Some(monomorph)
+                            } else {
+                                Some(named.path[0].name.clone())
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(owner_name) = enum_name {
+                    let owner = ast::Identifier {
+                        name: owner_name,
+                        span: object.span,
+                    };
+                    if let Some(_struct_ty) = self.enum_payload_layouts.get(&owner.name) {
+                        return self.emit_enum_construction_impl(&owner, field, &[], &expr.span);
+                    }
+                    if let Some(value) = self.enum_member_constant(&owner.name, &field.name) {
+                        return Ok(value);
+                    }
                 }
                 let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
                 let llvm_ty = self.lower_basic_type(&ty)?;
@@ -801,13 +839,56 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 method,
                 arguments,
             } => {
-                // Check if this is an enum variant construction
-                if let ast::ExpressionKind::Identifier(receiver_ident) = receiver.kind.as_ref()
-                    && (self.enum_payload_layouts.contains_key(&receiver_ident.name)
-                        || self.enum_variants.contains_key(&receiver_ident.name))
-                {
+                // Check if this is an enum variant construction: either a bare
+                // type-name receiver (`Optional.Some(...)`, `Box2<i32>.Full(...)`)
+                // or an identifier naming an enum (`OptInt.Some(42)`).
+                let enum_receiver = match receiver.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(receiver_ident) => {
+                        if self.enum_variants.contains_key(&receiver_ident.name)
+                            && self
+                                .enum_variants
+                                .get(&receiver_ident.name)
+                                .is_some_and(|variants| variants.contains_key(&method.name))
+                        {
+                            Some(receiver_ident.name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    ast::ExpressionKind::TypeName(ty) => {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            let base = Self::named_type_name(named);
+                            // For a generic enum the monomorphized concrete
+                            // instantiation (e.g. `Box2__i32`) is the registered
+                            // layout; fall back to the bare name for non-generic
+                            // enums (`Optional`, `OptInt`). Only route to
+                            // construction when the method names a real variant.
+                            let monomorph = Self::monomorph_owner_name_from_named(named);
+                            let is_variant = |candidate: &str| {
+                                self.enum_variants
+                                    .get(candidate)
+                                    .is_some_and(|variants| variants.contains_key(&method.name))
+                            };
+                            if is_variant(&monomorph) {
+                                Some(monomorph)
+                            } else if is_variant(&base) {
+                                Some(base)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(enum_name) = enum_receiver {
+                    let receiver_ident = ast::Identifier {
+                        name: enum_name,
+                        span: receiver.span,
+                    };
                     return self.emit_enum_construction_impl(
-                        receiver_ident,
+                        &receiver_ident,
                         method,
                         arguments,
                         &expr.span,
@@ -2184,15 +2265,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     variant,
                     data,
                 } => {
+                    // Resolve the enum name: either the explicit `Enum.Variant`
+                    // path, or (for bare `Variant` patterns) the scrutinee's
+                    // enum type, which typeck already validated.
                     let enum_name = if path.len() == 1 {
-                        &path[0].name
+                        path[0].name.clone()
+                    } else if let Some(ty) = self.resolve_receiver_type(expression)
+                        && let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                        && named.path.len() == 1
+                    {
+                        named.path[0].name.clone()
                     } else {
                         return Err(CodegenError::with_span(
                             "enum type path must be a single name in match".to_string(),
                             arm.pattern.span,
                         ));
                     };
-                    if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
+                    // For a generic enum (`Box2.Full(...)` matching a
+                    // `Box2<i32>` value), the payload layout and payload types
+                    // are registered under the monomorphized name
+                    // (`Box2__i32`); prefer it when present, falling back to
+                    // the bare name for non-generic enums.
+                    let concrete_name = if let Some(ty) = self.resolve_receiver_type(expression)
+                        && let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                        && named.path.len() == 1
+                    {
+                        let monomorph = Self::monomorph_owner_name_from_named(named);
+                        if self.enum_payload_layouts.contains_key(&monomorph)
+                            || self.enum_variant_payload_types.contains_key(&monomorph)
+                        {
+                            monomorph
+                        } else {
+                            enum_name.clone()
+                        }
+                    } else {
+                        enum_name.clone()
+                    };
+                    if let Some(struct_ty) = self.enum_payload_layouts.get(&concrete_name).cloned()
+                    {
                         let function = self.current_fn.ok_or_else(|| {
                             CodegenError::new("no active function for match enum")
                         })?;
@@ -2228,25 +2338,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 ));
                             }
                         };
-                        let expected_tag = if let Some(variants) = self.enum_variants.get(enum_name)
-                        {
-                            if let Some(val) = variants.get(&variant.name) {
-                                self.context.i16_type().const_int(*val as u64, false)
+                        let expected_tag =
+                            if let Some(variants) = self.enum_variants.get(&enum_name) {
+                                if let Some(val) = variants.get(&variant.name) {
+                                    self.context.i16_type().const_int(*val as u64, false)
+                                } else {
+                                    return Err(CodegenError::with_span(
+                                        format!(
+                                            "unknown variant '{}' in enum '{}'",
+                                            variant.name, enum_name
+                                        ),
+                                        variant.span,
+                                    ));
+                                }
                             } else {
                                 return Err(CodegenError::with_span(
-                                    format!(
-                                        "unknown variant '{}' in enum '{}'",
-                                        variant.name, enum_name
-                                    ),
-                                    variant.span,
+                                    format!("unknown enum '{}' in match", enum_name),
+                                    arm.pattern.span,
                                 ));
-                            }
-                        } else {
-                            return Err(CodegenError::with_span(
-                                format!("unknown enum '{}' in match", enum_name),
-                                arm.pattern.span,
-                            ));
-                        };
+                            };
                         let cond = self
                             .builder
                             .build_int_compare(
@@ -2266,7 +2376,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         if let Some(data_pattern) = data {
                             let payload_types = self
                                 .enum_variant_payload_types
-                                .get(enum_name)
+                                .get(&concrete_name)
                                 .and_then(|m| m.get(&variant.name))
                                 .cloned()
                                 .unwrap_or_default();
@@ -2359,25 +2469,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     } else {
                         // Unit enum — compare integer discriminant
                         if let BasicValueEnum::IntValue(scrutinee_int) = scrutinee {
-                            let expected = if let Some(variants) = self.enum_variants.get(enum_name)
-                            {
-                                if let Some(val) = variants.get(&variant.name) {
-                                    scrutinee_int.get_type().const_int(*val as u64, true)
+                            let expected =
+                                if let Some(variants) = self.enum_variants.get(&enum_name) {
+                                    if let Some(val) = variants.get(&variant.name) {
+                                        scrutinee_int.get_type().const_int(*val as u64, true)
+                                    } else {
+                                        return Err(CodegenError::with_span(
+                                            format!(
+                                                "unknown variant '{}' in enum '{}'",
+                                                variant.name, enum_name
+                                            ),
+                                            variant.span,
+                                        ));
+                                    }
                                 } else {
                                     return Err(CodegenError::with_span(
-                                        format!(
-                                            "unknown variant '{}' in enum '{}'",
-                                            variant.name, enum_name
-                                        ),
-                                        variant.span,
+                                        format!("unknown enum '{}' in match", enum_name),
+                                        arm.pattern.span,
                                     ));
-                                }
-                            } else {
-                                return Err(CodegenError::with_span(
-                                    format!("unknown enum '{}' in match", enum_name),
-                                    arm.pattern.span,
-                                ));
-                            };
+                                };
                             let cond = self
                                 .builder
                                 .build_int_compare(

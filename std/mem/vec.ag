@@ -207,13 +207,8 @@ impl<T> Iterator<VecIter<T>> for VecIter<T> {
         if (self.idx < self.len) {
             T value = self.data[self.idx];
             self.idx = self.idx + 1;
-            Optional<T> result;
-            result.present = true;
-            result.thing = value;
-            return result;
+            return Optional<T>.some(value);
         }
-        Optional<T> result;
-        result.present = false;
-        return result;
+        return Optional<T>.none();
     }
 }

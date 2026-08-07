@@ -2,3 +2,90 @@ disallowed-types = [
     { path = "std::collections::HashMap", reason = "Use rustc_hash::FxHashMap instead for better performance" },
     { path = "std::collections::HashSet", reason = "Use rustc_hash::FxHashSet instead for better performance" }
 ]
+
+# clippy.toml
+
+# -------------------------------
+# Documentation / Unsafe
+# -------------------------------
+
+accept-comment-above-attributes = true
+accept-comment-above-statement = true
+check-private-items = true
+
+# -------------------------------
+# Complexity
+# -------------------------------
+
+cognitive-complexity-threshold = 25
+too-many-lines-threshold = 120
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
+
+# -------------------------------
+# Memory
+# -------------------------------
+
+array-size-threshold = 16384
+future-size-threshold = 16384
+stack-size-threshold = 524288
+pass-by-value-size-limit = 256
+large-error-threshold = 128
+
+# -------------------------------
+# APIs
+# -------------------------------
+
+avoid-breaking-exported-api = true
+enum-variant-size-threshold = 200
+enum-variant-name-threshold = 3
+struct-field-name-threshold = 3
+
+# -------------------------------
+# Naming
+# -------------------------------
+
+allowed-idents-below-min-chars = [
+    "..",
+    "id",
+    "fd",
+    "io",
+    "ok",
+    "cx",
+]
+
+upper-case-acronyms-aggressive = false
+
+# -------------------------------
+# Style
+# -------------------------------
+
+module-items-ordered-within-groupings = "all"
+
+source-item-ordering = [
+    "enum",
+    "impl",
+    "module",
+    "struct",
+    "trait",
+]
+
+trait-assoc-item-kinds-order = [
+    "const",
+    "type",
+    "fn",
+]
+
+# -------------------------------
+# Safety
+# -------------------------------
+
+enable-raw-pointer-heuristic-for-send = true
+
+# -------------------------------
+# Misc
+# -------------------------------
+
+allow-mixed-uninlined-format-args = true
+warn-on-all-wildcard-imports = false
+allow-exact-repetitions = true

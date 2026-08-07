@@ -1,10 +1,9 @@
-// Optional<T> and Result<T, E> — tagged value-or-absence containers.
+// Optional<T> — payload-enum value-or-absence container.
 //
-// Both types abort the process (with a message on stderr) when a value
-// is extracted from the wrong variant: `unwrap()` on a none/err value
-// and `get_error()` on an ok value.  Use `is_some`/`is_none` (Optional)
-// or `success`/`failed` (Result) to test first, or `unwrap_or` for a
-// non-aborting fallback.
+// Aborts the process (with a message on stderr) when a value is extracted
+// from the wrong variant: `unwrap()` on a none value.  Use
+// `is_some`/`is_none` to test first, or `unwrap_or` for a non-aborting
+// fallback.
 import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
@@ -14,37 +13,38 @@ void __optional_abort() {
     while (true) {}
 }
 
-struct Optional<T> {
-    bool present;
-    T thing;
+// Optional<T> — None carries no value, Some(T) carries a value.
+// NOTE: None is declared first so its discriminant is 0, matching the
+// for-in lowering which treats a zero tag as the end of iteration.
+enum Optional<T> {
+    None;
+    Some(T);
 }
 
 impl Optional<T> {
-    Optional<T> none() {
-        Optional<T> value;
-        value.present = false;
-        return value;
+    /// Construct a present value.
+    Optional<T> some(T thing) {
+        return Optional.Some(thing);
     }
 
-    Optional<T> some(T thing) {
-        Optional<T> value;
-        value.present = true;
-        value.thing = thing;
-        return value;
+    /// Construct an absent value.
+    Optional<T> none() {
+        return Optional.None;
     }
 
     bool is_some(Optional<T> self) {
-        return self.present;
+        return match self { Some(v) : true, None : false };
     }
 
     bool is_none(Optional<T> self) {
-        return !self.present;
+        return match self { Some(v) : false, None : true };
     }
 
     /// Extract the contained value.  Aborts if the optional is none.
     T unwrap(Optional<T> self) {
-        if (self.present) {
-            return self.thing;
+        if (self.is_some()) {
+            T dummy;
+            return match self { Some(v) : v, None : dummy };
         }
         STDERR.write_str("Optional::unwrap: called on a none value\n");
         __optional_abort();
@@ -54,70 +54,6 @@ impl Optional<T> {
     }
 
     T unwrap_or(Optional<T> self, T fallback) {
-        if (self.present) {
-            return self.thing;
-        }
-        return fallback;
-    }
-}
-
-struct Result<T, E> {
-    bool ok;
-    T value;
-    E error;
-}
-
-impl Result<T, E> {
-    Result<T, E> ok(T value) {
-        Result<T, E> result;
-        result.ok = true;
-        result.value = value;
-        return result;
-    }
-
-    Result<T, E> err(E error) {
-        Result<T, E> result;
-        result.ok = false;
-        result.error = error;
-        return result;
-    }
-
-    bool success(Result<T, E> self) {
-        return self.ok;
-    }
-
-    bool failed(Result<T, E> self) {
-        return !self.ok;
-    }
-
-    /// Extract the success value.  Aborts if the result is an error.
-    T unwrap(Result<T, E> self) {
-        if (self.ok) {
-            return self.value;
-        }
-        STDERR.write_str("Result::unwrap: called on an err value\n");
-        __optional_abort();
-        // unreachable - dummy return to satisfy return type
-        T dummy;
-        return dummy;
-    }
-
-    T unwrap_or(Result<T, E> self, T fallback) {
-        if (self.ok) {
-            return self.value;
-        }
-        return fallback;
-    }
-
-    /// Extract the error value.  Aborts if the result is ok.
-    E get_error(Result<T, E> self) {
-        if (!self.ok) {
-            return self.error;
-        }
-        STDERR.write_str("Result::get_error: called on an ok value\n");
-        __optional_abort();
-        // unreachable - dummy return to satisfy return type
-        E dummy;
-        return dummy;
+        return match self { Some(v) : v, None : fallback };
     }
 }

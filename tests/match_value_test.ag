@@ -44,14 +44,14 @@ i32 main() {
     test_start("match multi-binding enum payload");
     {
         Rect2 r = Rect2.R(3, 4);
-        i64 sum = match r { Rect2.R(w, h) : w + h, Rect2.E : 0 };
+        i64 sum = match r { R(w, h) : w + h, E : 0 };
         assert_eq_i64(7, sum, "multi-binding payload extracted");
     }
 
     test_start("match f64 enum payload binds real type");
     {
         Shape2 s = Shape2.C(2.5);
-        f64 v = match s { Shape2.C(r) : r, Shape2.N : 0.0 };
+        f64 v = match s { C(r) : r, N : 0.0 };
         if (v != 2.5) { tests_failed += 1; @eprintln("  [FAIL] f64 payload bound with real type"); }
         else { tests_passed += 1; @println("  [PASS] f64 payload bound with real type"); }
     }

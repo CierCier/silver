@@ -455,6 +455,30 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         _visibility: &ast::Visibility,
         _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
+        // Register enum type params (e.g. `T` in `enum Optional<T>`) so that
+        // generic impl blocks on enums are recognized as templates
+        // (`is_generic_placeholder_name`), mirroring struct generics.
+        let enum_name = item.name.name.clone();
+        let enum_params: Vec<String> = item
+            .generics
+            .as_ref()
+            .map(|generics| {
+                generics
+                    .params
+                    .iter()
+                    .filter_map(|param| {
+                        if let ast::GenericParam::Type(type_param) = param {
+                            Some(type_param.name.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !enum_params.is_empty() {
+            self.struct_generics.insert(enum_name.clone(), enum_params);
+        }
         let mut variants = HashMap::default();
         let mut next_value = 0i128;
         let mut min_value = 0i128;

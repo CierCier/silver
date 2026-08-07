@@ -90,6 +90,42 @@ impl<'a> FileImportResolverHook<'a> {
             },
         );
 
+        // Auto-import: bare enum constructors (`Some`/`None` for Optional,
+        // `Ok`/`Err` for Result) resolve via typeck's expected-type inference
+        // but need the enum types registered. Inject the matching std module
+        // when the source uses those bare names without an explicit import.
+        // `seen_modules` dedupes against explicit `import std.optional;` /
+        // `import std.result;`.
+        for (ctor, module_path) in [
+            ("Some", vec!["std", "optional"]),
+            ("None", vec!["std", "optional"]),
+            ("Ok", vec!["std", "result"]),
+            ("Err", vec!["std", "result"]),
+        ] {
+            if uses_bare_constructor(&program.items, ctor) {
+                let module_key = module_path.join(".");
+                if !self.seen_modules.contains(&module_key) {
+                    program.items.insert(
+                        0,
+                        ast::Item {
+                            kind: ast::ItemKind::Import(ast::ImportItem {
+                                path: module_path
+                                    .into_iter()
+                                    .map(|seg| ast::Identifier {
+                                        name: seg.to_string(),
+                                        span: lexer::Span::default(),
+                                    })
+                                    .collect(),
+                            }),
+                            span: lexer::Span::default(),
+                            visibility: ast::Visibility::Private,
+                            attributes: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+
         self.lower_program_recursive(program, base_dir)?;
         validate_import_conflicts(
             self.module_imports
@@ -301,4 +337,244 @@ fn import_label(path: &Path) -> String {
         *last = last.strip_suffix(".ag").unwrap_or(last);
     }
     parts.join(".")
+}
+
+/// True when any item in `items` uses a bare identifier named `ctor` in an
+/// expression position (i.e. not as a field/method access target). Used to
+/// decide whether to auto-inject `std.optional` / `std.result` for bare
+/// `Some`/`None`/`Ok`/`Err` constructors.
+fn uses_bare_constructor(items: &[ast::Item], ctor: &str) -> bool {
+    items.iter().any(|item| {
+        let mut found = false;
+        match &item.kind {
+            ast::ItemKind::Function(func) => {
+                scan_block_for_bare_ctor(&func.body, ctor, &mut found);
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                for member in &impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        scan_block_for_bare_ctor(&func.body, ctor, &mut found);
+                    }
+                }
+            }
+            ast::ItemKind::Macro(def) => {
+                scan_block_for_bare_ctor(&def.body, ctor, &mut found);
+            }
+            _ => {}
+        }
+        found
+    })
+}
+
+fn scan_block_for_bare_ctor(block: &ast::Block, ctor: &str, found: &mut bool) {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            ast::StatementKind::Let(let_stmt) => {
+                if let Some(init) = &let_stmt.initializer {
+                    scan_expr_for_bare_ctor(init, ctor, found);
+                }
+            }
+            ast::StatementKind::Expression(expr)
+            | ast::StatementKind::Return(Some(expr))
+            | ast::StatementKind::Break(Some(expr)) => {
+                scan_expr_for_bare_ctor(expr, ctor, found);
+            }
+            ast::StatementKind::Block(block) => scan_block_for_bare_ctor(block, ctor, found),
+            ast::StatementKind::Defer(inner) => {
+                // Defer holds a statement; scan its expression/block shape.
+                match &inner.kind {
+                    ast::StatementKind::Expression(expr) => {
+                        scan_expr_for_bare_ctor(expr, ctor, found);
+                    }
+                    ast::StatementKind::Block(block) => {
+                        scan_block_for_bare_ctor(block, ctor, found);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if *found {
+            return;
+        }
+    }
+}
+
+fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool) {
+    if *found {
+        return;
+    }
+    match expr.kind.as_ref() {
+        // Bare `Some(...)` / `Ok(...)` call: the callee is a bare identifier.
+        ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } => {
+            if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
+                && ident.name == ctor
+            {
+                *found = true;
+                return;
+            }
+            scan_expr_for_bare_ctor(function, ctor, found);
+            for arg in arguments {
+                scan_expr_for_bare_ctor(arg, ctor, found);
+            }
+        }
+        // Bare `None` / `Err` (payload-less): a bare identifier not followed by
+        // a dot (i.e. not a field/method access target).
+        ast::ExpressionKind::Identifier(ident) => {
+            if ident.name == ctor {
+                *found = true;
+            }
+        }
+        ast::ExpressionKind::Block(block) => scan_block_for_bare_ctor(block, ctor, found),
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            scan_expr_for_bare_ctor(condition, ctor, found);
+            scan_block_for_bare_ctor(then_branch, ctor, found);
+            if let Some(else_block) = else_branch {
+                scan_block_for_bare_ctor(else_block, ctor, found);
+            }
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            scan_expr_for_bare_ctor(condition, ctor, found);
+            scan_block_for_bare_ctor(body, ctor, found);
+        }
+        ast::ExpressionKind::For {
+            condition, body, ..
+        } => {
+            scan_expr_for_bare_ctor(condition, ctor, found);
+            scan_block_for_bare_ctor(body, ctor, found);
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            scan_expr_for_bare_ctor(left, ctor, found);
+            scan_expr_for_bare_ctor(right, ctor, found);
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. }
+        | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Comptime(operand) => {
+            scan_expr_for_bare_ctor(operand, ctor, found);
+        }
+        ast::ExpressionKind::Cast { expression, .. } => {
+            scan_expr_for_bare_ctor(expression, ctor, found);
+        }
+        ast::ExpressionKind::FieldAccess { object, .. } => {
+            // `Some.variant` / `Optional.Some` are typed accesses, not bare
+            // constructors; scan the object but treat the field as a member.
+            scan_expr_for_bare_ctor(object, ctor, found);
+        }
+        ast::ExpressionKind::Index { object, index, .. } => {
+            scan_expr_for_bare_ctor(object, ctor, found);
+            scan_expr_for_bare_ctor(index, ctor, found);
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            scan_expr_for_bare_ctor(receiver, ctor, found);
+            for arg in arguments {
+                scan_expr_for_bare_ctor(arg, ctor, found);
+            }
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                scan_expr_for_bare_ctor(&field.value, ctor, found);
+            }
+        }
+        ast::ExpressionKind::Array(elements) | ast::ExpressionKind::Tuple(elements) => {
+            for element in elements {
+                scan_expr_for_bare_ctor(element, ctor, found);
+            }
+        }
+        ast::ExpressionKind::Initializer { items, .. } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(expr)
+                    | ast::InitializerItem::Field { value: expr, .. } => {
+                        scan_expr_for_bare_ctor(expr, ctor, found);
+                    }
+                    ast::InitializerItem::Index { index, value, .. } => {
+                        scan_expr_for_bare_ctor(index, ctor, found);
+                        scan_expr_for_bare_ctor(value, ctor, found);
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            scan_expr_for_bare_ctor(expression, ctor, found);
+            for arm in arms {
+                scan_expr_for_bare_ctor(&arm.body, ctor, found);
+            }
+        }
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    scan_expr_for_bare_ctor(expr, ctor, found);
+                }
+            }
+        }
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            scan_expr_for_bare_ctor(iterable, ctor, found);
+            scan_block_for_bare_ctor(body, ctor, found);
+        }
+        ast::ExpressionKind::Reference {
+            expression: operand,
+            ..
+        }
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand) => {
+            scan_expr_for_bare_ctor(operand, ctor, found);
+        }
+        ast::ExpressionKind::Literal(_)
+        | ast::ExpressionKind::TypeName(_)
+        | ast::ExpressionKind::Asm { .. }
+        | ast::ExpressionKind::EnumVariant { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::Parser;
+
+    fn parse(source: &str) -> ast::Program {
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        program
+    }
+
+    #[test]
+    fn scan_detects_bare_constructors() {
+        let program = parse(
+            "i32 main() { Optional<i32> a = Some(1); Result<i32, str> r = Ok(2); return 0; }",
+        );
+        assert!(
+            uses_bare_constructor(&program.items, "Some"),
+            "expected Some detected"
+        );
+        assert!(
+            uses_bare_constructor(&program.items, "Ok"),
+            "expected Ok detected"
+        );
+        assert!(!uses_bare_constructor(&program.items, "Err"), "no Err used");
+    }
+
+    #[test]
+    fn scan_ignores_typed_access() {
+        // `Optional.Some(...)` is a typed construction, not a bare ctor.
+        let program = parse("i32 main() { Optional<i32> a = Optional<i32>.Some(1); return 0; }");
+        assert!(
+            !uses_bare_constructor(&program.items, "Some"),
+            "typed Some not bare"
+        );
+    }
 }

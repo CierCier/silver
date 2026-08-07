@@ -698,6 +698,27 @@ fn instantiate_impls(
             if !mapping_covers_impl(&mapping, impl_item.generics.as_ref()) {
                 continue;
             }
+            // Body-only mapping: when the impl's owner is a GENERIC ENUM, also
+            // rewrite bare references to the enum's own name inside method
+            // bodies (e.g. `Optional.Some(x)` in `impl Optional<T>`
+            // instantiated as `Optional<i32>`) so enum variant construction
+            // targets the concrete monomorphized enum. Structs are excluded:
+            // rewriting `Vec<T> v;` to `Vec__String v;` would desync local
+            // variables from the monomorphized function signature.
+            let is_enum_impl = matches!(inst.item.kind, ast::ItemKind::Enum(_));
+            let body_mapping = if is_enum_impl {
+                let mut body_mapping = mapping.clone();
+                body_mapping.insert(
+                    base.clone(),
+                    Type::Named {
+                        path: vec![inst.mangled.clone()],
+                        generics: Vec::new(),
+                    },
+                );
+                body_mapping
+            } else {
+                mapping.clone()
+            };
             let mut new_impl = impl_item.clone();
             new_impl.generics = None;
             new_impl.self_type = substitute_ast_type(&impl_item.self_type, &mapping);
@@ -710,7 +731,7 @@ fn instantiate_impls(
                     if let Some(return_type) = &mut func.return_type {
                         *return_type = substitute_ast_type(return_type, &mapping);
                     }
-                    substitute_block_types(&mut func.body, &mapping);
+                    substitute_block_types(&mut func.body, &body_mapping);
                 }
             }
 
@@ -1810,17 +1831,19 @@ fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
 pub fn mangle_name(base: &str, args: &[Type]) -> String {
     let mut parts = Vec::new();
     for arg in args {
-        let key = arg
-            .canonical_key()
-            .replace('*', "ptr_")
-            .replace('&', "ref_");
-        parts.push(sanitize(&key));
+        parts.push(sanitize_type_key(&arg.canonical_key()));
     }
     if parts.is_empty() {
         base.to_string()
     } else {
         format!("{}__{}", base, parts.join("_"))
     }
+}
+
+/// Sanitize a canonical type key into a mangled-name-safe token: non-alphanumeric
+/// characters collapse to a single underscore, and `*`/`&` become `ptr_`/`ref_`.
+pub fn sanitize_type_key(value: &str) -> String {
+    sanitize(&value.replace('*', "ptr_").replace('&', "ref_"))
 }
 
 fn sanitize(value: &str) -> String {

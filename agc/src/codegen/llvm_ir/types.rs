@@ -128,11 +128,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(basic)
             }
             ast::TypeKind::Named(named) => {
-                // Check payload enum layout first
-                if named.path.len() == 1
-                    && let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name)
-                {
-                    return Ok(struct_ty.as_basic_type_enum());
+                // Check payload enum layout first: prefer the monomorphized
+                // concrete instantiation (e.g. `Optional__i32` for
+                // `Optional<i32>`) so the payload sizes come from the concrete
+                // type args, then fall back to the bare name for non-generic
+                // enums (`Optional`, `OptInt`).
+                if named.path.len() == 1 {
+                    let monomorph = Self::monomorph_owner_name_from_named(named);
+                    if let Some(struct_ty) = self
+                        .enum_payload_layouts
+                        .get(&monomorph)
+                        .or_else(|| self.enum_payload_layouts.get(&named.path[0].name))
+                    {
+                        return Ok(struct_ty.as_basic_type_enum());
+                    }
                 }
                 if let Some(enum_backing) = self.enum_backing_type_for_named(named) {
                     return self.lower_basic_type(&ast::Type {

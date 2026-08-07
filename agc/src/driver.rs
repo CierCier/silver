@@ -708,7 +708,6 @@ pub(crate) fn run(cli: Cli) {
                         &mut ast,
                         &resolved_iter_types,
                     );
-                    // MonomorphRequest sources were captured before population,
                     // so their ForIn nodes have iterator_type: None. Replace
                     // the sources with the now-populated bodies from the AST.
                     for request in &mut monomorphs {
@@ -756,6 +755,13 @@ pub(crate) fn run(cli: Cli) {
                             }
                         }
                     }
+                }
+                // Rewrite bare enum constructors (Some(x)/None/Ok(x)/Err(x))
+                // into typed Enum.Variant(...) constructions using the
+                // expected-type inference recorded during typeck.
+                let bare_constructors = checker.take_bare_constructors();
+                if !bare_constructors.is_empty() {
+                    agc::semantic::typeck::rewrite_bare_constructors(&mut ast, &bare_constructors);
                 }
                 if !type_errors.is_empty() {
                     eprintln!("agc: type errors:");

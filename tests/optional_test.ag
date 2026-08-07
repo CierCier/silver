@@ -8,6 +8,7 @@
 // covered.
 import std.test;
 import std.optional;
+import std.result;
 import std.mem.alloc;
 i32 main() {
     STDOUT.write_str("=== Optional<i32> Tests ===\n\n");

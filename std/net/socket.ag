@@ -24,12 +24,12 @@ struct Socket {
 impl Socket {
     /// Create a socket. Returns a closed socket on failure.
     Socket new(i64 domain, i64 ty, i64 protocol) {
-        SysResult r = try_socket(domain, ty, protocol);
+        Result<i64, i64> r = try_socket(domain, ty, protocol);
         if (r.is_err()) {
             Socket s = { .fd = -1, .is_open = false };
             return s;
         }
-        Socket s = { .fd = (i32)r.value, .is_open = true };
+        Socket s = { .fd = (i32)r.value(), .is_open = true };
         return s;
     }
 
@@ -93,16 +93,16 @@ impl UdpSocket {
     /// Bind to the given address and port.
     bool bind(UdpSocket* self, SockAddrIn* addr) {
         if (self.sock.invalid()) { return false; }
-        SysResult r = try_bind(self.sock.fd, (void*)addr, 16);
+        Result<i64, i64> r = try_bind(self.sock.fd, (void*)addr, 16);
         return r.is_ok();
     }
 
     /// Send `len` bytes to `dst`. Returns bytes sent, or -errno on error.
     i64 send_to(UdpSocket* self, u8* buf, i64 len, SockAddrIn* dst) {
         if (self.sock.invalid()) { return -EINVAL; }
-        SysResult r = try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)dst, 16);
-        if (r.is_err()) { return -r.errno; }
-        return r.value;
+        Result<i64, i64> r = try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)dst, 16);
+        if (r.is_err()) { return -r.errno(); }
+        return r.value();
     }
 
     /// Receive up to `len` bytes. Returns bytes received, or -errno on error.
@@ -110,9 +110,9 @@ impl UdpSocket {
     i64 recv_from(UdpSocket* self, u8* buf, i64 len, SockAddrIn* src) {
         if (self.sock.invalid()) { return -EINVAL; }
         u32 addr_len = 16;
-        SysResult r = try_recvfrom(self.sock.fd, (void*)buf, len, 0, (void*)src, &addr_len);
-        if (r.is_err()) { return -r.errno; }
-        return r.value;
+        Result<i64, i64> r = try_recvfrom(self.sock.fd, (void*)buf, len, 0, (void*)src, &addr_len);
+        if (r.is_err()) { return -r.errno(); }
+        return r.value();
     }
 
     /// Set receive timeout in seconds.
@@ -133,7 +133,7 @@ impl UdpSocket {
         if (self.sock.invalid()) { return (u16)0; }
         SockAddrIn sa;
         u32 len = 16;
-        SysResult r = try_getsockname(self.sock.fd, (void*)&sa, &len);
+        Result<i64, i64> r = try_getsockname(self.sock.fd, (void*)&sa, &len);
         if (r.is_err()) { return (u16)0; }
         return ntoh16(sa.sin_port);
     }

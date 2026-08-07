@@ -3,7 +3,7 @@
 // Raw syscalls (std/sys/linux.ag) return an i64 where values in the range
 // -4095..-1 encode a failed call: the errno is the negated return value.
 // This module provides the errno constants, a raw-return classifier, and
-// an errno -> symbolic-name helper. The typed SysResult front-ends built
+// an errno -> symbolic-name helper. The typed Result front-ends built
 // on top of these live in std/sys/result.ag.
 
 // Classic errno range (asm-generic/errno-base.h), 1..34.

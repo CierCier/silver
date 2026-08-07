@@ -1,0 +1,53 @@
+// Bare variant match patterns: `Variant` / `Variant(val)` without the enum
+// qualifier. The enum type is inferred from the scrutinee. Covers unit
+// variants, single/tuple payloads, wildcards, and generic enums.
+import std.test;
+
+enum Shape { Circle(f64); Rect(f64, f64); Point; }
+
+f64 area(Shape s) {
+    return match s {
+        Circle(r)  : 3.14159 * r * r,
+        Rect(w, h) : w * h,
+        Point      : 0.0,
+        _          : -1.0, // unreachable; wildcard after all variants
+    };
+}
+
+enum Simple { A; B; }
+
+enum Box2<T> { Full(T); Empty; }
+
+i32 main() {
+    // Payload + unit variants
+    Shape c = Shape.Circle(1.0);
+    Shape p = Shape.Point;
+    assert_true(area(c) > 3.14 && area(c) < 3.15, "circle area");
+    assert_true(area(p) == 0.0, "point area");
+
+    // Tuple payload
+    Shape r = Shape.Rect(3.0, 4.0);
+    assert_true(area(r) == 12.0, "rect area");
+
+    // Non-generic unit variant
+    Simple a = Simple.A;
+    i32 u = match a { A : 42, B : 0 };
+    assert_eq_i32(42, u, "unit variant match");
+
+    // Generic enum with bare variants
+    Box2<i32> full = Box2<i32>.Full(42);
+    i32 v = match full {
+        Full(val) : val,
+        Empty     : 0,
+    };
+    assert_eq_i32(42, v, "generic payload extract");
+
+    // Wildcard arm catches an unhandled variant
+    i32 w = match full {
+        Empty : 99,
+        _     : 5,
+    };
+    assert_eq_i32(5, w, "wildcard fallback");
+
+    return done();
+}

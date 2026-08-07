@@ -132,7 +132,6 @@ fn classify(
         | Token::Enum
         | Token::Impl
         | Token::Trait
-        | Token::Let
         | Token::Mut
         | Token::Const
         | Token::Static
@@ -152,7 +151,6 @@ fn classify(
         | Token::Comptime
         | Token::Cast
         | Token::Move
-        | Token::Ref
         | Token::Extern
         | Token::Private
         | Token::Asm
@@ -207,7 +205,6 @@ fn classify(
         | Token::Or
         | Token::Not
         | Token::Assign
-        | Token::Arrow
         | Token::PlusAssign
         | Token::MinusAssign
         | Token::StarAssign

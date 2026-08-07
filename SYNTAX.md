@@ -54,23 +54,21 @@ These are hard keywords — they cannot be used as identifiers:
 |---|---|---|---|
 | `struct` | Struct definition | `enum` | Enum definition |
 | `impl` | Implementation block | `trait` | Trait definition |
-| `let` | Local variable binding | `mut` | Mutable modifier |
-| `const` | Constant declaration (parsed, not enforced) | `static` | Static local / internal-linkage global |
-| `volatile` | Volatile load/store qualifier | `if` | Conditional branch |
-| `else` | Alternative branch | `while` | Condition loop |
-| `for` | Counter or iterator loop | `in` | Iterator element |
-| `break` | Loop termination (with optional value) | `continue` | Loop iteration skip |
-| `return` | Early return | `defer` | Scope-exit deferred action |
-| `import` | Module import directive | `comptime` | Compile-time evaluation |
-| `launch` | Spawn a detached thread, returning a `Task<T>` | `wait` | Join a `Task`, moving out its result |
-| `cast` | Type cast declaration/expr | `move` | Ownership transfer |
-| `ref` | Reference (aliasing) | `extern` | External symbol binding |
-| `pub` | Public visibility modifier | `private` | Private visibility modifier |
-| `asm` | Inline assembly block | `macro` | Macro declaration |
-| `true` / `false` | Boolean literals | `void` | Empty/unit return type |
+| `mut` | Mutable modifier | `const` | Constant declaration (parsed, not enforced) |
+| `static` | Static local / internal-linkage global | `volatile` | Volatile load/store qualifier |
+| `if` | Conditional branch | `else` | Alternative branch |
+| `while` | Condition loop | `for` | Counter or iterator loop |
+| `in` | Iterator element | `break` | Loop termination (with optional value) |
+| `continue` | Loop iteration skip | `return` | Early return |
+| `defer` | Scope-exit deferred action | `import` | Module import directive |
+| `comptime` | Compile-time evaluation | `launch` | Spawn a detached thread, returning a `Task<T>` |
+| `wait` | Join a `Task`, moving out its result | `cast` | Type cast declaration/expr |
+| `move` | Ownership transfer | `extern` | External symbol binding |
+| `private` | Private visibility modifier | `asm` | Inline assembly block |
+| `macro` | Macro declaration | `true` / `false` | Boolean literals |
+| `void` | Empty/unit return type | `match` | Match expression |
 
-**Not keywords** (treated as identifiers): `Self`, `type` (soft keyword), `where`
-(not used).  There is no `match` or `fn` keyword.
+**Not keywords** (treated as identifiers): `Self`, `type` (soft keyword), `let`,
 
 ### Literals
 
@@ -194,9 +192,6 @@ void() callback;             // function pointer: no params → void
 import std.io;
 // import parts of a module
 import std.io { print, println as pln };
-
-// Module path import with alias
-import path.to.graphics as gfx;
 ```
 
 Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
@@ -309,26 +304,26 @@ struct Vector2 { f64 x; f64 y; }
 
 // Inherent implementation
 impl Vector2 {
-    pub Vector2 new(f64 x, f64 y) {
+    Vector2 new(f64 x, f64 y) {
         Vector2 v = { .x = x, .y = y };
         return move v;
     }
 
-    pub f64 magnitude(Vector2* self) {
+    f64 magnitude(Vector2* self) {
         return sqrt(self.x * self.x + self.y * self.y);
     }
 }
 
 // Custom cast block
 impl Vector2 {
-    pub cast f64(Vector2 self) {
+    cast f64(Vector2 self) {
         return sqrt(self.x * self.x + self.y * self.y);
     }
 }
 
 // Trait implementation
 impl Display for Vector2 {
-    fn to_string(Vector2* self) -> str { return "Vector2"; }
+    str to_string(Vector2* self) { return "Vector2"; }
 }
 ```
 
@@ -367,9 +362,9 @@ Macro definitions parse but are **not expanded** — only built-in macros
 
 ```silver
 macro swap(a, b) {
-    let temp = a;
-    a = b;
-    b = temp;
+    a = a + b;
+    b = a - b;
+    a = a - b;
 }
 ```
 
@@ -379,10 +374,8 @@ macro swap(a, b) {
 
 ### Variable Declarations
 
-Silver uses **C-style syntax**: type before name.  The `let` keyword is reserved
-(recognized by the lexer) but the bootstrap parser does **not** parse `let`
-statements — only C-style declarations work.
-
+Silver uses **C-style syntax**: type before name. Only C-style declarations work
+(e.g., `i32 x = 42;`).
 ```silver
 i32 x = 42;           // C-style declaration (idiomatic)
 f64 y;                // uninitialized (allowed; drop-flag caveats apply)
@@ -485,8 +478,6 @@ i32[3] arr = { 1, 2, 3 };
 | Logical | `&&`, `\|\|` | `is_valid && !is_expired` |
 | Range | `..` | `0..10` |
 
-> **Note**: `..=` (inclusive range) does **not** exist.  Range `..` is at the
-> relational precedence level (alongside `<`/`>`), not a separate level.
 
 All binary operands must have matching types — e.g., `u64 << 8` fails;
 use `(u64)8`.
@@ -506,9 +497,6 @@ i++;        // postfix increment
 i--;        // postfix decrement
 ```
 
-`->` is **not** an expression operator — it is used only for function pointer
-return types (`void() callback`).
-
 ### Ownership & Move Expressions
 
 ```silver
@@ -516,12 +504,9 @@ Buffer b1 = create_buffer();
 Buffer b2 = move b1;    // b1's drop flag cleared; only b2 drops
 ```
 
-**References** are created with `&var` (address-of).  The `ref` keyword is
-reserved by the lexer but the bootstrap parser does **not** parse `ref` as an
-expression — use `&`.  A `&` expression passed as an argument or receiver is a
-**borrow**: the escape checker verifies it does not escape its source (see
-[§8](#8-memory-management--ownership-model)).
-
+**References** are created with `&var` (address-of). A `&` expression passed as an
+argument or receiver is a **borrow**: the escape checker verifies it does not escape
+its source (see [§8](#8-memory-management--ownership-model)).
 ```silver
 Buffer* r1 = &b2;     // raw pointer view of b2 (auto-derefs on field access)
 void take(&Buffer b) { ... }
@@ -596,15 +581,16 @@ enum Shape { Circle(f64); Rect(f64, f64); }
 
 f64 area(Shape s) {
     return match s {
-        Shape.Circle(r)  : 3.14159 * r * r,
-        Shape.Rect(w, h) : w * h,
+        Circle(r)  : 3.14159 * r * r,
+        Rect(w, h) : w * h,
     };
 }
 ```
 
-Arm syntax is `pattern : value` separated by commas. Patterns bind payload
-values (`v` in `OptionInt.Some(v)`), and a wildcard `_` arm can be used as a
-catch-all:
+Arm syntax is `pattern : value` separated by commas. Variant patterns use
+just the variant name (`Circle(r)`, `None`) — the enum type is inferred from
+the scrutinee. Patterns bind payload values (`r` in `Circle(r)`), and a
+wildcard `_` arm can be used as a catch-all:
 
 ### Inline Assembly (`asm`)
 
@@ -658,8 +644,8 @@ Actual precedence as implemented in the Pratt parser (`prt_parser.rs`):
 | 11 | `\|\|` | Left-to-Right |
 | 12 | `=` `+=` `-=` `*=` `/=` `%=` | Right-to-Left |
 
-> **Changes from previous version**: `->`, `ref`, `::` removed (not expression
-> operators).  `..=` removed (does not exist).  Range `..` is at the relational
+> **Changes from previous version**: `::` removed (not an expression
+> operator).  `..=` removed (does not exist).  Range `..` is at the relational
 > level, not a separate priority.
 
 ---

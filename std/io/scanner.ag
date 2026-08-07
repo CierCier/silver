@@ -43,9 +43,9 @@ impl Scanner {
                 s.cap = new_cap;
                 space = s.cap - s.len;
             }
-            SysResult r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
-            if (r.ok) {
-                i64 n = r.value;
+            Result<i64, i64> r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
+            if (r.is_ok()) {
+                i64 n = r.value();
                 if (n == 0) {
                     break;  // EOF
                 }

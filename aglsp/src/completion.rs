@@ -15,9 +15,9 @@ use crate::util::*;
 use agc::symbol_index::{Symbol, SymbolIndex, SymbolKind, type_root_name_of_str};
 
 const KEYWORDS: &[&str] = &[
-    "struct", "enum", "impl", "trait", "let", "mut", "const", "static", "if", "else", "while",
-    "for", "match", "break", "continue", "return", "defer", "import", "comptime", "cast", "move",
-    "ref", "extern", "asm", "in", "macro", "true", "false",
+    "struct", "enum", "impl", "trait", "mut", "const", "static", "if", "else", "while", "for",
+    "match", "break", "continue", "return", "defer", "import", "comptime", "cast", "move",
+    "extern", "asm", "in", "macro", "true", "false",
 ];
 
 pub(crate) fn completion(analysis: &SymbolIndex, offset: usize) -> Vec<CompletionItem> {

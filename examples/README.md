@@ -35,7 +35,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 | `iterators.ag` | `for i in 0..n` range loops, nested loops, accumulation |
 | `ownership.ag` | `move` ownership transfer, `drop` destructors, scope-based teardown |
 | `defer_cleanup.ag` | `defer` blocks — LIFO release order, cleanup before early return |
-| `associated_fn_values.ag` | Function-typed trait members (`handler: (i32) -> i32`) with static dispatch |
+| `associated_fn_values.ag` | Function-typed trait members (`handler: i32 (i32)`) with static dispatch |
 | `regression_demo.ag` | Larger program — linear/logistic regression with structs, impls, `std.math` |
 
 ## Graphics (requires raylib)

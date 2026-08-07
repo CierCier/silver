@@ -56,6 +56,23 @@ pub struct TypeChecker {
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
     pub resolved_iter_types: HashMap<(usize, usize), Box<ast::Type>>,
+    /// Bare enum constructors (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
+    /// via expected-type inference; applied to the AST after typeck.
+    pub bare_constructors: HashMap<(usize, usize), BareConstructorRewrite>,
+}
+
+/// A bare enum constructor (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
+/// via expected-type inference during typeck. The driver rewrites the AST node
+/// into an `Enum.Variant(...)` construction after typeck, mirroring the
+/// `populate_for_in_iterator_types` post-pass.
+#[derive(Debug, Clone)]
+pub struct BareConstructorRewrite {
+    /// Enum type name ("Optional", "Result").
+    pub enum_name: String,
+    /// Variant name ("Some", "None", "Ok", "Err").
+    pub variant: String,
+    /// Concrete generic arguments (e.g. [i32] for `Optional<i32>`).
+    pub generics: Vec<ast::Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +221,11 @@ impl TypeChecker {
     /// Consume the resolved iterator types map for post-typeck AST population.
     pub fn take_resolved_iter_types(&mut self) -> HashMap<(usize, usize), Box<ast::Type>> {
         std::mem::take(&mut self.resolved_iter_types)
+    }
+
+    /// Consume bare-constructor rewrite records for post-typeck AST rewriting.
+    pub fn take_bare_constructors(&mut self) -> HashMap<(usize, usize), BareConstructorRewrite> {
+        std::mem::take(&mut self.bare_constructors)
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -727,6 +749,16 @@ impl TypeChecker {
                     ty
                 }
                 None => {
+                    // Bare payload-less enum constructor with expected-type
+                    // inference: `Optional<i32> x = None;` / `Result<i32,str> r = Err("x")`.
+                    if let Some(bare) = self.check_bare_enum_constructor(
+                        &ident.name,
+                        &[] as &[&ast::Expression],
+                        expected,
+                        &expr.span,
+                    ) {
+                        return bare;
+                    }
                     if let Some(sigs) = self.functions.get(&ident.name).and_then(|syms| {
                         syms.first().and_then(|sym| self.function_symbols.get(sym))
                     }) {
@@ -1393,6 +1425,19 @@ impl TypeChecker {
                 arguments,
             } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
+                    // Bare enum constructor with expected-type inference:
+                    // `Optional<i32> x = Some(42);` / `Result<i32,str> r = Ok(7);`.
+                    if !self.functions.contains_key(&ident.name) {
+                        let arg_refs: Vec<&ast::Expression> = arguments.iter().collect();
+                        if let Some(bare) = self.check_bare_enum_constructor(
+                            &ident.name,
+                            &arg_refs,
+                            expected,
+                            &expr.span,
+                        ) {
+                            return bare;
+                        }
+                    }
                     // Atomic intrinsics (`__atomic_*`) are recognized by name and
                     // type-checked by a dedicated hook; they never live in the
                     // symbol table.
@@ -1554,6 +1599,9 @@ impl TypeChecker {
                         && let Some(variant_info) = enum_def.variants.get(&method.name)
                     {
                         let expected_count = variant_info.payload.len();
+                        let enum_type_params = enum_def.type_params.clone();
+                        let expected_types: Vec<Type> =
+                            variant_info.payload.iter().map(Type::from_ast).collect();
                         if arguments.len() != expected_count {
                             self.error(
                                 format!(
@@ -1565,11 +1613,66 @@ impl TypeChecker {
                                 expr.span,
                             );
                         } else {
-                            // Collect expected types upfront to release the immutable borrow
-                            let expected_types: Vec<Type> =
-                                variant_info.payload.iter().map(Type::from_ast).collect();
+                            // Collect argument types upfront (releasing the
+                            // immutable borrow of enum_defs).
+                            let mut arg_types: Vec<Type> = Vec::with_capacity(arguments.len());
                             for (i, arg) in arguments.iter().enumerate() {
-                                self.check_expr(arg, Some(&expected_types[i]));
+                                arg_types.push(self.check_expr(arg, Some(&expected_types[i])));
+                            }
+                            // For a generic enum (`Optional.Some(x)`), infer the
+                            // type args from the argument types so the result is
+                            // `Optional<i32>` rather than bare `Optional`.
+                            if !enum_type_params.is_empty() {
+                                let mut mapping = HashMap::default();
+                                let mut inferred = true;
+                                for (i, arg_ty) in arg_types.iter().enumerate() {
+                                    if let Some(pt) = expected_types.get(i)
+                                        && !self.infer_type_params(
+                                            pt,
+                                            arg_ty,
+                                            &enum_type_params,
+                                            &mut mapping,
+                                        )
+                                    {
+                                        inferred = false;
+                                        break;
+                                    }
+                                }
+                                // For payload-less variants (`Optional.None`)
+                                // there are no arguments to infer from; take the
+                                // generic args from the expected type when it is
+                                // the same enum with concrete args.
+                                if inferred
+                                    && mapping.is_empty()
+                                    && let Some(Type::Named {
+                                        path: exp_path,
+                                        generics: exp_generics,
+                                    }) = expected
+                                    && exp_path == ty_path
+                                    && exp_generics.len() == enum_type_params.len()
+                                {
+                                    return Type::Named {
+                                        path: ty_path.clone(),
+                                        generics: exp_generics.clone(),
+                                    };
+                                }
+                                if inferred {
+                                    let generics = enum_type_params
+                                        .iter()
+                                        .map(|param| {
+                                            mapping.get(param).cloned().unwrap_or_else(|| {
+                                                Type::Named {
+                                                    path: vec![param.clone()],
+                                                    generics: Vec::new(),
+                                                }
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    return Type::Named {
+                                        path: ty_path.clone(),
+                                        generics,
+                                    };
+                                }
                             }
                         }
                         return receiver_ty.clone();
@@ -1742,6 +1845,22 @@ impl TypeChecker {
                 if let Type::Named { path, .. } = &scrutinee_ty {
                     if path.len() == 1 && self.enum_defs.contains_key(&path[0]) {
                         let enum_name = path[0].clone();
+                        // For a generic enum like `Box2<i32>`, map the enum's
+                        // type params (`T`) to the scrutinee's concrete generic
+                        // args (`i32`) so payload bindings get the concrete type.
+                        let type_param_map = self
+                            .enum_defs
+                            .get(&enum_name)
+                            .map(|def| def.type_params.clone())
+                            .unwrap_or_default();
+                        let concrete_args: Vec<Type> = match &scrutinee_ty {
+                            Type::Named { generics, .. } => generics.clone(),
+                            _ => Vec::new(),
+                        };
+                        let mut enum_type_map = HashMap::default();
+                        for (param, concrete) in type_param_map.iter().zip(concrete_args.iter()) {
+                            enum_type_map.insert(param.clone(), concrete.clone());
+                        }
                         let mut arm_types: Vec<Type> = Vec::new();
                         for (arm_index, arm) in arms.iter().enumerate() {
                             self.push_scope();
@@ -1758,9 +1877,13 @@ impl TypeChecker {
                                         match &data_pattern.kind {
                                             ast::PatternKind::Identifier(binding) => {
                                                 if let Some(pt) = payload_types.first() {
+                                                    let bound = self.substitute_type_params(
+                                                        &Type::from_ast(pt),
+                                                        &enum_type_map,
+                                                    );
                                                     self.bind(
                                                         &binding.name,
-                                                        Type::from_ast(pt),
+                                                        bound,
                                                         false,
                                                         binding.span,
                                                     );
@@ -1772,12 +1895,11 @@ impl TypeChecker {
                                                         &sub.kind
                                                         && let Some(pt) = payload_types.get(i)
                                                     {
-                                                        self.bind(
-                                                            &b.name,
-                                                            Type::from_ast(pt),
-                                                            false,
-                                                            b.span,
+                                                        let bound = self.substitute_type_params(
+                                                            &Type::from_ast(pt),
+                                                            &enum_type_map,
                                                         );
+                                                        self.bind(&b.name, bound, false, b.span);
                                                     }
                                                 }
                                             }
@@ -3961,6 +4083,93 @@ impl TypeChecker {
         }
     }
 
+    /// Resolve a bare enum constructor (`Some(x)`, `None`, `Ok(x)`, `Err(x)`)
+    /// against the expected type. Returns the constructed enum type and records
+    /// a rewrite for the post-typeck AST pass; returns None when the name is
+    /// not a recognized constructor or the expected type is not a matching enum.
+    fn check_bare_enum_constructor(
+        &mut self,
+        name: &str,
+        arguments: &[&ast::Expression],
+        expected: Option<&Type>,
+        span: &Span,
+    ) -> Option<Type> {
+        let (enum_name, variant) = match name {
+            "Some" => ("Optional", "Some"),
+            "None" => ("Optional", "None"),
+            "Ok" => ("Result", "Ok"),
+            "Err" => ("Result", "Err"),
+            _ => return None,
+        };
+        // The expected type must be the matching enum with concrete args.
+        let Type::Named {
+            path: exp_path,
+            generics: exp_generics,
+        } = expected?
+        else {
+            return None;
+        };
+        if exp_path.len() != 1 || exp_path[0] != enum_name {
+            return None;
+        }
+        let enum_def = self.enum_defs.get(enum_name)?;
+        let variant_info = enum_def.variants.get(variant)?;
+        let enum_type_params = enum_def.type_params.clone();
+        let payload_types: Vec<Type> = variant_info.payload.iter().map(Type::from_ast).collect();
+        if arguments.len() != payload_types.len() {
+            self.error(
+                format!(
+                    "variant '{}' expects {} arguments, got {}",
+                    variant,
+                    payload_types.len(),
+                    arguments.len()
+                ),
+                *span,
+            );
+            return None;
+        }
+        for (i, arg) in arguments.iter().enumerate() {
+            self.check_expr(arg, Some(&payload_types[i]));
+        }
+        // Infer generic args: prefer the expected type's concrete args;
+        // fall back to inferring from the argument against the payload type.
+        let generics: Vec<Type> =
+            if exp_generics.len() == enum_type_params.len() && !exp_generics.is_empty() {
+                exp_generics.clone()
+            } else {
+                let mut mapping = HashMap::default();
+                for (i, arg) in arguments.iter().enumerate() {
+                    if let Some(pt) = payload_types.get(i) {
+                        let arg_ty = self.check_expr_with_literal_naturals(arg);
+                        if !self.infer_type_params(pt, &arg_ty, &enum_type_params, &mut mapping) {
+                            return None;
+                        }
+                    }
+                }
+                enum_type_params
+                    .iter()
+                    .map(|param| {
+                        mapping.get(param).cloned().unwrap_or_else(|| Type::Named {
+                            path: vec![param.clone()],
+                            generics: Vec::new(),
+                        })
+                    })
+                    .collect()
+            };
+        self.bare_constructors.insert(
+            (span.start, span.end),
+            BareConstructorRewrite {
+                enum_name: enum_name.to_string(),
+                variant: variant.to_string(),
+                generics: generics.iter().map(|g| g.to_ast()).collect(),
+            },
+        );
+        Some(Type::Named {
+            path: vec![enum_name.to_string()],
+            generics,
+        })
+    }
+
     fn substitute_self_type(&self, ty: &Type, receiver: &Type) -> Type {
         match ty {
             Type::Named { path, generics } => {
@@ -4009,6 +4218,68 @@ impl TypeChecker {
                     .map(|ty| self.substitute_self_type(ty, receiver))
                     .collect(),
                 return_type: Box::new(self.substitute_self_type(return_type, receiver)),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    /// Replace generic type parameters (e.g. `T` in `enum Box2<T>`) with
+    /// their concrete arguments from a type-param → type mapping. Used to bind
+    /// payload patterns with the scrutinee's concrete types (`Box2<i32>` binds
+    /// `val : i32`, not `val : T`).
+    fn substitute_type_params(&self, ty: &Type, mapping: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named { path, generics } => {
+                // A bare single-segment name that is a known type param (e.g.
+                // `T`) resolves to its concrete argument.
+                if path.len() == 1
+                    && generics.is_empty()
+                    && let Some(replacement) = mapping.get(&path[0])
+                {
+                    return replacement.clone();
+                }
+                Type::Named {
+                    path: path.clone(),
+                    generics: generics
+                        .iter()
+                        .map(|inner| self.substitute_type_params(inner, mapping))
+                        .collect(),
+                }
+            }
+            Type::Reference { is_mutable, inner } => Type::Reference {
+                is_mutable: *is_mutable,
+                inner: Box::new(self.substitute_type_params(inner, mapping)),
+            },
+            Type::Pointer {
+                is_mutable,
+                is_volatile,
+                inner,
+            } => Type::Pointer {
+                is_mutable: *is_mutable,
+                is_volatile: *is_volatile,
+                inner: Box::new(self.substitute_type_params(inner, mapping)),
+            },
+            Type::Slice { element } => Type::Slice {
+                element: Box::new(self.substitute_type_params(element, mapping)),
+            },
+            Type::Optional { inner } => Type::Optional {
+                inner: Box::new(self.substitute_type_params(inner, mapping)),
+            },
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|ty| self.substitute_type_params(ty, mapping))
+                    .collect(),
+            ),
+            Type::Function {
+                params,
+                return_type,
+            } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|ty| self.substitute_type_params(ty, mapping))
+                    .collect(),
+                return_type: Box::new(self.substitute_type_params(return_type, mapping)),
             },
             _ => ty.clone(),
         }
@@ -4972,6 +5243,230 @@ pub fn populate_for_in_iterator_types(
     }
 }
 
+/// After type checking, rewrites bare enum constructors (`Some(x)`, `None`,
+/// `Ok(x)`, `Err(x)`) into typed `Enum<V>.Variant(...)` constructions using the
+/// expected-type inference recorded during typeck.
+pub fn rewrite_bare_constructors(
+    program: &mut ast::Program,
+    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+) {
+    for item in &mut program.items {
+        rewrite_item_bare_constructors(item, rewrites);
+    }
+}
+
+fn rewrite_item_bare_constructors(
+    item: &mut ast::Item,
+    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+) {
+    match &mut item.kind {
+        ast::ItemKind::Function(func) => {
+            rewrite_block_bare_constructors(&mut func.body, rewrites);
+        }
+        ast::ItemKind::Impl(impl_item) => {
+            for member in &mut impl_item.items {
+                if let ast::ImplItemKind::Function(func) = member {
+                    rewrite_block_bare_constructors(&mut func.body, rewrites);
+                }
+            }
+        }
+        ast::ItemKind::Macro(def) => {
+            rewrite_block_bare_constructors(&mut def.body, rewrites);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_block_bare_constructors(
+    block: &mut ast::Block,
+    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+) {
+    for stmt in &mut block.statements {
+        rewrite_statement_bare_constructors(stmt, rewrites);
+    }
+}
+
+fn rewrite_statement_bare_constructors(
+    stmt: &mut ast::Statement,
+    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+) {
+    match &mut stmt.kind {
+        ast::StatementKind::Expression(expr)
+        | ast::StatementKind::Return(Some(expr))
+        | ast::StatementKind::Break(Some(expr)) => {
+            rewrite_expression_bare_constructors(expr, rewrites);
+        }
+        ast::StatementKind::Let(let_stmt) => {
+            if let Some(init) = &mut let_stmt.initializer {
+                rewrite_expression_bare_constructors(init, rewrites);
+            }
+        }
+        ast::StatementKind::Block(block) => rewrite_block_bare_constructors(block, rewrites),
+        ast::StatementKind::Defer(inner) => {
+            rewrite_statement_bare_constructors(inner, rewrites);
+        }
+        ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+        ast::StatementKind::Continue => {}
+    }
+}
+
+fn rewrite_expression_bare_constructors(
+    expr: &mut ast::Expression,
+    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+) {
+    let key = (expr.span.start, expr.span.end);
+    if let Some(rewrite) = rewrites.get(&key).cloned() {
+        let receiver_ty = ast::Type {
+            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                path: vec![ast::Identifier {
+                    name: rewrite.enum_name.clone(),
+                    span: expr.span,
+                }],
+                generics: if rewrite.generics.is_empty() {
+                    None
+                } else {
+                    Some(rewrite.generics.clone())
+                },
+            })),
+            span: expr.span,
+        };
+        let receiver = ast::Expression {
+            kind: Box::new(ast::ExpressionKind::TypeName(receiver_ty)),
+            span: expr.span,
+        };
+        let args: Vec<ast::Expression> = match expr.kind.as_ref() {
+            ast::ExpressionKind::Call { arguments, .. } => arguments.clone(),
+            _ => Vec::new(),
+        };
+        *expr.kind = ast::ExpressionKind::MethodCall {
+            receiver: Box::new(receiver),
+            method: ast::Identifier {
+                name: rewrite.variant.clone(),
+                span: expr.span,
+            },
+            arguments: args,
+        };
+        return;
+    }
+    match expr.kind.as_mut() {
+        ast::ExpressionKind::Block(block) => {
+            rewrite_block_bare_constructors(block, rewrites);
+        }
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            rewrite_expression_bare_constructors(condition, rewrites);
+            rewrite_block_bare_constructors(then_branch, rewrites);
+            if let Some(else_block) = else_branch {
+                rewrite_block_bare_constructors(else_block, rewrites);
+            }
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            rewrite_expression_bare_constructors(condition, rewrites);
+            rewrite_block_bare_constructors(body, rewrites);
+        }
+        ast::ExpressionKind::For {
+            condition, body, ..
+        } => {
+            rewrite_expression_bare_constructors(condition, rewrites);
+            rewrite_block_bare_constructors(body, rewrites);
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            rewrite_expression_bare_constructors(left, rewrites);
+            rewrite_expression_bare_constructors(right, rewrites);
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. }
+        | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Comptime(operand)
+        | ast::ExpressionKind::Reference {
+            expression: operand,
+            ..
+        }
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand) => {
+            rewrite_expression_bare_constructors(operand, rewrites);
+        }
+        ast::ExpressionKind::Cast { expression, .. } => {
+            rewrite_expression_bare_constructors(expression, rewrites);
+        }
+        ast::ExpressionKind::FieldAccess { object, .. } => {
+            rewrite_expression_bare_constructors(object, rewrites);
+        }
+        ast::ExpressionKind::Index { object, index, .. } => {
+            rewrite_expression_bare_constructors(object, rewrites);
+            rewrite_expression_bare_constructors(index, rewrites);
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            rewrite_expression_bare_constructors(receiver, rewrites);
+            for arg in arguments {
+                rewrite_expression_bare_constructors(arg, rewrites);
+            }
+        }
+        ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } => {
+            rewrite_expression_bare_constructors(function, rewrites);
+            for arg in arguments {
+                rewrite_expression_bare_constructors(arg, rewrites);
+            }
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                rewrite_expression_bare_constructors(&mut field.value, rewrites);
+            }
+        }
+        ast::ExpressionKind::Array(elements) | ast::ExpressionKind::Tuple(elements) => {
+            for element in elements {
+                rewrite_expression_bare_constructors(element, rewrites);
+            }
+        }
+        ast::ExpressionKind::Initializer { items, .. } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(expr)
+                    | ast::InitializerItem::Field { value: expr, .. } => {
+                        rewrite_expression_bare_constructors(expr, rewrites);
+                    }
+                    ast::InitializerItem::Index { index, value, .. } => {
+                        rewrite_expression_bare_constructors(index, rewrites);
+                        rewrite_expression_bare_constructors(value, rewrites);
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            rewrite_expression_bare_constructors(expression, rewrites);
+            for arm in arms {
+                rewrite_expression_bare_constructors(&mut arm.body, rewrites);
+            }
+        }
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expr) = arg {
+                    rewrite_expression_bare_constructors(expr, rewrites);
+                }
+            }
+        }
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            rewrite_expression_bare_constructors(iterable, rewrites);
+            rewrite_block_bare_constructors(body, rewrites);
+        }
+        ast::ExpressionKind::Literal(_)
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::TypeName(_)
+        | ast::ExpressionKind::Asm { .. }
+        | ast::ExpressionKind::EnumVariant { .. } => {}
+    }
+}
+
 fn populate_item_for_in_types(
     item: &mut ast::Item,
     resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
@@ -5764,5 +6259,90 @@ mod tests {
                 .contains("cannot take the address of volatile variable")),
             "expected address-of-volatile error, got {errors:?}"
         );
+    }
+
+    #[test]
+    fn bare_enum_constructors_record_rewrites() {
+        // Bare `Some`/`Ok` with expected-type inference must type-check and
+        // record a rewrite so the post-typeck pass can lower them.
+        let program = parse(
+            "enum Optional<T> { None; Some(T); } enum Result<T, E> { Ok(T); Err(E); } \
+             i32 main() { Optional<i32> a = Some(5); Optional<i32> b = None; \
+             Result<i32, str> r = Ok(7); return 0; }",
+        );
+        let mut checker = TypeChecker::new();
+        let mut table = crate::symbol_table::CompilerSymbolTable::new();
+        let (errors, _) = checker.check_program_with_table(&program, &mut table);
+        assert!(
+            errors.is_empty(),
+            "bare constructors should type-check: {errors:?}"
+        );
+        let rewrites = checker.take_bare_constructors();
+        assert!(!rewrites.is_empty(), "expected bare-constructor rewrites");
+        assert!(
+            rewrites
+                .values()
+                .any(|r| r.enum_name == "Optional" && r.variant == "Some"),
+            "expected an Optional::Some rewrite, got {rewrites:?}"
+        );
+        assert!(
+            rewrites
+                .values()
+                .any(|r| r.enum_name == "Result" && r.variant == "Ok"),
+            "expected a Result::Ok rewrite, got {rewrites:?}"
+        );
+    }
+
+    #[test]
+    fn bare_constructor_without_expected_type_errors() {
+        // Without an expected Optional/Result type, bare `Some` is unknown.
+        let program = parse("i32 main() { i32 x = Some(5); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("unknown identifier 'Some'")),
+            "expected unknown-identifier error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn generic_enum_construction_and_match_typecheck() {
+        // Generic payload enums: construction via `Box<i32>.Full(...)` and
+        // match arms binding the payload with the concrete type.
+        let program = parse(
+            "enum Box2<T> { Full(T); Empty; } i32 main() { \
+             Box2<i32> x = Box2<i32>.Full(42); \
+             i32 v = match x { Full(val) : val, Empty : 0 }; \
+             return v - 42; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors.is_empty(),
+            "generic enum should type-check: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn auto_import_injection_adds_optional_and_result() {
+        // A program using bare constructors with no explicit import should get
+        // std.optional / std.result injected by the import hook (verified by
+        // the import_hook tests + end-to-end driver runs).
+        let source =
+            "i32 main() { Optional<i32> a = Some(1); Result<i32, str> r = Ok(2); return 0; }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (mut program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let mut loader = crate::module_loader::ModuleLoader::new();
+        loader.add_search_dir(repo_root.to_path_buf());
+        let hook = crate::parser::import_hook::FileImportResolverHook::new(&loader);
+        // Lowering must succeed: bare constructors are recognized and the
+        // std modules are inlined (injected imports are consumed by lowering).
+        let result = hook.lower_program_imports(&mut program, None, None);
+        assert!(result.is_ok(), "import lowering failed: {result:?}");
     }
 }

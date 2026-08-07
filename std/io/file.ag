@@ -308,11 +308,11 @@ impl File {
     }
 
     File open(str path, str mode) {
-        SysResult r = try_open(path, File.mode_flags(mode), 438); // 0o666
+        Result<i64, i64> r = try_open(path, File.mode_flags(mode), 438); // 0o666
         if (r.is_err()) {
             return File.closed();
         }
-        return File.from_fd((i32)r.value);
+        return File.from_fd((i32)r.value());
     }
 
     File open_read(str path) {
@@ -346,14 +346,14 @@ impl File {
             self.owns_fd = false;
             return 0;
         }
-        SysResult r = try_close(self.fd);
+        Result<i64, i64> r = try_close(self.fd);
         if (r.is_ok()) {
             self.fd = -1;
             self.is_open = false;
             self.owns_fd = false;
             return 0;
         }
-        return (i32)r.errno;
+        return (i32)r.errno();
     }
 
     /// No userspace buffer to flush: a valid fd is already flushed.
@@ -369,12 +369,12 @@ impl File {
             return EOF;
         }
         u8 ch = (u8)0;
-        SysResult r = try_read(self.fd, &ch, 1);
+        Result<i64, i64> r = try_read(self.fd, &ch, 1);
         if (r.is_err()) {
             self.had_error = true;
             return EOF;
         }
-        if (r.value == 0) {
+        if (r.value() == 0) {
             self.at_eof = true;
             return EOF;
         }
@@ -386,8 +386,8 @@ impl File {
             return EOF;
         }
         u8 b = (u8)ch;
-        SysResult r = try_write(self.fd, &b, 1);
-        if (r.is_err() || r.value != 1) {
+        Result<i64, i64> r = try_write(self.fd, &b, 1);
+        if (r.is_err() || r.value() != 1) {
             self.had_error = true;
             return EOF;
         }
@@ -406,16 +406,16 @@ impl File {
         i64 len = cstr_len(p);
         i64 written = 0;
         while (written < len) {
-            SysResult r = try_write(self.fd, (u8*)((i64)p + written), len - written);
+            Result<i64, i64> r = try_write(self.fd, (u8*)((i64)p + written), len - written);
             if (r.is_err()) {
                 self.had_error = true;
                 return EOF;
             }
-            if (r.value == 0) {
+            if (r.value() == 0) {
                 self.had_error = true;
                 return EOF;
             }
-            written = written + r.value;
+            written = written  + r.value();
         }
         return 0;
     }
@@ -443,16 +443,16 @@ impl File {
         i64 total = elem_size * elem_count;
         i64 done = 0;
         while (done < total) {
-            SysResult r = try_read(self.fd, (u8*)((i64)buffer + done), total - done);
+            Result<i64, i64> r = try_read(self.fd, (u8*)((i64)buffer + done), total - done);
             if (r.is_err()) {
                 self.had_error = true;
                 break;
             }
-            if (r.value == 0) {
+            if (r.value() == 0) {
                 self.at_eof = true;
                 break;
             }
-            done = done + r.value;
+            done = done  + r.value();
         }
         return done / elem_size;
     }
@@ -469,16 +469,16 @@ impl File {
         i64 total = elem_size * elem_count;
         i64 done = 0;
         while (done < total) {
-            SysResult r = try_write(self.fd, (u8*)((i64)buffer + done), total - done);
+            Result<i64, i64> r = try_write(self.fd, (u8*)((i64)buffer + done), total - done);
             if (r.is_err()) {
                 self.had_error = true;
                 break;
             }
-            if (r.value == 0) {
+            if (r.value() == 0) {
                 self.had_error = true;
                 break;
             }
-            done = done + r.value;
+            done = done  + r.value();
         }
         return done / elem_size;
     }
@@ -499,7 +499,7 @@ impl File {
         if (self.invalid()) {
             return false;
         }
-        SysResult r = try_lseek(self.fd, offset, (i64)((i32)origin));
+        Result<i64, i64> r = try_lseek(self.fd, offset, (i64)((i32)origin));
         if (r.is_err()) {
             self.had_error = true;
             return false;
@@ -511,12 +511,12 @@ impl File {
         if (self.invalid()) {
             return -1;
         }
-        SysResult r = try_lseek(self.fd, 0, SEEK_CUR);
+        Result<i64, i64> r = try_lseek(self.fd, 0, SEEK_CUR);
         if (r.is_err()) {
             self.had_error = true;
             return -1;
         }
-        return r.value;
+        return r.value();
     }
 
     void rewind(File* self) {
@@ -556,13 +556,13 @@ impl File {
         if (pos < 0) {
             return -1;
         }
-        SysResult end = try_lseek(self.fd, 0, SEEK_END);
+        Result<i64, i64> end = try_lseek(self.fd, 0, SEEK_END);
         if (end.is_err()) {
             self.had_error = true;
             return -1;
         }
         self.seek_from(pos, IO_SEEK.SET);
-        return end.value;
+        return end.value();
     }
 }
 

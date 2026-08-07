@@ -886,6 +886,12 @@ impl Analyzer {
             return;
         }
 
+        // Bare enum constructors (`Some`, `None`, `Ok`, `Err`) are resolved by
+        // typeck's expected-type inference, not the symbol table.
+        if matches!(ident.name.as_str(), "Some" | "None" | "Ok" | "Err") {
+            return;
+        }
+
         match self.has_symbol(&ident.name) {
             Some(SymbolKind::Function)
             | Some(SymbolKind::GlobalVariable)
@@ -1134,7 +1140,6 @@ mod tests {
                 | "impl"
                 | "trait"
                 | "fn"
-                | "let"
                 | "mut"
                 | "const"
                 | "if"
@@ -1148,7 +1153,6 @@ mod tests {
                 | "comptime"
                 | "cast"
                 | "move"
-                | "ref"
                 | "extern"
                 | "pub"
                 | "private"

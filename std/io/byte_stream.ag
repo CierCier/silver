@@ -4,6 +4,7 @@
 import std.io.file;
 import std.mem;
 import std.mem.alloc;
+import std.sys.result;
 
 struct ByteStream {
     File file;
@@ -36,16 +37,16 @@ impl ByteStream {
         // Refill buffer from file.
         self.pos = 0;
         self.len = 0;
-        SysResult r = try_read(self.file.fd, self.buf, self.cap);
+        Result<i64, i64> r = try_read(self.file.fd, self.buf, self.cap);
         if (r.is_err()) {
             self.file.had_error = true;
             return -1;
         }
-        if (r.value == 0) {
+        if (r.value() == 0) {
             self.file.at_eof = true;
             return -1;
         }
-        self.len = r.value;
+        self.len = r.value();
         self.pos = 1;
         return (i32)self.buf[0];
     }
@@ -76,16 +77,16 @@ impl ByteStream {
         while (dst_len > 0 && !self.file.at_eof && !self.file.had_error) {
             self.pos = 0;
             self.len = 0;
-            SysResult r = try_read(self.file.fd, self.buf, self.cap);
+            Result<i64, i64> r = try_read(self.file.fd, self.buf, self.cap);
             if (r.is_err()) {
                 self.file.had_error = true;
                 break;
             }
-            if (r.value == 0) {
+            if (r.value() == 0) {
                 self.file.at_eof = true;
                 break;
             }
-            self.len = r.value;
+            self.len = r.value();
             i64 to_copy = dst_len;
             if (to_copy > self.len) {
                 to_copy = self.len;
