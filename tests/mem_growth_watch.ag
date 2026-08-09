@@ -3,7 +3,7 @@
 // Run with:  top -p $(pgrep -f mem_growth_watch)
 import std.mem;
 import std.io;      // STDOUT
-import std.sys.linux;
+import std.sys.raw.time;
 
 // Linux timespec (sys_nanosleep argument).
 struct timespec { i64 tv_sec; i64 tv_nsec; }

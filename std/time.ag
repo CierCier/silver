@@ -1,6 +1,6 @@
 // std/time.ag — clock and time operations.
 
-import std.sys.linux;
+import std.sys.raw.time;
 
 const i64 CLOCK_MONOTONIC = 1;
 

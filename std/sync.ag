@@ -14,7 +14,7 @@
 
 import std.atomic;
 import std.mem.drop;
-import std.sys.linux;
+import std.sys.raw.sync;
 import std.sys.errno;
 
 // futex(2) opcodes for the classic sys_futex syscall.

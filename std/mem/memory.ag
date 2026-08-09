@@ -120,7 +120,7 @@ i32 memcmp(const void* s1, const void* s2, i64 n) {
 // Sends SIGABRT to self, then exits with 128+6.
 // ---------------------------------------------------------------------------
 
-import std.sys.linux;
+import std.sys.raw.process;
 
 void abort() {
     sys_kill(sys_getpid(), 6);  // SIGABRT

@@ -3,4 +3,5 @@ import std.sys.entry;
 import std.sys.errno;
 import std.sys.linux;
 import std.sys.result;
+import std.sys.socket;
 import std.sys.syscall;

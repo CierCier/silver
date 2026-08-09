@@ -1,0 +1,77 @@
+// std/sys/socket.ag — typed Linux socket syscalls and socket value types.
+//
+// Socket domains, kinds, option names, and shutdown modes are enums because
+// each is a closed set of kernel-defined values. Bit flags remain integer
+// constants so callers can combine them with `|`.
+
+import std.sys.raw.socket;
+import std.sys.result;
+
+enum AddressFamily {
+    UNIX = 1;
+    INET = 2;
+    INET6 = 10;
+}
+
+enum SocketType {
+    STREAM = 1;
+    DGRAM = 2;
+}
+
+enum SocketOptionLevel {
+    SOCKET = 1;
+}
+
+enum SocketOption {
+    REUSEADDR = 2;
+    RCVTIMEO = 20;
+}
+
+enum ShutdownHow {
+    RD = 0;
+    WR = 1;
+    RDWR = 2;
+}
+
+const i64 SOCK_CLOEXEC = 524288;
+
+Result<i64, i64> try_socket(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
+    i64 socket_type = (i64)ty | flags;
+    return Result<i64, i64>.from_raw(sys_socket((i64)domain, socket_type, protocol));
+}
+
+Result<i64, i64> try_bind(i32 fd, void* addr, i64 addr_len) {
+    return Result<i64, i64>.from_raw(sys_bind((i64)fd, (i64)addr, addr_len));
+}
+
+Result<i64, i64> try_listen(i32 fd, i64 backlog) {
+    return Result<i64, i64>.from_raw(sys_listen((i64)fd, backlog));
+}
+
+Result<i64, i64> try_accept4(i32 fd, void* addr, u32* addr_len, i64 flags) {
+    return Result<i64, i64>.from_raw(sys_accept4((i64)fd, (i64)addr, (i64)addr_len, flags));
+}
+
+Result<i64, i64> try_connect(i32 fd, void* addr, i64 addr_len) {
+    return Result<i64, i64>.from_raw(sys_connect((i64)fd, (i64)addr, addr_len));
+}
+
+Result<i64, i64> try_shutdown(i32 fd, ShutdownHow how) {
+    return Result<i64, i64>.from_raw(sys_shutdown((i64)fd, (i64)how));
+}
+
+Result<i64, i64> try_setsockopt(i32 fd, SocketOptionLevel level, SocketOption optname, void* optval, i64 optlen) {
+    return Result<i64, i64>.from_raw(sys_setsockopt((i64)fd, (i64)level, (i64)optname, (i64)optval, optlen));
+}
+
+Result<i64, i64> try_getsockname(i32 fd, void* addr, u32* addr_len) {
+    return Result<i64, i64>.from_raw(sys_getsockname((i64)fd, (i64)addr, (i64)addr_len));
+}
+
+Result<i64, i64> try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr, i64 addr_len) {
+    return Result<i64, i64>.from_raw(sys_sendto((i64)fd, (i64)buf, len, flags, (i64)addr, addr_len));
+}
+
+Result<i64, i64> try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
+    return Result<i64, i64>.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
+}

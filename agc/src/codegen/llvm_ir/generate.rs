@@ -3,8 +3,7 @@ use std::ffi::CString;
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::OptimizationLevel;
-use inkwell::targets::TargetMachine;
-
+use inkwell::targets::{TargetData, TargetMachine};
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::module::{Linkage, Module};
@@ -514,30 +513,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .or_default()
                     .insert(variant.name.name.clone(), payload_types.clone());
             }
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             let mut variant_size: u64 = 0;
             for pt in &payload_types {
-                match pt.kind.as_ref() {
-                    ast::TypeKind::Primitive(p) => {
-                        variant_size += match p {
-                            ast::PrimitiveType::I8
-                            | ast::PrimitiveType::U8
-                            | ast::PrimitiveType::Bool => 1,
-                            ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
-                            ast::PrimitiveType::I32
-                            | ast::PrimitiveType::U32
-                            | ast::PrimitiveType::Char => 4,
-                            ast::PrimitiveType::F32 => 4,
-                            ast::PrimitiveType::I64 | ast::PrimitiveType::U64 => 8,
-                            ast::PrimitiveType::F64 => 8,
-                            ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
-                            _ => 8,
-                        };
-                    }
-                    ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => {
-                        variant_size += 8;
-                    }
-                    _ => variant_size += 8,
-                }
+                let llvm_ty = self.lower_basic_type(pt)?;
+                variant_size += target_data.get_abi_size(&llvm_ty);
             }
             max_payload_size = max_payload_size.max(variant_size);
         }
@@ -581,10 +562,51 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         let Some(owner) = Self::owner_name_from_type(&item.self_type) else {
             return Ok(());
         };
+        if let Some(named) = Self::extract_named_type(&item.self_type)
+            && let Some(args) = &named.generics
+        {
+            let base_name = Self::named_type_name(named);
+            if base_name != owner
+                && (self.enum_variants.contains_key(&base_name)
+                    || self.enum_variant_payload_types.contains_key(&base_name))
+                && !self.enum_variants.contains_key(&owner)
+                && let Some(params) = self.struct_generics.get(&base_name)
+                && params.len() == args.len()
+            {
+                let mapping = params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                self.register_monomorphized_enum(&base_name, &owner, &mapping)?;
+            }
+        }
 
         for impl_item in &item.items {
             match impl_item {
-                ast::ImplItemKind::Function(func) => {
+                ast::ImplItemKind::Function(original_func) => {
+                    let mut func = original_func.clone();
+                    if let Some(named) = Self::extract_named_type(&item.self_type)
+                        && named.generics.is_some()
+                    {
+                        let base_name = Self::named_type_name(named);
+                        if base_name != owner {
+                            let concrete_owner = ast::Type {
+                                kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                    path: vec![ast::Identifier {
+                                        name: owner.clone(),
+                                        span: func.name.span,
+                                    }],
+                                    generics: None,
+                                })),
+                                span: func.name.span,
+                            };
+                            let mut mapping = HashMap::default();
+                            mapping.insert(base_name, concrete_owner);
+                            Self::substitute_block_types(&mut func.body, &mapping);
+                        }
+                    }
+
                     if func.generics.is_some() {
                         continue;
                     }

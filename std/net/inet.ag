@@ -4,7 +4,7 @@
 // natural alignment) and pure-Silver helpers for network byte-order
 // conversion and dotted-quad IPv4 string parsing.
 
-import std.sys.result;
+import std.sys.socket;
 
 // Timeval — POSIX struct timeval (seconds/microseconds), shared by
 // the dns and socket modules for timeouts.
@@ -30,7 +30,7 @@ impl SockAddrIn {
     // IPv4 string. The port is converted to network byte order internally.
     SockAddrIn v4(u16 port, str addr_str) {
         SockAddrIn sa;
-        sa.sin_family = (u16)AF_INET;
+        sa.sin_family = (u16)AddressFamily.INET;
         sa.sin_port = hton16(port);
         sa.sin_addr = (u32)ntoh32(inet_addr(addr_str));
         sa.sin_zero_1 = (u32)0;
@@ -82,8 +82,24 @@ u32 ntoh32(u32 net) {
 // Uses i64 throughout (matching Silver's preferred integer type) with a final
 // cast to u32 at the call site.
 
-i64 inet_addr(str s) {
-    if (s == (str)0) { return (i64)0; }
+i64 inet_parse_port(u8* p) {
+    if (p == (u8*)0 || p[0] == (u8)0) { return -1; }
+    i64 value = 0;
+    i64 i = 0;
+    while (p[i] != (u8)0) {
+        u8 c = p[i];
+        if (c < (u8)48 || c > (u8)57) { return -1; }
+        value = value * 10 + (i64)(c - (u8)48);
+        if (value > 65535) { return -1; }
+        i += 1;
+        if (i > 5) { return -1; }
+    }
+    return value;
+}
+
+// Parse an IPv4 literal into network byte order.
+bool inet_pton4(str s, u32* out) {
+    if (s == (str)0 || out == (u32*)0) { return false; }
     u8* p = (u8*)s;
     i64 result = 0;
     i64 octet = 0;
@@ -93,12 +109,13 @@ i64 inet_addr(str s) {
     while (i < 16) {
         u8 c = p[i];
         if (c == (u8)0) {
-            if (dots != 3) { return (i64)0; }
+            if (dots != 3 || octet > 255) { return false; }
             result = result | (octet << shift);
-            break;
+            *out = (u32)result;
+            return true;
         }
-        if (c == (u8)46) {  // '.'
-            if (dots >= 3 || octet > 255) { return (i64)0; }
+        if (c == (u8)46) {
+            if (dots >= 3 || octet > 255) { return false; }
             result = result | (octet << shift);
             octet = 0;
             shift -= 8;
@@ -106,14 +123,21 @@ i64 inet_addr(str s) {
         } else {
             if (c >= (u8)48 && c <= (u8)57) {
                 octet = octet * 10 + ((i64)c - 48);
-                if (octet > 255) { return (i64)0; }
+                if (octet > 255) { return false; }
             } else {
-                return (i64)0;
+                return false;
             }
         }
         i += 1;
     }
-    return result;
+    return false;
+}
+
+// Compatibility helper: invalid input remains represented as zero.
+i64 inet_addr(str s) {
+    u32 out;
+    if (!inet_pton4(s, &out)) { return (i64)0; }
+    return (i64)out;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +159,7 @@ impl SockAddrIn6 {
     /// Construct from port and colon-hex address string ("::1", "2001:db8::1", etc.).
     SockAddrIn6 v6(u16 port, str addr_str) {
         SockAddrIn6 sa;
-        sa.sin6_family = (u16)AF_INET6;
+        sa.sin6_family = (u16)AddressFamily.INET6;
         sa.sin6_port = hton16(port);
         sa.sin6_flowinfo = (u32)0;
         sa.sin6_scope_id = (u32)0;
@@ -250,4 +274,208 @@ bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
     *hi_out = hi;
     *lo_out = lo;
     return true;
+}
+// ---------------------------------------------------------------------------
+// Public socket address abstraction
+// ---------------------------------------------------------------------------
+
+enum AddrError {
+    InvalidFormat;
+    InvalidAddress;
+    InvalidPort;
+    PathTooLong;
+}
+
+// Linux sockaddr_un: family followed by a 108-byte pathname buffer.
+struct SockAddrUn {
+    u16 sun_family;
+    u8 sun_path[108];
+}
+
+enum SocketAddr {
+    V4(SockAddrIn);
+    V6(SockAddrIn6);
+    Unix(SockAddrUn);
+}
+
+impl SocketAddr {
+    Result<SocketAddr, AddrError> v4(str ip, u16 port) {
+        u32 addr;
+        if (!inet_pton4(ip, &addr)) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+        }
+        SockAddrIn sa;
+        sa.sin_family = (u16)AddressFamily.INET;
+        sa.sin_port = hton16(port);
+        sa.sin_addr = (u32)ntoh32(addr);
+        sa.sin_zero_1 = (u32)0;
+        sa.sin_zero_2 = (u32)0;
+        return Result<SocketAddr, AddrError>.ok(SocketAddr.V4(sa));
+    }
+    // Construct from the network-byte-order representation returned by DNS.
+    Result<SocketAddr, AddrError> v4_network(u32 addr, u16 port) {
+        SockAddrIn sa;
+        sa.sin_family = (u16)AddressFamily.INET;
+        sa.sin_port = hton16(port);
+        sa.sin_addr = (u32)ntoh32(addr);
+        sa.sin_zero_1 = (u32)0;
+        sa.sin_zero_2 = (u32)0;
+        return Result<SocketAddr, AddrError>.ok(SocketAddr.V4(sa));
+    }
+
+    Result<SocketAddr, AddrError> v6(str ip, u16 port) {
+        u64 hi = 0;
+        u64 lo = 0;
+        if (!inet_pton6(ip, &hi, &lo)) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+        }
+        SockAddrIn6 sa;
+        sa.sin6_family = (u16)AddressFamily.INET6;
+        sa.sin6_port = hton16(port);
+        sa.sin6_flowinfo = (u32)0;
+        sa.sin6_addr_hi = hi;
+        sa.sin6_addr_lo = lo;
+        sa.sin6_scope_id = (u32)0;
+        return Result<SocketAddr, AddrError>.ok(SocketAddr.V6(sa));
+    }
+
+    Result<SocketAddr, AddrError> unix(str path) {
+        u8* p = (u8*)path;
+        if (path == (str)0 || p[0] == (u8)0) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+        }
+
+        bool abstract_ns = p[0] == (u8)64; // '@' spelling for Linux abstract names
+        i64 start = 0;
+        if (abstract_ns) { start = 1; }
+
+        i64 n = 0;
+        while (p[start + n] != (u8)0) {
+            n += 1;
+            if (n > 107) {
+                return Result<SocketAddr, AddrError>.Err(AddrError.PathTooLong);
+            }
+        }
+        if (n == 0) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+        }
+
+        SockAddrUn sa;
+        sa.sun_family = (u16)AddressFamily.UNIX;
+        i64 i = 0;
+        while (i < 108) {
+            sa.sun_path[i] = (u8)0;
+            i += 1;
+        }
+
+        i = 0;
+        if (abstract_ns) {
+            i = 1;
+            while (i <= n) {
+                sa.sun_path[i] = p[start + i - 1];
+                i += 1;
+            }
+        } else {
+            while (i < n) {
+                sa.sun_path[i] = p[i];
+                i += 1;
+            }
+        }
+        return Result<SocketAddr, AddrError>.ok(SocketAddr.Unix(sa));
+    }
+
+    Result<SocketAddr, AddrError> parse(str endpoint) {
+        if (endpoint == (str)0) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+        }
+        u8* p = (u8*)endpoint;
+
+        if (p[0] == (u8)117 && p[1] == (u8)110 && p[2] == (u8)105
+            && p[3] == (u8)120 && p[4] == (u8)58) {
+            return SocketAddr.unix((str)&p[5]);
+        }
+
+        if (p[0] == (u8)91) { // '[' — bracketed IPv6 endpoint
+            u8 host[64];
+            i64 i = 1;
+            i64 n = 0;
+            while (p[i] != (u8)0 && p[i] != (u8)93) {
+                if (n >= 63) {
+                    return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+                }
+                host[n] = p[i];
+                n += 1;
+                i += 1;
+            }
+            if (p[i] != (u8)93 || n == 0 || p[i + 1] != (u8)58) {
+                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+            }
+            host[n] = (u8)0;
+
+            u8 port[6];
+            i += 2;
+            n = 0;
+            while (p[i] != (u8)0) {
+                if (n >= 5) {
+                    return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+                }
+                port[n] = p[i];
+                n += 1;
+                i += 1;
+            }
+            port[n] = (u8)0;
+            i64 port_value = inet_parse_port(port);
+            if (port_value < 0) {
+                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+            }
+            return SocketAddr.v6((str)&host, (u16)port_value);
+        }
+
+        // Unbracketed endpoints are IPv4 only.
+        u8 host[16];
+        i64 i = 0;
+        i64 n = 0;
+        while (p[i] != (u8)0 && p[i] != (u8)58) {
+            if (n >= 15) {
+                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+            }
+            host[n] = p[i];
+            n += 1;
+            i += 1;
+        }
+        if (p[i] != (u8)58 || n == 0) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+        }
+        host[n] = (u8)0;
+
+        u8 port[6];
+        i += 1;
+        n = 0;
+        while (p[i] != (u8)0) {
+            if (n >= 5) {
+                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+            }
+            port[n] = p[i];
+            n += 1;
+            i += 1;
+        }
+        port[n] = (u8)0;
+        i64 port_value = inet_parse_port(port);
+        if (port_value < 0) {
+            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+        }
+        return SocketAddr.v4((str)&host, (u16)port_value);
+    }
+}
+
+// Length passed to bind/connect/sendto for a Unix address.
+i64 sockaddr_un_len(SockAddrUn* self) {
+    if (self.sun_path[0] == (u8)0) {
+        i64 n = 1;
+        while (n < 108 && self.sun_path[n] != (u8)0) { n += 1; }
+        return 2 + n;
+    }
+    i64 n = 0;
+    while (n < 108 && self.sun_path[n] != (u8)0) { n += 1; }
+    return 2 + n + 1;
 }

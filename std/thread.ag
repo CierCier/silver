@@ -11,7 +11,7 @@
 // machine word of argument. This is the M3 "threads pass addresses" core that
 // the T1 `Task<T>` message layer and channels build on.
 
-import std.sys.linux;
+import std.sys.raw.process;
 import std.rt.thread_registry;
 import std.mem.alloc;
 

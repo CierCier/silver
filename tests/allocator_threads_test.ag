@@ -10,7 +10,7 @@
 // free-list heads and fails — with it, all threads make progress and the
 // post-fray check passes.
 
-import std.sys.linux;
+import std.sys.raw.process;
 import std.mem.alloc;
 import std.atomic;
 

@@ -28,7 +28,9 @@
 /// Allocator state is a static .bss struct of free-list heads, zero-initialized
 /// by the OS loader — no lazy init, no hot-path branch.
 
-import std.sys.linux;
+import std.sys.raw.fs;
+import std.sys.raw.memory;
+import std.sys.raw.process;
 import std.mem.memory;
 import std.atomic;
 // Static free-list head table in .bss — eliminates lazy-init branch on every

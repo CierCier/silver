@@ -6,15 +6,12 @@
 //   3. 8.8.8.8           (Google public DNS)
 //   4. 1.1.1.1           (Cloudflare public DNS)
 //
-// The first responsive nameserver is cached and reused.  Queries use raw
-// UDP (sendto/recvfrom).  Successfully resolved A records are cached with
-// a default TTL of 60 s.
+// The first responsive nameserver is cached and reused. Queries use the
+// typed UdpSocket API. Successfully resolved A records are cached with a
+// default TTL of 60 s.
 
 import std.net.inet;
-import std.sys.result;
-import std.sys.linux;
-import std.sys.errno;
-import std.mem.alloc;
+import std.net.socket;
 import std.mem.drop;
 import std.string;
 import std.time;
@@ -182,18 +179,6 @@ void dns_cache_put(str hostname, i32 ip, i64 ttl_sec) {
     g_cache[best].ip = ip; g_cache[best].expires = expires;
 }
 
-// ---------------------------------------------------------------------------
-// DNS wire helpers
-// ---------------------------------------------------------------------------
-
-void dns_put_u16(u8* buf, i64 pos, u16 val) {
-    buf[pos]     = (u8)((val >> (u16)8) & (u16)0xFF);
-    buf[pos + 1] = (u8)(val & (u16)0xFF);
-}
-
-u16 dns_get_u16(u8* buf, i64 pos) {
-    return (u16)(((u16)buf[pos] << (u16)8) | (u16)buf[pos + 1]);
-}
 
 /// Encode hostname as DNS labels. "google.com" -> {6,g,o,o,g,l,e,3,c,o,m,0}
 i64 dns_encode_name(u8* buf, str hostname) {
@@ -296,31 +281,24 @@ i32 dns_parse_a(u8* buf, i64 len, u16 expected_id) {
 
 /// Try a single UDP query to one nameserver. Returns IP, 0 on failure.
 i32 dns_try_ns(str hostname, i32 ns_ip, u16 txid, u8* query, i64 qlen) {
-    SockAddrIn ns;
-    ns.sin_family = (u16)AF_INET;
-    ns.sin_port   = hton16((u16)DNS_PORT);
-    ns.sin_addr   = (u32)ns_ip;
-    ns.sin_zero_1 = (u32)0;
-    ns.sin_zero_2 = (u32)0;
+    Result<SocketAddr, AddrError> ns_result =
+        SocketAddr.v4_network((u32)ns_ip, (u16)DNS_PORT);
+    if (ns_result.failed()) { return 0; }
+    SocketAddr ns = ns_result.unwrap();
 
-    Result<i64, i64> s = try_socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (s.is_err()) { return 0; }
-    i32 fd = (i32)s.value();
+    UdpSocket sock = UdpSocket.new();
+    if (sock.invalid()) { return 0; }
+    sock.set_recv_timeout(DNS_TIMEOUT_SEC);
 
-    Timeval tv = { .tv_sec = DNS_TIMEOUT_SEC, .tv_usec = 0 };
-    try_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, 16);
-
-    Result<i64, i64> sr = try_sendto(fd, (void*)query, qlen, 0, (void*)&ns, 16);
-    if (sr.is_err()) { try_close(fd); return 0; }
+    i64 sent = sock.send_to(query, qlen, &ns);
+    if (sent < 0) { return 0; }
 
     u8 resp[512];
-    Result<i64, i64> rr = try_recvfrom(fd, (void*)resp, 512, 0, (void*)0, (u32*)0);
-    try_close(fd);
-    if (rr.is_err()) { return 0; }
+    i64 received = sock.recv_from(resp, 512, (SocketAddr*)0);
+    if (received < 0) { return 0; }
 
-    return dns_parse_a(resp, rr.value(), txid);
+    return dns_parse_a(resp, received, txid);
 }
-
 /// Resolve hostname to IPv4 (network byte order). 0 on failure.
 /// Tries each nameserver in order; first response wins.
 i32 dns_resolve(str hostname) {
@@ -460,30 +438,23 @@ bool dns_resolve6(str hostname, u64* hi, u64* lo) {
 
     i64 ni = 0;
     while (ni < g_ns_count) {
-        // Create UDP socket for this NS
-        SockAddrIn ns;
-        ns.sin_family = (u16)AF_INET;
-        ns.sin_port   = hton16((u16)DNS_PORT);
-        ns.sin_addr   = (u32)g_ns_ips[ni];
-        ns.sin_zero_1 = (u32)0;
-        ns.sin_zero_2 = (u32)0;
+        Result<SocketAddr, AddrError> ns_result =
+            SocketAddr.v4_network((u32)g_ns_ips[ni], (u16)DNS_PORT);
+        if (ns_result.failed()) { ni += 1; continue; }
+        SocketAddr ns = ns_result.unwrap();
 
-        Result<i64, i64> s = try_socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-        if (s.is_err()) { ni += 1; continue; }
-        i32 fd = (i32)s.value();
+        UdpSocket sock = UdpSocket.new();
+        if (sock.invalid()) { ni += 1; continue; }
+        sock.set_recv_timeout(DNS_TIMEOUT_SEC);
 
-        Timeval tv = { .tv_sec = DNS_TIMEOUT_SEC, .tv_usec = 0 };
-        try_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, 16);
-
-        Result<i64, i64> sr = try_sendto(fd, (void*)query, qlen, 0, (void*)&ns, 16);
-        if (sr.is_err()) { try_close(fd); ni += 1; continue; }
+        i64 sent = sock.send_to(query, qlen, &ns);
+        if (sent < 0) { ni += 1; continue; }
 
         u8 resp[512];
-        Result<i64, i64> rr = try_recvfrom(fd, (void*)resp, 512, 0, (void*)0, (u32*)0);
-        try_close(fd);
-        if (rr.is_err()) { ni += 1; continue; }
+        i64 received = sock.recv_from(resp, 512, (SocketAddr*)0);
+        if (received < 0) { ni += 1; continue; }
 
-        if (dns_parse_aaaa(resp, rr.value(), txid, hi, lo)) { return true; }
+        if (dns_parse_aaaa(resp, received, txid, hi, lo)) { return true; }
         ni += 1;
     }
     return false;

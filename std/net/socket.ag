@@ -4,6 +4,7 @@
 // provides send_to / recv_from on top of a SOCK_DGRAM socket.
 
 import std.sys.result;
+import std.sys.socket;
 import std.sys.errno;
 import std.net.inet;
 import std.mem.drop;
@@ -23,8 +24,8 @@ struct Socket {
 
 impl Socket {
     /// Create a socket. Returns a closed socket on failure.
-    Socket new(i64 domain, i64 ty, i64 protocol) {
-        Result<i64, i64> r = try_socket(domain, ty, protocol);
+    Socket new(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
+        Result<i64, i64> r = try_socket(domain, ty, flags, protocol);
         if (r.is_err()) {
             Socket s = { .fd = -1, .is_open = false };
             return s;
@@ -43,7 +44,7 @@ impl Socket {
     bool invalid(Socket* self) { return !self.valid(); }
 
     /// Set socket option. No-op on invalid sockets.
-    void set_opt(Socket* self, i64 level, i64 optname, void* optval, i64 optlen) {
+    void set_opt(Socket* self, SocketOptionLevel level, SocketOption optname, void* optval, i64 optlen) {
         if (self.invalid()) { return; }
         try_setsockopt(self.fd, level, optname, optval, optlen);
     }
@@ -52,7 +53,7 @@ impl Socket {
     void set_recv_timeout(Socket* self, i64 sec) {
         if (self.invalid()) { return; }
         Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
-        try_setsockopt(self.fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, 16);
+        try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, (void*)&tv, 16);
     }
 
     /// Close the socket. Idempotent.
@@ -86,32 +87,47 @@ impl UdpSocket {
     /// Create an unbound UDP socket. Returns a closed socket on failure.
     UdpSocket new() {
         UdpSocket u;
-        u.sock = Socket.new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        u.sock = Socket.new(AddressFamily.INET, SocketType.DGRAM, SOCK_CLOEXEC, 0);
         return u;
     }
 
-    /// Bind to the given address and port.
-    bool bind(UdpSocket* self, SockAddrIn* addr) {
+    /// Bind to a borrowed socket address. This socket is IPv4-only.
+    bool bind(UdpSocket* self, SocketAddr* addr) {
         if (self.sock.invalid()) { return false; }
-        Result<i64, i64> r = try_bind(self.sock.fd, (void*)addr, 16);
+        Result<i64, i64> r = match *addr {
+            V4(sa) : try_bind(self.sock.fd, (void*)&sa, 16),
+            V6(sa) : try_bind(self.sock.fd, (void*)&sa, 28),
+            Unix(sa) : try_bind(self.sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
+        };
         return r.is_ok();
     }
 
-    /// Send `len` bytes to `dst`. Returns bytes sent, or -errno on error.
-    i64 send_to(UdpSocket* self, u8* buf, i64 len, SockAddrIn* dst) {
+    /// Send `len` bytes to a borrowed destination address.
+    i64 send_to(UdpSocket* self, u8* buf, i64 len, SocketAddr* dst) {
         if (self.sock.invalid()) { return -EINVAL; }
-        Result<i64, i64> r = try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)dst, 16);
+        Result<i64, i64> r = match *dst {
+            V4(sa) : try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)&sa, 16),
+            V6(sa) : try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)&sa, 28),
+            Unix(sa) : try_sendto(
+                self.sock.fd, (void*)buf, len, 0, (void*)&sa,
+                sockaddr_un_len((SockAddrUn*)&sa))
+        };
         if (r.is_err()) { return -r.errno(); }
         return r.value();
     }
 
-    /// Receive up to `len` bytes. Returns bytes received, or -errno on error.
-    /// `src` is filled with the sender's address if non-null.
-    i64 recv_from(UdpSocket* self, u8* buf, i64 len, SockAddrIn* src) {
+    /// Receive up to `len` bytes. If non-null, fill `src` with the IPv4
+    /// sender address.
+    i64 recv_from(UdpSocket* self, u8* buf, i64 len, SocketAddr* src) {
         if (self.sock.invalid()) { return -EINVAL; }
+        SockAddrIn src_addr;
         u32 addr_len = 16;
-        Result<i64, i64> r = try_recvfrom(self.sock.fd, (void*)buf, len, 0, (void*)src, &addr_len);
+        Result<i64, i64> r = try_recvfrom(
+            self.sock.fd, (void*)buf, len, 0, (void*)&src_addr, &addr_len);
         if (r.is_err()) { return -r.errno(); }
+        if (src != (SocketAddr*)0) {
+            *src = SocketAddr.V4(src_addr);
+        }
         return r.value();
     }
 

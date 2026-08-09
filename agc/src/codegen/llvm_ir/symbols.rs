@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::types::StructType;
+use inkwell::targets::TargetData;
 use inkwell::values::{BasicValue, BasicValueEnum};
 
 use crate::codegen::llvm_ir::FunctionSig;
@@ -301,6 +302,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         expr: &mut ast::Expression,
         mapping: &HashMap<String, ast::Type>,
     ) {
+        // Enum constructors are parsed as field access on a bare identifier
+        // (`Result.Ok(value)`), not as a `TypeName`. Rewrite that identifier
+        // when a generic impl maps its enum owner to a concrete monomorph.
+        if let ast::ExpressionKind::Identifier(identifier) = expr.kind.as_ref()
+            && let Some(concrete_ty) = mapping.get(&identifier.name)
+            && matches!(concrete_ty.kind.as_ref(), ast::TypeKind::Named(_))
+        {
+            expr.kind = Box::new(ast::ExpressionKind::TypeName(concrete_ty.clone()));
+            return;
+        }
+
         match expr.kind.as_mut() {
             ast::ExpressionKind::Cast {
                 expression,
@@ -448,7 +460,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     *expr.kind = ast::ExpressionKind::TypeName(concrete_ty.clone());
                 }
             }
-            ast::ExpressionKind::EnumVariant { fields, .. } => {
+            ast::ExpressionKind::EnumVariant { path, fields, .. } => {
+                if path.len() == 1
+                    && let Some(concrete_ty) = mapping.get(&path[0].name)
+                    && let ast::TypeKind::Named(named) = concrete_ty.kind.as_ref()
+                    && let Some(owner) = named.path.last()
+                {
+                    path[0].name = owner.name.clone();
+                }
                 for field in fields {
                     Self::substitute_expression_types(field, mapping);
                 }
@@ -672,7 +691,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// payload types, and the `{i16, [N x i8]}` payload layout. Called when a
     /// generic enum-impl method is materialized on the fly and the concrete
     /// enum was not yet registered by monomorph.
-    fn register_monomorphized_enum(
+    pub(crate) fn register_monomorphized_enum(
         &mut self,
         base_name: &str,
         mangled_name: &str,
@@ -747,9 +766,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    /// Byte size of an AST type for payload-layout sizing (mirrors
-    /// generate_enum_item's sizing rules).
-    fn ast_type_size(&self, ty: &ast::Type) -> u64 {
+    /// Byte size of an AST type for payload-layout sizing.
+    fn ast_type_size(&mut self, ty: &ast::Type) -> u64 {
+        if let Ok(llvm_ty) = self.lower_basic_type(ty) {
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+            return target_data.get_abi_size(&llvm_ty);
+        }
+
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(p) => match p {
                 ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,

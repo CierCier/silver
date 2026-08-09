@@ -1,0 +1,32 @@
+import std.net.inet;
+import std.test;
+
+ i32 main() {
+    test_start("socket address constructors");
+
+    Result<SocketAddr, AddrError> v4 = SocketAddr.v4("127.0.0.1", (u16)8080);
+    assert_true(v4.success(), "valid IPv4 constructor");
+
+    Result<SocketAddr, AddrError> v6 = SocketAddr.v6("::1", (u16)443);
+    assert_true(v6.success(), "valid IPv6 constructor");
+
+    Result<SocketAddr, AddrError> unix_addr = SocketAddr.unix("/tmp/silver.sock");
+    assert_true(unix_addr.success(), "valid Unix constructor");
+
+    Result<SocketAddr, AddrError> parsed_v4 = SocketAddr.parse("127.0.0.1:8080");
+    assert_true(parsed_v4.success(), "parse IPv4 endpoint");
+
+    Result<SocketAddr, AddrError> parsed_v6 = SocketAddr.parse("[::1]:443");
+    assert_true(parsed_v6.success(), "parse bracketed IPv6 endpoint");
+
+    Result<SocketAddr, AddrError> parsed_unix = SocketAddr.parse("unix:/tmp/silver.sock");
+    assert_true(parsed_unix.success(), "parse Unix endpoint");
+
+    Result<SocketAddr, AddrError> bad_ip = SocketAddr.parse("999.1.1.1:80");
+    assert_true(bad_ip.failed(), "reject invalid IPv4 endpoint");
+
+    Result<SocketAddr, AddrError> bad_port = SocketAddr.parse("127.0.0.1:65536");
+    assert_true(bad_port.failed(), "reject invalid port");
+
+    return done();
+}

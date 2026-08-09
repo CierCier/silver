@@ -22,7 +22,7 @@ import std.thread;
 import std.atomic;
 import std.sync;
 import std.channel;
-import std.sys.linux;
+import std.sys.raw.thread;
 import std.sys.entry;
 
 // Shared channels (zero-initialized, which is a valid empty channel).

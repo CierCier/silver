@@ -14,7 +14,8 @@
 // declared type, so this file implements logical-shift-right, unsigned compare
 // and unsigned divide-by-10 manually on top of two's-complement i64 semantics.
 
-import std.sys.linux;
+import std.sys.raw.fs;
+import std.sys.raw.process;
 
 // ---------------------------------------------------------------------------
 // Raw fd writers (b): write the full buffer, retrying on EINTR/short writes.
