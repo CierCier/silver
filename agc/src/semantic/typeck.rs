@@ -1819,6 +1819,12 @@ impl TypeChecker {
                     let is_type_scoped_access = matches!(
                         object.kind.as_ref(),
                         ast::ExpressionKind::Identifier(ident) if ident.name == path[0]
+                    ) || matches!(
+                        object.kind.as_ref(),
+                        ast::ExpressionKind::TypeName(ty) if matches!(
+                            ty.kind.as_ref(),
+                            ast::TypeKind::Named(named) if named.path.len() == 1 && named.path[0].name == path[0]
+                        )
                     );
                     if !is_type_scoped_access {
                         self.error(
