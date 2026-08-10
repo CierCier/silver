@@ -2,12 +2,12 @@ use std::ffi::CString;
 
 use rustc_hash::FxHashMap as HashMap;
 
-use inkwell::OptimizationLevel;
-use inkwell::targets::{TargetData, TargetMachine};
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
+use inkwell::OptimizationLevel;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
+use inkwell::targets::{TargetData, TargetMachine};
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
 use crate::attributes::function_link_name;

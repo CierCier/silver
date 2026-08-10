@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap as HashMap;
 
-use inkwell::types::StructType;
 use inkwell::targets::TargetData;
+use inkwell::types::StructType;
 use inkwell::values::{BasicValue, BasicValueEnum};
 
 use crate::codegen::llvm_ir::FunctionSig;
@@ -309,7 +309,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             && let Some(concrete_ty) = mapping.get(&identifier.name)
             && matches!(concrete_ty.kind.as_ref(), ast::TypeKind::Named(_))
         {
-            expr.kind = Box::new(ast::ExpressionKind::TypeName(concrete_ty.clone()));
+            *expr.kind = ast::ExpressionKind::TypeName(concrete_ty.clone());
             return;
         }
 
