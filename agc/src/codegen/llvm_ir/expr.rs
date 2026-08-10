@@ -2380,12 +2380,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .and_then(|m| m.get(&variant.name))
                                 .cloned()
                                 .unwrap_or_default();
-                            let bindings: Vec<&ast::Identifier> = match &data_pattern.kind {
-                                ast::PatternKind::Identifier(binding) => vec![binding],
+                            let bindings: Vec<Option<&ast::Identifier>> = match &data_pattern.kind {
+                                ast::PatternKind::Identifier(binding) => vec![Some(binding)],
                                 ast::PatternKind::Tuple(items) => items
                                     .iter()
-                                    .filter_map(|p| match &p.kind {
-                                        ast::PatternKind::Identifier(b) => Some(b),
+                                    .map(|item| match &item.kind {
+                                        ast::PatternKind::Identifier(binding) => Some(binding),
                                         _ => None,
                                     })
                                     .collect(),
@@ -2402,9 +2402,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     self.module.get_data_layout().as_str().to_str().unwrap(),
                                 );
                                 let mut byte_offset: u32 = 0;
-                                for (i, binding) in bindings.iter().enumerate() {
-                                    if let Some(pt) = payload_types.get(i).cloned() {
-                                        let llvm_ty = self.lower_basic_type(&pt)?;
+                                for (i, pt) in payload_types.iter().enumerate() {
+                                    let llvm_ty = self.lower_basic_type(pt)?;
+                                    let binding = bindings.get(i).copied().flatten();
+                                    if let Some(binding) = binding {
                                         let field_ptr =
                                             if byte_offset == 0 {
                                                 data_ptr
@@ -2455,14 +2456,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 binding.name.clone(),
                                                 VarInfo {
                                                     ptr: alloca,
-                                                    ty: pt,
+                                                    ty: pt.clone(),
                                                     is_mutable: false,
                                                     is_volatile: false,
                                                 },
                                             );
                                         }
-                                        byte_offset += target_data.get_abi_size(&llvm_ty) as u32;
                                     }
+                                    byte_offset += target_data.get_abi_size(&llvm_ty) as u32;
                                 }
                             }
                         }

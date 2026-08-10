@@ -1,13 +1,14 @@
 import std.test;
 
 // Enum with a multi-field tuple variant.
-// Multi-field match extraction is deferred (separate work);
-// this test verifies construction succeeds (Fix C).
+// Match extraction covers all fields and preserves wildcard positions.
 enum Point { Coords(i32, i32); }
 
 i32 main() {
     Point p = Point.Coords(10, 20);
-    // Construction succeeded — just verify we didn't crash
-    assert_true(true, "multi-field enum construction");
+    i32 sum = match p { Coords(a, b) : a + b };
+    assert_eq_i32(30, sum, "multi-field enum extraction");
+    i32 second = match p { Coords(_, b) : b };
+    assert_eq_i32(20, second, "wildcard preserves payload position");
     return done();
 }
