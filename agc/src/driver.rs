@@ -1,6 +1,6 @@
 //! Compiler driver: CLI planning and pipeline orchestration.
 //!
-//! Owns [`EmitKind`], [`CompilePlan`] and the per-emit pipeline (lex,
+//! Owns [`Cli`], [`EmitKind`], [`CompilePlan`] and the per-emit pipeline (lex,
 //! parse, import lowering, semantic analysis, type check, monomorph,
 //! codegen, link). The linker itself lives in `crate::link`.
 
@@ -8,26 +8,129 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agc::attributes::{collect_program_link_libraries, extend_unique_libs};
-use agc::module_artifact::{
+use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
+use crate::module_artifact::{
     ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
 };
-use agc::module_loader::{ModuleLoader, module_loader_default_dirs};
-use agc::parser::ast;
-use agc::semantic::{
+use crate::module_loader::{ModuleLoader, module_loader_default_dirs};
+use crate::parser::ast;
+use crate::semantic::{
     self,
     analyzer::{Analyzer, SemanticAnalyzerHook},
     comptime_cast_hook::ComptimeCastHook,
     typeck::TypeChecker,
 };
-use agc::symbol_table::{CompilerPhase, CompilerSymbolTable};
-use agc::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
-use clap::ValueEnum;
+use crate::symbol_table::{CompilerPhase, CompilerSymbolTable};
+use crate::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
+use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
 
-use crate::Cli;
 use crate::link::{link_exe, link_shared_module};
+
+/// Command-line options for the `agc` driver binary.
+#[derive(Parser, Debug)]
+#[command(
+    name = "agc",
+    version = concat!(
+        env!("CARGO_PKG_VERSION"), "\n",
+        "version: ", env!("GIT_DESCRIBE"), "\n",
+        "commit: ", env!("GIT_SHA")
+    ),
+    about = "Silver compiler (clang-like driver)",
+    long_about = "A clang-like driver for the Silver compiler"
+)]
+pub struct Cli {
+    /// Input source files (.ag). Optional for --emit=grammar.
+    #[arg(value_name = "FILE")]
+    inputs: Vec<PathBuf>,
+
+    /// Write output to <file>
+    #[arg(short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Compile and assemble, but do not link (emit .o)
+    #[arg(short = 'c', action = ArgAction::SetTrue)]
+    compile_only: bool,
+
+    /// Compile only and emit assembly (.s)
+    #[arg(short = 'S', action = ArgAction::SetTrue)]
+    emit_asm: bool,
+
+    /// Emit LLVM IR instead of native output (.ll)
+    #[arg(long = "emit-llvm", action = ArgAction::SetTrue)]
+    emit_llvm: bool,
+
+    /// Explicitly select the output kind (overrides -c/-S/--emit-llvm)
+    #[arg(long = "emit", value_enum)]
+    emit: Option<EmitKind>,
+
+    /// Optimization level: 0,1,2,3,s,z,fast (accepts clang-style -O2)
+    #[arg(short = 'O', value_name = "LEVEL", default_missing_value = "2", num_args = 0..=1)]
+    opt_level: Option<String>,
+
+    /// Generate debug information
+    #[arg(short = 'g', action = ArgAction::SetTrue)]
+    debug_info: bool,
+
+    /// Add directory to include search path
+    #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append)]
+    include_dirs: Vec<PathBuf>,
+
+    /// Add a primary module include root (defaults to current working directory)
+    #[arg(long = "root", value_name = "DIR")]
+    root: Option<PathBuf>,
+
+    /// Define a preprocessor symbol (accepted for clang-compat; not yet used)
+    #[arg(short = 'D', value_name = "NAME[=VALUE]", action = ArgAction::Append)]
+    defines: Vec<String>,
+
+    /// Add directory to library search path
+    #[arg(short = 'L', value_name = "DIR", action = ArgAction::Append)]
+    lib_dirs: Vec<PathBuf>,
+
+    /// Link with library
+    #[arg(short = 'l', value_name = "LIB", action = ArgAction::Append)]
+    libs: Vec<String>,
+
+    /// Compile for the given target triple
+    #[arg(long = "target", value_name = "TRIPLE")]
+    target: Option<String>,
+
+    /// Use the given sysroot
+    #[arg(long = "sysroot", value_name = "DIR")]
+    sysroot: Option<PathBuf>,
+
+    /// Do not link the standard library (accepted for clang-compat; not yet used)
+    #[arg(long = "no-std", action = ArgAction::SetTrue)]
+    no_std: bool,
+
+    /// Link statically with the no-libc runtime. Always enabled: Silver never
+    /// links against libc, so every binary is fully static by default. The
+    /// flag exists for explicitness and backwards compatibility.
+    #[arg(long = "static-runtime", action = ArgAction::SetTrue, default_value_t = true)]
+    static_runtime: bool,
+
+    /// Prefer shared module artifacts and emit shared libraries for module packaging
+    #[arg(long = "shared", action = ArgAction::SetTrue)]
+    shared: bool,
+
+    /// Verbose output
+    #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue)]
+    verbose: bool,
+
+    /// Print commands/plan but do not execute (clang-style: also accepts -###)
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    dry_run: bool,
+
+    /// Enable time and memory profiling output
+    #[arg(long = "profile", action = ArgAction::SetTrue)]
+    profile: bool,
+
+    /// Enable allocator leak-check, double-free, and buffer overflow diagnostics
+    #[arg(long = "leak-check", action = ArgAction::SetTrue)]
+    leak_check: bool,
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
 pub(crate) enum EmitKind {
@@ -346,7 +449,7 @@ fn collect_dependency_link_artifacts(
 }
 
 /// Execute the full compile pipeline for a parsed CLI.
-pub(crate) fn run(cli: Cli) {
+pub fn run(cli: Cli) {
     match derive_plan(cli) {
         Ok(plan) => {
             if plan.verbose || std::env::var_os("AGC_VERBOSE").is_some() {
@@ -704,14 +807,14 @@ pub(crate) fn run(cli: Cli) {
                 // Populate ForIn iterator_type from typeck-resolved types
                 let resolved_iter_types = checker.take_resolved_iter_types();
                 if !resolved_iter_types.is_empty() {
-                    agc::semantic::typeck::populate_for_in_iterator_types(
+                    crate::semantic::typeck::populate_for_in_iterator_types(
                         &mut ast,
                         &resolved_iter_types,
                     );
                     // so their ForIn nodes have iterator_type: None. Replace
                     // the sources with the now-populated bodies from the AST.
                     for request in &mut monomorphs {
-                        use agc::semantic::monomorph::MonomorphRequest;
+                        use crate::semantic::monomorph::MonomorphRequest;
                         match request {
                             MonomorphRequest::Function { source, .. } => {
                                 for item in &ast.items {
@@ -761,7 +864,10 @@ pub(crate) fn run(cli: Cli) {
                 // expected-type inference recorded during typeck.
                 let bare_constructors = checker.take_bare_constructors();
                 if !bare_constructors.is_empty() {
-                    agc::semantic::typeck::rewrite_bare_constructors(&mut ast, &bare_constructors);
+                    crate::semantic::typeck::rewrite_bare_constructors(
+                        &mut ast,
+                        &bare_constructors,
+                    );
                 }
                 if !type_errors.is_empty() {
                     eprintln!("agc: type errors:");
@@ -780,7 +886,7 @@ pub(crate) fn run(cli: Cli) {
 
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
-                let escape_errors = agc::semantic::escape_check::check_program(&ast);
+                let escape_errors = crate::semantic::escape_check::check_program(&ast);
                 if !escape_errors.is_empty() {
                     eprintln!("agc: escape errors:");
                     for error in &escape_errors {
@@ -796,7 +902,7 @@ pub(crate) fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let move_errors = agc::semantic::move_check::check_program(&ast);
+                let move_errors = crate::semantic::move_check::check_program(&ast);
                 if !move_errors.is_empty() {
                     eprintln!("agc: move errors:");
                     for error in &move_errors {
