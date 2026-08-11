@@ -1,0 +1,71 @@
+// JSON serialization sent through the public TCP writer API.
+import std.json;
+import std.net.tcp;
+import std.net.inet;
+import std.sys.result;
+import std.mem;
+import std.test;
+
+struct ApiRequest {
+    i32 id;
+    str method;
+}
+
+impl ToJson<ApiRequest> for ApiRequest {
+    void to_json(ApiRequest* self, JsonWriter* out) {
+        out.begin_object();
+        out.field("id");
+        out.write_i64((i64)self.id);
+        out.field("method");
+        out.write_string(self.method);
+        out.end_object();
+    }
+}
+
+i32 main() {
+    test_start("JSON over TCP writer");
+
+    ApiRequest request;
+    request.id = 7;
+    request.method = "status";
+    str payload = @json(request);
+    assert_eq_str("{\"id\":7,\"method\":\"status\"}", payload, "JSON payload");
+
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    assert_true(bind_result.success(), "bind address valid");
+    SocketAddr bind_addr = bind_result.unwrap();
+    TcpListener listener = TcpListener.bind(&bind_addr, 1);
+    assert_true(listener.valid(), "listener bind ok");
+
+    SockAddrIn server_addr;
+    u32 addr_len = 16;
+    Result<i64, i64> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&server_addr, &addr_len);
+    assert_true(name_result.is_ok(), "getsockname ok");
+
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", ntoh16(server_addr.sin_port));
+    assert_true(connect_result.success(), "connect address valid");
+    SocketAddr connect_addr = connect_result.unwrap();
+    TcpStream client = TcpStream.connect(&connect_addr);
+    assert_true(client.valid(), "client connect ok");
+
+    Result<i64, i64> write_result =
+        client.write((u8*)payload, cstr_len((u8*)payload));
+    assert_true(write_result.is_ok(), "TCP writer accepted JSON");
+    assert_eq_i64(cstr_len((u8*)payload), write_result.value(), "all JSON bytes written");
+
+    Result<i64, i64> accept_result = listener.accept();
+    assert_true(accept_result.is_ok(), "server accepted client");
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+
+    u8* received = alloc<u8>(128);
+    Result<i64, i64> read_result = server.read(received, 127);
+    assert_true(read_result.is_ok(), "server read JSON");
+    received[read_result.value()] = (u8)0;
+    assert_eq_str(payload, (str)received, "TCP API received JSON");
+    free(received);
+
+    return done();
+}

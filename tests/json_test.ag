@@ -1,0 +1,45 @@
+import std.io.file;
+import std.json;
+
+struct User {
+    i32 id;
+    str name;
+}
+impl ToJson<User> for User {
+    void to_json(User* self, JsonWriter* out) {
+        out.begin_object();
+        out.field("id");
+        out.write_i64((i64)self.id);
+        out.field("name");
+        out.write_string(self.name);
+        out.end_object();
+    }
+}
+impl User {
+    User new(i32 id, str name) {
+        User user;
+        user.id = id;
+        user.name = name;
+        return move user;
+    }
+}
+
+
+i32 main() {
+    User user = User.new(7, "Ada");
+    str encoded = @json(user);
+    Optional<i32> some = Some(7);
+    Optional<i32> none = None;
+    str some_json = @json(some);
+    str none_json = @json(none);
+    Result<String, JsonError> decoded = @from_json(String, "\"Ada\"");
+    if (decoded.failed()) { return 4; }
+    String decoded_name = decoded.unwrap();
+    if (!decoded_name.equals("Ada")) { return 4; }
+    if (encoded != "{\"id\":7,\"name\":\"Ada\"}") { return 1; }
+    if (some_json != "7") { return 2; }
+    if (none_json != "null") { return 3; }
+    STDOUT.write_str(encoded);
+    STDOUT.write_str("\n");
+    return 0;
+}

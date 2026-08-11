@@ -122,6 +122,7 @@ pub(crate) mod call;
 pub(crate) mod entry;
 pub(crate) mod expr;
 pub(crate) mod generate;
+pub(crate) mod json;
 pub(crate) mod operators;
 pub(crate) mod scope;
 pub(crate) mod stmt;

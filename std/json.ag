@@ -1,0 +1,408 @@
+// JSON serialization traits and streaming reader/writer.
+//
+// ToJson is intentionally a streaming API: implementations write directly to
+// JsonWriter instead of allocating one string per nested value.
+// FromJson returns Result so custom implementations own validation policy.
+
+import std.io.file;
+import std.string;
+import std.result;
+
+enum JsonError {
+    Invalid;
+}
+
+impl JsonError {
+    JsonError invalid() {
+        return JsonError.Invalid;
+    }
+}
+
+trait ToJson<Self> {
+    void to_json(Self* self, JsonWriter* out);
+}
+
+trait FromJson<Self> {
+    Result<Self, JsonError> from_json(JsonReader* input);
+}
+
+struct JsonWriter {
+    BufWriter output;
+    u8 contexts[32]; // 1 = object, 2 = array
+    bool first[32];
+    i64 depth;
+    bool expecting_value;
+}
+
+impl JsonWriter {
+    JsonWriter new() {
+        JsonWriter writer;
+        writer.output.data = 0;
+        writer.output.len = 0;
+        writer.output.cap = 0;
+        writer.output.fd = -1;
+        writer.output.list_next = (BufWriter*)0;
+        writer.output.list_prev = (BufWriter*)0;
+        writer.output.mode = IOMODE_BLOCK;
+        writer.depth = 0;
+        writer.expecting_value = false;
+        return move writer;
+    }
+
+    void before_value(JsonWriter* self) {
+        if (self.depth == 0) {
+            return;
+        }
+        if (self.expecting_value) {
+            self.expecting_value = false;
+            return;
+        }
+        i64 top = self.depth - 1;
+        if (self.contexts[top] == 2) {
+            if (!self.first[top]) {
+                self.output.write_u8((u8)44);
+            }
+            self.first[top] = false;
+        }
+    }
+
+    void write_escaped_body(JsonWriter* self, str value) {
+        u8* bytes = (u8*)value;
+        i64 i = 0;
+        i64 len = cstr_len(bytes);
+        while (i < len) {
+            u8 ch = bytes[i];
+            if (ch == (u8)34) {
+                self.output.write_str("\\\"");
+            } else if (ch == (u8)92) {
+                self.output.write_str("\\\\");
+            } else if (ch == (u8)10) {
+                self.output.write_str("\\n");
+            } else if (ch == (u8)13) {
+                self.output.write_str("\\r");
+            } else if (ch == (u8)9) {
+                self.output.write_str("\\t");
+            } else {
+                self.output.write_u8(ch);
+            }
+            i = i + 1;
+        }
+    }
+
+    void write_string(JsonWriter* self, str value) {
+        self.before_value();
+        self.output.write_u8((u8)34);
+        self.write_escaped_body(value);
+        self.output.write_u8((u8)34);
+    }
+
+    void write_raw(JsonWriter* self, str value) {
+        self.before_value();
+        self.output.write_str(value);
+    }
+
+    void write_null(JsonWriter* self) {
+        self.before_value();
+        self.output.write_str("null");
+    }
+
+    void write_i64(JsonWriter* self, i64 value) {
+        self.before_value();
+        self.output.write_i64(value);
+    }
+
+    void write_u64(JsonWriter* self, u64 value) {
+        self.before_value();
+        self.output.write_u64(value);
+    }
+
+    void write_f64(JsonWriter* self, f64 value) {
+        self.before_value();
+        self.output.write_f64(value);
+    }
+
+    void write_bool(JsonWriter* self, bool value) {
+        self.before_value();
+        self.output.write_bool(value);
+    }
+
+    void begin_object(JsonWriter* self) {
+        self.before_value();
+        self.output.write_u8((u8)123);
+        if (self.depth < 32) {
+            self.contexts[self.depth] = 1;
+            self.first[self.depth] = true;
+            self.depth = self.depth + 1;
+        }
+    }
+
+    void end_object(JsonWriter* self) {
+        if (self.depth > 0) {
+            self.depth = self.depth - 1;
+        }
+        self.output.write_u8((u8)125);
+    }
+
+    void begin_array(JsonWriter* self) {
+        self.before_value();
+        self.output.write_u8((u8)91);
+        if (self.depth < 32) {
+            self.contexts[self.depth] = 2;
+            self.first[self.depth] = true;
+            self.depth = self.depth + 1;
+        }
+    }
+
+    void end_array(JsonWriter* self) {
+        if (self.depth > 0) {
+            self.depth = self.depth - 1;
+        }
+        self.output.write_u8((u8)93);
+    }
+
+    void field(JsonWriter* self, str name) {
+        if (self.depth == 0 || self.contexts[self.depth - 1] != 1) {
+            return;
+        }
+        i64 top = self.depth - 1;
+        if (!self.first[top]) {
+            self.output.write_u8((u8)44);
+        }
+        self.first[top] = false;
+        self.output.write_u8((u8)34);
+        self.write_escaped_body(name);
+        self.output.write_str("\":");
+        self.expecting_value = true;
+    }
+
+    str finish(JsonWriter* self) {
+        self.output.write_u8((u8)0);
+        str result = (str)self.output.data;
+        self.output.data = 0;
+        self.output.len = 0;
+        self.output.cap = 0;
+        return result;
+    }
+}
+
+struct JsonReader {
+    str input;
+    i64 index;
+    i64 length;
+    bool failed;
+}
+
+impl JsonReader {
+    JsonReader new(str input) {
+        JsonReader reader;
+        reader.input = input;
+        reader.index = 0;
+        reader.length = cstr_len((u8*)input);
+        reader.failed = false;
+        return move reader;
+    }
+
+    void skip_whitespace(JsonReader* self) {
+        u8* bytes = (u8*)self.input;
+        while (self.index < self.length) {
+            u8 ch = bytes[self.index];
+            if (ch != (u8)32 && ch != (u8)9 && ch != (u8)10 && ch != (u8)13) {
+                return;
+            }
+            self.index = self.index + 1;
+        }
+    }
+
+    bool expect(JsonReader* self, u8 expected) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        if (self.index >= self.length || bytes[self.index] != expected) {
+            self.failed = true;
+            return false;
+        }
+        self.index = self.index + 1;
+        return true;
+    }
+
+    bool begin_object(JsonReader* self) { return self.expect((u8)123); }
+    bool end_object(JsonReader* self) { return self.expect((u8)125); }
+    bool begin_array(JsonReader* self) { return self.expect((u8)91); }
+    bool end_array(JsonReader* self) { return self.expect((u8)93); }
+    bool comma(JsonReader* self) { return self.expect((u8)44); }
+
+    bool literal(JsonReader* self, str value) {
+        u8* input = (u8*)self.input;
+        u8* expected = (u8*)value;
+        self.skip_whitespace();
+        i64 len = cstr_len(expected);
+        if (self.index + len > self.length) {
+            self.failed = true;
+            return false;
+        }
+        i64 i = 0;
+        while (i < len) {
+            if (input[self.index + i] != expected[i]) {
+                self.failed = true;
+                return false;
+            }
+            i = i + 1;
+        }
+        self.index = self.index + len;
+        return true;
+    }
+
+    bool read_bool(JsonReader* self, bool* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        if (self.index + 4 <= self.length
+            && bytes[self.index] == (u8)116) {
+            if (self.literal("true")) { *out = true; return true; }
+        }
+        if (self.literal("false")) { *out = false; return true; }
+        self.failed = true;
+        return false;
+    }
+
+    bool read_i64(JsonReader* self, i64* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        bool negative = false;
+        if (self.index < self.length && bytes[self.index] == (u8)45) {
+            negative = true;
+            self.index = self.index + 1;
+        }
+        i64 value = 0;
+        i64 digits = 0;
+        while (self.index < self.length) {
+            u8 ch = bytes[self.index];
+            if (ch < (u8)48 || ch > (u8)57) { break; }
+            value = value * 10 + (i64)(ch - (u8)48);
+            self.index = self.index + 1;
+            digits = digits + 1;
+        }
+        if (digits == 0) {
+            self.failed = true;
+            return false;
+        }
+        if (negative) { value = -value; }
+        *out = value;
+        return true;
+    }
+
+    bool read_i32(JsonReader* self, i32* out) {
+        i64 value = 0;
+        if (!self.read_i64(&value)) { return false; }
+        *out = (i32)value;
+        return true;
+    }
+
+    String read_string(JsonReader* self) {
+        u8* bytes = (u8*)self.input;
+        String result = String.new();
+        if (!self.expect((u8)34)) { return move result; }
+        while (self.index < self.length) {
+            u8 ch = bytes[self.index];
+            self.index = self.index + 1;
+            if (ch == (u8)34) { return move result; }
+            if (ch != (u8)92) {
+                result.push(ch);
+                continue;
+            }
+            if (self.index >= self.length) { break; }
+            u8 escaped = bytes[self.index];
+            self.index = self.index + 1;
+            if (escaped == (u8)34) { result.push((u8)34); }
+            else if (escaped == (u8)92) { result.push((u8)92); }
+            else if (escaped == (u8)110) { result.push((u8)10); }
+            else if (escaped == (u8)114) { result.push((u8)13); }
+            else if (escaped == (u8)116) { result.push((u8)9); }
+            else { self.failed = true; return move result; }
+        }
+        self.failed = true;
+        return move result;
+    }
+
+    bool field(JsonReader* self, str name) {
+        String actual = self.read_string();
+        if (self.failed || !actual.equals(name)) {
+            self.failed = true;
+            return false;
+        }
+        return self.expect((u8)58);
+    }
+
+    bool ok(JsonReader* self) {
+        self.skip_whitespace();
+        return !self.failed && self.index == self.length;
+    }
+}
+
+impl ToJson<i8> for i8 { void to_json(i8* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson<i16> for i16 { void to_json(i16* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson<i32> for i32 { void to_json(i32* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson<i64> for i64 { void to_json(i64* self, JsonWriter* out) { out.write_i64(*self); } }
+impl ToJson<u8> for u8 { void to_json(u8* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson<u16> for u16 { void to_json(u16* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson<u32> for u32 { void to_json(u32* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson<u64> for u64 { void to_json(u64* self, JsonWriter* out) { out.write_u64(*self); } }
+impl ToJson<f64> for f64 { void to_json(f64* self, JsonWriter* out) { out.write_f64(*self); } }
+impl ToJson<bool> for bool { void to_json(bool* self, JsonWriter* out) { out.write_bool(*self); } }
+impl ToJson<str> for str { void to_json(str* self, JsonWriter* out) { out.write_string(*self); } }
+impl ToJson<String> for String { void to_json(String* self, JsonWriter* out) { out.write_string((str)self.data); } }
+impl ToJson<Optional<i32>> for Optional<i32> {
+    void to_json(Optional<i32>* self, JsonWriter* out) {
+        Optional<i32> value = *self;
+        if (value.is_some()) {
+            i32 inner = value.unwrap();
+            out.write_i64((i64)inner);
+        } else {
+            out.write_null();
+        }
+    }
+}
+
+
+impl FromJson<i64> for i64 {
+    Result<i64, JsonError> from_json(JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&mut value)) {
+            JsonError error = JsonError.invalid();
+            return Result<i64, JsonError>.Err(move error);
+        }
+        return Result<i64, JsonError>.ok(value);
+    }
+}
+
+impl FromJson<i32> for i32 {
+    Result<i32, JsonError> from_json(JsonReader* input) {
+        i32 value = 0;
+        if (!input.read_i32(&mut value)) {
+            JsonError error = JsonError.invalid();
+            return Result<i32, JsonError>.Err(move error);
+        }
+        return Result<i32, JsonError>.ok(value);
+    }
+}
+
+impl FromJson<bool> for bool {
+    Result<bool, JsonError> from_json(JsonReader* input) {
+        bool value = false;
+        if (!input.read_bool(&mut value)) {
+            JsonError error = JsonError.invalid();
+            return Result<bool, JsonError>.Err(move error);
+        }
+        return Result<bool, JsonError>.ok(value);
+    }
+}
+impl FromJson<String> for String {
+    Result<String, JsonError> from_json(JsonReader* input) {
+        String value = input.read_string();
+        if (input.failed) {
+            JsonError error = JsonError.invalid();
+            return Result<String, JsonError>.Err(move error);
+        }
+        Result<String, JsonError> result = Result<String, JsonError>.ok(move value);
+        return move result;
+    }
+}
+

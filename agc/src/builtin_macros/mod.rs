@@ -43,6 +43,8 @@ impl MacroRegistry {
         registry.register("size", Box::new(SizeHandler));
         registry.register("align", Box::new(AlignHandler));
         registry.register("hash", Box::new(HashHandler));
+        registry.register("json", Box::new(JsonHandler));
+        registry.register("from_json", Box::new(FromJsonHandler));
         registry.register("print", Box::new(PrintHandler));
         registry.register("println", Box::new(PrintHandler));
         registry.register("eprint", Box::new(PrintHandler));
@@ -134,6 +136,53 @@ impl MacroHandler for AlignHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.align_codegen(expr, args)
+    }
+}
+pub struct JsonHandler;
+
+impl MacroHandler for JsonHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.json_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.json_codegen(expr, args)
+    }
+}
+
+pub struct FromJsonHandler;
+
+impl MacroHandler for FromJsonHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.json_from_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.json_from_codegen(expr, args)
     }
 }
 pub struct HashHandler;

@@ -1,6 +1,7 @@
 // Abstract Syntax Tree node definitions for Silver language
 
 use crate::lexer::{CommentKind, Span};
+use rustc_hash::FxHashMap;
 
 /// Top-level AST node representing a complete Silver program
 #[derive(Debug, Clone, PartialEq)]
@@ -410,12 +411,13 @@ pub struct TraitBound {
     pub is_optional: bool,
 }
 
-/// Struct fields
+/// Named aggregate field metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: Identifier,
     pub field_type: Type,
     pub visibility: Visibility,
+    pub tags: FxHashMap<String, String>,
     pub span: Span,
 }
 

@@ -1,4 +1,4 @@
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 
 use crate::lexer::{LexToken, Span, Token};
 
@@ -34,6 +34,7 @@ struct ParsedDeclarator {
     name: ast::Identifier,
     ty: ast::Type,
     initializer: Option<ast::Expression>,
+    tags: FxHashMap<String, String>,
     span: Span,
 }
 
@@ -1195,12 +1196,65 @@ impl PRT_Parser {
         None
     }
 
+    fn parse_tag_literals(
+        &self,
+        tokens: &[LexToken],
+        cursor: &mut usize,
+        end: usize,
+    ) -> Result<FxHashMap<String, String>, ParseError> {
+        let mut tags = FxHashMap::default();
+        while *cursor < end {
+            let Some(LexToken {
+                kind: Token::StringLiteral(tag_text),
+                span,
+                ..
+            }) = tokens.get(*cursor)
+            else {
+                break;
+            };
+            let span = *span;
+            for pair in tag_text.split_whitespace() {
+                let Some((key, value)) = pair.split_once(':') else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: format!("tag entry `{pair}` must be a key:value pair"),
+                        span,
+                    });
+                };
+                if key.is_empty()
+                    || !key.chars().enumerate().all(|(index, ch)| {
+                        if index == 0 {
+                            ch == '_' || ch.is_ascii_alphabetic()
+                        } else {
+                            ch == '_' || ch.is_ascii_alphanumeric()
+                        }
+                    })
+                    || value.is_empty()
+                    || value.contains(':')
+                {
+                    return Err(ParseError::InvalidSyntax {
+                        message: format!("invalid tag entry `{pair}`; expected key:value"),
+                        span,
+                    });
+                }
+                if tags.insert(key.to_string(), value.to_string()).is_some() {
+                    return Err(ParseError::InvalidSyntax {
+                        message: format!("duplicate tag key `{key}`"),
+                        span,
+                    });
+                }
+            }
+            *cursor += 1;
+        }
+        Ok(tags)
+    }
+
     fn parse_declarator_group(
         &mut self,
         tokens: &[LexToken],
         start: usize,
         end: usize,
         allow_initializers: bool,
+        allow_tags: bool,
     ) -> Result<(ast::Type, Vec<ParsedDeclarator>), ParseError> {
         let (base_type, after_type) =
             self.parse_type_prefix(tokens, start, end).ok_or_else(|| {
@@ -1270,6 +1324,17 @@ impl PRT_Parser {
                 };
             }
 
+            let tags = if allow_tags {
+                let before_tags = cursor;
+                let tags = self.parse_tag_literals(tokens, &mut cursor, end)?;
+                if cursor > before_tags {
+                    declarator_end = tokens[cursor - 1].span.end;
+                }
+                tags
+            } else {
+                FxHashMap::default()
+            };
+
             let mut initializer = None;
             if cursor < end && matches!(tokens[cursor].kind, Token::Assign) {
                 if !allow_initializers {
@@ -1301,6 +1366,7 @@ impl PRT_Parser {
                 },
                 ty: decl_ty,
                 initializer,
+                tags,
                 span: base_type.span.with_end(declarator_end),
             });
 
@@ -1806,7 +1872,8 @@ impl PRT_Parser {
         let decl_start = Self::consume_declaration_qualifiers(tokens, start, end - 1)
             .map(|(cursor, _)| cursor)
             .unwrap_or(start);
-        let (_, declarators) = self.parse_declarator_group(tokens, decl_start, end - 1, true)?;
+        let (_, declarators) =
+            self.parse_declarator_group(tokens, decl_start, end - 1, true, false)?;
         let statement_end = tokens[end - 1].span.end;
         let mut statements = Vec::with_capacity(declarators.len());
         for mut declarator in declarators {
@@ -3011,19 +3078,23 @@ impl PRT_Parser {
         cursor += 1;
 
         let mut fields = Vec::new();
-        while cursor < end - 1 {
-            let Some(semicolon) = self.find_statement_terminator(tokens, cursor, end - 1) else {
-                return Err(ParseError::InvalidSyntax {
+        while cursor < end && !matches!(tokens[cursor].kind, Token::RightBrace) {
+            let (visibility, next) = self.parse_visibility_prefix(tokens, cursor, end);
+            cursor = next;
+            let semicolon = self
+                .find_token_in_range(tokens, cursor, end, Token::Semicolon)
+                .ok_or_else(|| ParseError::InvalidSyntax {
                     message: "expected ';' after struct field".to_string(),
                     span: tokens[cursor.min(end - 1)].span,
-                });
-            };
-            let (_, declarators) = self.parse_declarator_group(tokens, cursor, semicolon, false)?;
+                })?;
+            let (_, declarators) =
+                self.parse_declarator_group(tokens, cursor, semicolon, false, true)?;
             for declarator in declarators {
                 fields.push(ast::Field {
                     name: declarator.name,
                     field_type: declarator.ty,
-                    visibility: ast::Visibility::Private,
+                    visibility: visibility.clone(),
+                    tags: declarator.tags,
                     span: declarator.span,
                 });
             }
@@ -3147,7 +3218,14 @@ impl PRT_Parser {
                             span: name_token.span,
                         });
                     };
-                    let field_span = field_type.span.extend_to(&name_token.span);
+                    cursor += 1;
+                    let before_tags = cursor;
+                    let tags = self.parse_tag_literals(tokens, &mut cursor, end)?;
+                    let field_span = if cursor > before_tags {
+                        field_type.span.extend_to(&tokens[cursor - 1].span)
+                    } else {
+                        field_type.span.extend_to(&name_token.span)
+                    };
                     fields.push(ast::Field {
                         name: ast::Identifier {
                             name: field_name.clone(),
@@ -3155,9 +3233,9 @@ impl PRT_Parser {
                         },
                         field_type,
                         visibility: ast::Visibility::Private,
+                        tags,
                         span: field_span,
                     });
-                    cursor += 1;
                     if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Semicolon)) {
                         cursor += 1;
                     }
@@ -4886,6 +4964,61 @@ mod tests {
         assert_eq!(item.variants[1].discriminant, Some(7));
         assert_eq!(item.variants[2].name.name, "Blue");
         assert_eq!(item.variants[2].discriminant, None);
+    }
+
+    #[test]
+    fn parses_quoted_tags_on_named_aggregate_fields() {
+        let source = r#"
+            struct User {
+                i32 id "json:id" "db:user_id";
+                str name "json:name yaml:Name";
+            }
+            enum Event {
+                Created { i32 id "json:id"; };
+            }
+        "#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Struct(user) = &program.items[0].kind else {
+            panic!("expected struct item");
+        };
+        assert_eq!(
+            user.fields[0].tags.get("json").map(String::as_str),
+            Some("id")
+        );
+        assert_eq!(
+            user.fields[0].tags.get("db").map(String::as_str),
+            Some("user_id")
+        );
+        assert_eq!(
+            user.fields[1].tags.get("json").map(String::as_str),
+            Some("name")
+        );
+        assert_eq!(
+            user.fields[1].tags.get("yaml").map(String::as_str),
+            Some("Name")
+        );
+
+        let ast::ItemKind::Enum(event) = &program.items[1].kind else {
+            panic!("expected enum item");
+        };
+        let ast::EnumVariantData::Struct(fields) = &event.variants[0].data else {
+            panic!("expected struct variant");
+        };
+        assert_eq!(fields[0].tags.get("json").map(String::as_str), Some("id"));
+    }
+
+    #[test]
+    fn rejects_duplicate_field_tag_keys() {
+        let source = r#"struct User { i32 id "json:id" "json:other"; }"#;
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let error = parser
+            .parse_program(&tokens)
+            .expect_err("duplicate tag should fail");
+        assert!(error.to_string().contains("duplicate tag key `json`"));
     }
 
     #[test]

@@ -609,6 +609,7 @@ fn instantiate_struct(
             name: field.name.clone(),
             field_type: substitute_ast_type(&field.field_type, mapping),
             visibility: field.visibility.clone(),
+            tags: field.tags.clone(),
             span: field.span,
         })
         .collect::<Vec<_>>();
@@ -653,6 +654,7 @@ fn instantiate_enum(
                             name: field.name.clone(),
                             field_type: substitute_ast_type(&field.field_type, mapping),
                             visibility: field.visibility.clone(),
+                            tags: field.tags.clone(),
                             span: field.span,
                         })
                         .collect(),

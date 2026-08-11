@@ -277,7 +277,9 @@ test_stdin() {
     if test_stdin "$name" > /dev/null 2>&1; then
         (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name"))
     else
-        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin")
+        # Feed EOF stdin so tests that read stdin (e.g. Scanner.stdin())
+        # cannot block forever on an interactive terminal.
+        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < /dev/null)
     fi
     exit_code=$?
 

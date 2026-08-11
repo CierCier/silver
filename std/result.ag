@@ -20,11 +20,11 @@ enum Result<T, E> {
 
 impl Result<T, E> {
     Result<T, E> ok(T value) {
-        return Result.Ok(value);
+        return Result.Ok(move value);
     }
 
     Result<T, E> err(E error) {
-        return Result.Err(error);
+        return Result.Err(move error);
     }
 
     bool success(Result<T, E> self) {

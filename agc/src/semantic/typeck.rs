@@ -3793,6 +3793,124 @@ impl TypeChecker {
         }
     }
 
+    pub(crate) fn json_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
+        if !(1..=2).contains(&args.len()) {
+            self.error(
+                "@json expects a value and optional string prefix",
+                expr.span,
+            );
+            return Type::Unknown;
+        }
+
+        let value_expr = match &args[0] {
+            ast::MacroArg::Expression(value) => value,
+            _ => {
+                self.error("@json requires an expression value", expr.span);
+                return Type::Unknown;
+            }
+        };
+        let value_ty = self.check_expr(value_expr, None);
+        let owner_ty = Self::json_owner_type(&value_ty);
+        if !self.has_json_trait_impl("ToJson", &owner_ty) {
+            self.error(
+                format!("type {} does not implement ToJson", owner_ty),
+                value_expr.span,
+            );
+        }
+
+        if args.len() == 2 {
+            match &args[1] {
+                ast::MacroArg::Expression(prefix) => {
+                    let prefix_ty = self.check_expr(prefix, None);
+                    if prefix_ty != Type::Primitive(ast::PrimitiveType::Str) {
+                        self.error("@json prefix must have type str", prefix.span);
+                    }
+                }
+                _ => self.error("@json prefix must be a string expression", expr.span),
+            }
+        }
+
+        Type::Primitive(ast::PrimitiveType::Str)
+    }
+
+    pub(crate) fn json_from_typeck(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if args.len() != 2 {
+            self.error(
+                "@from_json expects a target type and input string",
+                expr.span,
+            );
+            return Type::Unknown;
+        }
+        let target = match &args[0] {
+            ast::MacroArg::Expression(target) => target,
+            _ => {
+                self.error("@from_json requires a target type", expr.span);
+                return Type::Unknown;
+            }
+        };
+        let target_ty = match target.kind.as_ref() {
+            ast::ExpressionKind::TypeName(ty) => Type::from_ast(ty),
+            ast::ExpressionKind::Identifier(identifier)
+                if self.known_types.contains_key(&identifier.name) =>
+            {
+                Type::Named {
+                    path: vec![identifier.name.clone()],
+                    generics: Vec::new(),
+                }
+            }
+            _ => Type::Unknown,
+        };
+        if target_ty == Type::Unknown {
+            self.error("@from_json requires a named target type", target.span);
+            return Type::Unknown;
+        }
+        let input = match &args[1] {
+            ast::MacroArg::Expression(input) => input,
+            _ => {
+                self.error("@from_json requires an input expression", expr.span);
+                return Type::Unknown;
+            }
+        };
+        if self.check_expr(input, None) != Type::Primitive(ast::PrimitiveType::Str) {
+            self.error("@from_json input must have type str", input.span);
+        }
+        if !self.has_json_trait_impl("FromJson", &target_ty) {
+            self.error(
+                format!("type {} does not implement FromJson", target_ty),
+                target.span,
+            );
+        }
+        Type::Named {
+            path: vec!["Result".to_string()],
+            generics: vec![
+                target_ty,
+                Type::Named {
+                    path: vec!["JsonError".to_string()],
+                    generics: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    fn json_owner_type(ty: &Type) -> Type {
+        match ty {
+            Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
+                Self::json_owner_type(inner)
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    fn has_json_trait_impl(&self, trait_name: &str, ty: &Type) -> bool {
+        self.trait_impls
+            .get(trait_name)
+            .is_some_and(|impls| impls.contains(&ty.canonical_key()))
+    }
+
     pub(crate) fn print_typeck(
         &mut self,
         name: &str,

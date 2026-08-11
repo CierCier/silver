@@ -1,4 +1,5 @@
 use crate::diagnostics;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 use crate::attributes::function_link_name;
@@ -6,8 +7,8 @@ use crate::lexer::{self, Span};
 use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
-
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x02";
+const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x03";
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -71,6 +72,7 @@ pub enum ModuleAbi {
 pub struct ModuleField {
     pub name: String,
     pub type_key: String,
+    pub tags: FxHashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +86,7 @@ pub struct ModuleEnumVariant {
     pub name: String,
     pub value: i128,
     pub payload_types: Vec<String>,
+    pub payload_fields: Vec<ModuleField>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +220,7 @@ impl ModuleArtifact {
             for field in &export.fields {
                 write_string(&mut out, &field.name)?;
                 write_string(&mut out, &field.type_key)?;
+                write_tags(&mut out, &field.tags)?;
             }
             write_layout(&mut out, export.layout)?;
             write_optional_string(&mut out, export.enum_backing_type.as_deref())?;
@@ -227,6 +231,12 @@ impl ModuleArtifact {
                 write_len(&mut out, variant.payload_types.len())?;
                 for pt in &variant.payload_types {
                     write_string(&mut out, pt)?;
+                }
+                write_len(&mut out, variant.payload_fields.len())?;
+                for field in &variant.payload_fields {
+                    write_string(&mut out, &field.name)?;
+                    write_string(&mut out, &field.type_key)?;
+                    write_tags(&mut out, &field.tags)?;
                 }
             }
             write_len(&mut out, export.trait_items.len())?;
@@ -241,13 +251,16 @@ impl ModuleArtifact {
         }
         Ok(out)
     }
-
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        if magic != MODULE_MAGIC {
+        let has_field_tags = if magic == MODULE_MAGIC {
+            true
+        } else if magic == MODULE_MAGIC_V2 {
+            false
+        } else {
             return Err("invalid module interface header".to_string());
-        }
+        };
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -310,6 +323,7 @@ impl ModuleArtifact {
                 fields.push(ModuleField {
                     name: read_string(bytes, &mut cursor)?,
                     type_key: read_string(bytes, &mut cursor)?,
+                    tags: read_tags(bytes, &mut cursor, has_field_tags)?,
                 });
             }
             let layout = read_layout(bytes, &mut cursor)?;
@@ -324,10 +338,25 @@ impl ModuleArtifact {
                 for _ in 0..payload_len {
                     payload_types.push(read_string(bytes, &mut cursor)?);
                 }
+                let payload_fields = if has_field_tags {
+                    let fields_len = read_len(bytes, &mut cursor)? as usize;
+                    let mut fields = Vec::with_capacity(fields_len);
+                    for _ in 0..fields_len {
+                        fields.push(ModuleField {
+                            name: read_string(bytes, &mut cursor)?,
+                            type_key: read_string(bytes, &mut cursor)?,
+                            tags: read_tags(bytes, &mut cursor, true)?,
+                        });
+                    }
+                    fields
+                } else {
+                    Vec::new()
+                };
                 enum_variants.push(ModuleEnumVariant {
                     name,
                     value,
                     payload_types,
+                    payload_fields,
                 });
             }
             let trait_items_len = read_len(bytes, &mut cursor)? as usize;
@@ -598,6 +627,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                     .map(|f| ModuleField {
                         name: f.name.name.clone(),
                         type_key: Type::from_ast(&f.field_type).canonical_key(),
+                        tags: f.tags.clone(),
                     })
                     .collect::<Vec<_>>();
                 let field_types = s
@@ -786,6 +816,19 @@ fn variant_payload_types(variant: &ast::EnumVariant) -> Vec<String> {
             .collect(),
     }
 }
+fn variant_payload_fields(variant: &ast::EnumVariant) -> Vec<ModuleField> {
+    match &variant.data {
+        ast::EnumVariantData::Struct(fields) => fields
+            .iter()
+            .map(|f| ModuleField {
+                name: f.name.name.clone(),
+                type_key: crate::types::Type::from_ast(&f.field_type).canonical_key(),
+                tags: f.tags.clone(),
+            })
+            .collect(),
+        ast::EnumVariantData::Unit | ast::EnumVariantData::Tuple(_) => Vec::new(),
+    }
+}
 
 fn collect_enum_variants(enum_item: &ast::EnumItem) -> Vec<ModuleEnumVariant> {
     let mut variants = Vec::new();
@@ -796,6 +839,7 @@ fn collect_enum_variants(enum_item: &ast::EnumItem) -> Vec<ModuleEnumVariant> {
             name: variant.name.name.clone(),
             value,
             payload_types: variant_payload_types(variant),
+            payload_fields: variant_payload_fields(variant),
         });
         next_value = value.saturating_add(1);
     }
@@ -914,6 +958,17 @@ fn write_optional_string(out: &mut Vec<u8>, text: Option<&str>) -> Result<(), St
     }
 }
 
+fn write_tags(out: &mut Vec<u8>, tags: &FxHashMap<String, String>) -> Result<(), String> {
+    write_len(out, tags.len())?;
+    let mut entries = tags.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    for (key, value) in entries {
+        write_string(out, key)?;
+        write_string(out, value)?;
+    }
+    Ok(())
+}
+
 fn write_optional_u8(out: &mut Vec<u8>, value: Option<u8>) {
     match value {
         Some(value) => {
@@ -981,6 +1036,26 @@ fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     let text =
         std::str::from_utf8(slice).map_err(|_| "invalid utf-8 in module interface".to_string())?;
     Ok(text.to_string())
+}
+
+fn read_tags(
+    bytes: &[u8],
+    cursor: &mut usize,
+    has_field_tags: bool,
+) -> Result<FxHashMap<String, String>, String> {
+    if !has_field_tags {
+        return Ok(FxHashMap::default());
+    }
+    let tags_len = read_len(bytes, cursor)? as usize;
+    let mut tags = FxHashMap::default();
+    for _ in 0..tags_len {
+        let key = read_string(bytes, cursor)?;
+        let value = read_string(bytes, cursor)?;
+        if tags.insert(key.clone(), value).is_some() {
+            return Err(format!("duplicate tag key `{key}` in module interface"));
+        }
+    }
+    Ok(tags)
 }
 
 fn read_optional_string(bytes: &[u8], cursor: &mut usize) -> Result<Option<String>, String> {
@@ -1091,10 +1166,14 @@ mod tests {
                         ModuleField {
                             name: "raw".to_string(),
                             type_key: "str".to_string(),
+                            tags: [("json".to_string(), "raw".to_string())]
+                                .into_iter()
+                                .collect(),
                         },
                         ModuleField {
                             name: "is_open".to_string(),
                             type_key: "bool".to_string(),
+                            tags: FxHashMap::default(),
                         },
                     ],
                     layout: Some(ModuleTypeLayout {
@@ -1116,6 +1195,13 @@ mod tests {
         assert_eq!(decoded.module_path, "std.io");
         assert!(decoded.code_artifacts.has_static_library);
         assert!(decoded.code_artifacts.has_shared_library);
+        assert_eq!(
+            decoded.exports[1].fields[0]
+                .tags
+                .get("json")
+                .map(String::as_str),
+            Some("raw")
+        );
         assert_eq!(decoded.module_deps, vec!["std.mem".to_string()]);
         assert_eq!(decoded.exports.len(), 2);
         assert_eq!(decoded.exports[0].type_params, vec!["T".to_string()]);
