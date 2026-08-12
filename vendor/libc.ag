@@ -1,0 +1,82 @@
+// vendor/libc.ag — optional libc interop layer.
+//
+// Importing this module adds `#[link(c)]` to the program, so the executable
+// links against libc (dynamically, by default). std is never polluted: the
+// pure-Silver runtime stays no-libc, and only programs that import this
+// module get libc.
+//
+// Every binding is prefixed `c_` and mapped to its C symbol with
+// `#[link_name]` so the layer never clashes with std's pure-Silver
+// implementations (strlen, strcmp, free, ...).
+//
+// Gotchas:
+//   - No memory bindings: std already owns the `malloc`/`free` C symbols
+//     (std.mem's pure-Silver allocator), so libc's heap functions are
+//     shadowed for direct calls. Use std.mem alloc/free for Silver-managed
+//     memory, and never pass Silver-heap pointers to libc functions that
+//     free them.
+//   - libc stdio buffers. Silver's _start exits via exit_group directly,
+//     which skips libc's exit-time flush — call c_fflush((void*)0) before
+//     returning from main (or use the runtime's own I/O).
+//   - Do not call libc exit(): it would bypass Silver's deferred drops.
+//     Return from main (or use std.sys exit_group) instead.
+//   - Requires the dynamic linker (the default); `--static` cannot use
+//     shared libc.
+
+#[link(c)]
+
+extern "C" {
+    // --- strings ---
+    #[link_name("strlen")]
+    i64 c_strlen(str s);
+    #[link_name("strcmp")]
+    i32 c_strcmp(str a, str b);
+    #[link_name("strncmp")]
+    i32 c_strncmp(str a, str b, i64 n);
+    #[link_name("strchr")]
+    str c_strchr(str s, i32 ch);
+    #[link_name("strstr")]
+    str c_strstr(str haystack, str needle);
+    #[link_name("strcpy")]
+    str c_strcpy(str dst, str src);
+    #[link_name("strcat")]
+    str c_strcat(str dst, str src);
+    #[link_name("atoi")]
+    i32 c_atoi(str s);
+    #[link_name("strtod")]
+    f64 c_strtod(str s, str* endptr);
+
+    // --- stdio ---
+    #[link_name("puts")]
+    i32 c_puts(str s);
+    #[link_name("printf")]
+    i32 c_printf(str fmt, ...);
+    #[link_name("fprintf")]
+    i32 c_fprintf(void* stream, str fmt, ...);
+    #[link_name("fopen")]
+    void* c_fopen(str path, str mode);
+    #[link_name("fclose")]
+    i32 c_fclose(void* stream);
+    #[link_name("fread")]
+    i64 c_fread(void* ptr, i64 size, i64 count, void* stream);
+    #[link_name("fwrite")]
+    i64 c_fwrite(void* ptr, i64 size, i64 count, void* stream);
+    #[link_name("fgets")]
+    str c_fgets(str buf, i32 size, void* stream);
+    #[link_name("fflush")]
+    i32 c_fflush(void* stream);
+    #[link_name("getchar")]
+    i32 c_getchar();
+
+    // --- environment ---
+    #[link_name("getenv")]
+    str c_getenv(str name);
+    #[link_name("setenv")]
+    i32 c_setenv(str name, str value, i32 overwrite);
+
+    // --- time ---
+    #[link_name("time")]
+    i64 c_time(i64* result);
+    #[link_name("clock")]
+    i64 c_clock();
+}

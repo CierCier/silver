@@ -106,10 +106,17 @@ pub struct Cli {
     no_std: bool,
 
     /// Link statically with the no-libc runtime. Always enabled: Silver never
-    /// links against libc, so every binary is fully static by default. The
-    /// flag exists for explicitness and backwards compatibility.
+    /// links against libc. This flag only governs the runtime, not the
+    /// linker's static/dynamic mode (see `--static`).
     #[arg(long = "static-runtime", action = ArgAction::SetTrue, default_value_t = true)]
     static_runtime: bool,
+
+    /// Link the executable fully statically. By default the executable is
+    /// dynamically linked so external shared libraries (e.g. raylib) can be
+    /// used; Silver code and std are always linked statically into the
+    /// objects either way.
+    #[arg(long = "static", action = ArgAction::SetTrue)]
+    static_link: bool,
 
     /// Prefer shared module artifacts and emit shared libraries for module packaging
     #[arg(long = "shared", action = ArgAction::SetTrue)]
@@ -168,6 +175,7 @@ pub(crate) struct CompilePlan {
     pub(crate) sysroot: Option<PathBuf>,
     pub(crate) no_std: bool,
     pub(crate) static_runtime: bool,
+    pub(crate) static_link: bool,
     pub(crate) shared: bool,
     pub(crate) verbose: bool,
     pub(crate) dry_run: bool,
@@ -327,6 +335,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         sysroot: cli.sysroot,
         no_std: cli.no_std || cli.static_runtime,
         static_runtime: cli.static_runtime,
+        static_link: cli.static_link,
         shared: cli.shared,
         verbose: cli.verbose,
         dry_run: cli.dry_run,
@@ -1382,6 +1391,7 @@ mod tests {
             sysroot: None,
             no_std: false,
             static_runtime: true,
+            static_link: false,
             shared: false,
             verbose: false,
             dry_run: false,

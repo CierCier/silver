@@ -370,8 +370,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             Some(func.name.span),
             SymbolKind::Function,
         );
-        // Also register under source name so callers using it can resolve.
+        // Also register under source name so callers using it can resolve, and
+        // record the source → linked-symbol mapping so call sites emit the
+        // renamed symbol.
         if link_name.is_some() {
+            self.imported_function_links
+                .insert(func.name.name.clone(), llvm_name.to_string());
             self.register_function_signature(
                 &func.name.name,
                 FunctionSig {
@@ -797,8 +801,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             Some(item.name.span),
             SymbolKind::ExternFunction,
         );
-        // Also register under source name so callers using it can resolve.
+        // Also register under source name so callers using it can resolve, and
+        // record the source → linked-symbol mapping so call sites emit the
+        // renamed symbol.
         if link_name.is_some() {
+            self.imported_function_links
+                .insert(item.name.name.clone(), llvm_name.to_string());
             self.register_function_signature(
                 &item.name.name,
                 FunctionSig {
@@ -872,7 +880,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
         for function in &item.functions {
-            self.generate_extern_function_item(function, visibility, attributes)?;
+            // A member's own `#[link_name]` wins over the block-level one.
+            let fn_attributes = if function_link_name(&function.attributes).is_some() {
+                &function.attributes
+            } else {
+                attributes
+            };
+            self.generate_extern_function_item(function, visibility, fn_attributes)?;
         }
         for variable in &item.variables {
             self.generate_extern_variable_item(variable, visibility, attributes)?;

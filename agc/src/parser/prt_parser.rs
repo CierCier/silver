@@ -4320,6 +4320,7 @@ impl PRT_Parser {
         start: usize,
         end: usize,
         linkage: ast::ExternLinkage,
+        attributes: Vec<ast::Attribute>,
     ) -> Result<ParsedExternDeclaration, ParseError> {
         let mut cursor = start;
 
@@ -4459,6 +4460,7 @@ impl PRT_Parser {
                 is_variadic,
             },
             linkage,
+            attributes,
         }))
     }
 
@@ -4495,7 +4497,10 @@ impl PRT_Parser {
             });
         }
 
-        self.parse_extern_member_reduction(tokens, cursor, end, linkage)
+        // Top-level extern items carry their attributes on the Item wrapper
+        // (passed to codegen by generate_item); members inside a block carry
+        // their own (parsed by parse_extern_block_reduction).
+        self.parse_extern_member_reduction(tokens, cursor, end, linkage, Vec::new())
     }
 
     fn parse_extern_block_reduction(
@@ -4540,17 +4545,25 @@ impl PRT_Parser {
         let mut variables = Vec::new();
         cursor = body_start;
         while cursor < body_end {
+            let (attributes, member_start) =
+                self.parse_attributes_prefix(tokens, cursor, body_end)?;
             let Some(member_end) = self
-                .find_statement_terminator(tokens, cursor, body_end)
+                .find_statement_terminator(tokens, member_start, body_end)
                 .map(|idx| idx + 1)
             else {
                 return Err(ParseError::InvalidSyntax {
                     message: "unterminated extern block declaration".to_string(),
-                    span: tokens[cursor].span,
+                    span: tokens[member_start].span,
                 });
             };
 
-            match self.parse_extern_member_reduction(tokens, cursor, member_end, linkage.clone())? {
+            match self.parse_extern_member_reduction(
+                tokens,
+                member_start,
+                member_end,
+                linkage.clone(),
+                attributes,
+            )? {
                 ParsedExternDeclaration::Function(function) => functions.push(function),
                 ParsedExternDeclaration::Variable(variable) => variables.push(variable),
             }

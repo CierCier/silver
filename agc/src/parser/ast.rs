@@ -171,6 +171,9 @@ pub struct ExternFunctionItem {
     pub name: Identifier,
     pub signature: FunctionSignature,
     pub linkage: ExternLinkage,
+    /// Per-declaration attributes (e.g. `#[link_name("strlen")]` inside an
+    /// `extern "C" { }` block).
+    pub attributes: Vec<Attribute>,
 }
 
 /// External variable declaration

@@ -1,0 +1,26 @@
+// tests/libc_test.ag — vendor.libc interop layer.
+//
+// Exercises the non-memory libc bindings: strings, environment, and stdio
+// (with the explicit flush the no-libc runtime requires). Memory stays with
+// std.mem's allocator; libc's heap functions are shadowed by std's shims.
+
+import std.test;
+import vendor.libc;
+
+i32 main() {
+    test_start("libc strings");
+    assert_eq_i64(c_strlen("hello"), 5, "c_strlen");
+    assert_eq_i32(c_strcmp("a", "b"), -1, "c_strcmp ordering");
+    assert_eq_i32(c_atoi("42"), 42, "c_atoi");
+    assert_true(c_strstr("haystack", "sta") != (str)0, "c_strstr finds substring");
+
+    test_start("libc environment");
+    str home = c_getenv("HOME");
+    assert_true(home != (str)0 && c_strlen(home) > 0, "c_getenv(HOME)");
+
+    test_start("libc stdio");
+    assert_true(c_puts("  [info] hello from libc") >= 0, "c_puts succeeds");
+    assert_eq_i32(c_fflush((void*)0), 0, "c_fflush flushes stdout");
+
+    return done();
+}

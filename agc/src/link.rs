@@ -33,7 +33,7 @@ pub(crate) fn run_tool(mut command: Command, label: &str) -> Result<(), String> 
 // ---- Cached cc queries — each arg is a LazyLock, spawned once ----
 
 static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
-    cc_query_raw("-print-search-dirs")
+    let mut dirs = cc_query_raw("-print-search-dirs")
         .ok()
         .map(|output| {
             let mut dirs = Vec::new();
@@ -48,7 +48,34 @@ static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
             }
             dirs
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Nix-style dev shells export their library search dirs via NIX_LDFLAGS
+    // (`-L<dir>` tokens) and LIBRARY_PATH, which `cc -print-search-dirs` does
+    // not report. Honor them so external shared libraries (e.g. raylib) are
+    // found by the primary lld path without an explicit `-L`.
+    if let Ok(nix_ldflags) = std::env::var("NIX_LDFLAGS") {
+        let mut tokens = nix_ldflags.split_whitespace().peekable();
+        while let Some(token) = tokens.next() {
+            if let Some(dir) = token.strip_prefix("-L") {
+                let dir = if dir.is_empty() {
+                    tokens.next().unwrap_or_default()
+                } else {
+                    dir
+                };
+                if !dir.is_empty() && !dirs.iter().any(|d| d.as_os_str() == dir) {
+                    dirs.push(PathBuf::from(dir));
+                }
+            }
+        }
+    }
+    if let Ok(library_path) = std::env::var("LIBRARY_PATH") {
+        for dir in std::env::split_paths(&library_path) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
 });
 
 pub(crate) fn cc_query_raw(arg: &str) -> Result<String, String> {
@@ -136,6 +163,15 @@ pub(crate) fn link_exe_with_ld_lld(
     // mold supports ld.lld-compatible flags.
     link.arg("-o").arg(&plan.output);
 
+    // Silver code and std are always statically linked into the objects; the
+    // executable stays non-PIE (codegen is not PIC) but is dynamically linked
+    // by default, so the linker adds PT_INTERP and DT_NEEDED entries when
+    // external shared libraries (e.g. raylib) are linked. `--static` restores
+    // the fully static executable.
+    if plan.static_link {
+        link.arg("-static");
+    }
+
     if let Some(target) = &plan.target {
         link.arg("-mtriple").arg(target);
     }
@@ -182,6 +218,8 @@ pub(crate) fn link_exe_with_cc(
     for dep in dependency_paths {
         link.arg(dep);
     }
+    // Non-PIC objects require an ET_EXEC executable; when shared libraries
+    // are linked the driver adds PT_INTERP/DYNAMIC itself.
     if should_force_non_pie(plan.target.as_deref()) {
         link.arg("-no-pie");
     }
@@ -191,9 +229,16 @@ pub(crate) fn link_exe_with_cc(
     if plan.debug_info {
         link.arg("-g");
     }
-    // Silver never links libc: no CRT startup, no libc/libgcc, fully static.
+    // Silver never links libc: no CRT startup, no libc/libgcc.
     link.arg("-nostdlib");
-    link.arg("-static");
+    if plan.static_link {
+        link.arg("-static");
+    } else {
+        // External shared libraries carry their own glibc/libstdc++ deps; let
+        // ld resolve them at runtime instead of demanding them at link time
+        // (the `-nostdlib` above leaves them out of the link).
+        link.arg("-Wl,--allow-shlib-undefined");
+    }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
     }
