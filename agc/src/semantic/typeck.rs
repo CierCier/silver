@@ -819,6 +819,7 @@ impl TypeChecker {
                                         &[],
                                         None,
                                         MethodCallStyle::Instance,
+                                        None,
                                         expr.span,
                                     ) {
                                         result_ty
@@ -874,6 +875,7 @@ impl TypeChecker {
                                     &[],
                                     None,
                                     MethodCallStyle::Instance,
+                                    None,
                                     expr.span,
                                 ) {
                                     result_ty
@@ -902,6 +904,7 @@ impl TypeChecker {
                                     &[],
                                     None,
                                     MethodCallStyle::Instance,
+                                    None,
                                     expr.span,
                                 ) {
                                     result_ty
@@ -1679,7 +1682,14 @@ impl TypeChecker {
                     }
                 }
                 // Otherwise, resolve as normal method call
-                self.resolve_method_overload(&receiver_ty, method, arguments, style, expr.span)
+                self.resolve_method_overload(
+                    &receiver_ty,
+                    method,
+                    arguments,
+                    style,
+                    expected,
+                    expr.span,
+                )
             }
             ast::ExpressionKind::Index { object, index } => {
                 let object_ty = self.check_expr(object, None);
@@ -1755,6 +1765,7 @@ impl TypeChecker {
                                 &[index_ty],
                                 None,
                                 MethodCallStyle::Instance,
+                                None,
                                 object.span,
                             ) {
                                 result_ty
@@ -1794,6 +1805,7 @@ impl TypeChecker {
                             &[index_ty],
                             None,
                             MethodCallStyle::Instance,
+                            None,
                             object.span,
                         ) {
                             result_ty
@@ -2152,6 +2164,7 @@ impl TypeChecker {
                             &method_ident,
                             &[],
                             MethodCallStyle::Instance,
+                            None,
                             iterable.span,
                         );
 
@@ -2177,6 +2190,7 @@ impl TypeChecker {
                                 &[],
                                 None,
                                 MethodCallStyle::Instance,
+                                None,
                                 expr.span,
                             );
                             match next_ret {
@@ -2626,6 +2640,7 @@ impl TypeChecker {
         method: &ast::Identifier,
         arguments: &[ast::Expression],
         style: MethodCallStyle,
+        expected: Option<&Type>,
         span: Span,
     ) -> Type {
         let arg_types = arguments
@@ -2639,6 +2654,7 @@ impl TypeChecker {
             &arg_types,
             Some(arguments),
             style,
+            expected,
             span,
         ) {
             Some(ty) => ty,
@@ -2683,6 +2699,7 @@ impl TypeChecker {
         arg_types: &[Type],
         arg_exprs: Option<&[ast::Expression]>,
         style: MethodCallStyle,
+        expected: Option<&Type>,
         span: Span,
     ) -> Option<Type> {
         let key = (self.method_key(receiver_ty), name.to_string());
@@ -2731,6 +2748,34 @@ impl TypeChecker {
                     )
                 {
                     continue;
+                }
+            }
+
+            // A bare generic receiver (`Result.ok(x)` with no type args) leaves
+            // the owner's type params unmapped. Fill them from the expected
+            // type when it names the same generic with concrete args, so
+            // `Result<i32, Error> r = Result.ok(x);` infers E from the LHS.
+            if mapping.len() < candidate.type_params.len()
+                && let Some(Type::Named {
+                    path: exp_path,
+                    generics: exp_generics,
+                }) = expected
+                && let Type::Named {
+                    path: owner_path,
+                    generics: owner_generics,
+                } = &candidate.owner
+                && owner_path == exp_path
+                && owner_generics.len() == exp_generics.len()
+            {
+                for (owner_param, exp_arg) in owner_generics.iter().zip(exp_generics.iter()) {
+                    if let Type::Named {
+                        path: param_path, ..
+                    } = owner_param
+                        && param_path.len() == 1
+                        && candidate.type_params.contains(&param_path[0])
+                    {
+                        mapping.insert(param_path[0].clone(), exp_arg.clone());
+                    }
                 }
             }
 
@@ -4468,6 +4513,7 @@ impl TypeChecker {
             std::slice::from_ref(right),
             None,
             MethodCallStyle::Instance,
+            None,
             expr.span,
         );
         if result.is_none() {
@@ -6382,6 +6428,42 @@ mod tests {
                 .message
                 .contains("cannot take the address of volatile variable")),
             "expected address-of-volatile error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn generic_method_infers_type_params_from_expected_type() {
+        // A bare generic receiver with an LHS annotation must fill the type
+        // params the arguments cannot provide (`E` in `Result.ok(x)` comes
+        // only from the expected type).
+        let program = parse(
+            "enum Pair<T, E> { P(T, E); } impl Pair<T, E> { Pair<T, E> mk(T a, E b) { return Pair.P(move a, move b); } } \
+             struct Wrapper<T> { T v; } impl Wrapper<T> { Wrapper<T> wrap(T v) { Wrapper<T> w; w.v = move v; return move w; } } \
+             i32 main() { Pair<i32, str> p = Pair.mk(5, \"hi\"); Wrapper<i64> w = Wrapper.wrap((i64)3); return 0; }",
+        );
+        let mut checker = TypeChecker::new();
+        let mut table = crate::symbol_table::CompilerSymbolTable::new();
+        let (errors, _) = checker.check_program_with_table(&program, &mut table);
+        assert!(
+            errors.is_empty(),
+            "expected-type generic inference should type-check: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn generic_method_without_expected_type_still_errors() {
+        // Without an expected type, a bare generic receiver whose type params
+        // cannot be fully inferred from the arguments is an error, not a
+        // silent partial instantiation (`E` here appears only in the return
+        // type, never in `mkT`'s parameters).
+        let program = parse(
+            "enum Pair<T, E> { P(T, E); } impl Pair<T, E> { Pair<T, E> mkT(T a) { Pair<T, E> p; return Pair.P(move a, move a); } } \
+             i32 main() { i32 x = Pair.mkT(5); return 0; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            !errors.is_empty(),
+            "expected an error for uninferable generics, got {errors:?}"
         );
     }
 
