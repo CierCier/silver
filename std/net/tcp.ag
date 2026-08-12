@@ -2,13 +2,14 @@
 //
 // TcpStream and TcpListener own a Socket and accept borrowed SocketAddr
 // values at the syscall boundary. Constructors retain the existing invalid
-// sentinel contract; operation failures use Result<i64, i64>.
+// sentinel contract; operation failures use Result<i64, Error>.
 
+import std.error;
+import std.mem.drop;
+import std.net.inet;
+import std.net.socket;
 import std.sys.result;
 import std.sys.socket;
-import std.net.socket;
-import std.net.inet;
-import std.mem.drop;
 
 // --- TcpStream ---
 
@@ -37,7 +38,7 @@ impl TcpStream {
         Socket sock = Socket.new(AddressFamily.INET, SocketType.STREAM, SOCK_CLOEXEC, 0);
         if (sock.invalid()) { return TcpStream.closed(); }
 
-        Result<i64, i64> c = match *addr {
+        Result<i64, Error> c = match *addr {
             V4(sa) : try_connect(sock.fd, (void*)&sa, 16),
             V6(sa) : try_connect(sock.fd, (void*)&sa, 28),
             Unix(sa) : try_connect(sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
@@ -52,42 +53,42 @@ impl TcpStream {
         return stream;
     }
 
-    Result<i64, i64> read(TcpStream* self, u8* buf, i64 len) {
+    Result<i64, Error> read(TcpStream* self, u8* buf, i64 len) {
         if (self.invalid()) {
-            return Result<i64, i64>.Err(EINVAL);
+            return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
         }
-        Result<i64, i64> r = try_read(self.sock.fd, buf, len);
+        Result<i64, Error> r = try_read(self.sock.fd, buf, len);
         if (r.err_is(EINTR)) {
             r = try_read(self.sock.fd, buf, len);
         }
         return r;
     }
 
-    Result<i64, i64> write(TcpStream* self, u8* buf, i64 len) {
+    Result<i64, Error> write(TcpStream* self, u8* buf, i64 len) {
         if (self.invalid()) {
-            return Result<i64, i64>.Err(EINVAL);
+            return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
         }
         i64 done = 0;
         while (done < len) {
-            Result<i64, i64> r =
+            Result<i64, Error> r =
                 try_write(self.sock.fd, (u8*)((i64)buf + done), len - done);
             if (r.is_err()) {
                 if (r.err_is(EINTR)) { continue; }
-                if (done > 0) { return Result<i64, i64>.Ok(done); }
+                if (done > 0) { return Result<i64, Error>.Ok(done); }
                 return r;
             }
             done = done + r.value();
             if (r.value() == 0) { break; }
         }
-        return Result<i64, i64>.Ok(done);
+        return Result<i64, Error>.Ok(done);
     }
 
     void close(TcpStream* self) {
         self.sock.close();
     }
 
-    Result<i64, i64> shutdown(TcpStream* self, ShutdownHow how) {
-        if (self.invalid()) { return Result<i64, i64>.Err(EINVAL); }
+    Result<i64, Error> shutdown(TcpStream* self, ShutdownHow how) {
+        if (self.invalid()) { return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid")); }
         return try_shutdown(self.sock.fd, how);
     }
 }
@@ -121,7 +122,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
         if (sock.invalid()) { return TcpListener.closed(); }
 
         i32 optval = 1;
-        Result<i64, i64> so = try_setsockopt(
+        Result<i64, Error> so = try_setsockopt(
             sock.fd,
             SocketOptionLevel.SOCKET,
             SocketOption.REUSEADDR,
@@ -133,7 +134,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
             return TcpListener.closed();
         }
 
-        Result<i64, i64> b = match *addr {
+        Result<i64, Error> b = match *addr {
             V4(sa) : try_bind(sock.fd, (void*)&sa, 16),
             V6(sa) : try_bind(sock.fd, (void*)&sa, 28),
             Unix(sa) : try_bind(sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
@@ -143,7 +144,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
             return TcpListener.closed();
         }
 
-        Result<i64, i64> li = try_listen(sock.fd, backlog);
+        Result<i64, Error> li = try_listen(sock.fd, backlog);
         if (li.is_err()) {
             sock.close();
             return TcpListener.closed();
@@ -155,11 +156,11 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
     }
 
     // Returns the accepted client fd; callers can use TcpStream.from_fd.
-    Result<i64, i64> accept(TcpListener* self) {
+    Result<i64, Error> accept(TcpListener* self) {
         if (self.invalid()) {
-            return Result<i64, i64>.Err(EINVAL);
+            return Result<i64, Error>.Err(Error.new(EINVAL, "listener is invalid"));
         }
-        Result<i64, i64> r =
+        Result<i64, Error> r =
             try_accept4(self.sock.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);
         if (r.err_is(EINTR)) {
             r = try_accept4(self.sock.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);

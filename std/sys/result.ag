@@ -2,11 +2,12 @@
 //
 // Raw sys_* wrappers (std/sys/linux.ag) traffic exclusively in i64 and
 // encode failure as a return value in -4095..-1 (negated errno). The
-// standard `Result<i64, i64>` decodes that convention: Ok(value) carries
-// the successful return, Err(errno) carries the positive errno. The
-// syscall-specific helpers (`from_raw`, `err_is`, `err_name`, ...) live on
-// an impl of `Result<i64, i64>` here so error handling is unified with the
-// rest of the stdlib.
+// standard `Result<i64, Error>` decodes that convention: Ok(value) carries
+// the successful return, Err(Error) carries a typed error whose `code` is
+// the positive errno and whose `message` is its symbolic name ("EACCES",
+// "ENOENT", ...). The syscall-specific helpers (`from_raw`, `err_is`,
+// `err_name`, ...) live on an impl of `Result<i64, Error>` here so error
+// handling is unified with the rest of the stdlib.
 //
 // The typed wrappers are prefixed `try_` (try_read, try_write, ...) rather
 // than using the bare POSIX names: Silver `pub` functions emit unmangled
@@ -14,6 +15,7 @@
 // libc symbols with an incompatible (sret struct return) ABI while the
 // toolchain still links against libc.
 
+import std.error;
 import std.result;
 import std.sys.errno;
 import std.sys.raw.fs;
@@ -63,52 +65,54 @@ const i32 STDIN_FD = 0;
 const i32 STDOUT_FD = 1;
 const i32 STDERR_FD = 2;
 
-// --- Result<i64, i64> syscall helpers ---
+// --- Result<i64, Error> syscall helpers ---
 //
-// Ok(value) carries the successful syscall return; Err(errno) carries the
-// positive errno. These helpers keep the pre-enum SysResult API.
+// Ok(value) carries the successful syscall return; Err(Error) carries a
+// typed error whose `code` is the positive errno. These helpers keep the
+// pre-enum SysResult API.
 
-impl Result<i64, i64> {
+impl Result<i64, Error> {
     // Decode a raw syscall return value (-4095..-1 => error).
-    Result<i64, i64> from_raw(i64 raw) {
+    Result<i64, Error> from_raw(i64 raw) {
         if (is_errno(raw)) {
-            return Result.Err(-raw);
+            i64 code = -raw;
+            return Result.Err(Error.new(code, errno_name(code)));
         }
         return Result.Ok(raw);
     }
 
-    bool is_ok(Result<i64, i64> self) {
+    bool is_ok(Result<i64, Error> self) {
         return match self { Ok(v) : true, Err(e) : false };
     }
 
-    bool is_err(Result<i64, i64> self) {
+    bool is_err(Result<i64, Error> self) {
         return match self { Ok(v) : false, Err(e) : true };
     }
 
     // True when this result failed with exactly errno `err`.
-    bool err_is(Result<i64, i64> self, i64 err) {
+    bool err_is(Result<i64, Error> self, i64 err) {
         return self.is_err() && self.errno() == err;
     }
 
     // The successful value, or 0 when the result is an error.
-    i64 value(Result<i64, i64> self) {
+    i64 value(Result<i64, Error> self) {
         return match self { Ok(v) : v, Err(e) : (i64)0 };
     }
 
     // The positive errno when the result is an error, or 0 on success.
-    i64 errno(Result<i64, i64> self) {
+    i64 errno(Result<i64, Error> self) {
         return match self {
             Ok(v) : (i64)0,
-            Err(e) : e
+            Err(e) : e.code
         };
     }
 
     // Symbolic errno name ("EOK" when the call succeeded).
-    str err_name(Result<i64, i64> self) {
-        if (self.is_ok()) {
-            return "EOK";
-        }
-        return errno_name(self.errno());
+    str err_name(Result<i64, Error> self) {
+        return match self {
+            Ok(v) : "EOK",
+            Err(e) : e.message
+        };
     }
 }
 
@@ -116,66 +120,66 @@ impl Result<i64, i64> {
 
 // read(2): read up to `count` bytes from `fd` into `buf`.
 // Ok value: number of bytes read (0 = EOF).
-Result<i64, i64> try_read(i32 fd, u8* buf, i64 count) {
-    return Result<i64, i64>.from_raw(sys_read((i64)fd, (i64)buf, count));
+Result<i64, Error> try_read(i32 fd, u8* buf, i64 count) {
+    return Result<i64, Error>.from_raw(sys_read((i64)fd, (i64)buf, count));
 }
 
 // write(2): write `count` bytes from `buf` to `fd`.
 // Ok value: number of bytes written.
-Result<i64, i64> try_write(i32 fd, u8* buf, i64 count) {
-    return Result<i64, i64>.from_raw(sys_write((i64)fd, (i64)buf, count));
+Result<i64, Error> try_write(i32 fd, u8* buf, i64 count) {
+    return Result<i64, Error>.from_raw(sys_write((i64)fd, (i64)buf, count));
 }
 
 // open(2): open `path` with O_* `flags`; `mode` is the creation mode
 // (only consulted when flags contain O_CREAT). Ok value: new fd.
-Result<i64, i64> try_open(str path, i64 flags, i64 mode) {
-    return Result<i64, i64>.from_raw(sys_open((i64)path, flags, mode));
+Result<i64, Error> try_open(str path, i64 flags, i64 mode) {
+    return Result<i64, Error>.from_raw(sys_open((i64)path, flags, mode));
 }
 
 // openat(2): like open, resolving relative paths against `dirfd`
 // (pass AT_FDCWD for the current working directory). Ok value: new fd.
-Result<i64, i64> try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
-    return Result<i64, i64>.from_raw(sys_openat((i64)dirfd, (i64)path, flags, mode));
+Result<i64, Error> try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
+    return Result<i64, Error>.from_raw(sys_openat((i64)dirfd, (i64)path, flags, mode));
 }
 
 // close(2): close `fd`. Ok value: 0.
-Result<i64, i64> try_close(i32 fd) {
-    return Result<i64, i64>.from_raw(sys_close((i64)fd));
+Result<i64, Error> try_close(i32 fd) {
+    return Result<i64, Error>.from_raw(sys_close((i64)fd));
 }
 
 // mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let
 // the kernel choose, fd = -1 with MAP_ANONYMOUS. Ok value: mapping address.
-Result<i64, i64> try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
-    return Result<i64, i64>.from_raw(sys_mmap((i64)addr, length, prot, flags, (i64)fd, offset));
+Result<i64, Error> try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
+    return Result<i64, Error>.from_raw(sys_mmap((i64)addr, length, prot, flags, (i64)fd, offset));
 }
 
 // munmap(2): unmap `length` bytes at page-aligned `addr`. Ok value: 0.
-Result<i64, i64> try_munmap(void* addr, i64 length) {
-    return Result<i64, i64>.from_raw(sys_munmap((i64)addr, length));
+Result<i64, Error> try_munmap(void* addr, i64 length) {
+    return Result<i64, Error>.from_raw(sys_munmap((i64)addr, length));
 }
 
 // mremap(2): resize the mapping at `old_addr` from `old_size` to `new_size`.
 // Pass MREMAP_MAYMOVE to allow relocation. Ok value: new mapping address.
 // MREMAP_FIXED is intentionally unsupported (no new_address parameter);
 // the kernel receives 0 for it.
-Result<i64, i64> try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
-    return Result<i64, i64>.from_raw(sys_mremap((i64)old_addr, old_size, new_size, flags, 0));
+Result<i64, Error> try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
+    return Result<i64, Error>.from_raw(sys_mremap((i64)old_addr, old_size, new_size, flags, 0));
 }
 
 // lseek(2): reposition `fd` to `offset` relative to SEEK_*. Ok value: the
 // resulting absolute offset.
-Result<i64, i64> try_lseek(i32 fd, i64 offset, i64 whence) {
-    return Result<i64, i64>.from_raw(sys_lseek((i64)fd, offset, whence));
+Result<i64, Error> try_lseek(i32 fd, i64 offset, i64 whence) {
+    return Result<i64, Error>.from_raw(sys_lseek((i64)fd, offset, whence));
 }
 
 // kill(2): send signal `sig` to `pid` (sig 0 probes existence). Ok value: 0.
-Result<i64, i64> try_kill(i32 pid, i32 sig) {
-    return Result<i64, i64>.from_raw(sys_kill((i64)pid, (i64)sig));
+Result<i64, Error> try_kill(i32 pid, i32 sig) {
+    return Result<i64, Error>.from_raw(sys_kill((i64)pid, (i64)sig));
 }
 
 // getpid(2): never fails. Ok value: the calling process id.
-Result<i64, i64> try_getpid() {
-    return Result<i64, i64>.from_raw(sys_getpid());
+Result<i64, Error> try_getpid() {
+    return Result<i64, Error>.from_raw(sys_getpid());
 }
 
 // exit_group(2): terminate every thread in the process with `code`.

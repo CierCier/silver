@@ -248,6 +248,174 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         format!("{owner}__{method}")
     }
 
+    /// Codegen symbol for `(owner, method)` with the given parameter-type keys
+    /// (including the receiver). Overloaded names get a `__N` symbol per
+    /// distinct signature; single-signature names keep the classic
+    /// `<Owner>__<method>` symbol even if defined more than once.
+    pub(crate) fn overloaded_method_symbol_name(
+        &self,
+        owner: &str,
+        method: &str,
+        param_keys: &[String],
+    ) -> String {
+        let key = (owner.to_string(), method.to_string());
+        let Some(signatures) = self.method_overload_signatures.get(&key) else {
+            return Self::mangle_method_name(owner, method);
+        };
+        if signatures.len() <= 1 {
+            return Self::mangle_method_name(owner, method);
+        }
+        let index = signatures
+            .iter()
+            .position(|signature| signature == param_keys)
+            .or_else(|| {
+                signatures
+                    .iter()
+                    .position(|signature| signature.len() == param_keys.len())
+            })
+            .unwrap_or(0)
+            + 1;
+        format!("{owner}__{method}__{index}")
+    }
+
+    /// Candidate symbols for a call to `(owner, method)`, most specific first.
+    pub(crate) fn overloaded_method_candidates(&self, owner: &str, method: &str) -> Vec<String> {
+        let key = (owner.to_string(), method.to_string());
+        let Some(signatures) = self.method_overload_signatures.get(&key) else {
+            return vec![Self::mangle_method_name(owner, method)];
+        };
+        if signatures.len() <= 1 {
+            return vec![Self::mangle_method_name(owner, method)];
+        }
+        (1..=signatures.len())
+            .map(|i| format!("{owner}__{method}__{i}"))
+            .collect()
+    }
+
+    /// Pure (side-effect-free) type of an argument expression, used to match
+    /// overload candidates. Covers identifiers, literals, casts, references,
+    /// and call/method-call return types; avoids `resolve_lvalue_ptr`, which
+    /// emits IR for field/index/deref addresses.
+    pub(crate) fn resolve_argument_type(&mut self, expr: &ast::Expression) -> Option<ast::Type> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
+            ast::ExpressionKind::Identifier(identifier) => self.lookup_value_type(&identifier.name),
+            ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
+            ast::ExpressionKind::Reference {
+                is_mutable,
+                expression,
+            } => {
+                let inner_ty = self.resolve_argument_type(expression)?;
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                        inner: Box::new(inner_ty),
+                        is_mutable: *is_mutable,
+                        is_volatile: false,
+                    })),
+                    span: expr.span,
+                })
+            }
+            ast::ExpressionKind::Literal(lit) => {
+                let prim = match lit {
+                    ast::Literal::Integer(_) => ast::PrimitiveType::I32,
+                    ast::Literal::Float(_) => ast::PrimitiveType::F64,
+                    ast::Literal::Complex(_, _) => ast::PrimitiveType::C64,
+                    ast::Literal::String(_) => ast::PrimitiveType::Str,
+                    ast::Literal::Char(_) => ast::PrimitiveType::Char,
+                    ast::Literal::Bool(_) => ast::PrimitiveType::Bool,
+                };
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Primitive(prim)),
+                    span: expr.span,
+                })
+            }
+            ast::ExpressionKind::Call { function, .. } => {
+                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
+                    && let Some(sig) = self.signature_for_name(&ident.name)
+                {
+                    return sig.return_type.clone();
+                }
+                None
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver, method, ..
+            } => {
+                let owners = self.receiver_owner_candidates(receiver);
+                for owner_name in &owners {
+                    for mangled in self.overloaded_method_candidates(owner_name, &method.name) {
+                        if let Some(sig) = self.signature_for_name(&mangled) {
+                            return sig.return_type.clone();
+                        }
+                    }
+                }
+                self.signature_for_name(&method.name)
+                    .and_then(|sig| sig.return_type)
+            }
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                let mut obj_ty = self.resolve_argument_type(object)?;
+                loop {
+                    let inner = match obj_ty.kind.as_ref() {
+                        ast::TypeKind::Pointer(ptr) => Some((*ptr.inner).clone()),
+                        ast::TypeKind::Reference(reference) => Some((*reference.inner).clone()),
+                        _ => None,
+                    };
+                    match inner {
+                        Some(next) => obj_ty = next,
+                        None => break,
+                    }
+                }
+                let owner = Self::owner_name_from_type(&obj_ty)?;
+                self.struct_fields.get(&owner).and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|(name, _)| *name == field.name)
+                        .map(|(_, field_ty)| field_ty.clone())
+                })
+            }
+            ast::ExpressionKind::Index { object, .. } => {
+                let obj_ty = self.resolve_argument_type(object)?;
+                match obj_ty.kind.as_ref() {
+                    ast::TypeKind::Pointer(ptr) => Some((*ptr.inner).clone()),
+                    ast::TypeKind::Reference(reference) => Some((*reference.inner).clone()),
+                    ast::TypeKind::Array(array) => Some((*array.element_type).clone()),
+                    ast::TypeKind::Slice(slice) => Some((*slice.element_type).clone()),
+                    ast::TypeKind::Named(_) => {
+                        // IndexedAccess impl: the `__index_get` return type is
+                        // the element type (e.g. String -> u8).
+                        for owner in Self::owner_name_candidates_from_type(&obj_ty) {
+                            if let Some(sig) = self.signature_for_name(&Self::mangle_method_name(
+                                &owner,
+                                "__index_get",
+                            )) {
+                                return sig.return_type;
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            ast::ExpressionKind::Binary { left, .. } => self.resolve_argument_type(left),
+            ast::ExpressionKind::Unary { operand, operator } => match operator {
+                ast::UnaryOperator::Not => Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                    span: expr.span,
+                }),
+                ast::UnaryOperator::Dereference => {
+                    // `*p` — the pointee type, not the pointer itself.
+                    let pointee = self.resolve_argument_type(operand)?;
+                    match pointee.kind.as_ref() {
+                        ast::TypeKind::Pointer(ptr) => Some((*ptr.inner).clone()),
+                        ast::TypeKind::Reference(reference) => Some((*reference.inner).clone()),
+                        _ => None,
+                    }
+                }
+                _ => self.resolve_argument_type(operand),
+            },
+            _ => None,
+        }
+    }
+
     pub(crate) fn cast_method_name(target_type: &ast::Type) -> String {
         match target_type.kind.as_ref() {
             ast::TypeKind::Primitive(prim) => format!("cast_{:?}", prim).to_lowercase(),
@@ -1068,9 +1236,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let owners = self.receiver_owner_candidates(receiver);
                 let mut return_ty = None;
                 for owner_name in &owners {
-                    let mangled = Self::mangle_method_name(owner_name, &method.name);
-                    if let Some(sig) = self.signature_for_name(&mangled) {
-                        return_ty = sig.return_type.clone();
+                    for mangled in self.overloaded_method_candidates(owner_name, &method.name) {
+                        if let Some(sig) = self.signature_for_name(&mangled) {
+                            return_ty = sig.return_type.clone();
+                            break;
+                        }
+                    }
+                    if return_ty.is_some() {
                         break;
                     }
                 }
@@ -1220,7 +1392,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .entry((owner.clone(), func.name.name.clone()))
                         .or_insert(expects_ref);
 
-                    let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
+                    let param_keys: Vec<String> = func
+                        .parameters
+                        .iter()
+                        .map(|param| Type::from_ast(&param.param_type).canonical_key())
+                        .collect();
+                    let mangled_name =
+                        self.overloaded_method_symbol_name(&owner, &func.name.name, &param_keys);
                     let effective_visibility =
                         Self::method_effective_visibility(impl_visibility, &func.visibility);
                     self.register_function_signature(

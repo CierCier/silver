@@ -1,11 +1,13 @@
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
 use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
-use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
+use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -331,6 +333,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    /// Whether `arguments` match the callee's parameter types, skipping the
+    /// first `skip` params (the receiver for instance methods). Returns true
+    /// when the signature is unknown so arity alone decides. Argument types
+    /// come from a side-effect-free resolver, so casts (`(i64)x`) participate
+    /// in matching as their target type.
+    fn argument_types_match(
+        &mut self,
+        signature: Option<&FunctionSig>,
+        arguments: &[ast::Expression],
+        skip: usize,
+    ) -> bool {
+        let Some(sig) = signature else {
+            return true;
+        };
+        if sig.params.len() < skip + arguments.len() {
+            return false;
+        }
+        for (i, argument) in arguments.iter().enumerate() {
+            let param_key = Type::from_ast(&sig.params[skip + i]).canonical_key();
+            let Some(arg_ty) = self.resolve_argument_type(argument) else {
+                return false;
+            };
+            if Type::from_ast(&arg_ty).canonical_key() != param_key {
+                return false;
+            }
+        }
+        true
+    }
+
     pub(crate) fn emit_method_call_expression(
         &mut self,
         receiver: &ast::Expression,
@@ -342,19 +373,57 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let owners = self.receiver_owner_candidates(receiver);
         let mut candidates = Vec::new();
         for owner_name in &owners {
-            candidates.push(Self::mangle_method_name(owner_name, &method.name));
+            candidates.extend(self.overloaded_method_candidates(owner_name, &method.name));
         }
         candidates.push(method.name.clone());
 
-        let mut selected_name = None;
-        let mut selected_fn = None;
-        for name in candidates {
-            if let Some(function) = self.module.get_function(&name) {
-                selected_name = Some(name);
-                selected_fn = Some(function);
-                break;
+        // Overload resolution: filter candidates by arity (instance methods
+        // declare `args + 1` params, static/by-value-receiver methods `args`),
+        // then prefer an exact argument-type match against the parameter
+        // types. A type match beats the instance/static ordering; when no
+        // argument types can be proven (or none match), fall back to the
+        // first arity match so untypable expressions keep resolving.
+        let mut instance_type: Option<(String, FunctionValue<'ctx>)> = None;
+        let mut static_type: Option<(String, FunctionValue<'ctx>)> = None;
+        let mut instance_fallback: Option<(String, FunctionValue<'ctx>)> = None;
+        let mut static_fallback: Option<(String, FunctionValue<'ctx>)> = None;
+        for name in &candidates {
+            let Some(function) = self.module.get_function(name) else {
+                continue;
+            };
+            let signature = self.signature_for_name(name);
+            let declared = signature
+                .as_ref()
+                .map(|sig| sig.params.len())
+                .unwrap_or_else(|| function.get_type().get_param_types().len());
+            let variadic = signature
+                .as_ref()
+                .map(|sig| sig.is_variadic)
+                .unwrap_or_else(|| function.get_type().is_var_arg());
+            if variadic || declared == arguments.len() + 1 {
+                if variadic || self.argument_types_match(signature.as_ref(), arguments, 1) {
+                    if instance_type.is_none() {
+                        instance_type = Some((name.clone(), function));
+                    }
+                } else if instance_fallback.is_none() {
+                    instance_fallback = Some((name.clone(), function));
+                }
+            } else if variadic || declared == arguments.len() {
+                if variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
+                    if static_type.is_none() {
+                        static_type = Some((name.clone(), function));
+                    }
+                } else if static_fallback.is_none() {
+                    static_fallback = Some((name.clone(), function));
+                }
             }
         }
+        let selected = instance_type
+            .or(static_type)
+            .or(instance_fallback)
+            .or(static_fallback);
+        let selected_name = selected.as_ref().map(|(name, _)| name.clone());
+        let selected_fn = selected.map(|(_, function)| function);
 
         let function = if let Some(function) = selected_fn {
             function

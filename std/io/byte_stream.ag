@@ -1,6 +1,7 @@
 // std/io/byte_stream.ag — Buffered byte-oriented stream over a File.
 // Provides a read-ahead buffer for efficient single-byte and bulk reads
 // from unbuffered file descriptors.
+import std.error;
 import std.io.file;
 import std.mem;
 import std.mem.alloc;
@@ -37,7 +38,7 @@ impl ByteStream {
         // Refill buffer from file.
         self.pos = 0;
         self.len = 0;
-        Result<i64, i64> r = try_read(self.file.fd, self.buf, self.cap);
+        Result<i64, Error> r = try_read(self.file.fd, self.buf, self.cap);
         if (r.is_err()) {
             self.file.had_error = true;
             return -1;
@@ -77,7 +78,7 @@ impl ByteStream {
         while (dst_len > 0 && !self.file.at_eof && !self.file.had_error) {
             self.pos = 0;
             self.len = 0;
-            Result<i64, i64> r = try_read(self.file.fd, self.buf, self.cap);
+            Result<i64, Error> r = try_read(self.file.fd, self.buf, self.cap);
             if (r.is_err()) {
                 self.file.had_error = true;
                 break;

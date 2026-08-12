@@ -455,13 +455,9 @@ impl IndexedAccess<String> for String {
     }
 }
 
-// NOTE: String+String and String+str via the `+` operator hit a codegen
-// limitation: large structs (>16 bytes) are classified as MEMORY class
-// by the System V AMD64 ABI and must be passed by pointer, but the
-// operator overload codegen doesn't yet handle this ABI coercion for
-// value receivers.  The __add methods below are correct and will work
-// automatically when the ABI issue is resolved.
-// Workaround: use push_str() or String.from_str() + manual construction.
+// String+String and String+str are overloads of the same `__add` name; the
+// compiler resolves them by argument type (see codegen overload handling).
+// Both take the by-value receiver as their first parameter.
 impl Add<String, String> for String {
     String __add(String self, String other) {
         i64 total = self.len + other.len;

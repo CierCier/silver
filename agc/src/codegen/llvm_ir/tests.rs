@@ -202,6 +202,63 @@ mod tests {
     }
 
     #[test]
+    fn lowers_overloaded_method_arity_symbols() {
+        let ir = lower_to_llvm(
+            "struct Thing { i64 v; } impl Thing { i64 bump(Thing* self, i64 a) { return self.v + a; } i64 bump(Thing* self, i64 a, i64 b) { return self.v + a + b; } i64 bump(Thing* self, i64 a, i64 b, i64 c) { return self.v + a + b + c; } } i32 main() { Thing t; t.v = 1; i64 r = t.bump(10, 20, 30); return (i32)r; }",
+        );
+        assert!(
+            ir.contains("define i64 @Thing__bump__1("),
+            "expected first overload symbol:\n{ir}"
+        );
+        assert!(
+            ir.contains("define i64 @Thing__bump__2("),
+            "expected second overload symbol:\n{ir}"
+        );
+        assert!(
+            ir.contains("define i64 @Thing__bump__3("),
+            "expected third overload symbol:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i64 @Thing__bump__3(ptr %t, i64 10, i64 20, i64 30)"),
+            "expected call to resolve to the 3-arg overload:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_same_arity_type_overloads_by_argument_type() {
+        let ir = lower_to_llvm(
+            "struct S { i64 v; } impl S { i64 pick(S* self, i64 v) { return v; } i64 pick(S* self, str v) { return 1; } } i32 main() { S s; s.v = 1; i64 a = s.pick(7); i64 b = s.pick((str)\"x\"); return 0; }",
+        );
+        assert!(
+            ir.contains("define i64 @S__pick__1(ptr"),
+            "expected i64 overload symbol:\n{ir}"
+        );
+        assert!(
+            ir.contains("define i64 @S__pick__2(ptr"),
+            "expected str overload symbol:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i64 @S__pick__1(ptr %s, i64 7)"),
+            "expected i64 argument to select the i64 overload:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i64 @S__pick__2(ptr %s, ptr"),
+            "expected cast str argument to select the str overload:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn lowers_deref_argument_to_pointee_overload() {
+        let ir = lower_to_llvm(
+            "struct S { i64 v; } impl S { i64 pick(S* self, bool v) { return 1; } i64 pick(S* self, i64 v) { return v; } } i32 main() { S s; s.v = 1; i64* p = &s.v; i64 r = s.pick(*p); return (i32)r; }",
+        );
+        assert!(
+            ir.contains("call i64 @S__pick__2(ptr %s, i64 %"),
+            "expected deref argument to select the i64 overload:\n{ir}"
+        );
+    }
+
+    #[test]
     fn lowers_pointer_receiver_method_call_without_double_pointer_cast() {
         let ir = lower_to_llvm(
             "struct Counter { i32 value; } impl Counter { i32 read(Counter* self) { return self.value; } } i32 use_ptr(Counter* p) { return p.read(); } i32 main() { return 0; }",

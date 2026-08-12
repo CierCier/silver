@@ -1,0 +1,214 @@
+// tests/http_test.ag — HTTP/1.0 and HTTP/1.1 client tests.
+//
+// The loopback cases preload a deterministic response before the client sends
+// its request. Framing cases (content length, chunked) are single-threaded;
+// the convenience-verb cases run a small server thread that accepts the
+// client's connection, serves the response, and captures the request. The
+// public API case requires internet access: it GETs api.ipify.org and checks
+// the JSON shape.
+
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.sys.entry;
+import std.test;
+import std.thread;
+
+const str HTTP_OK_WIRE =
+    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+
+// Shared server-thread state (single active case at a time).
+TcpListener g_listener;
+u8 g_req_head[1024];
+u8 g_req_body[64];
+
+struct ServerJob {
+    str wire;
+    i64 body_len;
+    i32 status;
+}
+
+ServerJob g_job;
+
+/// Server side of a convenience-verb case: accept, preload the response, and
+/// capture the client's request head and body for verification.
+void server_main(i64 unused) {
+    Result<i64, Error> accept_result = g_listener.accept();
+    if (accept_result.failed()) { g_job.status = 6; return; }
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+    Result<i64, Error> server_write =
+        server.write((u8*)g_job.wire, strlen(g_job.wire));
+    if (server_write.failed()) { g_job.status = 7; return; }
+
+    i64 hlen = 0;
+    u8 byte[1];
+    while (true) {
+        Result<i64, Error> r = server.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { g_job.status = 10; return; }
+        g_req_head[hlen] = byte[0];
+        hlen = hlen + 1;
+        if (hlen >= 1023) { g_job.status = 10; return; }
+        if (hlen >= 4 && g_req_head[hlen - 4] == (u8)'\r'
+            && g_req_head[hlen - 3] == (u8)'\n'
+            && g_req_head[hlen - 2] == (u8)'\r'
+            && g_req_head[hlen - 1] == (u8)'\n') { break; }
+    }
+    g_req_head[hlen] = (u8)0;
+    i64 done = 0;
+    while (done < g_job.body_len) {
+        Result<i64, Error> r = server.read(&g_req_body[done], g_job.body_len - done);
+        if (r.is_err() || r.value() == 0) { g_job.status = 10; return; }
+        done = done + r.value();
+    }
+    g_job.status = 0;
+}
+
+/// Bind an ephemeral loopback listener; report its port.
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+/// Build "http://127.0.0.1:<port><path>".
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+ i32 run_http_case(HttpVersion version, str response_wire) {
+    TcpListener listener;
+    u16 port = 0;
+    i32 r = bind_loopback(&listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    if (connect_result.failed()) { return 4; }
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    HttpClient client = HttpClient.new();
+    Result<HttpConnection, Error> connection_result =
+        client.connect(&connect_addr, version);
+    if (connection_result.failed()) { return 5; }
+    HttpConnection connection = connection_result.unwrap();
+
+    Result<i64, Error> accept_result = listener.accept();
+    if (accept_result.failed()) { return 6; }
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+    Result<i64, Error> server_write =
+        server.write((u8*)response_wire, strlen(response_wire));
+    if (server_write.failed()) { return 7; }
+
+    HttpRequest request = HttpRequest.new(version, "GET", "/status", "fixture.test");
+    Result<HttpResponse, Error> response_result =
+        connection.send(&request, 65536, 1024);
+    if (response_result.failed()) { return 8; }
+    HttpResponse response = response_result.unwrap();
+    if (response.status != 200) { return 9; }
+    if (!response.body.equals("hello")) { return 10; }
+    return 0;
+}
+
+/// Loopback case for the convenience verbs. `body`/`headers` select the
+/// helper arity: POST is called with body+headers, PUT with body, HEAD bare.
+i32 run_verb_case(str verb, str body, str headers) {
+    if (verb != "POST" && verb != "PUT" && verb != "HEAD") { return 15; }
+    u16 port = 0;
+    i32 r = bind_loopback(&g_listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    if (connect_result.failed()) { return 4; }
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    g_job.wire = HTTP_OK_WIRE;
+    g_job.body_len = 0;
+    if (body != (str)0) { g_job.body_len = strlen(body); }
+    g_job.status = -1;
+    TaskRecord* server_handle = thread_spawn(server_main, 0);
+    if (server_handle == (TaskRecord*)0) { return 16; }
+
+    HttpClient client = HttpClient.new();
+    String url = build_url(port, "/submit");
+    Result<HttpResponse, Error> response_result;
+    if (verb == "POST") { response_result = client.post((str)url.data, body, headers); }
+    else if (verb == "PUT") { response_result = client.put((str)url.data, body); }
+    else { response_result = client.head((str)url.data); }
+    if (response_result.failed()) { thread_join(server_handle); return 8; }
+    HttpResponse response = response_result.unwrap();
+    if (response.status != 200) { thread_join(server_handle); return 9; }
+    if (thread_join(server_handle) < 0) { return 16; }
+    if (g_job.status != 0) { return g_job.status; }
+
+    // Verify what the server captured.
+    String head = String.from_str((str)&g_req_head[0]);
+    if (!head.starts_with(verb)) { return 11; }
+    if (head.find("/submit") < 0) { return 12; }
+    if (headers != (str)0 && head.find(headers) < 0) { return 13; }
+    if (g_job.body_len > 0
+        && memcmp(&g_req_body[0], (const void*)body, g_job.body_len) != 0) { return 14; }
+    return 0;
+}
+
+/// GET `/?format=json` from api.ipify.org and check the JSON shape.
+i32 run_get_public_case() {
+    HttpClient client = HttpClient.new();
+    Result<HttpResponse, Error> response_result =
+        client.get("http://api.ipify.org/?format=json");
+    if (response_result.failed()) { return 1; }
+    HttpResponse response = response_result.unwrap();
+    if (response.status != 200) { return 2; }
+    if (!response.body.starts_with("{\"ip\":\"")) { return 3; }
+    return 0;
+}
+
+ i32 main() {
+    test_start("HTTP/1.1 client");
+    assert_eq_i64(0, run_http_case(HttpVersion.Http11,
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"),
+        "HTTP/1.1 response parsed");
+
+    test_start("HTTP/1.0 client");
+    assert_eq_i64(0, run_http_case(HttpVersion.Http10,
+        "HTTP/1.0 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"),
+        "HTTP/1.0 response parsed");
+
+    test_start("HTTP/1.1 chunked");
+    assert_eq_i64(0, run_http_case(HttpVersion.Http11,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        "5\r\nhello\r\n0\r\n\r\n"),
+        "HTTP/1.1 chunked response parsed");
+
+    test_start("client.post convenience");
+    assert_eq_i64(0, run_verb_case("POST", "payload", "X-Token: abc\r\n"),
+        "POST with body and headers");
+
+    test_start("client.put convenience");
+    assert_eq_i64(0, run_verb_case("PUT", "data", (str)0),
+        "PUT with body");
+
+    test_start("client.head convenience");
+    assert_eq_i64(0, run_verb_case("HEAD", (str)0, (str)0),
+        "HEAD request");
+
+    test_start("client.get public API");
+    assert_eq_i64(0, run_get_public_case(), "GET convenience against public API");
+
+    return done();
+}

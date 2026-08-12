@@ -1,6 +1,7 @@
 // std/io/scanner.ag — stdin token scanner with UTF-8 BOM support.
 // Reads all of stdin into a heap buffer, then provides whitespace-delimited
 // token and line iteration with zero-copy str borrows.
+import std.error;
 import std.io.file;
 import std.mem;
 import std.mem.alloc;
@@ -43,7 +44,7 @@ impl Scanner {
                 s.cap = new_cap;
                 space = s.cap - s.len;
             }
-            Result<i64, i64> r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
+            Result<i64, Error> r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
             if (r.is_ok()) {
                 i64 n = r.value();
                 if (n == 0) {

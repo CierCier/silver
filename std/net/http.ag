@@ -1,0 +1,593 @@
+// std/net/http.ag — controllable HTTP/1.0 and HTTP/1.1 client.
+//
+// The API deliberately separates connection, request, and response state:
+// callers can reuse an HttpConnection, stream request bodies as raw bytes,
+// and inspect framing decisions without hiding the transport.
+import std.error;
+import std.fmt;
+import std.mem.drop;
+import std.net.dns;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.result;
+
+const i64 HTTP_ERR_IO = -1;
+const i64 HTTP_ERR_MALFORMED = -2;
+const i64 HTTP_ERR_LIMIT = -3;
+const i64 HTTP_ERR_CONNECT = -4;
+const i64 HTTP_ERR_DNS = -5;
+
+const i64 HTTP_DEFAULT_MAX_HEADER = 65536;
+const i64 HTTP_DEFAULT_MAX_BODY = 16777216;
+const i64 HTTP_CHUNK_LINE_MAX = 8192;
+
+enum HttpVersion {
+    Http10 = 10;
+    Http11 = 11;
+}
+
+struct HttpRequest {
+    HttpVersion version;
+    str method;
+    str target;
+    str host;
+    String headers;
+    str body;
+    bool close;
+}
+
+struct HttpResponse {
+    HttpVersion version;
+    i32 status;
+    String headers;
+    String body;
+    i64 content_length;
+    bool chunked;
+    bool close_delimited;
+}
+
+struct HttpClient {
+    i64 max_header_bytes;
+    i64 max_body_bytes;
+}
+
+struct HttpConnection {
+    TcpStream stream;
+    HttpVersion version;
+}
+
+struct HttpUrl {
+    u8 host[255];
+    u16 port;
+    str path;
+}
+
+// --- Byte helpers ---------------------------------------------------------
+// Silver's `char` is 4 bytes wide, so protocol bytes are compared as u8
+// against self-documenting (u8)'x' literals rather than raw ASCII numbers.
+
+bool http_is_space(u8 ch) {
+    return ch == (u8)' ' || ch == (u8)'\t';
+}
+
+bool http_is_digit(u8 ch) {
+    return ch >= (u8)'0' && ch <= (u8)'9';
+}
+
+u8 http_lower(u8 ch) {
+    if (ch >= (u8)'A' && ch <= (u8)'Z') { return ch - (u8)'A' + (u8)'a'; }
+    return ch;
+}
+
+/// Case-insensitive compare of `data[start..end]` against `expected`.
+bool http_equal_ci(u8* data, i64 start, i64 end, str expected) {
+    u8* wanted = (u8*)expected;
+    i64 wanted_len = strlen(expected);
+    if (end - start != wanted_len) { return false; }
+    i64 i = 0;
+    while (i < wanted_len) {
+        if (http_lower(data[start + i]) != http_lower(wanted[i])) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// Index of the first CRLF at or after `start`, or -1 when none exists.
+i64 http_find_crlf(u8* data, i64 len, i64 start) {
+    i64 i = start;
+    while (i + 1 < len) {
+        if (data[i] == (u8)'\r' && data[i + 1] == (u8)'\n') { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Parse the decimal integer in `data[start..end]`, allowing surrounding
+/// whitespace. Returns false when the range is not a valid integer.
+bool http_parse_i64(u8* data, i64 start, i64 end, i64* out) {
+    i64 i = start;
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    if (i == end) { return false; }
+    i64 value = 0;
+    i64 digits = 0;
+    while (i < end && http_is_digit(data[i])) {
+        value = value * 10 + (i64)(data[i] - (u8)'0');
+        digits = digits + 1;
+        i = i + 1;
+    }
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    if (digits == 0 || i != end) { return false; }
+    *out = value;
+    return true;
+}
+
+/// Parse the hexadecimal integer in `data[start..end]`, allowing surrounding
+/// whitespace. Returns false when the range is not a valid integer.
+bool http_parse_hex(u8* data, i64 start, i64 end, i64* out) {
+    i64 i = start;
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    i64 value = 0;
+    i64 digits = 0;
+    while (i < end) {
+        u8 ch = data[i];
+        i64 digit = -1;
+        if (ch >= (u8)'0' && ch <= (u8)'9') { digit = (i64)(ch - (u8)'0'); }
+        else if (ch >= (u8)'A' && ch <= (u8)'F') { digit = (i64)(ch - (u8)'A') + 10; }
+        else if (ch >= (u8)'a' && ch <= (u8)'f') { digit = (i64)(ch - (u8)'a') + 10; }
+        else { break; }
+        value = value * 16 + digit;
+        digits = digits + 1;
+        i = i + 1;
+    }
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    if (digits == 0 || i != end) { return false; }
+    *out = value;
+    return true;
+}
+
+// Statuses that never carry a body (RFC 7230): 1xx, 204, 304.
+bool http_status_has_no_body(i32 status, bool head) {
+    if (head) { return true; }
+    if (status >= 100 && status < 200) { return true; }
+    return status == 204 || status == 304;
+}
+
+/// Append the decimal form of `value` to `out`.
+void http_append_i64(String* out, i64 value) {
+    u8 digits[32];
+    i64 len = itoa(value, &digits[0]);
+    i64 i = 0;
+    while (i < len) {
+        out.push(digits[i]);
+        i = i + 1;
+    }
+}
+
+/// Split "http://host[:port]/path" into host, port, and path. The scheme is
+/// optional and must be plain `http` (https is rejected). `path` is a view
+/// into `url`, which must therefore outlive the parsed value.
+bool http_parse_url(str url, HttpUrl* out) {
+    u8* p = (u8*)url;
+    i64 len = strlen(url);
+    i64 i = 0;
+    if (len >= 7 && http_equal_ci(p, 0, 7, "http://")) { i = 7; }
+    i64 host_start = i;
+    while (i < len && p[i] != (u8)':' && p[i] != (u8)'/') { i = i + 1; }
+    i64 host_len = i - host_start;
+    if (host_len == 0 || host_len >= 255) { return false; }
+    i64 j = 0;
+    while (j < host_len) { out.host[j] = p[host_start + j]; j = j + 1; }
+    out.host[j] = (u8)0;
+    u16 port = 80;
+    if (i < len && p[i] == (u8)':') {
+        i = i + 1;
+        i64 port_start = i;
+        while (i < len && p[i] != (u8)'/') { i = i + 1; }
+        i64 port_value = 0;
+        if (port_start == i || !http_parse_i64(p, port_start, i, &port_value)
+            || port_value <= 0 || port_value > 65535) {
+            return false;
+        }
+        port = (u16)port_value;
+    }
+    out.port = port;
+    out.path = (str)&p[i];
+    if (strlen(out.path) == 0) { out.path = "/"; }
+    return true;
+}
+
+/// Read one CRLF-terminated line into `line`, excluding the CRLF itself.
+/// Returns false on EOF, read error, or when the line exceeds `max_len`.
+bool http_read_line(TcpStream* stream, String* line, i64 max_len) {
+    line.clear();
+    u8 byte[1];
+    while (true) {
+        Result<i64, Error> r = stream.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { return false; }
+        line.push(byte[0]);
+        if (line.ends_with("\r\n")) {
+            line.len = line.len - 2;
+            line.data[line.len] = (u8)0;
+            return true;
+        }
+        if (line.len > max_len) { return false; }
+    }
+    // Unreachable — the loop above only exits via `return`.
+    return false;
+}
+
+// --- Requests -------------------------------------------------------------
+
+impl HttpRequest {
+    HttpRequest new(HttpVersion version, str method, str target, str host) {
+        HttpRequest request;
+        request.version = version;
+        request.method = method;
+        request.target = target;
+        request.host = host;
+        request.headers = String.new();
+        request.body = (str)0;
+        request.close = true;
+        return move request;
+    }
+
+    void header(&mut HttpRequest self, str name, str value) {
+        self.headers.push_str(name);
+        self.headers.push_str(": ");
+        self.headers.push_str(value);
+        self.headers.push_str("\r\n");
+    }
+
+    void set_body(&mut HttpRequest self, str body) {
+        self.body = body;
+    }
+
+    void keep_alive(&mut HttpRequest self) {
+        self.close = false;
+    }
+
+    Result<i64, Error> write(HttpRequest* self, TcpStream* stream) {
+        String head = String.new();
+        head.push_str(self.method);
+        head.push((u8)' ');
+        head.push_str(self.target);
+        head.push_str(" HTTP/");
+        if (self.version == HttpVersion.Http10) { head.push_str("1.0"); }
+        else { head.push_str("1.1"); }
+        head.push_str("\r\nHost: ");
+        head.push_str(self.host);
+        head.push_str("\r\n");
+        if (self.body != (str)0) {
+            head.push_str("Content-Length: ");
+            http_append_i64(&mut head, strlen(self.body));
+            head.push_str("\r\n");
+        }
+        if (self.close) { head.push_str("Connection: close\r\n"); }
+        head.push_str((str)self.headers.data);
+        head.push_str("\r\n");
+        Result<i64, Error> written = stream.write((u8*)head.data, head.len);
+        if (written.is_err()) { return written; }
+        if (self.body != (str)0 && strlen(self.body) > 0) {
+            return stream.write((u8*)self.body, strlen(self.body));
+        }
+        return Result<i64, Error>.Ok(written.value());
+    }
+}
+
+impl Drop<HttpRequest> for HttpRequest {
+    void drop(HttpRequest* self) {
+        self.headers.drop();
+    }
+}
+
+// --- Responses ------------------------------------------------------------
+
+impl HttpResponse {
+    HttpResponse empty() {
+        HttpResponse response;
+        response.version = HttpVersion.Http11;
+        response.status = 0;
+        response.headers = String.new();
+        response.body = String.new();
+        response.content_length = -1;
+        response.chunked = false;
+        response.close_delimited = false;
+        return move response;
+    }
+
+    Result<i64, Error> read_head(HttpResponse* self, TcpStream* stream, i64 max_header) {
+        String raw = String.new();
+        u8 byte[1];
+        while (true) {
+            Result<i64, Error> r = stream.read(&byte[0], 1);
+            if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+            if (r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            raw.push(byte[0]);
+            if (raw.len > max_header) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            if (raw.ends_with("\r\n\r\n")) { break; }
+        }
+
+        // Status line: "HTTP/1.x <3-digit status>[ reason]".
+        i64 line_end = raw.find("\r\n");
+        if (line_end < 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+        String status_line = raw.substr(0, line_end);
+        String version = status_line.substr(5, 3);
+        if (version.equals("1.0")) { self.version = HttpVersion.Http10; }
+        else if (version.equals("1.1")) { self.version = HttpVersion.Http11; }
+        else { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+        if (status_line.len < 12 || status_line[8] != (u8)' ') {
+            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        }
+        if (!http_is_digit(status_line[9]) || !http_is_digit(status_line[10])
+            || !http_is_digit(status_line[11])) {
+            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        }
+        self.status = (i32)((i64)(status_line[9] - (u8)'0') * 100
+            + (i64)(status_line[10] - (u8)'0') * 10
+            + (i64)(status_line[11] - (u8)'0'));
+
+        // Headers: CRLF-terminated lines up to the blank line.
+        u8* data = raw.data;
+        i64 header_start = line_end + 2;
+        i64 header_end = raw.len - 2;
+        while (header_start < header_end) {
+            i64 end = http_find_crlf(data, header_end, header_start);
+            if (end < 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            i64 colon = header_start;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon == end || colon == header_start) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            i64 value_start = colon + 1;
+            while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+            if (http_equal_ci(data, header_start, colon, "content-length")) {
+                if (!http_parse_i64(data, value_start, end, &mut self.content_length)) {
+                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                }
+            } else if (http_equal_ci(data, header_start, colon, "transfer-encoding")) {
+                if (http_equal_ci(data, value_start, end, "chunked")) { self.chunked = true; }
+            } else if (http_equal_ci(data, header_start, colon, "connection")) {
+                if (http_equal_ci(data, value_start, end, "close")) { self.close_delimited = true; }
+            }
+            header_start = end + 2;
+        }
+        self.headers = raw.substr(line_end + 2, raw.len - line_end - 2);
+        return Result<i64, Error>.Ok(0);
+    }
+
+    Result<i64, Error> read_exact(HttpResponse* self, TcpStream* stream, i64 count, i64 max_body) {
+        if (count < 0 || count > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+        i64 done = 0;
+        u8 buf[1024];
+        while (done < count) {
+            i64 want = count - done;
+            if (want > 1024) { want = 1024; }
+            Result<i64, Error> r = stream.read(&buf[0], want);
+            if (r.is_err() || r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+            i64 i = 0;
+            while (i < r.value()) { self.body.push(buf[i]); i = i + 1; }
+            done = done + r.value();
+        }
+        return Result<i64, Error>.Ok(done);
+    }
+
+    Result<i64, Error> read_chunked(HttpResponse* self, TcpStream* stream, i64 max_body) {
+        i64 total = 0;
+        String line = String.new();
+        u8 byte[1];
+        while (true) {
+            if (!http_read_line(stream, &line, HTTP_CHUNK_LINE_MAX)) {
+                return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+            }
+            i64 size = 0;
+            if (!http_parse_hex(line.data, 0, line.len, &mut size)) {
+                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            }
+            if (size == 0) {
+                // Zero-size chunk: consume trailers until the blank line.
+                while (true) {
+                    if (!http_read_line(stream, &line, HTTP_CHUNK_LINE_MAX)) {
+                        return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                    }
+                    if (line.len == 0) { return Result<i64, Error>.Ok(total); }
+                }
+            }
+            if (total + size > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            Result<i64, Error> got = self.read_exact(stream, size, max_body);
+            if (got.is_err()) { return got; }
+            Result<i64, Error> crlf = stream.read(&byte[0], 1);
+            if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\r') {
+                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            }
+            crlf = stream.read(&byte[0], 1);
+            if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\n') {
+                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            }
+            total = total + size;
+        }
+        // Unreachable — the loop above only exits via `return`.
+        return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+    }
+
+    Result<i64, Error> read_body(HttpResponse* self, TcpStream* stream, bool head, i64 max_body) {
+        if (http_status_has_no_body(self.status, head)) { return Result<i64, Error>.Ok(0); }
+        if (self.chunked) { return self.read_chunked(stream, max_body); }
+        if (self.content_length >= 0) { return self.read_exact(stream, self.content_length, max_body); }
+        // No framing headers: the body is close-delimited, read until EOF.
+        self.close_delimited = true;
+        u8 buf[1024];
+        i64 total = 0;
+        while (true) {
+            Result<i64, Error> r = stream.read(&buf[0], 1024);
+            if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+            if (r.value() == 0) { return Result<i64, Error>.Ok(total); }
+            if (total + r.value() > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            i64 i = 0;
+            while (i < r.value()) { self.body.push(buf[i]); i = i + 1; }
+            total = total + r.value();
+        }
+        // Unreachable — the loop above only exits via `return`.
+        return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+    }
+
+    Result<i64, Error> read(HttpResponse* self, TcpStream* stream, bool head, i64 max_header, i64 max_body) {
+        Result<i64, Error> h = self.read_head(stream, max_header);
+        if (h.is_err()) { return h; }
+        return self.read_body(stream, head, max_body);
+    }
+}
+
+impl Drop<HttpResponse> for HttpResponse {
+    void drop(HttpResponse* self) {
+        self.headers.drop();
+        self.body.drop();
+    }
+}
+
+// --- Client ---------------------------------------------------------------
+
+impl HttpClient {
+    HttpClient new() {
+        HttpClient client;
+        client.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
+        client.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
+        return client;
+    }
+
+    void limits(&mut HttpClient self, i64 max_header, i64 max_body) {
+        self.max_header_bytes = max_header;
+        self.max_body_bytes = max_body;
+    }
+
+    Result<HttpConnection, Error> connect(HttpClient* self, SocketAddr* addr, HttpVersion version) {
+        TcpStream stream = TcpStream.connect(addr);
+        if (stream.invalid()) { return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed")); }
+        HttpConnection connection;
+        connection.stream = move stream;
+        connection.version = version;
+        return Result<HttpConnection, Error>.Ok(move connection);
+    }
+
+    /// Core path behind the get/post/put/delete/head/patch helpers: parse the
+    /// URL, resolve the host, connect, and send a single request. `body` is
+    /// the request body and `headers` a raw CRLF-terminated header block
+    /// ("Name: value\r\n..."); either may be null. Honors the client's
+    /// configured size limits.
+    Result<HttpResponse, Error> request(HttpClient* self, str method, str url, str body, str headers) {
+        HttpUrl parsed;
+        if (!http_parse_url(url, &parsed)) {
+            return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        }
+        str host = (str)&parsed.host[0];
+        u32 ip4 = 0;
+        i32 ip = 0;
+        if (inet_pton4(host, &ip4)) { ip = (i32)ip4; }
+        else { ip = dns_resolve(host); }
+        if (ip == 0) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_DNS, "DNS resolution failed")); }
+        Result<SocketAddr, AddrError> addr_result =
+            SocketAddr.v4_network((u32)ip, parsed.port);
+        if (addr_result.failed()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+        SocketAddr addr = addr_result.unwrap();
+        Result<HttpConnection, Error> conn_result =
+            self.connect(&addr, HttpVersion.Http11);
+        if (conn_result.failed()) { return Result<HttpResponse, Error>.Err(conn_result.get_error()); }
+        HttpConnection conn = conn_result.unwrap();
+        HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, (str)&parsed.host[0]);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        if (body != (str)0) { req.set_body(body); }
+        return conn.send(&req, self.max_header_bytes, self.max_body_bytes);
+    }
+
+    Result<HttpResponse, Error> get(HttpClient* self, str url) {
+        return self.request("GET", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> get(HttpClient* self, str url, str body) {
+        return self.request("GET", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> get(HttpClient* self, str url, str body, str headers) {
+        return self.request("GET", url, body, headers);
+    }
+
+    Result<HttpResponse, Error> post(HttpClient* self, str url) {
+        return self.request("POST", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> post(HttpClient* self, str url, str body) {
+        return self.request("POST", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> post(HttpClient* self, str url, str body, str headers) {
+        return self.request("POST", url, body, headers);
+    }
+
+    Result<HttpResponse, Error> put(HttpClient* self, str url) {
+        return self.request("PUT", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> put(HttpClient* self, str url, str body) {
+        return self.request("PUT", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> put(HttpClient* self, str url, str body, str headers) {
+        return self.request("PUT", url, body, headers);
+    }
+
+    Result<HttpResponse, Error> delete(HttpClient* self, str url) {
+        return self.request("DELETE", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> delete(HttpClient* self, str url, str body) {
+        return self.request("DELETE", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> delete(HttpClient* self, str url, str body, str headers) {
+        return self.request("DELETE", url, body, headers);
+    }
+
+    Result<HttpResponse, Error> head(HttpClient* self, str url) {
+        return self.request("HEAD", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> head(HttpClient* self, str url, str body) {
+        return self.request("HEAD", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> head(HttpClient* self, str url, str body, str headers) {
+        return self.request("HEAD", url, body, headers);
+    }
+
+    Result<HttpResponse, Error> patch(HttpClient* self, str url) {
+        return self.request("PATCH", url, (str)0, (str)0);
+    }
+
+    Result<HttpResponse, Error> patch(HttpClient* self, str url, str body) {
+        return self.request("PATCH", url, body, (str)0);
+    }
+
+    Result<HttpResponse, Error> patch(HttpClient* self, str url, str body, str headers) {
+        return self.request("PATCH", url, body, headers);
+    }
+}
+
+impl HttpConnection {
+    Result<HttpResponse, Error> send(HttpConnection* self, HttpRequest* request, i64 max_header, i64 max_body) {
+        Result<i64, Error> written = request.write(&mut self.stream);
+        if (written.is_err()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+        HttpResponse response = HttpResponse.empty();
+        Result<i64, Error> read = response.read(&mut self.stream, request.method == "HEAD", max_header, max_body);
+        if (read.is_err()) { return Result<HttpResponse, Error>.Err(read.get_error()); }
+        if (request.close || response.close_delimited) { self.stream.close(); }
+        return Result<HttpResponse, Error>.Ok(move response);
+    }
+
+    void close(HttpConnection* self) {
+        self.stream.close();
+    }
+}
+
+impl Drop<HttpConnection> for HttpConnection {
+    void drop(HttpConnection* self) {
+        self.stream.drop();
+    }
+}

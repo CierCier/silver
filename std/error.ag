@@ -1,0 +1,23 @@
+// std/error.ag — typed error values carried by Result<T, Error>.
+//
+// Failures across the stdlib are `Result<T, Error>` rather than bare integer
+// codes: every error carries a numeric `code` (errno, HTTP_ERR_*, or a
+// module-local code) plus a borrowed, human-readable `message` so failures
+// are debuggable without a lookup table. The message is a string literal or
+// a view that outlives the error (the same lifetime rule as `str` fields
+// elsewhere in the stdlib).
+
+struct Error {
+    i64 code;
+    str message;
+}
+
+impl Error {
+    /// Build an error from a numeric code and a message.
+    Error new(i64 code, str message) {
+        Error e;
+        e.code = code;
+        e.message = message;
+        return e;
+    }
+}

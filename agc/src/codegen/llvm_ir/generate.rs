@@ -15,6 +15,7 @@ use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
+use crate::types::Type;
 pub(crate) fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveType {
     if min_value < 0 {
         if min_value >= i8::MIN as i128 && max_value <= i8::MAX as i128 {
@@ -178,6 +179,49 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 )?;
                 self.module
                     .add_function(&function_item.name.name, fn_ty, None);
+            }
+        }
+
+        // Pass 1a: record the distinct parameter-type signatures of same-named
+        // methods per owner so overloaded methods can be given distinct symbols
+        // (codegen mangles by name only). Duplicate definitions with the same
+        // signature collapse to the classic `<Owner>__<method>` symbol. The
+        // filters mirror collect_impl_method_signatures exactly.
+        for item in &program.items {
+            if let ast::ItemKind::Impl(impl_item) = &item.kind {
+                if impl_item.generics.is_some() {
+                    continue;
+                }
+                if self.has_generic_placeholder_type(&impl_item.self_type) {
+                    continue;
+                }
+                let Some(owner) = Self::owner_name_from_type(&impl_item.self_type) else {
+                    continue;
+                };
+                for impl_item in &impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = impl_item {
+                        if func.generics.is_some() {
+                            continue;
+                        }
+                        if self.has_generic_placeholder_signature(
+                            &func.parameters,
+                            func.return_type.as_ref(),
+                        ) {
+                            continue;
+                        }
+                        let key = (owner.clone(), func.name.name.clone());
+                        let signature: Vec<String> = func
+                            .parameters
+                            .iter()
+                            .map(|param| Type::from_ast(&param.param_type).canonical_key())
+                            .collect();
+                        let signatures = self.method_overload_signatures.entry(key).or_default();
+                        if !signatures.contains(&signature) {
+                            signatures.push(signature);
+                            signatures.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+                        }
+                    }
+                }
             }
         }
 
@@ -617,7 +661,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         continue;
                     }
 
-                    let mangled_name = Self::mangle_method_name(&owner, &func.name.name);
+                    let param_keys: Vec<String> = func
+                        .parameters
+                        .iter()
+                        .map(|param| Type::from_ast(&param.param_type).canonical_key())
+                        .collect();
+                    let mangled_name =
+                        self.overloaded_method_symbol_name(&owner, &func.name.name, &param_keys);
                     let effective_visibility =
                         Self::method_effective_visibility(visibility, &func.visibility);
                     if self.module.get_function(&mangled_name).is_none() {

@@ -40,7 +40,7 @@ i32 main() {
 
     SockAddrIn server_addr;
     u32 addr_len = 16;
-    Result<i64, i64> name_result =
+    Result<i64, Error> name_result =
         try_getsockname(listener.raw_fd(), (void*)&server_addr, &addr_len);
     assert_true(name_result.is_ok(), "getsockname ok");
 
@@ -51,17 +51,17 @@ i32 main() {
     TcpStream client = TcpStream.connect(&connect_addr);
     assert_true(client.valid(), "client connect ok");
 
-    Result<i64, i64> write_result =
+    Result<i64, Error> write_result =
         client.write((u8*)payload, cstr_len((u8*)payload));
     assert_true(write_result.is_ok(), "TCP writer accepted JSON");
     assert_eq_i64(cstr_len((u8*)payload), write_result.value(), "all JSON bytes written");
 
-    Result<i64, i64> accept_result = listener.accept();
+    Result<i64, Error> accept_result = listener.accept();
     assert_true(accept_result.is_ok(), "server accepted client");
     TcpStream server = TcpStream.from_fd((i32)accept_result.value());
 
     u8* received = alloc<u8>(128);
-    Result<i64, i64> read_result = server.read(received, 127);
+    Result<i64, Error> read_result = server.read(received, 127);
     assert_true(read_result.is_ok(), "server read JSON");
     received[read_result.value()] = (u8)0;
     assert_eq_str(payload, (str)received, "TCP API received JSON");

@@ -100,6 +100,11 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) volatile_globals: HashSet<String>,
     pub(crate) static_local_counter: usize,
     pub(crate) method_receivers: HashMap<(String, String), bool>,
+    /// Distinct parameter-type signatures per `(owner, method)`, sorted by
+    /// arity then type key. Overloaded methods get `__N` symbols keyed by
+    /// signature (codegen mangles by name only); duplicate definitions with
+    /// the same signature keep the classic `<Owner>__<method>` symbol.
+    pub(crate) method_overload_signatures: HashMap<(String, String), Vec<Vec<String>>>,
     pub(crate) string_constants: HashMap<String, PointerValue<'ctx>>,
     pub(crate) struct_generics: HashMap<String, Vec<String>>,
     pub(crate) generic_impl_templates: Vec<ast::ImplItem>,

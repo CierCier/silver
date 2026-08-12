@@ -3,6 +3,7 @@
 // Socket wraps a raw file descriptor with Drop-based cleanup.  UdpSocket
 // provides send_to / recv_from on top of a SOCK_DGRAM socket.
 
+import std.error;
 import std.sys.result;
 import std.sys.socket;
 import std.sys.errno;
@@ -25,7 +26,7 @@ struct Socket {
 impl Socket {
     /// Create a socket. Returns a closed socket on failure.
     Socket new(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
-        Result<i64, i64> r = try_socket(domain, ty, flags, protocol);
+        Result<i64, Error> r = try_socket(domain, ty, flags, protocol);
         if (r.is_err()) {
             Socket s = { .fd = -1, .is_open = false };
             return s;
@@ -94,7 +95,7 @@ impl UdpSocket {
     /// Bind to a borrowed socket address. This socket is IPv4-only.
     bool bind(UdpSocket* self, SocketAddr* addr) {
         if (self.sock.invalid()) { return false; }
-        Result<i64, i64> r = match *addr {
+        Result<i64, Error> r = match *addr {
             V4(sa) : try_bind(self.sock.fd, (void*)&sa, 16),
             V6(sa) : try_bind(self.sock.fd, (void*)&sa, 28),
             Unix(sa) : try_bind(self.sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
@@ -105,7 +106,7 @@ impl UdpSocket {
     /// Send `len` bytes to a borrowed destination address.
     i64 send_to(UdpSocket* self, u8* buf, i64 len, SocketAddr* dst) {
         if (self.sock.invalid()) { return -EINVAL; }
-        Result<i64, i64> r = match *dst {
+        Result<i64, Error> r = match *dst {
             V4(sa) : try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)&sa, 16),
             V6(sa) : try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)&sa, 28),
             Unix(sa) : try_sendto(
@@ -122,7 +123,7 @@ impl UdpSocket {
         if (self.sock.invalid()) { return -EINVAL; }
         SockAddrIn src_addr;
         u32 addr_len = 16;
-        Result<i64, i64> r = try_recvfrom(
+        Result<i64, Error> r = try_recvfrom(
             self.sock.fd, (void*)buf, len, 0, (void*)&src_addr, &addr_len);
         if (r.is_err()) { return -r.errno(); }
         if (src != (SocketAddr*)0) {
@@ -149,7 +150,7 @@ impl UdpSocket {
         if (self.sock.invalid()) { return (u16)0; }
         SockAddrIn sa;
         u32 len = 16;
-        Result<i64, i64> r = try_getsockname(self.sock.fd, (void*)&sa, &len);
+        Result<i64, Error> r = try_getsockname(self.sock.fd, (void*)&sa, &len);
         if (r.is_err()) { return (u16)0; }
         return ntoh16(sa.sin_port);
     }

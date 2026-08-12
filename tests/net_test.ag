@@ -2,6 +2,7 @@
 //
 // Tests: TCP echo (bind, connect, accept, send, recv) and connection refused.
 
+import std.error;
 import std.net.tcp;
 import std.net.inet;
 import std.sys.result;
@@ -19,7 +20,7 @@ i32 main() {
     assert_true(listener.valid(), "listener bind ok");
     SockAddrIn sa;
     u32 len = 16;
-    Result<i64, i64> gn = try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    Result<i64, Error> gn = try_getsockname(listener.raw_fd(), (void*)&sa, &len);
     assert_true(gn.is_ok(), "getsockname ok");
     Result<SocketAddr, AddrError> conn_result =
         SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port));
@@ -27,14 +28,14 @@ i32 main() {
     SocketAddr conn_addr = conn_result.unwrap();
     TcpStream client = TcpStream.connect(&conn_addr);
     assert_true(client.valid(), "connect ok");
-    Result<i64, i64> w = client.write((u8*)"hello", 5);
+    Result<i64, Error> w = client.write((u8*)"hello", 5);
     assert_true(w.is_ok(), "write ok");
     assert_eq_i64(5, w.value(), "wrote 5 bytes");
-    Result<i64, i64> a = listener.accept();
+    Result<i64, Error> a = listener.accept();
     assert_true(a.is_ok(), "accept ok");
     TcpStream server = TcpStream.from_fd((i32)a.value());
     u8* msg = alloc<u8>(8);
-    Result<i64, i64> r = server.read(msg, 7);
+    Result<i64, Error> r = server.read(msg, 7);
     assert_true(r.is_ok(), "read ok");
     assert_eq_i64(5, r.value(), "read 5 bytes");
     msg[r.value()] = (u8)0;

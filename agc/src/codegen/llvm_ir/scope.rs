@@ -276,6 +276,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(named) = Self::extract_named_type(ty).cloned() else {
             return Ok(());
         };
+        // Enums are scalar-backed or payload layouts, not structs with field
+        // metadata. Drop registration only cascades through struct fields.
+        if self.enum_backing_type_for_named(&named).is_some()
+            || (named.path.len() == 1
+                && self.enum_payload_layouts.contains_key(&named.path[0].name))
+        {
+            return Ok(());
+        }
         let _ = self.ensure_named_struct_type(&named)?;
         let named_key = Self::named_type_key(&named);
         // Clone fields and the struct type to avoid borrowing self while
