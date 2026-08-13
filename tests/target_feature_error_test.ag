@@ -1,0 +1,10 @@
+// tests/target_feature_error_test.ag — compile-time rejection of unknown
+// target features. Expected to FAIL compilation (run_tests.sh treats this
+// file's compile failure as success).
+
+import std.sys.entry;
+
+#[target_feature("bogus")]
+i64 f() { return 1; }
+
+i32 main() { return 0; }

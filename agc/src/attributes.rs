@@ -117,11 +117,71 @@ pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
     }
     None
 }
+
+/// Map a `#[target_feature("name")]` name (the same namespace as the
+/// `cpu.*` cfg keys and `std/cpu.ag` probe globals) to the LLVM x86 target
+/// feature string. `None` for unknown names — typeck reports those.
+pub fn llvm_target_feature(name: &str) -> Option<&'static str> {
+    match name {
+        "sse41" => Some("sse4.1"),
+        "sse42" => Some("sse4.2"),
+        "popcnt" => Some("popcnt"),
+        "fma" => Some("fma"),
+        "avx" => Some("avx"),
+        "avx2" => Some("avx2"),
+        "avx512f" => Some("avx512f"),
+        _ => None,
+    }
+}
+
+/// Collect every `#[target_feature("...")]` name on a function into an LLVM
+/// `target-features` attribute value ("+a,+b"), or `None` when none are
+/// present. Multiple attributes AND-compose.
+pub fn function_target_features(attributes: &[ast::Attribute]) -> Option<String> {
+    let mut features: Vec<&str> = Vec::new();
+    for attr in attributes {
+        if attr.name.name != "target_feature" {
+            continue;
+        }
+        if let Some(ast::AttributeArg::Literal(ast::Literal::String(name))) = attr.args.first()
+            && let Some(feature) = llvm_target_feature(name)
+        {
+            features.push(feature);
+        }
+    }
+    if features.is_empty() {
+        None
+    } else {
+        Some(format!("+{}", features.join(",+")))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::Parser;
+
+    #[test]
+    fn target_features_join_with_plus_prefix() {
+        let program = parse(
+            "#[target_feature(\"avx2\")]\n#[target_feature(\"fma\")]\ni64 f() { return 1; }\n",
+        );
+        let attrs = &program.items[0].attributes;
+        assert_eq!(
+            function_target_features(attrs).as_deref(),
+            Some("+avx2,+fma")
+        );
+        // Probe names map to LLVM feature names.
+        assert_eq!(llvm_target_feature("sse41"), Some("sse4.1"));
+        assert_eq!(llvm_target_feature("avx512f"), Some("avx512f"));
+        assert_eq!(llvm_target_feature("nope"), None);
+    }
+
+    #[test]
+    fn no_target_features_returns_none() {
+        let program = parse("#[link_name(\"strlen\")]\ni64 f() { return 1; }\n");
+        assert_eq!(function_target_features(&program.items[0].attributes), None);
+    }
 
     fn parse(source: &str) -> ast::Program {
         let tokens = lex(source).expect("lex failed");

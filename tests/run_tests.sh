@@ -73,6 +73,7 @@ test_specific_flags() {
         tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
+        target_feature_test) echo "--cfg cpu.avx2=1" ;;
         *) echo "" ;;
     esac
 }
@@ -85,6 +86,7 @@ expected_compile_failure() {
         enum_arity_error_test) return 0 ;;
         inherent_drop_error_test) return 0 ;;
         static_volatile_negative_test) return 0 ;;
+        target_feature_error_test) return 0 ;;
         borrow_origin_escape_error_test) return 0 ;;
         launch_wait_error_test) return 0 ;;
         launch_send_error_test) return 0 ;;

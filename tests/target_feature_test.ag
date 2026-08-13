@@ -1,0 +1,60 @@
+// tests/target_feature_test.ag — per-function LLVM target features.
+//
+// `#[target_feature("name")]` sets the LLVM `target-features` function
+// attribute (verified in the emitted IR: `attributes #N = {
+// "target-features"="+avx2" }`), so the x86 backend may select instructions
+// from that feature set for the function only. The feature namespace matches
+// the `cpu.*` cfg keys and std/cpu.ag probe globals. Calling a
+// target_feature function on a CPU without the feature is illegal — always
+// guard with has_*().
+//
+// Harness flags: --cfg cpu.avx2=1 (so the combined cfg+target_feature case
+// exercises item gating AND feature enabling on one function).
+
+import std.cpu;
+import std.sys.entry;
+import std.test;
+
+// Model B: always compiled, enabled for the feature. YMM arithmetic only
+// assembles when the function carries avx2.
+#[target_feature("avx2")]
+i64 ymm_probe() {
+    // vaddpd with 256-bit YMM registers; returns 42 in rax.
+    return asm("vaddpd %ymm0, %ymm1, %ymm2\nmovq $$42, %rax", []);
+}
+
+// Model B: avx512f — compile-proof on any machine; only called when the
+// runtime CPU has avx512f.
+#[target_feature("avx512f")]
+i64 zmm_probe() {
+    // 512-bit ZMM registers require avx512f.
+    return asm("vaddpd %zmm0, %zmm1, %zmm2\nmovq $$7, %rax", []);
+}
+
+// Model A + B hybrid: compiled only when the build enables cpu.avx2, AND
+// feature-enabled for codegen.
+#[cfg(cpu.avx2)]
+#[target_feature("avx2")]
+i64 gated_ymm() {
+    return asm("vaddpd %ymm0, %ymm1, %ymm2\nmovq $$21, %rax", []);
+}
+
+i32 main() {
+    test_start("target_feature runtime");
+    i64 r = 0;
+    if (has_avx2()) { r = ymm_probe(); }
+    assert_eq_i64(42, r, "avx2 function runs behind the runtime guard");
+
+    i64 z = 0;
+    if (has_avx512f()) { z = zmm_probe(); }
+    // Either the CPU has avx512f (7) or it does not (0); both are fine, the
+    // point is the guarded call compiles and the binary is safe either way.
+    if (z != 7 && z != 0) { assert_true(false, "avx512f guard mismatch"); }
+
+    test_start("target_feature cfg hybrid");
+    i64 g = 0;
+    if (@cfg(cpu.avx2)) { g = gated_ymm(); }
+    assert_eq_i64(21, g, "cfg-gated + feature-enabled function");
+
+    return done();
+}

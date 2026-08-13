@@ -425,6 +425,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ));
         };
         Self::apply_function_linkage(function, visibility);
+        Self::apply_target_feature_attributes(function, attributes);
         // Functions named `_start` are entry points for no-libc binaries. Only
         // apply the `naked` attribute when the body is a single asm statement —
         // a user-written `_start` with non-asm body should NOT get naked (the

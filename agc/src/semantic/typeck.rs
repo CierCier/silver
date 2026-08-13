@@ -528,6 +528,33 @@ impl TypeChecker {
                         }
                     }
                 }
+            } else if attr.name.name == "target_feature" {
+                if attr.args.len() != 1 {
+                    errors.push(TypeError {
+                        message: "#[target_feature] expects exactly one argument".to_string(),
+                        span: attr.span,
+                    });
+                } else if let Some(arg) = attr.args.first() {
+                    match arg {
+                        ast::AttributeArg::Literal(ast::Literal::String(name)) => {
+                            if crate::attributes::llvm_target_feature(name).is_none() {
+                                errors.push(TypeError {
+                                    message: format!(
+                                        "unknown target feature '{name}': expected one of \
+                                         sse41, sse42, popcnt, fma, avx, avx2, avx512f"
+                                    ),
+                                    span: attr.span,
+                                });
+                            }
+                        }
+                        _ => {
+                            errors.push(TypeError {
+                                message: "#[target_feature] requires a string literal".to_string(),
+                                span: attr.span,
+                            });
+                        }
+                    }
+                }
             }
         }
         errors

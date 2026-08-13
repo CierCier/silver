@@ -10,6 +10,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
 use inkwell::types::BasicType;
+use inkwell::values::AsValueRef;
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
 
 use crate::codegen::SilverGenerator;
@@ -47,6 +48,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             function.set_linkage(Linkage::Internal);
         } else {
             function.set_linkage(Linkage::External);
+        }
+    }
+
+    /// Apply `#[target_feature("name")]` attributes as an LLVM
+    /// `target-features` function attribute, so the x86 backend may select
+    /// instructions from the listed feature sets for this function only.
+    /// Calling such a function on a CPU lacking the feature is illegal —
+    /// guard with the runtime probes in `std/cpu.ag`.
+    pub(crate) fn apply_target_feature_attributes(
+        function: FunctionValue<'ctx>,
+        attributes: &[ast::Attribute],
+    ) {
+        let Some(features) = crate::attributes::function_target_features(attributes) else {
+            return;
+        };
+        let kind =
+            std::ffi::CString::new("target-features").expect("target-features contains no NUL");
+        let value = std::ffi::CString::new(features).expect("feature string contains no NUL");
+        unsafe {
+            llvm_sys::core::LLVMAddTargetDependentFunctionAttr(
+                function.as_value_ref(),
+                kind.as_ptr(),
+                value.as_ptr(),
+            );
         }
     }
 
