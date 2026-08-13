@@ -1,3 +1,10 @@
+// tests/memcpy_bench.ag — memory intrinsics benchmarks.
+//
+// Measures memcpy/memset (SIMD dispatch), strlen (SSE2), memcmp (16-byte
+// blocks) and memmove (forward/backward SIMD overlap) on heap buffers above
+// 4GB. run_tests.sh compiles with the cpu.* cfg flags, so the fat SIMD
+// paths are live. Compare runs with run_tests.sh --compare.
+
 import std.io;
 import std.mem.alloc;
 import std.mem.memory;
@@ -15,6 +22,7 @@ i32 main() {
     i64 ok = 1;
     i = 0;
     while (i < N) { if (dst[i] != src[i]) { ok = 0; } i = i + 1; }
+
     // large
     silver_rt_memcpy(dst, src, N);
     Instant t0 = now();
@@ -41,6 +49,31 @@ i32 main() {
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("memcpy 64B: {} ns/call ({} us for 2M)", us * 1000 / 2000000, us);
+
+    // strlen on a long string (16KB of 'a's + terminator)
+    u8* big = (u8*)malloc(16385);
+    i = 0;
+    while (i < 16384) { big[i] = (u8)'a'; i = i + 1; }
+    big[16384] = (u8)0;
+    t0 = now();
+    r = 0;
+    while (r < 20000) { strlen((const char*)big); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("strlen 16KB: {} ns/call ({} us for 20K)", us * 1000 / 20000, us);
+    if (strlen((const char*)big) != 16384) { return 2; }
+
+    // memcmp on equal buffers (full scan, not early-exit) — before memset.
+    t0 = now();
+    r = 0;
+    while (r < 100) { memcmp((const void*)src, (const void*)dst, N); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memcmp 8MB: {} us/call ({} us for 100)", us / 100, us);
+    if (memcmp((const void*)src, (const void*)dst, N) != 0) { return 3; }
+
     // memset 8MB
     silver_rt_memset(dst, (u8)0xAB, N);
     ok = 1;
@@ -53,6 +86,17 @@ i32 main() {
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("memset 8MB: {} MB/s ({} us)", (i64)N * 100 * 1000000 / us / 1048576, us);
-    if (ok != 1) { return 1; }
+    if (ok != 1) { return 4; }
+
+    // re-sync dst, then memmove backward overlap, 4MB
+    i = 0;
+    while (i < N) { dst[i] = src[i]; i = i + 1; }
+    t0 = now();
+    r = 0;
+    while (r < 100) { memmove((u8*)((i64)dst + 4096), dst, N / 2); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memmove 4MB: {} MB/s ({} us for 100)", (i64)(N / 2) * 100 * 1000000 / us / 1048576, us);
     return 0;
 }
