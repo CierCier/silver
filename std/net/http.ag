@@ -7,6 +7,7 @@ import std.error;
 import std.fmt;
 import std.mem.drop;
 import std.net.dns;
+import std.net.http_status;
 import std.net.inet;
 import std.net.tcp;
 import std.string;
@@ -40,6 +41,7 @@ struct HttpRequest {
 struct HttpResponse {
     HttpVersion version;
     i32 status;
+    String reason;
     String headers;
     String body;
     i64 content_length;
@@ -146,12 +148,6 @@ bool http_parse_hex(u8* data, i64 start, i64 end, i64* out) {
     return true;
 }
 
-// Statuses that never carry a body (RFC 7230): 1xx, 204, 304.
-bool http_status_has_no_body(i32 status, bool head) {
-    if (head) { return true; }
-    if (status >= 100 && status < 200) { return true; }
-    return status == 204 || status == 304;
-}
 
 /// Append the decimal form of `value` to `out`.
 void http_append_i64(String* out, i64 value) {
@@ -288,6 +284,7 @@ impl HttpResponse {
         HttpResponse response;
         response.version = HttpVersion.Http11;
         response.status = 0;
+        response.reason = String.new();
         response.headers = String.new();
         response.body = String.new();
         response.content_length = -1;
@@ -326,6 +323,11 @@ impl HttpResponse {
         self.status = (i32)((i64)(status_line[9] - (u8)'0') * 100
             + (i64)(status_line[10] - (u8)'0') * 10
             + (i64)(status_line[11] - (u8)'0'));
+        self.reason.drop();
+        self.reason = String.new();
+        if (status_line.len > 12 && status_line[12] == (u8)' ') {
+            self.reason = status_line.substr(13, status_line.len - 13);
+        }
 
         // Headers: CRLF-terminated lines up to the blank line.
         u8* data = raw.data;
@@ -429,15 +431,45 @@ impl HttpResponse {
         return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
     }
 
+    /// The Location header value (redirect target), or an empty string.
+    String location(HttpResponse* self) {
+        u8* data = self.headers.data;
+        i64 len = self.headers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end
+                && http_equal_ci(data, pos, colon, "location")) {
+                i64 value_start = colon + 1;
+                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+                return self.headers.substr(value_start, end - value_start);
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        return String.new();
+    }
+
     Result<i64, Error> read(HttpResponse* self, TcpStream* stream, bool head, i64 max_header, i64 max_body) {
         Result<i64, Error> h = self.read_head(stream, max_header);
         if (h.is_err()) { return h; }
+        // Skip interim 1xx responses (100 Continue, 102, 103) until the final
+        // response; 101 Switching Protocols is final.
+        while (http_status_is_informational(self.status)
+            && self.status != (i32)HttpStatus.SwitchingProtocols) {
+            h = self.read_head(stream, max_header);
+            if (h.is_err()) { return h; }
+        }
         return self.read_body(stream, head, max_body);
     }
 }
 
 impl Drop<HttpResponse> for HttpResponse {
     void drop(HttpResponse* self) {
+        self.reason.drop();
         self.headers.drop();
         self.body.drop();
     }

@@ -166,6 +166,47 @@ i32 run_verb_case(str verb, str body, str headers) {
     return 0;
 }
 
+/// Loopback GET against `wire`; check status, reason phrase, body, and
+/// (optionally) the Location header. `expected_location` null skips the check.
+i32 run_wire_case(str wire, i32 expected_status, str expected_body,
+                  str expected_location, str expected_reason) {
+    TcpListener listener;
+    u16 port = 0;
+    i32 r = bind_loopback(&listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    if (connect_result.failed()) { return 4; }
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    HttpClient client = HttpClient.new();
+    Result<HttpConnection, Error> connection_result =
+        client.connect(&connect_addr, HttpVersion.Http11);
+    if (connection_result.failed()) { return 5; }
+    HttpConnection connection = connection_result.unwrap();
+
+    Result<i64, Error> accept_result = listener.accept();
+    if (accept_result.failed()) { return 6; }
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+    Result<i64, Error> server_write =
+        server.write((u8*)wire, strlen(wire));
+    if (server_write.failed()) { return 7; }
+
+    HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/status", "fixture.test");
+    Result<HttpResponse, Error> response_result =
+        connection.send(&request, 65536, 1024);
+    if (response_result.failed()) { return 8; }
+    HttpResponse response = response_result.unwrap();
+    if (response.status != expected_status) { return 9; }
+    if (!response.reason.equals(expected_reason)) { return 10; }
+    if (!response.body.equals(expected_body)) { return 11; }
+    if (expected_location != (str)0) {
+        String loc = response.location();
+        if (!loc.equals(expected_location)) { return 12; }
+    }
+    return 0;
+}
+
 /// GET `/?format=json` from api.ipify.org and check the JSON shape.
 i32 run_get_public_case() {
     HttpClient client = HttpClient.new();
@@ -206,6 +247,52 @@ i32 run_get_public_case() {
     test_start("client.head convenience");
     assert_eq_i64(0, run_verb_case("HEAD", (str)0, (str)0),
         "HEAD request");
+
+    test_start("http status helpers");
+    assert_eq_i64((i64)(i32)HttpStatus.NotFound, 404, "HttpStatus.NotFound == 404");
+    assert_true(http_status_is_redirect(301), "301 is redirect");
+    assert_true(http_status_is_success(200), "200 is success");
+    assert_true(http_status_has_no_body(204, false), "204 has no body");
+    assert_true(http_status_has_no_body(205, false), "205 has no body");
+    assert_true(!http_status_has_no_body(200, false), "200 has a body");
+    assert_true(strcmp(http_status_reason(404), "Not Found") == 0, "reason(404)");
+
+    test_start("204 no content");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+        204, "", (str)0, "No Content"),
+        "204 parsed with empty body");
+
+    test_start("205 reset content");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n",
+        205, "", (str)0, "Reset Content"),
+        "205 parsed with empty body");
+
+    test_start("304 not modified");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
+        304, "", (str)0, "Not Modified"),
+        "304 parsed with empty body");
+
+    test_start("404 with body");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+        404, "nope", (str)0, "Not Found"),
+        "404 parsed with body");
+
+    test_start("interim 100 skipped");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 100 Continue\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+        200, "hi", (str)0, "OK"),
+        "100 Continue skipped, final 200 parsed");
+
+    test_start("301 location");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: http://example.com/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        301, "", "http://example.com/", "Moved Permanently"),
+        "301 parsed with Location header");
 
     test_start("client.get public API");
     assert_eq_i64(0, run_get_public_case(), "GET convenience against public API");
