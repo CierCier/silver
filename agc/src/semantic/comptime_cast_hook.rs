@@ -120,6 +120,15 @@ fn rewrite_expression(expression: &mut ast::Expression) {
                 rewrite_block(else_branch);
             }
         }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_expression(condition);
+            rewrite_expression(then_expr);
+            rewrite_expression(else_expr);
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression(condition);
             rewrite_block(body);

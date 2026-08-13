@@ -1199,6 +1199,46 @@ impl TypeChecker {
                     left_ty
                 }
             },
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let cond_ty = self.check_expr(condition, None);
+                if !is_bool(&cond_ty) {
+                    self.error(
+                        format!("ternary condition must be bool, found {}", cond_ty),
+                        condition.span,
+                    );
+                }
+                let then_ty = self.check_expr(then_expr, expected);
+                let else_ty = self.check_expr(else_expr, expected);
+                if then_ty == else_ty {
+                    then_ty
+                } else if let Some(exp) = expected {
+                    if self.is_assignable(exp, &then_ty) && self.is_assignable(exp, &else_ty) {
+                        exp.clone()
+                    } else {
+                        self.error(
+                            format!(
+                                "ternary branches must have the same type, found {} and {}",
+                                then_ty, else_ty
+                            ),
+                            expr.span,
+                        );
+                        then_ty
+                    }
+                } else {
+                    self.error(
+                        format!(
+                            "ternary branches must have the same type, found {} and {}",
+                            then_ty, else_ty
+                        ),
+                        expr.span,
+                    );
+                    then_ty
+                }
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,
@@ -5537,6 +5577,15 @@ fn rewrite_expression_bare_constructors(
                 rewrite_block_bare_constructors(else_block, rewrites);
             }
         }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_expression_bare_constructors(condition, rewrites);
+            rewrite_expression_bare_constructors(then_expr, rewrites);
+            rewrite_expression_bare_constructors(else_expr, rewrites);
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression_bare_constructors(condition, rewrites);
             rewrite_block_bare_constructors(body, rewrites);
@@ -5932,6 +5981,39 @@ mod tests {
         let program = parse("i32 main() { i32 x = 1; return x; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_ternary_with_matching_branches() {
+        let program =
+            parse("i32 main() { i64 a = 5; i64 b = 3; i64 mx = a > b ? a : b; return (i32)mx; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "type errors: {errors:?}");
+    }
+
+    #[test]
+    fn reports_ternary_branch_mismatch() {
+        let program =
+            parse("i32 main() { i64 a = 1; f64 b = 2.0; bool c = true; c ? a : b; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("ternary branches must have the same type")),
+            "expected branch mismatch error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reports_ternary_non_bool_condition() {
+        let program = parse("i32 main() { i64 x = 5 ? 1 : 2; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("ternary condition must be bool")),
+            "expected condition error, got: {errors:?}"
+        );
     }
 
     #[test]

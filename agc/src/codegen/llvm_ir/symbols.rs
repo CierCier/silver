@@ -543,6 +543,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::ExpressionKind::Index { object, .. } => {
                 Self::substitute_expression_types(object, mapping)
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                Self::substitute_expression_types(condition, mapping);
+                Self::substitute_expression_types(then_expr, mapping);
+                Self::substitute_expression_types(else_expr, mapping);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

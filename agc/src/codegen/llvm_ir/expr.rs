@@ -951,6 +951,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 self.emit_if_expression_value(condition, then_branch, else_branch, &expr.span)
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                // Reuse the value-if machinery: wrap each branch in a
+                // single-expression block, then phi-merge the results.
+                let then_block = ast::Block {
+                    statements: vec![ast::Statement {
+                        kind: ast::StatementKind::Expression((**then_expr).clone()),
+                        span: then_expr.span,
+                    }],
+                    span: then_expr.span,
+                };
+                let else_block = ast::Block {
+                    statements: vec![ast::Statement {
+                        kind: ast::StatementKind::Expression((**else_expr).clone()),
+                        span: else_expr.span,
+                    }],
+                    span: else_expr.span,
+                };
+                self.emit_if_expression_value(condition, &then_block, &else_block, &expr.span)
+            }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.emit_match_expression_value(expression, arms, &expr.span)
             }

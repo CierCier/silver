@@ -586,6 +586,15 @@ impl Analyzer {
                 self.check_expression(object);
                 self.check_expression(index);
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.check_expression(condition);
+                self.check_expression(then_expr);
+                self.check_expression(else_expr);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

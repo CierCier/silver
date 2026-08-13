@@ -521,6 +521,15 @@ impl MoveChecker {
             | ast::ExpressionKind::Comptime(operand) => {
                 self.check_expr(operand, state, scopes, var_types);
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.check_expr(condition, state, scopes, var_types);
+                self.check_expr(then_expr, state, scopes, var_types);
+                self.check_expr(else_expr, state, scopes, var_types);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

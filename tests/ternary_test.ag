@@ -1,0 +1,57 @@
+// tests/ternary_test.ag — `cond ? then : else` expressions.
+//
+// Covers: basic selection, nested ternaries, @cfg-folded ternaries (constant
+// conditions collapse before typeck), expected-type branch coercion, and the
+// value-producing conditional in various positions.
+
+import std.cpu;
+import std.sys.entry;
+import std.test;
+
+#[cfg(never_set)]
+i32 ghost() { return 99; }
+
+i32 main() {
+    test_start("ternary basic");
+    i64 a = 5;
+    i64 b = 3;
+    i64 mx = a > b ? a : b;
+    i64 mn = a > b ? b : a;
+    assert_eq_i64(5, mx, "true branch selected");
+    assert_eq_i64(3, mn, "false branch selected");
+
+    test_start("ternary nested");
+    // Nested ternaries chain through the else branch (right-associative).
+    i64 nested = a > b ? (b > 4 ? b : 4) : (a > 1 ? a : 1);
+    assert_eq_i64(4, nested, "nested then-branch");
+    i64 chain = a < b ? 1 : b < 4 ? 2 : 3;
+    assert_eq_i64(2, chain, "else-if-style chain");
+
+    test_start("ternary cfg fold");
+    // @cfg folds to a literal, so constant ternaries collapse before typeck
+    // and dead branches may reference gated-out items.
+    i64 gated = @cfg(never_set) ? ghost() : 7;
+    assert_eq_i64(7, gated, "absent cfg folds false, dead branch pruned");
+    i64 cpu = @cfg(cpu.sse41) ? 1 : 2;
+    i64 expect = 0;
+    if (has_sse41()) { expect = 1; } else { expect = 2; }
+    assert_eq_i64(expect, cpu, "cpu cfg ternary agrees with probe");
+
+    test_start("ternary expected-type");
+    // Both branches assignable to the target type (float truncation is the
+    // language's assignment rule).
+    i64 truncated = true ? 1 : 2.5;
+    assert_eq_i64(1, truncated, "expected-type coercion");
+
+    test_start("ternary expression positions");
+    // Ternary in a call argument.
+    i64 arg = a > b ? a : b;
+    assert_eq_i64(5, arg, "value in argument position");
+    // Ternary as a statement (value discarded).
+    a > b ? 10 : 20;
+    // Ternary in a comparison operand.
+    i64 cmp = (a > b ? 1 : 0) == 1 ? 100 : 200;
+    assert_eq_i64(100, cmp, "ternary composes with operators");
+
+    return done();
+}

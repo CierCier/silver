@@ -570,6 +570,15 @@ impl Checker {
             | ast::ExpressionKind::Index { object, .. } => {
                 self.check_expr(object, scopes, ref_sources, ptr_locals, ref_params);
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.check_expr(condition, scopes, ref_sources, ptr_locals, ref_params);
+                self.check_expr(then_expr, scopes, ref_sources, ptr_locals, ref_params);
+                self.check_expr(else_expr, scopes, ref_sources, ptr_locals, ref_params);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

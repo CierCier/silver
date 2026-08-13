@@ -379,6 +379,15 @@ fn collect_expression_instantiations(
         | ast::ExpressionKind::Index { object, .. } => {
             collect_expression_instantiations(object, generic_structs, instantiations, scopes);
         }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expression_instantiations(condition, generic_structs, instantiations, scopes);
+            collect_expression_instantiations(then_expr, generic_structs, instantiations, scopes);
+            collect_expression_instantiations(else_expr, generic_structs, instantiations, scopes);
+        }
         ast::ExpressionKind::Binary { left, right, .. } => {
             collect_expression_instantiations(left, generic_structs, instantiations, scopes);
             collect_expression_instantiations(right, generic_structs, instantiations, scopes);
@@ -886,6 +895,15 @@ fn substitute_statement_types(stmt: &mut ast::Statement, mapping: &HashMap<Strin
 
 fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<String, Type>) {
     match expr.kind.as_mut() {
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            substitute_expression_types(condition, mapping);
+            substitute_expression_types(then_expr, mapping);
+            substitute_expression_types(else_expr, mapping);
+        }
         ast::ExpressionKind::TypeName(ty) => {
             *ty = substitute_ast_type(ty, mapping);
         }
@@ -1144,6 +1162,15 @@ fn rewrite_expression_function_calls(
     param_count: usize,
 ) {
     match expr.kind.as_mut() {
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(then_expr, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(else_expr, name, args, mangled, span, param_count);
+        }
         ast::ExpressionKind::Call {
             function,
             arguments,
@@ -1430,6 +1457,15 @@ fn rewrite_expression_method_calls(
     span: &Span,
 ) {
     match expr.kind.as_mut() {
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_expression_method_calls(condition, base, method, args, span);
+            rewrite_expression_method_calls(then_expr, base, method, args, span);
+            rewrite_expression_method_calls(else_expr, base, method, args, span);
+        }
         ast::ExpressionKind::MethodCall {
             receiver,
             method: call_method,
@@ -1939,6 +1975,15 @@ fn collect_expression_remaining_calls(
 ) -> Vec<(String, Vec<Type>, Span, usize)> {
     let mut results = Vec::new();
     match expr.kind.as_ref() {
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            results.extend(collect_expression_remaining_calls(condition, generic_fns));
+            results.extend(collect_expression_remaining_calls(then_expr, generic_fns));
+            results.extend(collect_expression_remaining_calls(else_expr, generic_fns));
+        }
         ast::ExpressionKind::Call {
             function,
             arguments,

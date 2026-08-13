@@ -611,6 +611,17 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children.push(expression_node(index));
             n
         }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let mut n = Node::new("Expr::Ternary");
+            n.children.push(expression_node(condition));
+            n.children.push(expression_node(then_expr));
+            n.children.push(expression_node(else_expr));
+            n
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,

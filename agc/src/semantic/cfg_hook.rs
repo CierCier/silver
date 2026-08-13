@@ -154,6 +154,26 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
                 }
             }
         }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_expression(condition, cfg);
+            if let ast::ExpressionKind::Literal(ast::Literal::Bool(value)) = &*condition.kind {
+                // Constant condition: keep only the live branch, rewritten.
+                let mut chosen = if *value {
+                    (**then_expr).clone()
+                } else {
+                    (**else_expr).clone()
+                };
+                rewrite_expression(&mut chosen, cfg);
+                *expression = chosen;
+            } else {
+                rewrite_expression(then_expr, cfg);
+                rewrite_expression(else_expr, cfg);
+            }
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression(condition, cfg);
             rewrite_block(body, cfg);

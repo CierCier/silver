@@ -1025,6 +1025,15 @@ impl Walker<'_> {
                 self.walk_expr(object);
                 self.walk_expr(index);
             }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.walk_expr(condition);
+                self.walk_expr(then_expr);
+                self.walk_expr(else_expr);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

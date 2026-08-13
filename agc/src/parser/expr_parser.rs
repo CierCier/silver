@@ -1896,6 +1896,39 @@ fn parse_logical_or(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
 
 fn parse_assignment(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let lhs = parse_logical_or(cursor)?;
+
+    // Ternary: `cond ? then : else` — binds tighter than assignment, looser
+    // than logical-or; the else branch is right-associative (nested ternaries
+    // chain through it). Both branches are assignments, mirroring C's middle
+    // operand.
+    if matches!(cursor.current().map(|t| &t.kind), Some(Token::Question)) {
+        cursor.bump();
+        let then_expr = parse_assignment(cursor)?;
+        let Some(colon) = cursor.current() else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ':' in ternary expression".to_string(),
+                span: lhs.span,
+            });
+        };
+        if !matches!(colon.kind, Token::Colon) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ':' in ternary expression".to_string(),
+                span: colon.span,
+            });
+        }
+        cursor.bump();
+        let else_expr = parse_assignment(cursor)?;
+        let span = lhs.span.extend_to(&else_expr.span);
+        return Ok(ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Ternary {
+                condition: Box::new(lhs),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            }),
+            span,
+        });
+    }
+
     let Some(token) = cursor.current() else {
         return Ok(lhs);
     };

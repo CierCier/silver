@@ -649,6 +649,13 @@ pub enum ExpressionKind {
         then_branch: Block,
         else_branch: Option<Block>,
     },
+    /// `cond ? then_expr : else_expr` — the first value-producing
+    /// conditional: both branches must have the same type.
+    Ternary {
+        condition: Box<Expression>,
+        then_expr: Box<Expression>,
+        else_expr: Box<Expression>,
+    },
     While {
         condition: Box<Expression>,
         body: Block,

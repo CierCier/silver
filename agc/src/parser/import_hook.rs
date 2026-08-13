@@ -429,6 +429,15 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
             }
         }
         ast::ExpressionKind::Block(block) => scan_block_for_bare_ctor(block, ctor, found),
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            scan_expr_for_bare_ctor(condition, ctor, found);
+            scan_expr_for_bare_ctor(then_expr, ctor, found);
+            scan_expr_for_bare_ctor(else_expr, ctor, found);
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,
