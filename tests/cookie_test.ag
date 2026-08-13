@@ -1,0 +1,351 @@
+// tests/cookie_test.ag — Go net/http-style cookie jar behavior.
+//
+// Loopback server threads preload Set-Cookie responses and capture each
+// request head, so the tests assert exactly what the client puts on the
+// wire — mirroring Go's automatic jar flow (Client.Jar set → Set-Cookie
+// stored, Cookie header added on later requests) and RFC 6265 rules
+// (domain/path matching, expiry, dedup, longest-path-first ordering).
+
+import std.fmt;
+import std.net.cookie;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.entry;
+import std.test;
+import std.thread;
+
+// Shared server-thread state (single active case at a time).
+TcpListener g_listener;
+u8 g_head0[2048];
+u8 g_head1[2048];
+u8 g_head2[2048];
+i64 g_connections;
+str g_wire0;
+str g_wire1;
+str g_wire2;
+i64 g_status;
+
+/// Serve g_wire0..g_wire2 over g_connections connections, capturing each
+/// request head into g_head0..g_head2.
+void cookie_server_main(i64 unused) {
+    i32 n = 0;
+    while (n < g_connections) {
+        Result<i64, Error> a = g_listener.accept();
+        if (a.failed()) { g_status = 6; return; }
+        TcpStream s = TcpStream.from_fd((i32)a.value());
+        u8* head = g_head0;
+        if (n == 1) { head = &g_head1[0]; }
+        else if (n == 2) { head = &g_head2[0]; }
+        i64 hlen = 0;
+        u8 byte[1];
+        while (true) {
+            Result<i64, Error> r = s.read(&byte[0], 1);
+            if (r.is_err() || r.value() == 0) { g_status = 10; return; }
+            head[hlen] = byte[0];
+            hlen = hlen + 1;
+            if (hlen >= 2046) { g_status = 10; return; }
+            if (hlen >= 4 && head[hlen - 4] == (u8)'\r'
+                && head[hlen - 3] == (u8)'\n'
+                && head[hlen - 2] == (u8)'\r'
+                && head[hlen - 1] == (u8)'\n') { break; }
+        }
+        head[hlen] = (u8)0;
+        str wire = g_wire0;
+        if (n == 1) { wire = g_wire1; }
+        else if (n == 2) { wire = g_wire2; }
+        Result<i64, Error> w = s.write((u8*)wire, strlen(wire));
+        if (w.failed()) { g_status = 7; return; }
+        s.close();
+        n = n + 1;
+    }
+    g_status = 0;
+}
+
+/// Bind an ephemeral loopback listener; report its port.
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+/// Build "http://127.0.0.1:<port><path>".
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+const str OK_WIRE = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+/// Run a jar-backed multi-request case. Each url is fetched in order; the
+/// captured heads are then checked by the caller via `check`.
+i32 run_jar_case(u16 port, i32 connections) {
+    g_connections = connections;
+    g_status = -1;
+    TaskRecord* server_handle = thread_spawn(cookie_server_main, 0);
+    if (server_handle == (TaskRecord*)0) { return 16; }
+    HttpClient client = HttpClient.new();
+    CookieJar jar = CookieJar.new();
+    client.set_jar(move jar);
+    i32 k = 0;
+    while (k < connections) {
+        String url = build_url(port, "/p");
+        Result<HttpResponse, Error> r = client.get((str)url.data);
+        url.drop();
+        if (r.failed()) { thread_join(server_handle); return 8; }
+        k = k + 1;
+    }
+    if (thread_join(server_handle) < 0) { return 16; }
+    if (g_status != 0) { return g_status; }
+    return 0;
+}
+
+bool head_contains(u8* head, str needle) {
+    String s = String.from_str((str)head);
+    bool found = s.find(needle) >= 0;
+    s.drop();
+    return found;
+}
+
+i32 main() {
+    // --- Cookie.String() serialization, Go's attribute order ---
+    test_start("cookie serialization");
+    {
+        Cookie c = Cookie.new("session", "abc");
+        c.max_age = 3600;
+        c.path.drop();
+        c.path = String.from_str("/");
+        c.http_only = true;
+        c.same_site = SameSite.Lax;
+        String out = String.new();
+        c.to_string(&mut out);
+        assert_true(out.equals("session=abc; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax"),
+            "Go 1.26 Cookie.String() order");
+        out.drop();
+        c.drop();
+    }
+
+    // --- Basic round trip: Set-Cookie stored, Cookie sent next request ---
+    test_start("set-cookie round trip");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: session=abc123; Path=/; HttpOnly\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = OK_WIRE;
+        g_wire2 = (str)0;
+        assert_eq_i64(0, run_jar_case(port, 2), "jar round trip");
+        assert_true(head_contains(&g_head1[0], "Cookie: session=abc123"),
+            "second request carries the cookie");
+        assert_true(head_contains(&g_head1[0], "Host: 127.0.0.1"),
+            "host header still present");
+    }
+
+    // --- Path scoping: Path=/admin only matches /admin descendants ---
+    test_start("cookie path scoping");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: admin=1; Path=/admin\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = OK_WIRE;
+        g_wire2 = OK_WIRE;
+        g_connections = 3;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(cookie_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            CookieJar jar = CookieJar.new();
+            client.set_jar(move jar);
+            String u1 = build_url(port, "/admin/setup");
+            Result<HttpResponse, Error> r1 = client.get((str)u1.data);
+            u1.drop();
+            assert_true(!r1.failed(), "setup request");
+            String u2 = build_url(port, "/");
+            Result<HttpResponse, Error> r2 = client.get((str)u2.data);
+            u2.drop();
+            assert_true(!r2.failed(), "root request");
+            String u3 = build_url(port, "/admin/dash");
+            Result<HttpResponse, Error> r3 = client.get((str)u3.data);
+            u3.drop();
+            assert_true(!r3.failed(), "admin request");
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+        assert_true(!head_contains(&g_head1[0], "Cookie:"), "no cookie for /");
+        assert_true(head_contains(&g_head2[0], "Cookie: admin=1"), "cookie for /admin/dash");
+    }
+
+    // --- Domain rules: foreign Domain rejected, host-only accepted ---
+    test_start("cookie domain matching");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: bad=1; Domain=example.com\r\nSet-Cookie: good=2\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = OK_WIRE;
+        g_wire2 = (str)0;
+        assert_eq_i64(0, run_jar_case(port, 2), "jar domain case");
+        assert_true(head_contains(&g_head1[0], "Cookie: good=2"), "host-only cookie sent");
+        assert_true(!head_contains(&g_head1[0], "bad=1"), "foreign-domain cookie rejected");
+    }
+
+    // --- Multiple cookies, attributes, creation order ---
+    test_start("cookie ordering and attributes");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Max-Age=3600; SameSite=Lax\r\nSet-Cookie: b=2\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = OK_WIRE;
+        g_wire2 = (str)0;
+        assert_eq_i64(0, run_jar_case(port, 2), "jar multi-cookie case");
+        assert_true(head_contains(&g_head1[0], "Cookie: a=1; b=2"), "cookie header in creation order");
+    }
+
+    // --- Expired cookies are never sent ---
+    test_start("expired cookie not sent");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: gone=1; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = OK_WIRE;
+        g_wire2 = (str)0;
+        assert_eq_i64(0, run_jar_case(port, 2), "jar expired case");
+        assert_true(!head_contains(&g_head1[0], "Cookie:"), "expired cookie not sent");
+    }
+
+    // --- Response.Cookies() parsing without a jar ---
+    test_start("response.cookies parsing");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = "HTTP/1.1 200 OK\r\nSet-Cookie: one=1; Path=/p; HttpOnly\r\nSet-Cookie: two=\"quoted value\"\r\nContent-Length: 2\r\n\r\nok";
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(cookie_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/p");
+            Result<HttpResponse, Error> r1 = client.get((str)url.data);
+            url.drop();
+            assert_true(!r1.failed(), "request");
+            HttpResponse response = r1.unwrap();
+            Vec<Cookie> cookies = response.cookies();
+            assert_eq_i64(cookies.len, 2, "two cookies parsed");
+            if (cookies.len == 2) {
+                Cookie first = cookies.get(0);
+                Cookie second = cookies.get(1);
+                assert_true(first.name.equals("one") && first.value.equals("1"), "first cookie");
+                assert_true(first.path.equals("/p") && first.http_only, "first cookie attrs");
+                assert_true(second.name.equals("two") && second.value.equals("quoted value"),
+                    "quoted value unquoted");
+                first.drop();
+                second.drop();
+            }
+            cookies.drop();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+    }
+
+    // --- Request.AddCookie merges into one Cookie header (Go) ---
+    test_start("add_cookie merges");
+    {
+        u16 port = 0;
+        i32 r = bind_loopback(&g_listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_wire0 = OK_WIRE;
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(cookie_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/p");
+            HttpRequest req = HttpRequest.new("GET", (str)url.data, (str)0);
+            req.add_cookie("a", "1");
+            req.add_cookie("b", "2");
+            Result<HttpResponse, Error> r1 = client.do(&req);
+            url.drop();
+            assert_true(!r1.failed(), "request");
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+        assert_true(head_contains(&g_head0[0], "Cookie: a=1; b=2"), "single merged Cookie header");
+        String head = String.from_str((str)&g_head0[0]);
+        assert_true(head.find("Cookie: a=1; b=2") >= 0, "merged");
+        assert_true(head.find("Cookie: a=1\r\nCookie: b=2") < 0, "not duplicated");
+        head.drop();
+    }
+
+    // --- Jar rules verified against Go's net/http/cookiejar (oracle) ---
+    test_start("jar path ordering");
+    {
+        CookieJar jar = CookieJar.new();
+        Cookie a = Cookie.new("a", "1");
+        a.path.drop();
+        a.path = String.from_str("/a/b/c");
+        Cookie b = Cookie.new("b", "2");
+        b.path.drop();
+        b.path = String.from_str("/a");
+        Cookie c = Cookie.new("c", "3");
+        jar.set_cookie("127.0.0.1", "/", move a);
+        jar.set_cookie("127.0.0.1", "/", move b);
+        jar.set_cookie("127.0.0.1", "/", move c);
+        String out = jar.cookies_for("127.0.0.1", "/a/b/c/x");
+        assert_true(out.equals("a=1; b=2; c=3"), "longest path first, oldest on ties");
+        out.drop();
+        jar.drop();
+    }
+
+    test_start("jar max-age deletes");
+    {
+        CookieJar jar = CookieJar.new();
+        Cookie sid = Cookie.new("sid", "1");
+        jar.set_cookie("127.0.0.1", "/", move sid);
+        Cookie del = Cookie.new("sid", "2");
+        del.max_age = -1;
+        jar.set_cookie("127.0.0.1", "/", move del);
+        String out = jar.cookies_for("127.0.0.1", "/");
+        assert_eq_i64(out.len, 0, "Max-Age=-1 removes the cookie");
+        out.drop();
+        jar.drop();
+    }
+
+    test_start("jar secure cookie to loopback");
+    {
+        CookieJar jar = CookieJar.new();
+        Cookie s = Cookie.new("s", "1");
+        s.secure = true;
+        jar.set_cookie("127.0.0.1", "/", move s);
+        String out = jar.cookies_for("127.0.0.1", "/");
+        assert_true(out.equals("s=1"), "secure cookie sent to loopback origin");
+        out.drop();
+        jar.drop();
+    }
+
+    return done();
+}

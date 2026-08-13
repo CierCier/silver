@@ -1,0 +1,832 @@
+// std/net/cookie.ag — RFC 6265 cookies and a Go net/http/cookiejar-style jar.
+//
+// Mirrors Go's model: Cookie (Name/Value/Path/Domain/Expires/MaxAge/Secure/
+// HttpOnly/SameSite with Go's SameSite values), ReadSetCookies-style parsing
+// of Set-Cookie values (quoted values, comma-separated cookies, unknown
+// attributes ignored), Cookie.String()-order serialization, and a CookieJar
+// that applies domain/path matching, expiry, and dedup when the client stores
+// responses and builds outgoing Cookie headers. Max-Age wins over Expires;
+// negative/zero Max-Age is ignored exactly like Go's jar (golang/go#31631).
+// The jar does not implement the public suffix list.
+//
+// This module also hosts the shared HTTP byte utilities (case-insensitive
+// compare, decimal parsing, whitespace tests) used by the client, so the
+// low-level helpers live in one place below the net/http client.
+
+import std.fmt;
+import std.mem.vec;
+import std.net.inet;
+import std.string;
+import std.sys.raw.time;
+import std.time;
+
+const i64 HTTP_CLOCK_REALTIME = 0;
+
+const str HTTP_RFC1123_WEEKDAYS = "SunMonTueWedThuFriSat";
+const str HTTP_RFC1123_MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
+
+// --- Shared HTTP byte helpers ---------------------------------------------
+// Silver's `char` is 4 bytes wide, so protocol bytes are compared as u8
+// against self-documenting (u8)'x' literals rather than raw ASCII numbers.
+
+bool http_is_space(u8 ch) {
+    return ch == (u8)' ' || ch == (u8)'\t';
+}
+
+bool http_is_digit(u8 ch) {
+    return ch >= (u8)'0' && ch <= (u8)'9';
+}
+
+u8 http_lower(u8 ch) {
+    if (ch >= (u8)'A' && ch <= (u8)'Z') { return ch - (u8)'A' + (u8)'a'; }
+    return ch;
+}
+
+/// Case-insensitive compare of `data[start..end]` against `expected`.
+bool http_equal_ci(u8* data, i64 start, i64 end, str expected) {
+    u8* wanted = (u8*)expected;
+    i64 wanted_len = strlen(expected);
+    if (end - start != wanted_len) { return false; }
+    i64 i = 0;
+    while (i < wanted_len) {
+        if (http_lower(data[start + i]) != http_lower(wanted[i])) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// Parse the decimal integer in `data[start..end]`, allowing surrounding
+/// whitespace. Returns false when the range is not a valid integer.
+bool http_parse_i64(u8* data, i64 start, i64 end, i64* out) {
+    i64 i = start;
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    if (i == end) { return false; }
+    i64 value = 0;
+    i64 digits = 0;
+    while (i < end && http_is_digit(data[i])) {
+        value = value * 10 + (i64)(data[i] - (u8)'0');
+        digits = digits + 1;
+        i = i + 1;
+    }
+    while (i < end && http_is_space(data[i])) { i = i + 1; }
+    if (digits == 0 || i != end) { return false; }
+    *out = value;
+    return true;
+}
+
+/// Append the decimal form of `value` to `out`.
+void http_append_i64(String* out, i64 value) {
+    u8 digits[32];
+    i64 len = itoa(value, &digits[0]);
+    i64 i = 0;
+    while (i < len) {
+        out.push(digits[i]);
+        i = i + 1;
+    }
+}
+
+// --- Clock ----------------------------------------------------------------
+
+/// Current wall-clock time in unix seconds (CLOCK_REALTIME).
+i64 http_unix_now() {
+    Timespec ts;
+    sys_clock_gettime(HTTP_CLOCK_REALTIME, (i64)&ts);
+    return ts.sec;
+}
+
+// --- Cookie ---------------------------------------------------------------
+
+/// Go's http.SameSite values (SameSiteDefaultMode=1 .. SameSiteNoneMode=4).
+enum SameSite {
+    Default = 1;
+    Lax = 2;
+    Strict = 3;
+    None = 4;
+}
+
+struct Cookie {
+    String name;
+    String value;
+    String path;
+    String domain;
+    i64 expires; // unix seconds; -1 = session cookie (no expiry)
+    i64 max_age; // >0 seconds; 0 = absent; <0 = delete marker (Go's Cookie.MaxAge)
+    bool secure;
+    bool http_only;
+    SameSite same_site;
+    bool quoted; // value was quoted in the Set-Cookie header (Go's Cookie.Quoted)
+    i64 creation_seq; // per-jar monotonic sequence; jar ordering tiebreak
+}
+
+impl Cookie {
+    Cookie new(str name, str value) {
+        Cookie cookie;
+        cookie.name = String.from_str(name);
+        cookie.value = String.from_str(value);
+        cookie.path = String.new();
+        cookie.domain = String.new();
+        cookie.expires = -1;
+        cookie.max_age = 0;
+        cookie.secure = false;
+        cookie.http_only = false;
+        cookie.same_site = SameSite.Default;
+        cookie.quoted = false;
+        cookie.creation_seq = 0;
+        return move cookie;
+    }
+
+    bool is_expired(Cookie* self, i64 now) {
+        return self.expires >= 0 && self.expires <= now;
+    }
+
+    /// Go's Cookie.String(): an empty string for an invalid name; the value
+    /// is re-quoted when it contains space/comma or was quoted; attributes
+    /// follow Go 1.26's order (Path, Domain, Expires, Max-Age, HttpOnly,
+    /// Secure, SameSite). Max-Age < 0 serializes as "Max-Age=0" (deletion).
+    void to_string(Cookie* self, String* out) {
+        if (!http_cookie_name_valid((str)self.name.data)) { return; }
+        out.push_str((str)self.name.data);
+        out.push((u8)'=');
+        bool needs_quotes = self.quoted;
+        i64 i = 0;
+        while (i < self.value.len) {
+            if (self.value.data[i] == (u8)' ' || self.value.data[i] == (u8)',') { needs_quotes = true; break; }
+            i = i + 1;
+        }
+        if (needs_quotes) { out.push((u8)'"'); }
+        out.push_str((str)self.value.data);
+        if (needs_quotes) { out.push((u8)'"'); }
+        if (self.path.len > 0) {
+            out.push_str("; Path=");
+            out.push_str((str)self.path.data);
+        }
+        if (self.domain.len > 0) {
+            out.push_str("; Domain=");
+            u8* d = self.domain.data;
+            if (d[0] == (u8)'.') { out.push_str((str)&d[1]); }
+            else { out.push_str((str)d); }
+        }
+        if (self.expires >= 0 && http_expires_year_ok(self.expires)) {
+            out.push_str("; Expires=");
+            http_format_rfc1123(out, self.expires);
+        }
+        if (self.max_age > 0) {
+            out.push_str("; Max-Age=");
+            http_append_i64(out, self.max_age);
+        } else if (self.max_age < 0) {
+            out.push_str("; Max-Age=0");
+        }
+        if (self.http_only) { out.push_str("; HttpOnly"); }
+        if (self.secure) { out.push_str("; Secure"); }
+        if (self.same_site == SameSite.Lax) { out.push_str("; SameSite=Lax"); }
+        else if (self.same_site == SameSite.Strict) { out.push_str("; SameSite=Strict"); }
+        else if (self.same_site == SameSite.None) { out.push_str("; SameSite=None"); }
+    }
+}
+
+impl Drop<Cookie> for Cookie {
+    void drop(Cookie* self) {
+        self.name.drop();
+        self.value.drop();
+        self.path.drop();
+        self.domain.drop();
+    }
+}
+
+/// Drop every element of `v` (each Cookie owns Strings) and free the buffer.
+void http_cookie_vec_drop(Vec<Cookie>* v) {
+    i64 i = 0;
+    while (i < v.len) {
+        Cookie c = v.take(i);
+        c.drop();
+        i = i + 1;
+    }
+    v.drop();
+}
+
+// --- Set-Cookie parsing (Go's ReadSetCookies) -----------------------------
+
+/// Go's isToken (RFC 2616 token / RFC 7230 tchar): letters, digits, and
+/// "!#$%&'*+-.^_`|~" — everything else is invalid in a cookie name.
+bool http_cookie_name_byte_ok(u8 ch) {
+    if ((ch >= (u8)'0' && ch <= (u8)'9')
+        || (ch >= (u8)'A' && ch <= (u8)'Z')
+        || (ch >= (u8)'a' && ch <= (u8)'z')) { return true; }
+    if (ch == (u8)'!' || ch == (u8)'#' || ch == (u8)'$' || ch == (u8)'%'
+        || ch == (u8)'&' || ch == (u8)'\'' || ch == (u8)'*' || ch == (u8)'+'
+        || ch == (u8)'-' || ch == (u8)'.' || ch == (u8)'^' || ch == (u8)'_'
+        || ch == (u8)'`' || ch == (u8)'|' || ch == (u8)'~') { return true; }
+    return false;
+}
+
+/// Go's validCookieValueByte: printable ASCII (space and comma included)
+/// except " ; and backslash; control bytes and DEL are invalid.
+bool http_cookie_value_byte_ok(u8 ch) {
+    return ch >= (u8)' ' && ch < (u8)127
+        && ch != (u8)'"' && ch != (u8)';' && ch != (u8)'\\';
+}
+
+/// Go's isToken over a whole name: non-empty, every byte a token char.
+bool http_cookie_name_valid(str name) {
+    u8* p = (u8*)name;
+    i64 len = strlen(name);
+    if (len == 0) { return false; }
+    i64 i = 0;
+    while (i < len) {
+        if (!http_cookie_name_byte_ok(p[i])) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// RFC 6265 5.1.1.5: Expires years below 1601 are not serialized (Go's
+/// validCookieExpires).
+bool http_expires_year_ok(i64 unix_seconds) {
+    i64 days = unix_seconds / 86400;
+    i64 year = 0;
+    i64 month = 0;
+    i64 day = 0;
+    http_civil_from_days(days, &year, &month, &day);
+    return year >= 1601;
+}
+
+/// Copy `data[start..end]` into a new String.
+String http_string_from_bytes(u8* data, i64 start, i64 end) {
+    String out = String.new();
+    i64 i = start;
+    while (i < end) {
+        out.push(data[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Parse one "name=value; attr=..." cookie; push it on success. Malformed
+/// cookies (no '=', invalid name or value bytes) are skipped like Go does;
+/// unknown or malformed attributes are ignored. Attribute values are NOT
+/// unquoted and are byte-validated (Go passes allowDoubleQuote=false).
+void http_parse_one_set_cookie(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
+    i64 s = start;
+    i64 e = end;
+    while (s < e && http_is_space(data[s])) { s = s + 1; }
+    while (e > s && http_is_space(data[e - 1])) { e = e - 1; }
+    if (s == e) { return; }
+    i64 eq = s;
+    while (eq < e && data[eq] != (u8)'=') { eq = eq + 1; }
+    if (eq == e || eq == s) { return; }
+    i64 k = s;
+    while (k < eq) {
+        if (!http_cookie_name_byte_ok(data[k])) { return; }
+        k = k + 1;
+    }
+    i64 attr_start = eq + 1;
+    while (attr_start < e && data[attr_start] != (u8)';') { attr_start = attr_start + 1; }
+    // Main value: strip surrounding quotes when properly quoted (Go's
+    // parseCookieValue with allowDoubleQuote=true), then byte-validate.
+    bool quoted = false;
+    i64 vstart = eq + 1;
+    i64 vend = attr_start;
+    if (vend - vstart >= 2 && data[vstart] == (u8)'"' && data[vend - 1] == (u8)'"') {
+        quoted = true;
+        vstart = vstart + 1;
+        vend = vend - 1;
+    }
+    String value = String.new();
+    i64 v = vstart;
+    while (v < vend) {
+        if (!http_cookie_value_byte_ok(data[v])) { return; }
+        value.push(data[v]);
+        v = v + 1;
+    }
+    String name = http_string_from_bytes(data, s, eq);
+    Cookie cookie = Cookie.new((str)name.data, (str)value.data);
+    name.drop();
+    value.drop();
+    cookie.quoted = quoted;
+    // Attributes.
+    i64 a = attr_start;
+    while (a < e) {
+        i64 aend = a;
+        while (aend < e && data[aend] != (u8)';') { aend = aend + 1; }
+        i64 as = a;
+        while (as < aend && http_is_space(data[as])) { as = as + 1; }
+        i64 ae = aend;
+        while (ae > as && http_is_space(data[ae - 1])) { ae = ae - 1; }
+        if (as < ae) {
+            i64 av_eq = as;
+            while (av_eq < ae && data[av_eq] != (u8)'=') { av_eq = av_eq + 1; }
+            i64 aname_end = av_eq;
+            while (aname_end > as && http_is_space(data[aname_end - 1])) { aname_end = aname_end - 1; }
+            i64 avalue_start = av_eq;
+            i64 avalue_end = ae;
+            if (av_eq < ae) { avalue_start = av_eq + 1; }
+            while (avalue_start < avalue_end && http_is_space(data[avalue_start])) { avalue_start = avalue_start + 1; }
+            while (avalue_end > avalue_start && http_is_space(data[avalue_end - 1])) { avalue_end = avalue_end - 1; }
+            // Attribute values are byte-validated without unquoting (Go
+            // passes allowDoubleQuote=false); invalid ones are ignored.
+            bool attr_ok = true;
+            i64 vk = avalue_start;
+            while (vk < avalue_end) {
+                if (!http_cookie_value_byte_ok(data[vk])) { attr_ok = false; break; }
+                vk = vk + 1;
+            }
+            if (attr_ok) {
+                if (http_equal_ci(data, as, aname_end, "secure")) {
+                    cookie.secure = true;
+                } else if (http_equal_ci(data, as, aname_end, "httponly")) {
+                    cookie.http_only = true;
+                } else if (http_equal_ci(data, as, aname_end, "domain") && avalue_start < avalue_end) {
+                    cookie.domain.drop();
+                    cookie.domain = http_string_from_bytes(data, avalue_start, avalue_end);
+                } else if (http_equal_ci(data, as, aname_end, "path") && avalue_start < avalue_end) {
+                    cookie.path.drop();
+                    cookie.path = http_string_from_bytes(data, avalue_start, avalue_end);
+                } else if (http_equal_ci(data, as, aname_end, "max-age") && avalue_start < avalue_end) {
+                    // Go: Atoi; leading-zero values are rejected; <= 0
+                    // becomes the -1 delete marker.
+                    i64 v = 0;
+                    if (http_parse_i64(data, avalue_start, avalue_end, &v)
+                        && !(v != 0 && data[avalue_start] == (u8)'0')) {
+                        if (v <= 0) { v = -1; }
+                        cookie.max_age = v;
+                    }
+                } else if (http_equal_ci(data, as, aname_end, "expires") && avalue_start < avalue_end) {
+                    i64 v = 0;
+                    if (http_parse_rfc1123(data, avalue_start, avalue_end, &v)) {
+                        cookie.expires = v;
+                    }
+                } else if (http_equal_ci(data, as, aname_end, "samesite") && avalue_start < avalue_end) {
+                    if (http_equal_ci(data, avalue_start, avalue_end, "lax")) { cookie.same_site = SameSite.Lax; }
+                    else if (http_equal_ci(data, avalue_start, avalue_end, "strict")) { cookie.same_site = SameSite.Strict; }
+                    else if (http_equal_ci(data, avalue_start, avalue_end, "none")) { cookie.same_site = SameSite.None; }
+                }
+            }
+        }
+        a = aend + 1;
+    }
+    out.push(move cookie);
+}
+
+/// Parse one Set-Cookie header value into a single cookie, appended to `out`
+/// on success (Go's ParseSetCookie; each header line is one cookie — commas
+/// are not separators, so Expires dates survive). Malformed cookies are
+/// skipped.
+void http_parse_set_cookie_value(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
+    http_parse_one_set_cookie(data, start, end, out);
+}
+
+// --- RFC 1123 dates -------------------------------------------------------
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (civil algorithm).
+i64 http_days_from_civil(i64 year, i64 month, i64 day) {
+    i64 y = year;
+    if (month <= 2) { y = y - 1; }
+    i64 era = 0;
+    if (y >= 0) { era = y / 400; } else { era = (y - 399) / 400; }
+    i64 yoe = y - era * 400;
+    i64 mp = month;
+    if (month > 2) { mp = month - 3; } else { mp = month + 9; }
+    i64 doy = (153 * mp + 2) / 5 + day - 1;
+    i64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// Invert http_days_from_civil into year/month/day.
+void http_civil_from_days(i64 days, i64* year, i64* month, i64* day) {
+    i64 z = days + 719468;
+    i64 era = 0;
+    if (z >= 0) { era = z / 146097; } else { era = (z - 146096) / 146097; }
+    i64 doe = z - era * 146097;
+    i64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    i64 y = yoe + era * 400;
+    i64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    i64 mp = (5 * doy + 2) / 153;
+    i64 d = doy - (153 * mp + 2) / 5 + 1;
+    i64 m = mp;
+    if (mp < 10) { m = mp + 3; } else { m = mp - 9; }
+    if (m <= 2) { y = y + 1; }
+    *year = y;
+    *month = m;
+    *day = d;
+}
+
+/// Parse "Mon, 02 Jan 2006 15:04:05 GMT" (Go's http.TimeFormat) into unix
+/// seconds. Returns false when the format does not match.
+bool http_parse_rfc1123(u8* data, i64 start, i64 end, i64* out) {
+    if (end - start < 25) { return false; }
+    i64 i = start;
+    i64 j = 0;
+    while (j < 3) {
+        u8 ch = data[i + j];
+        if (!((ch >= (u8)'A' && ch <= (u8)'Z') || (ch >= (u8)'a' && ch <= (u8)'z'))) { return false; }
+        j = j + 1;
+    }
+    i = i + 3;
+    if (data[i] != (u8)',' || data[i + 1] != (u8)' ') { return false; }
+    i = i + 2;
+    if (!http_is_digit(data[i]) || !http_is_digit(data[i + 1])) { return false; }
+    i64 day = (i64)(data[i] - (u8)'0') * 10 + (i64)(data[i + 1] - (u8)'0');
+    i = i + 2;
+    if (data[i] != (u8)' ') { return false; }
+    i = i + 1;
+    i64 month = 0;
+    bool month_ok = false;
+    u8* months = (u8*)HTTP_RFC1123_MONTHS;
+    j = 1;
+    while (j <= 12) {
+        i64 moff = (j - 1) * 3;
+        if (http_lower(data[i]) == http_lower(months[moff])
+            && http_lower(data[i + 1]) == http_lower(months[moff + 1])
+            && http_lower(data[i + 2]) == http_lower(months[moff + 2])) {
+            month = j;
+            month_ok = true;
+            break;
+        }
+        j = j + 1;
+    }
+    if (!month_ok) { return false; }
+    i = i + 3;
+    if (data[i] != (u8)' ') { return false; }
+    i = i + 1;
+    if (!http_is_digit(data[i]) || !http_is_digit(data[i + 1])
+        || !http_is_digit(data[i + 2]) || !http_is_digit(data[i + 3])) { return false; }
+    i64 year = (i64)(data[i] - (u8)'0') * 1000 + (i64)(data[i + 1] - (u8)'0') * 100
+        + (i64)(data[i + 2] - (u8)'0') * 10 + (i64)(data[i + 3] - (u8)'0');
+    i = i + 4;
+    if (data[i] != (u8)' ') { return false; }
+    i = i + 1;
+    if (!http_is_digit(data[i]) || !http_is_digit(data[i + 1])) { return false; }
+    i64 hour = (i64)(data[i] - (u8)'0') * 10 + (i64)(data[i + 1] - (u8)'0');
+    i = i + 2;
+    if (data[i] != (u8)':') { return false; }
+    i = i + 1;
+    if (!http_is_digit(data[i]) || !http_is_digit(data[i + 1])) { return false; }
+    i64 minute = (i64)(data[i] - (u8)'0') * 10 + (i64)(data[i + 1] - (u8)'0');
+    i = i + 2;
+    if (data[i] != (u8)':') { return false; }
+    i = i + 1;
+    if (!http_is_digit(data[i]) || !http_is_digit(data[i + 1])) { return false; }
+    i64 second = (i64)(data[i] - (u8)'0') * 10 + (i64)(data[i + 1] - (u8)'0');
+    i = i + 2;
+    // Optional " GMT" suffix.
+    if (end - i == 4 && data[i] == (u8)' ' && http_equal_ci(data, i + 1, end, "gmt")) {
+        i = end;
+    }
+    if (i != end) { return false; }
+    i64 days = http_days_from_civil(year, month, day);
+    *out = days * 86400 + hour * 3600 + minute * 60 + second;
+    return true;
+}
+
+/// Append a two-digit (padded) decimal to `out`.
+void http_append_padded2(String* out, i64 v) {
+    if (v < 10) { out.push((u8)'0'); }
+    http_append_i64(out, v);
+}
+
+/// Format unix seconds as Go's http.TimeFormat RFC 1123 string.
+void http_format_rfc1123(String* out, i64 unix_seconds) {
+    i64 days = unix_seconds / 86400;
+    i64 rem = unix_seconds % 86400;
+    i64 hour = rem / 3600;
+    i64 minute = (rem / 60) % 60;
+    i64 second = rem % 60;
+    i64 year = 0;
+    i64 month = 0;
+    i64 day = 0;
+    http_civil_from_days(days, &year, &month, &day);
+    // 1970-01-01 was a Thursday; (days + 4) % 7 with Sunday = 0.
+    i64 wday = (days + 4) % 7;
+    if (wday < 0) { wday = wday + 7; }
+    u8* weekdays = (u8*)HTTP_RFC1123_WEEKDAYS;
+    out.push(weekdays[wday * 3]);
+    out.push(weekdays[wday * 3 + 1]);
+    out.push(weekdays[wday * 3 + 2]);
+    out.push((u8)',');
+    out.push((u8)' ');
+    http_append_padded2(out, day);
+    out.push((u8)' ');
+    u8* months = (u8*)HTTP_RFC1123_MONTHS;
+    i64 moff = (month - 1) * 3;
+    out.push(months[moff]);
+    out.push(months[moff + 1]);
+    out.push(months[moff + 2]);
+    out.push((u8)' ');
+    if (year < 1000) { out.push((u8)'0'); }
+    if (year < 100) { out.push((u8)'0'); }
+    if (year < 10) { out.push((u8)'0'); }
+    http_append_i64(out, year);
+    out.push((u8)' ');
+    http_append_padded2(out, hour);
+    out.push((u8)':');
+    http_append_padded2(out, minute);
+    out.push((u8)':');
+    http_append_padded2(out, second);
+    out.push_str(" GMT");
+}
+
+// --- CookieJar (Go net/http/cookiejar semantics) --------------------------
+
+struct CookieJar {
+    Vec<Cookie> cookies;
+    i64 next_seq; // Go's jar sequence: monotonic per-jar ordering tiebreak
+}
+
+impl CookieJar {
+    CookieJar new() {
+        CookieJar jar;
+        jar.cookies = Vec<Cookie>.new();
+        jar.next_seq = 0;
+        return jar;
+    }
+
+    /// Go's Jar.SetCookies for one URL: applies RFC 6265 domain/path
+    /// defaults and matching, expiry, and dedup before storing.
+    void set_cookie(CookieJar* self, str host, str path, Cookie incoming) {
+        i64 now = http_unix_now();
+        u32 ip4 = 0;
+        bool host_is_ip = inet_pton4(host, &ip4);
+        if (incoming.domain.len == 0) {
+            // Host-only cookie: its domain is the request host.
+            incoming.domain.drop();
+            incoming.domain = String.from_str(host);
+        } else if (host_is_ip) {
+            // Go's domainAndType: for IP hosts the Domain attribute must
+            // equal the host exactly (no leading-dot strip), and the cookie
+            // is treated as host-only.
+            u8* d = incoming.domain.data;
+            u8* h = (u8*)host;
+            i64 dlen = incoming.domain.len;
+            i64 hlen = strlen(host);
+            bool same = dlen == hlen;
+            i64 k = 0;
+            while (k < dlen) {
+                if (d[k] != h[k]) { same = false; break; }
+                k = k + 1;
+            }
+            if (!same) {
+                incoming.drop();
+                return;
+            }
+            incoming.domain.drop();
+            incoming.domain = String.from_str(host);
+        } else {
+            // Strip a leading dot; the cookie must domain-match the host.
+            u8* d = incoming.domain.data;
+            i64 dstart = 0;
+            if (d[0] == (u8)'.') { dstart = 1; }
+            String domain = incoming.domain.substr(dstart, incoming.domain.len - dstart);
+            incoming.domain.drop();
+            incoming.domain = move domain;
+            if (!http_domain_match(host, (str)incoming.domain.data)) {
+                incoming.drop();
+                return;
+            }
+        }
+        if (incoming.path.len == 0) {
+            incoming.path.drop();
+            incoming.path = http_default_path(path);
+        }
+        // Expiry (Go's cookiejar.newEntry): Max-Age < 0 deletes; > 0 sets
+        // now + MaxAge; else Expires (past = delete, else persistent);
+        // neither means session cookie.
+        if (incoming.max_age < 0) {
+            http_jar_remove_matching(self, &incoming);
+            incoming.drop();
+            return;
+        }
+        if (incoming.max_age > 0) { incoming.expires = now + incoming.max_age; }
+        if (incoming.expires >= 0 && incoming.expires <= now) {
+            // Expired: RFC 6265 removes any matching stored cookie.
+            http_jar_remove_matching(self, &incoming);
+            incoming.drop();
+            return;
+        }
+        incoming.creation_seq = self.next_seq;
+        self.next_seq = self.next_seq + 1;
+        http_jar_store(self, move incoming);
+    }
+
+    /// Store every cookie in `incoming`, consuming the vector's elements
+    /// (each is stored or dropped). The caller owns the (emptied) buffer.
+    void set_cookies(CookieJar* self, str host, str path, Vec<Cookie>* incoming) {
+        i64 i = 0;
+        while (i < incoming.len) {
+            Cookie c = incoming.take(i);
+            self.set_cookie(host, path, move c);
+            i = i + 1;
+        }
+        incoming.clear();
+    }
+
+    /// Go's Jar.Cookies for one URL, serialized as the Cookie header value
+    /// ("a=1; b=2"), longest path first, oldest first on ties. Secure
+    /// cookies are sent only to https origins and localhost (browsers treat
+    /// localhost as secure regardless of scheme); the client speaks http.
+    String cookies_for(CookieJar* self, str host, str path) {
+        i64 now = http_unix_now();
+        bool localhost = http_is_localhost(host);
+        Vec<i64> idx = Vec<i64>.new();
+        i64 i = 0;
+        while (i < self.cookies.len) {
+            Cookie* c = &self.cookies.data[i];
+            if (http_domain_match(host, (str)c.domain.data)
+                && http_path_match(path, (str)c.path.data)
+                && !c.is_expired(now)
+                && (!c.secure || localhost)) {
+                idx.push(i);
+            }
+            i = i + 1;
+        }
+        // Insertion sort: shift elements that sort AFTER the key to the
+        // right (path length descending, then creation ascending).
+        i64 a = 1;
+        while (a < idx.len) {
+            i64 key = idx.get(a);
+            i64 b = a - 1;
+            while (b >= 0 && !http_cookie_comes_before(self, idx.get(b), key)) {
+                idx.set(b + 1, idx.get(b));
+                b = b - 1;
+            }
+            idx.set(b + 1, key);
+            a = a + 1;
+        }
+        String out = String.new();
+        i64 k = 0;
+        while (k < idx.len) {
+            Cookie* c = &self.cookies.data[idx.get(k)];
+            if (k > 0) { out.push_str("; "); }
+            out.push_str((str)c.name.data);
+            out.push((u8)'=');
+            out.push_str((str)c.value.data);
+            k = k + 1;
+        }
+        idx.drop();
+        return out;
+    }
+}
+
+impl Drop<CookieJar> for CookieJar {
+    // Idempotent: the compiler may also register a field-drop for the inner
+    // Vec after this runs, so len is cleared and Vec.drop nulls the buffer
+    // to make a second call a no-op (Cookie.drop is itself guarded).
+    void drop(CookieJar* self) {
+        i64 i = 0;
+        while (i < self.cookies.len) {
+            Cookie c = self.cookies.take(i);
+            c.drop();
+            i = i + 1;
+        }
+        self.cookies.len = 0;
+        self.cookies.drop();
+    }
+}
+
+/// True when stored index `a` sorts before `b` (longer path, then older
+/// sequence — Go's cookiejar ordering).
+bool http_cookie_comes_before(CookieJar* jar, i64 a, i64 b) {
+    Cookie* ca = &jar.cookies.data[a];
+    Cookie* cb = &jar.cookies.data[b];
+    if (ca.path.len != cb.path.len) { return ca.path.len > cb.path.len; }
+    return ca.creation_seq < cb.creation_seq;
+}
+
+/// Remove any stored cookie with the same name/domain/path as `target`.
+void http_jar_remove_matching(CookieJar* self, Cookie* target) {
+    i64 i = 0;
+    while (i < self.cookies.len) {
+        Cookie* existing = &self.cookies.data[i];
+        if (existing.name.equals((str)target.name.data)
+            && existing.domain.equals((str)target.domain.data)
+            && existing.path.equals((str)target.path.data)) {
+            Cookie old = self.cookies.take(i);
+            old.drop();
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+/// Store `incoming`, replacing any cookie with the same name/domain/path.
+void http_jar_store(CookieJar* self, Cookie incoming) {
+    i64 i = 0;
+    while (i < self.cookies.len) {
+        Cookie* existing = &self.cookies.data[i];
+        if (existing.name.equals((str)incoming.name.data)
+            && existing.domain.equals((str)incoming.domain.data)
+            && existing.path.equals((str)incoming.path.data)) {
+            Cookie old = self.cookies.take(i);
+            old.drop();
+            self.cookies.set(i, move incoming);
+            return;
+        }
+        i = i + 1;
+    }
+    self.cookies.push(move incoming);
+}
+
+// --- Matching rules (RFC 6265 5.1.3 / 5.1.4, Go's cookiejar) --------------
+
+/// Domain-match: exact match always; for non-IP hosts, a suffix match behind
+/// a dot. IP hosts only match exactly (Go's domainMatch).
+bool http_domain_match(str host, str domain) {
+    u8* h = (u8*)host;
+    u8* d = (u8*)domain;
+    i64 hlen = strlen(host);
+    i64 dlen = strlen(domain);
+    if (hlen == dlen) {
+        i64 i = 0;
+        while (i < hlen) {
+            if (h[i] != d[i]) { break; }
+            i = i + 1;
+        }
+        if (i == hlen) { return true; }
+    }
+    u32 ip4 = 0;
+    if (inet_pton4(host, &ip4)) { return false; }
+    if (dlen >= hlen) { return false; }
+    i64 off = hlen - dlen - 1;
+    if (h[off] != (u8)'.') { return false; }
+    i64 i = 0;
+    while (i < dlen) {
+        if (h[off + 1 + i] != d[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// Path-match (Go's cookiejar pathMatch): exact match, or the request path
+/// descends under the cookie path ("any/" matches "/any/path" and "/any"
+/// matches "/any/path").
+bool http_path_match(str request_path, str path) {
+    u8* r = (u8*)request_path;
+    u8* p = (u8*)path;
+    i64 rlen = strlen(request_path);
+    i64 plen = strlen(path);
+    if (rlen == plen) {
+        i64 i = 0;
+        while (i < rlen) {
+            if (r[i] != p[i]) { break; }
+            i = i + 1;
+        }
+        if (i == rlen) { return true; }
+    }
+    if (rlen < plen) { return false; }
+    i64 i = 0;
+    while (i < plen) {
+        if (r[i] != p[i]) { break; }
+        i = i + 1;
+    }
+    if (i != plen) { return false; }
+    if (p[plen - 1] == (u8)'/') { return true; }
+    return rlen > plen && r[plen] == (u8)'/';
+}
+
+/// Go's isLocalhost + loopback-IP check: the host's last label is
+/// "localhost", or it is a 127.0.0.0/8 address.
+bool http_is_localhost(str host) {
+    u8* h = (u8*)host;
+    i64 len = strlen(host);
+    i64 start = 0;
+    i64 i = 0;
+    while (i < len) {
+        if (h[i] == (u8)'.') { start = i + 1; }
+        i = i + 1;
+    }
+    if (len - start == 9) {
+        u8* want = (u8*)"localhost";
+        i = 0;
+        bool same = true;
+        while (i < 9) {
+            u8 c = h[start + i];
+            u8 w = want[i];
+            if (c >= (u8)'A' && c <= (u8)'Z') { c = c - (u8)'A' + (u8)'a'; }
+            if (w >= (u8)'A' && w <= (u8)'Z') { w = w - (u8)'A' + (u8)'a'; }
+            if (c != w) { same = false; break; }
+            i = i + 1;
+        }
+        if (same) { return true; }
+    }
+    // 127.0.0.0/8 loopback.
+    u32 ip4 = 0;
+    if (inet_pton4(host, &ip4)) {
+        return ((ip4 >> 24) & (u32)0xFF) == (u32)127;
+    }
+    return false;
+}
+
+/// Default cookie path (Go's defaultPath): the request path up to its last
+/// slash, or "/" when the path has no directory component.
+String http_default_path(str path) {
+    u8* p = (u8*)path;
+    i64 len = strlen(path);
+    if (len == 0 || p[0] != (u8)'/') { return String.from_str("/"); }
+    i64 last = 0;
+    i64 i = 0;
+    while (i < len) {
+        if (p[i] == (u8)'/') { last = i; }
+        i = i + 1;
+    }
+    if (last == 0) { return String.from_str("/"); }
+    return http_string_from_bytes(p, 0, last);
+}

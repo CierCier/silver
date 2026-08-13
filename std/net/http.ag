@@ -8,6 +8,7 @@
 import std.error;
 import std.fmt;
 import std.mem.drop;
+import std.net.cookie;
 import std.net.dns;
 import std.net.http_status;
 import std.net.inet;
@@ -58,6 +59,8 @@ struct HttpClient {
     i64 max_header_bytes;
     i64 max_body_bytes;
     i32 max_redirects;
+    bool use_jar; // false = manual Cookie header handling, like Go's nil Jar
+    CookieJar jar;
 }
 
 struct HttpConnection {
@@ -72,34 +75,9 @@ struct HttpUrl {
 }
 
 // --- Byte helpers ---------------------------------------------------------
-// Silver's `char` is 4 bytes wide, so protocol bytes are compared as u8
-// against self-documenting (u8)'x' literals rather than raw ASCII numbers.
-
-bool http_is_space(u8 ch) {
-    return ch == (u8)' ' || ch == (u8)'\t';
-}
-
-bool http_is_digit(u8 ch) {
-    return ch >= (u8)'0' && ch <= (u8)'9';
-}
-
-u8 http_lower(u8 ch) {
-    if (ch >= (u8)'A' && ch <= (u8)'Z') { return ch - (u8)'A' + (u8)'a'; }
-    return ch;
-}
-
-/// Case-insensitive compare of `data[start..end]` against `expected`.
-bool http_equal_ci(u8* data, i64 start, i64 end, str expected) {
-    u8* wanted = (u8*)expected;
-    i64 wanted_len = strlen(expected);
-    if (end - start != wanted_len) { return false; }
-    i64 i = 0;
-    while (i < wanted_len) {
-        if (http_lower(data[start + i]) != http_lower(wanted[i])) { return false; }
-        i = i + 1;
-    }
-    return true;
-}
+// Shared byte utilities (http_is_space, http_is_digit, http_lower,
+// http_equal_ci, http_parse_i64, http_append_i64) live in std/net/cookie.ag
+// so the low-level helpers have a single definition point.
 
 /// Index of the first CRLF at or after `start`, or -1 when none exists.
 i64 http_find_crlf(u8* data, i64 len, i64 start) {
@@ -109,25 +87,6 @@ i64 http_find_crlf(u8* data, i64 len, i64 start) {
         i = i + 1;
     }
     return -1;
-}
-
-/// Parse the decimal integer in `data[start..end]`, allowing surrounding
-/// whitespace. Returns false when the range is not a valid integer.
-bool http_parse_i64(u8* data, i64 start, i64 end, i64* out) {
-    i64 i = start;
-    while (i < end && http_is_space(data[i])) { i = i + 1; }
-    if (i == end) { return false; }
-    i64 value = 0;
-    i64 digits = 0;
-    while (i < end && http_is_digit(data[i])) {
-        value = value * 10 + (i64)(data[i] - (u8)'0');
-        digits = digits + 1;
-        i = i + 1;
-    }
-    while (i < end && http_is_space(data[i])) { i = i + 1; }
-    if (digits == 0 || i != end) { return false; }
-    *out = value;
-    return true;
 }
 
 /// Parse the hexadecimal integer in `data[start..end]`, allowing surrounding
@@ -154,17 +113,6 @@ bool http_parse_hex(u8* data, i64 start, i64 end, i64* out) {
     return true;
 }
 
-
-/// Append the decimal form of `value` to `out`.
-void http_append_i64(String* out, i64 value) {
-    u8 digits[32];
-    i64 len = itoa(value, &digits[0]);
-    i64 i = 0;
-    while (i < len) {
-        out.push(digits[i]);
-        i = i + 1;
-    }
-}
 
 /// Split "http://host[:port]/path" into host, port, and path. The scheme is
 /// optional and must be plain `http` (https is rejected). `path` is a view
@@ -321,6 +269,41 @@ impl HttpRequest {
 
     void set_body(&mut HttpRequest self, str body) {
         self.body = body;
+    }
+
+    /// Go's Request.AddCookie: merge `name=value` into the existing Cookie
+    /// header line, or append a new Cookie header when none is set.
+    void add_cookie(&mut HttpRequest self, str name, str value) {
+        u8* data = self.headers.data;
+        i64 len = self.headers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end && http_equal_ci(data, pos, colon, "cookie")) {
+                String head = self.headers.substr(0, end);
+                String tail = self.headers.substr(end, len - end);
+                String updated = String.new();
+                updated.push_str((str)head.data);
+                updated.push_str("; ");
+                updated.push_str(name);
+                updated.push((u8)'=');
+                updated.push_str(value);
+                updated.push_str((str)tail.data);
+                self.headers.drop();
+                self.headers = move updated;
+                return;
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        self.headers.push_str("Cookie: ");
+        self.headers.push_str(name);
+        self.headers.push((u8)'=');
+        self.headers.push_str(value);
+        self.headers.push_str("\r\n");
     }
 
     void keep_alive(&mut HttpRequest self) {
@@ -538,6 +521,32 @@ impl HttpResponse {
         return String.new();
     }
 
+    /// Go's Response.Cookies: every Set-Cookie header, parsed into owned
+    /// cookies. The caller owns the vector and its elements (use
+    /// http_cookie_vec_drop to discard, or a CookieJar.set_cookies which
+    /// consumes them).
+    Vec<Cookie> cookies(HttpResponse* self) {
+        Vec<Cookie> out = Vec<Cookie>.new();
+        u8* data = self.headers.data;
+        i64 len = self.headers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end
+                && http_equal_ci(data, pos, colon, "set-cookie")) {
+                i64 value_start = colon + 1;
+                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+                http_parse_set_cookie_value(data, value_start, end, &mut out);
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        return out;
+    }
+
     /// "200 OK"-style status text. Mirrors Go's Response.Status.
     String status_text(HttpResponse* self) {
         String text = String.new();
@@ -599,7 +608,9 @@ impl HttpClient {
         client.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
         client.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
         client.max_redirects = HTTP_DEFAULT_MAX_REDIRECTS;
-        return client;
+        client.use_jar = false;
+        client.jar = CookieJar.new();
+        return move client;
     }
 
     void limits(&mut HttpClient self, i64 max_header, i64 max_body) {
@@ -609,6 +620,15 @@ impl HttpClient {
 
     void set_max_redirects(&mut HttpClient self, i32 limit) {
         self.max_redirects = limit;
+    }
+
+    /// Attach a cookie jar (Go's Client.Jar). When set, the client stores
+    /// Set-Cookie responses and sends matching cookies on later requests;
+    /// without it the Cookie header is never touched (manual mode).
+    void set_jar(&mut HttpClient self, CookieJar jar) {
+        self.jar.drop();
+        self.jar = move jar;
+        self.use_jar = true;
     }
 
     Result<HttpConnection, Error> connect(HttpClient* self, SocketAddr* addr, HttpVersion version) {
@@ -660,10 +680,39 @@ impl HttpClient {
         str headers = (str)request.headers.data;
         i32 redirects = 0;
         String next_url = String.new();
+        String hop_headers = String.new();
         while (true) {
-            Result<HttpResponse, Error> r = self.request(method, url, body, headers);
+            str hop_block = headers;
+            if (self.use_jar) {
+                hop_headers.clear();
+                HttpUrl parsed;
+                if (http_parse_url(url, &parsed)) {
+                    str host = (str)&parsed.host[0];
+                    String cookie_block = self.jar.cookies_for(host, parsed.path);
+                    if (cookie_block.len > 0) {
+                        if (headers != (str)0) { hop_headers.push_str(headers); }
+                        hop_headers.push_str("Cookie: ");
+                        hop_headers.push_str((str)cookie_block.data);
+                        hop_headers.push_str("\r\n");
+                        hop_block = (str)hop_headers.data;
+                    }
+                    cookie_block.drop();
+                }
+            }
+            Result<HttpResponse, Error> r = self.request(method, url, body, hop_block);
             if (r.failed()) { return r; }
             HttpResponse response = r.unwrap();
+            if (self.use_jar) {
+                // Store response cookies against the request URL (Go stores
+                // against req.URL, so redirect hops update the jar per hop).
+                HttpUrl parsed;
+                if (http_parse_url(url, &parsed)) {
+                    str host = (str)&parsed.host[0];
+                    Vec<Cookie> incoming = response.cookies();
+                    self.jar.set_cookies(host, parsed.path, &mut incoming);
+                    incoming.drop();
+                }
+            }
             bool follow = false;
             bool redirect_status = response.status == (i32)HttpStatus.MovedPermanently
                 || response.status == (i32)HttpStatus.Found
@@ -775,6 +824,12 @@ impl HttpClient {
         HttpRequest req = HttpRequest.new("PATCH", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
         return self.do(&req);
+    }
+}
+
+impl Drop<HttpClient> for HttpClient {
+    void drop(HttpClient* self) {
+        self.jar.drop();
     }
 }
 
