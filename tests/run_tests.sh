@@ -9,9 +9,33 @@
 #   bash tests/run_tests.sh              # run all tests
 #   bash tests/run_tests.sh vec_test     # run a single test by name
 #   bash tests/run_tests.sh vec_test.ag  # (with or without the .ag suffix)
+#   bash tests/run_tests.sh --compare FILE  # run, then diff run times vs FILE
+#
+# Every run appends a tab-separated metrics row (test, compile_ms, run_ms,
+# peak_mem_kb) to bench/metrics.tsv; the summary lists the slowest tests.
+# Compare two runs (e.g. before/after a perf change) with --compare.
 #
 # Dependencies: bash, coreutils, cargo (plus the toolchain agc itself needs).
 set -u
+
+# Baseline metrics file for --compare; also the destination of every run.
+COMPARE_BASELINE=""
+for arg in "$@"; do
+    if [ "$arg" = "--compare" ]; then
+        COMPARE_BASELINE="${2:-}"
+        if [ -z "$COMPARE_BASELINE" ] || [ ! -f "$COMPARE_BASELINE" ]; then
+            echo "error: --compare requires an existing metrics file" >&2
+            exit 1
+        fi
+        shift 2
+        break
+    fi
+    if [ "$arg" = "--" ]; then
+        shift
+        break
+    fi
+    break
+done
 
 # ---------------------------------------------------------------------------
 # Skip list. One test name (without .ag) per line, each with a comment
@@ -139,9 +163,21 @@ run_timed() {
     local step=$1
     local logfile=$2
     shift 2
+    local rundir=""
+    if [ "$1" = "-C" ]; then
+        rundir="$2"
+        shift 2
+    fi
     local tfile
     tfile="$(mktemp)"
-    \time -o "$tfile" -f "$TIME_FMT" "$@" >"$logfile" 2>&1
+    # Run the timed command in a subshell only when a working directory is
+    # requested; the timing file is parsed below in the caller's scope so
+    # the measured variables survive.
+    if [ -n "$rundir" ]; then
+        (cd "$rundir" && \time -o "$tfile" -f "$TIME_FMT" "$@" >"$logfile" 2>&1)
+    else
+        \time -o "$tfile" -f "$TIME_FMT" "$@" >"$logfile" 2>&1
+    fi
     local rc=$?
     # Parse fields: tab-separated key=value pairs from TIME_FMT.
     local line
@@ -186,6 +222,11 @@ if [ ! -x "$AGC" ]; then
 fi
 
 # Collect the tests to run.
+METRICS_FILE="$ROOT/bench/metrics.tsv"
+CURRENT_FILE="$ROOT/bench/current.tsv"
+mkdir -p "$ROOT/bench"
+printf '# run %s\n' "$(date +'%F %T')" > "$CURRENT_FILE"
+
 tests=()
 if [ "$#" -ge 1 ]; then
     name="${1##*/}"
@@ -313,11 +354,11 @@ test_stdin() {
     fi
     run_real_ms=0; run_cpu_pct=0; run_mem_kb=0
     if test_stdin "$name" > /dev/null 2>&1; then
-        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name"))
+        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name")
     else
         # Feed EOF stdin so tests that read stdin (e.g. Scanner.stdin())
         # cannot block forever on an interactive terminal.
-        (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < /dev/null)
+        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < /dev/null
     fi
     exit_code=$?
 
@@ -361,6 +402,29 @@ test_stdin() {
     peak_mem=$(( compile_mem_kb > run_mem_kb ? compile_mem_kb : run_mem_kb ))
     mem_str="$(fmt_mem "$peak_mem")"
 
+    # Metrics: append a TSV row (history + current-run file) and track the
+    # slowest run times.
+    printf '%s\t%s\t%s\t%s\n' "$name" "$compile_real_ms" "$run_real_ms" "$peak_mem" >> "$METRICS_FILE"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$compile_real_ms" "$run_real_ms" "$peak_mem" >> "$CURRENT_FILE"
+    if [ "$run_real_ms" -gt 0 ]; then
+        slot=0
+        while [ "$slot" -lt 5 ]; do
+            if [ -z "${slow_run_ms[$slot]:-}" ] || [ "$run_real_ms" -gt "${slow_run_ms[$slot]}" ]; then
+                # Shift the tail down.
+                tail=4
+                while [ "$tail" -gt "$slot" ]; do
+                    slow_run_ms[$tail]="${slow_run_ms[$((tail - 1))]:-}"
+                    slow_name[$tail]="${slow_name[$((tail - 1))]:-}"
+                    tail=$((tail - 1))
+                done
+                slow_run_ms[$slot]="$run_real_ms"
+                slow_name[$slot]="$name"
+                break
+            fi
+            slot=$((slot + 1))
+        done
+    fi
+
     printf '  PASS  %-*s  %*s  %*s  %3d%%  %*s\n' \
         "$COL_NAME" "$name" \
         "$COL_TIME" "$ctime" \
@@ -383,6 +447,44 @@ done
 if [ -n "$TLS_NODE_PID" ]; then
     kill "$TLS_NODE_PID" 2>/dev/null
     wait "$TLS_NODE_PID" 2>/dev/null
+fi
+
+# ---- Slowest tests (run time) ----
+echo
+echo "== Slowest tests =="
+slot=0
+while [ "$slot" -lt 5 ]; do
+    if [ -n "${slow_name[$slot]:-}" ]; then
+        printf '  %-24s %6s ms\n' "${slow_name[$slot]}" "${slow_run_ms[$slot]}"
+    fi
+    slot=$((slot + 1))
+done
+if [ -z "${slow_name[0]:-}" ]; then
+    echo "  (no timed runs)"
+fi
+
+# ---- Before/after comparison (--compare FILE) ----
+if [ -n "$COMPARE_BASELINE" ]; then
+    echo
+    echo "== Before/after (run time, ms) =="
+    awk -F'\t' '
+        NR == FNR {
+            if ($1 ~ /^#/ || $1 == "name") next
+            base[$1] = $3 + 0
+            next
+        }
+        {
+            if ($1 ~ /^#/ || $1 == "name") next
+            cur = $3 + 0
+            b = base[$1] + 0
+            delta = cur - b
+            rows[++n] = sprintf("%s\t%d\t%d\t%+d", $1, b, cur, delta)
+        }
+        END {
+            rows[0] = "TEST\tBEFORE\tAFTER\tDELTA"
+            for (i = 0; i <= n; i++) print rows[i]
+        }
+    ' "$COMPARE_BASELINE" "$CURRENT_FILE" | sort -t"$(printf '\t')" -k4 -n
 fi
 
 # ---- Summary ----

@@ -7,6 +7,7 @@
 // stays exposed for callers that need explicit connection reuse.
 import std.error;
 import std.fmt;
+import std.mem.alloc;
 import std.mem.drop;
 import std.mem.vec;
 import std.net.cookie;
@@ -78,9 +79,11 @@ struct HttpConnection {
     HttpVersion version;
     // Read buffer: framing reads byte-at-a-time, so the transport serves
     // from this buffer and refills in 4KB chunks instead of one syscall (or
-    // SSL_read) per byte. Empty at response boundaries, so pooled
-    // connections carry no stale bytes.
-    u8 read_buf[1024];
+    // SSL_read) per byte. Heap-allocated (4096 bytes) so the connection
+    // struct stays small — inline arrays this size made the compiler's
+    // struct layout pass superlinear. Empty at response boundaries, so
+    // pooled connections carry no stale bytes.
+    u8* read_buf;
     i64 read_buf_len;
     i64 read_buf_pos;
 }
@@ -387,6 +390,7 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
     connection.stream = move stream;
     connection.use_tls = false;
     connection.version = HttpVersion.Http11;
+    connection.read_buf = (u8*)malloc(4096);
     connection.read_buf_len = 0;
     connection.read_buf_pos = 0;
     return Result<HttpConnection, Error>.Ok(move connection);
@@ -617,8 +621,7 @@ impl HttpResponse {
             if (want > 1024) { want = 1024; }
             Result<i64, Error> r = transport_read(io, &buf[0], want);
             if (r.is_err() || r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
-            i64 i = 0;
-            while (i < r.value()) { self.body.push(buf[i]); i = i + 1; }
+            self.body.push_bytes(&buf[0], r.value());
             done = done + r.value();
         }
         return Result<i64, Error>.Ok(done);
@@ -675,8 +678,7 @@ impl HttpResponse {
             if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
             if (r.value() == 0) { return Result<i64, Error>.Ok(total); }
             if (total + r.value() > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
-            i64 i = 0;
-            while (i < r.value()) { self.body.push(buf[i]); i = i + 1; }
+            self.body.push_bytes(&buf[0], r.value());
             total = total + r.value();
         }
         // Unreachable — the loop above only exits via `return`.
@@ -938,8 +940,9 @@ impl HttpStream {
             self.conn.clear_timeout();
             HttpConnection pooled = self.conn;
             // Invalidate our copy so the compiler's field drop cannot close
-            // the now-pooled fd.
+            // the now-pooled fd or free the pooled connection's buffer.
             self.conn.stream.sock.fd = -1;
+            self.conn.read_buf = (u8*)0;
             self.pool_owner.release((str)&self.key_host[0], self.key_port, self.key_https,
                 move pooled);
         } else {
@@ -1012,6 +1015,7 @@ impl HttpClient {
         connection.stream = move stream;
         connection.use_tls = false;
         connection.version = version;
+        connection.read_buf = (u8*)malloc(4096);
         connection.read_buf_len = 0;
         connection.read_buf_pos = 0;
         return Result<HttpConnection, Error>.Ok(move connection);
@@ -1587,6 +1591,10 @@ impl HttpConnection {
     void close(HttpConnection* self) {
         if (self.use_tls) { transport_tls_close(&self.tls_state[0]); }
         self.stream.close();
+        if (self.read_buf != (u8*)0) {
+            free((void*)self.read_buf);
+            self.read_buf = (u8*)0;
+        }
     }
 
     /// Bound blocking reads and writes to `secs` seconds (Go's Client.Timeout

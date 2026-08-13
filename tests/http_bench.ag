@@ -1,0 +1,248 @@
+// tests/http_bench.ag — HTTP client micro-benchmarks.
+//
+// Loopback measurements of the hot paths: pooled small-request latency,
+// large-header parsing, large-body download, and streaming reads. Each case
+// uses the std.test timer and prints throughput. The numbers are
+// environment-dependent, so compare runs (run_tests.sh --compare) rather
+// than absolute values.
+
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.entry;
+import std.sys.errno;
+import std.test;
+import std.thread;
+import std.time;
+
+TcpListener g_listener;
+str g_wire;
+i64 g_per_conn;
+i64 g_total;
+i64 g_status;
+
+void bench_server_main(i64 unused) {
+    i64 served = 0;
+    while (served < g_total) {
+        Result<i64, Error> a = g_listener.accept();
+        if (a.failed()) { g_status = 6; return; }
+        TcpStream s = TcpStream.from_fd((i32)a.value());
+        s.sock.set_recv_timeout(5);
+        i64 on_conn = 0;
+        while (on_conn < g_per_conn && served < g_total) {
+            // Consume the request head; idle timeout or EOF ends the conn.
+            i64 hlen = 0;
+            u8 prev[4];
+            u8 byte[1];
+            bool closed = false;
+            while (true) {
+                Result<i64, Error> r = s.read(&byte[0], 1);
+                if (r.is_err()) {
+                    if (r.err_is(EAGAIN) || r.err_is(ETIMEDOUT)) { closed = true; break; }
+                    g_status = 8;
+                    return;
+                }
+                if (r.value() == 0) { closed = true; break; }
+                prev[hlen % 4] = byte[0];
+                hlen = hlen + 1;
+                if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+                    && prev[(hlen - 2) % 4] == (u8)'\r'
+                    && prev[(hlen - 3) % 4] == (u8)'\n'
+                    && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+                if (hlen >= 2048) { closed = true; break; }
+            }
+            if (closed) { break; }
+            Result<i64, Error> w = s.write((u8*)g_wire, strlen(g_wire));
+            if (w.failed()) { g_status = 7; return; }
+            served = served + 1;
+            on_conn = on_conn + 1;
+        }
+        s.close();
+    }
+    g_status = 0;
+}
+
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+/// Run `requests` GETs against the bench server; print throughput.
+i32 run_bench(u16 port, i64 requests, i64 per_conn, i64* elapsed_us) {
+    g_per_conn = per_conn;
+    g_total = requests;
+    g_status = -1;
+    TaskRecord* server_handle = thread_spawn(bench_server_main, 0);
+    if (server_handle == (TaskRecord*)0) { return 16; }
+    HttpClient client = HttpClient.new();
+    String url = build_url(port, "/b");
+    Instant t0 = now();
+    i64 i = 0;
+    while (i < requests) {
+        Result<HttpResponse, Error> r = client.get((str)url.data);
+        if (r.failed()) { thread_join(server_handle); url.drop(); return 8; }
+        HttpResponse response = r.unwrap();
+        if (response.status != 200) { thread_join(server_handle); url.drop(); return 9; }
+        i = i + 1;
+    }
+    Instant t1 = now();
+    url.drop();
+    *elapsed_us = t1.elapsed_ns(t0) / 1000;
+    if (thread_join(server_handle) < 0) { return 16; }
+    if (g_status != 0) { return (i32)g_status; }
+    return 0;
+}
+
+/// Build a response wire with `header_lines` 60-byte headers and a body of
+/// `body_bytes` patterned bytes.
+String make_wire(i64 header_lines, i64 body_bytes) {
+    String wire = String.new();
+    wire.push_str("HTTP/1.1 200 OK\r\n");
+    wire.push_str("Content-Length: ");
+    u8 digits[32];
+    i64 n = itoa(body_bytes, &digits[0]);
+    i64 i = 0;
+    while (i < n) { wire.push(digits[i]); i = i + 1; }
+    wire.push_str("\r\n");
+    i64 h = 0;
+    while (h < header_lines) {
+        wire.push_str("X-Bench-Header: abcdefghijklmnopqrstuvwxyz0123456789\r\n");
+        h = h + 1;
+    }
+    wire.push_str("\r\n");
+    i64 b = 0;
+    while (b < body_bytes) {
+        wire.push((u8)'a' + (u8)(b % 26));
+        b = b + 1;
+    }
+    return wire;
+}
+
+i32 main() {
+    // --- Pooled small-request latency ---
+    test_start("bench small header latency");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        String wire = make_wire(2, 16);
+        g_wire = (str)wire.data;
+        i64 us = 0;
+        i64 n = 300;
+        i32 rc = run_bench(port, n, 1000, &us);
+        assert_eq_i64(0, rc, "300 pooled requests");
+        i64 avg = us / n;
+        if (avg < 1) { avg = 1; }
+        @println("  {} req/s, {} us/req ({} us total)", 1000000 / avg, avg, us);
+        wire.drop();
+    }
+
+    // --- Large-header parsing (18KB) ---
+    test_start("bench large header");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        String wire = make_wire(300, 16); // ~18KB of headers
+        g_wire = (str)wire.data;
+        i64 us = 0;
+        i64 n = 30;
+        i32 rc = run_bench(port, n, 100, &us);
+        assert_eq_i64(0, rc, "30 large-header requests");
+        @println("  {} us per 18KB-header request ({} us total)", us / n, us);
+        wire.drop();
+    }
+
+    // --- Large-body download (1MB) ---
+    test_start("bench large body");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        String wire = make_wire(2, 1048576);
+        g_wire = (str)wire.data;
+        i64 us = 0;
+        i64 n = 10;
+        i32 rc = run_bench(port, n, 100, &us);
+        assert_eq_i64(0, rc, "10 x 1MB downloads");
+        if (us < 1) { us = 1; }
+        @println("  {} MB/s ({} us for {} MB)", (i64)n * 1000000 / us, us, n);
+        wire.drop();
+    }
+
+    // --- Streaming reads (1MB through 4KB buffers) ---
+    test_start("bench streaming body");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        String wire = make_wire(2, 1048576);
+        g_wire = (str)wire.data;
+        g_per_conn = 1;
+        g_total = 10;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(bench_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/s");
+            Instant t0 = now();
+            i64 i = 0;
+            i64 total_read = 0;
+            u8 buf[4096];
+            while (i < 10) {
+                Result<HttpStream, Error> s = client.get_stream((str)url.data);
+                if (s.failed()) { assert_true(false, "get_stream"); break; }
+                HttpStream stream = s.unwrap();
+                while (true) {
+                    Result<i64, Error> rr = stream.read(&buf[0], 4096);
+                    if (rr.failed() || rr.value() == 0) { break; }
+                    total_read = total_read + rr.value();
+                }
+                stream.close();
+                i = i + 1;
+            }
+            Instant t1 = now();
+            i64 us = t1.elapsed_ns(t0) / 1000;
+            if (us < 1) { us = 1; }
+            @println("  {} MB/s streamed ({} bytes in {} us)",
+                (i64)total_read * 1000000 / us / 1048576, total_read, us);
+            assert_eq_i64(total_read, 10485760, "10MB streamed total");
+            thread_join(server_handle);
+        }
+        wire.drop();
+    }
+
+    return done();
+}

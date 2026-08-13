@@ -1,17 +1,60 @@
 // std/test.ag — test harness using print macros.
 //
-// Provides shared counters (tests_passed/tests_failed) and a full
-// assertion suite using compiler-builtin print macros.
+// Provides shared counters (tests_passed/tests_failed), a full assertion
+// suite using compiler-builtin print macros, and per-case wall-clock timers:
+// done() prints a timing table (monotonic microseconds per test_start case
+// plus the total), so tests report where their time actually goes — loopback
+// cases are sub-millisecond, so microsecond resolution matters.
 
 import std.mem.memory;
 import std.io.file;
+import std.time;
 
 i32 tests_passed = 0;
 i32 tests_failed = 0;
 
-/// Print a section header.
+const i64 TEST_MAX_CASES = 256;
+
+struct TestCaseTiming {
+    u8 name[64];
+    i64 elapsed_us;
+}
+
+TestCaseTiming g_case_times[256]; // TEST_MAX_CASES
+i64 g_case_count = 0;
+Instant g_case_start;
+bool g_case_open = false;
+
+/// Print a section header and start the case timer.
 void test_start(str name) {
+    // Close the previous case's timer.
+    if (g_case_open && g_case_count > 0) {
+        Instant end = now();
+        g_case_times[g_case_count - 1].elapsed_us = end.elapsed_ns(g_case_start) / 1000;
+    }
+    g_case_start = now();
+    g_case_open = true;
+    if (g_case_count < TEST_MAX_CASES) {
+        u8* src = (u8*)name;
+        i64 i = 0;
+        while (i < 63 && src[i] != (u8)0) {
+            g_case_times[g_case_count].name[i] = src[i];
+            i = i + 1;
+        }
+        g_case_times[g_case_count].name[i] = (u8)0;
+        g_case_times[g_case_count].elapsed_us = -1;
+        g_case_count = g_case_count + 1;
+    }
     @println("\n--- {} ---", name);
+}
+
+/// Close the open case timer (called by done and the next test_start).
+void test_close_case() {
+    if (g_case_open && g_case_count > 0) {
+        Instant end = now();
+        g_case_times[g_case_count - 1].elapsed_us = end.elapsed_ns(g_case_start) / 1000;
+        g_case_open = false;
+    }
 }
 
 /// Simple pass/fail check (no value comparison).
@@ -77,7 +120,23 @@ void assert_eq_str(str expected, str actual, str msg) {
 
 /// Print summary and return failure count (for main() to return).
 i32 done() {
+    test_close_case();
     @println("\n=== Results ===");
     @println("Passed: {}, Failed: {}", tests_passed, tests_failed);
+    i64 total_us = 0;
+    i64 i = 0;
+    while (i < g_case_count) {
+        if (g_case_times[i].elapsed_us >= 0) {
+            total_us = total_us + g_case_times[i].elapsed_us;
+        }
+        i = i + 1;
+    }
+    @println("\n=== Timings (microseconds) ===");
+    i = 0;
+    while (i < g_case_count) {
+        @println("  {}: {} us", (str)&g_case_times[i].name[0], g_case_times[i].elapsed_us);
+        i = i + 1;
+    }
+    @println("  TOTAL: {} us", total_us);
     return tests_failed;
 }

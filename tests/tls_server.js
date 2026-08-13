@@ -19,6 +19,12 @@ const server = https.createServer(options, (req, res) => {
     } else if (req.url === '/redirect') {
         res.writeHead(302, { 'Location': '/secure', 'Content-Length': '0' });
         res.end();
+    } else if (req.url === '/big-header') {
+        // ~18KB of response headers for the TLS header-parsing benchmark.
+        const h = { 'Content-Length': '2' };
+        for (let i = 0; i < 300; i++) { h['X-Big-' + i] = 'abcdefghijklmnopqrstuvwxyz0123456789'; }
+        res.writeHead(200, h);
+        res.end('ok');
     } else if (req.url === '/cookie') {
         res.writeHead(200, { 'Set-Cookie': 'sec=1; Secure; Path=/', 'Content-Length': '2' });
         res.end('ok');

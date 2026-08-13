@@ -6,3 +6,4 @@ dist/
 *.ll
 *.agm
 bootstrap/
+bench/
