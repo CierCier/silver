@@ -68,15 +68,15 @@ void server_main(i64 unused) {
 i32 bind_loopback(TcpListener* listener, u16* port) {
     Result<SocketAddr, AddrError> bind_result =
         SocketAddr.v4("127.0.0.1", (u16)0);
-    if (bind_result.failed()) { return 1; }
+    @assert(!(bind_result.failed()), "bind_result.failed()");
     SocketAddr bind_addr = bind_result.unwrap();
     *listener = TcpListener.bind(&bind_addr, 1);
-    if (!listener.valid()) { return 2; }
+    @assert(!(!listener.valid()), "!listener.valid()");
     SockAddrIn sa;
     u32 len = 16;
     Result<i64, Error> name_result =
         try_getsockname(listener.raw_fd(), (void*)&sa, &len);
-    if (name_result.failed()) { return 3; }
+    @assert(!(name_result.failed()), "name_result.failed()");
     *port = ntoh16(sa.sin_port);
     return 0;
 }
@@ -99,42 +99,42 @@ String build_url(u16 port, str path) {
     if (r != 0) { return r; }
     Result<SocketAddr, AddrError> connect_result =
         SocketAddr.v4("127.0.0.1", port);
-    if (connect_result.failed()) { return 4; }
+    @assert(!(connect_result.failed()), "connect_result.failed()");
     SocketAddr connect_addr = connect_result.unwrap();
 
     HttpClient client = HttpClient.new();
     Result<HttpConnection, Error> connection_result =
         client.connect(&connect_addr, version);
-    if (connection_result.failed()) { return 5; }
+    @assert(!(connection_result.failed()), "connection_result.failed()");
     HttpConnection connection = connection_result.unwrap();
 
     Result<i64, Error> accept_result = listener.accept();
-    if (accept_result.failed()) { return 6; }
+    @assert(!(accept_result.failed()), "accept_result.failed()");
     TcpStream server = TcpStream.from_fd((i32)accept_result.value());
     Result<i64, Error> server_write =
         server.write((u8*)response_wire, strlen(response_wire));
-    if (server_write.failed()) { return 7; }
+    @assert(!(server_write.failed()), "server_write.failed()");
 
     HttpRequest request = HttpRequest.new(version, "GET", "/status", "fixture.test");
     Result<HttpResponse, Error> response_result =
         connection.send(&request, 65536, 1024);
-    if (response_result.failed()) { return 8; }
+    @assert(!(response_result.failed()), "response_result.failed()");
     HttpResponse response = response_result.unwrap();
-    if (response.status != 200) { return 9; }
-    if (!response.body.equals("hello")) { return 10; }
+    @assert(!(response.status != 200), "response.status != 200");
+    @assert(!(!response.body.equals("hello")), "check");
     return 0;
 }
 
 /// Loopback case for the convenience verbs. `body`/`headers` select the
 /// helper arity: POST is called with body+headers, PUT with body, HEAD bare.
 i32 run_verb_case(str verb, str body, str headers) {
-    if (verb != "POST" && verb != "PUT" && verb != "HEAD") { return 15; }
+    @assert(!(verb != "POST" && verb != "PUT" && verb != "HEAD"), "check");
     u16 port = 0;
     i32 r = bind_loopback(&g_listener, &port);
     if (r != 0) { return r; }
     Result<SocketAddr, AddrError> connect_result =
         SocketAddr.v4("127.0.0.1", port);
-    if (connect_result.failed()) { return 4; }
+    @assert(!(connect_result.failed()), "connect_result.failed()");
     SocketAddr connect_addr = connect_result.unwrap();
 
     g_job.wire = HTTP_OK_WIRE;
@@ -142,7 +142,7 @@ i32 run_verb_case(str verb, str body, str headers) {
     if (body != (str)0) { g_job.body_len = strlen(body); }
     g_job.status = -1;
     TaskRecord* server_handle = thread_spawn(server_main, 0);
-    if (server_handle == (TaskRecord*)0) { return 16; }
+    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
 
     HttpClient client = HttpClient.new();
     String url = build_url(port, "/submit");
@@ -158,14 +158,14 @@ i32 run_verb_case(str verb, str body, str headers) {
     if (response_result.failed()) { thread_join(server_handle); return 8; }
     HttpResponse response = response_result.unwrap();
     if (response.status != 200) { thread_join(server_handle); return 9; }
-    if (thread_join(server_handle) < 0) { return 16; }
+    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
     if (g_job.status != 0) { return g_job.status; }
 
     // Verify what the server captured.
     String head = String.from_str((str)&g_req_head[0]);
-    if (!head.starts_with(verb)) { return 11; }
-    if (head.find("/submit") < 0) { return 12; }
-    if (headers != (str)0 && head.find(headers) < 0) { return 13; }
+    @assert(!(!head.starts_with(verb)), "!head.starts_with(verb)");
+    @assert(!(head.find("/submit") < 0), "check");
+    @assert(!(headers != (str)0 && head.find(headers) < 0), "headers != (str)0 && head.find(headers) < 0");
     if (g_job.body_len > 0
         && memcmp(&g_req_body[0], (const void*)body, g_job.body_len) != 0) { return 14; }
     return 0;
@@ -181,33 +181,33 @@ i32 run_wire_case(str wire, i32 expected_status, str expected_body,
     if (r != 0) { return r; }
     Result<SocketAddr, AddrError> connect_result =
         SocketAddr.v4("127.0.0.1", port);
-    if (connect_result.failed()) { return 4; }
+    @assert(!(connect_result.failed()), "connect_result.failed()");
     SocketAddr connect_addr = connect_result.unwrap();
 
     HttpClient client = HttpClient.new();
     Result<HttpConnection, Error> connection_result =
         client.connect(&connect_addr, HttpVersion.Http11);
-    if (connection_result.failed()) { return 5; }
+    @assert(!(connection_result.failed()), "connection_result.failed()");
     HttpConnection connection = connection_result.unwrap();
 
     Result<i64, Error> accept_result = listener.accept();
-    if (accept_result.failed()) { return 6; }
+    @assert(!(accept_result.failed()), "accept_result.failed()");
     TcpStream server = TcpStream.from_fd((i32)accept_result.value());
     Result<i64, Error> server_write =
         server.write((u8*)wire, strlen(wire));
-    if (server_write.failed()) { return 7; }
+    @assert(!(server_write.failed()), "server_write.failed()");
 
     HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/status", "fixture.test");
     Result<HttpResponse, Error> response_result =
         connection.send(&request, 65536, 1024);
-    if (response_result.failed()) { return 8; }
+    @assert(!(response_result.failed()), "response_result.failed()");
     HttpResponse response = response_result.unwrap();
-    if (response.status != expected_status) { return 9; }
-    if (!response.reason.equals(expected_reason)) { return 10; }
-    if (!response.body.equals(expected_body)) { return 11; }
+    @assert(!(response.status != expected_status), "response.status != expected_status");
+    @assert(!(!response.reason.equals(expected_reason)), "!response.reason.equals(expected_reason)");
+    @assert(!(!response.body.equals(expected_body)), "!response.body.equals(expected_body)");
     if (expected_location != (str)0) {
         String loc = response.location();
-        if (!loc.equals(expected_location)) { return 12; }
+        @assert(!(!loc.equals(expected_location)), "!loc.equals(expected_location)");
     }
     return 0;
 }
@@ -290,7 +290,7 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
     if (r != 0) { return r; }
     Result<SocketAddr, AddrError> connect_result =
         SocketAddr.v4("127.0.0.1", port);
-    if (connect_result.failed()) { return 4; }
+    @assert(!(connect_result.failed()), "connect_result.failed()");
     SocketAddr connect_addr = connect_result.unwrap();
 
     g_job.wire = first_wire;
@@ -301,7 +301,7 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
     if (expected_second_body != (str)0) { g_second_body_len = strlen(expected_second_body); }
     g_job.status = -1;
     TaskRecord* server_handle = thread_spawn(redirect_server_main, 0);
-    if (server_handle == (TaskRecord*)0) { return 16; }
+    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
 
     HttpClient client = HttpClient.new();
     String url = build_url(port, "/start");
@@ -311,12 +311,12 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
     HttpResponse response = response_result.unwrap();
     if (response.status != 200) { thread_join(server_handle); return 9; }
     if (!response.body.equals("hello")) { thread_join(server_handle); return 10; }
-    if (thread_join(server_handle) < 0) { return 16; }
+    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
     if (g_job.status != 0) { return g_job.status; }
 
     String head = String.from_str((str)&g_req_head[0]);
-    if (!head.starts_with(expected_method)) { return 11; }
-    if (head.find(expected_target) < 0) { return 12; }
+    @assert(!(!head.starts_with(expected_method)), "!head.starts_with(expected_method)");
+    @assert(!(head.find(expected_target) < 0), "head.find(expected_target) < 0");
     if (g_second_body_len > 0
         && memcmp(&g_req_body[0], (const void*)expected_second_body, g_second_body_len) != 0) {
         return 13;
@@ -329,10 +329,10 @@ i32 run_get_public_case() {
     HttpClient client = HttpClient.new();
     Result<HttpResponse, Error> response_result =
         client.get("http://api.ipify.org/?format=json");
-    if (response_result.failed()) { return 1; }
+    @assert(!(response_result.failed()), "response_result.failed()");
     HttpResponse response = response_result.unwrap();
-    if (response.status != 200) { return 2; }
-    if (!response.body.starts_with("{\"ip\":\"")) { return 3; }
+    @assert(!(response.status != 200), "response.status != 200");
+    @assert(!(!response.body.starts_with("{\"ip\":\"")), "check");
     return 0;
 }
 

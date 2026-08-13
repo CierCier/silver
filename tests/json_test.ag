@@ -33,12 +33,12 @@ i32 main() {
     str some_json = @json(some);
     str none_json = @json(none);
     Result<String, JsonError> decoded = @from_json(String, "\"Ada\"");
-    if (decoded.failed()) { return 4; }
+    @assert(!(decoded.failed()), "decoded.failed()");
     String decoded_name = decoded.unwrap();
-    if (!decoded_name.equals("Ada")) { return 4; }
-    if (encoded != "{\"id\":7,\"name\":\"Ada\"}") { return 1; }
-    if (some_json != "7") { return 2; }
-    if (none_json != "null") { return 3; }
+    @assert(!(!decoded_name.equals("Ada")), "check");
+    @assert(!(encoded != "{\"id\":7,\"name\":\"Ada\"}"), "check");
+    @assert(!(some_json != "7"), "check");
+    @assert(!(none_json != "null"), "check");
 
     // --- full scalar coverage: encode + decode round trips ---
     i8 n8 = -12;
@@ -51,16 +51,16 @@ i32 main() {
     u64 p64 = 18000000000000000000;
     f32 half = 2.5;
     f64 quarter = -3.25;
-    if (@json(n8) != "-12") { return 10; }
-    if (@json(n16) != "-1234") { return 10; }
-    if (@json(n32) != "-123456") { return 10; }
-    if (@json(n64) != "-123456789") { return 10; }
-    if (@json(p8) != "250") { return 10; }
-    if (@json(p16) != "60000") { return 10; }
-    if (@json(p32) != "4000000000") { return 10; }
-    if (@json(p64) != "18000000000000000000") { return 10; }
-    if (@json(half) != "2.5") { return 10; }
-    if (@json(quarter) != "-3.25") { return 10; }
+    @assert(!(@json(n8) != "-12"), "check");
+    @assert(!(@json(n16) != "-1234"), "check");
+    @assert(!(@json(n32) != "-123456"), "check");
+    @assert(!(@json(n64) != "-123456789"), "check");
+    @assert(!(@json(p8) != "250"), "check");
+    @assert(!(@json(p16) != "60000"), "check");
+    @assert(!(@json(p32) != "4000000000"), "check");
+    @assert(!(@json(p64) != "18000000000000000000"), "check");
+    @assert(!(@json(half) != "2.5"), "check");
+    @assert(!(@json(quarter) != "-3.25"), "check");
 
     Result<i8, JsonError> d8 = @from_json(i8, "-12");
     Result<i16, JsonError> d16 = @from_json(i16, "-1234");
@@ -71,39 +71,39 @@ i32 main() {
     Result<f32, JsonError> df32 = @from_json(f32, "2.5");
     Result<f64, JsonError> df64 = @from_json(f64, "-3.25");
     Result<f64, JsonError> dexp = @from_json(f64, "2.5e3");
-    if (d8.failed() || d8.unwrap() != n8) { return 11; }
-    if (d16.failed() || d16.unwrap() != n16) { return 11; }
-    if (du8.failed() || du8.unwrap() != p8) { return 11; }
-    if (du16.failed() || du16.unwrap() != p16) { return 11; }
-    if (du32.failed() || du32.unwrap() != p32) { return 11; }
-    if (du64.failed() || du64.unwrap() != p64) { return 11; }
-    if (df32.failed() || df32.unwrap() != half) { return 11; }
-    if (df64.failed() || df64.unwrap() != quarter) { return 11; }
-    if (dexp.failed() || dexp.unwrap() != 2500.0) { return 11; }
+    @assert(!(d8.failed() || d8.unwrap() != n8), "d8.failed() || d8.unwrap() != n8");
+    @assert(!(d16.failed() || d16.unwrap() != n16), "d16.failed() || d16.unwrap() != n16");
+    @assert(!(du8.failed() || du8.unwrap() != p8), "du8.failed() || du8.unwrap() != p8");
+    @assert(!(du16.failed() || du16.unwrap() != p16), "du16.failed() || du16.unwrap() != p16");
+    @assert(!(du32.failed() || du32.unwrap() != p32), "du32.failed() || du32.unwrap() != p32");
+    @assert(!(du64.failed() || du64.unwrap() != p64), "du64.failed() || du64.unwrap() != p64");
+    @assert(!(df32.failed() || df32.unwrap() != half), "df32.failed() || df32.unwrap() != half");
+    @assert(!(df64.failed() || df64.unwrap() != quarter), "df64.failed() || df64.unwrap() != quarter");
+    @assert(!(dexp.failed() || dexp.unwrap() != 2500.0), "dexp.failed() || dexp.unwrap() != 2500.0");
 
     // --- Optional round trips, null decodes to None ---
     Optional<i32> fsome = Some(7);
     Optional<f64> fhalf = Some(2.5);
     Optional<f64> fnone = None;
-    if (@json(fsome) != "7") { return 12; }
-    if (@json(fhalf) != "2.5") { return 12; }
-    if (@json(fnone) != "null") { return 12; }
+    @assert(!(@json(fsome) != "7"), "check");
+    @assert(!(@json(fhalf) != "2.5"), "check");
+    @assert(!(@json(fnone) != "null"), "check");
     Result<Optional<i32>, JsonError> osome = @from_json(Optional<i32>, "7");
     Result<Optional<i32>, JsonError> onone = @from_json(Optional<i32>, "null");
     Result<Optional<f64>, JsonError> ofhalf = @from_json(Optional<f64>, "2.5");
     Result<Optional<f64>, JsonError> ofnone = @from_json(Optional<f64>, "null");
-    if (osome.failed()) { return 12; }
+    @assert(!(osome.failed()), "osome.failed()");
     Optional<i32> o1 = osome.unwrap();
-    if (!o1.is_some() || o1.unwrap() != 7) { return 12; }
-    if (onone.failed()) { return 12; }
+    @assert(!(!o1.is_some() || o1.unwrap() != 7), "!o1.is_some() || o1.unwrap() != 7");
+    @assert(!(onone.failed()), "onone.failed()");
     Optional<i32> o2 = onone.unwrap();
-    if (o2.is_some()) { return 12; }
-    if (ofhalf.failed()) { return 12; }
+    @assert(!(o2.is_some()), "o2.is_some()");
+    @assert(!(ofhalf.failed()), "ofhalf.failed()");
     Optional<f64> o3 = ofhalf.unwrap();
-    if (!o3.is_some() || o3.unwrap() != 2.5) { return 12; }
-    if (ofnone.failed()) { return 12; }
+    @assert(!(!o3.is_some() || o3.unwrap() != 2.5), "!o3.is_some() || o3.unwrap() != 2.5");
+    @assert(!(ofnone.failed()), "ofnone.failed()");
     Optional<f64> o4 = ofnone.unwrap();
-    if (o4.is_some()) { return 12; }
+    @assert(!(o4.is_some()), "o4.is_some()");
 
     STDOUT.write_str(encoded);
     STDOUT.write_str("\n");

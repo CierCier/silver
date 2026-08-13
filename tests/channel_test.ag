@@ -80,41 +80,39 @@ i64 main() {
     g_wg.add(4);
     for (i64 t = 0; t < 4; t = t + 1) {
         TaskRecord* h = thread_spawn(producer_count, 0);
-        if (h == (TaskRecord*)0) { return 1; }
+        @assert(!(h == (TaskRecord*)0), "h == (TaskRecord*)0");
     }
     g_wg.wait_all();
-    if (g_shared != 40000) { return 2; }
+    @assert(!(g_shared != 40000), "g_shared != 40000");
 
     // Test 1: FIFO + compaction.
     TaskRecord* h1 = thread_spawn(producer_seq, 0);
-    if (h1 == (TaskRecord*)0) { return 3; }
-    if (thread_join(h1) < 0) { return 4; }
+    @assert(!(h1 == (TaskRecord*)0), "h1 == (TaskRecord*)0");
+    @assert(!(thread_join(h1) < 0), "thread_join(h1) < 0");
     for (i64 i = 0; i < 2048; i = i + 1) {
         i64 v = g_ch.recv();
-        if (v != i) { return 5; }
+        @assert(!(v != i), "v != i");
     }
-    if (g_ch.len() != 0) { return 6; }
+    @assert(!(g_ch.len() != 0), "g_ch.len() != 0");
 
     // Test 2: multi-producer.
     for (i64 t = 0; t < 4; t = t + 1) {
         TaskRecord* h = thread_spawn(producer_tag, 0);
-        if (h == (TaskRecord*)0) { return 7; }
+        @assert(!(h == (TaskRecord*)0), "h == (TaskRecord*)0");
     }
     for (i64 k = 0; k < 1000; k = k + 1) {
         i64 v = g_ch2.recv();
-        if (v < 0 || v >= 4) { return 8; }
+        @assert(!(v < 0 || v >= 4), "v < 0 || v >= 4");
         g_counts[v] = g_counts[v] + 1;
     }
-    if (g_counts[0] != 250 || g_counts[1] != 250 || g_counts[2] != 250 || g_counts[3] != 250) {
-        return 9;
-    }
+    @assert(!(g_counts[0] != 250 || g_counts[1] != 250 || g_counts[2] != 250 || g_counts[3] != 250), "g_counts[0] != 250 || g_counts[1] != 250 || g_counts[2] != 250 || g_counts[3] != 250");
 
     // Test 3: blocking recv (consumer waits, then producer delivers).
     TaskRecord* h3 = thread_spawn(producer_slow, 0);
-    if (h3 == (TaskRecord*)0) { return 10; }
+    @assert(!(h3 == (TaskRecord*)0), "h3 == (TaskRecord*)0");
     i64 v3 = g_ch3.recv();   // blocks until producer_slow sends
-    if (v3 != 777) { return 11; }
-    if (thread_join(h3) < 0) { return 12; }
+    @assert(!(v3 != 777), "v3 != 777");
+    @assert(!(thread_join(h3) < 0), "thread_join(h3) < 0");
 
     // Free the channel buffers so leak-check sees a clean exit.
     g_ch.close();

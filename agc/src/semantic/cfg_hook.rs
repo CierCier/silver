@@ -313,14 +313,14 @@ fn expand_assert(args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> 
     let ast::MacroArg::Expression(cond) = &args[0] else {
         return None;
     };
-    let message = match args.get(1) {
-        None => "assertion failed".to_string(),
-        Some(ast::MacroArg::Expression(expr)) => {
-            let ast::ExpressionKind::Literal(ast::Literal::String(s)) = &*expr.kind else {
-                return None;
-            };
-            s.clone()
-        }
+    let message_expr = match args.get(1) {
+        None => ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                "assertion failed".to_string(),
+            ))),
+            span,
+        },
+        Some(ast::MacroArg::Expression(expr)) => (*expr).clone(),
         Some(_) => return None,
     };
     let file = crate::lexer::source_file(span.file)
@@ -346,10 +346,7 @@ fn expand_assert(args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> 
                     kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(line))),
                     span,
                 },
-                ast::Expression {
-                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(message))),
-                    span,
-                },
+                message_expr,
             ],
         }),
         span,

@@ -60,7 +60,7 @@ i64 main() {
     wait t3;
     {
         Guard<i64> g = g_counter.lock();
-        if (g.get() != 20000) { return 1; }
+        @assert(!(g.get() != 20000), "g.get() != 20000");
     }
 
     // 2. Drop on scope exit: the guard above dropped at its block's end, so
@@ -71,14 +71,14 @@ i64 main() {
     }
     {
         Guard<i64> h = g_counter.lock();
-        if (h.get() != 0) { return 2; }
+        @assert(!(h.get() != 0), "h.get() != 0");
         h.set(123);
     }
 
     // 3. Drop on early return.
-    if (guarded_early(&g_counter, -1) != -1) { return 3; }
+    @assert(!(guarded_early(&g_counter, -1) != -1), "guarded_early(&g_counter, -1) != -1");
     Guard<i64> g3 = g_counter.lock();   // must not deadlock
-    if (g3.get() != 123) { return 4; }  // early-return path left value untouched
+    @assert(!(g3.get() != 123), "g3.get() != 123");  // early-return path left value untouched
     g3.set(456);
 
     // 4. Task launched in a scope, NOT waited: it keeps running past the
@@ -93,7 +93,7 @@ i64 main() {
     while (true) {
         if (__atomic_load_i64(&g_flag, ATOMIC_ACQUIRE) == 1) { break; }
         spins = spins + 1;
-        if (spins > 500000000) { return 5; }
+        @assert(!(spins > 500000000), "spins > 500000000");
     }
     return 0;
 }

@@ -65,14 +65,10 @@ i64 main() {
     i64 nthreads = 4;
     for (i64 t = 0; t < nthreads; t = t + 1) {
         u8* stack = mem_sys_alloc(65536);
-        if (stack == (u8*)0) {
-            return 1;
-        }
+        @assert(!(stack == (u8*)0), "stack == (u8*)0");
         u8* top = (u8*)((i64)stack + 65536);
         i64 tid = clone_shim(CLONE_FLAGS, top, (i64)worker, t);
-        if (tid < 0) {
-            return 2;
-        }
+        @assert(!(tid < 0), "tid < 0");
     }
     i64 spins = 0;
     while (true) {
@@ -84,19 +80,13 @@ i64 main() {
             return 3; // join timeout
         }
     }
-    if (__atomic_load_i64(&g_failed, ATOMIC_ACQUIRE) != 0) {
-        return 4;
-    }
+    @assert(!(__atomic_load_i64(&g_failed, ATOMIC_ACQUIRE) != 0), "__atomic_load_i64(&g_failed, ATOMIC_ACQUIRE) != 0");
     // Post-fray sanity: the allocator must still hand out coherent blocks.
     for (i64 i = 0; i < 1000; i = i + 1) {
         u8* p = alloc<u8>(256);
-        if (p == (u8*)0) {
-            return 5;
-        }
+        @assert(!(p == (u8*)0), "p == (u8*)0");
         p[0] = (u8)7;
-        if (p[0] != (u8)7) {
-            return 6;
-        }
+        @assert(!(p[0] != (u8)7), "p[0] != (u8)7");
         free((void*)p);
     }
     return 0;

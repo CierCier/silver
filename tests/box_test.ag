@@ -10,9 +10,7 @@ i32 main() {
         }
     }
 
-    if (drop_count != 1) {
-        return 1;
-    }
+    @assert(!(drop_count != 1), "drop_count != 1");
 
     // Test multiple defers run in reverse order
     drop_count = 0;
@@ -25,9 +23,7 @@ i32 main() {
         }
     }
     // LIFO: +3 first, then +10: 0+3+10 = 13
-    if (drop_count != 13) {
-        return 2;
-    }
+    @assert(!(drop_count != 13), "drop_count != 13");
 
     return 0;
 }

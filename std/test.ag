@@ -57,65 +57,87 @@ void test_close_case() {
     }
 }
 
-/// Simple pass/fail check (no value comparison).
+// The assertion helpers below are fail-fast: the check runs through the
+// language `@assert` macro, so a failed check aborts immediately with an
+// "assertion failed at <file>:<line>: <msg>" report on stderr. In release
+// builds (@assert pruned) the helpers still record a pass for bookkeeping.
+// A scratch buffer carries the expected/got detail into the abort message.
+u8 g_assert_scratch[256];
+
+/// "<msg> (expected <e>, got <a>)" in the scratch buffer.
+str assert_values(str msg, i64 expected, i64 actual) {
+    u8* out = &g_assert_scratch[0];
+    i64 n = 0;
+    if (msg != (str)0) {
+        u8* m = (u8*)msg;
+        i64 i = 0;
+        while (m[i] != (u8)0 && n < 200) { out[n] = m[i]; n = n + 1; i = i + 1; }
+    }
+    str suffix = " (expected ";
+    u8* s = (u8*)suffix;
+    i64 i = 0;
+    while (s[i] != (u8)0 && n < 240) { out[n] = s[i]; n = n + 1; i = i + 1; }
+    u8 digits[24];
+    i64 nd = 0;
+    i64 v = expected;
+    if (v < 0) { out[n] = (u8)'-'; n = n + 1; v = 0 - v; }
+    if (v == 0) { digits[0] = (u8)'0'; nd = 1; }
+    while (v > 0 && nd < 23) { digits[nd] = (u8)((u8)'0' + (u8)(v % 10)); nd = nd + 1; v = v / 10; }
+    while (nd > 0 && n < 240) { nd = nd - 1; out[n] = digits[nd]; n = n + 1; }
+    str mid = ", got ";
+    s = (u8*)mid;
+    i = 0;
+    while (s[i] != (u8)0 && n < 240) { out[n] = s[i]; n = n + 1; i = i + 1; }
+    nd = 0;
+    v = actual;
+    if (v < 0) { out[n] = (u8)'-'; n = n + 1; v = 0 - v; }
+    if (v == 0) { digits[0] = (u8)'0'; nd = 1; }
+    while (v > 0 && nd < 23) { digits[nd] = (u8)((u8)'0' + (u8)(v % 10)); nd = nd + 1; v = v / 10; }
+    while (nd > 0 && n < 240) { nd = nd - 1; out[n] = digits[nd]; n = n + 1; }
+    if (n < 240) { out[n] = (u8)')'; n = n + 1; }
+    out[n] = (u8)0;
+    return (str)&g_assert_scratch[0];
+}
+
+/// Simple pass/fail check (no value comparison). Fail-fast via @assert.
 void check(bool cond, str msg) {
-    if (cond) {
-        @println("  [PASS] {}", msg);
-        tests_passed += 1;
-    } else {
-        @eprintln("  [FAIL] {}", msg);
-        tests_failed += 1;
-    }
+    @assert(cond, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
 }
 
-/// Check a boolean condition is false.
+/// Check a boolean condition is false. Fail-fast via @assert.
 void assert_false(bool cond, str msg) {
-    if (!cond) {
-        @println("  [PASS] {}", msg);
-        tests_passed += 1;
-    } else {
-        @eprintln("  [FAIL] {}", msg);
-        tests_failed += 1;
-    }
+    @assert(!cond, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
 }
 
-/// Check a boolean condition.
+/// Check a boolean condition. Fail-fast via @assert.
 void assert_true(bool cond, str msg) {
-    if (cond) {
-        @println("  [PASS] {}", msg);
-        tests_passed += 1;
-    } else {
-        @eprintln("  [FAIL] {}", msg);
-        tests_failed += 1;
-    }
+    @assert(cond, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
 }
 
-/// Check i64 equality.
+/// Check i64 equality. Fail-fast via @assert; the abort message carries the
+/// expected and actual values.
 void assert_eq_i64(i64 expected, i64 actual, str msg) {
-    if (expected == actual) {
-        @println("  [PASS] {}", msg);
-        tests_passed += 1;
-    } else {
-        @eprintln("  [FAIL] {} (expected {}, got {})", msg, expected, actual);
-        tests_failed += 1;
-    }
+    @assert(expected == actual, assert_values(msg, expected, actual));
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
 }
 
-/// Check i32 equality.
+/// Check i32 equality. Fail-fast via @assert.
 void assert_eq_i32(i32 expected, i32 actual, str msg) {
     assert_eq_i64((i64)expected, (i64)actual, msg);
 }
 
-/// Check string equality.
+/// Check string equality. Fail-fast via @assert.
 void assert_eq_str(str expected, str actual, str msg) {
-    // Use strcmp from std.mem.memory (transitive via std.io/std.fmt)
-    if (strcmp(expected, actual) == 0) {
-        @println("  [PASS] {}", msg);
-        tests_passed += 1;
-    } else {
-        @eprintln("  [FAIL] {} (expected \"{}\", got \"{}\")", msg, expected, actual);
-        tests_failed += 1;
-    }
+    @assert(strcmp(expected, actual) == 0, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
 }
 
 /// Print summary and return failure count (for main() to return).

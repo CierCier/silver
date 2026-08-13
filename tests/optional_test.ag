@@ -181,8 +181,6 @@ i32 main() {
     STDOUT.write_i64(tests_failed);
     STDOUT.write_str("\n");
     
-    if (tests_failed > 0) {
-        return 1;
-    }
+    @assert(!(tests_failed > 0), "tests_failed > 0");
     return 0;
 }

@@ -10,24 +10,12 @@ u64 align_of<T>() {
 i32 main() {
     i32 x = 0;
 
-    if (@align(i8) != 1) {
-        return 1;
-    }
-    if (@align(i32) != 4) {
-        return 2;
-    }
-    if (@align(i64) != 8) {
-        return 3;
-    }
-    if (@align(AlignPair) != 8) {
-        return 4;
-    }
-    if (@align(x) != 4) {
-        return 5;
-    }
-    if (align_of<i64>() != 8) {
-        return 6;
-    }
+    @assert(!(@align(i8) != 1), "@align(i8) != 1");
+    @assert(!(@align(i32) != 4), "@align(i32) != 4");
+    @assert(!(@align(i64) != 8), "@align(i64) != 8");
+    @assert(!(@align(AlignPair) != 8), "@align(AlignPair) != 8");
+    @assert(!(@align(x) != 4), "@align(x) != 4");
+    @assert(!(align_of<i64>() != 8), "align_of<i64>() != 8");
 
     return 0;
 }

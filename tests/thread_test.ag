@@ -26,15 +26,9 @@ i64 main() {
     TaskRecord* h1 = thread_spawn(worker, 1);
     TaskRecord* h2 = thread_spawn(worker, 2);
     TaskRecord* h3 = thread_spawn(worker, 3);
-    if (h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0) {
-        return 1;
-    }
-    if (thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0) {
-        return 2;
-    }
-    if (__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10) {
-        return 3;
-    }
+    @assert(!(h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0), "h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0");
+    @assert(!(thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0), "thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0");
+    @assert(!(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10), "__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10");
 
     // Round 2: slots were reclaimed by join — spawn again and join all four.
     // The counter must reach the full sum again, proving concurrent runs of
@@ -44,15 +38,9 @@ i64 main() {
     h1 = thread_spawn(worker, 1);
     h2 = thread_spawn(worker, 2);
     h3 = thread_spawn(worker, 3);
-    if (h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0) {
-        return 4;
-    }
-    if (thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0) {
-        return 5;
-    }
-    if (__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10) {
-        return 6;
-    }
+    @assert(!(h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0), "h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0");
+    @assert(!(thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0), "thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0");
+    @assert(!(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10), "__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10");
 
     // Round 3: spawn one thread and return WITHOUT joining. The join-all hook
     // in _start must wait for it before exit_group; if the registry were not
@@ -61,8 +49,6 @@ i64 main() {
     // increment races the exit only if join-all is missing — with it, the
     // thread always finishes before exit_group.
     h0 = thread_spawn(worker, 0);
-    if (h0 == (TaskRecord*)0) {
-        return 7;
-    }
+    @assert(!(h0 == (TaskRecord*)0), "h0 == (TaskRecord*)0");
     return 0;
 }

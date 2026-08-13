@@ -14,9 +14,7 @@ i32 main() {
         defer increment();
     }
     // Counter should be 1 after block exits
-    if (global_counter != 1) {
-        return 1;
-    }
+    @assert(!(global_counter != 1), "global_counter != 1");
 
     // Test 2: defer after decrement to restore
     global_counter = 5;
@@ -27,9 +25,7 @@ i32 main() {
         global_counter = 100;
     }
     // Counter should be 99 (100 - 1)
-    if (global_counter != 99) {
-        return 2;
-    }
+    @assert(!(global_counter != 99), "global_counter != 99");
 
     // Test 3: multiple defers in same block run in reverse order
     global_counter = 0;
@@ -42,9 +38,7 @@ i32 main() {
         }
     }
     // First +3 runs (defer order: reverse), then *10: (0+3)*10 = 30
-    if (global_counter != 30) {
-        return 3;
-    }
+    @assert(!(global_counter != 30), "global_counter != 30");
 
     return 0;
 }

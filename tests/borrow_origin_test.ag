@@ -50,46 +50,28 @@ i64 main() {
     second_pair.right = 21;
 
     i64* left = first(&first_pair);
-    if (*left != 10) {
-        return 1;
-    }
+    @assert(!(*left != 10), "*left != 10");
 
     i64* chosen = choose_second(&first_pair, &second_pair);
-    if (*chosen != 21) {
-        return 2;
-    }
+    @assert(!(*chosen != 21), "*chosen != 21");
 
     i64* method_result = second_pair.right_ref();
 
-    if (read_through_raw(&second_pair) != 21) {
-        return 5;
-    }
+    @assert(!(read_through_raw(&second_pair) != 21), "read_through_raw(&second_pair) != 21");
 
-    if (read_through_ref(&second_pair) != 21) {
-        return 6;
-    }
-    if (*method_result != 21) {
-        return 3;
-    }
+    @assert(!(read_through_ref(&second_pair) != 21), "read_through_ref(&second_pair) != 21");
+    @assert(!(*method_result != 21), "*method_result != 21");
 
     bump_through_ref(&mut second_pair);
-    if (second_pair.left != 21) {
-        return 7;
-    }
+    @assert(!(second_pair.left != 21), "second_pair.left != 21");
 
     i64* mutable_origin = second_pair.get_mut();
-    if (*mutable_origin != 21) {
-        return 8;
-    }
+    @assert(!(*mutable_origin != 21), "*mutable_origin != 21");
     *mutable_origin = 25; // write through the &mut-receiver borrow
-    if (second_pair.left != 25) {
-        return 9;
-    }
+    @assert(!(second_pair.left != 25), "second_pair.left != 25");
 
     first_pair.bump();
-    if (first_pair.left != 11) {
-        return 4;
-    }
+    @assert(!(first_pair.left != 11), "first_pair.left != 11");
 
     return 0;
 }

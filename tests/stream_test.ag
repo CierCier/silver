@@ -72,15 +72,15 @@ void stream_server_main(i64 which) {
 i32 bind_loopback(TcpListener* listener, u16* port) {
     Result<SocketAddr, AddrError> bind_result =
         SocketAddr.v4("127.0.0.1", (u16)0);
-    if (bind_result.failed()) { return 1; }
+    @assert(!(bind_result.failed()), "bind_result.failed()");
     SocketAddr bind_addr = bind_result.unwrap();
     *listener = TcpListener.bind(&bind_addr, 1);
-    if (!listener.valid()) { return 2; }
+    @assert(!(!listener.valid()), "!listener.valid()");
     SockAddrIn sa;
     u32 len = 16;
     Result<i64, Error> name_result =
         try_getsockname(listener.raw_fd(), (void*)&sa, &len);
-    if (name_result.failed()) { return 3; }
+    @assert(!(name_result.failed()), "name_result.failed()");
     *port = ntoh16(sa.sin_port);
     return 0;
 }

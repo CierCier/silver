@@ -81,15 +81,15 @@ void keepalive_server_main(i64 which) {
 i32 bind_loopback(TcpListener* listener, u16* port) {
     Result<SocketAddr, AddrError> bind_result =
         SocketAddr.v4("127.0.0.1", (u16)0);
-    if (bind_result.failed()) { return 1; }
+    @assert(!(bind_result.failed()), "bind_result.failed()");
     SocketAddr bind_addr = bind_result.unwrap();
     *listener = TcpListener.bind(&bind_addr, 1);
-    if (!listener.valid()) { return 2; }
+    @assert(!(!listener.valid()), "!listener.valid()");
     SockAddrIn sa;
     u32 len = 16;
     Result<i64, Error> name_result =
         try_getsockname(listener.raw_fd(), (void*)&sa, &len);
-    if (name_result.failed()) { return 3; }
+    @assert(!(name_result.failed()), "name_result.failed()");
     *port = ntoh16(sa.sin_port);
     return 0;
 }
@@ -112,7 +112,7 @@ i32 run_requests(u16 port, i64 requests, i64 per_conn) {
     g_accepts_a = 0;
     g_status = -1;
     TaskRecord* server_handle = thread_spawn(keepalive_server_main, 0);
-    if (server_handle == (TaskRecord*)0) { return 16; }
+    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
     HttpClient client = HttpClient.new();
     i64 i = 0;
     while (i < requests) {
@@ -127,7 +127,7 @@ i32 run_requests(u16 port, i64 requests, i64 per_conn) {
         }
         i = i + 1;
     }
-    if (thread_join(server_handle) < 0) { return 16; }
+    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
     if (g_status != 0) { return (i32)g_status; }
     return 0;
 }

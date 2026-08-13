@@ -28,68 +28,68 @@ i64 main() {
     {
         AtomicI32 c = AtomicI32.new(0);
         c.set(42);
-        if (c.get() != 42) { return 1; }
+        @assert(!(c.get() != 42), "c.get() != 42");
 
         i32 old = c.fetch_add(5);
-        if (old != 42) { return 2; }
-        if (c.get() != 47) { return 3; }
+        @assert(!(old != 42), "old != 42");
+        @assert(!(c.get() != 47), "c.get() != 47");
 
         i32 old2 = c.fetch_sub(7);
-        if (old2 != 47) { return 4; }
-        if (c.get() != 40) { return 5; }
+        @assert(!(old2 != 47), "old2 != 47");
+        @assert(!(c.get() != 40), "c.get() != 40");
 
         i32 old3 = c.swap(100);
-        if (old3 != 40) { return 6; }
-        if (c.get() != 100) { return 7; }
+        @assert(!(old3 != 40), "old3 != 40");
+        @assert(!(c.get() != 100), "c.get() != 100");
 
-        if (!c.compare_exchange(100, 200)) { return 8; }
-        if (c.get() != 200) { return 9; }
+        @assert(!(!c.compare_exchange(100, 200)), "!c.compare_exchange(100, 200)");
+        @assert(!(c.get() != 200), "c.get() != 200");
 
         // Failing CAS leaves the value untouched.
-        if (c.compare_exchange(999, 1)) { return 10; }
-        if (c.get() != 200) { return 11; }
+        @assert(!(c.compare_exchange(999, 1)), "c.compare_exchange(999, 1)");
+        @assert(!(c.get() != 200), "c.get() != 200");
 
         // Monotonic variants still operate atomically.
         i32 m = c.fetch_add_monotonic(10);
-        if (m != 200) { return 12; }
-        if (c.get_monotonic() != 210) { return 13; }
+        @assert(!(m != 200), "m != 200");
+        @assert(!(c.get_monotonic() != 210), "c.get_monotonic() != 210");
         c.set_monotonic(300);
-        if (c.get() != 300) { return 14; }
+        @assert(!(c.get() != 300), "c.get() != 300");
     }
 
     // --- AtomicI64 ---
     {
         AtomicI64 c = AtomicI64.new(0);
         c.set(1000000);
-        if (c.get() != 1000000) { return 15; }
+        @assert(!(c.get() != 1000000), "c.get() != 1000000");
         i64 old = c.fetch_add(999999);
-        if (old != 1000000) { return 16; }
-        if (c.get() != 1999999) { return 17; }
-        if (!c.compare_exchange(1999999, 2000000)) { return 18; }
-        if (c.get() != 2000000) { return 19; }
+        @assert(!(old != 1000000), "old != 1000000");
+        @assert(!(c.get() != 1999999), "c.get() != 1999999");
+        @assert(!(!c.compare_exchange(1999999, 2000000)), "!c.compare_exchange(1999999, 2000000)");
+        @assert(!(c.get() != 2000000), "c.get() != 2000000");
     }
 
     // --- AtomicI8 ---
     {
         AtomicI8 small = AtomicI8.new(3);
         i8 old = small.fetch_add(2);
-        if (old != 3) { return 20; }
-        if (small.get() != 5) { return 21; }
-        if (!small.compare_exchange(5, 9)) { return 22; }
-        if (small.get() != 9) { return 23; }
+        @assert(!(old != 3), "old != 3");
+        @assert(!(small.get() != 5), "small.get() != 5");
+        @assert(!(!small.compare_exchange(5, 9)), "!small.compare_exchange(5, 9)");
+        @assert(!(small.get() != 9), "small.get() != 9");
     }
 
     // --- AtomicBool ---
     {
         AtomicBool flag = AtomicBool.new(true);
-        if (!flag.get()) { return 24; }
+        @assert(!(!flag.get()), "!flag.get()");
         flag.set(false);
-        if (flag.get()) { return 25; }
+        @assert(!(flag.get()), "flag.get()");
         bool old = flag.swap(true);
-        if (old) { return 26; }
-        if (!flag.get()) { return 27; }
-        if (!flag.compare_exchange(true, false)) { return 28; }
-        if (flag.get()) { return 29; }
+        @assert(!(old), "old");
+        @assert(!(!flag.get()), "!flag.get()");
+        @assert(!(!flag.compare_exchange(true, false)), "!flag.compare_exchange(true, false)");
+        @assert(!(flag.get()), "flag.get()");
     }
 
     // --- Spinlock built on cmpxchg (memory-ordering sanity) ---
@@ -97,9 +97,9 @@ i64 main() {
         AtomicI32 lock = AtomicI32.new(0);
         spin_lock(&lock);
         // Critical section: a thread acquires exactly once.
-        if (lock.get() != 1) { return 30; }
+        @assert(!(lock.get() != 1), "lock.get() != 1");
         spin_unlock(&lock);
-        if (lock.get() != 0) { return 31; }
+        @assert(!(lock.get() != 0), "lock.get() != 0");
     }
 
     // --- Fences ---
@@ -113,7 +113,7 @@ i64 main() {
         // Reader side pattern: acquire-fence then load.
         if (ready.get()) {
             fence_acquire();
-            if (x.get() != 9) { return 32; }
+            @assert(!(x.get() != 9), "x.get() != 9");
         }
         fence_seq_cst();
         fence_acq_rel();
@@ -124,7 +124,7 @@ i64 main() {
         i32 value = 0;
         __atomic_store_i32(&value, 7, ATOMIC_SEQ_CST);
         i32 v = __atomic_load_i32(&value, ATOMIC_ACQUIRE);
-        if (v != 7) { return 33; }
+        @assert(!(v != 7), "v != 7");
         __atomic_fence(ATOMIC_ACQ_REL);
     }
 

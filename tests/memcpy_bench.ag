@@ -62,7 +62,7 @@ i32 main() {
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("strlen 16KB: {} ns/call ({} us for 20K)", us * 1000 / 20000, us);
-    if (strlen((const char*)big) != 16384) { return 2; }
+    @assert(!(strlen((const char*)big) != 16384), "strlen((const char*)big) != 16384");
 
     // memcmp on equal buffers (full scan, not early-exit) — before memset.
     t0 = now();
@@ -72,7 +72,7 @@ i32 main() {
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("memcmp 8MB: {} us/call ({} us for 100)", us / 100, us);
-    if (memcmp((const void*)src, (const void*)dst, N) != 0) { return 3; }
+    @assert(!(memcmp((const void*)src, (const void*)dst, N) != 0), "memcmp((const void*)src, (const void*)dst, N) != 0");
 
     // memset 8MB
     silver_rt_memset(dst, (u8)0xAB, N);
@@ -86,7 +86,7 @@ i32 main() {
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("memset 8MB: {} MB/s ({} us)", (i64)N * 100 * 1000000 / us / 1048576, us);
-    if (ok != 1) { return 4; }
+    @assert(!(ok != 1), "ok != 1");
 
     // re-sync dst, then memmove backward overlap, 4MB
     i = 0;

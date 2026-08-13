@@ -66,8 +66,8 @@ i32 main() {
         {
             Outer o = Outer.new(1, 2);
         }
-        if (outer_drop_count != 1) { return 1; }
-        if (inner_total != 2) { return 2; }
+        @assert(!(outer_drop_count != 1), "outer_drop_count != 1");
+        @assert(!(inner_total != 2), "inner_total != 2");
     }
 
     {
@@ -77,8 +77,8 @@ i32 main() {
             Outer o = Outer.new(3, 4);
             Outer p = move o;
         }
-        if (outer_drop_count != 1) { return 3; }
-        if (inner_total != 2) { return 4; }
+        @assert(!(outer_drop_count != 1), "outer_drop_count != 1");
+        @assert(!(inner_total != 2), "inner_total != 2");
     }
 
     {
@@ -86,7 +86,7 @@ i32 main() {
         {
             InherentOnly x = InherentOnly.new(5);
         }
-        if (inherent_drop_count != 0) { return 5; }
+        @assert(!(inherent_drop_count != 0), "inherent_drop_count != 0");
     }
 
     return 0;

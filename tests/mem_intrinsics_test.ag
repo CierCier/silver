@@ -17,26 +17,26 @@ i32 main() {
     STDOUT.write_str("strlen=");
     STDOUT.write_i64(l);
     STDOUT.write_str("\n");
-    if (l != 63) { return 1; }
-    if (strlen("") != 0) { return 2; }
-    if (strlen("x") != 1) { return 3; }
+    @assert(!(l != 63), "l != 63");
+    @assert(!(strlen("") != 0), "check");
+    @assert(!(strlen("x") != 1), "check");
     // strcmp
-    if (strcmp("abc", "abc") != 0) { return 4; }
-    if (strcmp("abc", "abd") >= 0) { return 5; }
-    if (strcmp("abd", "abc") <= 0) { return 6; }
-    if (strcmp("abc", "abcd") >= 0) { return 7; }
+    @assert(!(strcmp("abc", "abc") != 0), "check");
+    @assert(!(strcmp("abc", "abd") >= 0), "check");
+    @assert(!(strcmp("abd", "abc") <= 0), "check");
+    @assert(!(strcmp("abc", "abcd") >= 0), "check");
     // memcmp equal + differing
-    if (memcmp((const void*)"abcdefghijklmnopqrstuvwxyz", (const void*)"abcdefghijklmnopqrstuvwxyz", 26) != 0) { return 8; }
-    if (memcmp((const void*)"abcdefghijklmnopqrstuvwxyz", (const void*)"abcdefghijklmnopqrstuvwxYz", 26) <= 0) { return 9; }
+    @assert(!(memcmp((const void*)"abcdefghijklmnopqrstuvwxyz", (const void*)"abcdefghijklmnopqrstuvwxyz", 26) != 0), "check");
+    @assert(!(memcmp((const void*)"abcdefghijklmnopqrstuvwxyz", (const void*)"abcdefghijklmnopqrstuvwxYz", 26) <= 0), "check");
     // memcmp on malloc'd buffers (page-edge safety)
     i64 N = 4096 * 8;
     u8* a = (u8*)malloc(N);
     u8* b = (u8*)malloc(N);
     i64 i = 0;
     while (i < N) { a[i] = (u8)(i % 251); b[i] = a[i]; i = i + 1; }
-    if (memcmp(a, b, N) != 0) { return 10; }
+    @assert(!(memcmp(a, b, N) != 0), "memcmp(a, b, N) != 0");
     a[N - 100] = (u8)(a[N - 100] + 1);
-    if (memcmp(a, b, N) <= 0) { return 11; }
+    @assert(!(memcmp(a, b, N) <= 0), "memcmp(a, b, N) <= 0");
 
     // memmove forward + backward overlap
     u8* buf = (u8*)malloc(4096);
@@ -45,30 +45,30 @@ i32 main() {
     // forward: shift right by 100
     memmove((u8*)((i64)buf + 100), buf, 3000);
     i = 0;
-    while (i < 3000) { if (buf[100 + i] != (u8)(i % 7)) { return 12; } i = i + 1; }
+    while (i < 3000) { @assert(!(buf[100 + i] != (u8)(i % 7)), "buf[100 + i] != (u8)(i % 7)"); i = i + 1; }
     // backward: shift left by 50
     memmove((u8*)((i64)buf + 50), (u8*)((i64)buf + 150), 2000);
     i = 0;
-    while (i < 2000) { if (buf[50 + i] != (u8)((50 + i) % 7)) { return 13; } i = i + 1; }
+    while (i < 2000) { @assert(!(buf[50 + i] != (u8)((50 + i) % 7)), "buf[50 + i] != (u8)((50 + i) % 7)"); i = i + 1; }
     // memchr: first occurrence, absent, heap buffer above 4GB near the end.
-    if (memchr((u8*)"hello world", (u8)'w', 11) != 6) { return 14; }
-    if (memchr((u8*)"hello world", (u8)'x', 11) != -1) { return 15; }
-    if (memchr((u8*)"abcabc", (u8)'b', 6) != 1) { return 16; }
+    @assert(!(memchr((u8*)"hello world", (u8)'w', 11) != 6), "check");
+    @assert(!(memchr((u8*)"hello world", (u8)'x', 11) != -1), "check");
+    @assert(!(memchr((u8*)"abcabc", (u8)'b', 6) != 1), "check");
     u8* hay = (u8*)malloc(4096 * 8);
     i = 0;
     while (i < 4096 * 8) { hay[i] = (u8)'a'; i = i + 1; }
     hay[4096 * 8 - 3] = (u8)'Z';
-    if (memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3) { return 17; }
+    @assert(!(memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3), "memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3");
 
     // String single-byte search fast paths (SSE2 memchr).
     String q = String.from_str("the quick brown fox");
-    if (!q.contains("q")) { return 18; }
-    if (q.contains("z")) { return 19; }
-    if (q.find("q") != 4) { return 20; }
-    if (q.find("brown") != 10) { return 21; }
-    if (q.find("zz") != -1) { return 22; }
+    @assert(!(!q.contains("q")), "check");
+    @assert(!(q.contains("z")), "check");
+    @assert(!(q.find("q") != 4), "check");
+    @assert(!(q.find("brown") != 10), "check");
+    @assert(!(q.find("zz") != -1), "check");
     String t = String.from_str("aaaaab");
-    if (t.find("b") != 5) { return 23; }
+    @assert(!(t.find("b") != 5), "check");
 
     STDOUT.write_str("all intrinsics ok\n");
     return 0;
