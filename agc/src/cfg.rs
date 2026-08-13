@@ -1,0 +1,215 @@
+//! Compile-time configuration (CFG) machinery.
+//!
+//! `--cfg "key=value,key2=value2"` flags populate a [`CfgSet`]. Items marked
+//! `#[cfg(key)]` (or `#[cfg(cpu.feature)]`, `#[cfg("key")]`) are kept only
+//! when the key is present; multiple cfg arguments AND-compose. The gate runs
+//! after import lowering and before symbol registration, so gated-out items
+//! never register or type-check.
+//!
+//! The `@cfg(key)` expression form folds at semantic time (see
+//! `semantic::cfg_hook`): absent keys become `false` (dead branches pruned),
+//! custom keys become `true`, and present `cpu.*` keys become a read of the
+//! runtime probe global `g_has_<feature>` initialized by `__silver_cpu_init`
+//! in `std/cpu.ag` before `main`.
+
+use crate::lexer::Span;
+use crate::parser::ast;
+use rustc_hash::FxHashMap;
+
+/// The set of cfg keys enabled for this compilation, with their values.
+#[derive(Debug, Clone, Default)]
+pub struct CfgSet {
+    values: FxHashMap<String, String>,
+}
+
+impl CfgSet {
+    /// Parse `--cfg` flag values: comma-separated `key=value` pairs; a bare
+    /// `key` gets the value `"1"`. Empty fragments are ignored.
+    pub fn parse(flags: &[String]) -> Self {
+        let mut set = CfgSet::default();
+        for flag in flags {
+            for pair in flag.split(',') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                let (key, value) = match pair.split_once('=') {
+                    Some((key, value)) => (key.trim(), value.trim()),
+                    None => (pair, "1"),
+                };
+                if key.is_empty() {
+                    continue;
+                }
+                set.values.insert(key.to_string(), value.to_string());
+            }
+        }
+        set
+    }
+
+    /// True when the key is present in the cfg set (value irrelevant).
+    pub fn contains(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    /// The value bound to the key, if present.
+    pub fn value(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+}
+
+/// A malformed `#[cfg(...)]` attribute.
+pub struct CfgError {
+    pub message: String,
+    pub span: Span,
+}
+
+/// Normalize a cfg attribute argument to its key string.
+fn cfg_arg_key(arg: &ast::AttributeArg) -> Option<String> {
+    match arg {
+        ast::AttributeArg::Identifier(id) => Some(id.name.clone()),
+        ast::AttributeArg::Path(path) => Some(
+            path.iter()
+                .map(|id| id.name.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        ),
+        ast::AttributeArg::Literal(ast::Literal::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn cfg_arg_span(arg: &ast::AttributeArg) -> Span {
+    match arg {
+        ast::AttributeArg::Identifier(id) => id.span,
+        ast::AttributeArg::Path(path) => {
+            let first = &path[0];
+            let last = &path[path.len() - 1];
+            first.span.with_end(last.span.end)
+        }
+        ast::AttributeArg::Literal(ast::Literal::String(_)) => Span::default(),
+        _ => Span::default(),
+    }
+}
+
+/// Drop items whose `#[cfg(...)]` attributes do not match `cfg`. Items
+/// without cfg attributes are always kept. All cfg arguments on an item must
+/// match (AND); multiple `#[cfg]` attributes also AND-compose. Malformed
+/// attributes are reported as errors.
+pub fn gate_items(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
+    let mut errors = Vec::new();
+    program.items.retain(|item| {
+        let cfg_attrs: Vec<&ast::Attribute> = item
+            .attributes
+            .iter()
+            .filter(|attr| attr.name.name == "cfg")
+            .collect();
+        if cfg_attrs.is_empty() {
+            return true;
+        }
+        let mut keep = true;
+        for attr in cfg_attrs {
+            if attr.args.is_empty() {
+                errors.push(CfgError {
+                    message: "#[cfg] requires at least one argument".to_string(),
+                    span: attr.span,
+                });
+                keep = false;
+                continue;
+            }
+            for arg in &attr.args {
+                match cfg_arg_key(arg) {
+                    Some(key) => {
+                        if !cfg.contains(&key) {
+                            keep = false;
+                        }
+                    }
+                    None => {
+                        errors.push(CfgError {
+                            message:
+                                "invalid #[cfg] argument: expected a name, string, or dotted path"
+                                    .to_string(),
+                            span: cfg_arg_span(arg),
+                        });
+                        keep = false;
+                    }
+                }
+            }
+        }
+        keep
+    });
+    errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::Parser;
+
+    fn parse(src: &str) -> ast::Program {
+        let tokens = lex(src).expect("lexer should succeed");
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parser errors: {errors:?}");
+        program
+    }
+
+    #[test]
+    fn parse_comma_separated_pairs() {
+        let set = CfgSet::parse(&["cpu.avx=1,cpu.sse41".to_string(), "release".to_string()]);
+        assert!(set.contains("cpu.avx"));
+        assert!(set.contains("cpu.sse41"));
+        assert!(set.contains("release"));
+        assert!(!set.contains("cpu.avx2"));
+        assert_eq!(set.value("cpu.avx"), Some("1"));
+        assert_eq!(set.value("release"), Some("1"));
+    }
+
+    #[test]
+    fn gate_keeps_matching_items() {
+        let mut program = parse(
+            "#[cfg(flag)]\ni32 a() { return 1; }\n#[cfg(missing)]\ni32 b() { return 2; }\ni32 c() { return 3; }\n",
+        );
+        let set = CfgSet::parse(&["flag".to_string()]);
+        let errors = gate_items(&mut program, &set);
+        assert!(errors.is_empty());
+        let names: Vec<&str> = program
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ast::ItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn gate_requires_all_args_to_match() {
+        let mut program = parse(
+            "#[cfg(flag, missing)]\ni32 a() { return 1; }\n#[cfg(flag, other)]\ni32 b() { return 2; }\n",
+        );
+        let set = CfgSet::parse(&["flag".to_string()]);
+        let _ = gate_items(&mut program, &set);
+        assert!(program.items.is_empty());
+    }
+
+    #[test]
+    fn gate_accepts_dotted_and_string_keys() {
+        let mut program = parse(
+            "#[cfg(cpu.sse41)]\ni32 a() { return 1; }\n#[cfg(\"plain\")]\ni32 b() { return 2; }\n",
+        );
+        let set = CfgSet::parse(&["cpu.sse41=1,plain".to_string()]);
+        let errors = gate_items(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(program.items.len(), 2);
+    }
+
+    #[test]
+    fn gate_reports_malformed_cfg() {
+        let mut program = parse("#[cfg(42)]\ni32 a() { return 1; }\n");
+        let set = CfgSet::default();
+        let errors = gate_items(&mut program, &set);
+        assert_eq!(errors.len(), 1);
+    }
+}

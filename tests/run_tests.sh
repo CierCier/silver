@@ -71,6 +71,7 @@ test_specific_flags() {
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
         tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
+        cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         *) echo "" ;;
     esac
 }

@@ -669,11 +669,19 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children = items.iter().map(initializer_item_node).collect();
             n
         }
-        ast::ExpressionKind::Asm { code, inputs } => {
+        ast::ExpressionKind::Asm {
+            code,
+            inputs,
+            clobbers,
+        } => {
             let mut n = Node::new(format!("Expr::Asm \"{}\"", code));
             if !inputs.is_empty() {
                 n.children
                     .push(Node::new(format!("inputs: {} items", inputs.len())));
+            }
+            if !clobbers.is_empty() {
+                n.children
+                    .push(Node::new(format!("clobbers: {}", clobbers.join(", "))));
             }
             n
         }
@@ -1030,6 +1038,13 @@ fn attribute_node(attribute: &ast::Attribute) -> Node {
 fn attribute_arg_node(arg: &ast::AttributeArg) -> Node {
     match arg {
         ast::AttributeArg::Identifier(ident) => Node::new(format!("ident {}", ident.name)),
+        ast::AttributeArg::Path(path) => Node::new(format!(
+            "path {}",
+            path.iter()
+                .map(|ident| ident.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        )),
         ast::AttributeArg::Literal(literal) => {
             Node::new(format!("literal {}", literal_name(literal)))
         }

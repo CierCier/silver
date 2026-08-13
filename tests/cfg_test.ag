@@ -1,0 +1,78 @@
+// tests/cfg_test.ag — compile-time cfg machinery.
+//
+// Compiled by run_tests.sh with `--cfg "cfg_test_flag=1,cpu.sse41=1,cpu.avx512f=1"`.
+// Exercises: #[cfg] item gating, @cfg folding (custom keys + cpu.* runtime
+// probes), and the if-prune that keeps dead branches referencing gated-out
+// items from reaching type checking.
+
+import std.cpu;
+import std.sys.entry;
+import std.test;
+
+#[cfg(cfg_test_flag)]
+i32 pick() { return 1; }
+
+#[cfg(never_set)]
+i32 pick() { return 2; }
+
+// Never compiled in this build: any surviving reference would fail typeck
+// with "unknown function" — proving the cfg prune runs before type checking.
+#[cfg(never_set)]
+i32 ghost() { return 42; }
+
+i32 main() {
+    test_start("cfg item gating");
+    // Duplicate `pick` definitions (one gated out) compile only when the
+    // item gate runs before symbol registration.
+    assert_eq_i64(1, pick(), "gated-in item present, gated-out dropped");
+
+    test_start("cfg fold custom keys");
+    i64 x = 0;
+    if (@cfg(cfg_test_flag)) { x = 7; } else { x = 8; }
+    assert_eq_i64(7, x, "present key folds to true");
+    if (@cfg(missing_key)) { x = x + 1000; }
+    assert_eq_i64(7, x, "absent key folds to false, branch pruned");
+
+    test_start("cfg prune removes dead calls");
+    i64 y = 0;
+    if (@cfg(never_set)) { y = ghost(); }
+    assert_eq_i64(0, y, "dead branch with gated-out call pruned before typeck");
+
+    test_start("cfg cpu runtime probes");
+    // The @cfg(cpu.*) fold must agree with the explicit has_*() probe: both
+    // read the same g_has_* globals initialized by __silver_cpu_init at
+    // _start. sse41 is baseline on x86-64; avx512f depends on the machine.
+    i64 s = 0;
+    if (@cfg(cpu.sse41)) { s = 1; } else { s = 2; }
+    i64 s_expect = 0;
+    if (has_sse41()) { s_expect = 1; } else { s_expect = 2; }
+    assert_eq_i64(s_expect, s, "@cfg(cpu.sse41) agrees with has_sse41()");
+
+    i64 a = 0;
+    if (@cfg(cpu.avx512f)) { a = 1; } else { a = 2; }
+    i64 a_expect = 0;
+    if (has_avx512f()) { a_expect = 1; } else { a_expect = 2; }
+    assert_eq_i64(a_expect, a, "@cfg(cpu.avx512f) agrees with has_avx512f()");
+
+    i64 v = 0;
+    if (@cfg(cpu.avx2)) { v = 1; } else { v = 2; }
+    i64 v_expect = 0;
+    if (has_avx2()) { v_expect = 1; } else { v_expect = 2; }
+    assert_eq_i64(v_expect, v, "@cfg(cpu.avx2) agrees with has_avx2()");
+
+    // has_*() wrappers are the same storage as the folds: both must have
+    // been initialized by _start (not lazily).
+    i64 total = 0;
+    if (has_sse41()) { total = total + 1; }
+    if (has_sse42()) { total = total + 1; }
+    if (has_popcnt()) { total = total + 1; }
+    if (has_fma()) { total = total + 1; }
+    if (has_avx()) { total = total + 1; }
+    if (has_avx2()) { total = total + 1; }
+    if (has_avx512f()) { total = total + 1; }
+    // x86-64 guarantees sse2; sse41 is universal on any machine from the
+    // last ~15 years, so at least sse41 must be true here.
+    assert_true(total >= 1, "cpu probe globals initialized before main");
+
+    return done();
+}

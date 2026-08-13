@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod cfg_hook;
 pub mod comptime_cast_hook;
 pub mod escape_check;
 pub mod monomorph;

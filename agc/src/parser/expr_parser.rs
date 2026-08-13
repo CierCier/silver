@@ -989,6 +989,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             cursor.bump();
 
             let mut inputs = Vec::new();
+            let mut clobbers = Vec::new();
             // Optional input list: asm("code", [expr, expr, ...])
             if let Some(comma) = cursor.current()
                 && matches!(comma.kind, Token::Comma)
@@ -1032,6 +1033,57 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 cursor.bump();
             }
 
+            // Optional clobber list: asm("code", [inputs], ["rbx", "rdx"])
+            if let Some(comma) = cursor.current()
+                && matches!(comma.kind, Token::Comma)
+            {
+                cursor.bump();
+                let Some(open_bracket) = cursor.current() else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected '[' after ',' in asm clobbers".to_string(),
+                        span: comma.span,
+                    });
+                };
+                if !matches!(open_bracket.kind, Token::LeftBracket) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected '[' after ',' in asm clobbers".to_string(),
+                        span: open_bracket.span,
+                    });
+                }
+                cursor.bump();
+                while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBracket)) {
+                    let Some(clobber) = cursor.current() else {
+                        break;
+                    };
+                    let Token::StringLiteral(name) = &clobber.kind else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "asm clobbers must be string literals".to_string(),
+                            span: clobber.span,
+                        });
+                    };
+                    clobbers.push(name.clone());
+                    cursor.bump();
+                    if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+                        cursor.bump();
+                    } else {
+                        break;
+                    }
+                }
+                let Some(close_bracket) = cursor.current() else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "unterminated asm clobber list".to_string(),
+                        span: token.span.with_end(asm_start),
+                    });
+                };
+                if !matches!(close_bracket.kind, Token::RightBracket) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected ']' after asm clobbers".to_string(),
+                        span: close_bracket.span,
+                    });
+                }
+                cursor.bump();
+            }
+
             let Some(close) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ')' after asm string".to_string(),
@@ -1050,6 +1102,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 kind: Box::new(ast::ExpressionKind::Asm {
                     code: code.clone(),
                     inputs,
+                    clobbers,
                 }),
                 span,
             });

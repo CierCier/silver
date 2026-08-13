@@ -1,0 +1,80 @@
+// std/cpu.ag — runtime CPU feature detection (x86-64).
+//
+// __silver_cpu_init() runs once, before main, from the `_start` entry point
+// (std/sys/entry.ag). It probes CPUID and stores one global bool per feature;
+// `@cfg(cpu.<feature>)` folds to a read of those globals, so dispatch
+// callsites become a single load + test. The explicit has_*() wrappers are
+// the same storage, for hand-written runtime dispatch.
+//
+// Inline asm form used here: asm("code", [inputs], [clobbers]).
+// Inputs bind in order to {rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}; the
+// return value is {rax}. Clobbers beyond the hardcoded rcx/r11 (cpuid
+// destroys rbx/rdx, xgetbv destroys rdx) must be listed so LLVM preserves
+// live values across the instruction.
+
+/// Feature flags, probed once by __silver_cpu_init().
+bool g_has_sse41;
+bool g_has_sse42;
+bool g_has_popcnt;
+bool g_has_fma;
+bool g_has_avx;
+bool g_has_avx2;
+bool g_has_avx512f;
+
+/// Run cpuid(leaf, subleaf) and store eax/ebx/ecx/edx at buf[0..3]
+/// (64-bit slots, low 32 bits valid). Returns eax (unused).
+i64 cpuid_buf(i64 leaf, i64 subleaf, i64 buf) {
+    return asm("movq %rdi, %rcx\ncpuid\nmovl %eax, 0(%rsi)\nmovl %ebx, 8(%rsi)\nmovl %ecx, 16(%rsi)\nmovl %edx, 24(%rsi)\nmovl %eax, %eax", [leaf, subleaf, buf], ["rbx", "rdx"]);
+}
+
+/// Bit `bit` of cpuid leaf 1 ECX.
+bool cpuid_leaf1_ecx(i64 bit) {
+    i64 buf[4];
+    cpuid_buf(1, 0, (i64)&buf[0]);
+    // Only the low 32 bits of each slot were stored; mask the rest.
+    i64 ecx = buf[2] & 0xffffffff;
+    return ((ecx >> bit) & 1) == 1;
+}
+
+/// Bit `bit` of cpuid leaf 7 EBX.
+bool cpuid_leaf7_ebx(i64 bit) {
+    i64 buf[4];
+    cpuid_buf(7, 0, (i64)&buf[0]);
+    i64 ebx = buf[1] & 0xffffffff;
+    return ((ebx >> bit) & 1) == 1;
+}
+
+/// Low 32 bits of XCR0 (via xgetbv), zero-extended.
+i64 xcr0_low() {
+    return asm("movl $$0, %ecx\nxgetbv\nmovl %eax, %eax", [], ["rdx"]);
+}
+
+/// True when the OS saves the XMM/YMM/ZMM state required by `required`
+/// (a mask of XCR0 bits). Without this, AVX/AVX2/AVX-512 instructions trap.
+bool avx_state_ok(i64 required) {
+    i64 xcr0 = xcr0_low();
+    return (xcr0 & required) == required;
+}
+
+/// Probe every feature flag. Called once by `_start` before main.
+void __silver_cpu_init() {
+    g_has_sse41 = cpuid_leaf1_ecx(19);
+    g_has_sse42 = cpuid_leaf1_ecx(20);
+    g_has_popcnt = cpuid_leaf1_ecx(23);
+    g_has_fma = cpuid_leaf1_ecx(12);
+    bool avx_hardware = cpuid_leaf1_ecx(28);
+    // XCR0 bits 1+2 (SSE + YMM state) must be OS-enabled.
+    g_has_avx = avx_hardware && avx_state_ok(0x6);
+    g_has_avx2 = cpuid_leaf7_ebx(5) && avx_state_ok(0x6);
+    // XCR0 bits 1+2+5+6+7 (opmask, ZMM hi256, hi16 ZMM) for AVX-512.
+    g_has_avx512f = cpuid_leaf7_ebx(16) && avx_state_ok(0xe6);
+}
+
+/// Explicit runtime probes (same storage as the @cfg folds).
+bool has_sse41() { return g_has_sse41; }
+bool has_sse42() { return g_has_sse42; }
+bool has_popcnt() { return g_has_popcnt; }
+bool has_fma() { return g_has_fma; }
+bool has_avx() { return g_has_avx; }
+bool has_avx2() { return g_has_avx2; }
+bool has_avx512f() { return g_has_avx512f; }

@@ -1037,9 +1037,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Comptime(inner) => self.emit_expression_value(inner),
             ast::ExpressionKind::Launch(_) => self.emit_launch_expression(expr),
             ast::ExpressionKind::Wait(_) => self.emit_wait_expression(expr),
-            ast::ExpressionKind::Asm { code, inputs } => {
-                self.emit_asm_expression(code, inputs, &expr.span)
-            }
+            ast::ExpressionKind::Asm {
+                code,
+                inputs,
+                clobbers,
+            } => self.emit_asm_expression(code, inputs, clobbers, &expr.span),
             ast::ExpressionKind::EnumVariant {
                 path,
                 variant,
@@ -1301,6 +1303,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         code: &str,
         inputs: &[ast::Expression],
+        clobbers: &[String],
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         // Validate: x86_64 syscall has 1 syscall number (rax) + 6 arg registers
@@ -1331,7 +1334,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // 2. Build constraint string
         // Output: {rax} — syscall return value is always in %rax
         // Inputs (in syscall order): {rax}, {rdi}, {rsi}, {rdx}, {r10}, {r8}, {r9}
-        // Clobbers: ~{rcx}, ~{r11} — always destroyed by Linux syscall
+        // Clobbers: ~{rcx}, ~{r11} — always destroyed by Linux syscall, plus
+        // any caller-supplied clobbers (e.g. "rbx", "rdx" for `cpuid`).
         let regs = ["{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"];
         let mut constraints = String::from("={rax}");
         for reg in regs.iter().take(inputs.len()) {
@@ -1339,6 +1343,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             constraints.push_str(reg);
         }
         constraints.push_str(",~{rcx},~{r11}");
+        for clobber in clobbers {
+            let name = clobber.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let name = name.strip_prefix('%').unwrap_or(name);
+            let named = format!("~{{{name}}}");
+            if !constraints.contains(&named) {
+                constraints.push(',');
+                constraints.push_str(&named);
+            }
+        }
 
         // 3. Build LLVM function type: i64(i64, i64, ...)
         let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = (0..inputs.len())

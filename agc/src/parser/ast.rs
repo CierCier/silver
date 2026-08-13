@@ -223,6 +223,8 @@ pub struct Attribute {
 pub enum AttributeArg {
     Identifier(Identifier),
     Literal(Literal),
+    /// Dotted path, e.g. `cpu.sse41` in `#[cfg(cpu.sse41)]`.
+    Path(Vec<Identifier>),
 }
 
 /// Identifiers
@@ -677,6 +679,9 @@ pub enum ExpressionKind {
     Asm {
         code: String,
         inputs: Vec<Expression>,
+        /// Extra clobber registers beyond the hardcoded `rcx`/`r11`
+        /// (e.g. `["rbx", "rdx"]` for `cpuid`). Names without braces.
+        clobbers: Vec<String>,
     },
     Array(Vec<Expression>),
     Tuple(Vec<Expression>),

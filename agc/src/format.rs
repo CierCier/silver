@@ -178,6 +178,11 @@ pub fn format_attribute(attr: &ast::Attribute) -> String {
         .iter()
         .map(|arg| match arg {
             ast::AttributeArg::Identifier(id) => id.name.clone(),
+            ast::AttributeArg::Path(path) => path
+                .iter()
+                .map(|id| id.name.clone())
+                .collect::<Vec<_>>()
+                .join("."),
             ast::AttributeArg::Literal(lit) => format!("{lit:?}"),
         })
         .collect();

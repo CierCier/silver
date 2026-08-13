@@ -21,7 +21,7 @@ use crate::semantic::{
     typeck::TypeChecker,
 };
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable};
-use crate::{ast_tree, codegen, diagnostics, lexer, parser, profiler};
+use crate::{ast_tree, cfg, codegen, diagnostics, lexer, parser, profiler};
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -137,6 +137,12 @@ pub struct Cli {
     /// Enable allocator leak-check, double-free, and buffer overflow diagnostics
     #[arg(long = "leak-check", action = ArgAction::SetTrue)]
     leak_check: bool,
+
+    /// Enable compile-time cfgs: --cfg "key=value,key2=value2" (repeatable).
+    /// Drives #[cfg(key)] item gating and @cfg(key) folding; cpu.* keys also
+    /// gate on the runtime CPU probe (see std/cpu.ag).
+    #[arg(long = "cfg", value_name = "KEY=VALUE,...", action = ArgAction::Append)]
+    cfg_flags: Vec<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -181,6 +187,7 @@ pub(crate) struct CompilePlan {
     pub(crate) dry_run: bool,
     pub(crate) profile: bool,
     pub(crate) leak_check: bool,
+    pub(crate) cfg_flags: Vec<String>,
 }
 
 impl CompilePlan {
@@ -341,6 +348,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         dry_run: cli.dry_run,
         profile: cli.profile,
         leak_check: cli.leak_check,
+        cfg_flags: cli.cfg_flags,
     })
 }
 
@@ -784,6 +792,28 @@ pub fn run(cli: Cli) {
                         std::process::exit(2);
                     }
                 }
+
+                // Compile-time cfg gate: drop #[cfg(...)]-rejected items, then
+                // fold @cfg(...) and prune dead branches, before any symbol
+                // registration, semantic analysis, or type checking sees them.
+                let cfg_set = cfg::CfgSet::parse(&plan.cfg_flags);
+                let cfg_errors = cfg::gate_items(&mut ast, &cfg_set);
+                if !cfg_errors.is_empty() {
+                    eprintln!("agc: cfg errors:");
+                    for error in &cfg_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
+                semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
 
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
@@ -1397,6 +1427,7 @@ mod tests {
             dry_run: false,
             profile: false,
             leak_check: false,
+            cfg_flags: Vec::new(),
         }
     }
 

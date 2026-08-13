@@ -2897,11 +2897,36 @@ impl PRT_Parser {
         while cursor < end {
             match &tokens[cursor].kind {
                 Token::Identifier(name) => {
-                    args.push(ast::AttributeArg::Identifier(ast::Identifier {
+                    // Dotted path: `cpu.sse41` → Path([cpu, sse41]).
+                    let first_span = tokens[cursor].span;
+                    let mut path = vec![ast::Identifier {
                         name: name.clone(),
-                        span: tokens[cursor].span,
-                    }));
+                        span: first_span,
+                    }];
                     cursor += 1;
+                    while cursor < end && matches!(tokens[cursor].kind, Token::Dot) {
+                        let Some(Token::Identifier(part)) = tokens.get(cursor + 1).map(|t| &t.kind)
+                        else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected identifier after '.' in attribute path"
+                                    .to_string(),
+                                span: tokens[cursor].span,
+                            });
+                        };
+                        path.push(ast::Identifier {
+                            name: part.clone(),
+                            span: tokens[cursor + 1].span,
+                        });
+                        cursor += 2;
+                    }
+                    if path.len() == 1 {
+                        args.push(ast::AttributeArg::Identifier(ast::Identifier {
+                            name: name.clone(),
+                            span: first_span,
+                        }));
+                    } else {
+                        args.push(ast::AttributeArg::Path(path));
+                    }
                 }
                 Token::IntLiteral(value) => {
                     args.push(ast::AttributeArg::Literal(ast::Literal::Integer(*value)));
