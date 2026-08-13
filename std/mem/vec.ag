@@ -158,11 +158,11 @@ impl<T> Drop<Vec<T>> for Vec<T> {
 impl<T> IndexedAccess<Vec<T>> for Vec<T> {
     type Item = T;
     T __index_get(Vec<T>* self, i64 index) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         return self.data[index];
     }
     void __index_set(Vec<T>* self, i64 index, T value) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         self.data[index] = move value;
     }
 }

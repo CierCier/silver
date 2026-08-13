@@ -1,7 +1,41 @@
-// std/hash.ag — Hash trait for types that want custom hashing
-// HashMap<K, V> uses @hash(key) by default, not this trait.
-// Implement Hash for your type to override the byte-hash behavior.
+// std/hash.ag — the Silver hash unit.
+//
+// HashMap<K, V> hashes keys with @hash(key), which the compiler lowers to a
+// call into this module: str hashes go through hash_str (content), everything
+// else through hash_bytes (raw value bytes). Keeping the algorithm here means
+// the hash is upgradeable without touching codegen.
+//
+// The algorithm is FNV-1a 64-bit, strided: 8 bytes per iteration via
+// unaligned u64 loads, with a byte-wise tail. Values are deterministic
+// across builds; they are NOT bit-identical to the previous byte-wise FNV-1a
+// (HashMap bucket order may differ — iteration order is unspecified).
 
-trait Hash<Self> {
-    i64 hash(Self self);
+import std.mem.memory;
+
+/// FNV-1a 64-bit over `len` bytes at `data`. Null data hashes as empty.
+i64 hash_bytes(u8* data, i64 len) {
+    u64 h = (u64)0xcbf29ce484222325;
+    if (data == (u8*)0) {
+        return (i64)h;
+    }
+    u64* words = (u64*)data;
+    i64 i = 0;
+    while (i + 8 <= len) {
+        u64 word = words[i / 8];
+        h = (h ^ word) * (u64)0x100000001b3;
+        i = i + 8;
+    }
+    while (i < len) {
+        h = (h ^ (u64)data[i]) * (u64)0x100000001b3;
+        i = i + 1;
+    }
+    return (i64)h;
+}
+
+/// Hash a NUL-terminated string's content (null string hashes as empty).
+i64 hash_str(str s) {
+    if (s == (str)0) {
+        return (i64)(u64)0xcbf29ce484222325;
+    }
+    return hash_bytes((u8*)s, strlen(s));
 }

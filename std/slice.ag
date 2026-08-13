@@ -19,7 +19,7 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 
     /// Returns the element at `index`, aborting if out of bounds.
     T __index_get(Slice<T>* self, i64 index) {
-        if (index < 0 || index >= self.len) {
+        if (@cfg(debug) && (index < 0 || index >= self.len)) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
             STDOUT.write_str(" (len: ");
@@ -32,7 +32,7 @@ impl<T> IndexedAccess<Slice<T>> for Slice<T> {
 
     /// Sets the element at `index` to `value`, aborting if out of bounds.
     void __index_set(Slice<T>* self, i64 index, T value) {
-        if (index < 0 || index >= self.len) {
+        if (@cfg(debug) && (index < 0 || index >= self.len)) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
             STDOUT.write_str(" (len: ");

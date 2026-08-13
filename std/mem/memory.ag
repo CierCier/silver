@@ -273,6 +273,32 @@ i64 silver_rt_strlen(const char* s) {
     return asm("movq %rax, %r8\nmovq %rax, %r9\nandq $$15, %rax\njz 2f\n1:\ncmpb $$0, (%r9)\nje 3f\nincq %r9\nmovq %r9, %rax\nandq $$15, %rax\njnz 1b\n2:\n4:\nmovdqu (%r9), %xmm0\npxor %xmm1, %xmm1\npcmpeqb %xmm1, %xmm0\npmovmskb %xmm0, %ecx\ntestl %ecx, %ecx\njnz 5f\naddq $$16, %r9\njmp 4b\n5:\nbsfl %ecx, %ecx\nmovl %ecx, %eax\naddq %rax, %r9\n3:\nmovq %r9, %rax\nsubq %r8, %rax", [p], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
 }
 
+/// Find the first occurrence of byte `c` in the first `n` bytes of `p`.
+/// Returns the byte index, or -1 when absent. Scans 16 bytes per iteration
+/// with SSE2 (baseline); the block reads never pass `p + n`, so there is no
+/// over-read and no page hazard on arbitrary buffers.
+i64 memchr(u8* p, u8 c, i64 n) {
+    if (p == (u8*)0 || n <= 0) {
+        return -1;
+    }
+    i64 i = 0;
+    while (i + 16 <= n) {
+        i64 blocks = (n - i) / 16;
+        i64 r = asm("movq %rax, %r8\nmovq %rdi, %r9\nmovl %esi, %eax\nmovd %eax, %xmm0\npunpcklbw %xmm0, %xmm0\npunpcklwd %xmm0, %xmm0\npshufd $$0, %xmm0, %xmm0\n1:\nmovdqu (%r9), %xmm1\npcmpeqb %xmm0, %xmm1\npmovmskb %xmm1, %ecx\ntestl %ecx, %ecx\njnz 2f\naddq $$16, %r9\ndecq %r8\njnz 1b\nmovq $$-1, %rax\njmp 3f\n2:\nbsfl %ecx, %ecx\nmovl %ecx, %edx\nmovq %r9, %rax\nsubq %rdi, %rax\naddq %rdx, %rax\n3:", [blocks, &p[i], (i64)c], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
+        if (r >= 0) {
+            return i + r;
+        }
+        i = i + blocks * 16;
+    }
+    while (i < n) {
+        if (p[i] == c) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
 /// Compare the first `n` bytes of two regions. Returns 0 when equal, else the
 /// difference of the first differing bytes. Null inputs are not tolerated
 /// (matches the C contract).

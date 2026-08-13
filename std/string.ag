@@ -208,6 +208,12 @@ impl String {
         if (self.len < needle_len) {
             return false;
         }
+        if (needle_len == 1) {
+            // Single byte: SSE2 memchr scan instead of per-position memcmp.
+            u8* n = (u8*)needle;
+            u8 first = n[0];
+            return memchr(&self.data[0], first, self.len) >= 0;
+        }
         for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
                 return true;
@@ -226,6 +232,12 @@ impl String {
         }
         if (self.len < needle_len) {
             return -1;
+        }
+        if (needle_len == 1) {
+            // Single byte: SSE2 memchr scan instead of per-position memcmp.
+            u8* n = (u8*)needle;
+            u8 first = n[0];
+            return memchr(&self.data[0], first, self.len);
         }
         for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
@@ -462,11 +474,11 @@ impl Drop<String> for String {
 impl IndexedAccess<String> for String {
     type Item = u8;
     u8 __index_get(String* self, i64 index) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         return self.data[index];
     }
     void __index_set(String* self, i64 index, u8 value) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         self.data[index] = value;
     }
 }

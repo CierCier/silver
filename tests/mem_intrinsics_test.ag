@@ -7,6 +7,7 @@
 
 import std.mem.alloc;
 import std.mem.memory;
+import std.string;
 import std.sys.entry;
 
 i32 main() {
@@ -49,6 +50,26 @@ i32 main() {
     memmove((u8*)((i64)buf + 50), (u8*)((i64)buf + 150), 2000);
     i = 0;
     while (i < 2000) { if (buf[50 + i] != (u8)((50 + i) % 7)) { return 13; } i = i + 1; }
+    // memchr: first occurrence, absent, heap buffer above 4GB near the end.
+    if (memchr((u8*)"hello world", (u8)'w', 11) != 6) { return 14; }
+    if (memchr((u8*)"hello world", (u8)'x', 11) != -1) { return 15; }
+    if (memchr((u8*)"abcabc", (u8)'b', 6) != 1) { return 16; }
+    u8* hay = (u8*)malloc(4096 * 8);
+    i = 0;
+    while (i < 4096 * 8) { hay[i] = (u8)'a'; i = i + 1; }
+    hay[4096 * 8 - 3] = (u8)'Z';
+    if (memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3) { return 17; }
+
+    // String single-byte search fast paths (SSE2 memchr).
+    String q = String.from_str("the quick brown fox");
+    if (!q.contains("q")) { return 18; }
+    if (q.contains("z")) { return 19; }
+    if (q.find("q") != 4) { return 20; }
+    if (q.find("brown") != 10) { return 21; }
+    if (q.find("zz") != -1) { return 22; }
+    String t = String.from_str("aaaaab");
+    if (t.find("b") != 5) { return 23; }
+
     STDOUT.write_str("all intrinsics ok\n");
     return 0;
 }

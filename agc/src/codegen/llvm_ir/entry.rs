@@ -934,192 +934,54 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let val = self.emit_expression_value(inner_expr)?;
         let llvm_ty = val.get_type();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        if llvm_ty.is_pointer_type() {
+            // str: hash the string CONTENT via std.hash.hash_str.
+            let hash_fn = self.module.get_function("hash_str").ok_or_else(|| {
+                CodegenError::with_span(
+                    "@hash on a string requires `import std.hash;`".to_string(),
+                    expr.span,
+                )
+            })?;
+            let str_ptr = val.into_pointer_value();
+            let call = self
+                .builder
+                .build_call(hash_fn, &[str_ptr.into()], "hash_str_call")
+                .map_err(|e| CodegenError::with_span(format!("hash_str call: {e}"), expr.span))?;
+            return call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::new("hash_str returned void"));
+        }
+
+        // Non-str: hash the raw byte representation via std.hash.hash_bytes.
+        let hash_fn = self.module.get_function("hash_bytes").ok_or_else(|| {
+            CodegenError::with_span("@hash requires `import std.hash;`".to_string(), expr.span)
+        })?;
         let target_data =
             TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         let size = target_data.get_abi_size(&llvm_ty);
-
-        let i64_ty = self.context.i64_type();
-        let i8_ty = self.context.i8_type();
-        let zero = i64_ty.const_zero();
-        let one = i64_ty.const_int(1, false);
-
-        // FNV-1a 64-bit constants
-        let fnv_offset = i64_ty.const_int(0xcbf29ce484222325, false);
-        let fnv_prime = i64_ty.const_int(0x100000001b3, false);
-        let is_str = llvm_ty.is_pointer_type();
-        let len_val: inkwell::values::IntValue<'ctx> = if is_str {
-            // For str (pointer) types, hash the string CONTENT.
-            // Length will be determined via strlen — set a dummy len here;
-            // the special case below replaces the data pointer and recomputes len.
-            i64_ty.const_int(0, false)
-        } else {
-            i64_ty.const_int(size, false)
-        };
-
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for hash alloca"))?;
-
-        // Alloca the value so we can iterate its raw bytes
         let alloca = self.create_entry_alloca(function, "hash_val", llvm_ty)?;
         self.builder
             .build_store(alloca, val)
             .map_err(|e| CodegenError::new(format!("hash store: {e}")))?;
-
-        let ptr_ty = self.context.ptr_type(AddressSpace::default());
-        let (data_ptr, strlen_len) = if is_str {
-            // str is a pointer type — load the pointer value, then call strlen
-            // to hash the string CONTENT rather than the pointer bytes.
-            let str_ptr = self
-                .builder
-                .build_load(llvm_ty, alloca, "hash_str_ptr")
-                .map_err(|e| CodegenError::new(format!("hash load str: {e}")))?;
-            let str_ptr = str_ptr.into_pointer_value();
-
-            let strlen_fn = self.module.get_function("strlen").unwrap_or_else(|| {
-                let i8_ptr_ty = self.context.ptr_type(AddressSpace::default());
-                let strlen_ty = i64_ty.fn_type(&[i8_ptr_ty.into()], false);
-                self.module.add_function("strlen", strlen_ty, None)
-            });
-
-            let call_len = self
-                .builder
-                .build_call(strlen_fn, &[str_ptr.into()], "hash_strlen")
-                .map_err(|e| CodegenError::new(format!("hash strlen: {e}")))?;
-            let call_len = call_len
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::new("strlen returned void"))?;
-            let call_len = call_len.into_int_value();
-
-            let data_ptr = self
-                .builder
-                .build_pointer_cast(str_ptr, ptr_ty, "hash_data_ptr")
-                .map_err(|e| CodegenError::new(format!("hash data ptr: {e}")))?;
-            (data_ptr, call_len)
-        } else {
-            // For non-str types, hash the raw byte representation
-            let ptr = self
-                .builder
-                .build_pointer_cast(alloca, ptr_ty, "hash_ptr")
-                .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
-            (ptr, len_val)
-        };
-
-        // Save current block (predecessor of the loop)
-        let curr_block = self
+        let ptr = self
             .builder
-            .get_insert_block()
-            .ok_or_else(|| CodegenError::new("no insert block for hash"))?;
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for hash"))?;
-
-        let loop_block = self.context.append_basic_block(function, "hash_loop");
-        let done_block = self.context.append_basic_block(function, "hash_done");
-
-        // Branch from current block to loop
-        self.builder
-            .build_unconditional_branch(loop_block)
-            .map_err(|e| CodegenError::new(format!("hash branch to loop: {e}")))?;
-
-        // Loop: PHIs for hash value and index
-        self.builder.position_at_end(loop_block);
-        let hash_phi = self
+            .build_pointer_cast(alloca, ptr_ty, "hash_ptr")
+            .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
+        let size_val = i64_ty.const_int(size, false);
+        let call = self
             .builder
-            .build_phi(i64_ty, "hash_phi")
-            .map_err(|e| CodegenError::new(format!("hash phi: {e}")))?;
-        let idx_phi = self
-            .builder
-            .build_phi(i64_ty, "idx_phi")
-            .map_err(|e| CodegenError::new(format!("idx phi: {e}")))?;
-
-        // First iteration: from current block (predecessor)
-        let init_incoming: Vec<(
-            &dyn BasicValue<'ctx>,
-            inkwell::basic_block::BasicBlock<'ctx>,
-        )> = vec![(&fnv_offset as &dyn BasicValue<'ctx>, curr_block)];
-        hash_phi.add_incoming(&init_incoming);
-        let idx_init_incoming: Vec<(
-            &dyn BasicValue<'ctx>,
-            inkwell::basic_block::BasicBlock<'ctx>,
-        )> = vec![(&zero as &dyn BasicValue<'ctx>, curr_block)];
-        idx_phi.add_incoming(&idx_init_incoming);
-
-        let idx_val = idx_phi.as_basic_value().into_int_value();
-        let hash_val = hash_phi.as_basic_value().into_int_value();
-
-        // Load byte at ptr[idx]
-        let gep = unsafe {
-            self.builder
-                .build_in_bounds_gep(i8_ty, data_ptr, &[idx_val], "hash_byte_gep")
-        }
-        .map_err(|e| CodegenError::new(format!("hash gep: {e}")))?;
-        let byte = self
-            .builder
-            .build_load(i8_ty, gep, "hash_byte")
-            .map_err(|e| CodegenError::new(format!("hash load: {e}")))?;
-        let byte_int = byte.into_int_value();
-        let byte_ext = self
-            .builder
-            .build_int_z_extend(byte_int, i64_ty, "hash_byte_ext")
-            .map_err(|e| CodegenError::new(format!("hash zext: {e}")))?;
-
-        // hash = (hash ^ byte) * prime
-        let xor_val = self
-            .builder
-            .build_xor(hash_val, byte_ext, "hash_xor")
-            .map_err(|e| CodegenError::new(format!("hash xor: {e}")))?;
-        let mul_val = self
-            .builder
-            .build_int_mul(xor_val, fnv_prime, "hash_mul")
-            .map_err(|e| CodegenError::new(format!("hash mul: {e}")))?;
-
-        // idx += 1
-        let next_idx = self
-            .builder
-            .build_int_add(idx_val, one, "hash_next_idx")
-            .map_err(|e| CodegenError::new(format!("hash add: {e}")))?;
-
-        // Subsequent iterations: from loop block itself (back edge)
-        let loop_incoming: Vec<(
-            &dyn BasicValue<'ctx>,
-            inkwell::basic_block::BasicBlock<'ctx>,
-        )> = vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
-        hash_phi.add_incoming(&loop_incoming);
-        let idx_loop_incoming: Vec<(
-            &dyn BasicValue<'ctx>,
-            inkwell::basic_block::BasicBlock<'ctx>,
-        )> = vec![(&next_idx as &dyn BasicValue<'ctx>, loop_block)];
-        idx_phi.add_incoming(&idx_loop_incoming);
-
-        // Branch back if next_idx < len
-        let cond = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::ULT,
-                next_idx,
-                strlen_len,
-                "hash_cond",
-            )
-            .map_err(|e| CodegenError::new(format!("hash cmp: {e}")))?;
-        self.builder
-            .build_conditional_branch(cond, loop_block, done_block)
-            .map_err(|e| CodegenError::new(format!("hash branch: {e}")))?;
-
-        // Done: result PHI
-        self.builder.position_at_end(done_block);
-        let result_phi = self
-            .builder
-            .build_phi(i64_ty, "hash_result")
-            .map_err(|e| CodegenError::new(format!("hash result phi: {e}")))?;
-        let result_incoming: Vec<(
-            &dyn BasicValue<'ctx>,
-            inkwell::basic_block::BasicBlock<'ctx>,
-        )> = vec![(&mul_val as &dyn BasicValue<'ctx>, loop_block)];
-        result_phi.add_incoming(&result_incoming);
-
-        Ok(result_phi.as_basic_value())
+            .build_call(hash_fn, &[ptr.into(), size_val.into()], "hash_call")
+            .map_err(|e| CodegenError::with_span(format!("hash_bytes call: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::new("hash_bytes returned void"))
     }
 
     pub(crate) fn memcpy_codegen(

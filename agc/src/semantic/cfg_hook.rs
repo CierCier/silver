@@ -98,9 +98,50 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
             }
         }
         ast::ExpressionKind::Unary { operand, .. } => rewrite_expression(operand, cfg),
-        ast::ExpressionKind::Binary { left, right, .. } => {
+        ast::ExpressionKind::Binary {
+            left,
+            right,
+            operator,
+        } => {
             rewrite_expression(left, cfg);
             rewrite_expression(right, cfg);
+            // Short-circuit-safe constant folding: `false && X` → false,
+            // `true && X` → X, `true || X` → true, `false || X` → X. These
+            // never change evaluation (the skipped side was already
+            // short-circuited), so they are valid for any X, side effects
+            // included.
+            let simplified = match operator {
+                ast::BinaryOperator::LogicalAnd => match &*left.kind {
+                    ast::ExpressionKind::Literal(ast::Literal::Bool(false)) => {
+                        Some(lit_bool(false, expression.span))
+                    }
+                    ast::ExpressionKind::Literal(ast::Literal::Bool(true)) => {
+                        Some((**right).clone())
+                    }
+                    _ => None,
+                },
+                ast::BinaryOperator::LogicalOr => match &*left.kind {
+                    ast::ExpressionKind::Literal(ast::Literal::Bool(true)) => {
+                        Some(lit_bool(true, expression.span))
+                    }
+                    ast::ExpressionKind::Literal(ast::Literal::Bool(false)) => {
+                        Some((**right).clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(simplified) = simplified {
+                *expression = simplified;
+            }
+        }
+        ast::ExpressionKind::Unary { operator, operand } => {
+            rewrite_expression(operand, cfg);
+            if *operator == ast::UnaryOperator::Not
+                && let ast::ExpressionKind::Literal(ast::Literal::Bool(value)) = &*operand.kind
+            {
+                *expression = lit_bool(!value, expression.span);
+            }
         }
         ast::ExpressionKind::Call {
             function,
@@ -246,6 +287,13 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
 
 /// Evaluate `@cfg(...)` against the cfg set. Returns `None` (leave the call
 /// for typeck to reject) when the arguments are malformed.
+fn lit_bool(value: bool, span: Span) -> ast::Expression {
+    ast::Expression {
+        kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Bool(value))),
+        span,
+    }
+}
+
 fn eval_cfg_call(cfg: &CfgSet, args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> {
     if args.len() != 1 {
         return None;

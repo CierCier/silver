@@ -11,6 +11,7 @@
 // default TTL of 60 s.
 
 import std.net.inet;
+import std.hash;
 import std.net.socket;
 import std.mem.drop;
 import std.string;

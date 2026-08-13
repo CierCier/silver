@@ -73,14 +73,14 @@ impl Bytes {
     }
 
     u8 get(&Bytes self, i64 index) {
-        if (index < 0 || index >= self.len) {
+        if (@cfg(debug) && (index < 0 || index >= self.len)) {
             abort();
         }
         return self.data[index];
     }
 
     void set(&mut Bytes self, i64 index, u8 value) {
-        if (index < 0 || index >= self.len) {
+        if (@cfg(debug) && (index < 0 || index >= self.len)) {
             abort();
         }
         self.data[index] = value;
@@ -109,11 +109,11 @@ impl Drop<Bytes> for Bytes {
 impl IndexedAccess<Bytes> for Bytes {
     type Item = u8;
     u8 __index_get(Bytes* self, i64 index) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         return self.data[index];
     }
     void __index_set(Bytes* self, i64 index, u8 value) {
-        if (index < 0 || index >= self.len) { abort(); }
+        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         self.data[index] = value;
     }
 }
