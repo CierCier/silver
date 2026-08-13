@@ -826,7 +826,7 @@ impl<'a> TypeParser<'a> {
     }
 }
 
-fn parse_primitive_name(name: &str) -> Option<ast::PrimitiveType> {
+pub(crate) fn parse_primitive_name(name: &str) -> Option<ast::PrimitiveType> {
     match name {
         "i8" => Some(ast::PrimitiveType::I8),
         "i16" => Some(ast::PrimitiveType::I16),

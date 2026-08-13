@@ -39,6 +39,72 @@ i32 main() {
     if (encoded != "{\"id\":7,\"name\":\"Ada\"}") { return 1; }
     if (some_json != "7") { return 2; }
     if (none_json != "null") { return 3; }
+
+    // --- full scalar coverage: encode + decode round trips ---
+    i8 n8 = -12;
+    i16 n16 = -1234;
+    i32 n32 = -123456;
+    i64 n64 = -123456789;
+    u8 p8 = 250;
+    u16 p16 = 60000;
+    u32 p32 = 4000000000;
+    u64 p64 = 18000000000000000000;
+    f32 half = 2.5;
+    f64 quarter = -3.25;
+    if (@json(n8) != "-12") { return 10; }
+    if (@json(n16) != "-1234") { return 10; }
+    if (@json(n32) != "-123456") { return 10; }
+    if (@json(n64) != "-123456789") { return 10; }
+    if (@json(p8) != "250") { return 10; }
+    if (@json(p16) != "60000") { return 10; }
+    if (@json(p32) != "4000000000") { return 10; }
+    if (@json(p64) != "18000000000000000000") { return 10; }
+    if (@json(half) != "2.5") { return 10; }
+    if (@json(quarter) != "-3.25") { return 10; }
+
+    Result<i8, JsonError> d8 = @from_json(i8, "-12");
+    Result<i16, JsonError> d16 = @from_json(i16, "-1234");
+    Result<u8, JsonError> du8 = @from_json(u8, "250");
+    Result<u16, JsonError> du16 = @from_json(u16, "60000");
+    Result<u32, JsonError> du32 = @from_json(u32, "4000000000");
+    Result<u64, JsonError> du64 = @from_json(u64, "18000000000000000000");
+    Result<f32, JsonError> df32 = @from_json(f32, "2.5");
+    Result<f64, JsonError> df64 = @from_json(f64, "-3.25");
+    Result<f64, JsonError> dexp = @from_json(f64, "2.5e3");
+    if (d8.failed() || d8.unwrap() != n8) { return 11; }
+    if (d16.failed() || d16.unwrap() != n16) { return 11; }
+    if (du8.failed() || du8.unwrap() != p8) { return 11; }
+    if (du16.failed() || du16.unwrap() != p16) { return 11; }
+    if (du32.failed() || du32.unwrap() != p32) { return 11; }
+    if (du64.failed() || du64.unwrap() != p64) { return 11; }
+    if (df32.failed() || df32.unwrap() != half) { return 11; }
+    if (df64.failed() || df64.unwrap() != quarter) { return 11; }
+    if (dexp.failed() || dexp.unwrap() != 2500.0) { return 11; }
+
+    // --- Optional round trips, null decodes to None ---
+    Optional<i32> fsome = Some(7);
+    Optional<f64> fhalf = Some(2.5);
+    Optional<f64> fnone = None;
+    if (@json(fsome) != "7") { return 12; }
+    if (@json(fhalf) != "2.5") { return 12; }
+    if (@json(fnone) != "null") { return 12; }
+    Result<Optional<i32>, JsonError> osome = @from_json(Optional<i32>, "7");
+    Result<Optional<i32>, JsonError> onone = @from_json(Optional<i32>, "null");
+    Result<Optional<f64>, JsonError> ofhalf = @from_json(Optional<f64>, "2.5");
+    Result<Optional<f64>, JsonError> ofnone = @from_json(Optional<f64>, "null");
+    if (osome.failed()) { return 12; }
+    Optional<i32> o1 = osome.unwrap();
+    if (!o1.is_some() || o1.unwrap() != 7) { return 12; }
+    if (onone.failed()) { return 12; }
+    Optional<i32> o2 = onone.unwrap();
+    if (o2.is_some()) { return 12; }
+    if (ofhalf.failed()) { return 12; }
+    Optional<f64> o3 = ofhalf.unwrap();
+    if (!o3.is_some() || o3.unwrap() != 2.5) { return 12; }
+    if (ofnone.failed()) { return 12; }
+    Optional<f64> o4 = ofnone.unwrap();
+    if (o4.is_some()) { return 12; }
+
     STDOUT.write_str(encoded);
     STDOUT.write_str("\n");
     return 0;

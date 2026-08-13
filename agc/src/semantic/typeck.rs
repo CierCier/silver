@@ -3899,12 +3899,16 @@ impl TypeChecker {
         };
         let target_ty = match target.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Type::from_ast(ty),
-            ast::ExpressionKind::Identifier(identifier)
-                if self.known_types.contains_key(&identifier.name) =>
-            {
-                Type::Named {
-                    path: vec![identifier.name.clone()],
-                    generics: Vec::new(),
+            ast::ExpressionKind::Identifier(identifier) => {
+                if let Some(primitive) = crate::types::parse_primitive_name(&identifier.name) {
+                    Type::Primitive(primitive)
+                } else if self.known_types.contains_key(&identifier.name) {
+                    Type::Named {
+                        path: vec![identifier.name.clone()],
+                        generics: Vec::new(),
+                    }
+                } else {
+                    Type::Unknown
                 }
             }
             _ => Type::Unknown,
