@@ -1,0 +1,158 @@
+// tests/timeout_test.ag — per-request timeouts (Go's Client.Timeout).
+//
+// A hung server (accepts but never responds) must fail the request within
+// the configured timeout instead of hanging forever; fast requests must be
+// unaffected by a set timeout.
+
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.entry;
+import std.sys.raw.time;
+import std.test;
+import std.thread;
+import std.time;
+
+TcpListener g_listener;
+i64 g_status;
+
+/// Accept one connection and never respond (simulates a hung server).
+void hung_server_main(i64 unused) {
+    Result<i64, Error> a = g_listener.accept();
+    if (a.failed()) { g_status = 6; return; }
+    TcpStream s = TcpStream.from_fd((i32)a.value());
+    u8 byte[1];
+    i64 hlen = 0;
+    while (true) {
+        Result<i64, Error> r = s.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { break; }
+        hlen = hlen + 1;
+        if (hlen >= 2048) { break; }
+    }
+    s.close();
+    g_status = 0;
+}
+
+/// Accept one connection, respond immediately.
+void fast_server_main(i64 unused) {
+    Result<i64, Error> a = g_listener.accept();
+    if (a.failed()) { g_status = 6; return; }
+    TcpStream s = TcpStream.from_fd((i32)a.value());
+    // Consume the request head so the close below does not RST the exchange.
+    // Consume the full request head (CRLFCRLF) so the close below does not
+    // RST the exchange.
+    u8 byte[1];
+    i64 hlen = 0;
+    u8 prev[4];
+    bool closed = false;
+    while (true) {
+        Result<i64, Error> r = s.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { closed = true; break; }
+        prev[hlen % 4] = byte[0];
+        hlen = hlen + 1;
+        if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+            && prev[(hlen - 2) % 4] == (u8)'\r'
+            && prev[(hlen - 3) % 4] == (u8)'\n'
+            && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+        if (hlen >= 2048) { closed = true; break; }
+    }
+    if (closed) { g_status = 8; return; }
+    Result<i64, Error> w = s.write(
+        (u8*)"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        strlen("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+    if (w.failed()) { g_status = 7; return; }
+    s.close();
+    g_status = 0;
+}
+
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+i64 now_millis() {
+    Timespec ts;
+    sys_clock_gettime(CLOCK_MONOTONIC, (i64)&ts);
+    return ts.sec * 1000 + ts.nsec / 1000000;
+}
+
+i32 main() {
+    // --- Hung server: request fails within the timeout ---
+    test_start("hung server times out");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(hung_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            client.set_timeout(1);
+            String url = build_url(port, "/hang");
+            i64 start = now_millis();
+            Result<HttpResponse, Error> r1 = client.get((str)url.data);
+            url.drop();
+            i64 elapsed = now_millis() - start;
+            assert_true(r1.failed(), "hung request fails");
+            assert_true(elapsed < 5000, "fails within the timeout (not forever)");
+            assert_true(elapsed >= 900, "waits at least the timeout");
+            thread_join(server_handle);
+        }
+    }
+
+    // --- Fast request unaffected by a set timeout ---
+    test_start("timeout does not break fast requests");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener = listener;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(fast_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            client.set_timeout(2);
+            String url = build_url(port, "/fast");
+            Result<HttpResponse, Error> r1 = client.get((str)url.data);
+            url.drop();
+            assert_true(!r1.failed(), "fast request succeeds");
+            if (!r1.failed()) {
+                HttpResponse response = r1.unwrap();
+                assert_eq_i64(response.status, 200, "status");
+                assert_true(response.body.equals("ok"), "body");
+            }
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+    }
+
+    return done();
+}

@@ -220,6 +220,58 @@ i32 main() {
         }
     }
 
+    // --- Large body spans many buffer refills ---
+    test_start("stream large body");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        // Build a 20KB body in the wire (larger than the 1KB read buffer).
+        String wire = String.new();
+        wire.push_str("HTTP/1.1 200 OK\r\nContent-Length: 20480\r\n\r\n");
+        i64 i = 0;
+        while (i < 20480) {
+            wire.push((u8)'a' + (u8)(i % 26));
+            i = i + 1;
+        }
+        g_listener_a = listener;
+        g_wire0 = (str)wire.data;
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_per_conn = 1;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/big");
+            Result<HttpStream, Error> s = client.get_stream((str)url.data);
+            url.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            bool ok = true;
+            String body = drain_stream(&stream, 64, &ok);
+            assert_true(ok, "reads succeeded");
+            assert_eq_i64(body.len, 20480, "full 20KB body");
+            // Spot-check the content pattern.
+            bool pattern_ok = true;
+            i64 k = 0;
+            while (k < body.len) {
+                u8 expect = (u8)'a' + (u8)(k % 26);
+                if (body.data[k] != expect) { pattern_ok = false; break; }
+                k = k + 1;
+            }
+            assert_true(pattern_ok, "body content intact across refills");
+            body.drop();
+            stream.close();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+        wire.drop();
+    }
+
     // --- A consumed stream returns its connection to the pool ---
     test_start("stream returns connection to pool");
     {

@@ -57,6 +57,13 @@ impl Socket {
         try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, (void*)&tv, 16);
     }
 
+    /// Set send timeout in seconds (SO_SNDTIMEO).
+    void set_send_timeout(Socket* self, i64 sec) {
+        if (self.invalid()) { return; }
+        Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
+        try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.SNDTIMEO, (void*)&tv, 16);
+    }
+
     /// Close the socket. Idempotent.
     void close(Socket* self) {
         if (self.invalid()) { return; }

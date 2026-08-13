@@ -26,6 +26,7 @@ enum SocketOptionLevel {
 enum SocketOption {
     REUSEADDR = 2;
     RCVTIMEO = 20;
+    SNDTIMEO = 21;
 }
 
 enum ShutdownHow {

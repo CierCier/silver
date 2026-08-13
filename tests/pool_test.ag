@@ -132,7 +132,120 @@ i32 run_requests(u16 port, i64 requests, i64 per_conn) {
     return 0;
 }
 
+u16 g_redirect_port;
+u8 g_head_b[2048];
+
+/// Serve a 302 redirect to `g_redirect_port` (the B server).
+void cross_server_a_main(i64 which) {
+    Result<i64, Error> a = g_listener_a.accept();
+    if (a.failed()) { g_status = 6; return; }
+    TcpStream s = TcpStream.from_fd((i32)a.value());
+    // Consume the request head (discard).
+    i64 hlen = 0;
+    u8 prev[4];
+    u8 byte[1];
+    bool closed = false;
+    while (true) {
+        Result<i64, Error> r = s.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { closed = true; break; }
+        prev[hlen % 4] = byte[0];
+        hlen = hlen + 1;
+        if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+            && prev[(hlen - 2) % 4] == (u8)'\r'
+            && prev[(hlen - 3) % 4] == (u8)'\n'
+            && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+        if (hlen >= 2048) { closed = true; break; }
+    }
+    if (closed) { g_status = 8; return; }
+    String wire = String.new();
+    wire.push_str("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)g_redirect_port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { wire.push(digits[i]); i = i + 1; }
+    wire.push_str("/final\r\nContent-Length: 0\r\n\r\n");
+    Result<i64, Error> w = s.write((u8*)wire.data, wire.len);
+    if (w.failed()) { g_status = 7; return; }
+    wire.drop();
+    s.close();
+    g_status = 0;
+}
+
+/// Capture the request head into g_head_b, then serve OK.
+void cross_server_b_main(i64 which) {
+    Result<i64, Error> a = g_listener_b.accept();
+    if (a.failed()) { g_status = 6; return; }
+    TcpStream s = TcpStream.from_fd((i32)a.value());
+    i64 hlen = 0;
+    u8 prev[4];
+    u8 byte[1];
+    bool closed = false;
+    while (true) {
+        Result<i64, Error> r = s.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { closed = true; break; }
+        prev[hlen % 4] = byte[0];
+        g_head_b[hlen] = byte[0];
+        hlen = hlen + 1;
+        if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+            && prev[(hlen - 2) % 4] == (u8)'\r'
+            && prev[(hlen - 3) % 4] == (u8)'\n'
+            && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+        if (hlen >= 2046) { closed = true; break; }
+    }
+    if (closed) { g_status = 8; return; }
+    g_head_b[hlen] = (u8)0;
+    Result<i64, Error> w = s.write((u8*)OK_WIRE, strlen(OK_WIRE));
+    if (w.failed()) { g_status = 7; return; }
+    s.close();
+    g_status = 0;
+}
+
+bool head_contains(u8* head, str needle) {
+    String s = String.from_str((str)head);
+    bool found = s.find(needle) >= 0;
+    s.drop();
+    return found;
+}
+
 i32 main() {
+    // --- Cross-host redirect drops sensitive headers (Go's rule) ---
+    test_start("cross-host redirect strips authorization");
+    {
+        TcpListener listener_a;
+        TcpListener listener_b;
+        u16 port_a = 0;
+        u16 port_b = 0;
+        i32 ra = bind_loopback(&listener_a, &port_a);
+        i32 rb = bind_loopback(&listener_b, &port_b);
+        assert_eq_i64(0, ra, "bind a");
+        assert_eq_i64(0, rb, "bind b");
+        g_listener_a = listener_a;
+        g_listener_b = listener_b;
+        g_redirect_port = port_b;
+        g_status = -1;
+        TaskRecord* server_a = thread_spawn(cross_server_a_main, 0);
+        assert_true(server_a != (TaskRecord*)0, "spawn a");
+        TaskRecord* server_b = thread_spawn(cross_server_b_main, 1);
+        assert_true(server_b != (TaskRecord*)0, "spawn b");
+
+        HttpClient client = HttpClient.new();
+        String url = build_url(port_a, "/start");
+        HttpRequest req = HttpRequest.new("GET", (str)url.data, (str)0);
+        req.header("Authorization", "Bearer secret");
+        Result<HttpResponse, Error> r = client.do(&req);
+        url.drop();
+        assert_true(!r.failed(), "redirect followed");
+        if (!r.failed()) {
+            HttpResponse response = r.unwrap();
+            assert_eq_i64(response.status, 200, "final status");
+        }
+        assert_true(thread_join(server_a) >= 0, "join a");
+        assert_true(thread_join(server_b) >= 0, "join b");
+        assert_eq_i64(g_status, 0, "server status");
+        assert_true(!head_contains(&g_head_b[0], "authorization"),
+            "Authorization dropped on cross-host redirect");
+    }
+
     // --- Two requests share one keep-alive connection ---
     test_start("pool reuses connection");
     {

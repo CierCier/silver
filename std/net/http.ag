@@ -68,6 +68,7 @@ struct HttpClient {
     String tls_ca_file; // optional CA bundle; empty = system trust store
     bool use_pool; // keep-alive connection reuse (Go's Transport pooling)
     ConnectionPool pool;
+    i64 timeout_secs; // per-request socket timeout; 0 = none (Go's Client.Timeout)
 }
 
 struct HttpConnection {
@@ -75,12 +76,71 @@ struct HttpConnection {
     u8 tls_state[64]; // opaque TLS transport state (TRANSPORT_TLS_STATE_SIZE)
     bool use_tls;
     HttpVersion version;
+    // Read buffer: framing reads byte-at-a-time, so the transport serves
+    // from this buffer and refills in 4KB chunks instead of one syscall (or
+    // SSL_read) per byte. Empty at response boundaries, so pooled
+    // connections carry no stale bytes.
+    u8 read_buf[1024];
+    i64 read_buf_len;
+    i64 read_buf_pos;
 }
 
 impl Drop<HttpConnection> for HttpConnection {
     void drop(HttpConnection* self) {
         self.close();
     }
+}
+
+// --- Buffered transport ---------------------------------------------------
+// The framing layer reads one byte at a time; this adapter serves those
+// bytes from a per-connection buffer, refilling with a single large read
+// (4KB) so header/body parsing costs one syscall (or SSL_read) per 4KB
+// instead of one per byte.
+
+Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
+    HttpConnection* conn = (HttpConnection*)ctx;
+    i64 avail = conn.read_buf_len - conn.read_buf_pos;
+    if (avail <= 0) {
+        // Refill the buffer.
+        Result<i64, Error> r;
+        if (conn.use_tls) {
+            Result<i64, Error>(void*, u8*, i64) f = g_tls_provider.read;
+            r = f(&conn.tls_state[0], &conn.read_buf[0], 1024);
+        } else {
+            r = conn.stream.read(&conn.read_buf[0], 1024);
+        }
+        if (r.failed()) { return r; }
+        if (r.value() == 0) { return Result<i64, Error>.Ok(0); }
+        conn.read_buf_len = r.value();
+        conn.read_buf_pos = 0;
+        avail = conn.read_buf_len;
+    }
+    i64 n = len;
+    if (n > avail) { n = avail; }
+    i64 i = 0;
+    while (i < n) {
+        buf[i] = conn.read_buf[conn.read_buf_pos + i];
+        i = i + 1;
+    }
+    conn.read_buf_pos = conn.read_buf_pos + n;
+    return Result<i64, Error>.Ok(n);
+}
+
+Result<i64, Error> http_transport_write(void* ctx, u8* buf, i64 len) {
+    HttpConnection* conn = (HttpConnection*)ctx;
+    if (conn.use_tls) {
+        Result<i64, Error>(void*, u8*, i64) f = g_tls_provider.write;
+        return f(&conn.tls_state[0], buf, len);
+    }
+    return conn.stream.write(buf, len);
+}
+
+StreamIo http_transport_io(HttpConnection* conn) {
+    StreamIo io;
+    io.ctx = (void*)conn;
+    io.read = http_transport_read;
+    io.write = http_transport_write;
+    return io;
 }
 
 // --- Connection pooling (Go's Transport keep-alive pool) ------------------
@@ -160,6 +220,32 @@ struct HttpUrl {
 // http_equal_ci, http_parse_i64, http_append_i64) live in std/net/cookie.ag
 // so the low-level helpers have a single definition point.
 
+/// Append `block` minus Authorization/Cookie/Cookie2/WWW-Authenticate header
+/// lines. Go drops these sensitive headers when a redirect crosses hosts.
+void http_strip_sensitive_headers(str block, String* out) {
+    u8* data = (u8*)block;
+    i64 len = strlen(block);
+    i64 pos = 0;
+    while (pos < len) {
+        i64 end = http_find_crlf(data, len, pos);
+        if (end < 0) { end = len; }
+        i64 colon = pos;
+        while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+        bool sensitive = colon > pos && colon < end
+            && (http_equal_ci(data, pos, colon, "authorization")
+                || http_equal_ci(data, pos, colon, "cookie")
+                || http_equal_ci(data, pos, colon, "cookie2")
+                || http_equal_ci(data, pos, colon, "www-authenticate"));
+        if (!sensitive) {
+            i64 k = pos;
+            while (k < end) { out.push(data[k]); k = k + 1; }
+            out.push_str("\r\n");
+        }
+        if (end >= len) { break; }
+        pos = end + 2;
+    }
+}
+
 /// Index of the first CRLF at or after `start`, or -1 when none exists.
 i64 http_find_crlf(u8* data, i64 len, i64 start) {
     i64 i = start;
@@ -211,8 +297,15 @@ bool http_parse_url(str url, HttpUrl* out) {
     while (i < len && p[i] != (u8)':' && p[i] != (u8)'/') { i = i + 1; }
     i64 host_len = i - host_start;
     if (host_len == 0 || host_len >= 255) { return false; }
+    // Hosts must be printable ASCII without spaces or control bytes, so the
+    // Host header can never be malformed or injected.
     i64 j = 0;
-    while (j < host_len) { out.host[j] = p[host_start + j]; j = j + 1; }
+    while (j < host_len) {
+        u8 ch = p[host_start + j];
+        if (ch < (u8)0x21 || ch > (u8)0x7e) { return false; }
+        out.host[j] = ch;
+        j = j + 1;
+    }
     out.host[j] = (u8)0;
     u16 port = 80;
     if (https) { port = 443; }
@@ -294,6 +387,8 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
     connection.stream = move stream;
     connection.use_tls = false;
     connection.version = HttpVersion.Http11;
+    connection.read_buf_len = 0;
+    connection.read_buf_pos = 0;
     return Result<HttpConnection, Error>.Ok(move connection);
 }
 
@@ -764,9 +859,7 @@ impl HttpStream {
             return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "stream is closed"));
         }
         if (self.body_finished) { return Result<i64, Error>.Ok(0); }
-        StreamIo io;
-        if (self.conn.use_tls) { io = transport_tls_io(&self.conn.tls_state[0]); }
-        else { io = transport_tcp_io(&self.conn.stream); }
+        StreamIo io = http_transport_io(&self.conn);
         if (self.head.chunked) { return self.read_chunked(&io, buf, len); }
         if (self.head.content_length >= 0) {
             i64 want = len;
@@ -842,6 +935,7 @@ impl HttpStream {
         self.stream_active = false;
         if (self.body_finished && !self.head.close_delimited
             && self.pool_owner != (HttpClient*)0 && self.pool_owner.use_pool) {
+            self.conn.clear_timeout();
             HttpConnection pooled = self.conn;
             // Invalidate our copy so the compiler's field drop cannot close
             // the now-pooled fd.
@@ -876,6 +970,7 @@ impl HttpClient {
         client.tls_ca_file = String.new();
         client.use_pool = true;
         client.pool = ConnectionPool.new();
+        client.timeout_secs = 0;
         return move client;
     }
 
@@ -917,6 +1012,8 @@ impl HttpClient {
         connection.stream = move stream;
         connection.use_tls = false;
         connection.version = version;
+        connection.read_buf_len = 0;
+        connection.read_buf_pos = 0;
         return Result<HttpConnection, Error>.Ok(move connection);
     }
 
@@ -924,6 +1021,13 @@ impl HttpClient {
     /// MaxIdleConnsPerHost; default 2).
     void set_pool_max_idle(&mut HttpClient self, i32 limit) {
         self.pool.max_idle = limit;
+    }
+
+    /// Bound each request to `secs` seconds (Go's Client.Timeout): blocking
+    /// reads and writes on the connection, including the TLS handshake, fail
+    /// after the timeout instead of hanging forever. 0 disables (default).
+    void set_timeout(&mut HttpClient self, i64 secs) {
+        self.timeout_secs = secs;
     }
 
     /// Complete the TLS handshake on a fresh connection for an https URL.
@@ -986,6 +1090,8 @@ impl HttpClient {
             PoolEntry evicted = http_pool_remove_at(&self.pool.entries, oldest);
             evicted.conn.close();
         }
+        conn.read_buf_len = 0;
+        conn.read_buf_pos = 0;
         PoolEntry entry;
         entry.conn = move conn;
         u8* src = (u8*)host;
@@ -1022,6 +1128,7 @@ impl HttpClient {
         Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
         if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
+        if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
         if (parsed.https && !reused) {
             Error err;
             if (!self.tls_handshake(&conn, host, &mut err)) {
@@ -1053,16 +1160,18 @@ impl HttpClient {
                 }
                 if (ok) {
                     conn = move fresh;
-
+                    if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
                     r = conn.send(&req, self.max_header_bytes, self.max_body_bytes);
                 }
             }
         }
         if (r.failed()) {
+            if (self.timeout_secs > 0) { conn.clear_timeout(); }
             conn.close();
             return Result<HttpResponse, Error>.Err(r.get_error());
         }
         HttpResponse response = r.unwrap();
+        if (self.timeout_secs > 0) { conn.clear_timeout(); }
         if (self.use_pool && !response.close_delimited) {
             self.release(host, parsed.port, parsed.https, move conn);
         } else {
@@ -1084,6 +1193,7 @@ impl HttpClient {
         Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
         if (opened.failed()) { return Result<HttpStream, Error>.Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
+        if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
         if (parsed.https && !reused) {
             Error err;
             if (!self.tls_handshake(&conn, host, &mut err)) {
@@ -1113,6 +1223,7 @@ impl HttpClient {
                 }
                 if (ok) {
                     conn = move fresh;
+                    if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
                     h = conn.send_head(&req, self.max_header_bytes);
                 }
             }
@@ -1140,6 +1251,7 @@ impl HttpClient {
             Result<HttpConnection, Error> opened = self.acquire(request.host, 80, false, &mut reused);
             if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
             HttpConnection conn = opened.unwrap();
+            if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
             Result<HttpResponse, Error> r = conn.send(request, self.max_header_bytes, self.max_body_bytes);
             if (r.failed() && reused) {
                 conn.close();
@@ -1147,14 +1259,17 @@ impl HttpClient {
                 Result<HttpConnection, Error> reopened = self.acquire(request.host, 80, false, &mut reused2);
                 if (!reopened.failed()) {
                     conn = reopened.unwrap();
+                    if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
                     r = conn.send(request, self.max_header_bytes, self.max_body_bytes);
                 }
             }
             if (r.failed()) {
+                if (self.timeout_secs > 0) { conn.clear_timeout(); }
                 conn.close();
                 return Result<HttpResponse, Error>.Err(r.get_error());
             }
             HttpResponse response = r.unwrap();
+            if (self.timeout_secs > 0) { conn.clear_timeout(); }
             if (self.use_pool && !request.close && !response.close_delimited) {
                 self.release(request.host, 80, false, move conn);
             } else {
@@ -1169,6 +1284,18 @@ impl HttpClient {
         i32 redirects = 0;
         String next_url = String.new();
         String hop_headers = String.new();
+        String scrubbed = String.new();
+        // Origin for sensitive-header scoping (Go: Authorization and Cookie
+        // headers are dropped when a redirect leaves the host:port).
+        str origin_host = (str)0;
+        u16 origin_port = 0;
+        {
+            HttpUrl parsed0;
+            if (http_parse_url(request.url, &parsed0)) {
+                origin_host = (str)&parsed0.host[0];
+                origin_port = parsed0.port;
+            }
+        }
         while (true) {
             str hop_block = headers;
             if (self.use_jar) {
@@ -1222,6 +1349,15 @@ impl HttpClient {
                 || response.status == (i32)HttpStatus.PermanentRedirect;
             if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
             url = (str)next_url.data;
+            // Cross-host redirect: drop sensitive headers (Go's rule).
+            HttpUrl hop_parsed;
+            if (origin_host != (str)0 && http_parse_url(url, &hop_parsed)
+                && (!http_host_eq((str)&hop_parsed.host[0], origin_host)
+                    || hop_parsed.port != origin_port)) {
+                scrubbed.clear();
+                http_strip_sensitive_headers(headers, &scrubbed);
+                headers = (str)scrubbed.data;
+            }
             redirects = redirects + 1;
             // The intermediate response drops at loop scope end; the next
             // iteration sends the follow-up request.
@@ -1245,6 +1381,18 @@ impl HttpClient {
         i32 redirects = 0;
         String next_url = String.new();
         String hop_headers = String.new();
+        String scrubbed = String.new();
+        // Origin for sensitive-header scoping (Go: Authorization and Cookie
+        // headers are dropped when a redirect leaves the host:port).
+        str origin_host = (str)0;
+        u16 origin_port = 0;
+        {
+            HttpUrl parsed0;
+            if (http_parse_url(request.url, &parsed0)) {
+                origin_host = (str)&parsed0.host[0];
+                origin_port = parsed0.port;
+            }
+        }
         while (true) {
             str hop_block = headers;
             if (self.use_jar) {
@@ -1296,6 +1444,15 @@ impl HttpClient {
                 || stream.head.status == (i32)HttpStatus.PermanentRedirect;
             if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
             url = (str)next_url.data;
+            // Cross-host redirect: drop sensitive headers (Go's rule).
+            HttpUrl hop_parsed;
+            if (origin_host != (str)0 && http_parse_url(url, &hop_parsed)
+                && (!http_host_eq((str)&hop_parsed.host[0], origin_host)
+                    || hop_parsed.port != origin_port)) {
+                scrubbed.clear();
+                http_strip_sensitive_headers(headers, &scrubbed);
+                headers = (str)scrubbed.data;
+            }
             redirects = redirects + 1;
             stream.close(); // discard the 3xx hop (its body is unread)
         }
@@ -1407,9 +1564,7 @@ impl HttpConnection {
     /// Write the request and read the response head (interim 1xx skipped),
     /// leaving the body unread. The caller keeps the connection.
     Result<HttpResponse, Error> send_head(HttpConnection* self, HttpRequest* request, i64 max_header) {
-        StreamIo io;
-        if (self.use_tls) { io = transport_tls_io(&self.tls_state[0]); }
-        else { io = transport_tcp_io(&self.stream); }
+        StreamIo io = http_transport_io(self);
         Result<i64, Error> written = request.write(&io);
         if (written.is_err()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
         HttpResponse response = HttpResponse.empty();
@@ -1422,9 +1577,7 @@ impl HttpConnection {
         Result<HttpResponse, Error> h = self.send_head(request, max_header);
         if (h.failed()) { return h; }
         HttpResponse response = h.unwrap();
-        StreamIo io;
-        if (self.use_tls) { io = transport_tls_io(&self.tls_state[0]); }
-        else { io = transport_tcp_io(&self.stream); }
+        StreamIo io = http_transport_io(self);
         Result<i64, Error> b = response.read_body(&io, request.method == "HEAD", max_body);
         if (b.is_err()) { return Result<HttpResponse, Error>.Err(b.get_error()); }
         if (request.close || response.close_delimited) { self.close(); }
@@ -1434,5 +1587,19 @@ impl HttpConnection {
     void close(HttpConnection* self) {
         if (self.use_tls) { transport_tls_close(&self.tls_state[0]); }
         self.stream.close();
+    }
+
+    /// Bound blocking reads and writes to `secs` seconds (Go's Client.Timeout
+    /// approximation: each socket operation is bounded, including the TLS
+    /// handshake and buffered refills).
+    void set_timeout(HttpConnection* self, i64 secs) {
+        self.stream.sock.set_recv_timeout(secs);
+        self.stream.sock.set_send_timeout(secs);
+    }
+
+    /// Remove the read/write timeouts (before returning to the pool).
+    void clear_timeout(HttpConnection* self) {
+        self.stream.sock.set_recv_timeout(0);
+        self.stream.sock.set_send_timeout(0);
     }
 }

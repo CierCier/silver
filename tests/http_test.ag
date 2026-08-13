@@ -503,6 +503,19 @@ i32 run_get_public_case() {
         }
     }
 
+    test_start("malformed host rejected");
+    {
+        HttpClient client = HttpClient.new();
+        Result<HttpResponse, Error> r = client.get("http://bad host/");
+        assert_true(r.failed(), "host with space rejected");
+        if (r.failed()) {
+            Error e = r.get_error();
+            assert_eq_i64(e.code, HTTP_ERR_MALFORMED, "malformed URL error");
+        }
+        Result<HttpResponse, Error> r2 = client.get("http://host\tevil/");
+        assert_true(r2.failed(), "control char host rejected");
+    }
+
     test_start("client.get public API");
     assert_eq_i64(0, run_get_public_case(), "GET convenience against public API");
 

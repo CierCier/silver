@@ -8,7 +8,6 @@
 // runtime. Calling an https URL before registration yields a clear error.
 
 import std.error;
-import std.net.tcp;
 import std.sys.result;
 
 struct StreamIo {
@@ -25,26 +24,6 @@ Result<i64, Error> transport_read(StreamIo* io, u8* buf, i64 len) {
 Result<i64, Error> transport_write(StreamIo* io, u8* buf, i64 len) {
     Result<i64, Error>(void*, u8*, i64) f = io.write;
     return f(io.ctx, buf, len);
-}
-
-// --- TCP adapter ----------------------------------------------------------
-
-Result<i64, Error> transport_tcp_read(void* ctx, u8* buf, i64 len) {
-    TcpStream* stream = (TcpStream*)ctx;
-    return stream.read(buf, len);
-}
-
-Result<i64, Error> transport_tcp_write(void* ctx, u8* buf, i64 len) {
-    TcpStream* stream = (TcpStream*)ctx;
-    return stream.write(buf, len);
-}
-
-StreamIo transport_tcp_io(TcpStream* stream) {
-    StreamIo io;
-    io.ctx = (void*)stream;
-    io.read = transport_tcp_read;
-    io.write = transport_tcp_write;
-    return io;
 }
 
 // --- TLS provider registration --------------------------------------------
