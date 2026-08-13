@@ -135,52 +135,80 @@ fn cfg_arg_span(arg: &ast::AttributeArg) -> Span {
     }
 }
 
-/// Drop items whose `#[cfg(...)]` attributes do not match `cfg`. Items
-/// without cfg attributes are always kept. All cfg arguments on an item must
-/// match (AND); multiple `#[cfg]` attributes also AND-compose. Malformed
-/// attributes are reported as errors.
-pub fn gate_items(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
-    let mut errors = Vec::new();
-    program.items.retain(|item| {
-        let cfg_attrs: Vec<&ast::Attribute> = item
-            .attributes
-            .iter()
-            .filter(|attr| attr.name.name == "cfg")
-            .collect();
-        if cfg_attrs.is_empty() {
-            return true;
+/// Evaluate the `#[cfg(...)]` attributes on one item or method against the
+/// set. Returns `None` (keep) when there are no cfg attributes; otherwise the
+/// keep decision plus any malformed-attribute errors. All cfg arguments must
+/// match (AND); multiple `#[cfg]` attributes also AND-compose.
+fn eval_cfg_attrs(
+    attributes: &[ast::Attribute],
+    cfg: &CfgSet,
+    errors: &mut Vec<CfgError>,
+) -> Option<bool> {
+    let cfg_attrs: Vec<&ast::Attribute> = attributes
+        .iter()
+        .filter(|attr| attr.name.name == "cfg")
+        .collect();
+    if cfg_attrs.is_empty() {
+        return None;
+    }
+    let mut keep = true;
+    for attr in cfg_attrs {
+        if attr.args.is_empty() {
+            errors.push(CfgError {
+                message: "#[cfg] requires at least one argument".to_string(),
+                span: attr.span,
+            });
+            keep = false;
+            continue;
         }
-        let mut keep = true;
-        for attr in cfg_attrs {
-            if attr.args.is_empty() {
-                errors.push(CfgError {
-                    message: "#[cfg] requires at least one argument".to_string(),
-                    span: attr.span,
-                });
-                keep = false;
-                continue;
-            }
-            for arg in &attr.args {
-                match cfg_arg_key(arg) {
-                    Some(key) => {
-                        if !cfg.contains(&key) {
-                            keep = false;
-                        }
-                    }
-                    None => {
-                        errors.push(CfgError {
-                            message:
-                                "invalid #[cfg] argument: expected a name, string, or dotted path"
-                                    .to_string(),
-                            span: cfg_arg_span(arg),
-                        });
+        for arg in &attr.args {
+            match cfg_arg_key(arg) {
+                Some(key) => {
+                    if !cfg.contains(&key) {
                         keep = false;
                     }
                 }
+                None => {
+                    errors.push(CfgError {
+                        message: "invalid #[cfg] argument: expected a name, string, or dotted path"
+                            .to_string(),
+                        span: cfg_arg_span(arg),
+                    });
+                    keep = false;
+                }
             }
         }
-        keep
-    });
+    }
+    Some(keep)
+}
+
+/// Drop items whose `#[cfg(...)]` attributes do not match `cfg` (and the same
+/// for impl methods, which now carry attributes too). Items without cfg
+/// attributes are always kept. Malformed attributes are reported as errors.
+pub fn gate_items(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
+    let mut errors = Vec::new();
+    // Filter impl methods first (needs &mut access per item).
+    for item in &mut program.items {
+        if let ast::ItemKind::Impl(impl_item) = &mut item.kind {
+            impl_item.items.retain(|member| {
+                let attributes = match member {
+                    ast::ImplItemKind::Function(func) => &func.attributes,
+                    _ => return true,
+                };
+                match eval_cfg_attrs(attributes, cfg, &mut errors) {
+                    Some(keep) => keep,
+                    None => true,
+                }
+            });
+        }
+    }
+    // Then filter top-level items.
+    program.items.retain(
+        |item| match eval_cfg_attrs(&item.attributes, cfg, &mut errors) {
+            Some(keep) => keep,
+            None => true,
+        },
+    );
     errors
 }
 
@@ -247,6 +275,28 @@ mod tests {
         let errors = gate_items(&mut program, &set);
         assert!(errors.is_empty());
         assert_eq!(program.items.len(), 2);
+    }
+
+    #[test]
+    fn gate_applies_to_impl_methods() {
+        let mut program = parse(
+            "struct Foo { i64 x; }\nimpl Foo {\n  #[cfg(on)]\n  i64 gated() { return 1; }\n  #[cfg(off)]\n  i64 dropped() { return 2; }\n  i64 plain() { return 3; }\n}\n",
+        );
+        let set = CfgSet::parse(&["on".to_string()]);
+        let errors = gate_items(&mut program, &set);
+        assert!(errors.is_empty());
+        let ast::ItemKind::Impl(impl_item) = &program.items[1].kind else {
+            panic!("expected impl");
+        };
+        let names: Vec<&str> = impl_item
+            .items
+            .iter()
+            .filter_map(|m| match m {
+                ast::ImplItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["gated", "plain"]);
     }
 
     #[test]

@@ -134,6 +134,16 @@ pub fn llvm_target_feature(name: &str) -> Option<&'static str> {
     }
 }
 
+/// True when the function carries `#[inline(always)]`, requesting the LLVM
+/// alwaysinline attribute so the always-inline pass inlines it everywhere.
+pub fn function_always_inline(attributes: &[ast::Attribute]) -> bool {
+    attributes.iter().any(|attr| {
+        attr.name.name == "inline"
+            && attr.args.len() == 1
+            && matches!(&attr.args[0], ast::AttributeArg::Identifier(id) if id.name == "always")
+    })
+}
+
 /// Collect every `#[target_feature("...")]` name on a function into an LLVM
 /// `target-features` attribute value ("+a,+b"), or `None` when none are
 /// present. Multiple attributes AND-compose.

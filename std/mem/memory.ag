@@ -326,6 +326,14 @@ i32 memcmp(const void* s1, const void* s2, i64 n) {
     return 0;
 }
 
+/// libc-compatible `bcmp`: zero when the regions are equal, non-zero
+/// otherwise. LLVM's optimizer recognizes memcmp-shaped code at -O2 and
+/// lowers it to a `bcmp` call; the no-libc runtime provides this shim so
+/// optimized builds link.
+i32 bcmp(const void* s1, const void* s2, i64 n) {
+    return memcmp(s1, s2, n);
+}
+
 /// Compare two NUL-terminated strings. Kept scalar: strings are typically
 /// short, and the wide-path dispatch overhead would dominate; the page-edge
 /// alignment cost of a SIMD version is not worth it here.

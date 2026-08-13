@@ -200,6 +200,8 @@ impl TypeChecker {
                 for impl_member in &impl_item.items {
                     match impl_member {
                         ast::ImplItemKind::Function(func) => {
+                            self.errors
+                                .extend(Self::check_function_attributes(&func.attributes));
                             self.check_impl_method(&self_ty, func);
                         }
                         ast::ImplItemKind::Cast(cast) => {
@@ -527,6 +529,21 @@ impl TypeChecker {
                             });
                         }
                     }
+                }
+            } else if attr.name.name == "inline" {
+                if attr.args.len() != 1 {
+                    errors.push(TypeError {
+                        message: "#[inline] expects exactly one argument (always)".to_string(),
+                        span: attr.span,
+                    });
+                } else if !matches!(
+                    &attr.args[0],
+                    ast::AttributeArg::Identifier(id) if id.name == "always"
+                ) {
+                    errors.push(TypeError {
+                        message: "#[inline] only supports #[inline(always)]".to_string(),
+                        span: attr.span,
+                    });
                 }
             } else if attr.name.name == "target_feature" {
                 if attr.args.len() != 1 {

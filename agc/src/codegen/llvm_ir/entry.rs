@@ -51,6 +51,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Apply `#[inline(always)]` as the LLVM alwaysinline attribute, so the
+    /// always-inline pass inlines the function into every caller.
+    pub(crate) fn apply_inline_always_attribute(
+        function: FunctionValue<'ctx>,
+        attributes: &[ast::Attribute],
+        context: &inkwell::context::Context,
+    ) {
+        if crate::attributes::function_always_inline(attributes) {
+            let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline");
+            let attr = context.create_enum_attribute(kind_id, 0);
+            function.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+
     /// Apply `#[target_feature("name")]` attributes as an LLVM
     /// `target-features` function attribute, so the x86 backend may select
     /// instructions from the listed feature sets for this function only.

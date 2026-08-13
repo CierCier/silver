@@ -63,6 +63,7 @@ impl String {
     }
 
     /// Append `len` raw bytes from `bytes` with a single bulk copy.
+    #[inline(always)]
     void push_bytes(&mut String self, u8* bytes, i64 len) {
         if (len <= 0 || bytes == (u8*)0) { return; }
         if (self.len + len + 1 > self.capacity) {

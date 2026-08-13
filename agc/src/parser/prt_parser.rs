@@ -3868,14 +3868,23 @@ impl PRT_Parser {
                 items.push(ast::ImplItemKind::AssociatedType(item));
                 cursor = next_cursor;
             } else {
-                let Some((method, next_cursor)) =
-                    self.parse_impl_method(tokens, cursor, end - 1, &self_type)?
+                // Optional attribute prefix on methods: `#[inline(always)]`,
+                // `#[cfg(...)]`, `#[target_feature(...)]` before the `fn`.
+                let (attrs, after_attrs) =
+                    if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Hash)) {
+                        self.parse_attributes_prefix(tokens, cursor, end - 1)?
+                    } else {
+                        (Vec::new(), cursor)
+                    };
+                let Some((mut method, next_cursor)) =
+                    self.parse_impl_method(tokens, after_attrs, end - 1, &self_type)?
                 else {
                     return Err(ParseError::InvalidSyntax {
                         message: "invalid impl item".to_string(),
                         span: tokens[cursor].span,
                     });
                 };
+                method.attributes = attrs;
                 items.push(ast::ImplItemKind::Function(method));
                 cursor = next_cursor;
             }
@@ -3955,6 +3964,7 @@ impl PRT_Parser {
                 visibility,
                 return_type: function.return_type,
                 body: function.body,
+                attributes: Vec::new(),
                 span: tokens[start].span.extend_to(&tokens[method_end - 1].span),
             },
             method_end,

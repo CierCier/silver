@@ -16,11 +16,13 @@ struct StreamIo {
     Result<i64, Error>(void*, u8*, i64) write;
 }
 
+#[inline(always)]
 Result<i64, Error> transport_read(StreamIo* io, u8* buf, i64 len) {
     Result<i64, Error>(void*, u8*, i64) f = io.read;
     return f(io.ctx, buf, len);
 }
 
+#[inline(always)]
 Result<i64, Error> transport_write(StreamIo* io, u8* buf, i64 len) {
     Result<i64, Error>(void*, u8*, i64) f = io.write;
     return f(io.ctx, buf, len);

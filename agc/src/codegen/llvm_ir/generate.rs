@@ -72,12 +72,16 @@ pub(crate) fn run_module_optimization_passes(
     // *verification* (a sanity check). LLVM 22 falsely trips it on `nuw` GEPs
     // from struct field access, erroring "did not reach a fixpoint"; the pass
     // itself terminates correctly, so the check is safe to disable.
+    // The inliner runs after mem2reg so the many small Silver helpers
+    // (String ops, transport_read, pool lookups) get inlined into hot paths.
     let pipeline = if matches!(level, "3" | "s" | "z" | "fast") {
         CString::new(
-            "mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>",
+            "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>",
         )
     } else {
-        CString::new("mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg")
+        CString::new(
+            "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg",
+        )
     }
     .expect("pipeline CString should not contain null bytes");
 
@@ -90,9 +94,19 @@ pub(crate) fn run_module_optimization_passes(
             options.as_mut_ptr(),
         );
         if !err.is_null() {
-            return Err(CodegenError::new(
-                "LLVM optimization pipeline returned an error",
-            ));
+            let detail = unsafe {
+                let msg = llvm_sys::error::LLVMGetErrorMessage(err);
+                let text = if msg.is_null() {
+                    "<no detail>".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(msg).to_string_lossy().into_owned()
+                };
+                llvm_sys::error::LLVMDisposeErrorMessage(msg);
+                text
+            };
+            return Err(CodegenError::new(format!(
+                "LLVM optimization pipeline returned an error: {detail}"
+            )));
         }
     }
     Ok(())
@@ -426,6 +440,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         };
         Self::apply_function_linkage(function, visibility);
         Self::apply_target_feature_attributes(function, attributes);
+        Self::apply_inline_always_attribute(function, attributes, self.context);
         // Functions named `_start` are entry points for no-libc binaries. Only
         // apply the `naked` attribute when the body is a single asm statement —
         // a user-written `_start` with non-asm body should NOT get naked (the
@@ -717,6 +732,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         ));
                     };
                     Self::apply_function_linkage(function, &effective_visibility);
+                    Self::apply_target_feature_attributes(function, &func.attributes);
+                    Self::apply_inline_always_attribute(function, &func.attributes, self.context);
 
                     self.emit_function_body(
                         function,

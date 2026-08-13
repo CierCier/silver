@@ -100,6 +100,7 @@ impl Drop<HttpConnection> for HttpConnection {
 // (4KB) so header/body parsing costs one syscall (or SSL_read) per 4KB
 // instead of one per byte.
 
+#[inline(always)]
 Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
     HttpConnection* conn = (HttpConnection*)ctx;
     i64 avail = conn.read_buf_len - conn.read_buf_pos;
@@ -129,6 +130,7 @@ Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
     return Result<i64, Error>.Ok(n);
 }
 
+#[inline(always)]
 Result<i64, Error> http_transport_write(void* ctx, u8* buf, i64 len) {
     HttpConnection* conn = (HttpConnection*)ctx;
     if (conn.use_tls) {
@@ -254,6 +256,7 @@ void http_strip_sensitive_headers(str block, String* out) {
 }
 
 /// Index of the first CRLF at or after `start`, or -1 when none exists.
+#[inline(always)]
 i64 http_find_crlf(u8* data, i64 len, i64 start) {
     i64 i = start;
     while (i + 1 < len) {
@@ -267,6 +270,7 @@ i64 http_find_crlf(u8* data, i64 len, i64 start) {
 /// followed by `data[0..len)`, or -1 when none exists. The carry holds the
 /// last few bytes of the previous chunk so a terminator straddling a chunk
 /// boundary is still found.
+#[inline(always)]
 i64 http_find_crlfcrlf(u8* carry, i64 carry_len, u8* data, i64 len) {
     i64 total = carry_len + len;
     i64 i = 0;
@@ -423,6 +427,7 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
 /// (the unconsumed tail of a bulk head/line scan). Only valid immediately
 /// after a read that served from the buffer; the buffer always still holds
 /// those bytes because the adapter refills only when it is empty.
+#[inline(always)]
 void http_transport_rewind(StreamIo* io, i64 n) {
     if (n <= 0) { return; }
     HttpConnection* conn = (HttpConnection*)io.ctx;

@@ -43,7 +43,7 @@ run_one() {
 case "${1:-all}" in
     silver)
         # Build and run the Silver HttpClient (15s).
-        "$ROOT/target/debug/agc" "$ROOT/tests/http_perf_test.ag" -o /tmp/silver_http_perf 2>/dev/null || exit 1
+        "$ROOT/target/debug/agc" -O2 "$ROOT/tests/http_perf_test.ag" -o /tmp/silver_http_perf 2>/dev/null || exit 1
         run_one silver /tmp/silver_http_perf
         ;;
     raw)
@@ -59,7 +59,7 @@ case "${1:-all}" in
         run_one rust /tmp/silver_http_perf_rust
         ;;
     all)
-        "$ROOT/target/debug/agc" "$ROOT/tests/http_perf_test.ag" -o /tmp/silver_http_perf 2>/dev/null || exit 1
+        "$ROOT/target/debug/agc" -O2 "$ROOT/tests/http_perf_test.ag" -o /tmp/silver_http_perf 2>/dev/null || exit 1
         run_one silver /tmp/silver_http_perf
         "$ROOT/target/debug/agc" "$ROOT/tests/perf/client_raw.ag" -o /tmp/silver_http_perf_raw 2>/dev/null || exit 1
         run_one "silver raw" /tmp/silver_http_perf_raw

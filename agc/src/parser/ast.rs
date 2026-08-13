@@ -493,6 +493,8 @@ pub struct ImplFunction {
     pub visibility: Visibility,
     pub return_type: Option<Type>,
     pub body: Block,
+    /// Per-method attributes (e.g. `#[inline(always)]`, `#[cfg(...)]`).
+    pub attributes: Vec<Attribute>,
     pub span: Span,
 }
 
