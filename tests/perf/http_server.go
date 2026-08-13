@@ -6,12 +6,18 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 )
 
 const body = "hello"
 
 func main() {
+	ln, err := net.Listen("tcp", "127.0.0.1:18099")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("PERF_SERVER_READY")
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
@@ -19,7 +25,7 @@ func main() {
 		w.Write([]byte(body))
 	})
 	// 127.0.0.1:18099 — dedicated port, see run_perf.sh and run_tests.sh.
-	if err := http.ListenAndServe("127.0.0.1:18099", nil); err != nil {
+	if err := http.Serve(ln, nil); err != nil {
 		panic(err)
 	}
 }

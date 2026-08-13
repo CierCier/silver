@@ -153,8 +153,12 @@ struct PoolEntry {
     u8 host[255];
     u16 port;
     bool https;
-    i64 last_used; // unix seconds at release time
+    i64 last_used; // pool sequence at release time (LRU ordering only)
 }
+
+// Monotonic sequence for pool LRU ordering — cheaper than a clock syscall
+// per release and strictly increasing.
+i64 g_pool_seq = 0;
 
 struct ConnectionPool {
     Vec<PoolEntry> entries;
@@ -254,6 +258,24 @@ i64 http_find_crlf(u8* data, i64 len, i64 start) {
     i64 i = start;
     while (i + 1 < len) {
         if (data[i] == (u8)'\r' && data[i + 1] == (u8)'\n') { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Index of the first CRLFCRLF in the combined stream `carry[0..carry_len)`
+/// followed by `data[0..len)`, or -1 when none exists. The carry holds the
+/// last few bytes of the previous chunk so a terminator straddling a chunk
+/// boundary is still found.
+i64 http_find_crlfcrlf(u8* carry, i64 carry_len, u8* data, i64 len) {
+    i64 total = carry_len + len;
+    i64 i = 0;
+    while (i + 4 <= total) {
+        u8 b0 = i < carry_len ? carry[i] : data[i - carry_len];
+        u8 b1 = i + 1 < carry_len ? carry[i + 1] : data[i + 1 - carry_len];
+        u8 b2 = i + 2 < carry_len ? carry[i + 2] : data[i + 2 - carry_len];
+        u8 b3 = i + 3 < carry_len ? carry[i + 3] : data[i + 3 - carry_len];
+        if (b0 == (u8)'\r' && b1 == (u8)'\n' && b2 == (u8)'\r' && b3 == (u8)'\n') { return i; }
         i = i + 1;
     }
     return -1;
@@ -396,21 +418,55 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
     return Result<HttpConnection, Error>.Ok(move connection);
 }
 
+/// Rewind the buffered transport by `n` bytes — bytes already consumed from
+/// the connection's read buffer but logically belonging to the next read
+/// (the unconsumed tail of a bulk head/line scan). Only valid immediately
+/// after a read that served from the buffer; the buffer always still holds
+/// those bytes because the adapter refills only when it is empty.
+void http_transport_rewind(StreamIo* io, i64 n) {
+    if (n <= 0) { return; }
+    HttpConnection* conn = (HttpConnection*)io.ctx;
+    conn.read_buf_pos = conn.read_buf_pos - n;
+}
+
 /// Read one CRLF-terminated line into `line`, excluding the CRLF itself.
 /// Returns false on EOF, read error, or when the line exceeds `max_len`.
+/// Reads in 512-byte chunks and scans for the terminator in bulk.
 bool http_read_line(StreamIo* io, String* line, i64 max_len) {
     line.clear();
-    u8 byte[1];
+    u8 chunk[512];
+    u8 carry[1];
+    i64 carry_len = 0;
     while (true) {
-        Result<i64, Error> r = transport_read(io, &byte[0], 1);
+        Result<i64, Error> r = transport_read(io, &chunk[0], 512);
         if (r.is_err() || r.value() == 0) { return false; }
-        line.push(byte[0]);
-        if (line.ends_with("\r\n")) {
-            line.len = line.len - 2;
-            line.data[line.len] = (u8)0;
+        i64 n = r.value();
+        i64 strip = 0;   // CRLF bytes already in `line` (straddling CR)
+        i64 consume = n; // bytes to take from this chunk
+        bool done = false;
+        if (carry_len == 1 && carry[0] == (u8)'\r' && n >= 1 && chunk[0] == (u8)'\n') {
+            // CR straddles the boundary: strip it from the line, consume the LF.
+            strip = 1;
+            consume = 1;
+            done = true;
+        } else {
+            i64 found = http_find_crlf(&chunk[0], n, 0);
+            if (found >= 0) {
+                consume = found + 2; // content + CRLF
+                done = true;
+            }
+        }
+        if (line.len + consume - strip - (done ? 2 : 0) > max_len) { return false; }
+        line.push_bytes(&chunk[0], consume);
+        line.len = line.len - strip - 2;
+        line.data[line.len] = (u8)0;
+        if (done) {
+            http_transport_rewind(io, n - consume);
             return true;
         }
-        if (line.len > max_len) { return false; }
+        // Keep the last byte so a boundary-straddling CRLF is found next time.
+        carry_len = 1;
+        carry[0] = chunk[n - 1];
     }
     // Unreachable — the loop above only exits via `return`.
     return false;
@@ -550,39 +606,65 @@ impl HttpResponse {
     }
 
     Result<i64, Error> read_head(HttpResponse* self, StreamIo* io, i64 max_header) {
+        // Phase 1: accumulate the raw head in 512-byte bulk reads, scanning
+        // for the CRLFCRLF terminator with a plain loop (plus a 3-byte carry
+        // for boundary-straddling terminators). The unconsumed tail — the
+        // body start — is rewound into the buffered transport. The old
+        // per-byte transport_read(1) + push + ends_with loop cost one
+        // buffered call per head byte.
         String raw = String.new();
-        u8 byte[1];
+        u8 chunk[512];
+        u8 carry[3];
+        i64 carry_len = 0;
         while (true) {
-            Result<i64, Error> r = transport_read(io, &byte[0], 1);
+            Result<i64, Error> r = transport_read(io, &chunk[0], 512);
             if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
-            if (r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
-            raw.push(byte[0]);
-            if (raw.len > max_header) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
-            if (raw.ends_with("\r\n\r\n")) { break; }
+            i64 n = r.value();
+            if (n == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            i64 term = http_find_crlfcrlf(&carry[0], carry_len, &chunk[0], n);
+            i64 consume = n;
+            if (term >= 0) { consume = term + 4 - carry_len; }
+            if (raw.len + consume > max_header) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            raw.push_bytes(&chunk[0], consume);
+            if (term >= 0) {
+                http_transport_rewind(io, n - consume);
+                break;
+            }
+            // Carry the last 3 bytes so a boundary-straddling terminator is
+            // found next time.
+            carry_len = 0;
+            i64 back = consume;
+            if (back > 3) { back = 3; }
+            while (back > 0) {
+                back = back - 1;
+                carry[carry_len] = chunk[consume - 1 - back];
+                carry_len = carry_len + 1;
+            }
         }
 
-        // Status line: "HTTP/1.x <3-digit status>[ reason]".
-        i64 line_end = raw.find("\r\n");
+        // Status line: "HTTP/1.x <3-digit status>[ reason]". Parsed in place
+        // from the raw head (no intermediate substr allocations).
+        i64 line_end = http_find_crlf(raw.data, raw.len, 0);
         if (line_end < 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
-        String status_line = raw.substr(0, line_end);
-        String version = status_line.substr(5, 3);
-        if (version.equals("1.0")) { self.version = HttpVersion.Http10; }
-        else if (version.equals("1.1")) { self.version = HttpVersion.Http11; }
+        if (line_end < 12 || raw[8] != (u8)' ') {
+            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        }
+        if (raw[5] != (u8)'1' || raw[6] != (u8)'.') {
+            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        }
+        if (raw[7] == (u8)'0') { self.version = HttpVersion.Http10; }
+        else if (raw[7] == (u8)'1') { self.version = HttpVersion.Http11; }
         else { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
-        if (status_line.len < 12 || status_line[8] != (u8)' ') {
+        if (!http_is_digit(raw[9]) || !http_is_digit(raw[10])
+            || !http_is_digit(raw[11])) {
             return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
         }
-        if (!http_is_digit(status_line[9]) || !http_is_digit(status_line[10])
-            || !http_is_digit(status_line[11])) {
-            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
-        }
-        self.status = (i32)((i64)(status_line[9] - (u8)'0') * 100
-            + (i64)(status_line[10] - (u8)'0') * 10
-            + (i64)(status_line[11] - (u8)'0'));
-        self.reason.drop();
-        self.reason = String.new();
-        if (status_line.len > 12 && status_line[12] == (u8)' ') {
-            self.reason = status_line.substr(13, status_line.len - 13);
+        self.status = (i32)((i64)(raw[9] - (u8)'0') * 100
+            + (i64)(raw[10] - (u8)'0') * 10
+            + (i64)(raw[11] - (u8)'0'));
+        self.reason.len = 0;
+        if (line_end > 12 && raw[12] == (u8)' ') {
+            self.reason.push_bytes(&raw.data[13], line_end - 13);
         }
 
         // Headers: CRLF-terminated lines up to the blank line.
@@ -1107,7 +1189,8 @@ impl HttpClient {
         entry.host[k] = (u8)0;
         entry.port = port;
         entry.https = https;
-        entry.last_used = http_unix_now();
+        entry.last_used = g_pool_seq;
+        g_pool_seq = g_pool_seq + 1;
         self.pool.entries.push(move entry);
         self.pool.lock.unlock();
     }

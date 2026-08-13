@@ -294,9 +294,13 @@ fi
 # the perf test itself via the warmup request); give it a moment to bind.
 PERF_SERVER_PID=""
 if ! is_skipped http_perf_test; then
-    (cd "$ROOT" && exec go run tests/perf/http_server.go >"$WORKDIR/perf_server.log" 2>&1) &
+    CGO_ENABLED=0 go build -o "$WORKDIR/perf_server" "$ROOT/tests/perf/http_server.go" || true
+    (cd "$ROOT" && exec "$WORKDIR/perf_server" >"$WORKDIR/perf_server.log" 2>&1) &
     PERF_SERVER_PID=$!
-    sleep 0.5
+    for _ in $(seq 1 50); do
+        if grep -q PERF_SERVER_READY "$WORKDIR/perf_server.log" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
 fi
 
 passed=0

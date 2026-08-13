@@ -21,7 +21,9 @@ URL="http://127.0.0.1:$PORT/"
 command -v go >/dev/null 2>&1 || { echo "go not available" >&2; exit 1; }
 command -v rustc >/dev/null 2>&1 || { echo "rustc not available" >&2; exit 1; }
 
-# Build the server and wait until it accepts connections.
+# Clear any lingering server from a previous run, then build and start.
+pkill -f silver_http_perf_server 2>/dev/null
+sleep 0.2
 CGO_ENABLED=0 go build -o /tmp/silver_http_perf_server "$ROOT/tests/perf/http_server.go" || exit 1
 /tmp/silver_http_perf_server &
 SERVER_PID=$!
