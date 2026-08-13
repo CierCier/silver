@@ -92,6 +92,21 @@ pub(crate) fn cc_query_raw(arg: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The ELF dynamic loader (PT_INTERP) for dynamically-linked executables.
+/// ld.lld only adds the default interpreter when libc is a direct NEEDED
+/// dependency, so links against e.g. raylib alone would run without a loader
+/// and jump to null on the first PLT call. Prefer the loader the C compiler
+/// knows about; fall back to the standard /lib64 path.
+static DYNAMIC_LINKER: LazyLock<String> = LazyLock::new(|| {
+    let queried = cc_query_raw("-print-file-name=ld-linux-x86-64.so.2").unwrap_or_default();
+    let trimmed = queried.trim();
+    if !trimmed.is_empty() && !trimmed.starts_with("ld-linux") && Path::new(trimmed).is_absolute() {
+        trimmed.to_string()
+    } else {
+        "/lib64/ld-linux-x86-64.so.2".to_string()
+    }
+});
+
 pub(crate) fn cc_library_dirs() -> Vec<PathBuf> {
     CC_LIB_DIRS.clone()
 }
@@ -123,6 +138,28 @@ pub(crate) fn should_force_non_pie(target: Option<&str>) -> bool {
         Some(triple) => triple.contains("linux"),
         None => cfg!(target_os = "linux"),
     }
+}
+
+/// Whether the link pulls in any shared object: a `.so` module dependency or
+/// a `-l` library that resolves to `lib<name>.so` in the search dirs. Only
+/// then does the executable need a dynamic loader (PT_INTERP); adding one
+/// without a dynamic section makes ld-linux crash in `dl_main`.
+fn link_has_shared_libraries(
+    native_libs: &[String],
+    search_dirs: &[PathBuf],
+    dependency_paths: &[PathBuf],
+) -> bool {
+    if dependency_paths
+        .iter()
+        .any(|p| p.extension().is_some_and(|e| e == "so"))
+    {
+        return true;
+    }
+    native_libs.iter().any(|lib| {
+        search_dirs
+            .iter()
+            .any(|dir| dir.join(format!("lib{lib}.so")).exists())
+    })
 }
 
 pub(crate) fn dependency_library_dirs(dependency_paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -170,6 +207,8 @@ pub(crate) fn link_exe_with_ld_lld(
     // the fully static executable.
     if plan.static_link {
         link.arg("-static");
+    } else if link_has_shared_libraries(native_libs, &cc_library_dirs(), dependency_paths) {
+        link.arg("--dynamic-linker").arg(&*DYNAMIC_LINKER);
     }
 
     if let Some(target) = &plan.target {
