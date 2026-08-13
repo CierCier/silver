@@ -55,6 +55,50 @@ impl CfgSet {
     pub fn value(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)
     }
+
+    fn insert_if_absent(&mut self, key: &str) {
+        if !self.values.contains_key(key) {
+            self.values.insert(key.to_string(), "1".to_string());
+        }
+    }
+}
+
+/// Derive compiler-defined cfg keys from the build configuration:
+///
+///   - `debug` when the opt level is unset/0, `release` for 1/2/3/s/z/fast
+///   - `arch.<arch>` and `os.<os>` from the target triple (or the compiler
+///     host when no `--target` is given)
+///
+/// User-provided keys win (insert-if-absent), so explicit `--cfg` values are
+/// never clobbered — e.g. `--cfg "debug=1"` with `-O2` keeps both.
+pub fn add_derived_cfgs(set: &mut CfgSet, opt_level: Option<&str>, target: Option<&str>) {
+    let release = matches!(opt_level, Some("1" | "2" | "3" | "s" | "z" | "fast"));
+    set.insert_if_absent(if release { "release" } else { "debug" });
+    let (arch, os) = match target {
+        Some(triple) => {
+            let mut parts = triple.split('-');
+            let arch = parts.next().unwrap_or("unknown");
+            let os = triple_os(triple);
+            (arch, os)
+        }
+        None => (std::env::consts::ARCH, std::env::consts::OS),
+    };
+    set.insert_if_absent(&format!("arch.{arch}"));
+    set.insert_if_absent(&format!("os.{os}"));
+}
+
+/// Best-effort OS extraction from a target triple: the token that matches a
+/// known OS name, else the vendor position.
+fn triple_os(triple: &str) -> &str {
+    for os in [
+        "linux", "darwin", "macos", "windows", "freebsd", "netbsd", "openbsd", "solaris",
+        "illumos", "android", "ios", "haiku",
+    ] {
+        if triple.split('-').any(|part| part == os) {
+            return os;
+        }
+    }
+    triple.split('-').nth(1).unwrap_or("unknown")
 }
 
 /// A malformed `#[cfg(...)]` attribute.
@@ -211,5 +255,44 @@ mod tests {
         let set = CfgSet::default();
         let errors = gate_items(&mut program, &set);
         assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn derives_debug_release_from_opt_level() {
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, None);
+        assert!(set.contains("debug"));
+        assert!(!set.contains("release"));
+
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, Some("2"), None);
+        assert!(!set.contains("debug"));
+        assert!(set.contains("release"));
+
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, Some("fast"), None);
+        assert!(set.contains("release"));
+    }
+
+    #[test]
+    fn user_cfg_wins_over_derived() {
+        let mut set = CfgSet::parse(&["debug=1".to_string()]);
+        add_derived_cfgs(&mut set, Some("2"), None);
+        // -O2 derives release, but the explicit debug=1 must survive.
+        assert!(set.contains("debug"));
+        assert!(set.contains("release"));
+    }
+
+    #[test]
+    fn derives_arch_and_os_from_target() {
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, Some("x86_64-unknown-linux-gnu"));
+        assert!(set.contains("arch.x86_64"));
+        assert!(set.contains("os.linux"));
+
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, Some("aarch64-apple-darwin"));
+        assert!(set.contains("arch.aarch64"));
+        assert!(set.contains("os.darwin"));
     }
 }

@@ -1,0 +1,40 @@
+// tests/cfg_derived_test.ag — compiler-derived cfg keys.
+//
+// The harness compiles this test with `-O2`, so `release` is derived; the
+// host triple derives arch.x86_64 / os.linux on this machine. Debug/release
+// and arch/os come from the build configuration, not from --cfg flags.
+
+import std.sys.entry;
+import std.test;
+
+#[cfg(release)]
+i32 release_mode() { return 1; }
+
+#[cfg(debug)]
+i32 debug_mode() { return 2; }
+
+#[cfg(arch.x86_64)]
+i32 arch_x86_64() { return 3; }
+
+#[cfg(os.linux)]
+i32 os_linux() { return 4; }
+
+i32 main() {
+    test_start("cfg derived release");
+    // -O2 derives release; the debug-mode item must be dropped.
+    assert_eq_i64(1, release_mode(), "release derived from -O2");
+    i64 d = 0;
+    if (@cfg(debug)) { d = 1; }
+    assert_eq_i64(0, d, "debug not set in an -O2 build");
+
+    test_start("cfg derived arch/os");
+    // On this machine the triple is x86_64-unknown-linux-gnu.
+    i64 a = 0;
+    if (@cfg(arch.x86_64)) { a = 1; }
+    assert_eq_i64(1, a, "arch.x86_64 derived from host triple");
+    i64 o = 0;
+    if (@cfg(os.linux)) { o = 1; }
+    assert_eq_i64(1, o, "os.linux derived from host triple");
+
+    return done();
+}

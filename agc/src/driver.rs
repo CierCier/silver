@@ -796,7 +796,12 @@ pub fn run(cli: Cli) {
                 // Compile-time cfg gate: drop #[cfg(...)]-rejected items, then
                 // fold @cfg(...) and prune dead branches, before any symbol
                 // registration, semantic analysis, or type checking sees them.
-                let cfg_set = cfg::CfgSet::parse(&plan.cfg_flags);
+                let mut cfg_set = cfg::CfgSet::parse(&plan.cfg_flags);
+                cfg::add_derived_cfgs(
+                    &mut cfg_set,
+                    plan.opt_level.as_deref(),
+                    plan.target.as_deref(),
+                );
                 let cfg_errors = cfg::gate_items(&mut ast, &cfg_set);
                 if !cfg_errors.is_empty() {
                     eprintln!("agc: cfg errors:");

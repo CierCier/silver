@@ -8,14 +8,82 @@
 //   - memset/memcpy/memmove return dst and tolerate null pointers (no-op).
 //   - memmove handles overlapping regions in either direction.
 //   - strlen(null) returns 0.
+//
+// Bulk copies: when the build enables the cpu.* cfg keys, memcpy/memset
+// dispatch large transfers to per-feature SIMD kernels. The kernels are
+// always compiled (#[target_feature]) and the dispatch checks are @cfg
+// folds: build-gated at compile time, then the runtime CPU probe (std/cpu.ag)
+// decides per machine. Small transfers never pay the probes — the size guard
+// precedes every feature check.
+
+import std.cpu;
+
+/// Copy 64 bytes per iteration (`blocks` iterations), AVX-512.
+#[target_feature("avx512f")]
+void memcpy_v512(u8* d, u8* s, i64 blocks) {
+    asm("movq %rax, %r8\nmovq %rdi, %r9\nmovq %rsi, %r10\n1:\nvmovdqu64 (%r10), %zmm0\nvmovdqu64 %zmm0, (%r9)\naddq $$64, %r9\naddq $$64, %r10\ndecq %r8\njnz 1b\nvzeroupper", [blocks, d, s], ["rbx", "rdx", "r8", "r9", "r10", "xmm0"]);
+}
+
+/// Copy 32 bytes per iteration (`blocks` iterations), AVX2.
+#[target_feature("avx2")]
+void memcpy_v256(u8* d, u8* s, i64 blocks) {
+    asm("movq %rax, %r8\nmovq %rdi, %r9\nmovq %rsi, %r10\n1:\nvmovdqu (%r10), %ymm0\nvmovdqu %ymm0, (%r9)\naddq $$32, %r9\naddq $$32, %r10\ndecq %r8\njnz 1b\nvzeroupper", [blocks, d, s], ["rbx", "rdx", "r8", "r9", "r10", "xmm0"]);
+}
+
+/// Copy 16 bytes per iteration (`blocks` iterations), SSE.
+#[target_feature("sse41")]
+void memcpy_v128(u8* d, u8* s, i64 blocks) {
+    asm("movq %rax, %r8\nmovq %rdi, %r9\nmovq %rsi, %r10\n1:\nmovdqu (%r10), %xmm0\nmovdqu %xmm0, (%r9)\naddq $$16, %r9\naddq $$16, %r10\ndecq %r8\njnz 1b", [blocks, d, s], ["rbx", "rdx", "r8", "r9", "r10", "xmm0"]);
+}
+
+/// Fill 64 bytes per iteration (`blocks` iterations), AVX-512.
+#[target_feature("avx512f")]
+void memset_v512(u8* d, u8 value, i64 blocks) {
+    asm("movq %rax, %r8\nmovq %rdi, %r9\nmovl %esi, %eax\nvmovd %eax, %xmm0\nvpbroadcastb %xmm0, %zmm0\n1:\nvmovdqu64 %zmm0, (%r9)\naddq $$64, %r9\ndecq %r8\njnz 1b\nvzeroupper", [blocks, d, value], ["rbx", "rdx", "r8", "r9", "xmm0"]);
+}
+
+/// Fill 32 bytes per iteration (`blocks` iterations), AVX2.
+#[target_feature("avx2")]
+void memset_v256(u8* d, u8 value, i64 blocks) {
+    asm("movq %rax, %r8\nmovq %rdi, %r9\nmovl %esi, %eax\nvmovd %eax, %xmm0\nvpbroadcastb %xmm0, %ymm0\n1:\nvmovdqu %ymm0, (%r9)\naddq $$32, %r9\ndecq %r8\njnz 1b\nvzeroupper", [blocks, d, value], ["rbx", "rdx", "r8", "r9", "xmm0"]);
+}
 
 /// Fill `len` bytes at `dst` with `value`. Returns `dst`. Null-tolerant.
 u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
     if (dst == (u8*)0) {
         return dst;
     }
-    for (i64 i = 0; i < len; i = i + 1) {
-        dst[i] = value;
+    i64 n = len;
+    if (n >= 64) {
+        if (@cfg(cpu.avx512f)) {
+            i64 blocks = n / 64;
+            memset_v512(dst, value, blocks);
+            n = n - blocks * 64;
+            dst = (u8*)((i64)dst + blocks * 64);
+        }
+    }
+    if (n >= 32) {
+        if (@cfg(cpu.avx2)) {
+            i64 blocks = n / 32;
+            memset_v256(dst, value, blocks);
+            n = n - blocks * 32;
+            dst = (u8*)((i64)dst + blocks * 32);
+        }
+    }
+    while (n >= 8) {
+        dst[n - 8] = value;
+        dst[n - 7] = value;
+        dst[n - 6] = value;
+        dst[n - 5] = value;
+        dst[n - 4] = value;
+        dst[n - 3] = value;
+        dst[n - 2] = value;
+        dst[n - 1] = value;
+        n = n - 8;
+    }
+    while (n >= 1) {
+        dst[n - 1] = value;
+        n = n - 1;
     }
     return dst;
 }
@@ -26,8 +94,48 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
     if (dst == (u8*)0 || src == (u8*)0) {
         return dst;
     }
-    for (i64 i = 0; i < len; i = i + 1) {
-        dst[i] = src[i];
+    i64 n = len;
+    if (n >= 64) {
+        if (@cfg(cpu.avx512f)) {
+            i64 blocks = n / 64;
+            memcpy_v512(dst, src, blocks);
+            n = n - blocks * 64;
+            dst = (u8*)((i64)dst + blocks * 64);
+            src = (u8*)((i64)src + blocks * 64);
+        }
+    }
+    if (n >= 32) {
+        if (@cfg(cpu.avx2)) {
+            i64 blocks = n / 32;
+            memcpy_v256(dst, src, blocks);
+            n = n - blocks * 32;
+            dst = (u8*)((i64)dst + blocks * 32);
+            src = (u8*)((i64)src + blocks * 32);
+        }
+    }
+    if (n >= 16) {
+        if (@cfg(cpu.sse41)) {
+            i64 blocks = n / 16;
+            memcpy_v128(dst, src, blocks);
+            n = n - blocks * 16;
+            dst = (u8*)((i64)dst + blocks * 16);
+            src = (u8*)((i64)src + blocks * 16);
+        }
+    }
+    while (n >= 8) {
+        dst[n - 8] = src[n - 8];
+        dst[n - 7] = src[n - 7];
+        dst[n - 6] = src[n - 6];
+        dst[n - 5] = src[n - 5];
+        dst[n - 4] = src[n - 4];
+        dst[n - 3] = src[n - 3];
+        dst[n - 2] = src[n - 2];
+        dst[n - 1] = src[n - 1];
+        n = n - 8;
+    }
+    while (n >= 1) {
+        dst[n - 1] = src[n - 1];
+        n = n - 1;
     }
     return dst;
 }

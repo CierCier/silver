@@ -74,6 +74,7 @@ test_specific_flags() {
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
         target_feature_test) echo "--cfg cpu.avx2=1" ;;
+        cfg_derived_test) echo "-O2" ;;
         *) echo "" ;;
     esac
 }
@@ -319,7 +320,8 @@ for t in "${tests[@]}"; do
     extra_flags="$(test_specific_flags "$name")"
     compile_real_ms=0; compile_cpu_pct=0; compile_mem_kb=0
     # shellcheck disable=SC2086
-    if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" $extra_flags; then
+    if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" \
+        --cfg "cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" $extra_flags; then
         if expected_compile_failure "$name"; then
             printf '  PASS  %-*s  (expected compile error)\n' "$COL_NAME" "$name"
             passed=$((passed + 1))

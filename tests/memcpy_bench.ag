@@ -1,0 +1,58 @@
+import std.io;
+import std.mem.alloc;
+import std.mem.memory;
+import std.sys.entry;
+import std.time;
+
+i32 main() {
+    i64 N = 8 * 1024 * 1024;
+    u8* src = (u8*)malloc(N);
+    u8* dst = (u8*)malloc(N);
+    i64 i = 0;
+    while (i < N) { src[i] = (u8)(i % 251); i = i + 1; }
+    // correctness
+    silver_rt_memcpy(dst, src, N);
+    i64 ok = 1;
+    i = 0;
+    while (i < N) { if (dst[i] != src[i]) { ok = 0; } i = i + 1; }
+    // large
+    silver_rt_memcpy(dst, src, N);
+    Instant t0 = now();
+    i64 reps = 100;
+    i64 r = 0;
+    while (r < reps) { silver_rt_memcpy(dst, src, N); r = r + 1; }
+    Instant t1 = now();
+    i64 us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memcpy 8MB: {} MB/s ({} us, {} MB)", (i64)N * reps * 1000000 / us / 1048576, us, (i64)N * reps / 1048576);
+    // medium 1KB
+    r = 0;
+    t0 = now();
+    while (r < 200000) { silver_rt_memcpy(dst, src, 1024); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memcpy 1KB: {} MB/s ({} us for 200000)", 1024 * 200000 * 1000000 / us / 1048576, us);
+    // small 64B
+    r = 0;
+    t0 = now();
+    while (r < 2000000) { silver_rt_memcpy(dst, src, 64); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memcpy 64B: {} ns/call ({} us for 2M)", us * 1000 / 2000000, us);
+    // memset 8MB
+    silver_rt_memset(dst, (u8)0xAB, N);
+    ok = 1;
+    i = 0;
+    while (i < N) { if (dst[i] != (u8)0xAB) { ok = 0; } i = i + 1; }
+    t0 = now();
+    r = 0;
+    while (r < 100) { silver_rt_memset(dst, (u8)0xAB, N); r = r + 1; }
+    t1 = now();
+    us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("memset 8MB: {} MB/s ({} us)", (i64)N * 100 * 1000000 / us / 1048576, us);
+    if (ok != 1) { return 1; }
+    return 0;
+}
