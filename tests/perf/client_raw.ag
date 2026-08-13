@@ -1,0 +1,63 @@
+// tests/perf/client_raw.ag — Silver raw-socket throughput ceiling.
+//
+// No HTTP client machinery: a bare TcpStream speaks the same keep-alive
+// GET workload against the Go server, with a minimal buffered read of the
+// response (head through CRLFCRLF + 5 body bytes). This measures the
+// loopback+TCP round-trip ceiling that a full client stacks on top of —
+// compare with tests/http_perf_test.ag (the full HttpClient) to see the
+// client machinery's cost.
+
+import std.io;
+import std.net.inet;
+import std.net.tcp;
+import std.sys.entry;
+import std.time;
+
+/// Read one full response (head through CRLFCRLF + 5 body bytes) into buf.
+bool read_response(TcpStream* s, u8* buf, i64* have) {
+    while (true) {
+        i64 i = 0;
+        bool head_done = false;
+        while (i + 4 <= *have) {
+            if (buf[i] == (u8)13 && buf[i + 1] == (u8)10
+                && buf[i + 2] == (u8)13 && buf[i + 3] == (u8)10) {
+                head_done = true;
+                break;
+            }
+            i = i + 1;
+        }
+        if (head_done && *have >= i + 4 + 5) { return true; }
+        i64 r = s.read(&buf[0], 1024).unwrap();
+        if (r == 0) { return false; }
+        *have = *have + r;
+        if (*have > 1024) { return false; }
+    }
+    // Unreachable — the loop only exits via return.
+    return false;
+}
+
+i32 main() {
+    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)18099);
+    SocketAddr a = addr.unwrap();
+    TcpStream s = TcpStream.connect(&a);
+    str head = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
+    u8 buf[1024];
+    i64 have = 0;
+    if (s.write((u8*)head, strlen(head)).failed()) { return 1; }
+    if (!read_response(&s, &buf[0], &have)) { return 2; }
+    Instant t0 = now();
+    i64 count = 0;
+    while (true) {
+        if (now().elapsed_ns(t0) >= 15000000000) { break; }
+        if (s.write((u8*)head, strlen(head)).failed()) { return 3; }
+        have = 0;
+        if (!read_response(&s, &buf[0], &have)) { return 4; }
+        count = count + 1;
+    }
+    Instant t1 = now();
+    i64 us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("silver raw: {} requests in {}.{}s ({} req/s)",
+        count, us / 1000000, (us / 1000) % 1000, count * 1000000 / us);
+    return 0;
+}

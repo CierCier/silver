@@ -271,6 +271,10 @@ if [ -z "$SILVER_OPENSSL_LIB" ] || ! command -v node >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
 tls_test"
 fi
+if ! command -v go >/dev/null 2>&1; then
+    SKIP_TESTS="$SKIP_TESTS
+http_perf_test"
+fi
 
 # Start the node HTTPS server once, before the loop, if tls_test will run.
 TLS_NODE_PID=""
@@ -283,6 +287,16 @@ if ! is_skipped tls_test; then
         fi
         sleep 0.1
     done
+fi
+
+# Start the loopback HTTP perf server once, before the loop, if http_perf_test
+# will run. The Go server is ready when it accepts connections (checked by
+# the perf test itself via the warmup request); give it a moment to bind.
+PERF_SERVER_PID=""
+if ! is_skipped http_perf_test; then
+    (cd "$ROOT" && exec go run tests/perf/http_server.go >"$WORKDIR/perf_server.log" 2>&1) &
+    PERF_SERVER_PID=$!
+    sleep 0.5
 fi
 
 passed=0
@@ -455,6 +469,10 @@ done
 if [ -n "$TLS_NODE_PID" ]; then
     kill "$TLS_NODE_PID" 2>/dev/null
     wait "$TLS_NODE_PID" 2>/dev/null
+fi
+if [ -n "$PERF_SERVER_PID" ]; then
+    kill "$PERF_SERVER_PID" 2>/dev/null
+    wait "$PERF_SERVER_PID" 2>/dev/null
 fi
 
 # ---- Slowest tests (run time) ----

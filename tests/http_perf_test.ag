@@ -1,0 +1,46 @@
+// tests/http_perf_test.ag — sustained HTTP client throughput.
+//
+// Hammers the loopback server (tests/perf/http_server.go, spawned by
+// run_tests.sh on port 18099) with sequential keep-alive GETs for 15 seconds
+// and reports the sustained request rate. The same workload runs against the
+// same server from tests/perf/client_go.go and tests/perf/client_rust.rs —
+// run tests/perf/run_perf.sh for the three-way comparison.
+//
+// The metric is honest end-to-end client cost: connection pool reuse, URL
+// parse, header read, body read and drop per request.
+
+import std.io;
+import std.net.http;
+import std.sys.entry;
+import std.time;
+
+i32 main() {
+    HttpClient client = HttpClient.new();
+    str url = "http://127.0.0.1:18099/";
+
+    // Warm up: establish the pooled connection.
+    Result<HttpResponse, Error> w = client.get(url);
+    if (w.failed()) {
+        STDOUT.write_str("warmup failed\n");
+        return 1;
+    }
+
+    Instant t0 = now();
+    i64 count = 0;
+    while (true) {
+        Instant t = now();
+        if (t.elapsed_ns(t0) >= 15000000000) { break; }
+        Result<HttpResponse, Error> r = client.get(url);
+        if (r.failed()) {
+            STDOUT.write_str("request failed\n");
+            return 2;
+        }
+        count = count + 1;
+    }
+    Instant t1 = now();
+    i64 us = t1.elapsed_ns(t0) / 1000;
+    if (us < 1) { us = 1; }
+    @println("silver: {} requests in {}.{}s ({} req/s)",
+        count, us / 1000000, (us / 1000) % 1000, count * 1000000 / us);
+    return 0;
+}
