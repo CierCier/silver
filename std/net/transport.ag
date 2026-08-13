@@ -1,0 +1,97 @@
+// std/net/transport.ag — pluggable stream transport for the HTTP client.
+//
+// Framing code (std/net/http.ag) reads and writes through a StreamIo pair so
+// plain TCP and TLS connections share one code path (Go's Transport
+// layering). The TLS provider is REGISTERED rather than linked: std.net.tls
+// calls tls_provider_register() from its tls_init(), so programs that only
+// speak plain http never link OpenSSL and keep the pure-Silver no-libc
+// runtime. Calling an https URL before registration yields a clear error.
+
+import std.error;
+import std.net.tcp;
+import std.sys.result;
+
+struct StreamIo {
+    void* ctx;
+    Result<i64, Error>(void*, u8*, i64) read;
+    Result<i64, Error>(void*, u8*, i64) write;
+}
+
+Result<i64, Error> transport_read(StreamIo* io, u8* buf, i64 len) {
+    Result<i64, Error>(void*, u8*, i64) f = io.read;
+    return f(io.ctx, buf, len);
+}
+
+Result<i64, Error> transport_write(StreamIo* io, u8* buf, i64 len) {
+    Result<i64, Error>(void*, u8*, i64) f = io.write;
+    return f(io.ctx, buf, len);
+}
+
+// --- TCP adapter ----------------------------------------------------------
+
+Result<i64, Error> transport_tcp_read(void* ctx, u8* buf, i64 len) {
+    TcpStream* stream = (TcpStream*)ctx;
+    return stream.read(buf, len);
+}
+
+Result<i64, Error> transport_tcp_write(void* ctx, u8* buf, i64 len) {
+    TcpStream* stream = (TcpStream*)ctx;
+    return stream.write(buf, len);
+}
+
+StreamIo transport_tcp_io(TcpStream* stream) {
+    StreamIo io;
+    io.ctx = (void*)stream;
+    io.read = transport_tcp_read;
+    io.write = transport_tcp_write;
+    return io;
+}
+
+// --- TLS provider registration --------------------------------------------
+// The provider operates on an opaque per-connection state blob owned by the
+// HTTP client (std.net.tls casts it to its TlsStream). A zero table means
+// TLS is unavailable.
+
+const i64 TRANSPORT_TLS_STATE_SIZE = 64;
+
+struct TlsProvider {
+    bool(void*, i32, str, bool, str, Error*) handshake;
+    Result<i64, Error>(void*, u8*, i64) read;
+    Result<i64, Error>(void*, u8*, i64) write;
+    void(void*) close;
+}
+
+TlsProvider g_tls_provider;
+
+/// Install a TLS transport provider (called by std.net.tls's tls_init).
+void tls_provider_register(bool(void*, i32, str, bool, str, Error*) handshake,
+                           Result<i64, Error>(void*, u8*, i64) read,
+                           Result<i64, Error>(void*, u8*, i64) write,
+                           void(void*) close) {
+    g_tls_provider.handshake = handshake;
+    g_tls_provider.read = read;
+    g_tls_provider.write = write;
+    g_tls_provider.close = close;
+}
+
+bool transport_tls_handshake(void* state, i32 fd, str host, bool verify, str ca_file, Error* err) {
+    bool(void*, i32, str, bool, str, Error*) f = g_tls_provider.handshake;
+    if ((i64)f == 0) {
+        *err = Error.new(-7, "TLS not initialized: import std.net.tls and call tls_init()");
+        return false;
+    }
+    return f(state, fd, host, verify, ca_file, err);
+}
+
+StreamIo transport_tls_io(void* state) {
+    StreamIo io;
+    io.ctx = state;
+    io.read = g_tls_provider.read;
+    io.write = g_tls_provider.write;
+    return io;
+}
+
+void transport_tls_close(void* state) {
+    void(void*) f = g_tls_provider.close;
+    if ((i64)f != 0) { f(state); }
+}

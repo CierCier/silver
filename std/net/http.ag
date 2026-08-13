@@ -13,6 +13,7 @@ import std.net.dns;
 import std.net.http_status;
 import std.net.inet;
 import std.net.tcp;
+import std.net.transport;
 import std.string;
 import std.sys.result;
 
@@ -61,10 +62,14 @@ struct HttpClient {
     i32 max_redirects;
     bool use_jar; // false = manual Cookie header handling, like Go's nil Jar
     CookieJar jar;
+    bool tls_verify; // true = verify peer certificates (Go's default)
+    String tls_ca_file; // optional CA bundle; empty = system trust store
 }
 
 struct HttpConnection {
     TcpStream stream;
+    u8 tls_state[64]; // opaque TLS transport state (TRANSPORT_TLS_STATE_SIZE)
+    bool use_tls;
     HttpVersion version;
 }
 
@@ -72,6 +77,7 @@ struct HttpUrl {
     u8 host[255];
     u16 port;
     str path;
+    bool https;
 }
 
 // --- Byte helpers ---------------------------------------------------------
@@ -114,14 +120,18 @@ bool http_parse_hex(u8* data, i64 start, i64 end, i64* out) {
 }
 
 
-/// Split "http://host[:port]/path" into host, port, and path. The scheme is
-/// optional and must be plain `http` (https is rejected). `path` is a view
-/// into `url`, which must therefore outlive the parsed value.
+/// Split "http://host[:port]/path" or "https://host[:port]/path" into
+/// host, port, path, and scheme. The scheme is optional and must be plain
+/// http or https (https defaults to port 443). `path` is a view into `url`,
+/// which must therefore outlive the parsed value.
 bool http_parse_url(str url, HttpUrl* out) {
     u8* p = (u8*)url;
     i64 len = strlen(url);
     i64 i = 0;
-    if (len >= 7 && http_equal_ci(p, 0, 7, "http://")) { i = 7; }
+    bool https = false;
+    if (len >= 8 && http_equal_ci(p, 0, 8, "https://")) { https = true; i = 8; }
+    else if (len >= 7 && http_equal_ci(p, 0, 7, "http://")) { i = 7; }
+    else { return false; }
     i64 host_start = i;
     while (i < len && p[i] != (u8)':' && p[i] != (u8)'/') { i = i + 1; }
     i64 host_len = i - host_start;
@@ -130,6 +140,7 @@ bool http_parse_url(str url, HttpUrl* out) {
     while (j < host_len) { out.host[j] = p[host_start + j]; j = j + 1; }
     out.host[j] = (u8)0;
     u16 port = 80;
+    if (https) { port = 443; }
     if (i < len && p[i] == (u8)':') {
         i = i + 1;
         i64 port_start = i;
@@ -142,41 +153,44 @@ bool http_parse_url(str url, HttpUrl* out) {
         port = (u16)port_value;
     }
     out.port = port;
+    out.https = https;
     out.path = (str)&p[i];
     if (strlen(out.path) == 0) { out.path = "/"; }
     return true;
 }
 
 /// Resolve `location` against the absolute `base` URL (Go's
-/// Reference.ResolveReference for the common cases): absolute URLs pass
-/// through, "//host/path" reuses the base scheme, "/path" reuses the base
-/// authority. Path-relative and https locations are not resolvable here and
+/// Reference.ResolveReference for the common cases): absolute http/https
+/// URLs pass through, "//host/path" reuses the base scheme, "/path" reuses
+/// the base authority. Path-relative locations are not resolvable here and
 /// yield an empty string (callers then return the response instead of
 /// following).
 String http_resolve_url(str base, str location) {
     String result = String.new();
     u8* loc = (u8*)location;
     i64 loc_len = strlen(location);
-    if (loc_len >= 7 && http_equal_ci(loc, 0, 7, "http://")) {
+    if ((loc_len >= 8 && http_equal_ci(loc, 0, 8, "https://"))
+        || (loc_len >= 7 && http_equal_ci(loc, 0, 7, "http://"))) {
         result.push_str(location);
         return move result;
     }
     u8* b = (u8*)base;
     i64 base_len = strlen(base);
-    if (base_len < 7 || !http_equal_ci(b, 0, 7, "http://")) {
-        return move result;
-    }
+    i64 scheme_len = 0;
+    if (base_len >= 8 && http_equal_ci(b, 0, 8, "https://")) { scheme_len = 8; }
+    else if (base_len >= 7 && http_equal_ci(b, 0, 7, "http://")) { scheme_len = 7; }
+    else { return move result; }
     if (loc_len >= 2 && loc[0] == (u8)'/' && loc[1] == (u8)'/') {
-        result.push_str("http:");
+        i64 s = 0;
+        while (s < scheme_len - 3) { result.push(b[s]); s = s + 1; }
         result.push_str(location);
         return move result;
     }
     if (loc_len >= 1 && loc[0] == (u8)'/') {
-        i64 i = 7;
+        i64 i = scheme_len;
         while (i < base_len && b[i] != (u8)'/') { i = i + 1; }
-        result.push_str("http://");
-        i64 j = 7;
-        while (j < i) { result.push(b[j]); j = j + 1; }
+        i64 s = 0;
+        while (s < i) { result.push(b[s]); s = s + 1; }
         result.push_str(location);
         return move result;
     }
@@ -203,17 +217,18 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
     }
     HttpConnection connection;
     connection.stream = move stream;
+    connection.use_tls = false;
     connection.version = HttpVersion.Http11;
     return Result<HttpConnection, Error>.Ok(move connection);
 }
 
 /// Read one CRLF-terminated line into `line`, excluding the CRLF itself.
 /// Returns false on EOF, read error, or when the line exceeds `max_len`.
-bool http_read_line(TcpStream* stream, String* line, i64 max_len) {
+bool http_read_line(StreamIo* io, String* line, i64 max_len) {
     line.clear();
     u8 byte[1];
     while (true) {
-        Result<i64, Error> r = stream.read(&byte[0], 1);
+        Result<i64, Error> r = transport_read(io, &byte[0], 1);
         if (r.is_err() || r.value() == 0) { return false; }
         line.push(byte[0]);
         if (line.ends_with("\r\n")) {
@@ -310,7 +325,7 @@ impl HttpRequest {
         self.close = false;
     }
 
-    Result<i64, Error> write(HttpRequest* self, TcpStream* stream) {
+    Result<i64, Error> write(HttpRequest* self, StreamIo* io) {
         String head = String.new();
         head.push_str(self.method);
         head.push((u8)' ');
@@ -329,10 +344,10 @@ impl HttpRequest {
         if (self.close) { head.push_str("Connection: close\r\n"); }
         head.push_str((str)self.headers.data);
         head.push_str("\r\n");
-        Result<i64, Error> written = stream.write((u8*)head.data, head.len);
+        Result<i64, Error> written = transport_write(io, (u8*)head.data, head.len);
         if (written.is_err()) { return written; }
         if (self.body != (str)0 && strlen(self.body) > 0) {
-            return stream.write((u8*)self.body, strlen(self.body));
+            return transport_write(io, (u8*)self.body, strlen(self.body));
         }
         return Result<i64, Error>.Ok(written.value());
     }
@@ -360,11 +375,11 @@ impl HttpResponse {
         return move response;
     }
 
-    Result<i64, Error> read_head(HttpResponse* self, TcpStream* stream, i64 max_header) {
+    Result<i64, Error> read_head(HttpResponse* self, StreamIo* io, i64 max_header) {
         String raw = String.new();
         u8 byte[1];
         while (true) {
-            Result<i64, Error> r = stream.read(&byte[0], 1);
+            Result<i64, Error> r = transport_read(io, &byte[0], 1);
             if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
             if (r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
             raw.push(byte[0]);
@@ -423,14 +438,14 @@ impl HttpResponse {
         return Result<i64, Error>.Ok(0);
     }
 
-    Result<i64, Error> read_exact(HttpResponse* self, TcpStream* stream, i64 count, i64 max_body) {
+    Result<i64, Error> read_exact(HttpResponse* self, StreamIo* io, i64 count, i64 max_body) {
         if (count < 0 || count > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
         i64 done = 0;
         u8 buf[1024];
         while (done < count) {
             i64 want = count - done;
             if (want > 1024) { want = 1024; }
-            Result<i64, Error> r = stream.read(&buf[0], want);
+            Result<i64, Error> r = transport_read(io, &buf[0], want);
             if (r.is_err() || r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
             i64 i = 0;
             while (i < r.value()) { self.body.push(buf[i]); i = i + 1; }
@@ -439,12 +454,12 @@ impl HttpResponse {
         return Result<i64, Error>.Ok(done);
     }
 
-    Result<i64, Error> read_chunked(HttpResponse* self, TcpStream* stream, i64 max_body) {
+    Result<i64, Error> read_chunked(HttpResponse* self, StreamIo* io, i64 max_body) {
         i64 total = 0;
         String line = String.new();
         u8 byte[1];
         while (true) {
-            if (!http_read_line(stream, &line, HTTP_CHUNK_LINE_MAX)) {
+            if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
                 return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
             }
             i64 size = 0;
@@ -454,20 +469,20 @@ impl HttpResponse {
             if (size == 0) {
                 // Zero-size chunk: consume trailers until the blank line.
                 while (true) {
-                    if (!http_read_line(stream, &line, HTTP_CHUNK_LINE_MAX)) {
+                    if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
                         return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
                     }
                     if (line.len == 0) { return Result<i64, Error>.Ok(total); }
                 }
             }
             if (total + size > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
-            Result<i64, Error> got = self.read_exact(stream, size, max_body);
+            Result<i64, Error> got = self.read_exact(io, size, max_body);
             if (got.is_err()) { return got; }
-            Result<i64, Error> crlf = stream.read(&byte[0], 1);
+            Result<i64, Error> crlf = transport_read(io, &byte[0], 1);
             if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\r') {
                 return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
             }
-            crlf = stream.read(&byte[0], 1);
+            crlf = transport_read(io, &byte[0], 1);
             if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\n') {
                 return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
             }
@@ -477,16 +492,16 @@ impl HttpResponse {
         return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
     }
 
-    Result<i64, Error> read_body(HttpResponse* self, TcpStream* stream, bool head, i64 max_body) {
+    Result<i64, Error> read_body(HttpResponse* self, StreamIo* io, bool head, i64 max_body) {
         if (http_status_has_no_body(self.status, head)) { return Result<i64, Error>.Ok(0); }
-        if (self.chunked) { return self.read_chunked(stream, max_body); }
-        if (self.content_length >= 0) { return self.read_exact(stream, self.content_length, max_body); }
+        if (self.chunked) { return self.read_chunked(io, max_body); }
+        if (self.content_length >= 0) { return self.read_exact(io, self.content_length, max_body); }
         // No framing headers: the body is close-delimited, read until EOF.
         self.close_delimited = true;
         u8 buf[1024];
         i64 total = 0;
         while (true) {
-            Result<i64, Error> r = stream.read(&buf[0], 1024);
+            Result<i64, Error> r = transport_read(io, &buf[0], 1024);
             if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
             if (r.value() == 0) { return Result<i64, Error>.Ok(total); }
             if (total + r.value() > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
@@ -578,17 +593,17 @@ impl HttpResponse {
         return String.new();
     }
 
-    Result<i64, Error> read(HttpResponse* self, TcpStream* stream, bool head, i64 max_header, i64 max_body) {
-        Result<i64, Error> h = self.read_head(stream, max_header);
+    Result<i64, Error> read(HttpResponse* self, StreamIo* io, bool head, i64 max_header, i64 max_body) {
+        Result<i64, Error> h = self.read_head(io, max_header);
         if (h.is_err()) { return h; }
         // Skip interim 1xx responses (100 Continue, 102, 103) until the final
         // response; 101 Switching Protocols is final.
         while (http_status_is_informational(self.status)
             && self.status != (i32)HttpStatus.SwitchingProtocols) {
-            h = self.read_head(stream, max_header);
+            h = self.read_head(io, max_header);
             if (h.is_err()) { return h; }
         }
-        return self.read_body(stream, head, max_body);
+        return self.read_body(io, head, max_body);
     }
 }
 
@@ -610,6 +625,8 @@ impl HttpClient {
         client.max_redirects = HTTP_DEFAULT_MAX_REDIRECTS;
         client.use_jar = false;
         client.jar = CookieJar.new();
+        client.tls_verify = true;
+        client.tls_ca_file = String.new();
         return move client;
     }
 
@@ -631,11 +648,25 @@ impl HttpClient {
         self.use_jar = true;
     }
 
+    /// Disable peer certificate verification for https connections (Go's
+    /// tls.Config.InsecureSkipVerify).
+    void set_insecure_skip_verify(&mut HttpClient self) {
+        self.tls_verify = false;
+    }
+
+    /// Verify https peers against the CA bundle at `path` instead of the
+    /// system trust store (Go's tls.Config.RootCAs).
+    void set_ca_file(&mut HttpClient self, str path) {
+        self.tls_ca_file.drop();
+        self.tls_ca_file = String.from_str(path);
+    }
+
     Result<HttpConnection, Error> connect(HttpClient* self, SocketAddr* addr, HttpVersion version) {
         TcpStream stream = TcpStream.connect(addr);
         if (stream.invalid()) { return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed")); }
         HttpConnection connection;
         connection.stream = move stream;
+        connection.use_tls = false;
         connection.version = version;
         return Result<HttpConnection, Error>.Ok(move connection);
     }
@@ -653,7 +684,16 @@ impl HttpClient {
         Result<HttpConnection, Error> opened = http_open(host, parsed.port);
         if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
-        HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, (str)&parsed.host[0]);
+        if (parsed.https) {
+            Error err;
+            bool ok = transport_tls_handshake(&conn.tls_state[0], conn.stream.sock.fd, host,
+                self.tls_verify, (str)self.tls_ca_file.data, &mut err);
+            if (!ok) {
+                return Result<HttpResponse, Error>.Err(move err);
+            }
+            conn.use_tls = true;
+        }
+        HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
         if (headers != (str)0) { req.headers.push_str(headers); }
         if (body != (str)0) { req.set_body(body); }
         return conn.send(&req, self.max_header_bytes, self.max_body_bytes);
@@ -688,7 +728,7 @@ impl HttpClient {
                 HttpUrl parsed;
                 if (http_parse_url(url, &parsed)) {
                     str host = (str)&parsed.host[0];
-                    String cookie_block = self.jar.cookies_for(host, parsed.path);
+                    String cookie_block = self.jar.cookies_for(host, parsed.path, parsed.https);
                     if (cookie_block.len > 0) {
                         if (headers != (str)0) { hop_headers.push_str(headers); }
                         hop_headers.push_str("Cookie: ");
@@ -830,21 +870,26 @@ impl HttpClient {
 impl Drop<HttpClient> for HttpClient {
     void drop(HttpClient* self) {
         self.jar.drop();
+        self.tls_ca_file.drop();
     }
 }
 
 impl HttpConnection {
     Result<HttpResponse, Error> send(HttpConnection* self, HttpRequest* request, i64 max_header, i64 max_body) {
-        Result<i64, Error> written = request.write(&mut self.stream);
+        StreamIo io;
+        if (self.use_tls) { io = transport_tls_io(&self.tls_state[0]); }
+        else { io = transport_tcp_io(&self.stream); }
+        Result<i64, Error> written = request.write(&io);
         if (written.is_err()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
         HttpResponse response = HttpResponse.empty();
-        Result<i64, Error> read = response.read(&mut self.stream, request.method == "HEAD", max_header, max_body);
+        Result<i64, Error> read = response.read(&io, request.method == "HEAD", max_header, max_body);
         if (read.is_err()) { return Result<HttpResponse, Error>.Err(read.get_error()); }
-        if (request.close || response.close_delimited) { self.stream.close(); }
+        if (request.close || response.close_delimited) { self.close(); }
         return Result<HttpResponse, Error>.Ok(move response);
     }
 
     void close(HttpConnection* self) {
+        if (self.use_tls) { transport_tls_close(&self.tls_state[0]); }
         self.stream.close();
     }
 }

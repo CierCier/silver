@@ -1,0 +1,97 @@
+// tests/tls_test.ag — HTTPS client over the OpenSSL transport.
+//
+// Connects to the node HTTPS server (tests/tls_server.js, run by the harness
+// on 127.0.0.1:18443) which serves the committed self-signed certificate.
+// The client verifies it against tests/certs/ca.pem — Go's default behavior
+// with a custom RootCAs pool. OpenSSL only runs on the main thread (raw-clone
+// threads share the parent's TLS area and must not call OpenSSL; the server
+// side of TlsStream is for main-thread or pthread-based servers).
+// Requires OpenSSL 3 shared libraries and node to build and run; the harness
+// skips this test when they are absent.
+
+import std.net.cookie;
+import std.net.http;
+import std.net.tls;
+import std.string;
+import std.test;
+
+const str TLS_BASE = "https://127.0.0.1:18443";
+
+i32 main() {
+    tls_init();
+
+    // --- HTTPS with CA verification (Go's default behavior) ---
+    test_start("https verified");
+    {
+        HttpClient client = HttpClient.new();
+        client.set_ca_file("tests/certs/ca.pem");
+        Result<HttpResponse, Error> r =
+            client.get("https://127.0.0.1:18443/secure");
+        assert_true(!r.failed(), "https request");
+        if (!r.failed()) {
+            HttpResponse response = r.unwrap();
+            assert_eq_i64(response.status, 200, "https status");
+            assert_true(response.body.equals("hello"), "https body");
+        }
+    }
+
+    // --- Verification failure against the system trust store ---
+    test_start("https verification failure");
+    {
+        HttpClient client = HttpClient.new(); // verify on, system store
+        Result<HttpResponse, Error> r =
+            client.get("https://127.0.0.1:18443/secure");
+        assert_true(r.failed(), "self-signed cert rejected");
+        if (r.failed()) {
+            Error e = r.get_error();
+            assert_eq_i64(e.code, TLS_ERR, "TLS error code");
+        }
+    }
+
+    // --- InsecureSkipVerify (Go's InsecureSkipVerify) ---
+    test_start("https insecure skip verify");
+    {
+        HttpClient client = HttpClient.new();
+        client.set_insecure_skip_verify();
+        Result<HttpResponse, Error> r =
+            client.get("https://127.0.0.1:18443/secure");
+        assert_true(!r.failed(), "insecure https request");
+    }
+
+    // --- HTTPS redirect followed over a new TLS connection ---
+    test_start("https redirect");
+    {
+        HttpClient client = HttpClient.new();
+        client.set_ca_file("tests/certs/ca.pem");
+        Result<HttpResponse, Error> r =
+            client.get("https://127.0.0.1:18443/redirect");
+        assert_true(!r.failed(), "https redirect request");
+        if (!r.failed()) {
+            HttpResponse response = r.unwrap();
+            assert_eq_i64(response.status, 200, "redirect followed");
+            assert_true(response.body.equals("hello"), "redirect body");
+        }
+    }
+
+    // --- Secure cookie sent over https (Go's secureMatch) ---
+    test_start("secure cookie over https");
+    {
+        HttpClient client = HttpClient.new();
+        client.set_ca_file("tests/certs/ca.pem");
+        CookieJar jar = CookieJar.new();
+        client.set_jar(move jar);
+        Result<HttpResponse, Error> r1 =
+            client.get("https://127.0.0.1:18443/cookie");
+        assert_true(!r1.failed(), "set-cookie request");
+        Result<HttpResponse, Error> r2 =
+            client.get("https://127.0.0.1:18443/cookie-check");
+        assert_true(!r2.failed(), "cookie request");
+        if (!r2.failed()) {
+            HttpResponse response = r2.unwrap();
+            assert_true(response.body.equals("sec=1"),
+                "secure cookie sent over https (server echoed it)");
+        }
+    }
+
+    return done();
+}

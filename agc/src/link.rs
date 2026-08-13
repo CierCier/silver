@@ -205,9 +205,11 @@ pub(crate) fn link_exe_with_ld_lld(
     // by default, so the linker adds PT_INTERP and DT_NEEDED entries when
     // external shared libraries (e.g. raylib) are linked. `--static` restores
     // the fully static executable.
+    let mut search_dirs = cc_library_dirs();
+    search_dirs.extend(plan.lib_dirs.iter().cloned());
     if plan.static_link {
         link.arg("-static");
-    } else if link_has_shared_libraries(native_libs, &cc_library_dirs(), dependency_paths) {
+    } else if link_has_shared_libraries(native_libs, &search_dirs, dependency_paths) {
         link.arg("--dynamic-linker").arg(&*DYNAMIC_LINKER);
     }
 
@@ -230,6 +232,7 @@ pub(crate) fn link_exe_with_ld_lld(
     }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
+        link.arg("-rpath").arg(dir);
     }
     for dir in dependency_library_dirs(dependency_paths) {
         link.arg("-L").arg(&dir);
@@ -270,6 +273,8 @@ pub(crate) fn link_exe_with_cc(
     }
     // Silver never links libc: no CRT startup, no libc/libgcc.
     link.arg("-nostdlib");
+    let mut search_dirs = cc_library_dirs();
+    search_dirs.extend(plan.lib_dirs.iter().cloned());
     if plan.static_link {
         link.arg("-static");
     } else {
@@ -277,9 +282,13 @@ pub(crate) fn link_exe_with_cc(
         // ld resolve them at runtime instead of demanding them at link time
         // (the `-nostdlib` above leaves them out of the link).
         link.arg("-Wl,--allow-shlib-undefined");
+        if link_has_shared_libraries(native_libs, &search_dirs, dependency_paths) {
+            link.arg(format!("-Wl,-dynamic-linker,{}", *DYNAMIC_LINKER));
+        }
     }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
+        link.arg(format!("-Wl,-rpath,{}", dir.display()));
     }
     for dir in dependency_library_dirs(dependency_paths) {
         link.arg("-L").arg(&dir);

@@ -1,0 +1,332 @@
+// std/net/tls.ag — TLS transport over the OpenSSL C ABI.
+//
+// Importing this module links libssl and libcrypto (dynamically by default);
+// executables that import it need the OpenSSL 3 shared libraries at load
+// time. The pure-Silver runtime is untouched — Silver code only calls the
+// ssl_-prefixed bindings below, and only programs that import this module
+// get the dependency (pass -L <openssl lib dir> to the compiler; the driver
+// emits an rpath for it).
+//
+// HTTPS in std.net.http is opt-in: call tls_init() once before making https
+// requests. It registers this module's transport with the HTTP client, which
+// otherwise stays OpenSSL-free (like vendor.libc, importing this module is
+// the explicit opt-in).
+//
+// TlsStream mirrors TcpStream's read/write Result interface so the HTTP
+// transport layer (std/net/http.ag) can treat plain and encrypted
+// connections uniformly. The TLS layer never owns the socket fd: callers
+// keep the TcpStream that provided it and close it themselves.
+//
+// Verification is on by default with the system trust store (Go parity);
+// connect() also does SNI and hostname verification, and advertises
+// http/1.1 over ALPN (the negotiated protocol is exposed for the future
+// HTTP/2 work).
+
+import std.error;
+import std.mem.memory;
+import std.net.transport;
+import std.sys.result;
+
+#[link(ssl)]
+#[link(crypto)]
+
+extern "C" {
+    #[link_name("TLS_client_method")]
+    i64 ssl_tls_client_method();
+    #[link_name("TLS_server_method")]
+    i64 ssl_tls_server_method();
+    #[link_name("SSL_CTX_new")]
+    i64 ssl_ctx_new(i64 method);
+    #[link_name("SSL_CTX_free")]
+    void ssl_ctx_free(i64 ctx);
+    #[link_name("SSL_new")]
+    i64 ssl_new(i64 ctx);
+    #[link_name("SSL_free")]
+    void ssl_free(i64 ssl);
+    #[link_name("SSL_set_fd")]
+    i32 ssl_set_fd(i64 ssl, i32 fd);
+    #[link_name("SSL_connect")]
+    i32 ssl_connect(i64 ssl);
+    #[link_name("SSL_accept")]
+    i32 ssl_accept(i64 ssl);
+    #[link_name("SSL_read")]
+    i32 ssl_read(i64 ssl, void* buf, i32 len);
+    #[link_name("SSL_write")]
+    i32 ssl_write(i64 ssl, void* buf, i32 len);
+    #[link_name("SSL_get_error")]
+    i32 ssl_get_error(i64 ssl, i32 ret);
+    #[link_name("SSL_shutdown")]
+    i32 ssl_shutdown(i64 ssl);
+    #[link_name("SSL_get_version")]
+    i64 ssl_get_version(i64 ssl);
+    #[link_name("SSL_set1_host")]
+    i32 ssl_set1_host(i64 ssl, str host);
+    #[link_name("SSL_ctrl")]
+    i64 ssl_ctrl(i64 ssl, i32 cmd, i64 larg, void* parg);
+    #[link_name("SSL_CTX_set_verify")]
+    void ssl_ctx_set_verify(i64 ctx, i32 mode, void* callback);
+    #[link_name("SSL_CTX_set_default_verify_paths")]
+    i32 ssl_ctx_set_default_verify_paths(i64 ctx);
+    #[link_name("SSL_CTX_load_verify_locations")]
+    i32 ssl_ctx_load_verify_locations(i64 ctx, str ca_file, str ca_path);
+    #[link_name("SSL_CTX_ctrl")]
+    i64 ssl_ctx_ctrl(i64 ctx, i32 cmd, i64 larg, void* parg);
+    #[link_name("SSL_use_certificate_file")]
+    i32 ssl_use_certificate_file(i64 ssl, str file, i32 filetype);
+    #[link_name("SSL_use_PrivateKey_file")]
+    i32 ssl_use_private_key_file(i64 ssl, str file, i32 filetype);
+    #[link_name("SSL_set_alpn_protos")]
+    i32 ssl_set_alpn_protos(i64 ssl, u8* protos, u32 len);
+    #[link_name("SSL_get0_alpn_selected")]
+    void ssl_get0_alpn_selected(i64 ssl, void* out, void* out_len);
+    #[link_name("OpenSSL_version")]
+    i64 ssl_version(i32 which);
+}
+
+const i64 TLS_ERR = -7;
+
+const i32 SSL_VERIFY_PEER = 1;
+const i32 SSL_FILETYPE_PEM = 1;
+const i32 TLS1_2_VERSION = 0x0303;
+// SSL_ctrl command for SNI (SSL_set_tlsext_host_name is a macro over it).
+const i32 SSL_CTRL_SET_TLSEXT_HOSTNAME = 55;
+const i32 SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
+const i64 TLSEXT_NAMETYPE_HOST_NAME = 0;
+
+const i32 SSL_ERROR_ZERO_RETURN = 6;
+const i32 SSL_ERROR_SYSCALL = 5;
+
+/// OpenSSL handle + configuration. The socket fd stays owned by the caller's
+/// TcpStream; close() only tears down the TLS session.
+struct TlsStream {
+    i64 ssl;
+    i64 ctx;
+    bool shared_ctx; // ctx is a cached shared one; do not free on close
+    bool active;
+}
+
+// Cached default client context (verify on, system trust store) and the
+// server context (certificate loaded once).
+i64 g_client_ctx = 0;
+i64 g_server_ctx = 0;
+
+/// Build a client context with the given verification policy. The default
+/// config (verify on, no CA file) is cached and shared; custom configs get
+/// a fresh context owned by the TlsStream.
+i64 ssl_make_client_ctx(bool verify, str ca_file) {
+    i64 ctx = ssl_ctx_new(ssl_tls_client_method());
+    if (ctx == 0) { return 0; }
+    ssl_ctx_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, (i64)TLS1_2_VERSION, (void*)0);
+    if (verify) {
+        ssl_ctx_set_verify(ctx, SSL_VERIFY_PEER, (void*)0);
+        if (ca_file != (str)0 && strlen(ca_file) > 0) {
+            ssl_ctx_load_verify_locations(ctx, ca_file, (str)0);
+        } else {
+            ssl_ctx_set_default_verify_paths(ctx);
+        }
+    }
+    return ctx;
+}
+
+i64 ssl_client_ctx(bool verify, str ca_file) {
+    if (verify && (ca_file == (str)0 || strlen(ca_file) == 0)) {
+        if (g_client_ctx == 0) {
+            g_client_ctx = ssl_make_client_ctx(true, (str)0);
+        }
+        return g_client_ctx;
+    }
+    return ssl_make_client_ctx(verify, ca_file);
+}
+
+i64 ssl_make_server_ctx(str cert_file, str key_file) {
+    i64 ctx = ssl_ctx_new(ssl_tls_server_method());
+    if (ctx == 0) { return 0; }
+    ssl_ctx_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, (i64)TLS1_2_VERSION, (void*)0);
+    // The server context needs an SSL to load the certificate into.
+    i64 ssl = ssl_new(ctx);
+    if (ssl == 0) { ssl_ctx_free(ctx); return 0; }
+    if (ssl_use_certificate_file(ssl, cert_file, SSL_FILETYPE_PEM) != 1
+        || ssl_use_private_key_file(ssl, key_file, SSL_FILETYPE_PEM) != 1) {
+        ssl_free(ssl);
+        ssl_ctx_free(ctx);
+        return 0;
+    }
+    ssl_free(ssl);
+    return ctx;
+}
+
+i64 ssl_server_ctx(str cert_file, str key_file) {
+    if (g_server_ctx == 0) {
+        g_server_ctx = ssl_make_server_ctx(cert_file, key_file);
+    }
+    return g_server_ctx;
+}
+
+impl TlsStream {
+    TlsStream closed() {
+        TlsStream tls;
+        tls.ssl = 0;
+        tls.ctx = 0;
+        tls.shared_ctx = false;
+        tls.active = false;
+        return tls;
+    }
+
+    bool invalid(TlsStream* self) { return self.ssl == 0; }
+
+    /// Client handshake on a connected fd. `host` is used for SNI and, when
+    /// verification is on, hostname checking. On failure `err` is filled and
+    /// the stream stays inactive.
+    bool connect(TlsStream* self, i32 fd, str host, bool verify, str ca_file, Error* err) {
+        bool default_config = verify && (ca_file == (str)0 || strlen(ca_file) == 0);
+        i64 ctx = ssl_client_ctx(verify, ca_file);
+        if (ctx == 0) {
+            *err = Error.new(TLS_ERR, "TLS context creation failed");
+            return false;
+        }
+        i64 ssl = ssl_new(ctx);
+        if (ssl == 0) {
+            *err = Error.new(TLS_ERR, "TLS session creation failed");
+            return false;
+        }
+        if (ssl_set_fd(ssl, fd) != 1) {
+            ssl_free(ssl);
+            *err = Error.new(TLS_ERR, "TLS socket setup failed");
+            return false;
+        }
+        ssl_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_HOST_NAME, (void*)host);
+        if (verify) { ssl_set1_host(ssl, host); }
+        u8 alpn[9];
+        alpn[0] = (u8)8;
+        alpn[1] = (u8)'h'; alpn[2] = (u8)'t'; alpn[3] = (u8)'t'; alpn[4] = (u8)'p';
+        alpn[5] = (u8)'/'; alpn[6] = (u8)'1'; alpn[7] = (u8)'.'; alpn[8] = (u8)'1';
+        ssl_set_alpn_protos(ssl, &alpn[0], 9);
+        if (ssl_connect(ssl) != 1) {
+            ssl_free(ssl);
+            if (!default_config) { ssl_ctx_free(ctx); }
+            *err = Error.new(TLS_ERR, "TLS handshake failed");
+            return false;
+        }
+        self.ssl = ssl;
+        self.ctx = ctx;
+        self.shared_ctx = default_config;
+        self.active = true;
+        return true;
+    }
+
+    /// Server handshake (used by local TLS test servers): loads the PEM
+    /// certificate/key bundle and accepts a client connection.
+    bool accept(TlsStream* self, i32 fd, str cert_file, str key_file, Error* err) {
+        i64 ctx = ssl_server_ctx(cert_file, key_file);
+        if (ctx == 0) {
+            *err = Error.new(TLS_ERR, "TLS server context failed");
+            return false;
+        }
+        i64 ssl = ssl_new(ctx);
+        if (ssl == 0) {
+            *err = Error.new(TLS_ERR, "TLS session creation failed");
+            return false;
+        }
+        if (ssl_set_fd(ssl, fd) != 1) {
+            ssl_free(ssl);
+            *err = Error.new(TLS_ERR, "TLS socket setup failed");
+            return false;
+        }
+        if (ssl_accept(ssl) != 1) {
+            ssl_free(ssl);
+            *err = Error.new(TLS_ERR, "TLS handshake failed");
+            return false;
+        }
+        self.ssl = ssl;
+        self.ctx = ctx;
+        self.shared_ctx = true;
+        self.active = true;
+        return true;
+    }
+
+    Result<i64, Error> read(TlsStream* self, u8* buf, i64 len) {
+        if (!self.active || self.ssl == 0) {
+            return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
+        }
+        i32 r = ssl_read(self.ssl, (void*)buf, (i32)len);
+        if (r > 0) { return Result<i64, Error>.Ok((i64)r); }
+        if (r == 0) { return Result<i64, Error>.Ok(0); }
+        i32 e = ssl_get_error(self.ssl, r);
+        if (e == SSL_ERROR_ZERO_RETURN) { return Result<i64, Error>.Ok(0); }
+        if (e == SSL_ERROR_SYSCALL) { return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS I/O error")); }
+        return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS read error"));
+    }
+
+    Result<i64, Error> write(TlsStream* self, u8* buf, i64 len) {
+        if (!self.active || self.ssl == 0) {
+            return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
+        }
+        i64 done = 0;
+        while (done < len) {
+            i32 r = ssl_write(self.ssl, (void*)((i64)buf + done), (i32)(len - done));
+            if (r <= 0) {
+                if (done > 0) { return Result<i64, Error>.Ok(done); }
+                return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS write error"));
+            }
+            done = done + (i64)r;
+        }
+        return Result<i64, Error>.Ok(done);
+    }
+
+    /// Negotiated protocol version ("TLSv1.3", "TLSv1.2", ...) or "unknown".
+    str version(TlsStream* self) {
+        if (!self.active || self.ssl == 0) { return "unknown"; }
+        return (str)ssl_get_version(self.ssl);
+    }
+
+    /// Tear down the TLS session; the socket fd is owned by the caller.
+    void close(TlsStream* self) {
+        if (self.ssl != 0) {
+            ssl_shutdown(self.ssl);
+            ssl_free(self.ssl);
+            self.ssl = 0;
+        }
+        if (self.ctx != 0 && !self.shared_ctx) {
+            ssl_ctx_free(self.ctx);
+            self.ctx = 0;
+        }
+        self.active = false;
+    }
+}
+
+impl Drop<TlsStream> for TlsStream {
+    void drop(TlsStream* self) {
+        self.close();
+    }
+}
+
+// --- HTTP transport registration ------------------------------------------
+// tls_init() registers the TlsStream transport with std.net.http (see
+// std/net/transport.ag). The per-connection state blob is a TlsStream.
+
+bool tls_provider_handshake(void* state, i32 fd, str host, bool verify, str ca_file, Error* err) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.connect(fd, host, verify, ca_file, err);
+}
+
+Result<i64, Error> tls_provider_read(void* state, u8* buf, i64 len) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.read(buf, len);
+}
+
+Result<i64, Error> tls_provider_write(void* state, u8* buf, i64 len) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.write(buf, len);
+}
+
+void tls_provider_close(void* state) {
+    TlsStream* tls = (TlsStream*)state;
+    tls.close();
+}
+
+/// Enable https in std.net.http: registers this module's TLS transport.
+/// Call once before making https requests.
+void tls_init() {
+    tls_provider_register(tls_provider_handshake, tls_provider_read,
+        tls_provider_write, tls_provider_close);
+}

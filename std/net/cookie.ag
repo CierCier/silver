@@ -621,9 +621,10 @@ impl CookieJar {
 
     /// Go's Jar.Cookies for one URL, serialized as the Cookie header value
     /// ("a=1; b=2"), longest path first, oldest first on ties. Secure
-    /// cookies are sent only to https origins and localhost (browsers treat
-    /// localhost as secure regardless of scheme); the client speaks http.
-    String cookies_for(CookieJar* self, str host, str path) {
+    /// cookies are sent only on https connections and to localhost origins
+    /// (browsers treat localhost as secure regardless of scheme — Go's
+    /// secureMatch).
+    String cookies_for(CookieJar* self, str host, str path, bool secure) {
         i64 now = http_unix_now();
         bool localhost = http_is_localhost(host);
         Vec<i64> idx = Vec<i64>.new();
@@ -633,7 +634,7 @@ impl CookieJar {
             if (http_domain_match(host, (str)c.domain.data)
                 && http_path_match(path, (str)c.path.data)
                 && !c.is_expired(now)
-                && (!c.secure || localhost)) {
+                && (!c.secure || secure || localhost)) {
                 idx.push(i);
             }
             i = i + 1;

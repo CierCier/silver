@@ -46,6 +46,7 @@ test_specific_flags() {
         channel_test) echo "--static-runtime" ;;
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
+        tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
         *) echo "" ;;
     esac
 }
@@ -203,6 +204,39 @@ fi
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# tls_test links and loads the OpenSSL shared libraries and needs node to
+# serve HTTPS. Skip it (and its server) when either is unavailable.
+SILVER_OPENSSL_LIB=""
+if command -v openssl >/dev/null 2>&1; then
+    # NixOS: the openssl package dir's lib (the -bin wrapper has no lib).
+    for d in /nix/store/*openssl-*/lib; do
+        if [ -f "$d/libssl.so" ] || [ -f "$d/libssl.so.3" ]; then
+            SILVER_OPENSSL_LIB="$d"
+            break
+        fi
+    done
+    if [ -z "$SILVER_OPENSSL_LIB" ] && ldconfig -p 2>/dev/null | grep -q 'libssl\.so'; then
+        SILVER_OPENSSL_LIB="$(ldconfig -p | awk '/libssl\.so/{print $NF; exit}' | xargs dirname)"
+    fi
+fi
+if [ -z "$SILVER_OPENSSL_LIB" ] || ! command -v node >/dev/null 2>&1; then
+    SKIP_TESTS="$SKIP_TESTS
+tls_test"
+fi
+
+# Start the node HTTPS server once, before the loop, if tls_test will run.
+TLS_NODE_PID=""
+if ! is_skipped tls_test; then
+    (cd "$ROOT" && exec node tests/tls_server.js >"$WORKDIR/tls_node.log" 2>&1) &
+    TLS_NODE_PID=$!
+    for _ in $(seq 1 50); do
+        if grep -q TLS_NODE_READY "$WORKDIR/tls_node.log" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
 passed=0
 failed=0
 skipped=0
@@ -273,6 +307,10 @@ test_stdin() {
     # ------- Run step -------
     run_dir="$WORKDIR/$name.rundir"
     mkdir -p "$run_dir"
+    # tls_test reads the committed certs via relative paths.
+    if [ "$name" = "tls_test" ]; then
+        run_dir="$ROOT"
+    fi
     run_real_ms=0; run_cpu_pct=0; run_mem_kb=0
     if test_stdin "$name" > /dev/null 2>&1; then
         (cd "$run_dir" && run_timed run "$run_log" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name"))
@@ -341,6 +379,11 @@ test_stdin() {
     fi
     test_count=$(( test_count + 1 ))
 done
+
+if [ -n "$TLS_NODE_PID" ]; then
+    kill "$TLS_NODE_PID" 2>/dev/null
+    wait "$TLS_NODE_PID" 2>/dev/null
+fi
 
 # ---- Summary ----
 echo
