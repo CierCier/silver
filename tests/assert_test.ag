@@ -1,0 +1,29 @@
+// tests/assert_test.ag — @assert macro.
+//
+// @assert(cond) / @assert(cond, "message") expand in the cfg fold to
+// `if (@cfg(debug)) { if (!(cond)) { __silver_assert_failed(file, line, msg); } }`.
+// The harness compiles at debug, so the checks are live here; release (-O2)
+// builds prune them entirely (verified in the emitted IR).
+
+import std.io;
+import std.sys.entry;
+import std.test;
+
+i32 main() {
+    test_start("assert macro");
+    @assert(1 + 1 == 2);
+    @assert(true, "constant-true assert folds away even in debug");
+    i64 x = 7;
+    @assert(x > 0, "x must be positive");
+    @assert(x < 10);
+    // assert inside a branch with a runtime condition
+    bool flag = true;
+    if (flag) {
+        @assert(x != 0, "nonzero in branch");
+    }
+    // release-mode behavior is verified by IR inspection; here we just make
+    // sure passing asserts are free.
+    assert_eq_i64(7, x, "asserts do not disturb the computation");
+
+    return done();
+}

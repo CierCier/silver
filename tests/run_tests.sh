@@ -56,6 +56,8 @@ expected_exit() {
         # main returns a + b + c + d = 1 + 2 + 3 + 1 = 7; the harness
         # treats the exit status as the expected code.
         static_volatile_test) echo 7 ;;
+        # A failing @assert prints its message to stderr and aborts (128+6).
+        assert_fail_test) echo 134 ;;
         *) echo 0 ;;
     esac
 }

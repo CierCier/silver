@@ -95,9 +95,16 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
                 && let Some(folded) = eval_cfg_call(cfg, args, expression.span)
             {
                 *expression = folded;
+            } else if name.name == "assert"
+                && let Some(expanded) = expand_assert(args, expression.span)
+            {
+                // Rewrite the expansion so its own @cfg(debug) folds and the
+                // branch prunes: debug builds keep the check, release builds
+                // compile it away entirely.
+                *expression = expanded;
+                rewrite_expression(expression, cfg);
             }
         }
-        ast::ExpressionKind::Unary { operand, .. } => rewrite_expression(operand, cfg),
         ast::ExpressionKind::Binary {
             left,
             right,
@@ -292,6 +299,108 @@ fn lit_bool(value: bool, span: Span) -> ast::Expression {
         kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Bool(value))),
         span,
     }
+}
+
+/// Expand `@assert(cond)` / `@assert(cond, "message")` into
+/// `if (@cfg(debug)) { if (!(cond)) { __silver_assert_failed(file, line, msg); } }`.
+/// The cfg fold then keeps the check in debug builds and prunes it in
+/// release builds (the report call is never referenced there). Returns None
+/// for malformed calls, which then fail in typeck as an unknown macro.
+fn expand_assert(args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> {
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let ast::MacroArg::Expression(cond) = &args[0] else {
+        return None;
+    };
+    let message = match args.get(1) {
+        None => "assertion failed".to_string(),
+        Some(ast::MacroArg::Expression(expr)) => {
+            let ast::ExpressionKind::Literal(ast::Literal::String(s)) = &*expr.kind else {
+                return None;
+            };
+            s.clone()
+        }
+        Some(_) => return None,
+    };
+    let file = crate::lexer::source_file(span.file)
+        .map(|f| f.path)
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let line = span.start_line as i128;
+
+    let report_call = ast::Expression {
+        kind: Box::new(ast::ExpressionKind::Call {
+            function: Box::new(ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                    name: "__silver_assert_failed".to_string(),
+                    span,
+                })),
+                span,
+            }),
+            arguments: vec![
+                ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(file))),
+                    span,
+                },
+                ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(line))),
+                    span,
+                },
+                ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(message))),
+                    span,
+                },
+            ],
+        }),
+        span,
+    };
+    let inner_if = ast::Expression {
+        kind: Box::new(ast::ExpressionKind::If {
+            condition: Box::new(ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Unary {
+                    operator: ast::UnaryOperator::Not,
+                    operand: Box::new((*cond).clone()),
+                }),
+                span,
+            }),
+            then_branch: ast::Block {
+                statements: vec![ast::Statement {
+                    kind: ast::StatementKind::Expression(report_call),
+                    span,
+                }],
+                span,
+            },
+            else_branch: None,
+        }),
+        span,
+    };
+    let debug_cond = ast::Expression {
+        kind: Box::new(ast::ExpressionKind::MacroCall {
+            name: ast::Identifier {
+                name: "cfg".to_string(),
+                span,
+            },
+            args: vec![ast::MacroArg::Identifier(ast::Identifier {
+                name: "debug".to_string(),
+                span,
+            })],
+        }),
+        span,
+    };
+    Some(ast::Expression {
+        kind: Box::new(ast::ExpressionKind::If {
+            condition: Box::new(debug_cond),
+            then_branch: ast::Block {
+                statements: vec![ast::Statement {
+                    kind: ast::StatementKind::Expression(inner_if),
+                    span,
+                }],
+                span,
+            },
+            else_branch: None,
+        }),
+        span,
+    })
 }
 
 fn eval_cfg_call(cfg: &CfgSet, args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> {
@@ -557,6 +666,51 @@ mod tests {
             }
         }
         false
+    }
+
+    #[test]
+    fn expands_assert_to_debug_guarded_check() {
+        let mut program = parse("i32 main() { @assert(x == 1, \"msg\"); return 0; }");
+        let cfg = CfgSet::default(); // debug derived
+        run_hook(&mut program, &cfg);
+        // The outer if folds true (debug) -> collapses to the inner check.
+        let body = match &program.items[0].kind {
+            ast::ItemKind::Function(f) => &f.body,
+            _ => panic!("expected function"),
+        };
+        let stmt = &body.statements[0];
+        let cond = match &stmt.kind {
+            ast::StatementKind::Expression(expr) => match &*expr.kind {
+                ast::ExpressionKind::If { condition, .. } => condition,
+                _ => panic!("expected if"),
+            },
+            _ => panic!("expected expression statement"),
+        };
+        // Inner condition: !(x == 1)
+        match &*cond.kind {
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Not,
+                ..
+            } => {}
+            _ => panic!("expected negated condition"),
+        }
+    }
+
+    #[test]
+    fn prunes_assert_in_release() {
+        let mut program = parse("i32 main() { @assert(x == 1); return 0; }");
+        let cfg = CfgSet::parse(&["release".to_string()]);
+        run_hook(&mut program, &cfg);
+        // The whole assert becomes an empty block: no report call remains.
+        let body = match &program.items[0].kind {
+            ast::ItemKind::Function(f) => &f.body,
+            _ => panic!("expected function"),
+        };
+        let source = format!("{:?}", body);
+        assert!(
+            !source.contains("__silver_assert_failed"),
+            "release build must not reference the report function"
+        );
     }
 
     #[test]

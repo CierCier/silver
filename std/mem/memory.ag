@@ -369,9 +369,43 @@ i64 strlen(const char* s) {
 // Sends SIGABRT to self, then exits with 128+6.
 // ---------------------------------------------------------------------------
 
+import std.sys.raw.fs;
 import std.sys.raw.process;
 
 void abort() {
     sys_kill(sys_getpid(), 6);  // SIGABRT
     sys_exit_group(134);        // 128 + SIGABRT
+}
+
+/// Called by the compiler's `@assert` expansion when a debug check fails.
+/// Writes `assertion failed at <file>:<line>: <msg>\n` to stderr via raw
+/// write(2) (no stdio dependency), then aborts. In release builds the
+/// expansion is pruned before codegen, so this is never referenced.
+void __silver_assert_failed(str file, i64 line, str msg) {
+    u8 buf[512];
+    i64 n = 0;
+    u8* prefix = (u8*)"assertion failed at ";
+    i64 i = 0;
+    while (prefix[i] != (u8)0 && n < 480) { buf[n] = prefix[i]; n = n + 1; i = i + 1; }
+    if (file != (str)0) {
+        u8* f = (u8*)file;
+        i = 0;
+        while (f[i] != (u8)0 && n < 480) { buf[n] = f[i]; n = n + 1; i = i + 1; }
+    }
+    if (n < 480) { buf[n] = (u8)':'; n = n + 1; }
+    i64 ln = line;
+    u8 digits[20];
+    i64 nd = 0;
+    if (ln == 0) { digits[0] = (u8)'0'; nd = 1; }
+    while (ln > 0 && nd < 19) { digits[nd] = (u8)((u8)'0' + (u8)(ln % 10)); nd = nd + 1; ln = ln / 10; }
+    while (nd > 0 && n < 480) { nd = nd - 1; buf[n] = digits[nd]; n = n + 1; }
+    if (n + 1 < 480) { buf[n] = (u8)':'; buf[n + 1] = (u8)' '; n = n + 2; }
+    if (msg != (str)0) {
+        u8* m = (u8*)msg;
+        i = 0;
+        while (m[i] != (u8)0 && n < 480) { buf[n] = m[i]; n = n + 1; i = i + 1; }
+    }
+    if (n < 480) { buf[n] = (u8)'\n'; n = n + 1; }
+    sys_write(2, (i64)&buf[0], n);
+    abort();
 }

@@ -1,0 +1,12 @@
+// tests/assert_fail_test.ag — a failing @assert aborts with a message.
+// Expected to exit 134 (SIGABRT): the harness treats that as success for
+// this test. The stderr output must read:
+//   assertion failed at tests/assert_fail_test.ag:5: x should be five
+
+import std.sys.entry;
+
+i32 main() {
+    i64 x = 3;
+    @assert(x == 5, "x should be five");
+    return 0;
+}
