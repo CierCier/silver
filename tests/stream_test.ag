@@ -1,0 +1,296 @@
+// tests/stream_test.ag — streaming response bodies (Go's Response.Body).
+//
+// get_stream()/do_stream() return an HttpStream whose read() pulls body
+// bytes incrementally, honoring content-length, chunked, and close-delimited
+// framing. close() returns the connection to the pool when the body was
+// fully consumed.
+
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.entry;
+import std.sys.errno;
+import std.test;
+import std.thread;
+
+TcpListener g_listener_a;
+str g_wire0;
+str g_wire1;
+i64 g_connections;
+i64 g_per_conn;
+i64 g_accepts;
+i64 g_status;
+
+void stream_server_main(i64 which) {
+    TcpListener* listener = &g_listener_a;
+    i64 served = 0;
+    i64 conn = 0;
+    while (conn < g_connections && served < g_connections * g_per_conn) {
+        Result<i64, Error> a = listener.accept();
+        if (a.failed()) { g_status = 6; return; }
+        g_accepts = g_accepts + 1;
+        TcpStream s = TcpStream.from_fd((i32)a.value());
+        s.sock.set_recv_timeout(1);
+        str wire = g_wire0;
+        if (conn == 1) { wire = g_wire1; }
+        i64 on_conn = 0;
+        while (on_conn < g_per_conn && served < g_connections * g_per_conn) {
+            i64 hlen = 0;
+            u8 prev[4];
+            u8 byte[1];
+            bool closed = false;
+            while (true) {
+                Result<i64, Error> r = s.read(&byte[0], 1);
+                if (r.is_err()) {
+                    if (r.err_is(EAGAIN) || r.err_is(ETIMEDOUT)) { closed = true; break; }
+                    g_status = 8;
+                    return;
+                }
+                if (r.value() == 0) { closed = true; break; }
+                prev[hlen % 4] = byte[0];
+                hlen = hlen + 1;
+                if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+                    && prev[(hlen - 2) % 4] == (u8)'\r'
+                    && prev[(hlen - 3) % 4] == (u8)'\n'
+                    && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+                if (hlen >= 2048) { closed = true; break; }
+            }
+            if (closed) { break; }
+            Result<i64, Error> w = s.write((u8*)wire, strlen(wire));
+            if (w.failed()) { g_status = 7; return; }
+            served = served + 1;
+            on_conn = on_conn + 1;
+        }
+        s.close();
+        conn = conn + 1;
+    }
+    g_status = 0;
+}
+
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+/// Read a stream to EOF into a String, asserting the chunk pattern.
+String drain_stream(HttpStream* stream, i64 chunk, bool* ok) {
+    String out = String.new();
+    u8 buf[64];
+    i64 total = 0;
+    while (true) {
+        Result<i64, Error> r = stream.read(&buf[0], chunk);
+        if (r.failed()) { *ok = false; break; }
+        i64 got = r.value();
+        if (got == 0) { break; }
+        i64 i = 0;
+        while (i < got) { out.push(buf[i]); i = i + 1; }
+        total = total + got;
+    }
+    return out;
+}
+
+i32 main() {
+    // --- Content-length streaming in small chunks ---
+    test_start("stream content-length");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        g_wire0 = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n0123456789abcdefghij";
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_per_conn = 1;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/big");
+            Result<HttpStream, Error> s = client.get_stream((str)url.data);
+            url.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            assert_eq_i64(stream.status(), 200, "stream status");
+            String text = stream.status_text();
+            assert_true(text.equals("200 OK"), "stream status text");
+            text.drop();
+            bool ok = true;
+            String body = drain_stream(&stream, 7, &ok);
+            assert_true(ok, "reads succeeded");
+            assert_true(body.equals("0123456789abcdefghij"), "full streamed body");
+            body.drop();
+            stream.close();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+            assert_eq_i64(g_accepts, 1, "one connection");
+        }
+    }
+
+    // --- Chunked streaming in odd-sized reads ---
+    test_start("stream chunked");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        g_wire0 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n";
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_per_conn = 1;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/chunked");
+            Result<HttpStream, Error> s = client.get_stream((str)url.data);
+            url.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            bool ok = true;
+            String body = drain_stream(&stream, 3, &ok);
+            assert_true(ok, "reads succeeded");
+            assert_true(body.equals("helloworld"), "chunked body reassembled");
+            body.drop();
+            stream.close();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+    }
+
+    // --- Close-delimited streaming (no framing headers) ---
+    test_start("stream close-delimited");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        g_wire0 = "HTTP/1.1 200 OK\r\n\r\nstream-body-data";
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_per_conn = 1;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/close");
+            Result<HttpStream, Error> s = client.get_stream((str)url.data);
+            url.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            bool ok = true;
+            String body = drain_stream(&stream, 5, &ok);
+            assert_true(ok, "reads succeeded");
+            assert_true(body.equals("stream-body-data"), "close-delimited body");
+            body.drop();
+            stream.close();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+    }
+
+    // --- A consumed stream returns its connection to the pool ---
+    test_start("stream returns connection to pool");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        g_wire0 = "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nstream-ok";
+        g_wire1 = (str)0;
+        g_connections = 1;
+        g_per_conn = 2;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String u1 = build_url(port, "/a");
+            Result<HttpStream, Error> s = client.get_stream((str)u1.data);
+            u1.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            bool ok = true;
+            String body = drain_stream(&stream, 4, &ok);
+            assert_true(body.equals("stream-ok"), "streamed body");
+            body.drop();
+            stream.close(); // fully consumed -> pooled
+            String u2 = build_url(port, "/b");
+            Result<HttpResponse, Error> r2 = client.get((str)u2.data);
+            u2.drop();
+            assert_true(!r2.failed(), "follow-up get");
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+            assert_eq_i64(g_accepts, 1, "connection reused after stream close");
+        }
+    }
+
+    // --- get_stream follows redirects ---
+    test_start("stream redirect");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        g_wire0 = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n";
+        g_wire1 = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        g_connections = 2;
+        g_per_conn = 1;
+        g_accepts = 0;
+        g_status = -1;
+        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        else {
+            HttpClient client = HttpClient.new();
+            String url = build_url(port, "/start");
+            Result<HttpStream, Error> s = client.get_stream((str)url.data);
+            url.drop();
+            assert_true(!s.failed(), "get_stream");
+            HttpStream stream = s.unwrap();
+            assert_eq_i64(stream.status(), 200, "redirect followed");
+            bool ok = true;
+            String body = drain_stream(&stream, 2, &ok);
+            assert_true(body.equals("hello"), "final streamed body");
+            body.drop();
+            stream.close();
+            assert_true(thread_join(server_handle) >= 0, "join");
+            assert_eq_i64(g_status, 0, "server status");
+        }
+    }
+
+    return done();
+}

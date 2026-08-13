@@ -1,0 +1,213 @@
+// tests/pool_test.ag — keep-alive connection pooling (Go's Transport pool).
+//
+// A keep-alive server thread serves requests on each connection until the
+// client closes it. The tests assert how many connections the server
+// accepted, proving reuse, stale-connection retry, and max-idle eviction.
+
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.string;
+import std.sys.entry;
+import std.sys.errno;
+import std.test;
+import std.thread;
+
+const str OK_WIRE = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+TcpListener g_listener_a;
+TcpListener g_listener_b;
+i64 g_per_conn; // requests served per accepted connection before closing
+i64 g_total_a; // total requests for server A before it exits
+i64 g_total_b; // total requests for server B
+i64 g_accepts_a;
+i64 g_accepts_b;
+i64 g_status;
+
+/// Keep-alive server: accept connections, serve `g_per_conn` requests on
+/// each, then close it; exit after `g_total` requests. `unused` selects the
+/// accept counter (0 = A, anything else = B).
+void keepalive_server_main(i64 which) {
+    i64 total = g_total_a;
+    if (which != 0) { total = g_total_b; }
+    i64 served = 0;
+    TcpListener* listener = &g_listener_a;
+    if (which != 0) { listener = &g_listener_b; }
+    while (served < total) {
+        Result<i64, Error> a = listener.accept();
+        if (a.failed()) { g_status = 6; return; }
+        if (which == 0) { g_accepts_a = g_accepts_a + 1; }
+        else { g_accepts_b = g_accepts_b + 1; }
+        TcpStream s = TcpStream.from_fd((i32)a.value());
+        // Treat a read timeout as client idleness: close the connection and
+        // accept the next one (the client may have moved to another host).
+        s.sock.set_recv_timeout(1);
+        i64 on_conn = 0;
+        while (on_conn < g_per_conn && served < total) {
+            // Capture the request head until CRLFCRLF; EOF or timeout ends
+            // the connection.
+            i64 hlen = 0;
+            u8 prev[4];
+            u8 byte[1];
+            bool closed = false;
+            while (true) {
+                Result<i64, Error> r = s.read(&byte[0], 1);
+                if (r.is_err()) {
+                    if (r.err_is(EAGAIN) || r.err_is(ETIMEDOUT)) { closed = true; break; }
+                    g_status = 8;
+                    return;
+                }
+                if (r.value() == 0) { closed = true; break; }
+                prev[hlen % 4] = byte[0];
+                hlen = hlen + 1;
+                if (hlen >= 4 && prev[(hlen - 1) % 4] == (u8)'\n'
+                    && prev[(hlen - 2) % 4] == (u8)'\r'
+                    && prev[(hlen - 3) % 4] == (u8)'\n'
+                    && prev[(hlen - 4) % 4] == (u8)'\r') { break; }
+                if (hlen >= 2048) { closed = true; break; }
+            }
+            if (closed) { break; }
+            Result<i64, Error> w = s.write((u8*)OK_WIRE, strlen(OK_WIRE));
+            if (w.failed()) { g_status = 7; return; }
+            served = served + 1;
+            on_conn = on_conn + 1;
+        }
+        s.close();
+    }
+    g_status = 0;
+}
+
+i32 bind_loopback(TcpListener* listener, u16* port) {
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    if (bind_result.failed()) { return 1; }
+    SocketAddr bind_addr = bind_result.unwrap();
+    *listener = TcpListener.bind(&bind_addr, 1);
+    if (!listener.valid()) { return 2; }
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    if (name_result.failed()) { return 3; }
+    *port = ntoh16(sa.sin_port);
+    return 0;
+}
+
+String build_url(u16 port, str path) {
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    i64 i = 0;
+    while (i < n) { url.push(digits[i]); i = i + 1; }
+    url.push_str(path);
+    return url;
+}
+
+/// Run `requests` GETs against the server; `per_conn` requests per connection.
+i32 run_requests(u16 port, i64 requests, i64 per_conn) {
+    g_per_conn = per_conn;
+    g_total_a = requests;
+    g_total_b = 0;
+    g_accepts_a = 0;
+    g_status = -1;
+    TaskRecord* server_handle = thread_spawn(keepalive_server_main, 0);
+    if (server_handle == (TaskRecord*)0) { return 16; }
+    HttpClient client = HttpClient.new();
+    i64 i = 0;
+    while (i < requests) {
+        String url = build_url(port, "/p");
+        Result<HttpResponse, Error> r = client.get((str)url.data);
+        url.drop();
+        if (r.failed()) { thread_join(server_handle); return 8; }
+        HttpResponse response = r.unwrap();
+        if (response.status != 200 || !response.body.equals("ok")) {
+            thread_join(server_handle);
+            return 9;
+        }
+        i = i + 1;
+    }
+    if (thread_join(server_handle) < 0) { return 16; }
+    if (g_status != 0) { return (i32)g_status; }
+    return 0;
+}
+
+i32 main() {
+    // --- Two requests share one keep-alive connection ---
+    test_start("pool reuses connection");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        assert_eq_i64(0, run_requests(port, 2, 2), "two requests");
+        assert_eq_i64(g_accepts_a, 1, "one accepted connection reused");
+    }
+
+    // --- Server closes idle connection: retried on a fresh one ---
+    test_start("stale pooled connection retried");
+    {
+        TcpListener listener;
+        u16 port = 0;
+        i32 r = bind_loopback(&listener, &port);
+        assert_eq_i64(0, r, "bind");
+        g_listener_a = listener;
+        // One request per connection: after the first response the server
+        // closes, so the pooled connection is stale for request two.
+        assert_eq_i64(0, run_requests(port, 2, 1), "two requests");
+        assert_eq_i64(g_accepts_a, 2, "second request retried on a fresh connection");
+    }
+
+    // --- Max-idle eviction: a different host evicts the idle connection ---
+    test_start("pool max idle eviction");
+    {
+        TcpListener listener_a;
+        TcpListener listener_b;
+        u16 port_a = 0;
+        u16 port_b = 0;
+        i32 ra = bind_loopback(&listener_a, &port_a);
+        i32 rb = bind_loopback(&listener_b, &port_b);
+        assert_eq_i64(0, ra, "bind a");
+        assert_eq_i64(0, rb, "bind b");
+
+        g_listener_a = listener_a;
+        g_listener_b = listener_b;
+        g_per_conn = 10;
+        g_total_a = 2; // A serves A1 and (after eviction) A2
+        g_total_b = 1;
+        g_accepts_a = 0;
+        g_status = -1;
+        TaskRecord* server_a = thread_spawn(keepalive_server_main, 0);
+        assert_true(server_a != (TaskRecord*)0, "spawn a");
+
+        g_accepts_b = 0;
+        g_status = -1;
+        TaskRecord* server_b = thread_spawn(keepalive_server_main, 1);
+        assert_true(server_b != (TaskRecord*)0, "spawn b");
+
+        HttpClient client = HttpClient.new();
+        client.set_pool_max_idle(1);
+        String ua = build_url(port_a, "/");
+        Result<HttpResponse, Error> r1 = client.get((str)ua.data);
+        ua.drop();
+        assert_true(!r1.failed(), "request A1");
+        String ub = build_url(port_b, "/");
+        Result<HttpResponse, Error> r2 = client.get((str)ub.data);
+        ub.drop();
+        assert_true(!r2.failed(), "request B1");
+        // B's release evicts A's idle connection (max_idle = 1), so A2
+        // reconnects fresh.
+        String ua2 = build_url(port_a, "/");
+        Result<HttpResponse, Error> r3 = client.get((str)ua2.data);
+        ua2.drop();
+        assert_true(!r3.failed(), "request A2 reconnects");
+        assert_true(thread_join(server_a) >= 0, "join a");
+        assert_true(thread_join(server_b) >= 0, "join b");
+        assert_eq_i64(g_status, 0, "server status");
+        assert_eq_i64(g_accepts_b, 1, "server b accepted once");
+        assert_eq_i64(g_accepts_a, 2, "server a accepted twice (evicted, then reconnected)");
+    }
+
+    return done();
+}

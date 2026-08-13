@@ -125,6 +125,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<()> {
         self.declare_leak_check_flag();
+        // Pass 0: register every struct's field metadata first, so a field
+        // type may reference a struct defined later in the program (e.g.
+        // HttpClient referencing ConnectionPool). Eagerly lowering field
+        // types here would abort on forward references.
+        for item in &program.items {
+            if let ast::ItemKind::Struct(struct_item) = &item.kind {
+                self.register_struct_fields(struct_item);
+            }
+        }
+        // Pass 0b: lay out struct bodies (field types resolve now).
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Struct(struct_item) => {
@@ -446,12 +456,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         )
     }
 
-    fn generate_struct_item(
-        &mut self,
-        item: &ast::StructItem,
-        _visibility: &ast::Visibility,
-        _attributes: &[ast::Attribute],
-    ) -> CodegenResult<()> {
+    /// Register a struct's field metadata and generic parameters without
+    /// laying out its LLVM body (all fields must be known before any body is
+    /// laid out, so forward references resolve).
+    fn register_struct_fields(&mut self, item: &ast::StructItem) {
         let name = item.name.name.clone();
         self.struct_fields.insert(
             name.clone(),
@@ -471,6 +479,18 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 })
                 .collect::<Vec<_>>();
             self.struct_generics.insert(name, params);
+        }
+    }
+
+    fn generate_struct_item(
+        &mut self,
+        item: &ast::StructItem,
+        _visibility: &ast::Visibility,
+        _attributes: &[ast::Attribute],
+    ) -> CodegenResult<()> {
+        let name = item.name.name.clone();
+        // Generic templates are laid out on instantiation.
+        if self.struct_generics.contains_key(&name) {
             self.struct_types
                 .entry(item.name.name.clone())
                 .or_insert_with(|| self.context.opaque_struct_type(&item.name.name));

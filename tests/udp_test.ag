@@ -1,0 +1,64 @@
+// tests/udp_test.ag — UdpSocket datagram round trip.
+//
+// Verifies the std.net UdpSocket primitive: send_to / recv_from over a
+// loopback datagram socket, including the sender address and an echo back.
+
+import std.net.inet;
+import std.net.socket;
+import std.string;
+import std.test;
+
+i32 main() {
+    // Server socket bound to an ephemeral loopback port.
+    UdpSocket server = UdpSocket.new();
+    assert_true(server.valid(), "server socket valid");
+    Result<SocketAddr, AddrError> bind_result =
+        SocketAddr.v4("127.0.0.1", (u16)0);
+    assert_true(!bind_result.failed(), "v4 address");
+    SocketAddr bind_addr = bind_result.unwrap();
+    assert_true(server.bind(&bind_addr), "bind server");
+    server.set_recv_timeout(2);
+
+    // Discover the bound port via getsockname.
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> name_result =
+        try_getsockname(server.sock.fd, (void*)&sa, &len);
+    assert_true(!name_result.failed(), "getsockname");
+    u16 port = ntoh16(sa.sin_port);
+    Result<SocketAddr, AddrError> server_addr_result =
+        SocketAddr.v4("127.0.0.1", port);
+    assert_true(!server_addr_result.failed(), "server address");
+    SocketAddr server_addr = server_addr_result.unwrap();
+
+    // Client sends a datagram.
+    UdpSocket client = UdpSocket.new();
+    assert_true(client.valid(), "client socket valid");
+    client.set_recv_timeout(2);
+    i64 sent = client.send_to((u8*)"ping!", 5, &server_addr);
+    assert_eq_i64(sent, 5, "client sent 5 bytes");
+
+    // Server receives it with the sender address.
+    u8 buf[16];
+    SocketAddr from;
+    i64 got = server.recv_from(&buf[0], 16, &from);
+    assert_eq_i64(got, 5, "server received 5 bytes");
+    if (got == 5) {
+        assert_true(memcmp(&buf[0], (const void*)"ping!", 5) == 0, "payload matches");
+    }
+
+    // Server echoes back to the sender (validating the reported address).
+    i64 echoed = server.send_to(&buf[0], got, &from);
+    assert_eq_i64(echoed, 5, "server echoed 5 bytes");
+
+    // Client receives the echo.
+    i64 back = client.recv_from(&buf[0], 16, (SocketAddr*)0);
+    assert_eq_i64(back, 5, "client received echo");
+    if (back == 5) {
+        assert_true(memcmp(&buf[0], (const void*)"ping!", 5) == 0, "echo matches");
+    }
+
+    server.close();
+    client.close();
+    return done();
+}

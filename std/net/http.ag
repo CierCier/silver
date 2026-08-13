@@ -8,6 +8,7 @@
 import std.error;
 import std.fmt;
 import std.mem.drop;
+import std.mem.vec;
 import std.net.cookie;
 import std.net.dns;
 import std.net.http_status;
@@ -15,6 +16,7 @@ import std.net.inet;
 import std.net.tcp;
 import std.net.transport;
 import std.string;
+import std.sync;
 import std.sys.result;
 
 const i64 HTTP_ERR_IO = -1;
@@ -64,6 +66,8 @@ struct HttpClient {
     CookieJar jar;
     bool tls_verify; // true = verify peer certificates (Go's default)
     String tls_ca_file; // optional CA bundle; empty = system trust store
+    bool use_pool; // keep-alive connection reuse (Go's Transport pooling)
+    ConnectionPool pool;
 }
 
 struct HttpConnection {
@@ -71,6 +75,77 @@ struct HttpConnection {
     u8 tls_state[64]; // opaque TLS transport state (TRANSPORT_TLS_STATE_SIZE)
     bool use_tls;
     HttpVersion version;
+}
+
+impl Drop<HttpConnection> for HttpConnection {
+    void drop(HttpConnection* self) {
+        self.close();
+    }
+}
+
+// --- Connection pooling (Go's Transport keep-alive pool) ------------------
+
+struct PoolEntry {
+    HttpConnection conn;
+    u8 host[255];
+    u16 port;
+    bool https;
+    i64 last_used; // unix seconds at release time
+}
+
+struct ConnectionPool {
+    Vec<PoolEntry> entries;
+    RawMutex lock;
+    i32 max_idle; // Go's MaxIdleConnsPerHost
+}
+
+impl ConnectionPool {
+    ConnectionPool new() {
+        ConnectionPool pool;
+        pool.entries = Vec<PoolEntry>.new();
+        pool.lock = RawMutex.new();
+        pool.max_idle = 2;
+        return pool;
+    }
+}
+
+impl Drop<ConnectionPool> for ConnectionPool {
+    void drop(ConnectionPool* self) {
+        i64 i = 0;
+        while (i < self.entries.len) {
+            PoolEntry e = self.entries.take(i);
+            e.conn.close();
+            i = i + 1;
+        }
+        self.entries.len = 0;
+        self.entries.drop();
+    }
+}
+
+/// Remove entry `index` from the pool, returning it. Vec.take leaves the
+/// slot in place (len unchanged), so this swaps the last entry into the hole
+/// and shrinks len.
+PoolEntry http_pool_remove_at(Vec<PoolEntry>* entries, i64 index) {
+    i64 last = entries.len - 1;
+    PoolEntry entry = entries.data[index];
+    if (index != last) {
+        entries.data[index] = entries.data[last];
+    }
+    entries.len = last;
+    return entry;
+}
+
+bool http_host_eq(str a, str b) {
+    u8* pa = (u8*)a;
+    u8* pb = (u8*)b;
+    i64 i = 0;
+    while (true) {
+        if (pa[i] != pb[i]) { return false; }
+        if (pa[i] == (u8)0) { return true; }
+        i = i + 1;
+    }
+    // Unreachable — the loop above only exits via `return`.
+    return false;
 }
 
 struct HttpUrl {
@@ -593,16 +668,22 @@ impl HttpResponse {
         return String.new();
     }
 
-    Result<i64, Error> read(HttpResponse* self, StreamIo* io, bool head, i64 max_header, i64 max_body) {
+    /// Read the head, skipping interim 1xx responses (100 Continue, 102, 103)
+    /// until the final response; 101 Switching Protocols is final.
+    Result<i64, Error> read_final_head(HttpResponse* self, StreamIo* io, i64 max_header) {
         Result<i64, Error> h = self.read_head(io, max_header);
         if (h.is_err()) { return h; }
-        // Skip interim 1xx responses (100 Continue, 102, 103) until the final
-        // response; 101 Switching Protocols is final.
         while (http_status_is_informational(self.status)
             && self.status != (i32)HttpStatus.SwitchingProtocols) {
             h = self.read_head(io, max_header);
             if (h.is_err()) { return h; }
         }
+        return Result<i64, Error>.Ok(0);
+    }
+
+    Result<i64, Error> read(HttpResponse* self, StreamIo* io, bool head, i64 max_header, i64 max_body) {
+        Result<i64, Error> h = self.read_final_head(io, max_header);
+        if (h.is_err()) { return h; }
         return self.read_body(io, head, max_body);
     }
 }
@@ -612,6 +693,172 @@ impl Drop<HttpResponse> for HttpResponse {
         self.reason.drop();
         self.headers.drop();
         self.body.drop();
+    }
+}
+
+// --- Streaming responses (Go's Response.Body) -----------------------------
+// A streamed response carries the head plus an owned connection; read()
+// pulls body bytes incrementally, honoring the framing (content-length,
+// chunked, close-delimited). close() returns the connection to the client's
+// pool when the body was fully consumed and the peer kept it alive.
+
+struct HttpStream {
+    HttpResponse head; // status/headers/reason; body stays empty
+    HttpConnection conn; // owned; returned to the pool on close
+    HttpClient* pool_owner; // null when the client cannot pool
+    u8 key_host[255]; // pool key
+    u16 key_port;
+    bool key_https;
+    i64 body_remaining; // content-length remaining (when content_length >= 0)
+    String chunk_line; // reusable line buffer for chunked reads
+    i64 chunk_remaining;
+    bool chunk_want_size;
+    bool body_finished;
+    bool stream_active;
+}
+
+impl HttpStream {
+    HttpStream new(HttpResponse head, HttpConnection conn, HttpClient* owner,
+                   str host, u16 port, bool https) {
+        HttpStream stream;
+        stream.head = move head;
+        stream.conn = move conn;
+        stream.pool_owner = owner;
+        u8* src = (u8*)host;
+        i64 k = 0;
+        while (k < 254 && src[k] != (u8)0) {
+            stream.key_host[k] = src[k];
+            k = k + 1;
+        }
+        stream.key_host[k] = (u8)0;
+        stream.key_port = port;
+        stream.key_https = https;
+        stream.body_remaining = stream.head.content_length;
+        stream.chunk_line = String.new();
+        stream.chunk_remaining = 0;
+        stream.chunk_want_size = true;
+        stream.body_finished = false;
+        stream.stream_active = true;
+        return stream;
+    }
+
+    i32 status(HttpStream* self) { return self.head.status; }
+
+    /// The value of `name` (case-insensitive) in the response headers, or an
+    /// empty string when absent.
+    String get_header(HttpStream* self, str name) {
+        return self.head.get_header(name);
+    }
+
+    /// "200 OK"-style status text.
+    String status_text(HttpStream* self) {
+        return self.head.status_text();
+    }
+
+    /// Read up to `len` body bytes, honoring the response framing. Returns 0
+    /// at end of body. The transport is derived from the owned connection on
+    /// each call (a self-referential io field would dangle when the stream
+    /// value moves).
+    Result<i64, Error> read(HttpStream* self, u8* buf, i64 len) {
+        if (!self.stream_active) {
+            return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "stream is closed"));
+        }
+        if (self.body_finished) { return Result<i64, Error>.Ok(0); }
+        StreamIo io;
+        if (self.conn.use_tls) { io = transport_tls_io(&self.conn.tls_state[0]); }
+        else { io = transport_tcp_io(&self.conn.stream); }
+        if (self.head.chunked) { return self.read_chunked(&io, buf, len); }
+        if (self.head.content_length >= 0) {
+            i64 want = len;
+            if (want > self.body_remaining) { want = self.body_remaining; }
+            Result<i64, Error> r = transport_read(&io, buf, want);
+            if (r.failed()) { return r; }
+            self.body_remaining = self.body_remaining - r.value();
+            if (self.body_remaining <= 0) { self.body_finished = true; }
+            return r;
+        }
+        // Close-delimited: read until EOF.
+        Result<i64, Error> r = transport_read(&io, buf, len);
+        if (r.failed()) { return r; }
+        if (r.value() == 0) { self.body_finished = true; }
+        return r;
+    }
+
+    /// Framing-aware chunked read: parses chunk sizes and CRLF separators as
+    /// needed, returning up to `len` body bytes per call.
+    Result<i64, Error> read_chunked(HttpStream* self, StreamIo* io, u8* buf, i64 len) {
+        while (true) {
+            if (self.chunk_want_size) {
+                if (!http_read_line(io, &self.chunk_line, HTTP_CHUNK_LINE_MAX)) {
+                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                }
+                i64 size = 0;
+                if (!http_parse_hex(self.chunk_line.data, 0, self.chunk_line.len, &mut size)) {
+                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                }
+                if (size == 0) {
+                    // Zero-size chunk: consume trailers until the blank line.
+                    while (true) {
+                        if (!http_read_line(io, &self.chunk_line, HTTP_CHUNK_LINE_MAX)) {
+                            return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                        }
+                        if (self.chunk_line.len == 0) {
+                            self.body_finished = true;
+                            return Result<i64, Error>.Ok(0);
+                        }
+                    }
+                }
+                self.chunk_remaining = size;
+                self.chunk_want_size = false;
+            }
+            i64 want = len;
+            if (want > self.chunk_remaining) { want = self.chunk_remaining; }
+            Result<i64, Error> r = transport_read(io, buf, want);
+            if (r.failed()) { return r; }
+            self.chunk_remaining = self.chunk_remaining - r.value();
+            if (self.chunk_remaining == 0) {
+                // Consume the CRLF after the chunk.
+                u8 byte[2];
+                Result<i64, Error> c1 = transport_read(io, &byte[0], 1);
+                if (c1.failed() || c1.value() != 1 || byte[0] != (u8)'\r') {
+                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                }
+                Result<i64, Error> c2 = transport_read(io, &byte[1], 1);
+                if (c2.failed() || c2.value() != 1 || byte[1] != (u8)'\n') {
+                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                }
+                self.chunk_want_size = true;
+            }
+            return r;
+        }
+        // Unreachable — the loop above only exits via `return`.
+        return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+    }
+
+    /// Close the stream: return the connection to the pool when the body was
+    /// fully consumed and the peer kept it alive, else close it.
+    void close(HttpStream* self) {
+        if (!self.stream_active) { return; }
+        self.stream_active = false;
+        if (self.body_finished && !self.head.close_delimited
+            && self.pool_owner != (HttpClient*)0 && self.pool_owner.use_pool) {
+            HttpConnection pooled = self.conn;
+            // Invalidate our copy so the compiler's field drop cannot close
+            // the now-pooled fd.
+            self.conn.stream.sock.fd = -1;
+            self.pool_owner.release((str)&self.key_host[0], self.key_port, self.key_https,
+                move pooled);
+        } else {
+            self.conn.close();
+        }
+        self.chunk_line.drop();
+        self.head.drop();
+    }
+}
+
+impl Drop<HttpStream> for HttpStream {
+    void drop(HttpStream* self) {
+        self.close();
     }
 }
 
@@ -627,6 +874,8 @@ impl HttpClient {
         client.jar = CookieJar.new();
         client.tls_verify = true;
         client.tls_ca_file = String.new();
+        client.use_pool = true;
+        client.pool = ConnectionPool.new();
         return move client;
     }
 
@@ -671,32 +920,210 @@ impl HttpClient {
         return Result<HttpConnection, Error>.Ok(move connection);
     }
 
+    /// Limit on idle keep-alive connections kept per host (Go's
+    /// MaxIdleConnsPerHost; default 2).
+    void set_pool_max_idle(&mut HttpClient self, i32 limit) {
+        self.pool.max_idle = limit;
+    }
+
+    /// Complete the TLS handshake on a fresh connection for an https URL.
+    bool tls_handshake(HttpClient* self, HttpConnection* conn, str host, Error* err) {
+        bool ok = transport_tls_handshake(&conn.tls_state[0], conn.stream.sock.fd, host,
+            self.tls_verify, (str)self.tls_ca_file.data, err);
+        if (ok) { conn.use_tls = true; }
+        return ok;
+    }
+
+    /// Take an idle pooled connection for (host, port, https), or open a
+    /// fresh one. `reused` is true when the connection came from the pool;
+    /// callers retry once on reused connections whose peer closed.
+    Result<HttpConnection, Error> acquire(HttpClient* self, str host, u16 port, bool https, bool* reused) {
+        *reused = false;
+        if (self.use_pool) {
+            self.pool.lock.lock();
+            i64 best = -1;
+            i64 i = 0;
+            while (i < self.pool.entries.len) {
+                PoolEntry* e = &self.pool.entries.data[i];
+                if (e.port == port && e.https == https
+                    && http_host_eq((str)&e.host[0], host)) {
+                    if (best < 0 || e.last_used > self.pool.entries.data[best].last_used) {
+                        best = i;
+                    }
+                }
+                i = i + 1;
+            }
+            if (best >= 0) {
+                PoolEntry entry = http_pool_remove_at(&self.pool.entries, best);
+                self.pool.lock.unlock();
+                HttpConnection pooled = entry.conn;
+                *reused = true;
+                return Result<HttpConnection, Error>.Ok(move pooled);
+            }
+            self.pool.lock.unlock();
+        }
+        return http_open(host, port);
+    }
+
+    /// Return a fully-read, reusable connection to the pool, or close it.
+    /// `conn` must have no unread response data.
+    void release(HttpClient* self, str host, u16 port, bool https, HttpConnection conn) {
+        if (!self.use_pool) {
+            conn.close();
+            return;
+        }
+        self.pool.lock.lock();
+        if (self.pool.entries.len >= (i64)self.pool.max_idle) {
+            // Close the least recently used idle connection.
+            i64 oldest = 0;
+            i64 i = 1;
+            while (i < self.pool.entries.len) {
+                if (self.pool.entries.data[i].last_used < self.pool.entries.data[oldest].last_used) {
+                    oldest = i;
+                }
+                i = i + 1;
+            }
+            PoolEntry evicted = http_pool_remove_at(&self.pool.entries, oldest);
+            evicted.conn.close();
+        }
+        PoolEntry entry;
+        entry.conn = move conn;
+        u8* src = (u8*)host;
+        i64 k = 0;
+        while (k < 254 && src[k] != (u8)0) {
+            entry.host[k] = src[k];
+            k = k + 1;
+        }
+        entry.host[k] = (u8)0;
+        entry.port = port;
+        entry.https = https;
+        entry.last_used = http_unix_now();
+        self.pool.entries.push(move entry);
+        self.pool.lock.unlock();
+    }
+
     /// One round trip: parse the URL, resolve the host, connect, send, and
     /// read the response. `body` is the request body and `headers` a raw
     /// CRLF-terminated header block ("Name: value\r\n..."); either may be
     /// null. Honors the client's configured size limits.
+    /// One round trip: parse the URL, acquire a connection (pooled or fresh),
+    /// send, and read the response. `body` is the request body and `headers`
+    /// a raw CRLF-terminated header block ("Name: value\r\n..."); either may
+    /// be null. Honors the client's configured size limits. Keep-alive
+    /// connections are returned to the pool when the response is fully read
+    /// and the peer did not close.
     Result<HttpResponse, Error> request(HttpClient* self, str method, str url, str body, str headers) {
         HttpUrl parsed;
         if (!http_parse_url(url, &parsed)) {
             return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed URL"));
         }
         str host = (str)&parsed.host[0];
-        Result<HttpConnection, Error> opened = http_open(host, parsed.port);
+        bool reused = false;
+        Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
         if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
-        if (parsed.https) {
+        if (parsed.https && !reused) {
             Error err;
-            bool ok = transport_tls_handshake(&conn.tls_state[0], conn.stream.sock.fd, host,
-                self.tls_verify, (str)self.tls_ca_file.data, &mut err);
-            if (!ok) {
+            if (!self.tls_handshake(&conn, host, &mut err)) {
                 return Result<HttpResponse, Error>.Err(move err);
             }
-            conn.use_tls = true;
         }
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
         if (headers != (str)0) { req.headers.push_str(headers); }
         if (body != (str)0) { req.set_body(body); }
-        return conn.send(&req, self.max_header_bytes, self.max_body_bytes);
+        if (self.use_pool) { req.keep_alive(); }
+        Result<HttpResponse, Error> r = conn.send(&req, self.max_header_bytes, self.max_body_bytes);
+        if (r.failed() && reused) {
+
+            // The pooled connection's peer closed it while idle; discard and
+            // retry once on a fresh connection (nothing was sent).
+            conn.close();
+            bool reused2 = false;
+            Result<HttpConnection, Error> reopened = self.acquire(host, parsed.port, parsed.https, &mut reused2);
+            if (!reopened.failed()) {
+                HttpConnection fresh = reopened.unwrap();
+                bool ok = true;
+                if (parsed.https) {
+                    Error err;
+                    ok = self.tls_handshake(&fresh, host, &mut err);
+                    if (!ok) {
+                        fresh.close();
+                        return Result<HttpResponse, Error>.Err(move err);
+                    }
+                }
+                if (ok) {
+                    conn = move fresh;
+
+                    r = conn.send(&req, self.max_header_bytes, self.max_body_bytes);
+                }
+            }
+        }
+        if (r.failed()) {
+            conn.close();
+            return Result<HttpResponse, Error>.Err(r.get_error());
+        }
+        HttpResponse response = r.unwrap();
+        if (self.use_pool && !response.close_delimited) {
+            self.release(host, parsed.port, parsed.https, move conn);
+        } else {
+            conn.close();
+        }
+        return Result<HttpResponse, Error>.Ok(move response);
+    }
+
+    /// One streaming round trip: like `request`, but only the response head
+    /// is read; the caller streams the body via HttpStream.read() and closes
+    /// it (returning the connection to the pool).
+    Result<HttpStream, Error> request_stream(HttpClient* self, str method, str url, str body, str headers) {
+        HttpUrl parsed;
+        if (!http_parse_url(url, &parsed)) {
+            return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed URL"));
+        }
+        str host = (str)&parsed.host[0];
+        bool reused = false;
+        Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
+        if (opened.failed()) { return Result<HttpStream, Error>.Err(opened.get_error()); }
+        HttpConnection conn = opened.unwrap();
+        if (parsed.https && !reused) {
+            Error err;
+            if (!self.tls_handshake(&conn, host, &mut err)) {
+                return Result<HttpStream, Error>.Err(move err);
+            }
+        }
+        HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        if (body != (str)0) { req.set_body(body); }
+        if (self.use_pool) { req.keep_alive(); }
+        Result<HttpResponse, Error> h = conn.send_head(&req, self.max_header_bytes);
+        if (h.failed() && reused) {
+            // The pooled connection's peer closed it while idle; retry once.
+            conn.close();
+            bool reused2 = false;
+            Result<HttpConnection, Error> reopened = self.acquire(host, parsed.port, parsed.https, &mut reused2);
+            if (!reopened.failed()) {
+                HttpConnection fresh = reopened.unwrap();
+                bool ok = true;
+                if (parsed.https) {
+                    Error err;
+                    ok = self.tls_handshake(&fresh, host, &mut err);
+                    if (!ok) {
+                        fresh.close();
+                        return Result<HttpStream, Error>.Err(move err);
+                    }
+                }
+                if (ok) {
+                    conn = move fresh;
+                    h = conn.send_head(&req, self.max_header_bytes);
+                }
+            }
+        }
+        if (h.failed()) {
+            conn.close();
+            return Result<HttpStream, Error>.Err(h.get_error());
+        }
+        HttpResponse head = h.unwrap();
+        HttpStream stream = HttpStream.new(move head, move conn, self, host, parsed.port, parsed.https);
+        return Result<HttpStream, Error>.Ok(move stream);
     }
 
     /// Go's Client.Do: performs `request`, following 301/302/303/307/308
@@ -709,10 +1136,31 @@ impl HttpClient {
     /// port 80 without redirect handling.
     Result<HttpResponse, Error> do(HttpClient* self, HttpRequest* request) {
         if (request.url == (str)0) {
-            Result<HttpConnection, Error> opened = http_open(request.host, 80);
+            bool reused = false;
+            Result<HttpConnection, Error> opened = self.acquire(request.host, 80, false, &mut reused);
             if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
             HttpConnection conn = opened.unwrap();
-            return conn.send(request, self.max_header_bytes, self.max_body_bytes);
+            Result<HttpResponse, Error> r = conn.send(request, self.max_header_bytes, self.max_body_bytes);
+            if (r.failed() && reused) {
+                conn.close();
+                bool reused2 = false;
+                Result<HttpConnection, Error> reopened = self.acquire(request.host, 80, false, &mut reused2);
+                if (!reopened.failed()) {
+                    conn = reopened.unwrap();
+                    r = conn.send(request, self.max_header_bytes, self.max_body_bytes);
+                }
+            }
+            if (r.failed()) {
+                conn.close();
+                return Result<HttpResponse, Error>.Err(r.get_error());
+            }
+            HttpResponse response = r.unwrap();
+            if (self.use_pool && !request.close && !response.close_delimited) {
+                self.release(request.host, 80, false, move conn);
+            } else {
+                conn.close();
+            }
+            return Result<HttpResponse, Error>.Ok(move response);
         }
         str url = request.url;
         str method = request.method;
@@ -780,6 +1228,86 @@ impl HttpClient {
         }
         // Unreachable — the loop above only exits via `return`.
         return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+    }
+
+    /// Go's Client.Do returning a streaming body: follows redirects (each
+    /// 3xx hop's connection is closed, since its body is discarded) and
+    /// returns the final response with the body unread. Manual requests have
+    /// no URL to resolve redirects against and cannot stream.
+    Result<HttpStream, Error> do_stream(HttpClient* self, HttpRequest* request) {
+        if (request.url == (str)0) {
+            return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "streaming requires a URL"));
+        }
+        str url = request.url;
+        str method = request.method;
+        str body = request.body;
+        str headers = (str)request.headers.data;
+        i32 redirects = 0;
+        String next_url = String.new();
+        String hop_headers = String.new();
+        while (true) {
+            str hop_block = headers;
+            if (self.use_jar) {
+                hop_headers.clear();
+                HttpUrl parsed;
+                if (http_parse_url(url, &parsed)) {
+                    str host = (str)&parsed.host[0];
+                    String cookie_block = self.jar.cookies_for(host, parsed.path, parsed.https);
+                    if (cookie_block.len > 0) {
+                        if (headers != (str)0) { hop_headers.push_str(headers); }
+                        hop_headers.push_str("Cookie: ");
+                        hop_headers.push_str((str)cookie_block.data);
+                        hop_headers.push_str("\r\n");
+                        hop_block = (str)hop_headers.data;
+                    }
+                    cookie_block.drop();
+                }
+            }
+            Result<HttpStream, Error> s = self.request_stream(method, url, body, hop_block);
+            if (s.failed()) { return s; }
+            HttpStream stream = s.unwrap();
+            if (self.use_jar) {
+                HttpUrl parsed;
+                if (http_parse_url(url, &parsed)) {
+                    str host = (str)&parsed.host[0];
+                    Vec<Cookie> incoming = stream.head.cookies();
+                    self.jar.set_cookies(host, parsed.path, &mut incoming);
+                    incoming.drop();
+                }
+            }
+            bool follow = false;
+            bool redirect_status = stream.head.status == (i32)HttpStatus.MovedPermanently
+                || stream.head.status == (i32)HttpStatus.Found
+                || stream.head.status == (i32)HttpStatus.SeeOther
+                || stream.head.status == (i32)HttpStatus.TemporaryRedirect
+                || stream.head.status == (i32)HttpStatus.PermanentRedirect;
+            if (redirect_status) {
+                String location = stream.head.location();
+                if (location.len > 0) {
+                    if (redirects >= self.max_redirects) {
+                        return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+                    }
+                    next_url = http_resolve_url(url, (str)location.data);
+                    if (next_url.len > 0) { follow = true; }
+                }
+            }
+            if (!follow) { return Result<HttpStream, Error>.Ok(move stream); }
+            bool preserve = stream.head.status == (i32)HttpStatus.TemporaryRedirect
+                || stream.head.status == (i32)HttpStatus.PermanentRedirect;
+            if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
+            url = (str)next_url.data;
+            redirects = redirects + 1;
+            stream.close(); // discard the 3xx hop (its body is unread)
+        }
+        // Unreachable — the loop above only exits via `return`.
+        return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+    }
+
+    /// Go's Client.Get with a streaming body: fetch the head, then stream
+    /// the body via HttpStream.read().
+    Result<HttpStream, Error> get_stream(HttpClient* self, str url) {
+        HttpRequest req = HttpRequest.new("GET", url, (str)0);
+        return self.do_stream(&req);
     }
 
     Result<HttpResponse, Error> get(HttpClient* self, str url) {
@@ -871,19 +1399,34 @@ impl Drop<HttpClient> for HttpClient {
     void drop(HttpClient* self) {
         self.jar.drop();
         self.tls_ca_file.drop();
+        self.pool.drop();
     }
 }
 
 impl HttpConnection {
-    Result<HttpResponse, Error> send(HttpConnection* self, HttpRequest* request, i64 max_header, i64 max_body) {
+    /// Write the request and read the response head (interim 1xx skipped),
+    /// leaving the body unread. The caller keeps the connection.
+    Result<HttpResponse, Error> send_head(HttpConnection* self, HttpRequest* request, i64 max_header) {
         StreamIo io;
         if (self.use_tls) { io = transport_tls_io(&self.tls_state[0]); }
         else { io = transport_tcp_io(&self.stream); }
         Result<i64, Error> written = request.write(&io);
         if (written.is_err()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
         HttpResponse response = HttpResponse.empty();
-        Result<i64, Error> read = response.read(&io, request.method == "HEAD", max_header, max_body);
-        if (read.is_err()) { return Result<HttpResponse, Error>.Err(read.get_error()); }
+        Result<i64, Error> h = response.read_final_head(&io, max_header);
+        if (h.is_err()) { return Result<HttpResponse, Error>.Err(h.get_error()); }
+        return Result<HttpResponse, Error>.Ok(move response);
+    }
+
+    Result<HttpResponse, Error> send(HttpConnection* self, HttpRequest* request, i64 max_header, i64 max_body) {
+        Result<HttpResponse, Error> h = self.send_head(request, max_header);
+        if (h.failed()) { return h; }
+        HttpResponse response = h.unwrap();
+        StreamIo io;
+        if (self.use_tls) { io = transport_tls_io(&self.tls_state[0]); }
+        else { io = transport_tcp_io(&self.stream); }
+        Result<i64, Error> b = response.read_body(&io, request.method == "HEAD", max_body);
+        if (b.is_err()) { return Result<HttpResponse, Error>.Err(b.get_error()); }
         if (request.close || response.close_delimited) { self.close(); }
         return Result<HttpResponse, Error>.Ok(move response);
     }
@@ -891,11 +1434,5 @@ impl HttpConnection {
     void close(HttpConnection* self) {
         if (self.use_tls) { transport_tls_close(&self.tls_state[0]); }
         self.stream.close();
-    }
-}
-
-impl Drop<HttpConnection> for HttpConnection {
-    void drop(HttpConnection* self) {
-        self.stream.drop();
     }
 }
