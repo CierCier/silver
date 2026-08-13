@@ -147,7 +147,12 @@ i32 run_verb_case(str verb, str body, str headers) {
     HttpClient client = HttpClient.new();
     String url = build_url(port, "/submit");
     Result<HttpResponse, Error> response_result;
-    if (verb == "POST") { response_result = client.post((str)url.data, body, headers); }
+    if (verb == "POST") {
+        // Go style: NewRequest + Do, custom headers via req.header().
+        HttpRequest req = HttpRequest.new("POST", (str)url.data, body);
+        req.header("X-Token", "abc");
+        response_result = client.do(&req);
+    }
     else if (verb == "PUT") { response_result = client.put((str)url.data, body); }
     else { response_result = client.head((str)url.data); }
     if (response_result.failed()) { thread_join(server_handle); return 8; }
@@ -203,6 +208,118 @@ i32 run_wire_case(str wire, i32 expected_status, str expected_body,
     if (expected_location != (str)0) {
         String loc = response.location();
         if (!loc.equals(expected_location)) { return 12; }
+    }
+    return 0;
+}
+
+/// Capture one request head into g_req_head; false on EOF or overflow.
+bool capture_head(TcpStream* stream) {
+    i64 hlen = 0;
+    u8 byte[1];
+    while (true) {
+        Result<i64, Error> r = stream.read(&byte[0], 1);
+        if (r.is_err() || r.value() == 0) { return false; }
+        g_req_head[hlen] = byte[0];
+        hlen = hlen + 1;
+        if (hlen >= 1023) { return false; }
+        if (hlen >= 4 && g_req_head[hlen - 4] == (u8)'\r'
+            && g_req_head[hlen - 3] == (u8)'\n'
+            && g_req_head[hlen - 2] == (u8)'\r'
+            && g_req_head[hlen - 1] == (u8)'\n') { break; }
+    }
+    g_req_head[hlen] = (u8)0;
+    return true;
+}
+
+/// Two-connection server for redirect cases: serve `g_job.wire` (the 3xx),
+/// then capture the follow-up request and serve `g_second_wire`. The second
+/// connection reads `g_second_body_len` body bytes (the rewritten request
+/// may drop the body).
+str g_second_wire;
+i64 g_second_body_len;
+void redirect_server_main(i64 unused) {
+    Result<i64, Error> a1 = g_listener.accept();
+    if (a1.failed()) { g_job.status = 6; return; }
+    TcpStream s1 = TcpStream.from_fd((i32)a1.value());
+    Result<i64, Error> w1 = s1.write((u8*)g_job.wire, strlen(g_job.wire));
+    if (w1.failed()) { g_job.status = 7; return; }
+    if (!capture_head(&s1)) { g_job.status = 10; return; }
+    s1.close();
+
+    Result<i64, Error> a2 = g_listener.accept();
+    if (a2.failed()) { g_job.status = 8; return; }
+    TcpStream s2 = TcpStream.from_fd((i32)a2.value());
+    if (!capture_head(&s2)) { g_job.status = 10; return; }
+    i64 done = 0;
+    while (done < g_second_body_len) {
+        Result<i64, Error> r = s2.read(&g_req_body[done], g_second_body_len - done);
+        if (r.is_err() || r.value() == 0) { g_job.status = 10; return; }
+        done = done + r.value();
+    }
+    Result<i64, Error> w2 = s2.write((u8*)g_second_wire, strlen(g_second_wire));
+    if (w2.failed()) { g_job.status = 9; return; }
+    s2.close();
+    g_job.status = 0;
+}
+
+/// Serve the same redirect `g_job.wire` three times (initial request plus
+/// two follow-ups), then exit.
+void redirect_loop_server_main(i64 unused) {
+    i32 i = 0;
+    while (i < 3) {
+        Result<i64, Error> a = g_listener.accept();
+        if (a.failed()) { g_job.status = 6; return; }
+        TcpStream s = TcpStream.from_fd((i32)a.value());
+        if (!capture_head(&s)) { g_job.status = 10; return; }
+        Result<i64, Error> w = s.write((u8*)g_job.wire, strlen(g_job.wire));
+        if (w.failed()) { g_job.status = 7; return; }
+        s.close();
+        i = i + 1;
+    }
+    g_job.status = 0;
+}
+
+/// Redirect case: `first_wire` is the 3xx response, `second_wire` the final
+/// response. After the round trip, verifies the follow-up request line
+/// (`expected_method` + `expected_target`) and captured body.
+i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
+                      str expected_method, str expected_target,
+                      str expected_second_body) {
+    u16 port = 0;
+    i32 r = bind_loopback(&g_listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    if (connect_result.failed()) { return 4; }
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    g_job.wire = first_wire;
+    g_second_wire = second_wire;
+    g_job.body_len = 0;
+    if (body != (str)0) { g_job.body_len = strlen(body); }
+    g_second_body_len = 0;
+    if (expected_second_body != (str)0) { g_second_body_len = strlen(expected_second_body); }
+    g_job.status = -1;
+    TaskRecord* server_handle = thread_spawn(redirect_server_main, 0);
+    if (server_handle == (TaskRecord*)0) { return 16; }
+
+    HttpClient client = HttpClient.new();
+    String url = build_url(port, "/start");
+    HttpRequest req = HttpRequest.new(method, (str)url.data, body);
+    Result<HttpResponse, Error> response_result = client.do(&req);
+    if (response_result.failed()) { thread_join(server_handle); return 8; }
+    HttpResponse response = response_result.unwrap();
+    if (response.status != 200) { thread_join(server_handle); return 9; }
+    if (!response.body.equals("hello")) { thread_join(server_handle); return 10; }
+    if (thread_join(server_handle) < 0) { return 16; }
+    if (g_job.status != 0) { return g_job.status; }
+
+    String head = String.from_str((str)&g_req_head[0]);
+    if (!head.starts_with(expected_method)) { return 11; }
+    if (head.find(expected_target) < 0) { return 12; }
+    if (g_second_body_len > 0
+        && memcmp(&g_req_body[0], (const void*)expected_second_body, g_second_body_len) != 0) {
+        return 13;
     }
     return 0;
 }
@@ -293,6 +410,98 @@ i32 run_get_public_case() {
         "HTTP/1.1 301 Moved Permanently\r\nLocation: http://example.com/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         301, "", "http://example.com/", "Moved Permanently"),
         "301 parsed with Location header");
+
+    test_start("302 followed");
+    assert_eq_i64(0, run_redirect_case(
+        "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n",
+        HTTP_OK_WIRE, "GET", (str)0, "GET", "/final", (str)0),
+        "302 followed to /final");
+
+    test_start("301 rewrites POST to GET");
+    assert_eq_i64(0, run_redirect_case(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n",
+        HTTP_OK_WIRE, "POST", "payload", "GET", "/final", (str)0),
+        "301 followed, POST rewritten to GET without body");
+
+    test_start("307 preserves POST and body");
+    assert_eq_i64(0, run_redirect_case(
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n",
+        HTTP_OK_WIRE, "POST", "payload", "POST", "/final", "payload"),
+        "307 followed, method and body preserved");
+
+    test_start("redirect limit");
+    // A 302 pointing back to /start: the client must stop after 2 follows.
+    u16 port = 0;
+    i32 r = bind_loopback(&g_listener, &port);
+    if (r != 0) { assert_true(false, "bind loopback"); }
+    else {
+        Result<SocketAddr, AddrError> connect_result =
+            SocketAddr.v4("127.0.0.1", port);
+        assert_true(!connect_result.failed(), "v4 addr");
+        SocketAddr connect_addr = connect_result.unwrap();
+        g_job.wire = "HTTP/1.1 302 Found\r\nLocation: /start\r\nContent-Length: 0\r\n\r\n";
+        g_job.body_len = 0;
+        g_second_body_len = 0;
+        g_job.status = -1;
+        TaskRecord* server_handle = thread_spawn(redirect_loop_server_main, 0);
+        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn server"); }
+        else {
+            HttpClient client = HttpClient.new();
+            client.set_max_redirects(2);
+            String url = build_url(port, "/start");
+            HttpRequest req = HttpRequest.new("GET", (str)url.data, (str)0);
+            Result<HttpResponse, Error> response_result = client.do(&req);
+            thread_join(server_handle);
+            assert_true(response_result.failed(), "redirect limit errors");
+            if (response_result.failed()) {
+                Error e = response_result.get_error();
+                assert_eq_i64(e.code, HTTP_ERR_REDIRECT, "HTTP_ERR_REDIRECT code");
+            }
+        }
+    }
+
+    test_start("response header and status text");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        200, "hello", (str)0, "OK"),
+        "200 with content-type parsed");
+    {
+        TcpListener listener;
+        u16 port2 = 0;
+        i32 r2 = bind_loopback(&listener, &port2);
+        if (r2 != 0) { assert_true(false, "bind loopback"); }
+        else {
+            Result<SocketAddr, AddrError> connect_result =
+                SocketAddr.v4("127.0.0.1", port2);
+            assert_true(!connect_result.failed(), "v4 addr");
+            SocketAddr connect_addr = connect_result.unwrap();
+            HttpClient client = HttpClient.new();
+            Result<HttpConnection, Error> connection_result =
+                client.connect(&connect_addr, HttpVersion.Http11);
+            assert_true(!connection_result.failed(), "connect");
+            HttpConnection connection = connection_result.unwrap();
+            Result<i64, Error> accept_result = listener.accept();
+            assert_true(!accept_result.failed(), "accept");
+            TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+            Result<i64, Error> server_write = server.write(
+                (u8*)"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                strlen("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"));
+            assert_true(!server_write.failed(), "server write");
+            HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/h", "fixture.test");
+            Result<HttpResponse, Error> response_result =
+                connection.send(&request, 65536, 1024);
+            assert_true(!response_result.failed(), "send");
+            HttpResponse response = response_result.unwrap();
+            String ct = response.get_header("Content-Type");
+            assert_true(ct.equals("text/plain"), "get_header Content-Type");
+            String cl = response.get_header("content-length");
+            assert_true(cl.equals("5"), "get_header case-insensitive");
+            String missing = response.get_header("X-Nope");
+            assert_eq_i64(missing.len, 0, "get_header absent is empty");
+            String text = response.status_text();
+            assert_true(text.equals("200 OK"), "status_text");
+        }
+    }
 
     test_start("client.get public API");
     assert_eq_i64(0, run_get_public_case(), "GET convenience against public API");

@@ -1,8 +1,10 @@
-// std/net/http.ag — controllable HTTP/1.0 and HTTP/1.1 client.
+// std/net/http.ag — HTTP/1.0 and HTTP/1.1 client modeled after Go's net/http.
 //
-// The API deliberately separates connection, request, and response state:
-// callers can reuse an HttpConnection, stream request bodies as raw bytes,
-// and inspect framing decisions without hiding the transport.
+// The familiar surface is HttpClient.Get/Post/Head/Do with HttpRequest.new
+// (Go's NewRequest), automatic redirect following (301/302/303 rewrite to
+// GET, 307/308 preserve), and a Response with status, reason, get_header,
+// and status_text. The lower layer (HttpConnection, request/response framing)
+// stays exposed for callers that need explicit connection reuse.
 import std.error;
 import std.fmt;
 import std.mem.drop;
@@ -18,10 +20,12 @@ const i64 HTTP_ERR_MALFORMED = -2;
 const i64 HTTP_ERR_LIMIT = -3;
 const i64 HTTP_ERR_CONNECT = -4;
 const i64 HTTP_ERR_DNS = -5;
+const i64 HTTP_ERR_REDIRECT = -6;
 
 const i64 HTTP_DEFAULT_MAX_HEADER = 65536;
 const i64 HTTP_DEFAULT_MAX_BODY = 16777216;
 const i64 HTTP_CHUNK_LINE_MAX = 8192;
+const i32 HTTP_DEFAULT_MAX_REDIRECTS = 10;
 
 enum HttpVersion {
     Http10 = 10;
@@ -36,6 +40,7 @@ struct HttpRequest {
     String headers;
     str body;
     bool close;
+    str url; // full URL for Go-style requests; null for manual requests
 }
 
 struct HttpResponse {
@@ -52,6 +57,7 @@ struct HttpResponse {
 struct HttpClient {
     i64 max_header_bytes;
     i64 max_body_bytes;
+    i32 max_redirects;
 }
 
 struct HttpConnection {
@@ -193,6 +199,66 @@ bool http_parse_url(str url, HttpUrl* out) {
     return true;
 }
 
+/// Resolve `location` against the absolute `base` URL (Go's
+/// Reference.ResolveReference for the common cases): absolute URLs pass
+/// through, "//host/path" reuses the base scheme, "/path" reuses the base
+/// authority. Path-relative and https locations are not resolvable here and
+/// yield an empty string (callers then return the response instead of
+/// following).
+String http_resolve_url(str base, str location) {
+    String result = String.new();
+    u8* loc = (u8*)location;
+    i64 loc_len = strlen(location);
+    if (loc_len >= 7 && http_equal_ci(loc, 0, 7, "http://")) {
+        result.push_str(location);
+        return move result;
+    }
+    u8* b = (u8*)base;
+    i64 base_len = strlen(base);
+    if (base_len < 7 || !http_equal_ci(b, 0, 7, "http://")) {
+        return move result;
+    }
+    if (loc_len >= 2 && loc[0] == (u8)'/' && loc[1] == (u8)'/') {
+        result.push_str("http:");
+        result.push_str(location);
+        return move result;
+    }
+    if (loc_len >= 1 && loc[0] == (u8)'/') {
+        i64 i = 7;
+        while (i < base_len && b[i] != (u8)'/') { i = i + 1; }
+        result.push_str("http://");
+        i64 j = 7;
+        while (j < i) { result.push(b[j]); j = j + 1; }
+        result.push_str(location);
+        return move result;
+    }
+    return move result;
+}
+
+/// Resolve `host` (IP literal or DNS name) and open a fresh connection.
+Result<HttpConnection, Error> http_open(str host, u16 port) {
+    u32 ip4 = 0;
+    i32 ip = 0;
+    if (inet_pton4(host, &ip4)) { ip = (i32)ip4; }
+    else { ip = dns_resolve(host); }
+    if (ip == 0) {
+        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_DNS, "DNS resolution failed"));
+    }
+    Result<SocketAddr, AddrError> addr_result = SocketAddr.v4_network((u32)ip, port);
+    if (addr_result.failed()) {
+        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed address"));
+    }
+    SocketAddr addr = addr_result.unwrap();
+    TcpStream stream = TcpStream.connect(&addr);
+    if (stream.invalid()) {
+        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed"));
+    }
+    HttpConnection connection;
+    connection.stream = move stream;
+    connection.version = HttpVersion.Http11;
+    return Result<HttpConnection, Error>.Ok(move connection);
+}
+
 /// Read one CRLF-terminated line into `line`, excluding the CRLF itself.
 /// Returns false on EOF, read error, or when the line exceeds `max_len`.
 bool http_read_line(TcpStream* stream, String* line, i64 max_len) {
@@ -216,6 +282,23 @@ bool http_read_line(TcpStream* stream, String* line, i64 max_len) {
 // --- Requests -------------------------------------------------------------
 
 impl HttpRequest {
+    /// Go's http.NewRequest: full URL, default HTTP/1.1, body optional.
+    /// The URL is parsed when the request is sent via HttpClient.do.
+    HttpRequest new(str method, str url, str body) {
+        HttpRequest request;
+        request.version = HttpVersion.Http11;
+        request.method = method;
+        request.url = url;
+        request.target = (str)0;
+        request.host = (str)0;
+        request.headers = String.new();
+        request.body = body;
+        request.close = true;
+        return move request;
+    }
+
+    /// Manual request: explicit version, request target, and Host header.
+    /// Sent via HttpClient.do with a fresh connection to port 80.
     HttpRequest new(HttpVersion version, str method, str target, str host) {
         HttpRequest request;
         request.version = version;
@@ -225,6 +308,7 @@ impl HttpRequest {
         request.headers = String.new();
         request.body = (str)0;
         request.close = true;
+        request.url = (str)0;
         return move request;
     }
 
@@ -431,6 +515,38 @@ impl HttpResponse {
         return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
     }
 
+    /// The value of `name` (case-insensitive) in the response headers, or
+    /// an empty string when absent. Mirrors Go's Header.Get.
+    String get_header(HttpResponse* self, str name) {
+        u8* data = self.headers.data;
+        i64 len = self.headers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end
+                && http_equal_ci(data, pos, colon, name)) {
+                i64 value_start = colon + 1;
+                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+                return self.headers.substr(value_start, end - value_start);
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        return String.new();
+    }
+
+    /// "200 OK"-style status text. Mirrors Go's Response.Status.
+    String status_text(HttpResponse* self) {
+        String text = String.new();
+        http_append_i64(&mut text, (i64)self.status);
+        text.push((u8)' ');
+        text.push_str((str)self.reason.data);
+        return move text;
+    }
+
     /// The Location header value (redirect target), or an empty string.
     String location(HttpResponse* self) {
         u8* data = self.headers.data;
@@ -482,12 +598,17 @@ impl HttpClient {
         HttpClient client;
         client.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
         client.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
+        client.max_redirects = HTTP_DEFAULT_MAX_REDIRECTS;
         return client;
     }
 
     void limits(&mut HttpClient self, i64 max_header, i64 max_body) {
         self.max_header_bytes = max_header;
         self.max_body_bytes = max_body;
+    }
+
+    void set_max_redirects(&mut HttpClient self, i32 limit) {
+        self.max_redirects = limit;
     }
 
     Result<HttpConnection, Error> connect(HttpClient* self, SocketAddr* addr, HttpVersion version) {
@@ -499,106 +620,161 @@ impl HttpClient {
         return Result<HttpConnection, Error>.Ok(move connection);
     }
 
-    /// Core path behind the get/post/put/delete/head/patch helpers: parse the
-    /// URL, resolve the host, connect, and send a single request. `body` is
-    /// the request body and `headers` a raw CRLF-terminated header block
-    /// ("Name: value\r\n..."); either may be null. Honors the client's
-    /// configured size limits.
+    /// One round trip: parse the URL, resolve the host, connect, send, and
+    /// read the response. `body` is the request body and `headers` a raw
+    /// CRLF-terminated header block ("Name: value\r\n..."); either may be
+    /// null. Honors the client's configured size limits.
     Result<HttpResponse, Error> request(HttpClient* self, str method, str url, str body, str headers) {
         HttpUrl parsed;
         if (!http_parse_url(url, &parsed)) {
-            return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed URL"));
         }
         str host = (str)&parsed.host[0];
-        u32 ip4 = 0;
-        i32 ip = 0;
-        if (inet_pton4(host, &ip4)) { ip = (i32)ip4; }
-        else { ip = dns_resolve(host); }
-        if (ip == 0) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_DNS, "DNS resolution failed")); }
-        Result<SocketAddr, AddrError> addr_result =
-            SocketAddr.v4_network((u32)ip, parsed.port);
-        if (addr_result.failed()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
-        SocketAddr addr = addr_result.unwrap();
-        Result<HttpConnection, Error> conn_result =
-            self.connect(&addr, HttpVersion.Http11);
-        if (conn_result.failed()) { return Result<HttpResponse, Error>.Err(conn_result.get_error()); }
-        HttpConnection conn = conn_result.unwrap();
+        Result<HttpConnection, Error> opened = http_open(host, parsed.port);
+        if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
+        HttpConnection conn = opened.unwrap();
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, (str)&parsed.host[0]);
         if (headers != (str)0) { req.headers.push_str(headers); }
         if (body != (str)0) { req.set_body(body); }
         return conn.send(&req, self.max_header_bytes, self.max_body_bytes);
     }
 
+    /// Go's Client.Do: performs `request`, following 301/302/303/307/308
+    /// redirects up to max_redirects (default 10). 301/302/303 switch to GET
+    /// and drop the body (HEAD stays HEAD); 307/308 preserve method and
+    /// body. Location resolves against the current URL (absolute,
+    /// protocol-relative, or root-relative); when it cannot be resolved
+    /// (e.g. https) the 3xx response is returned as-is. Manual requests
+    /// (built with the version/target/host constructor) are sent once to
+    /// port 80 without redirect handling.
+    Result<HttpResponse, Error> do(HttpClient* self, HttpRequest* request) {
+        if (request.url == (str)0) {
+            Result<HttpConnection, Error> opened = http_open(request.host, 80);
+            if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
+            HttpConnection conn = opened.unwrap();
+            return conn.send(request, self.max_header_bytes, self.max_body_bytes);
+        }
+        str url = request.url;
+        str method = request.method;
+        str body = request.body;
+        str headers = (str)request.headers.data;
+        i32 redirects = 0;
+        String next_url = String.new();
+        while (true) {
+            Result<HttpResponse, Error> r = self.request(method, url, body, headers);
+            if (r.failed()) { return r; }
+            HttpResponse response = r.unwrap();
+            bool follow = false;
+            bool redirect_status = response.status == (i32)HttpStatus.MovedPermanently
+                || response.status == (i32)HttpStatus.Found
+                || response.status == (i32)HttpStatus.SeeOther
+                || response.status == (i32)HttpStatus.TemporaryRedirect
+                || response.status == (i32)HttpStatus.PermanentRedirect;
+            if (redirect_status) {
+                String location = response.location();
+                if (location.len > 0) {
+                    if (redirects >= self.max_redirects) {
+                        return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+                    }
+                    next_url = http_resolve_url(url, (str)location.data);
+                    if (next_url.len > 0) { follow = true; }
+                }
+            }
+            if (!follow) { return Result<HttpResponse, Error>.Ok(move response); }
+            bool preserve = response.status == (i32)HttpStatus.TemporaryRedirect
+                || response.status == (i32)HttpStatus.PermanentRedirect;
+            if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
+            url = (str)next_url.data;
+            redirects = redirects + 1;
+            // The intermediate response drops at loop scope end; the next
+            // iteration sends the follow-up request.
+        }
+        // Unreachable — the loop above only exits via `return`.
+        return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+    }
+
     Result<HttpResponse, Error> get(HttpClient* self, str url) {
-        return self.request("GET", url, (str)0, (str)0);
+        HttpRequest req = HttpRequest.new("GET", url, (str)0);
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> get(HttpClient* self, str url, str body) {
-        return self.request("GET", url, body, (str)0);
+        HttpRequest req = HttpRequest.new("GET", url, body);
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> get(HttpClient* self, str url, str body, str headers) {
-        return self.request("GET", url, body, headers);
+        HttpRequest req = HttpRequest.new("GET", url, body);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> post(HttpClient* self, str url) {
-        return self.request("POST", url, (str)0, (str)0);
+        return self.post(url, (str)0, (str)0);
     }
 
-    Result<HttpResponse, Error> post(HttpClient* self, str url, str body) {
-        return self.request("POST", url, body, (str)0);
-    }
-
-    Result<HttpResponse, Error> post(HttpClient* self, str url, str body, str headers) {
-        return self.request("POST", url, body, headers);
+    /// Go's Client.Post: `content_type` is sent as the Content-Type header
+    /// (null omits it). Custom headers go through NewRequest + Do.
+    Result<HttpResponse, Error> post(HttpClient* self, str url, str content_type, str body) {
+        HttpRequest req = HttpRequest.new("POST", url, body);
+        if (content_type != (str)0) { req.header("Content-Type", content_type); }
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> put(HttpClient* self, str url) {
-        return self.request("PUT", url, (str)0, (str)0);
+        return self.put(url, (str)0, (str)0);
     }
 
     Result<HttpResponse, Error> put(HttpClient* self, str url, str body) {
-        return self.request("PUT", url, body, (str)0);
+        return self.put(url, body, (str)0);
     }
 
     Result<HttpResponse, Error> put(HttpClient* self, str url, str body, str headers) {
-        return self.request("PUT", url, body, headers);
+        HttpRequest req = HttpRequest.new("PUT", url, body);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> delete(HttpClient* self, str url) {
-        return self.request("DELETE", url, (str)0, (str)0);
+        return self.delete(url, (str)0, (str)0);
     }
 
     Result<HttpResponse, Error> delete(HttpClient* self, str url, str body) {
-        return self.request("DELETE", url, body, (str)0);
+        return self.delete(url, body, (str)0);
     }
 
     Result<HttpResponse, Error> delete(HttpClient* self, str url, str body, str headers) {
-        return self.request("DELETE", url, body, headers);
+        HttpRequest req = HttpRequest.new("DELETE", url, body);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> head(HttpClient* self, str url) {
-        return self.request("HEAD", url, (str)0, (str)0);
+        return self.head(url, (str)0, (str)0);
     }
 
     Result<HttpResponse, Error> head(HttpClient* self, str url, str body) {
-        return self.request("HEAD", url, body, (str)0);
+        return self.head(url, body, (str)0);
     }
 
     Result<HttpResponse, Error> head(HttpClient* self, str url, str body, str headers) {
-        return self.request("HEAD", url, body, headers);
+        HttpRequest req = HttpRequest.new("HEAD", url, body);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        return self.do(&req);
     }
 
     Result<HttpResponse, Error> patch(HttpClient* self, str url) {
-        return self.request("PATCH", url, (str)0, (str)0);
+        return self.patch(url, (str)0, (str)0);
     }
 
     Result<HttpResponse, Error> patch(HttpClient* self, str url, str body) {
-        return self.request("PATCH", url, body, (str)0);
+        return self.patch(url, body, (str)0);
     }
 
     Result<HttpResponse, Error> patch(HttpClient* self, str url, str body, str headers) {
-        return self.request("PATCH", url, body, headers);
+        HttpRequest req = HttpRequest.new("PATCH", url, body);
+        if (headers != (str)0) { req.headers.push_str(headers); }
+        return self.do(&req);
     }
 }
 

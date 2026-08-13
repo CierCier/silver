@@ -383,6 +383,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // types. A type match beats the instance/static ordering; when no
         // argument types can be proven (or none match), fall back to the
         // first arity match so untypable expressions keep resolving.
+        // A type receiver must select the static form (params == args); a
+        // value receiver the instance form (params == args + 1). Arity alone
+        // is ambiguous when a static method happens to take args + 1
+        // parameters (e.g. the HttpRequest.new overloads) — that would pick
+        // the instance form and emit the type name as a receiver value. An
+        // identifier that fails type resolution is a type name (mirrors
+        // receiver_owner_candidates); imported/unknown types stay static.
+        let receiver_is_type = match receiver.kind.as_ref() {
+            ast::ExpressionKind::TypeName(_) => true,
+            ast::ExpressionKind::Identifier(_) => self.resolve_receiver_type(receiver).is_none(),
+            _ => false,
+        };
         let mut instance_type: Option<(String, FunctionValue<'ctx>)> = None;
         let mut static_type: Option<(String, FunctionValue<'ctx>)> = None;
         let mut instance_fallback: Option<(String, FunctionValue<'ctx>)> = None;
@@ -400,21 +412,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .as_ref()
                 .map(|sig| sig.is_variadic)
                 .unwrap_or_else(|| function.get_type().is_var_arg());
-            if variadic || declared == arguments.len() + 1 {
-                if variadic || self.argument_types_match(signature.as_ref(), arguments, 1) {
-                    if instance_type.is_none() {
+            if variadic
+                || (receiver_is_type && declared == arguments.len())
+                || (!receiver_is_type && declared == arguments.len() + 1)
+            {
+                let offset = if receiver_is_type { 0 } else { 1 };
+                if variadic || self.argument_types_match(signature.as_ref(), arguments, offset) {
+                    if receiver_is_type {
+                        if static_type.is_none() {
+                            static_type = Some((name.clone(), function));
+                        }
+                    } else if instance_type.is_none() {
                         instance_type = Some((name.clone(), function));
+                    }
+                } else if receiver_is_type {
+                    if static_fallback.is_none() {
+                        static_fallback = Some((name.clone(), function));
                     }
                 } else if instance_fallback.is_none() {
                     instance_fallback = Some((name.clone(), function));
-                }
-            } else if variadic || declared == arguments.len() {
-                if variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
-                    if static_type.is_none() {
-                        static_type = Some((name.clone(), function));
-                    }
-                } else if static_fallback.is_none() {
-                    static_fallback = Some((name.clone(), function));
                 }
             }
         }
