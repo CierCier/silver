@@ -278,7 +278,7 @@ impl TypeChecker {
                         self.struct_defs.insert(
                             export.name.clone(),
                             StructDef {
-                                type_params: Vec::new(),
+                                type_params: export.type_params.clone(),
                                 fields,
                             },
                         );
@@ -325,7 +325,7 @@ impl TypeChecker {
                         EnumDef {
                             backing_type: backing_type.clone(),
                             variants,
-                            type_params: Vec::new(),
+                            type_params: export.type_params.clone(),
                         },
                     );
                     self.register_enum_layout(&export.name, &backing_type);

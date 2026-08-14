@@ -630,6 +630,22 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                 });
             }
             ast::ItemKind::Struct(s) => {
+                let type_params = s
+                    .generics
+                    .as_ref()
+                    .map(|generics| {
+                        generics
+                            .params
+                            .iter()
+                            .filter_map(|param| match param {
+                                ast::GenericParam::Type(type_param) => {
+                                    Some(type_param.name.name.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let fields = s
                     .fields
                     .iter()
@@ -657,7 +673,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                             .collect::<Vec<_>>()
                             .join(",")
                     ),
-                    type_params: Vec::new(),
+                    type_params,
                     link_name: None,
                     abi: None,
                     is_variadic: false,
