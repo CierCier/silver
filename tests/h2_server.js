@@ -8,7 +8,6 @@
 
 const http2 = require('http2');
 const fs = require('fs');
-
 function handler(stream, headers) {
     const path = headers[':path'];
     if (path === '/hello') {
@@ -24,6 +23,13 @@ function handler(stream, headers) {
             location: '/hello',
         });
         stream.end('');
+    } else if (path === '/echo') {
+        const chunks = [];
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('end', () => {
+            stream.respond({ ':status': 200, 'content-type': 'application/octet-stream' });
+            stream.end(Buffer.concat(chunks));
+        });
     } else {
         stream.respond({ ':status': 404 });
         stream.end('not found');

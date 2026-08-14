@@ -121,5 +121,21 @@ i32 main() {
     assert_eq_str("www.example.com", (str)hdr[3].value, "round-trip authority value");
     hpack_free_fields(&hdr[0], n);
 
+    // Huffman encoder: "www.example.com" must match the C.4.1 bytes, and
+    // round-trip back through the decoder.
+    u8 huff[64];
+    i64 huff_len = hpack_huff_encode((u8*)"www.example.com", 15, &huff[0], 64);
+    assert_eq_i64(12, huff_len, "huffman encoded length");
+    u8 expect[12] = { 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff };
+    i64 k = 0;
+    while (k < 12) {
+        assert_eq_i64((i64)expect[k], (i64)huff[k], "huffman byte matches");
+        k += 1;
+    }
+    u8 dec[64];
+    i64 dlen = hpack_huff_decode(&huff[0], 12, &dec[0], 64);
+    assert_eq_i64(15, dlen, "huffman round-trip length");
+    assert_true(memcmp((const void*)&dec[0], (const void*)"www.example.com", 15) == 0, "huffman round-trip");
+
     return done();
 }

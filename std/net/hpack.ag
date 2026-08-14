@@ -140,6 +140,35 @@ i64 hpack_int_decode(u8* data, i64* pos, i64 len, i64 prefix_bits) {
     return value;
 }
 
+
+/// Huffman-encode `len` octets into `out` (capacity `out_cap`). Returns the
+/// number of octets written, or -1 on overflow. The result is padded to the
+/// next octet boundary with the EOS prefix (all ones), per RFC 7541 §5.2.
+i64 hpack_huff_encode(u8* src, i64 len, u8* out, i64 out_cap) {
+    i64 acc = 0;
+    i64 nbits = 0;
+    i64 out_pos = 0;
+    i64 i = 0;
+    while (i < len) {
+        i64 sym = (i64)src[i];
+        acc = (acc << (i64)hpack_huff_lens[sym]) | (i64)hpack_huff_codes[sym];
+        nbits += (i64)hpack_huff_lens[sym];
+        while (nbits >= 8) {
+            if (out_pos >= out_cap) { return -1; }
+            nbits -= 8;
+            out[out_pos] = (u8)((acc >> nbits) & 0xFF);
+            out_pos += 1;
+            acc = acc & ((1 << nbits) - 1);
+        }
+        i += 1;
+    }
+    if (nbits > 0) {
+        if (out_pos >= out_cap) { return -1; }
+        out[out_pos] = (u8)((acc << (8 - nbits)) | ((1 << (8 - nbits)) - 1));
+        out_pos += 1;
+    }
+    return out_pos;
+}
 /// Encode `value` with `prefix_bits` prefix bits, merging `prefix` into the
 /// first octet. Returns the new position, or -1 on buffer exhaustion.
 i64 hpack_int_encode(u8* out, i64 pos, i64 cap, i64 value, i64 prefix_bits, u8 prefix) {
@@ -390,6 +419,40 @@ i64 hpack_encode(HpackField* fields, i64 n, u8* out, i64 cap) {
         if (p < 0) { return -1; }
         pos = p;
         p = hpack_string_encode(out, pos, cap, fields[i].value, fields[i].value_len);
+        if (p < 0) { return -1; }
+        pos = p;
+        i += 1;
+    }
+    return pos;
+}
+
+/// Encode a Huffman-coded string literal (RFC 7541 §5.2). Returns the new
+/// position, or -1 on overflow.
+i64 hpack_string_encode_huff(u8* out, i64 pos, i64 cap, u8* s, i64 slen) {
+    u8 scratch[1024];
+    if (slen > 1024) { return -1; }
+    i64 hlen = hpack_huff_encode(s, slen, &scratch[0], 1024);
+    if (hlen < 0) { return -1; }
+    i64 p = hpack_int_encode(out, pos, cap, hlen, 7, (u8)0x80);
+    if (p < 0) { return -1; }
+    if (p + hlen > cap) { return -1; }
+    silver_rt_memcpy(&out[p], &scratch[0], hlen);
+    return p + hlen;
+}
+
+/// Encode `n` header fields as literal-without-indexing with Huffman-coded
+/// names and values. Returns bytes written, or -1 on overflow.
+i64 hpack_encode_huff(HpackField* fields, i64 n, u8* out, i64 cap) {
+    i64 pos = 0;
+    i64 i = 0;
+    while (i < n) {
+        if (pos + 1 > cap) { return -1; }
+        out[pos] = (u8)0x00; // literal without indexing, index 0 (literal name)
+        pos += 1;
+        i64 p = hpack_string_encode_huff(out, pos, cap, fields[i].name, fields[i].name_len);
+        if (p < 0) { return -1; }
+        pos = p;
+        p = hpack_string_encode_huff(out, pos, cap, fields[i].value, fields[i].value_len);
         if (p < 0) { return -1; }
         pos = p;
         i += 1;

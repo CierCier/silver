@@ -312,8 +312,8 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
 /// Perform one HTTP/2 request on an established connection. The stream id is
 /// allocated from `c`. `extra`/`n_extra` are optional additional header
 /// fields (borrowed; not freed). Returns 0 or -1.
-i64 h2_request(H2Connection* c, str method, str scheme, str authority, str path,
-               HpackField* extra, i64 n_extra, H2Response* out) {
+i64 h2_request_body(H2Connection* c, str method, str scheme, str authority, str path,
+                    HpackField* extra, i64 n_extra, u8* body, i64 body_len, H2Response* out) {
     HpackField req[16];
     i64 nreq = 0;
     req[0].name = (u8*)":method";   req[0].name_len = 7;
@@ -338,11 +338,29 @@ i64 h2_request(H2Connection* c, str method, str scheme, str authority, str path,
 
     i64 sid = c.next_stream_id;
     c.next_stream_id += 2;
-    if (h2_send_frame(c, H2_HEADERS, H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
-                      sid, &hpack_buf[0], hlen) != 0) {
+    i64 hflags = H2_FLAG_END_HEADERS;
+    if (body_len == 0) { hflags = hflags | H2_FLAG_END_STREAM; }
+    if (h2_send_frame(c, H2_HEADERS, hflags, sid, &hpack_buf[0], hlen) != 0) {
         return -1;
     }
+    i64 sent = 0;
+    while (sent < body_len) {
+        i64 chunk = body_len - sent;
+        if (chunk > c.peer_max_frame_size) { chunk = c.peer_max_frame_size; }
+        i64 dflags = 0;
+        if (sent + chunk >= body_len) { dflags = H2_FLAG_END_STREAM; }
+        if (h2_send_frame(c, H2_DATA, dflags, sid, &body[sent], chunk) != 0) {
+            return -1;
+        }
+        sent += chunk;
+    }
     return h2_read_response(c, sid, out);
+}
+
+i64 h2_request(H2Connection* c, str method, str scheme, str authority, str path,
+               HpackField* extra, i64 n_extra, H2Response* out) {
+    return h2_request_body(c, method, scheme, authority, path, extra, n_extra,
+                           (u8*)0, 0, out);
 }
 
 /// Convenience: h2c/ALPN single GET over a connected transport. Initializes

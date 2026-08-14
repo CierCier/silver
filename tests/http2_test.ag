@@ -77,5 +77,23 @@ i32 main() {
     free(resp2.body);
     hpack_free_fields(&resp2.headers[0], resp2.header_count);
 
+    // POST with a body (DATA frame), echoed by the server
+    test_start("http2: h2c POST echo");
+    HpackField extra[2];
+    extra[0].name = (u8*)"content-type";   extra[0].name_len = 12;
+    extra[0].value = (u8*)"text/plain";    extra[0].value_len = 10;
+    extra[1].name = (u8*)"content-length"; extra[1].name_len = 14;
+    extra[1].value = (u8*)"10";            extra[1].value_len = 2;
+    u8* body = (u8*)"hello post";
+    H2Response resp3;
+    rc = h2_request_body(&c, "POST", "http", "127.0.0.1:18444", "/echo",
+                         &extra[0], 2, body, 10, &resp3);
+    assert_eq_i64(0, rc, "POST succeeded");
+    assert_eq_i64(200, resp3.status, "POST status 200");
+    assert_eq_i64(10, resp3.body_len, "echo length");
+    assert_true(memcmp((const void*)resp3.body, (const void*)"hello post", 10) == 0, "echo body");
+    free(resp3.body);
+    hpack_free_fields(&resp3.headers[0], resp3.header_count);
+
     return done();
 }
