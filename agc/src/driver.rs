@@ -774,6 +774,7 @@ pub fn run(cli: Cli) {
                 let base_dir = input.parent();
                 profiler::begin_phase("import lowering");
                 let import_lowering = match parser::FileImportResolverHook::new(&loader)
+                    .with_entry_import(!matches!(plan.emit, EmitKind::Module))
                     .lower_program_imports(&mut ast, base_dir, Some(input))
                 {
                     Ok(result) => result,

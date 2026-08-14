@@ -8,7 +8,7 @@ use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x03";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x04"; // v3 changed function signature keys to fn(...) -> ret
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -167,7 +167,13 @@ impl ModuleArtifact {
         transitive_deps: Vec<String>,
         native_libs: Vec<String>,
     ) -> Self {
-        let exports = collect_exports(program);
+        // Only the library's own items are API. Imported modules are inlined
+        // into the program before this point; their items carry their own
+        // source file ids, so filtering on the source file keeps the exports
+        // to what the library actually declares (generated/synthetic items
+        // with file id 0 are excluded too).
+        let lib_file = crate::lexer::register_source(&source_path, source_text);
+        let exports = collect_exports(program, lib_file);
         Self {
             module_name,
             module_path,
@@ -529,10 +535,13 @@ fn collect_module_dependencies(program: &ast::Program) -> Vec<String> {
     deps
 }
 
-fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
+fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
     let mut exports = Vec::new();
     let type_ctx = TypeContext::default();
     for item in &program.items {
+        if item.span.file != lib_file {
+            continue;
+        }
         if matches!(item.visibility, ast::Visibility::Private) {
             continue;
         }
@@ -569,7 +578,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
-                    signature: format!("{ret}({})", params.join(",")),
+                    signature: format!("fn({}) -> {ret}", params.join(",")),
                     type_params,
                     link_name: Some(
                         link_name_attr
@@ -603,7 +612,7 @@ fn collect_exports(program: &ast::Program) -> Vec<ModuleExport> {
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
-                    signature: format!("{ret}({})", params.join(",")),
+                    signature: format!("fn({}) -> {ret}", params.join(",")),
                     type_params: Vec::new(),
                     link_name: Some(
                         link_name_attr
@@ -1141,7 +1150,7 @@ mod tests {
                 ModuleExport {
                     kind: ExportKind::Function,
                     name: "print".to_string(),
-                    signature: "unit(str)".to_string(),
+                    signature: "fn(str) -> unit".to_string(),
                     type_params: vec!["T".to_string()],
                     link_name: Some("silver_print".to_string()),
                     abi: Some(ModuleAbi::Silver),

@@ -27,6 +27,10 @@ pub struct FileImportResolverHook<'a> {
     seen_files: HashSet<PathBuf>,
     module_imports: Vec<(String, ModuleArtifact)>,
     file_cache: Option<&'a Mutex<FileItemCache>>,
+    /// Whether the default `std.sys.entry` import (the `_start` entry point)
+    /// is injected. Libraries emitted as modules have no entry point of
+    /// their own and must not define the runtime; disable for --emit=module.
+    include_entry_import: bool,
 }
 
 // (ImportAliasPlan removed — import guards and aliases not supported)
@@ -38,6 +42,7 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: None,
+            include_entry_import: true,
         }
     }
 
@@ -48,7 +53,15 @@ impl<'a> FileImportResolverHook<'a> {
             seen_files: HashSet::default(),
             module_imports: Vec::new(),
             file_cache: Some(file_cache),
+            include_entry_import: true,
         }
+    }
+
+    /// Disable the automatic `std.sys.entry` import (used when emitting a
+    /// library module, which has no entry point).
+    pub fn with_entry_import(mut self, include: bool) -> Self {
+        self.include_entry_import = include;
+        self
     }
 
     pub fn lower_program_imports(
@@ -65,30 +78,32 @@ impl<'a> FileImportResolverHook<'a> {
         // the `_start` entry point. Silver never links libc/crt0, so without
         // it no executable would have an entry symbol. `seen_modules` dedupes
         // this against an explicit `import std.sys.entry;` or `import std.sys;`.
-        program.items.insert(
-            0,
-            ast::Item {
-                kind: ast::ItemKind::Import(ast::ImportItem {
-                    path: vec![
-                        ast::Identifier {
-                            name: "std".to_string(),
-                            span: lexer::Span::default(),
-                        },
-                        ast::Identifier {
-                            name: "sys".to_string(),
-                            span: lexer::Span::default(),
-                        },
-                        ast::Identifier {
-                            name: "entry".to_string(),
-                            span: lexer::Span::default(),
-                        },
-                    ],
-                }),
-                span: lexer::Span::default(),
-                visibility: ast::Visibility::Private,
-                attributes: Vec::new(),
-            },
-        );
+        if self.include_entry_import {
+            program.items.insert(
+                0,
+                ast::Item {
+                    kind: ast::ItemKind::Import(ast::ImportItem {
+                        path: vec![
+                            ast::Identifier {
+                                name: "std".to_string(),
+                                span: lexer::Span::default(),
+                            },
+                            ast::Identifier {
+                                name: "sys".to_string(),
+                                span: lexer::Span::default(),
+                            },
+                            ast::Identifier {
+                                name: "entry".to_string(),
+                                span: lexer::Span::default(),
+                            },
+                        ],
+                    }),
+                    span: lexer::Span::default(),
+                    visibility: ast::Visibility::Private,
+                    attributes: Vec::new(),
+                },
+            );
+        }
 
         // Auto-import: bare enum constructors (`Some`/`None` for Optional,
         // `Ok`/`Err` for Result) resolve via typeck's expected-type inference

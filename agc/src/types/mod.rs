@@ -543,7 +543,7 @@ impl Type {
                     .map(|inner| inner.canonical_key())
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{}({})", return_type.canonical_key(), args)
+                format!("fn({args}) -> {}", return_type.canonical_key())
             }
             Type::Unknown => "unknown".to_string(),
         }
@@ -791,6 +791,7 @@ impl<'a> TypeParser<'a> {
         }
         if self.consume_str("fn(") {
             let params = self.parse_type_list(b')')?;
+            self.skip_ws();
             self.expect_str("->")?;
             let return_type = self.parse_type()?;
             return Ok(Type::Function {

@@ -127,6 +127,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             "__silver_leak_check_enabled",
         );
+        // Private (not external): the flag is a compile-time constant read by
+        // whichever object contains the allocator. External linkage collides
+        // when a library module object is linked against a consumer object
+        // that also declares it.
+        global.set_linkage(inkwell::module::Linkage::Private);
         global.set_constant(true);
         let initializer = self
             .context
