@@ -1,0 +1,398 @@
+// std/net/hpack.ag — HPACK (RFC 7541) header compression codec.
+//
+// Provides the HTTP/2 HEADERS codec: Huffman string decoding (Appendix B;
+// the encoder emits literal strings without Huffman, always valid), integer
+// encoding/decoding with N-bit prefixes, header-block decoding (indexed,
+// literal +/- indexing, never-indexed, size update) against the static +
+// dynamic tables, and minimal literal-without-indexing encoding.
+//
+// Ownership: decoded name/value octets are malloc'd, null-terminated, and
+// length-tracked (embedded NULs survive). The caller frees fields with
+// hpack_free_field / hpack_free_fields. The dynamic table owns its entries
+// and frees them on eviction/clear. The Huffman + static tables live in
+// std/net/hpack_table.ag (generated from the RFC — do not edit by hand).
+
+import std.mem.alloc;
+import std.mem.memory;
+import std.net.hpack_table;
+
+const i64 HPACK_ENTRY_OVERHEAD = 32;
+const i64 HPACK_MAX_DYN_ENTRIES = 256;
+const i64 HPACK_STATIC_COUNT = 61;
+
+// --- Header field ---------------------------------------------------------
+
+struct HpackField {
+    u8* name;      // malloc'd, null-terminated; name_len octets
+    i64 name_len;
+    u8* value;     // malloc'd, null-terminated; value_len octets
+    i64 value_len;
+}
+
+// --- Dynamic table state --------------------------------------------------
+
+struct HpackDecoder {
+    HpackField table[256]; // newest first (index 0); see HPACK_MAX_DYN_ENTRIES
+    i64 count;
+    i64 size;
+    i64 max_size;
+}
+
+// --- Primitive helpers ----------------------------------------------------
+
+/// Copy `len` octets from `src` into a malloc'd, null-terminated buffer.
+u8* hpack_dup(u8* src, i64 len) {
+    u8* p = (u8*)malloc(len + 1);
+    if (len > 0) { silver_rt_memcpy(p, src, len); }
+    p[len] = (u8)0;
+    return p;
+}
+
+/// Free one field's buffers (idempotent).
+void hpack_free_field(HpackField* f) {
+    if (f.name != (u8*)0) { free(f.name); f.name = (u8*)0; }
+    if (f.value != (u8*)0) { free(f.value); f.value = (u8*)0; }
+    f.name_len = 0;
+    f.value_len = 0;
+}
+
+/// Deep-copy `src` into `dst` (separate malloc'd buffers).
+void hpack_copy_field(HpackField* dst, HpackField* src) {
+    dst.name = hpack_dup(src.name, src.name_len);
+    dst.name_len = src.name_len;
+    dst.value = hpack_dup(src.value, src.value_len);
+    dst.value_len = src.value_len;
+}
+
+/// Initialize a decoder (dynamic table empty; default 4096-byte max).
+void hpack_init(HpackDecoder* d) {
+    d.count = 0;
+    d.size = 0;
+    d.max_size = 4096;
+}
+
+// --- Huffman decoding (RFC 7541 §5.2, Appendix B) ------------------------
+
+/// Decode a Huffman-coded byte string into `out` (capacity `out_cap`).
+/// Returns the decoded length, or -1 on error (EOS symbol, malformed, or
+/// output overflow). Trailing all-ones padding is accepted and ignored.
+i64 hpack_huff_decode(u8* src, i64 src_len, u8* out, i64 out_cap) {
+    i64 src_pos = 0;
+    i64 out_pos = 0;
+    i64 acc = 0;   // accumulated bits, MSB-aligned
+    i64 nbits = 0; // number of valid bits in acc
+    while (true) {
+        while (nbits < 30 && src_pos < src_len) {
+            acc = (acc << 8) | (i64)src[src_pos];
+            src_pos += 1;
+            nbits += 8;
+        }
+        if (nbits == 0) { break; }
+        i64 found = -1;
+        i64 found_len = 0;
+        i64 i = 0;
+        while (i <= 256) {
+            i64 L = (i64)hpack_huff_lens[i];
+            if (L <= nbits) {
+                i64 top = acc >> (nbits - L);
+                if (top == (i64)hpack_huff_codes[i]) {
+                    found = i;
+                    found_len = L;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if (found == 256) { return -1; } // EOS must not appear in a literal
+        if (found < 0) {
+            // No code matched: the only valid remainder is all-ones padding.
+            if (acc == ((1 << nbits) - 1)) { break; }
+            return -1;
+        }
+        if (out_pos >= out_cap) { return -1; }
+        out[out_pos] = (u8)found;
+        out_pos += 1;
+        acc = acc & ((1 << (nbits - found_len)) - 1);
+        nbits -= found_len;
+    }
+    return out_pos;
+}
+
+// --- Integer representation (RFC 7541 §5.1) ------------------------------
+
+/// Decode an integer with `prefix_bits` prefix bits. Advances `*pos`.
+/// Returns the value, or -1 on truncation.
+i64 hpack_int_decode(u8* data, i64* pos, i64 len, i64 prefix_bits) {
+    if (*pos >= len) { return -1; }
+    i64 max_prefix = (1 << prefix_bits) - 1;
+    i64 value = (i64)data[*pos] & max_prefix;
+    *pos += 1;
+    if (value < max_prefix) { return value; }
+    i64 shift = 0;
+    while (true) {
+        if (*pos >= len) { return -1; }
+        i64 b = (i64)data[*pos];
+        *pos += 1;
+        value += (b & 0x7F) << shift;
+        if ((b & 0x80) == 0) { break; }
+        shift += 7;
+    }
+    return value;
+}
+
+/// Encode `value` with `prefix_bits` prefix bits, merging `prefix` into the
+/// first octet. Returns the new position, or -1 on buffer exhaustion.
+i64 hpack_int_encode(u8* out, i64 pos, i64 cap, i64 value, i64 prefix_bits, u8 prefix) {
+    i64 max_prefix = (1 << prefix_bits) - 1;
+    if (value < max_prefix) {
+        if (pos + 1 > cap) { return -1; }
+        out[pos] = prefix | (u8)value;
+        return pos + 1;
+    }
+    if (pos + 1 > cap) { return -1; }
+    out[pos] = prefix | (u8)max_prefix;
+    pos += 1;
+    value -= max_prefix;
+    while (value >= 128) {
+        if (pos + 1 > cap) { return -1; }
+        out[pos] = (u8)((value & 0x7F) | 0x80);
+        pos += 1;
+        value = value >> 7;
+    }
+    if (pos + 1 > cap) { return -1; }
+    out[pos] = (u8)value;
+    return pos + 1;
+}
+
+// --- String literal (RFC 7541 §5.2) --------------------------------------
+
+/// Decode a string literal into a malloc'd buffer. Returns 0 on success
+/// (sets *out_ptr/*out_len) or -1 on error. Handles Huffman + raw.
+i64 hpack_string_decode(u8* data, i64* pos, i64 len, u8** out_ptr, i64* out_len) {
+    if (*pos >= len) { return -1; }
+    u8 first = data[*pos];
+    *pos += 1;
+    bool huffman = (first & 0x80) != 0;
+    i64 slen = (i64)(first & 0x7F);
+    if (slen == 0x7F) {
+        i64 shift = 0;
+        while (true) {
+            if (*pos >= len) { return -1; }
+            u8 b = data[*pos];
+            *pos += 1;
+            slen += ((i64)(b & 0x7F)) << shift;
+            if ((b & 0x80) == 0) { break; }
+            shift += 7;
+        }
+    }
+    if (slen < 0 || *pos + slen > len) { return -1; }
+    if (huffman) {
+        u8* buf = (u8*)malloc(slen * 2 + 1);
+        i64 dlen = hpack_huff_decode(&data[*pos], slen, buf, slen * 2);
+        if (dlen < 0) { free(buf); return -1; }
+        buf[dlen] = (u8)0;
+        *out_ptr = buf;
+        *out_len = dlen;
+    } else {
+        u8* buf = (u8*)malloc(slen + 1);
+        if (slen > 0) { silver_rt_memcpy(buf, &data[*pos], slen); }
+        buf[slen] = (u8)0;
+        *out_ptr = buf;
+        *out_len = slen;
+    }
+    *pos += slen;
+    return 0;
+}
+
+/// Encode a raw (non-Huffman) string literal. Returns new position, or -1.
+i64 hpack_string_encode(u8* out, i64 pos, i64 cap, u8* s, i64 slen) {
+    i64 p = hpack_int_encode(out, pos, cap, slen, 7, (u8)0);
+    if (p < 0) { return -1; }
+    if (p + slen > cap) { return -1; }
+    if (slen > 0) { silver_rt_memcpy(&out[p], s, slen); }
+    return p + slen;
+}
+
+// --- Dynamic table (RFC 7541 §4) -----------------------------------------
+
+/// Remove and free the oldest (last) dynamic table entry.
+void hpack_evict_last(HpackDecoder* d) {
+    if (d.count <= 0) { return; }
+    HpackField* e = &d.table[d.count - 1];
+    d.size -= e.name_len + e.value_len + HPACK_ENTRY_OVERHEAD;
+    hpack_free_field(e);
+    d.count -= 1;
+}
+
+/// Free every dynamic table entry (keeps max_size).
+void hpack_clear_table(HpackDecoder* d) {
+    while (d.count > 0) { hpack_evict_last(d); }
+    d.size = 0;
+}
+
+/// Set the dynamic table size limit, evicting to fit (RFC 7541 §4.2).
+void hpack_set_max_size(HpackDecoder* d, i64 new_size) {
+    d.max_size = new_size;
+    while (d.count > 0 && d.size > new_size) { hpack_evict_last(d); }
+}
+
+/// Insert a field at the front of the dynamic table, taking ownership of
+/// `f`'s buffers. Evicts from the tail to respect max_size.
+void hpack_insert(HpackDecoder* d, HpackField* f) {
+    i64 entry_size = f.name_len + f.value_len + HPACK_ENTRY_OVERHEAD;
+    if (entry_size > d.max_size) {
+        hpack_clear_table(d);
+        return;
+    }
+    while (d.count > 0 && d.size + entry_size > d.max_size) {
+        hpack_evict_last(d);
+    }
+    if (d.count >= HPACK_MAX_DYN_ENTRIES) { hpack_evict_last(d); }
+    i64 i = d.count;
+    while (i > 0) {
+        d.table[i] = d.table[i - 1];
+        i -= 1;
+    }
+    d.table[0] = *f;
+    d.count += 1;
+    d.size += entry_size;
+}
+
+/// Fill `out` with a malloc'd copy of the header field at HPACK `idx`
+/// (static table 1..61, then dynamic table). Returns false on bad index.
+bool hpack_resolve(HpackDecoder* d, i64 idx, HpackField* out) {
+    if (idx >= 1 && idx <= HPACK_STATIC_COUNT) {
+        str name = hpack_static_names[idx];
+        str value = hpack_static_values[idx];
+        i64 nl = strlen(name);
+        i64 vl = strlen(value);
+        out.name = hpack_dup((u8*)name, nl);
+        out.name_len = nl;
+        out.value = hpack_dup((u8*)value, vl);
+        out.value_len = vl;
+        return true;
+    }
+    i64 di = idx - (HPACK_STATIC_COUNT + 1);
+    if (di >= 0 && di < d.count) {
+        HpackField* e = &d.table[di];
+        out.name = hpack_dup(e.name, e.name_len);
+        out.name_len = e.name_len;
+        out.value = hpack_dup(e.value, e.value_len);
+        out.value_len = e.value_len;
+        return true;
+    }
+    return false;
+}
+
+/// Like hpack_resolve but only the name (value left null for the caller).
+bool hpack_resolve_name(HpackDecoder* d, i64 idx, HpackField* out) {
+    out.value = (u8*)0;
+    out.value_len = 0;
+    if (idx >= 1 && idx <= HPACK_STATIC_COUNT) {
+        str name = hpack_static_names[idx];
+        i64 nl = strlen(name);
+        out.name = hpack_dup((u8*)name, nl);
+        out.name_len = nl;
+        return true;
+    }
+    i64 di = idx - (HPACK_STATIC_COUNT + 1);
+    if (di >= 0 && di < d.count) {
+        HpackField* e = &d.table[di];
+        out.name = hpack_dup(e.name, e.name_len);
+        out.name_len = e.name_len;
+        return true;
+    }
+    return false;
+}
+
+// --- Header block (RFC 7541 §6) ------------------------------------------
+
+/// Decode a header block into caller-provided `out` (capacity `out_cap`).
+/// Returns the number of fields decoded, or -1 on error. On error the caller
+/// must still free any fields already written to `out`.
+i64 hpack_decode(HpackDecoder* d, u8* data, i64 len, HpackField* out, i64 out_cap) {
+    i64 pos = 0;
+    i64 count = 0;
+    while (pos < len) {
+        if (count >= out_cap) { return -1; }
+        i64 b = (i64)data[pos];
+        if ((b & 0x80) != 0) {
+            // Indexed header field: 1xxxxxxx (7-bit prefix).
+            i64 idx = hpack_int_decode(data, &pos, len, 7);
+            if (idx <= 0) { return -1; }
+            if (!hpack_resolve(d, idx, &out[count])) { return -1; }
+            count += 1;
+        } else if ((b & 0xC0) == 0x40) {
+            // Literal with incremental indexing: 01xxxxxx (6-bit prefix).
+            i64 idx = hpack_int_decode(data, &pos, len, 6);
+            if (idx < 0) { return -1; }
+            HpackField f;
+            f.name = (u8*)0; f.name_len = 0; f.value = (u8*)0; f.value_len = 0;
+            if (idx == 0) {
+                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { return -1; }
+            } else {
+                if (!hpack_resolve_name(d, idx, &f)) { return -1; }
+            }
+            if (hpack_string_decode(data, &pos, len, &f.value, &f.value_len) != 0) {
+                hpack_free_field(&f);
+                return -1;
+            }
+            hpack_copy_field(&out[count], &f); // caller's copy
+            hpack_insert(d, &f);               // table takes f's buffers
+            count += 1;
+        } else if ((b & 0xE0) == 0x20) {
+            // Dynamic table size update: 001xxxxx (5-bit prefix).
+            i64 new_size = hpack_int_decode(data, &pos, len, 5);
+            if (new_size < 0) { return -1; }
+            hpack_set_max_size(d, new_size);
+        } else {
+            // Literal without indexing (0000) or never indexed (0001):
+            // 4-bit prefix, never-indexed flag in bit 4.
+            i64 idx = hpack_int_decode(data, &pos, len, 4);
+            if (idx < 0) { return -1; }
+            HpackField f;
+            f.name = (u8*)0; f.name_len = 0; f.value = (u8*)0; f.value_len = 0;
+            if (idx == 0) {
+                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { return -1; }
+            } else {
+                if (!hpack_resolve_name(d, idx, &f)) { return -1; }
+            }
+            if (hpack_string_decode(data, &pos, len, &f.value, &f.value_len) != 0) {
+                hpack_free_field(&f);
+                return -1;
+            }
+            out[count] = f; // move ownership to caller
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// Free every field written into `fields[0..count)`.
+void hpack_free_fields(HpackField* fields, i64 count) {
+    i64 i = 0;
+    while (i < count) {
+        hpack_free_field(&fields[i]);
+        i += 1;
+    }
+}
+
+/// Encode `n` header fields as literal-without-indexing (raw strings, no
+/// Huffman). Returns the number of bytes written, or -1 on overflow.
+i64 hpack_encode(HpackField* fields, i64 n, u8* out, i64 cap) {
+    i64 pos = 0;
+    i64 i = 0;
+    while (i < n) {
+        if (pos + 1 > cap) { return -1; }
+        out[pos] = (u8)0x00; // literal without indexing, index 0 (literal name)
+        pos += 1;
+        i64 p = hpack_string_encode(out, pos, cap, fields[i].name, fields[i].name_len);
+        if (p < 0) { return -1; }
+        pos = p;
+        p = hpack_string_encode(out, pos, cap, fields[i].value, fields[i].value_len);
+        if (p < 0) { return -1; }
+        pos = p;
+        i += 1;
+    }
+    return pos;
+}

@@ -449,6 +449,16 @@ impl PRT_Parser {
         }
 
         if let Some(Token::Identifier(_)) = tokens.get(index + 1).map(|next| &next.kind) {
+            // `Name ident [ ... ]` — array declaration whose element type is
+            // not yet in known_type_names (e.g. a struct inlined from an
+            // import). A bare `a b[c]` is not a valid Silver expression
+            // statement, so this shape is unambiguous.
+            if matches!(
+                tokens.get(index + 2).map(|next| &next.kind),
+                Some(Token::LeftBracket)
+            ) {
+                return true;
+            }
             if let Some(Token::Assign | Token::Semicolon | Token::Comma) =
                 tokens.get(index + 2).map(|next| &next.kind)
             {

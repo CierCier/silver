@@ -1,0 +1,125 @@
+// tests/hpack_test.ag — HPACK golden vectors (RFC 7541 Appendix C).
+//
+// Decodes the C.3/C.4 request and C.5/C.6 response examples (raw and
+// Huffman), checks the C.1 integer examples, and round-trips a request
+// through the encoder back into the decoder.
+
+import std.net.hpack;
+import std.sys.entry;
+import std.test;
+
+i32 main() {
+    HpackDecoder d;
+    HpackField hdr[16];
+    i64 n = 0;
+
+    // C.3.1 first request (no Huffman)
+    u8 c31[20] = {
+        0x82, 0x86, 0x84, 0x41, 0x0f, 0x77, 0x77, 0x77, 0x2e, 0x65, 0x78, 0x61,
+        0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d
+    };
+    hpack_init(&d);
+    n = hpack_decode(&d, &c31[0], 20, &hdr[0], 16);
+    assert_eq_i64(4, n, "c31 field count");
+    assert_eq_str(":method", (str)hdr[0].name, "c31[0] name");
+    assert_eq_str("GET", (str)hdr[0].value, "c31[0] value");
+    assert_eq_str(":scheme", (str)hdr[1].name, "c31[1] name");
+    assert_eq_str("http", (str)hdr[1].value, "c31[1] value");
+    assert_eq_str(":path", (str)hdr[2].name, "c31[2] name");
+    assert_eq_str("/", (str)hdr[2].value, "c31[2] value");
+    assert_eq_str(":authority", (str)hdr[3].name, "c31[3] name");
+    assert_eq_str("www.example.com", (str)hdr[3].value, "c31[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.4.1 first request (Huffman)
+    u8 c41[17] = {
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b,
+        0xa0, 0xab, 0x90, 0xf4, 0xff
+    };
+    hpack_init(&d);
+    n = hpack_decode(&d, &c41[0], 17, &hdr[0], 16);
+    assert_eq_i64(4, n, "c41 field count");
+    assert_eq_str(":method", (str)hdr[0].name, "c41[0] name");
+    assert_eq_str("GET", (str)hdr[0].value, "c41[0] value");
+    assert_eq_str(":scheme", (str)hdr[1].name, "c41[1] name");
+    assert_eq_str("http", (str)hdr[1].value, "c41[1] value");
+    assert_eq_str(":path", (str)hdr[2].name, "c41[2] name");
+    assert_eq_str("/", (str)hdr[2].value, "c41[2] value");
+    assert_eq_str(":authority", (str)hdr[3].name, "c41[3] name");
+    assert_eq_str("www.example.com", (str)hdr[3].value, "c41[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.5.1 first response (no Huffman)
+    u8 c51[70] = {
+        0x48, 0x03, 0x33, 0x30, 0x32, 0x58, 0x07, 0x70, 0x72, 0x69, 0x76, 0x61,
+        0x74, 0x65, 0x61, 0x1d, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x32, 0x31, 0x20,
+        0x4f, 0x63, 0x74, 0x20, 0x32, 0x30, 0x31, 0x33, 0x20, 0x32, 0x30, 0x3a,
+        0x31, 0x33, 0x3a, 0x32, 0x31, 0x20, 0x47, 0x4d, 0x54, 0x6e, 0x17, 0x68,
+        0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f, 0x2f, 0x77, 0x77, 0x77, 0x2e, 0x65,
+        0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d
+    };
+    hpack_init(&d);
+    n = hpack_decode(&d, &c51[0], 70, &hdr[0], 16);
+    assert_eq_i64(4, n, "c51 field count");
+    assert_eq_str(":status", (str)hdr[0].name, "c51[0] name");
+    assert_eq_str("302", (str)hdr[0].value, "c51[0] value");
+    assert_eq_str("cache-control", (str)hdr[1].name, "c51[1] name");
+    assert_eq_str("private", (str)hdr[1].value, "c51[1] value");
+    assert_eq_str("date", (str)hdr[2].name, "c51[2] name");
+    assert_eq_str("Mon, 21 Oct 2013 20:13:21 GMT", (str)hdr[2].value, "c51[2] value");
+    assert_eq_str("location", (str)hdr[3].name, "c51[3] name");
+    assert_eq_str("https://www.example.com", (str)hdr[3].value, "c51[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.6.1 first response (Huffman)
+    u8 c61[54] = {
+        0x48, 0x82, 0x64, 0x02, 0x58, 0x85, 0xae, 0xc3, 0x77, 0x1a, 0x4b, 0x61,
+        0x96, 0xd0, 0x7a, 0xbe, 0x94, 0x10, 0x54, 0xd4, 0x44, 0xa8, 0x20, 0x05,
+        0x95, 0x04, 0x0b, 0x81, 0x66, 0xe0, 0x82, 0xa6, 0x2d, 0x1b, 0xff, 0x6e,
+        0x91, 0x9d, 0x29, 0xad, 0x17, 0x18, 0x63, 0xc7, 0x8f, 0x0b, 0x97, 0xc8,
+        0xe9, 0xae, 0x82, 0xae, 0x43, 0xd3
+    };
+    hpack_init(&d);
+    n = hpack_decode(&d, &c61[0], 54, &hdr[0], 16);
+    assert_eq_i64(4, n, "c61 field count");
+    assert_eq_str(":status", (str)hdr[0].name, "c61[0] name");
+    assert_eq_str("302", (str)hdr[0].value, "c61[0] value");
+    assert_eq_str("cache-control", (str)hdr[1].name, "c61[1] name");
+    assert_eq_str("private", (str)hdr[1].value, "c61[1] value");
+    assert_eq_str("date", (str)hdr[2].name, "c61[2] name");
+    assert_eq_str("Mon, 21 Oct 2013 20:13:21 GMT", (str)hdr[2].value, "c61[2] value");
+    assert_eq_str("location", (str)hdr[3].name, "c61[3] name");
+    assert_eq_str("https://www.example.com", (str)hdr[3].value, "c61[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.1 integer examples
+    u8 e10[1] = { 0x0a };
+    i64 p = 0;
+    assert_eq_i64(10, hpack_int_decode(&e10[0], &p, 1, 5), "C.1.1 10 in 5 bits");
+    u8 e1337[3] = { 0x1f, 0x9a, 0x0a };
+    p = 0;
+    assert_eq_i64(1337, hpack_int_decode(&e1337[0], &p, 3, 5), "C.1.2 1337 in 5 bits");
+    u8 e42[1] = { 0x2a };
+    p = 0;
+    assert_eq_i64(42, hpack_int_decode(&e42[0], &p, 1, 8), "C.1.3 42 at octet boundary");
+
+    // Round-trip: encode the C.3.1 header list, then decode it back.
+    HpackField req[4];
+    req[0].name = (u8*)":method";   req[0].name_len = 7;   req[0].value = (u8*)"GET";       req[0].value_len = 3;
+    req[1].name = (u8*)":scheme";   req[1].name_len = 7;   req[1].value = (u8*)"http";      req[1].value_len = 4;
+    req[2].name = (u8*)":path";     req[2].name_len = 5;   req[2].value = (u8*)"/";         req[2].value_len = 1;
+    req[3].name = (u8*)":authority";req[3].name_len = 10;  req[3].value = (u8*)"www.example.com"; req[3].value_len = 15;
+    u8 enc[256];
+    i64 enc_len = hpack_encode(&req[0], 4, &enc[0], 256);
+    assert_true(enc_len > 0, "hpack_encode wrote bytes");
+    hpack_init(&d);
+    n = hpack_decode(&d, &enc[0], enc_len, &hdr[0], 16);
+    assert_eq_i64(4, n, "round-trip field count");
+    assert_eq_str(":method", (str)hdr[0].name, "round-trip :method");
+    assert_eq_str("GET", (str)hdr[0].value, "round-trip GET");
+    assert_eq_str(":authority", (str)hdr[3].name, "round-trip :authority");
+    assert_eq_str("www.example.com", (str)hdr[3].value, "round-trip authority value");
+    hpack_free_fields(&hdr[0], n);
+
+    return done();
+}
