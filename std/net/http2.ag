@@ -43,8 +43,44 @@ const i64 H2_SET_MAX_HEADER_LIST_SIZE = 0x6;
 const i64 H2_DEFAULT_WINDOW = 65535;
 const i64 H2_DEFAULT_MAX_FRAME = 16384;
 const i64 H2_MAX_HEADER_BLOCK = 65536;
+const i64 H2_MAX_STREAMS = 8;
 
 // --- Connection state -----------------------------------------------------
+
+// --- Response -------------------------------------------------------------
+
+struct H2Response {
+    i64 status;                 // from the :status pseudo-header (0 if absent)
+    HpackField headers[32];     // decoded header fields (caller frees)
+    i64 header_count;
+    u8* body;                   // malloc'd body bytes (caller frees)
+    i64 body_len;
+    i64 body_cap;
+}
+
+/// Parse a decimal integer from `len` octets (stops at a non-digit).
+i64 h2_parse_int(u8* s, i64 len) {
+    i64 v = 0;
+    i64 i = 0;
+    while (i < len && s[i] >= (u8)'0' && s[i] <= (u8)'9') {
+        v = v * 10 + ((i64)s[i] - (i64)'0');
+        i += 1;
+    }
+    return v;
+}
+
+/// A pending (multiplexed) response accumulator. `hbuf` collects the
+/// HEADERS+CONTINUATION payload until END_HEADERS; `resp` holds the decoded
+/// headers and body once the stream completes.
+struct H2Stream {
+    bool active;
+    i64 sid;
+    bool end_stream;
+    u8 hbuf[4096];
+    i64 hlen;
+    i64 window;                 // per-stream receive window
+    H2Response resp;
+}
 
 struct H2Connection {
     StreamIo io;
@@ -54,6 +90,7 @@ struct H2Connection {
     i64 conn_window;           // our receive window (connection)
     i64 stream_window;         // our receive window (stream 1)
     i64 next_stream_id;        // next client stream id (starts at 1)
+    H2Stream streams[8]; // see H2_MAX_STREAMS
 }
 
 /// Initialize connection state over an already-connected transport.
@@ -65,6 +102,14 @@ void h2_init(H2Connection* c, StreamIo* io) {
     c.conn_window = H2_DEFAULT_WINDOW;
     c.stream_window = H2_DEFAULT_WINDOW;
     c.next_stream_id = 1;
+    i64 i = 0;
+    while (i < H2_MAX_STREAMS) {
+        c.streams[i].active = false;
+        c.streams[i].resp.body = (u8*)0;
+        c.streams[i].resp.body_len = 0;
+        c.streams[i].resp.body_cap = 0;
+        i += 1;
+    }
 }
 
 // --- Frame header I/O -----------------------------------------------------
@@ -162,27 +207,6 @@ i64 h2_apply_settings(H2Connection* c, u8* payload, i64 len) {
     return 0;
 }
 
-// --- Response -------------------------------------------------------------
-
-struct H2Response {
-    i64 status;                 // from the :status pseudo-header (0 if absent)
-    HpackField headers[32];     // decoded header fields (caller frees)
-    i64 header_count;
-    u8* body;                   // malloc'd body bytes (caller frees)
-    i64 body_len;
-    i64 body_cap;
-}
-
-/// Parse a decimal integer from `len` octets (stops at a non-digit).
-i64 h2_parse_int(u8* s, i64 len) {
-    i64 v = 0;
-    i64 i = 0;
-    while (i < len && s[i] >= (u8)'0' && s[i] <= (u8)'9') {
-        v = v * 10 + ((i64)s[i] - (i64)'0');
-        i += 1;
-    }
-    return v;
-}
 
 /// Read the response for stream `sid` into `out`. Returns 0 on success, or
 /// -1 on protocol/transport error. On error any partially-written body is
@@ -309,11 +333,10 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
     return 0;
 }
 
-/// Perform one HTTP/2 request on an established connection. The stream id is
-/// allocated from `c`. `extra`/`n_extra` are optional additional header
-/// fields (borrowed; not freed). Returns 0 or -1.
-i64 h2_request_body(H2Connection* c, str method, str scheme, str authority, str path,
-                    HpackField* extra, i64 n_extra, u8* body, i64 body_len, H2Response* out) {
+/// Build the HPACK header block for a request (pseudo-headers + extras).
+/// Returns the block length, or -1.
+i64 h2_build_headers(str method, str scheme, str authority, str path,
+                     HpackField* extra, i64 n_extra, u8* out, i64 cap) {
     HpackField req[16];
     i64 nreq = 0;
     req[0].name = (u8*)":method";   req[0].name_len = 7;
@@ -331,29 +354,40 @@ i64 h2_request_body(H2Connection* c, str method, str scheme, str authority, str 
         nreq += 1;
         i += 1;
     }
+    return hpack_encode(&req[0], nreq, out, cap);
+}
 
+/// Send the HEADERS (+ DATA) frames for a new stream. Returns the stream id.
+i64 h2_send_request_frames(H2Connection* c, str method, str scheme, str authority,
+                           str path, HpackField* extra, i64 n_extra,
+                           u8* body, i64 body_len) {
     u8 hpack_buf[4096];
-    i64 hlen = hpack_encode(&req[0], nreq, &hpack_buf[0], 4096);
+    i64 hlen = h2_build_headers(method, scheme, authority, path, extra, n_extra,
+                                &hpack_buf[0], 4096);
     if (hlen < 0) { return -1; }
-
     i64 sid = c.next_stream_id;
     c.next_stream_id += 2;
     i64 hflags = H2_FLAG_END_HEADERS;
     if (body_len == 0) { hflags = hflags | H2_FLAG_END_STREAM; }
-    if (h2_send_frame(c, H2_HEADERS, hflags, sid, &hpack_buf[0], hlen) != 0) {
-        return -1;
-    }
+    if (h2_send_frame(c, H2_HEADERS, hflags, sid, &hpack_buf[0], hlen) != 0) { return -1; }
     i64 sent = 0;
     while (sent < body_len) {
         i64 chunk = body_len - sent;
         if (chunk > c.peer_max_frame_size) { chunk = c.peer_max_frame_size; }
         i64 dflags = 0;
         if (sent + chunk >= body_len) { dflags = H2_FLAG_END_STREAM; }
-        if (h2_send_frame(c, H2_DATA, dflags, sid, &body[sent], chunk) != 0) {
-            return -1;
-        }
+        if (h2_send_frame(c, H2_DATA, dflags, sid, &body[sent], chunk) != 0) { return -1; }
         sent += chunk;
     }
+    return sid;
+}
+
+/// Perform one HTTP/2 request on an established connection. `extra`/`n_extra`
+/// are optional additional header fields (borrowed; not freed). Returns 0 or -1.
+i64 h2_request_body(H2Connection* c, str method, str scheme, str authority, str path,
+                    HpackField* extra, i64 n_extra, u8* body, i64 body_len, H2Response* out) {
+    i64 sid = h2_send_request_frames(c, method, scheme, authority, path, extra, n_extra, body, body_len);
+    if (sid < 0) { return -1; }
     return h2_read_response(c, sid, out);
 }
 
@@ -371,4 +405,133 @@ i64 h2_get(StreamIo* io, str scheme, str authority, str path, H2Response* out) {
     h2_init(&c, io);
     if (h2_send_preface(&c) != 0) { return -1; }
     return h2_request(&c, "GET", scheme, authority, path, (HpackField*)0, 0, out);
+}
+
+// --- Multiplexing ---------------------------------------------------------
+
+/// Begin a request on a fresh multiplexed stream. Returns the index into
+/// `c.streams` (0..H2_MAX_STREAMS-1) whose `resp` will receive the response,
+/// or -1 when the stream table is full. Several streams may be begun before
+/// h2_wait_all drains the responses.
+i64 h2_begin(H2Connection* c, str method, str scheme, str authority, str path,
+             HpackField* extra, i64 n_extra, u8* body, i64 body_len) {
+    i64 idx = -1;
+    i64 i = 0;
+    while (i < H2_MAX_STREAMS) {
+        if (!c.streams[i].active) { idx = i; break; }
+        i += 1;
+    }
+    if (idx < 0) { return -1; }
+    i64 sid = h2_send_request_frames(c, method, scheme, authority, path, extra,
+                                     n_extra, body, body_len);
+    if (sid < 0) { return -1; }
+    c.streams[idx].active = true;
+    c.streams[idx].sid = sid;
+    c.streams[idx].end_stream = false;
+    c.streams[idx].hlen = 0;
+    c.streams[idx].window = c.peer_initial_window;
+    c.streams[idx].resp.status = 0;
+    c.streams[idx].resp.header_count = 0;
+    c.streams[idx].resp.body = (u8*)0;
+    c.streams[idx].resp.body_len = 0;
+    c.streams[idx].resp.body_cap = 0;
+    return idx;
+}
+
+/// Read frames until every active stream completes, dispatching
+/// HEADERS/CONTINUATION/DATA to the owning stream. Returns 0 or -1.
+i64 h2_wait_all(H2Connection* c) {
+    i64 active = 0;
+    i64 i = 0;
+    while (i < H2_MAX_STREAMS) {
+        if (c.streams[i].active && !c.streams[i].end_stream) { active += 1; }
+        i += 1;
+    }
+    while (active > 0) {
+        u8 fh[9];
+        if (h2_read_full(&c.io, &fh[0], 9) != 0) { return -1; }
+        i64 flen = ((i64)fh[0] << 16) | ((i64)fh[1] << 8) | (i64)fh[2];
+        i64 ftype = (i64)fh[3];
+        i64 fflags = (i64)fh[4];
+        i64 fsid = (((i64)fh[5] & 0x7F) << 24) | ((i64)fh[6] << 16)
+                 | ((i64)fh[7] << 8) | (i64)fh[8];
+        if (flen > 16384) { return -1; }
+        u8 payload[16384];
+        if (flen > 0 && h2_read_full(&c.io, &payload[0], flen) != 0) { return -1; }
+
+        i64 sidx = -1;
+        i64 j = 0;
+        while (j < H2_MAX_STREAMS) {
+            if (c.streams[j].active && c.streams[j].sid == fsid) { sidx = j; break; }
+            j += 1;
+        }
+
+        if (ftype == H2_SETTINGS) {
+            if ((fflags & H2_FLAG_ACK) == 0) {
+                if (h2_apply_settings(c, &payload[0], flen) != 0) { return -1; }
+                if (h2_send_settings_ack(c) != 0) { return -1; }
+            }
+        } else if (ftype == H2_WINDOW_UPDATE) {
+            i64 inc = (((i64)payload[0] & 0x7F) << 24) | ((i64)payload[1] << 16)
+                    | ((i64)payload[2] << 8) | (i64)payload[3];
+            if (fsid == 0) { c.conn_window += inc; }
+            else if (sidx >= 0) { c.streams[sidx].window += inc; }
+        } else if (sidx >= 0 && (ftype == H2_HEADERS || ftype == H2_CONTINUATION)) {
+            H2Stream* st = &c.streams[sidx];
+            if (st.hlen + flen > 4096) { return -1; }
+            if (flen > 0) { silver_rt_memcpy(&st.hbuf[st.hlen], &payload[0], flen); }
+            st.hlen += flen;
+            if ((fflags & H2_FLAG_END_HEADERS) != 0) {
+                i64 n = hpack_decode(&c.hpack, &st.hbuf[0], st.hlen, &st.resp.headers[0], 32);
+                if (n < 0) { return -1; }
+                st.resp.header_count = n;
+                i64 k = 0;
+                while (k < n) {
+                    if (strcmp((str)st.resp.headers[k].name, ":status") == 0) {
+                        st.resp.status = h2_parse_int(st.resp.headers[k].value, st.resp.headers[k].value_len);
+                    }
+                    k += 1;
+                }
+                if ((fflags & H2_FLAG_END_STREAM) != 0) {
+                    st.end_stream = true;
+                    st.active = false;
+                    active -= 1;
+                }
+            }
+        } else if (sidx >= 0 && ftype == H2_DATA) {
+            H2Stream* st = &c.streams[sidx];
+            if (st.resp.body_len + flen > st.resp.body_cap) {
+                i64 nc = st.resp.body_cap * 2;
+                if (nc < 4096) { nc = 4096; }
+                while (nc < st.resp.body_len + flen) { nc = nc * 2; }
+                if (st.resp.body == (u8*)0) { st.resp.body = alloc<u8>(nc); }
+                else { st.resp.body = realloc<u8>(st.resp.body, nc); }
+                st.resp.body_cap = nc;
+            }
+            if (flen > 0) { silver_rt_memcpy(&st.resp.body[st.resp.body_len], &payload[0], flen); }
+            st.resp.body_len += flen;
+            c.conn_window -= flen;
+            st.window -= flen;
+            if (c.conn_window < 32768) {
+                if (h2_send_window_update(c, 0, 65535 - c.conn_window) != 0) { return -1; }
+                c.conn_window = 65535;
+            }
+            if (st.window < 32768) {
+                if (h2_send_window_update(c, fsid, 65535 - st.window) != 0) { return -1; }
+                st.window = 65535;
+            }
+            if ((fflags & H2_FLAG_END_STREAM) != 0) {
+                st.end_stream = true;
+                st.active = false;
+                active -= 1;
+            }
+        } else if (ftype == H2_GOAWAY || (ftype == H2_RST_STREAM && sidx >= 0)) {
+            return -1;
+        } else if (ftype == H2_PING) {
+            if ((fflags & H2_FLAG_ACK) == 0) {
+                if (h2_send_frame(c, H2_PING, H2_FLAG_ACK, 0, &payload[0], flen) != 0) { return -1; }
+            }
+        }
+    }
+    return 0;
 }

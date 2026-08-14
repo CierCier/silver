@@ -95,5 +95,26 @@ i32 main() {
     free(resp3.body);
     hpack_free_fields(&resp3.headers[0], resp3.header_count);
 
+    // multiplexed: three concurrent GETs on fresh streams
+    test_start("http2: h2c multiplexed streams");
+    i64 s0 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    i64 s1 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    i64 s2 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    assert_true(s0 >= 0 && s1 >= 0 && s2 >= 0, "streams allocated");
+    assert_eq_i64(0, h2_wait_all(&c), "multiplexed responses complete");
+    i64 mi = 0;
+    while (mi < 3) {
+        i64 idx = 0;
+        if (mi == 0) { idx = s0; }
+        else if (mi == 1) { idx = s1; }
+        else { idx = s2; }
+        assert_eq_i64(200, c.streams[idx].resp.status, "mux status 200");
+        assert_eq_i64(8, c.streams[idx].resp.body_len, "mux body length");
+        assert_true(memcmp((const void*)c.streams[idx].resp.body, (const void*)"hello h2", 8) == 0, "mux body");
+        free(c.streams[idx].resp.body);
+        hpack_free_fields(&c.streams[idx].resp.headers[0], c.streams[idx].resp.header_count);
+        mi += 1;
+    }
+
     return done();
 }
