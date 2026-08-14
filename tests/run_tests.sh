@@ -72,7 +72,7 @@ test_specific_flags() {
         channel_test) echo "--static-runtime" ;;
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
-        tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
+        tls_test|http2_tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
         target_feature_test) echo "--cfg cpu.avx2=1" ;;
@@ -269,7 +269,8 @@ if command -v openssl >/dev/null 2>&1; then
 fi
 if [ -z "$SILVER_OPENSSL_LIB" ] || ! command -v node >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
-tls_test"
+tls_test
+http2_tls_test"
 fi
 if ! command -v go >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
@@ -389,8 +390,8 @@ test_stdin() {
     # ------- Run step -------
     run_dir="$WORKDIR/$name.rundir"
     mkdir -p "$run_dir"
-    # tls_test reads the committed certs via relative paths.
-    if [ "$name" = "tls_test" ]; then
+    # tls/http2-tls tests read the committed certs via relative paths.
+    if [ "$name" = "tls_test" ] || [ "$name" = "http2_tls_test" ]; then
         run_dir="$ROOT"
     fi
     run_real_ms=0; run_cpu_pct=0; run_mem_kb=0

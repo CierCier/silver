@@ -196,11 +196,11 @@ impl TlsStream {
         }
         ssl_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_HOST_NAME, (void*)host);
         if (verify) { ssl_set1_host(ssl, host); }
-        u8 alpn[9];
-        alpn[0] = (u8)8;
-        alpn[1] = (u8)'h'; alpn[2] = (u8)'t'; alpn[3] = (u8)'t'; alpn[4] = (u8)'p';
-        alpn[5] = (u8)'/'; alpn[6] = (u8)'1'; alpn[7] = (u8)'.'; alpn[8] = (u8)'1';
-        ssl_set_alpn_protos(ssl, &alpn[0], 9);
+        u8 alpn[12];
+        alpn[0] = (u8)2; alpn[1] = (u8)'h'; alpn[2] = (u8)'2';
+        alpn[3] = (u8)8; alpn[4] = (u8)'h'; alpn[5] = (u8)'t'; alpn[6] = (u8)'t';
+        alpn[7] = (u8)'p'; alpn[8] = (u8)'/'; alpn[9] = (u8)'1'; alpn[10] = (u8)'.'; alpn[11] = (u8)'1';
+        ssl_set_alpn_protos(ssl, &alpn[0], 12);
         if (ssl_connect(ssl) != 1) {
             ssl_free(ssl);
             if (!default_config) { ssl_ctx_free(ctx); }
@@ -212,6 +212,16 @@ impl TlsStream {
         self.shared_ctx = default_config;
         self.active = true;
         return true;
+    }
+
+    /// True when ALPN negotiated the "h2" protocol (HTTP/2 over TLS).
+    bool is_h2(TlsStream* self) {
+        if (!self.active || self.ssl == 0) { return false; }
+        u8* proto = (u8*)0;
+        u32 plen = 0;
+        ssl_get0_alpn_selected(self.ssl, (void*)&proto, (void*)&plen);
+        if (proto == (u8*)0 || plen != 2) { return false; }
+        return proto[0] == (u8)'h' && proto[1] == (u8)'2';
     }
 
     /// Server handshake (used by local TLS test servers): loads the PEM

@@ -1,0 +1,53 @@
+// tests/http2_tls_test.ag — HTTP/2 over TLS (ALPN "h2") against the node
+// http2 secure server on 127.0.0.1:18445 (tests/h2_server.js, started by the
+// harness). The client verifies the committed cert against tests/certs/ca.pem
+// and asserts ALPN negotiated h2 before speaking the HTTP/2 protocol.
+
+import std.error;
+import std.mem.alloc;
+import std.mem.memory;
+import std.net.hpack;
+import std.net.http2;
+import std.net.inet;
+import std.net.tcp;
+import std.net.tls;
+import std.net.transport;
+import std.sys.entry;
+import std.test;
+
+i32 main() {
+    tls_init();
+
+    test_start("http2: h2 over TLS");
+
+    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)18445);
+    assert_true(addr.success(), "address valid");
+    SocketAddr a = addr.unwrap();
+
+    Result<TcpStream, Error> cr = TcpStream.connect_timeout(&a, 2);
+    assert_true(cr.success(), "tls connect ok");
+    TcpStream s = cr.unwrap();
+
+    TlsStream tls;
+    Error err;
+    bool ok = tls.connect(s.sock.fd, "127.0.0.1", true, "tests/certs/ca.pem", &err);
+    assert_true(ok, "tls handshake");
+    assert_true(tls.is_h2(), "ALPN negotiated h2");
+
+    StreamIo io = transport_tls_io((void*)&tls);
+    H2Connection c;
+    h2_init(&c, &io);
+    assert_eq_i64(0, h2_send_preface(&c), "preface sent");
+
+    H2Response resp;
+    i64 rc = h2_request(&c, "GET", "https", "127.0.0.1:18445", "/hello", (HpackField*)0, 0, &resp);
+    assert_eq_i64(0, rc, "h2 over tls request");
+    assert_eq_i64(200, resp.status, ":status is 200");
+    assert_eq_i64(8, resp.body_len, "body length");
+    assert_true(resp.body != (u8*)0, "body present");
+    assert_true(memcmp((const void*)resp.body, (const void*)"hello h2", 8) == 0, "body is hello h2");
+    free(resp.body);
+    hpack_free_fields(&resp.headers[0], resp.header_count);
+
+    return done();
+}
