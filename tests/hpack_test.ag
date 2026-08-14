@@ -1,4 +1,4 @@
-// tests/hpack_test.ag — HPACK golden vectors (RFC 7541 Appendix C).
+// tests/hpack_test.ag - HPACK golden vectors (RFC 7541 Appendix C).
 //
 // Decodes the C.3/C.4 request and C.5/C.6 response examples (raw and
 // Huffman), checks the C.1 integer examples, and round-trips a request
@@ -29,6 +29,45 @@ i32 main() {
     assert_eq_str("/", (str)hdr[2].value, "c31[2] value");
     assert_eq_str(":authority", (str)hdr[3].name, "c31[3] name");
     assert_eq_str("www.example.com", (str)hdr[3].value, "c31[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.3.2 second request - dynamic table now holds :authority (idx 62)
+    u8 c32v[14] = {
+        0x82, 0x86, 0x84, 0xbe, 0x58, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63,
+        0x68, 0x65
+    };
+    n = hpack_decode(&d, &c32v[0], 14, &hdr[0], 16);
+    assert_eq_i64(5, n, "c32 field count");
+    assert_eq_str(":method", (str)hdr[0].name, "c32[0] name");
+    assert_eq_str("GET", (str)hdr[0].value, "c32[0] value");
+    assert_eq_str(":scheme", (str)hdr[1].name, "c32[1] name");
+    assert_eq_str("http", (str)hdr[1].value, "c32[1] value");
+    assert_eq_str(":path", (str)hdr[2].name, "c32[2] name");
+    assert_eq_str("/", (str)hdr[2].value, "c32[2] value");
+    assert_eq_str(":authority", (str)hdr[3].name, "c32[3] name");
+    assert_eq_str("www.example.com", (str)hdr[3].value, "c32[3] value");
+    assert_eq_str("cache-control", (str)hdr[4].name, "c32[4] name");
+    assert_eq_str("no-cache", (str)hdr[4].value, "c32[4] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.3.3 third request - cache-control pushes :authority to idx 63
+    u8 c33[29] = {
+        0x82, 0x87, 0x85, 0xbf, 0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d,
+        0x2d, 0x6b, 0x65, 0x79, 0x0c, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d,
+        0x76, 0x61, 0x6c, 0x75, 0x65
+    };
+    n = hpack_decode(&d, &c33[0], 29, &hdr[0], 16);
+    assert_eq_i64(5, n, "c33 field count");
+    assert_eq_str(":method", (str)hdr[0].name, "c33[0] name");
+    assert_eq_str("GET", (str)hdr[0].value, "c33[0] value");
+    assert_eq_str(":scheme", (str)hdr[1].name, "c33[1] name");
+    assert_eq_str("https", (str)hdr[1].value, "c33[1] value");
+    assert_eq_str(":path", (str)hdr[2].name, "c33[2] name");
+    assert_eq_str("/index.html", (str)hdr[2].value, "c33[2] value");
+    assert_eq_str(":authority", (str)hdr[3].name, "c33[3] name");
+    assert_eq_str("www.example.com", (str)hdr[3].value, "c33[3] value");
+    assert_eq_str("custom-key", (str)hdr[4].name, "c33[4] name");
+    assert_eq_str("custom-value", (str)hdr[4].value, "c33[4] value");
     hpack_free_fields(&hdr[0], n);
 
     // C.4.1 first request (Huffman)
@@ -90,6 +129,48 @@ i32 main() {
     assert_eq_str("Mon, 21 Oct 2013 20:13:21 GMT", (str)hdr[2].value, "c61[2] value");
     assert_eq_str("location", (str)hdr[3].name, "c61[3] name");
     assert_eq_str("https://www.example.com", (str)hdr[3].value, "c61[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.6.2 second response - dynamic table references (idx 65/64/63)
+    u8 c62[8] = {
+        0x48, 0x83, 0x64, 0x0e, 0xff, 0xc1, 0xc0, 0xbf
+    };
+    n = hpack_decode(&d, &c62[0], 8, &hdr[0], 16);
+    assert_eq_i64(4, n, "c62 field count");
+    assert_eq_str(":status", (str)hdr[0].name, "c62[0] name");
+    assert_eq_str("307", (str)hdr[0].value, "c62[0] value");
+    assert_eq_str("cache-control", (str)hdr[1].name, "c62[1] name");
+    assert_eq_str("private", (str)hdr[1].value, "c62[1] value");
+    assert_eq_str("date", (str)hdr[2].name, "c62[2] name");
+    assert_eq_str("Mon, 21 Oct 2013 20:13:21 GMT", (str)hdr[2].value, "c62[2] value");
+    assert_eq_str("location", (str)hdr[3].name, "c62[3] name");
+    assert_eq_str("https://www.example.com", (str)hdr[3].value, "c62[3] value");
+    hpack_free_fields(&hdr[0], n);
+
+    // C.6.3 third response - evictions + set-cookie
+    u8 c63[79] = {
+        0x88, 0xc1, 0x61, 0x96, 0xd0, 0x7a, 0xbe, 0x94, 0x10, 0x54, 0xd4, 0x44,
+        0xa8, 0x20, 0x05, 0x95, 0x04, 0x0b, 0x81, 0x66, 0xe0, 0x84, 0xa6, 0x2d,
+        0x1b, 0xff, 0xc0, 0x5a, 0x83, 0x9b, 0xd9, 0xab, 0x77, 0xad, 0x94, 0xe7,
+        0x82, 0x1d, 0xd7, 0xf2, 0xe6, 0xc7, 0xb3, 0x35, 0xdf, 0xdf, 0xcd, 0x5b,
+        0x39, 0x60, 0xd5, 0xaf, 0x27, 0x08, 0x7f, 0x36, 0x72, 0xc1, 0xab, 0x27,
+        0x0f, 0xb5, 0x29, 0x1f, 0x95, 0x87, 0x31, 0x60, 0x65, 0xc0, 0x03, 0xed,
+        0x4e, 0xe5, 0xb1, 0x06, 0x3d, 0x50, 0x07
+    };
+    n = hpack_decode(&d, &c63[0], 79, &hdr[0], 16);
+    assert_eq_i64(6, n, "c63 field count");
+    assert_eq_str(":status", (str)hdr[0].name, "c63[0] name");
+    assert_eq_str("200", (str)hdr[0].value, "c63[0] value");
+    assert_eq_str("cache-control", (str)hdr[1].name, "c63[1] name");
+    assert_eq_str("private", (str)hdr[1].value, "c63[1] value");
+    assert_eq_str("date", (str)hdr[2].name, "c63[2] name");
+    assert_eq_str("Mon, 21 Oct 2013 20:13:22 GMT", (str)hdr[2].value, "c63[2] value");
+    assert_eq_str("location", (str)hdr[3].name, "c63[3] name");
+    assert_eq_str("https://www.example.com", (str)hdr[3].value, "c63[3] value");
+    assert_eq_str("content-encoding", (str)hdr[4].name, "c63[4] name");
+    assert_eq_str("gzip", (str)hdr[4].value, "c63[4] value");
+    assert_eq_str("set-cookie", (str)hdr[5].name, "c63[5] name");
+    assert_eq_str("foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1", (str)hdr[5].value, "c63[5] value");
     hpack_free_fields(&hdr[0], n);
 
     // C.1 integer examples

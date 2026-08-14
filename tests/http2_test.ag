@@ -111,10 +111,10 @@ i32 main() {
         assert_eq_i64(200, c.streams[idx].resp.status, "mux status 200");
         assert_eq_i64(8, c.streams[idx].resp.body_len, "mux body length");
         assert_true(memcmp((const void*)c.streams[idx].resp.body, (const void*)"hello h2", 8) == 0, "mux body");
-        free(c.streams[idx].resp.body);
-        hpack_free_fields(&c.streams[idx].resp.headers[0], c.streams[idx].resp.header_count);
         mi += 1;
     }
+    // Multiplexed responses are owned by the connection; H2Connection's Drop
+    // frees them on scope exit.
 
     return done();
 }
