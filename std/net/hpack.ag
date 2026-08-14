@@ -65,7 +65,9 @@ void hpack_copy_field(HpackField* dst, HpackField* src) {
 }
 
 /// Initialize a decoder (dynamic table empty; default 4096-byte max).
+/// Releases any entries left from a prior use of the same buffer.
 void hpack_init(HpackDecoder* d) {
+    hpack_clear_table(d);
     d.count = 0;
     d.size = 0;
     d.max_size = 4096;
@@ -259,6 +261,15 @@ void hpack_clear_table(HpackDecoder* d) {
     d.size = 0;
 }
 
+/// RAII for a standalone HpackDecoder: the dynamic table is released when
+/// the decoder goes out of scope (embedded in H2Connection, whose own Drop
+/// clears it first; the double clear is a no-op).
+impl Drop<HpackDecoder> for HpackDecoder {
+    void drop(HpackDecoder* self) {
+        hpack_clear_table(self);
+    }
+}
+
 /// Set the dynamic table size limit, evicting to fit (RFC 7541 §4.2).
 void hpack_set_max_size(HpackDecoder* d, i64 new_size) {
     d.max_size = new_size;
@@ -337,34 +348,36 @@ bool hpack_resolve_name(HpackDecoder* d, i64 idx, HpackField* out) {
 // --- Header block (RFC 7541 §6) ------------------------------------------
 
 /// Decode a header block into caller-provided `out` (capacity `out_cap`).
-/// Returns the number of fields decoded, or -1 on error. On error the caller
-/// must still free any fields already written to `out`.
+/// Returns the number of fields decoded, or -1 on error. On error any fields
+/// already written to `out` are freed before returning (self-cleaning).
 i64 hpack_decode(HpackDecoder* d, u8* data, i64 len, HpackField* out, i64 out_cap) {
     i64 pos = 0;
     i64 count = 0;
-    while (pos < len) {
-        if (count >= out_cap) { return -1; }
+    bool failed = false;
+    while (pos < len && !failed) {
+        if (count >= out_cap) { failed = true; break; }
         i64 b = (i64)data[pos];
         if ((b & 0x80) != 0) {
             // Indexed header field: 1xxxxxxx (7-bit prefix).
             i64 idx = hpack_int_decode(data, &pos, len, 7);
-            if (idx <= 0) { return -1; }
-            if (!hpack_resolve(d, idx, &out[count])) { return -1; }
+            if (idx <= 0) { failed = true; break; }
+            if (!hpack_resolve(d, idx, &out[count])) { failed = true; break; }
             count += 1;
         } else if ((b & 0xC0) == 0x40) {
             // Literal with incremental indexing: 01xxxxxx (6-bit prefix).
             i64 idx = hpack_int_decode(data, &pos, len, 6);
-            if (idx < 0) { return -1; }
+            if (idx < 0) { failed = true; break; }
             HpackField f;
             f.name = (u8*)0; f.name_len = 0; f.value = (u8*)0; f.value_len = 0;
             if (idx == 0) {
-                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { return -1; }
+                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { failed = true; break; }
             } else {
-                if (!hpack_resolve_name(d, idx, &f)) { return -1; }
+                if (!hpack_resolve_name(d, idx, &f)) { failed = true; break; }
             }
             if (hpack_string_decode(data, &pos, len, &f.value, &f.value_len) != 0) {
                 hpack_free_field(&f);
-                return -1;
+                failed = true;
+                break;
             }
             hpack_copy_field(&out[count], &f); // caller's copy
             hpack_insert(d, &f);               // table takes f's buffers
@@ -372,27 +385,32 @@ i64 hpack_decode(HpackDecoder* d, u8* data, i64 len, HpackField* out, i64 out_ca
         } else if ((b & 0xE0) == 0x20) {
             // Dynamic table size update: 001xxxxx (5-bit prefix).
             i64 new_size = hpack_int_decode(data, &pos, len, 5);
-            if (new_size < 0) { return -1; }
+            if (new_size < 0) { failed = true; break; }
             hpack_set_max_size(d, new_size);
         } else {
             // Literal without indexing (0000) or never indexed (0001):
             // 4-bit prefix, never-indexed flag in bit 4.
             i64 idx = hpack_int_decode(data, &pos, len, 4);
-            if (idx < 0) { return -1; }
+            if (idx < 0) { failed = true; break; }
             HpackField f;
             f.name = (u8*)0; f.name_len = 0; f.value = (u8*)0; f.value_len = 0;
             if (idx == 0) {
-                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { return -1; }
+                if (hpack_string_decode(data, &pos, len, &f.name, &f.name_len) != 0) { failed = true; break; }
             } else {
-                if (!hpack_resolve_name(d, idx, &f)) { return -1; }
+                if (!hpack_resolve_name(d, idx, &f)) { failed = true; break; }
             }
             if (hpack_string_decode(data, &pos, len, &f.value, &f.value_len) != 0) {
                 hpack_free_field(&f);
-                return -1;
+                failed = true;
+                break;
             }
             out[count] = f; // move ownership to caller
             count += 1;
         }
+    }
+    if (failed) {
+        hpack_free_fields(out, count);
+        return -1;
     }
     return count;
 }
