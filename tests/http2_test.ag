@@ -1,0 +1,81 @@
+// tests/http2_test.ag — HTTP/2 client (h2c prior-knowledge) against the node
+// http2 server on 127.0.0.1:18444.
+//
+// Verifies the client preface/SETTINGS exchange, a HEADERS request with
+// HPACK, and the HEADERS+DATA response (status, headers, body), including
+// a Huffman-encoded response header block (node Huffman-encodes by default).
+
+import std.error;
+import std.mem.alloc;
+import std.mem.memory;
+import std.net.hpack;
+import std.net.http2;
+import std.net.inet;
+import std.net.tcp;
+import std.net.transport;
+import std.sys.entry;
+import std.test;
+
+Result<i64, Error> tcp_io_read(void* ctx, u8* buf, i64 len) {
+    TcpStream* s = (TcpStream*)ctx;
+    return s.read(buf, len);
+}
+
+Result<i64, Error> tcp_io_write(void* ctx, u8* buf, i64 len) {
+    TcpStream* s = (TcpStream*)ctx;
+    return s.write(buf, len);
+}
+
+i32 main() {
+    test_start("http2: h2c hello");
+
+    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)18444);
+    assert_true(addr.success(), "address valid");
+    SocketAddr a = addr.unwrap();
+
+    Result<TcpStream, Error> cr = TcpStream.connect_timeout(&a, 2);
+    assert_true(cr.success(), "h2c connect ok");
+    TcpStream s = cr.unwrap();
+    StreamIo io;
+    io.ctx = (void*)&s;
+    io.read = tcp_io_read;
+    io.write = tcp_io_write;
+
+    H2Connection c;
+    h2_init(&c, &io);
+    assert_eq_i64(0, h2_send_preface(&c), "preface sent");
+
+    H2Response resp;
+    i64 rc = h2_request(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, &resp);
+    assert_eq_i64(0, rc, "h2 request succeeded");
+    assert_eq_i64(200, resp.status, ":status is 200");
+    assert_eq_i64(8, resp.body_len, "body length");
+    assert_true(resp.body != (u8*)0, "body present");
+    assert_true(memcmp((const void*)resp.body, (const void*)"hello h2", 8) == 0, "body is hello h2");
+
+    // check a decoded header (content-type)
+    bool found_ct = false;
+    i64 i = 0;
+    while (i < resp.header_count) {
+        if (strcmp((str)resp.headers[i].name, "content-type") == 0) {
+            assert_eq_str("text/plain", (str)resp.headers[i].value, "content-type value");
+            found_ct = true;
+        }
+        i += 1;
+    }
+    assert_true(found_ct, "content-type header present");
+
+    free(resp.body);
+    hpack_free_fields(&resp.headers[0], resp.header_count);
+
+    // second request on the same connection: 404 path
+    test_start("http2: h2c 404");
+    H2Response resp2;
+    rc = h2_request(&c, "GET", "http", "127.0.0.1:18444", "/missing", (HpackField*)0, 0, &resp2);
+    assert_eq_i64(0, rc, "h2 request (404) succeeded");
+    assert_eq_i64(404, resp2.status, ":status is 404");
+    free(resp2.body);
+    hpack_free_fields(&resp2.headers[0], resp2.header_count);
+
+    return done();
+}

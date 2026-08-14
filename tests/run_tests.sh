@@ -275,6 +275,10 @@ if ! command -v go >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
 http_perf_test"
 fi
+if ! command -v node >/dev/null 2>&1; then
+    SKIP_TESTS="$SKIP_TESTS
+http2_test"
+fi
 
 # Start the node HTTPS server once, before the loop, if tls_test will run.
 TLS_NODE_PID=""
@@ -285,6 +289,17 @@ if ! is_skipped tls_test; then
         if grep -q TLS_NODE_READY "$WORKDIR/tls_node.log" 2>/dev/null; then
             break
         fi
+        sleep 0.1
+    done
+fi
+
+# Start the node HTTP/2 server once, before the loop, if http2_test will run.
+H2_NODE_PID=""
+if ! is_skipped http2_test; then
+    (cd "$ROOT" && exec node tests/h2_server.js >"$WORKDIR/h2_node.log" 2>&1) &
+    H2_NODE_PID=$!
+    for _ in $(seq 1 50); do
+        if grep -q H2C_NODE_READY "$WORKDIR/h2_node.log" 2>/dev/null; then break; fi
         sleep 0.1
     done
 fi
@@ -477,6 +492,10 @@ fi
 if [ -n "$PERF_SERVER_PID" ]; then
     kill "$PERF_SERVER_PID" 2>/dev/null
     wait "$PERF_SERVER_PID" 2>/dev/null
+fi
+if [ -n "$H2_NODE_PID" ]; then
+    kill "$H2_NODE_PID" 2>/dev/null
+    wait "$H2_NODE_PID" 2>/dev/null
 fi
 
 # ---- Slowest tests (run time) ----
