@@ -239,7 +239,7 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
                     | ((i64)payload[2] << 8) | (i64)payload[3];
             if (fsid == 0) { c.conn_window += inc; }
             else if (fsid == sid) { c.stream_window += inc; }
-        } else if (ftype == H2_HEADERS || ftype == H2_CONTINUATION) {
+        } else if (fsid == sid && (ftype == H2_HEADERS || ftype == H2_CONTINUATION)) {
             if (hlen + flen > 65536) {
                 if (body != (u8*)0) { free(body); }
                 return -1;
@@ -262,7 +262,7 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
                 }
                 if ((fflags & H2_FLAG_END_STREAM) != 0) { end_stream = true; }
             }
-        } else if (ftype == H2_DATA) {
+        } else if (fsid == sid && ftype == H2_DATA) {
             if (body_len + flen > body_cap) {
                 i64 nc = body_cap * 2;
                 if (nc < 4096) { nc = 4096; }
@@ -290,7 +290,7 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
                 c.stream_window = 65535;
             }
             if ((fflags & H2_FLAG_END_STREAM) != 0) { end_stream = true; }
-        } else if (ftype == H2_GOAWAY || ftype == H2_RST_STREAM) {
+        } else if (ftype == H2_GOAWAY || (ftype == H2_RST_STREAM && fsid == sid)) {
             if (body != (u8*)0) { free(body); }
             return -1;
         } else if (ftype == H2_PING) {
