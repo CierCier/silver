@@ -478,7 +478,7 @@ pub struct AssociatedType {
 /// Implementation items
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImplItemKind {
-    Function(ImplFunction),
+    Function(Box<ImplFunction>),
     AssociatedType(ImplAssociatedType),
     Cast(ImplCast),
 }

@@ -1040,7 +1040,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::ImplItemKind::Function(func)
                     if func.name.name == method_name && func.generics.is_none() =>
                 {
-                    Some(func.clone())
+                    Some((**func).clone())
                 }
                 _ => None,
             }) else {

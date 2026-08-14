@@ -94,7 +94,7 @@ pub(crate) fn run_module_optimization_passes(
             options.as_mut_ptr(),
         );
         if !err.is_null() {
-            let detail = unsafe {
+            let detail = {
                 let msg = llvm_sys::error::LLVMGetErrorMessage(err);
                 let text = if msg.is_null() {
                     "<no detail>".to_string()
@@ -669,7 +669,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         for impl_item in &item.items {
             match impl_item {
                 ast::ImplItemKind::Function(original_func) => {
-                    let mut func = original_func.clone();
+                    let mut func = (**original_func).clone();
                     if let Some(named) = Self::extract_named_type(&item.self_type)
                         && named.generics.is_some()
                     {

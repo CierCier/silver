@@ -3885,7 +3885,7 @@ impl PRT_Parser {
                     });
                 };
                 method.attributes = attrs;
-                items.push(ast::ImplItemKind::Function(method));
+                items.push(ast::ImplItemKind::Function(Box::new(method)));
                 cursor = next_cursor;
             }
         }

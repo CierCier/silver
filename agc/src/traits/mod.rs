@@ -369,7 +369,7 @@ impl TraitRegistry {
             for impl_item in &impl_item.items {
                 match impl_item {
                     ast::ImplItemKind::Function(func) => {
-                        impl_methods.insert(func.name.name.clone(), func.clone());
+                        impl_methods.insert(func.name.name.clone(), (**func).clone());
                     }
                     ast::ImplItemKind::AssociatedType(assoc) => {
                         impl_assoc.insert(assoc.name.name.clone(), assoc.clone());

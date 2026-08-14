@@ -4704,7 +4704,7 @@ impl TypeChecker {
                                 owner: self_ty.clone(),
                                 bounds: func_bounds,
                                 source_impl: impl_item.clone(),
-                                source_method: func.clone(),
+                                source_method: (**func).clone(),
                             },
                         );
                         self.methods

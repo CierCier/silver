@@ -2538,7 +2538,7 @@ mod tests {
                 if let ast::ImplItemKind::Function(f) = m
                     && f.name.name == "grow"
                 {
-                    return Some(Box::new(f.clone()));
+                    return Some(Box::new((**f).clone()));
                 }
                 None
             })

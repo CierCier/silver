@@ -195,20 +195,14 @@ pub fn gate_items(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
                     ast::ImplItemKind::Function(func) => &func.attributes,
                     _ => return true,
                 };
-                match eval_cfg_attrs(attributes, cfg, &mut errors) {
-                    Some(keep) => keep,
-                    None => true,
-                }
+                eval_cfg_attrs(attributes, cfg, &mut errors).unwrap_or(true)
             });
         }
     }
     // Then filter top-level items.
-    program.items.retain(
-        |item| match eval_cfg_attrs(&item.attributes, cfg, &mut errors) {
-            Some(keep) => keep,
-            None => true,
-        },
-    );
+    program
+        .items
+        .retain(|item| eval_cfg_attrs(&item.attributes, cfg, &mut errors).unwrap_or(true));
     errors
 }
 
