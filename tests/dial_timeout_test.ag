@@ -1,0 +1,64 @@
+// tests/dial_timeout_test.ag — TcpStream.connect_timeout coverage.
+//
+// (A) A refused connection fails fast with ECONNREFUSED, never a timeout.
+// (B) Loopback connects succeed with a deadline and with timeout 0 (blocking).
+// (C) A black-holed peer trips the deadline (ETIMEDOUT) instead of hanging.
+//     On networks that fast-reject the blackhole (ENETUNREACH/EHOSTUNREACH)
+//     the deadline cannot be exercised, so the test passes those through.
+
+import std.error;
+import std.net.inet;
+import std.net.tcp;
+import std.sys.errno;
+import std.sys.result;
+import std.test;
+import std.time;
+
+i32 main() {
+    test_start("dial timeout: refused surfaces ECONNREFUSED");
+    Result<SocketAddr, AddrError> refused_addr = SocketAddr.v4("127.0.0.1", (u16)9999);
+    assert_true(refused_addr.success(), "refused address valid");
+    SocketAddr refused = refused_addr.unwrap();
+    Result<TcpStream, Error> refused_result = TcpStream.connect_timeout(&refused, 2);
+    assert_true(refused_result.failed(), "refused connect fails");
+    Error refused_err = refused_result.get_error();
+    assert_eq_i64(ECONNREFUSED, refused_err.code, "refused errno is ECONNREFUSED");
+
+    Result<SocketAddr, AddrError> bind_addr = SocketAddr.v4("127.0.0.1", (u16)0);
+    assert_true(bind_addr.success(), "bind address valid");
+    SocketAddr bind = bind_addr.unwrap();
+    TcpListener listener = TcpListener.bind(&bind, 8);
+    assert_true(listener.valid(), "listener bind ok");
+    SockAddrIn sa;
+    u32 len = 16;
+    Result<i64, Error> gn = try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    assert_true(gn.is_ok(), "getsockname ok");
+    Result<SocketAddr, AddrError> conn_addr = SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port));
+    assert_true(conn_addr.success(), "connect address valid");
+    SocketAddr conn = conn_addr.unwrap();
+
+    Result<TcpStream, Error> with_deadline = TcpStream.connect_timeout(&conn, 2);
+    assert_true(with_deadline.success(), "connect_timeout(2) succeeds");
+
+    Result<TcpStream, Error> blocking = TcpStream.connect_timeout(&conn, 0);
+    assert_true(blocking.success(), "connect_timeout(0) succeeds");
+
+    test_start("dial timeout: blackhole trips deadline");
+    Result<SocketAddr, AddrError> blackhole_addr = SocketAddr.v4("10.255.255.1", (u16)81);
+    assert_true(blackhole_addr.success(), "blackhole address valid");
+    SocketAddr blackhole = blackhole_addr.unwrap();
+    Instant t0 = now();
+    Result<TcpStream, Error> blackhole_result = TcpStream.connect_timeout(&blackhole, 1);
+    i64 elapsed = now().elapsed_ns(t0);
+    assert_true(blackhole_result.failed(), "blackhole connect fails");
+    Error blackhole_err = blackhole_result.get_error();
+    if (blackhole_err.code == ENETUNREACH || blackhole_err.code == EHOSTUNREACH) {
+        // No route to the blackhole: the kernel rejects the connect
+        // immediately, so the deadline path is not exercisable here.
+        return done();
+    }
+    assert_eq_i64(ETIMEDOUT, blackhole_err.code, "blackhole errno is ETIMEDOUT");
+    assert_true(elapsed < 5000000000, "connect_timeout returns within 5s");
+
+    return done();
+}

@@ -26,6 +26,7 @@ const i64 HTTP_ERR_LIMIT = -3;
 const i64 HTTP_ERR_CONNECT = -4;
 const i64 HTTP_ERR_DNS = -5;
 const i64 HTTP_ERR_REDIRECT = -6;
+const i64 HTTP_ERR_TIMEOUT = -7;
 
 const i64 HTTP_DEFAULT_MAX_HEADER = 65536;
 const i64 HTTP_DEFAULT_MAX_BODY = 16777216;
@@ -394,8 +395,9 @@ String http_resolve_url(str base, str location) {
     return move result;
 }
 
-/// Resolve `host` (IP literal or DNS name) and open a fresh connection.
-Result<HttpConnection, Error> http_open(str host, u16 port) {
+/// Resolve `host` (IP literal or DNS name) and open a fresh connection,
+/// bounding the TCP connect by `timeout_secs` (0 = wait indefinitely).
+Result<HttpConnection, Error> http_open(str host, u16 port, i64 timeout_secs) {
     u32 ip4 = 0;
     i32 ip = 0;
     if (inet_pton4(host, &ip4)) { ip = (i32)ip4; }
@@ -408,10 +410,15 @@ Result<HttpConnection, Error> http_open(str host, u16 port) {
         return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed address"));
     }
     SocketAddr addr = addr_result.unwrap();
-    TcpStream stream = TcpStream.connect(&addr);
-    if (stream.invalid()) {
+    Result<TcpStream, Error> connect_result = TcpStream.connect_timeout(&addr, timeout_secs);
+    if (connect_result.failed()) {
+        Error e = connect_result.get_error();
+        if (e.code == ETIMEDOUT) {
+            return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_TIMEOUT, "connection timed out"));
+        }
         return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed"));
     }
+    TcpStream stream = connect_result.unwrap();
     HttpConnection connection;
     connection.stream = move stream;
     connection.use_tls = false;
@@ -1096,8 +1103,15 @@ impl HttpClient {
     }
 
     Result<HttpConnection, Error> connect(HttpClient* self, SocketAddr* addr, HttpVersion version) {
-        TcpStream stream = TcpStream.connect(addr);
-        if (stream.invalid()) { return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed")); }
+        Result<TcpStream, Error> connect_result = TcpStream.connect_timeout(addr, self.timeout_secs);
+        if (connect_result.failed()) {
+            Error e = connect_result.get_error();
+            if (e.code == ETIMEDOUT) {
+                return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_TIMEOUT, "connection timed out"));
+            }
+            return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed"));
+        }
+        TcpStream stream = connect_result.unwrap();
         HttpConnection connection;
         connection.stream = move stream;
         connection.use_tls = false;
@@ -1157,7 +1171,7 @@ impl HttpClient {
             }
             self.pool.lock.unlock();
         }
-        return http_open(host, port);
+        return http_open(host, port, self.timeout_secs);
     }
 
     /// Return a fully-read, reusable connection to the pool, or close it.

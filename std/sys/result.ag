@@ -52,6 +52,10 @@ const i64 O_NONBLOCK = 2048;   // 0o4000
 const i64 O_DIRECTORY = 65536; // 0o200000
 const i64 O_CLOEXEC = 524288;  // 0o2000000
 
+// fcntl(2) commands used to toggle O_NONBLOCK on an open fd.
+const i64 F_GETFL = 3;
+const i64 F_SETFL = 4;
+
 // openat(2) special dirfd: resolve relative paths against the CWD.
 const i64 AT_FDCWD = -100;
 
@@ -145,6 +149,11 @@ Result<i64, Error> try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
 // close(2): close `fd`. Ok value: 0.
 Result<i64, Error> try_close(i32 fd) {
     return Result<i64, Error>.from_raw(sys_close((i64)fd));
+}
+
+// fcntl(2): F_GETFL returns the current flags; F_SETFL sets them (Ok 0).
+Result<i64, Error> try_fcntl(i32 fd, i64 cmd, i64 arg) {
+    return Result<i64, Error>.from_raw(sys_fcntl((i64)fd, cmd, arg));
 }
 
 // mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let

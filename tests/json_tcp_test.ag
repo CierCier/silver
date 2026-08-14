@@ -48,8 +48,9 @@ i32 main() {
         SocketAddr.v4("127.0.0.1", ntoh16(server_addr.sin_port));
     assert_true(connect_result.success(), "connect address valid");
     SocketAddr connect_addr = connect_result.unwrap();
-    TcpStream client = TcpStream.connect(&connect_addr);
-    assert_true(client.valid(), "client connect ok");
+    Result<TcpStream, Error> tcp_result = TcpStream.connect(&connect_addr);
+    assert_true(tcp_result.success(), "client connect ok");
+    TcpStream client = tcp_result.unwrap();
 
     Result<i64, Error> write_result =
         client.write((u8*)payload, cstr_len((u8*)payload));

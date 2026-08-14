@@ -39,7 +39,9 @@ bool read_response(TcpStream* s, u8* buf, i64* have) {
 i32 main() {
     Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)18099);
     SocketAddr a = addr.unwrap();
-    TcpStream s = TcpStream.connect(&a);
+    Result<TcpStream, Error> cres = TcpStream.connect(&a);
+    if (cres.failed()) { return 1; }
+    TcpStream s = cres.unwrap();
     str head = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
     u8 buf[1024];
     i64 have = 0;

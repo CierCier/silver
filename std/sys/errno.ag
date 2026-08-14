@@ -56,6 +56,7 @@ const i64 ECONNREFUSED = 111;     // Connection refused
 const i64 EADDRINUSE = 98;        // Address already in use
 const i64 EADDRNOTAVAIL = 99;     // Cannot assign requested address
 const i64 ENETUNREACH = 101;      // Network is unreachable
+const i64 EHOSTUNREACH = 113;     // No route to host
 const i64 EINPROGRESS = 115;      // Operation now in progress
 const i64 ENOTCONN = 107;         // Transport endpoint is not connected
 const i64 EALREADY = 114;         // Operation already in progress
@@ -138,6 +139,7 @@ str errno_name(i64 err) {
     if (e == EADDRINUSE) { return "EADDRINUSE"; }
     if (e == EADDRNOTAVAIL) { return "EADDRNOTAVAIL"; }
     if (e == ENETUNREACH) { return "ENETUNREACH"; }
+    if (e == EHOSTUNREACH) { return "EHOSTUNREACH"; }
     if (e == ECONNRESET) { return "ECONNRESET"; }
     if (e == ENOTCONN) { return "ENOTCONN"; }
     if (e == ETIMEDOUT) { return "ETIMEDOUT"; }

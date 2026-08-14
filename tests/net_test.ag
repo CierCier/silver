@@ -26,8 +26,9 @@ i32 main() {
         SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port));
     assert_true(conn_result.success(), "connect address valid");
     SocketAddr conn_addr = conn_result.unwrap();
-    TcpStream client = TcpStream.connect(&conn_addr);
-    assert_true(client.valid(), "connect ok");
+    Result<TcpStream, Error> client_result = TcpStream.connect(&conn_addr);
+    assert_true(client_result.success(), "connect ok");
+    TcpStream client = client_result.unwrap();
     Result<i64, Error> w = client.write((u8*)"hello", 5);
     assert_true(w.is_ok(), "write ok");
     assert_eq_i64(5, w.value(), "wrote 5 bytes");
@@ -48,8 +49,10 @@ i32 main() {
         SocketAddr.v4("127.0.0.1", (u16)9999);
     assert_true(refused_result.success(), "refused address valid");
     SocketAddr refused_addr = refused_result.unwrap();
-    TcpStream s = TcpStream.connect(&refused_addr);
-    assert_true(s.invalid(), "connect refused returns invalid");
+    Result<TcpStream, Error> refused = TcpStream.connect(&refused_addr);
+    assert_true(refused.failed(), "connect refused returns error");
+    Error refused_err = refused.get_error();
+    assert_eq_i64(refused_err.code, ECONNREFUSED, "refused errno");
 
     return done();
 }

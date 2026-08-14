@@ -5,6 +5,7 @@
 // constants so callers can combine them with `|`.
 
 import std.error;
+import std.sys.raw.poll;
 import std.sys.raw.socket;
 import std.sys.result;
 
@@ -25,6 +26,7 @@ enum SocketOptionLevel {
 
 enum SocketOption {
     REUSEADDR = 2;
+    SO_ERROR = 4;
     RCVTIMEO = 20;
     SNDTIMEO = 21;
 }
@@ -36,6 +38,7 @@ enum ShutdownHow {
 }
 
 const i64 SOCK_CLOEXEC = 524288;
+const i64 SOCK_NONBLOCK = 2048; // == O_NONBLOCK on Linux
 
 Result<i64, Error> try_socket(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
     i64 socket_type = (i64)ty | flags;
@@ -66,6 +69,10 @@ Result<i64, Error> try_setsockopt(i32 fd, SocketOptionLevel level, SocketOption 
     return Result<i64, Error>.from_raw(sys_setsockopt((i64)fd, (i64)level, (i64)optname, (i64)optval, optlen));
 }
 
+Result<i64, Error> try_getsockopt(i32 fd, SocketOptionLevel level, SocketOption optname, void* optval, void* optlen) {
+    return Result<i64, Error>.from_raw(sys_getsockopt((i64)fd, (i64)level, (i64)optname, (i64)optval, (i64)optlen));
+}
+
 Result<i64, Error> try_getsockname(i32 fd, void* addr, u32* addr_len) {
     return Result<i64, Error>.from_raw(sys_getsockname((i64)fd, (i64)addr, (i64)addr_len));
 }
@@ -76,4 +83,23 @@ Result<i64, Error> try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr,
 
 Result<i64, Error> try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
     return Result<i64, Error>.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
+}
+
+// poll(2) file-descriptor descriptor. Layout matches the kernel's struct
+// pollfd (int fd; short events; short revents) — 8 bytes on x86_64.
+struct PollFd {
+    i32 fd;
+    i16 events;
+    i16 revents;
+}
+
+const i64 POLLIN = 1;
+const i64 POLLPRI = 2;
+const i64 POLLOUT = 4;
+const i64 POLLERR = 8;
+const i64 POLLHUP = 16;
+
+// poll(2): wait for events on `fds`. Ok value: ready fd count (0 = timeout).
+Result<i64, Error> try_poll(PollFd* fds, i64 nfds, i64 timeout_ms) {
+    return Result<i64, Error>.from_raw(sys_poll((i64)fds, nfds, timeout_ms));
 }

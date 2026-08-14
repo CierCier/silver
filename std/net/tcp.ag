@@ -17,13 +17,28 @@ struct TcpStream {
     Socket sock;
 }
 
-impl TcpStream {
-    TcpStream closed() {
-        TcpStream s;
-        s.sock = Socket.from_fd(-1);
-        return s;
-    }
+// Connect `sock` to `addr`. Ok on success; Err carries the errno.
+Result<i64, Error> tcp_connect_raw(Socket* sock, SocketAddr* addr) {
+    return match *addr {
+        V4(sa) : try_connect(sock.fd, (void*)&sa, 16),
+        V6(sa) : try_connect(sock.fd, (void*)&sa, 28),
+        Unix(sa) : try_connect(sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
+    };
+}
 
+// Clear O_NONBLOCK on `fd` (restore blocking mode) via fcntl(2).
+Result<i64, Error> tcp_clear_nonblocking(i32 fd) {
+    Result<i64, Error> flags = try_fcntl(fd, F_GETFL, 0);
+    if (flags.is_err()) { return flags; }
+    return try_fcntl(fd, F_SETFL, flags.value() & ~O_NONBLOCK);
+}
+
+// Error payload of a failed syscall Result (positive errno + symbolic name).
+Error tcp_syscall_error(Result<i64, Error> r) {
+    return Error.new(r.errno(), r.err_name());
+}
+
+impl TcpStream {
     TcpStream from_fd(i32 fd) {
         TcpStream s;
         s.sock = Socket.from_fd(fd);
@@ -33,24 +48,70 @@ impl TcpStream {
     bool valid(TcpStream* self) { return self.sock.valid(); }
     bool invalid(TcpStream* self) { return self.sock.invalid(); }
 
-    // Connect to a borrowed address. Returns an invalid stream on failure.
-    TcpStream connect(SocketAddr* addr) {
-        Socket sock = Socket.new(AddressFamily.INET, SocketType.STREAM, SOCK_CLOEXEC, 0);
-        if (sock.invalid()) { return TcpStream.closed(); }
+    // Connect to a borrowed address. Err.code is the errno.
+    Result<TcpStream, Error> connect(SocketAddr* addr) {
+        return TcpStream.connect_timeout(addr, 0);
+    }
 
-        Result<i64, Error> c = match *addr {
-            V4(sa) : try_connect(sock.fd, (void*)&sa, 16),
-            V6(sa) : try_connect(sock.fd, (void*)&sa, 28),
-            Unix(sa) : try_connect(sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
-        };
+    // Connect with a deadline. timeout_secs <= 0 waits indefinitely; a
+    // positive value bounds the total connect time. Err.code is the
+    // underlying errno (ECONNREFUSED, ENETUNREACH, ...), or ETIMEDOUT when
+    // the deadline elapsed first.
+    Result<TcpStream, Error> connect_timeout(SocketAddr* addr, i64 timeout_secs) {
+        Result<i64, Error> fd_r = try_socket(AddressFamily.INET, SocketType.STREAM,
+            SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (fd_r.is_err()) {
+            return Result<TcpStream, Error>.Err(tcp_syscall_error(fd_r));
+        }
+        Socket sock = Socket.from_fd((i32)fd_r.value());
+
+        Result<i64, Error> c = tcp_connect_raw(&sock, addr);
         if (c.is_err()) {
-            sock.close();
-            return TcpStream.closed();
+            if (c.err_is(EINPROGRESS)) {
+                // Connection in progress: wait for completion (or the deadline).
+                i64 ms = -1; // infinite
+                if (timeout_secs > 0) {
+                    ms = timeout_secs * 1000;
+                    if (ms > 2147483647) { ms = 2147483647; }
+                }
+                PollFd pfd = { .fd = sock.fd, .events = (i16)POLLOUT, .revents = 0 };
+                Result<i64, Error> pr = try_poll(&pfd, 1, ms);
+                if (pr.is_err()) {
+                    sock.close();
+                    return Result<TcpStream, Error>.Err(tcp_syscall_error(pr));
+                }
+                if (pr.value() == 0) {
+                    sock.close();
+                    return Result<TcpStream, Error>.Err(Error.new(ETIMEDOUT, "connect timed out"));
+                }
+                i32 so_error = 0;
+                i64 so_len = 4;
+                Result<i64, Error> g = try_getsockopt(sock.fd, SocketOptionLevel.SOCKET,
+                    SocketOption.SO_ERROR, (void*)&so_error, (void*)&so_len);
+                if (g.is_err()) {
+                    sock.close();
+                    return Result<TcpStream, Error>.Err(tcp_syscall_error(g));
+                }
+                if (so_error != 0) {
+                    sock.close();
+                    return Result<TcpStream, Error>.Err(Error.new((i64)so_error, errno_name((i64)so_error)));
+                }
+            } else {
+                // Immediate failure (refused, unreachable, ...).
+                sock.close();
+                return Result<TcpStream, Error>.Err(tcp_syscall_error(c));
+            }
         }
 
+        // Connected: restore blocking mode and wrap the stream.
+        Result<i64, Error> fl = tcp_clear_nonblocking(sock.fd);
+        if (fl.is_err()) {
+            sock.close();
+            return Result<TcpStream, Error>.Err(tcp_syscall_error(fl));
+        }
         TcpStream stream;
         stream.sock = move sock;
-        return stream;
+        return Result<TcpStream, Error>.Ok(move stream);
     }
 
     Result<i64, Error> read(TcpStream* self, u8* buf, i64 len) {
