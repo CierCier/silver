@@ -1158,8 +1158,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let cast_method_name = Self::cast_method_name(target_type);
         let owners = self.receiver_owner_candidates(source_expr);
         let Some(cast_fn) = owners.iter().find_map(|owner| {
-            let name = Self::mangle_method_name(owner, &cast_method_name);
-            self.module.get_function(&name)
+            self.overloaded_method_candidates(owner, &cast_method_name)
+                .iter()
+                .find_map(|name| self.module.get_function(name))
         }) else {
             return Ok(None);
         };

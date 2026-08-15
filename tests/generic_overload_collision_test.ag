@@ -1,0 +1,20 @@
+// Regression: two generic function shapes must never share a symbol.
+// `f<T,U>(T)` @ [i64,f64] and `f<T>(f64,T)` @ [i64] previously mangled to
+// the same symbol (f__i64_f64_i64); the monomorph dedup dropped one body and
+// both call sites bound to the first. Arity counts + the signature hash
+// (see agc/src/mangling.rs) keep them distinct.
+
+import std.sys.entry;
+
+i64 f<T, U>(T x) { return 1; }
+i64 f<T>(f64 y, T z) { return 2; }
+
+i32 main() {
+    i64 a;
+    a = 7;
+    f64 d;
+    d = 3.5;
+    if (f<i64, f64>(a) != 1) { return 1; }
+    if (f<i64>(d, a) != 2) { return 2; }
+    return 0;
+}

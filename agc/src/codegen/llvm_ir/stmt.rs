@@ -591,8 +591,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let owners = self.receiver_owner_candidates(&iter_expr);
                     let mut found = None;
                     for owner_name in &owners {
-                        let mangled = Self::mangle_method_name(owner_name, &next_ident.name);
-                        if let Some(sig) = self.signature_for_name(&mangled)
+                        let mut resolved = None;
+                        for mangled in
+                            self.overloaded_method_candidates(owner_name, &next_ident.name)
+                        {
+                            if let Some(sig) = self.signature_for_name(&mangled) {
+                                resolved = Some(sig);
+                                break;
+                            }
+                        }
+                        if let Some(sig) = resolved
                             && let Some(return_type) = &sig.return_type
                         {
                             let inner = match return_type.kind.as_ref() {

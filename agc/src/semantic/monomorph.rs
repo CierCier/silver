@@ -53,7 +53,6 @@ pub fn append_monomorphs(
             program.items.push(inst.item.clone());
         }
     }
-
     let impl_items = instantiate_impls(&generic_impls, &instantiations, &mut generated);
     // Collect all newly generated items for remaining-call scanning
     all_new_items.reserve(impl_items.len());
@@ -889,7 +888,6 @@ fn instantiate_impls(
                     substitute_block_types(&mut func.body, &body_mapping);
                 }
             }
-
             items.push(ast::Item {
                 kind: ast::ItemKind::Impl(new_impl),
                 span: impl_item.self_type.span,
@@ -2035,35 +2033,13 @@ fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
 pub fn mangle_name(base: &str, args: &[Type]) -> String {
     let mut parts = Vec::new();
     for arg in args {
-        parts.push(sanitize_type_key(&arg.canonical_key()));
+        parts.push(crate::mangling::sanitize_type_key(&arg.canonical_key()));
     }
     if parts.is_empty() {
         base.to_string()
     } else {
         format!("{}__{}", base, parts.join("_"))
     }
-}
-
-/// Sanitize a canonical type key into a mangled-name-safe token: non-alphanumeric
-/// characters collapse to a single underscore, and `*`/`&` become `ptr_`/`ref_`.
-pub fn sanitize_type_key(value: &str) -> String {
-    sanitize(&value.replace('*', "ptr_").replace('&', "ref_"))
-}
-
-fn sanitize(value: &str) -> String {
-    let mut out = String::new();
-    let mut last_underscore = false;
-    for ch in value.chars() {
-        let is_ok = ch.is_ascii_alphanumeric();
-        if is_ok {
-            out.push(ch);
-            last_underscore = false;
-        } else if !last_underscore {
-            out.push('_');
-            last_underscore = true;
-        }
-    }
-    if out.is_empty() { "_".to_string() } else { out }
 }
 
 fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<Type> {
@@ -2076,26 +2052,37 @@ fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<
 /// Compute the full mangled function name including parameter type signature,
 /// enabling disambiguation of overloaded generic functions with different
 /// value parameter counts (e.g. alloc<i32>() vs alloc<i32>(i64)).
+/// Format: `{name}__{K}_{args}__{P}_{params}__{hash}` — explicit arity
+/// counts plus an FNV-1a-64 hash of the complete canonical signature make
+/// distinct instances always distinct (see crate::mangling).
 fn mangle_function_instance(
     source: &ast::FunctionItem,
     args: &[Type],
     mapping: &HashMap<String, Type>,
 ) -> String {
-    let param_sig = source
+    let arg_keys = args
+        .iter()
+        .map(|arg| arg.canonical_key())
+        .collect::<Vec<_>>();
+    let param_keys = source
         .parameters
         .iter()
         .map(|param| {
             let concrete = Type::from_ast(&param.param_type).substitute(mapping);
-            sanitize(&concrete.canonical_key())
+            concrete.canonical_key()
         })
-        .collect::<Vec<_>>()
-        .join("_");
-    let mangled_base = mangle_name(&source.name.name, args);
-    if param_sig.is_empty() {
-        format!("{}__v", mangled_base)
-    } else {
-        format!("{}_{}", mangled_base, param_sig)
-    }
+        .collect::<Vec<_>>();
+    let ret_key = source
+        .return_type
+        .as_ref()
+        .map(|ret| Type::from_ast(ret).substitute(mapping).canonical_key());
+    crate::mangling::generic_instance_symbol(
+        &source.name.name,
+        &arg_keys,
+        &param_keys,
+        ret_key.as_deref(),
+        source.is_variadic,
+    )
 }
 
 /// Collect names of all generic functions (functions with generic type parameters).
@@ -2490,7 +2477,9 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "foo__i32_i32",
+            ast::ItemKind::Function(f) => {
+                f.name.name.starts_with("foo__1_i32__1_i32__") && f.name.name.len() == 19 + 16
+            }
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function foo__i32");
@@ -2516,7 +2505,10 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64_i32_f64",
+            ast::ItemKind::Function(f) => {
+                f.name.name.starts_with("bar__2_i32_f64__2_i32_f64__")
+                    && f.name.name.len() == 27 + 16
+            }
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function bar__i32_f64");
@@ -2541,7 +2533,10 @@ mod tests {
         let items = append_monomorphs(&mut program, &[request.clone(), request], &[]);
         let count = items
             .iter()
-            .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32_i32"))
+            .filter(|item| {
+                matches!(&item.kind, ast::ItemKind::Function(f)
+                if f.name.name.starts_with("foo__1_i32__1_i32__"))
+            })
             .count();
         assert_eq!(
             count, 1,
@@ -2569,7 +2564,9 @@ mod tests {
 
         let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "id__i32_i32",
+            ast::ItemKind::Function(f) => {
+                f.name.name.starts_with("id__1_i32__1_i32__") && f.name.name.len() == 18 + 16
+            }
             _ => false,
         });
         assert!(has_fn, "expected monomorphized function id__i32");
@@ -2753,7 +2750,9 @@ mod tests {
 
         // Verify that alloc<i32>(i32) was also monomorphized (nested call within Holder<i32>.grow)
         let has_alloc = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Function(f) => f.name.name == "alloc__i32_i32",
+            ast::ItemKind::Function(f) => {
+                f.name.name.starts_with("alloc__1_i32__1_i32__") && f.name.name.len() == 21 + 16
+            }
             _ => false,
         });
         assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");

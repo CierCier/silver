@@ -146,6 +146,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             method_overload_signatures: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
             drop_trait_impl_owners: HashSet::default(),
             generic_impl_templates: Vec::new(),
             loop_stack: Vec::new(),
@@ -243,6 +245,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             method_overload_signatures: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
             generic_impl_templates: Vec::new(),
             drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
@@ -570,6 +574,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             method_overload_signatures: HashMap::default(),
             string_constants: HashMap::default(),
             struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
             generic_impl_templates: Vec::new(),
             drop_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
@@ -694,6 +700,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         };
                         self.imported_function_links
                             .insert(export.name.clone(), llvm_name.clone());
+                        self.register_source_function_symbol(&export.name, &llvm_name);
                         let abi = export.abi.map(|abi| match abi {
                             crate::module_artifact::ModuleAbi::C => ast::ExternLinkage::C,
                             crate::module_artifact::ModuleAbi::Silver => ast::ExternLinkage::Silver,

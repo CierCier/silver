@@ -41,6 +41,35 @@ mod tests {
         LlvmIrGenerator::generate(&program).expect("llvm generation failed")
     }
 
+    /// Extract the distinct 16-hex hashed symbols defined in the IR under a
+    /// `define <retty> @<prefix>` pattern (e.g. `define i64 @Thing__bump__`).
+    fn defined_hashed_symbols(ir: &str, define_prefix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = ir;
+        while let Some(pos) = rest.find(define_prefix) {
+            let hash_start = pos + define_prefix.len();
+            let hash: String = rest[hash_start..].chars().take(16).collect();
+            assert!(
+                hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected 16-hex symbol hash after {define_prefix}: {hash}"
+            );
+            let symbol = format!("{define_prefix}{hash}");
+            if !out.contains(&symbol) {
+                out.push(symbol);
+            }
+            rest = &rest[hash_start + 16..];
+        }
+        out
+    }
+
+    /// The 16-hex hash of the symbol the IR calls through `call <retty> @<prefix>`.
+    fn called_symbol_hash(ir: &str, call_prefix: &str) -> String {
+        let pos = ir
+            .find(call_prefix)
+            .expect("expected call to hashed symbol");
+        ir[pos + call_prefix.len()..][..16].to_string()
+    }
+
     fn find_function_mut<'a>(
         program: &'a mut ast::Program,
         name: &str,
@@ -206,20 +235,22 @@ mod tests {
         let ir = lower_to_llvm(
             "struct Thing { i64 v; } impl Thing { i64 bump(Thing* self, i64 a) { return self.v + a; } i64 bump(Thing* self, i64 a, i64 b) { return self.v + a + b; } i64 bump(Thing* self, i64 a, i64 b, i64 c) { return self.v + a + b + c; } } i32 main() { Thing t; t.v = 1; i64 r = t.bump(10, 20, 30); return (i32)r; }",
         );
+        let defs = defined_hashed_symbols(&ir, "define i64 @Thing__bump__");
+        assert_eq!(
+            defs.len(),
+            3,
+            "expected three distinct overload symbols:\n{ir}"
+        );
+        // The 3-argument call must resolve to one of the three definitions.
+        let call_hash = called_symbol_hash(&ir, "call i64 @Thing__bump__");
         assert!(
-            ir.contains("define i64 @Thing__bump__1("),
-            "expected first overload symbol:\n{ir}"
+            defs.iter().any(|d| d.ends_with(&call_hash)),
+            "call target {call_hash} not among definitions:\n{ir}"
         );
         assert!(
-            ir.contains("define i64 @Thing__bump__2("),
-            "expected second overload symbol:\n{ir}"
-        );
-        assert!(
-            ir.contains("define i64 @Thing__bump__3("),
-            "expected third overload symbol:\n{ir}"
-        );
-        assert!(
-            ir.contains("call i64 @Thing__bump__3(ptr %t, i64 10, i64 20, i64 30)"),
+            ir.contains(&format!(
+                "call i64 @Thing__bump__{call_hash}(ptr %t, i64 10, i64 20, i64 30)"
+            )),
             "expected call to resolve to the 3-arg overload:\n{ir}"
         );
     }
@@ -229,20 +260,27 @@ mod tests {
         let ir = lower_to_llvm(
             "struct S { i64 v; } impl S { i64 pick(S* self, i64 v) { return v; } i64 pick(S* self, str v) { return 1; } } i32 main() { S s; s.v = 1; i64 a = s.pick(7); i64 b = s.pick((str)\"x\"); return 0; }",
         );
-        assert!(
-            ir.contains("define i64 @S__pick__1(ptr"),
-            "expected i64 overload symbol:\n{ir}"
+        let defs = defined_hashed_symbols(&ir, "define i64 @S__pick__");
+        assert_eq!(
+            defs.len(),
+            2,
+            "expected two distinct overload symbols:\n{ir}"
+        );
+        let i64_hash = called_symbol_hash(&ir, "call i64 @S__pick__");
+        let str_hash = called_symbol_hash(
+            &ir[ir.find("call i64 @S__pick__").unwrap() + 1..],
+            "call i64 @S__pick__",
+        );
+        assert_ne!(
+            i64_hash, str_hash,
+            "i64 and str calls must select different overloads:\n{ir}"
         );
         assert!(
-            ir.contains("define i64 @S__pick__2(ptr"),
-            "expected str overload symbol:\n{ir}"
-        );
-        assert!(
-            ir.contains("call i64 @S__pick__1(ptr %s, i64 7)"),
+            ir.contains(&format!("call i64 @S__pick__{i64_hash}(ptr %s, i64 7)")),
             "expected i64 argument to select the i64 overload:\n{ir}"
         );
         assert!(
-            ir.contains("call i64 @S__pick__2(ptr %s, ptr"),
+            ir.contains(&format!("call i64 @S__pick__{str_hash}(ptr %s, ptr")),
             "expected cast str argument to select the str overload:\n{ir}"
         );
     }
@@ -252,8 +290,20 @@ mod tests {
         let ir = lower_to_llvm(
             "struct S { i64 v; } impl S { i64 pick(S* self, bool v) { return 1; } i64 pick(S* self, i64 v) { return v; } } i32 main() { S s; s.v = 1; i64* p = &s.v; i64 r = s.pick(*p); return (i32)r; }",
         );
+        let defs = defined_hashed_symbols(&ir, "define i64 @S__pick__");
+        assert_eq!(
+            defs.len(),
+            2,
+            "expected two distinct overload symbols:\n{ir}"
+        );
+        // The deref argument (i64) must select the i64 overload (i64 second param).
+        let call_hash = called_symbol_hash(&ir, "call i64 @S__pick__");
+        let call_line = ir
+            .lines()
+            .find(|l| l.contains(&format!("call i64 @S__pick__{call_hash}")))
+            .unwrap_or("");
         assert!(
-            ir.contains("call i64 @S__pick__2(ptr %s, i64 %"),
+            call_line.contains("ptr %s, i64 %"),
             "expected deref argument to select the i64 overload:\n{ir}"
         );
     }
@@ -264,7 +314,7 @@ mod tests {
             "struct Counter { i32 value; } impl Counter { i32 read(Counter* self) { return self.value; } } i32 use_ptr(Counter* p) { return p.read(); } i32 main() { return 0; }",
         );
         assert!(
-            ir.contains("call i32 @Counter__read(ptr"),
+            ir.contains("call i32 @Counter__read__"),
             "expected pointer receiver method call:\n{ir}"
         );
         assert!(

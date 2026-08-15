@@ -679,7 +679,7 @@ mod tests {
         let cond = match &stmt.kind {
             ast::StatementKind::Expression(expr) => match &*expr.kind {
                 ast::ExpressionKind::If { condition, .. } => condition,
-                _ => panic!("expected if"),
+                _ => panic!("expected if, got {:?}", expr.kind),
             },
             _ => panic!("expected expression statement"),
         };

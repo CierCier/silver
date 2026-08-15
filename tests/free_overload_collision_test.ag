@@ -1,0 +1,19 @@
+// Regression: non-generic free-function overloads must resolve to distinct
+// symbols. `g(i64)` and `g(f64)` previously both emitted symbol `g`; the
+// f64 call bound to the i64 body. Overloaded names now carry a signature
+// hash (see agc/src/mangling.rs).
+
+import std.sys.entry;
+
+i64 g(i64 x) { return 1; }
+i64 g(f64 y) { return 2; }
+
+i32 main() {
+    i64 a;
+    a = 5;
+    f64 d;
+    d = 3.5;
+    if (g(a) != 1) { return 1; }
+    if (g(d) != 2) { return 2; }
+    return 0;
+}

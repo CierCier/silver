@@ -211,9 +211,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let drop_owners = Self::owner_name_candidates_from_type(ty);
         for owner in &drop_owners {
             if self.drop_trait_impl_owners.contains(owner.as_str()) {
-                let mangled = Self::mangle_method_name(owner, "drop");
-                if self.module.get_function(&mangled).is_some() {
-                    return Ok(Some(mangled));
+                for candidate in self.overloaded_method_candidates(owner, "drop") {
+                    if self.module.get_function(&candidate).is_some() {
+                        return Ok(Some(candidate));
+                    }
                 }
             }
         }

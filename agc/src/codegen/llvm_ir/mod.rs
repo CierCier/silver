@@ -23,6 +23,16 @@ pub(crate) struct FunctionSig {
     pub(crate) linkage: Option<ast::ExternLinkage>,
 }
 
+/// Canonical signature of a free function, used to decide whether a name is
+/// overloaded and to compute its collision-safe symbol hash. Keys are the
+/// PRE-sanitization canonical type keys of concrete types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FreeFunctionSig {
+    pub(crate) params: Vec<String>,
+    pub(crate) return_type: Option<String>,
+    pub(crate) is_variadic: bool,
+}
+
 impl PartialEq for FunctionSig {
     fn eq(&self, other: &Self) -> bool {
         self.is_variadic == other.is_variadic
@@ -81,6 +91,13 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) variables: Vec<HashMap<String, VarInfo<'ctx>>>,
     pub(crate) function_sigs: HashMap<SymbolId, FunctionSig>,
     pub(crate) function_name_to_symbol: HashMap<String, SymbolId>,
+    /// Distinct full signatures per source function name (params + return +
+    /// variadic, as canonical keys). Names with more than one signature get
+    /// hash-suffixed symbols; single-signature names keep their plain name.
+    pub(crate) free_function_sigs: HashMap<String, Vec<FreeFunctionSig>>,
+    /// Source function name -> every LLVM symbol registered for it. Used at
+    /// call sites to enumerate overload candidates.
+    pub(crate) source_function_symbols: HashMap<String, Vec<String>>,
     pub(crate) imported_function_links: HashMap<String, String>,
     pub(crate) extern_globals: HashMap<String, ast::Type>,
     pub(crate) global_variables: HashMap<String, ast::Type>,
@@ -100,11 +117,11 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) volatile_globals: HashSet<String>,
     pub(crate) static_local_counter: usize,
     pub(crate) method_receivers: HashMap<(String, String), bool>,
-    /// Distinct parameter-type signatures per `(owner, method)`, sorted by
-    /// arity then type key. Overloaded methods get `__N` symbols keyed by
-    /// signature (codegen mangles by name only); duplicate definitions with
-    /// the same signature keep the classic `<Owner>__<method>` symbol.
-    pub(crate) method_overload_signatures: HashMap<(String, String), Vec<Vec<String>>>,
+    /// Distinct full signatures per `(owner, method)` (params + return +
+    /// variadic, as canonical keys). Every method symbol carries an
+    /// FNV-1a-64 hash of its full signature, so distinct methods always get
+    /// distinct symbols (see crate::mangling).
+    pub(crate) method_overload_signatures: HashMap<(String, String), Vec<FreeFunctionSig>>,
     pub(crate) string_constants: HashMap<String, PointerValue<'ctx>>,
     pub(crate) struct_generics: HashMap<String, Vec<String>>,
     pub(crate) generic_impl_templates: Vec<ast::ImplItem>,

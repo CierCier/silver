@@ -11,6 +11,7 @@ pub mod format;
 pub mod intrinsics;
 pub mod lexer;
 pub mod link;
+pub mod mangling;
 pub mod module_artifact;
 pub mod module_loader;
 pub mod parser;

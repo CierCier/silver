@@ -4,11 +4,10 @@ use inkwell::targets::TargetData;
 use inkwell::types::StructType;
 use inkwell::values::{BasicValue, BasicValueEnum};
 
-use crate::codegen::llvm_ir::FunctionSig;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::llvm_ir::{FreeFunctionSig, FunctionSig};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::parser::ast;
-use crate::semantic::monomorph::mangle_name;
 use crate::symbol_table::SymbolKind;
 use crate::types::Type;
 
@@ -228,11 +227,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let Some(args) = &named.generics {
             let parts = args
                 .iter()
-                .map(|arg| {
-                    crate::semantic::monomorph::sanitize_type_key(
-                        &Type::from_ast(arg).canonical_key(),
-                    )
-                })
+                .map(|arg| crate::mangling::sanitize_type_key(&Type::from_ast(arg).canonical_key()))
                 .collect::<Vec<_>>();
             if parts.is_empty() {
                 base
@@ -248,47 +243,113 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         format!("{owner}__{method}")
     }
 
-    /// Codegen symbol for `(owner, method)` with the given parameter-type keys
-    /// (including the receiver). Overloaded names get a `__N` symbol per
-    /// distinct signature; single-signature names keep the classic
-    /// `<Owner>__<method>` symbol even if defined more than once.
+    /// Full canonical signature of a free function item (concrete types),
+    /// used for overload detection and collision-safe symbol hashing.
+    pub(crate) fn free_signature_from_ast(
+        params: &[ast::Parameter],
+        return_type: Option<&ast::Type>,
+        is_variadic: bool,
+    ) -> FreeFunctionSig {
+        FreeFunctionSig {
+            params: params
+                .iter()
+                .map(|param| Type::from_ast(&param.param_type).canonical_key())
+                .collect(),
+            return_type: return_type.map(|ret| Type::from_ast(ret).canonical_key()),
+            is_variadic,
+        }
+    }
+
+    /// LLVM symbol for a free function: the plain name when the name has a
+    /// single signature, `{name}__{hash}` when overloaded (see
+    /// crate::mangling for the collision guarantees).
+    pub(crate) fn free_function_symbol_name(&self, name: &str, sig: &FreeFunctionSig) -> String {
+        if self
+            .free_function_sigs
+            .get(name)
+            .is_some_and(|sigs| sigs.len() > 1)
+        {
+            crate::mangling::overloaded_free_function_symbol(
+                name,
+                &sig.params,
+                sig.return_type.as_deref(),
+                sig.is_variadic,
+            )
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// Record a source function name -> LLVM symbol so call sites can
+    /// enumerate overload candidates. Only overloaded names need entries;
+    /// single-signature and extern names resolve through the plain-name
+    /// fallback.
+    pub(crate) fn register_source_function_symbol(&mut self, source: &str, symbol: &str) {
+        if source == symbol {
+            return;
+        }
+        self.source_function_symbols
+            .entry(source.to_string())
+            .or_default()
+            .push(symbol.to_string());
+    }
+
+    /// Codegen symbol for `(owner, method)` with the given full signature
+    /// (params including the receiver, return, variadic). Every method
+    /// symbol carries an FNV-1a-64 hash of its full signature, so distinct
+    /// methods — even ones whose (owner, method) strings concatenate
+    /// identically, e.g. `Foo.bar__baz` vs `Foo__bar.baz` — never collide.
     pub(crate) fn overloaded_method_symbol_name(
         &self,
         owner: &str,
         method: &str,
-        param_keys: &[String],
+        sig: &FreeFunctionSig,
     ) -> String {
-        let key = (owner.to_string(), method.to_string());
-        let Some(signatures) = self.method_overload_signatures.get(&key) else {
-            return Self::mangle_method_name(owner, method);
-        };
-        if signatures.len() <= 1 {
-            return Self::mangle_method_name(owner, method);
-        }
-        let index = signatures
-            .iter()
-            .position(|signature| signature == param_keys)
-            .or_else(|| {
-                signatures
-                    .iter()
-                    .position(|signature| signature.len() == param_keys.len())
-            })
-            .unwrap_or(0)
-            + 1;
-        format!("{owner}__{method}__{index}")
+        crate::mangling::method_symbol(
+            owner,
+            method,
+            &sig.params,
+            sig.return_type.as_deref(),
+            sig.is_variadic,
+        )
     }
 
-    /// Candidate symbols for a call to `(owner, method)`, most specific first.
+    /// Convenience: hashed method symbol directly from the AST method item.
+    pub(crate) fn method_symbol_from_ast(
+        &self,
+        owner: &str,
+        method: &str,
+        params: &[ast::Parameter],
+        return_type: Option<&ast::Type>,
+        is_variadic: bool,
+    ) -> String {
+        let sig = Self::free_signature_from_ast(params, return_type, is_variadic);
+        self.overloaded_method_symbol_name(owner, method, &sig)
+    }
+
+    /// Candidate symbols for a call to `(owner, method)` — one hashed symbol
+    /// per recorded signature. Falls back to the classic `<Owner>__<method>`
+    /// name when the signature table has no entry (e.g. methods materialized
+    /// lazily before registration).
     pub(crate) fn overloaded_method_candidates(&self, owner: &str, method: &str) -> Vec<String> {
         let key = (owner.to_string(), method.to_string());
         let Some(signatures) = self.method_overload_signatures.get(&key) else {
             return vec![Self::mangle_method_name(owner, method)];
         };
-        if signatures.len() <= 1 {
+        if signatures.is_empty() {
             return vec![Self::mangle_method_name(owner, method)];
         }
-        (1..=signatures.len())
-            .map(|i| format!("{owner}__{method}__{i}"))
+        signatures
+            .iter()
+            .map(|sig| {
+                crate::mangling::method_symbol(
+                    owner,
+                    method,
+                    &sig.params,
+                    sig.return_type.as_deref(),
+                    sig.is_variadic,
+                )
+            })
             .collect()
     }
 
@@ -383,11 +444,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // IndexedAccess impl: the `__index_get` return type is
                         // the element type (e.g. String -> u8).
                         for owner in Self::owner_name_candidates_from_type(&obj_ty) {
-                            if let Some(sig) = self.signature_for_name(&Self::mangle_method_name(
-                                &owner,
-                                "__index_get",
-                            )) {
-                                return sig.return_type;
+                            for mangled in self.overloaded_method_candidates(&owner, "__index_get")
+                            {
+                                if let Some(sig) = self.signature_for_name(&mangled) {
+                                    return sig.return_type;
+                                }
                             }
                         }
                         None
@@ -760,7 +821,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     && !generics.is_empty()
                     && generics.iter().all(|g| !Self::type_has_type_param(g))
                 {
-                    // All concrete args -> this is a generic function call
+                    // All concrete args -> this is a generic function call.
+                    // Monomorphized instances are declared in Pass 1a under
+                    // `{name}__{K}_{args}__{P}_{params}__{hash}`; match the
+                    // registered instance with the same type-arg count and
+                    // list and the same value arity (P = arguments.len()).
                     let fn_name = named
                         .path
                         .iter()
@@ -768,32 +833,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .collect::<Vec<_>>()
                         .join(".");
                     let rhs_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
-                    let base_mangled = mangle_name(&fn_name, &rhs_args);
-                    // Check LLVM module: monomorphized functions are declared in Pass 1a
-                    if self.module.get_function(&base_mangled).is_some() {
+                    let arg_keys = rhs_args
+                        .iter()
+                        .map(|ty| crate::mangling::sanitize_type_key(&ty.canonical_key()))
+                        .collect::<Vec<_>>();
+                    let base_prefix =
+                        format!("{fn_name}__{}_{}__", arg_keys.len(), arg_keys.join("_"));
+                    // The params part is `{P}_{param1}_{param2}__{hash}`: after
+                    // the value-arity count comes a single underscore, then the
+                    // sanitized param types.
+                    let param_prefix = format!("{base_prefix}{}_", arguments.len());
+                    let found = self
+                        .function_name_to_symbol
+                        .keys()
+                        .filter(|name| name.starts_with(&param_prefix))
+                        .min_by_key(|name| name.len())
+                        .cloned();
+                    if let Some(mangled) = found {
                         **function = ast::Expression {
                             kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                                name: base_mangled,
+                                name: mangled,
                                 span: function.span,
                             })),
                             span: function.span,
                         };
-                    } else {
-                        // Try with parameter suffix (e.g. alloc__i32 vs alloc__i32_i64)
-                        for name in self.function_name_to_symbol.keys() {
-                            if name.starts_with(&format!("{}_", base_mangled)) {
-                                **function = ast::Expression {
-                                    kind: Box::new(ast::ExpressionKind::Identifier(
-                                        ast::Identifier {
-                                            name: name.clone(),
-                                            span: function.span,
-                                        },
-                                    )),
-                                    span: function.span,
-                                };
-                                break;
-                            }
-                        }
                     }
                 }
                 for arg in arguments {
@@ -1047,15 +1110,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 continue;
             };
 
-            let mangled_name = Self::mangle_method_name(&owner, method_name);
+            let mut func = template_func;
+            for param in &mut func.parameters {
+                param.param_type = Self::substitute_generic_type(&param.param_type, &mapping);
+            }
+            if let Some(return_ty) = &mut func.return_type {
+                *return_ty = Self::substitute_generic_type(return_ty, &mapping);
+            }
+            // The symbol carries a hash of the substituted signature; it must
+            // agree with the declaration emitted from the monomorphized impl.
+            let mangled_name = self.method_symbol_from_ast(
+                &owner,
+                method_name,
+                &func.parameters,
+                func.return_type.as_ref(),
+                func.is_variadic,
+            );
             if self.module.get_function(&mangled_name).is_none() {
-                let mut func = template_func;
-                for param in &mut func.parameters {
-                    param.param_type = Self::substitute_generic_type(&param.param_type, &mapping);
-                }
-                if let Some(return_ty) = &mut func.return_type {
-                    *return_ty = Self::substitute_generic_type(return_ty, &mapping);
-                }
                 // Rewrite bare references to the enum's own base name inside
                 // the method body (e.g. `Optional.Some(x)` in `impl Optional<T>`
                 // instantiated for `Optional<i32>`) so variant construction
@@ -1401,13 +1472,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .entry((owner.clone(), func.name.name.clone()))
                         .or_insert(expects_ref);
 
-                    let param_keys: Vec<String> = func
-                        .parameters
-                        .iter()
-                        .map(|param| Type::from_ast(&param.param_type).canonical_key())
-                        .collect();
-                    let mangled_name =
-                        self.overloaded_method_symbol_name(&owner, &func.name.name, &param_keys);
+                    let mangled_name = self.method_symbol_from_ast(
+                        &owner,
+                        &func.name.name,
+                        &func.parameters,
+                        func.return_type.as_ref(),
+                        func.is_variadic,
+                    );
                     let effective_visibility =
                         Self::method_effective_visibility(impl_visibility, &func.visibility);
                     self.register_function_signature(
@@ -1451,7 +1522,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         continue;
                     }
                     let cast_method_name = Self::cast_method_name(&cast.target_type);
-                    let mangled_name = Self::mangle_method_name(&owner, &cast_method_name);
+                    let mangled_name = self.method_symbol_from_ast(
+                        &owner,
+                        &cast_method_name,
+                        &cast.parameters,
+                        Some(&cast.target_type),
+                        false,
+                    );
                     let effective_visibility = Self::method_effective_visibility(
                         impl_visibility,
                         &ast::Visibility::Private,

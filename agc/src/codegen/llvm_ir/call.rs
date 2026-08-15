@@ -192,10 +192,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .unwrap_or_else(|| fn_name.clone())
             }
         } else {
-            self.imported_function_links
-                .get(&fn_name)
-                .cloned()
-                .unwrap_or_else(|| fn_name.clone())
+            self.resolve_free_function_symbol(&fn_name, arguments)?
         };
         let function = self.module.get_function(&llvm_name).ok_or_else(|| {
             CodegenError::with_span(
@@ -360,6 +357,70 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
         true
+    }
+
+    /// Resolve the LLVM symbol for a direct call to a (non-generic) free
+    /// function. Single-signature names resolve through the plain-name
+    /// fallback (extern, #[link_name], imported, and un-overloaded functions
+    /// alike); overloaded names pick the candidate whose arity and argument
+    /// types match, mirroring method-call resolution.
+    fn resolve_free_function_symbol(
+        &mut self,
+        name: &str,
+        arguments: &[ast::Expression],
+    ) -> CodegenResult<String> {
+        // Overloaded names enumerate their hashed symbols from
+        // source_function_symbols; single-symbol names fall back to the
+        // #[link_name] mapping (for renamed/imported functions), then the
+        // plain name. imported_function_links must NOT short-circuit here:
+        // it is a 1:1 map, so a second overload would overwrite the first.
+        let candidates = self
+            .source_function_symbols
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| {
+                self.imported_function_links
+                    .get(name)
+                    .cloned()
+                    .map_or_else(|| vec![name.to_string()], |linked| vec![linked])
+            });
+        if candidates.len() <= 1 {
+            return Ok(candidates
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| name.to_string()));
+        }
+        let mut arity_match: Option<String> = None;
+        let mut type_match: Option<String> = None;
+        for candidate in &candidates {
+            let signature = self.signature_for_name(candidate);
+            let declared = signature
+                .as_ref()
+                .map(|sig| sig.params.len())
+                .unwrap_or_else(|| {
+                    self.module
+                        .get_function(candidate)
+                        .map(|f| f.get_type().get_param_types().len())
+                        .unwrap_or(0)
+                });
+            let variadic = signature
+                .as_ref()
+                .map(|sig| sig.is_variadic)
+                .unwrap_or(false);
+            if !variadic && declared != arguments.len() {
+                continue;
+            }
+            if variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
+                type_match = Some(candidate.clone());
+                break;
+            }
+            if arity_match.is_none() {
+                arity_match = Some(candidate.clone());
+            }
+        }
+        Ok(type_match
+            .or(arity_match)
+            .unwrap_or_else(|| name.to_string()))
     }
 
     pub(crate) fn emit_method_call_expression(

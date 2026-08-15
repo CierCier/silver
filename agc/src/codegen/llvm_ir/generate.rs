@@ -15,7 +15,6 @@ use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
-use crate::types::Type;
 pub(crate) fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveType {
     if min_value < 0 {
         if min_value >= i8::MIN as i128 && max_value <= i8::MAX as i128 {
@@ -166,6 +165,39 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
         }
 
+        // Pass 1a0: collect distinct free-function signatures per source name
+        // so overloaded names get collision-safe symbols. Generics, placeholder
+        // signatures, and #[link_name]-pinned functions are excluded (the
+        // latter keep their user-chosen symbol verbatim).
+        for item in &program.items {
+            if let ast::ItemKind::Function(function_item) = &item.kind {
+                if function_item.generics.is_some() {
+                    continue;
+                }
+                if self.has_generic_placeholder_signature(
+                    &function_item.parameters,
+                    function_item.return_type.as_ref(),
+                ) {
+                    continue;
+                }
+                if function_link_name(&item.attributes).is_some() {
+                    continue;
+                }
+                let sig = Self::free_signature_from_ast(
+                    &function_item.parameters,
+                    function_item.return_type.as_ref(),
+                    function_item.is_variadic,
+                );
+                let signatures = self
+                    .free_function_sigs
+                    .entry(function_item.name.name.clone())
+                    .or_default();
+                if !signatures.contains(&sig) {
+                    signatures.push(sig);
+                }
+            }
+        }
+
         // Pass 1a: Declare all functions (declaration only, no bodies) so forward references resolve.
         for item in &program.items {
             if let ast::ItemKind::Function(function_item) = &item.kind {
@@ -178,11 +210,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 ) {
                     continue;
                 }
-                if self.module.get_function(&function_item.name.name).is_some() {
+                let sig = Self::free_signature_from_ast(
+                    &function_item.parameters,
+                    function_item.return_type.as_ref(),
+                    function_item.is_variadic,
+                );
+                let symbol_name = self.free_function_symbol_name(&function_item.name.name, &sig);
+                if self.module.get_function(&symbol_name).is_some() {
                     continue;
                 }
                 self.register_function_signature(
-                    &function_item.name.name,
+                    &symbol_name,
                     FunctionSig {
                         params: function_item
                             .parameters
@@ -196,6 +234,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     Some(function_item.name.span),
                     SymbolKind::Function,
                 );
+                self.register_source_function_symbol(&function_item.name.name, &symbol_name);
                 let fn_ty = self.lower_function_type(
                     &function_item
                         .parameters
@@ -206,8 +245,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     function_item.is_variadic,
                     None,
                 )?;
-                self.module
-                    .add_function(&function_item.name.name, fn_ty, None);
+                self.module.add_function(&symbol_name, fn_ty, None);
             }
         }
 
@@ -228,27 +266,48 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     continue;
                 };
                 for impl_item in &impl_item.items {
-                    if let ast::ImplItemKind::Function(func) = impl_item {
-                        if func.generics.is_some() {
-                            continue;
+                    let (method_name, sig) = match impl_item {
+                        ast::ImplItemKind::Function(func) => {
+                            if func.generics.is_some() {
+                                continue;
+                            }
+                            if self.has_generic_placeholder_signature(
+                                &func.parameters,
+                                func.return_type.as_ref(),
+                            ) {
+                                continue;
+                            }
+                            (
+                                func.name.name.clone(),
+                                Self::free_signature_from_ast(
+                                    &func.parameters,
+                                    func.return_type.as_ref(),
+                                    func.is_variadic,
+                                ),
+                            )
                         }
-                        if self.has_generic_placeholder_signature(
-                            &func.parameters,
-                            func.return_type.as_ref(),
-                        ) {
-                            continue;
+                        ast::ImplItemKind::Cast(cast) => {
+                            if self.has_generic_placeholder_signature(
+                                &cast.parameters,
+                                Some(&cast.target_type),
+                            ) {
+                                continue;
+                            }
+                            (
+                                Self::cast_method_name(&cast.target_type),
+                                Self::free_signature_from_ast(
+                                    &cast.parameters,
+                                    Some(&cast.target_type),
+                                    false,
+                                ),
+                            )
                         }
-                        let key = (owner.clone(), func.name.name.clone());
-                        let signature: Vec<String> = func
-                            .parameters
-                            .iter()
-                            .map(|param| Type::from_ast(&param.param_type).canonical_key())
-                            .collect();
-                        let signatures = self.method_overload_signatures.entry(key).or_default();
-                        if !signatures.contains(&signature) {
-                            signatures.push(signature);
-                            signatures.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-                        }
+                        _ => continue,
+                    };
+                    let key = (owner.clone(), method_name);
+                    let signatures = self.method_overload_signatures.entry(key).or_default();
+                    if !signatures.contains(&sig) {
+                        signatures.push(sig);
                     }
                 }
             }
@@ -382,7 +441,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         }
 
         let link_name = function_link_name(attributes);
-        let llvm_name = link_name.unwrap_or(&func.name.name);
+        let symbol_name = self.free_function_symbol_name(
+            &func.name.name,
+            &Self::free_signature_from_ast(
+                &func.parameters,
+                func.return_type.as_ref(),
+                func.is_variadic,
+            ),
+        );
+        let llvm_name = link_name.unwrap_or(&symbol_name);
+
+        self.register_source_function_symbol(&func.name.name, &symbol_name);
 
         self.register_function_signature(
             llvm_name,
@@ -713,13 +782,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         continue;
                     }
 
-                    let param_keys: Vec<String> = func
-                        .parameters
-                        .iter()
-                        .map(|param| Type::from_ast(&param.param_type).canonical_key())
-                        .collect();
-                    let mangled_name =
-                        self.overloaded_method_symbol_name(&owner, &func.name.name, &param_keys);
+                    let mangled_name = self.method_symbol_from_ast(
+                        &owner,
+                        &func.name.name,
+                        &func.parameters,
+                        func.return_type.as_ref(),
+                        func.is_variadic,
+                    );
                     let effective_visibility =
                         Self::method_effective_visibility(visibility, &func.visibility);
                     if self.module.get_function(&mangled_name).is_none() {
@@ -759,7 +828,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 }
                 ast::ImplItemKind::Cast(cast) => {
                     let cast_method_name = Self::cast_method_name(&cast.target_type);
-                    let mangled_name = Self::mangle_method_name(&owner, &cast_method_name);
+                    let mangled_name = self.method_symbol_from_ast(
+                        &owner,
+                        &cast_method_name,
+                        &cast.parameters,
+                        Some(&cast.target_type),
+                        false,
+                    );
                     let effective_visibility =
                         Self::method_effective_visibility(visibility, &ast::Visibility::Private);
                     if self.module.get_function(&mangled_name).is_none() {

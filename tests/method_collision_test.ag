@@ -1,0 +1,32 @@
+// Regression: method symbols must stay distinct even when (owner, method)
+// strings concatenate identically. `Foo.bar__baz` and `Foo__bar.baz` both
+// previously emitted `Foo__bar__baz`; the second definition won. Every
+// method symbol now carries a signature hash (see agc/src/mangling.rs).
+
+import std.sys.entry;
+
+struct Foo {
+    i64 v;
+}
+
+struct Foo__bar {
+    i64 v;
+}
+
+impl Foo {
+    i64 bar__baz(Foo* self) { return self.v; }
+}
+
+impl Foo__bar {
+    i64 baz(Foo__bar* self) { return self.v; }
+}
+
+i32 main() {
+    Foo a;
+    a.v = 1;
+    Foo__bar b;
+    b.v = 2;
+    if (a.bar__baz() != 1) { return 1; }
+    if (b.baz() != 2) { return 2; }
+    return 0;
+}

@@ -1,5 +1,5 @@
 use crate::diagnostics;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashMap as HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::attributes::function_link_name;
@@ -8,7 +8,7 @@ use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x04"; // v3 changed function signature keys to fn(...) -> ret
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x05"; // v5: collision-safe hashed symbol mangling (v4 used unsuffixed instance names)
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -538,6 +538,38 @@ fn collect_module_dependencies(program: &ast::Program) -> Vec<String> {
 fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
     let mut exports = Vec::new();
     let type_ctx = TypeContext::default();
+    // Count distinct signatures per exported function name so overloaded
+    // names get collision-safe hashed link names (mirroring the codegen
+    // symbol rule: single-signature names keep the plain name).
+    let mut function_arity: HashMap<String, Vec<(Vec<String>, String, bool)>> = HashMap::default();
+    for item in &program.items {
+        if item.span.file != lib_file
+            || matches!(item.visibility, ast::Visibility::Private)
+            || function_link_name(&item.attributes).is_some()
+        {
+            continue;
+        }
+        if let ast::ItemKind::Function(func) = &item.kind
+            && func.generics.is_none()
+        {
+            let sig = (
+                func.parameters
+                    .iter()
+                    .map(|p| Type::from_ast(&p.param_type).canonical_key())
+                    .collect::<Vec<_>>(),
+                func.return_type
+                    .as_ref()
+                    .map(Type::from_ast)
+                    .unwrap_or(Type::Unit)
+                    .canonical_key(),
+                func.is_variadic,
+            );
+            let signatures = function_arity.entry(func.name.name.clone()).or_default();
+            if !signatures.contains(&sig) {
+                signatures.push(sig);
+            }
+        }
+    }
     for item in &program.items {
         if item.span.file != lib_file {
             continue;
@@ -575,18 +607,35 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let link_name = match link_name_attr {
+                    Some(pinned) => Some(pinned.to_string()),
+                    None => {
+                        // Overloaded names reference hash-suffixed symbols in
+                        // the library object; single-signature names keep the
+                        // plain symbol.
+                        let overloaded = function_arity
+                            .get(&func.name.name)
+                            .is_some_and(|sigs| sigs.len() > 1);
+                        if overloaded {
+                            Some(crate::mangling::overloaded_free_function_symbol(
+                                &func.name.name,
+                                &params,
+                                Some(&ret),
+                                func.is_variadic,
+                            ))
+                        } else {
+                            Some(func.name.name.clone())
+                        }
+                    }
+                };
                 exports.push(ModuleExport {
                     kind: ExportKind::Function,
                     name: func.name.name.clone(),
                     signature: format!("fn({}) -> {ret}", params.join(",")),
                     type_params,
-                    link_name: Some(
-                        link_name_attr
-                            .map(|s| s.to_string())
-                            .unwrap_or(func.name.name.clone()),
-                    ),
+                    link_name,
                     abi: Some(ModuleAbi::Silver),
-                    is_variadic: false,
+                    is_variadic: func.is_variadic,
                     type_key: None,
                     fields: Vec::new(),
                     layout: None,
@@ -1150,14 +1199,7 @@ fn read_i128(bytes: &[u8], cursor: &mut usize) -> Result<i128, String> {
     ))
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
+use crate::mangling::fnv1a64;
 
 #[cfg(test)]
 mod tests {
