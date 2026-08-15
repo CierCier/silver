@@ -53,7 +53,7 @@ struct WsUrl {
 /// Split "ws://host[:port]/path" or "wss://host[:port]/path". Default ports
 /// are 80/443; the path defaults to "/".
 bool ws_parse_url(str url, WsUrl* out) {
-    u8* p = (u8*)url;
+    u8* p = url;
     i64 len = strlen(url);
     i64 i = 0;
     bool tls = false;
@@ -104,7 +104,7 @@ const str WS_B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 /// Encode `len` bytes into a fresh base64 String (caller drops).
 String ws_base64(u8* data, i64 len) {
     String out = String.new();
-    u8* alpha = (u8*)WS_B64_ALPHABET;
+    u8* alpha = WS_B64_ALPHABET;
     i64 i = 0;
     while (i + 3 <= len) {
         u32 trio = ((u32)data[i] << 16) | ((u32)data[i + 1] << 8) | (u32)data[i + 2];
@@ -150,8 +150,8 @@ bool ws_random_bytes(u8* out, i64 len) {
 // --- Case-insensitive helpers ----------------------------------------------
 
 bool ws_ci_eq(str a, str b) {
-    u8* pa = (u8*)a;
-    u8* pb = (u8*)b;
+    u8* pa = a;
+    u8* pb = b;
     while (true) {
         u8 ca = pa[0];
         u8 cb = pb[0];
@@ -159,8 +159,8 @@ bool ws_ci_eq(str a, str b) {
         if (cb >= (u8)'A' && cb <= (u8)'Z') { cb = (u8)(cb + 32); }
         if (ca != cb) { return false; }
         if (ca == (u8)0) { return true; }
-        pa = (u8*)((i64)pa + 1);
-        pb = (u8*)((i64)pb + 1);
+        pa = pa + 1;
+        pb = pb + 1;
     }
     // Unreachable.
     return false;
@@ -170,8 +170,8 @@ bool ws_ci_eq(str a, str b) {
 /// to `token` (used for Connection: Upgrade).
 bool ws_header_has_token(str value, str token) {
     if (value == (str)0) { return false; }
-    u8* v = (u8*)value;
-    u8* t = (u8*)token;
+    u8* v = value;
+    u8* t = token;
     i64 vlen = strlen(value);
     i64 tlen = strlen(token);
     i64 i = 0;
@@ -342,7 +342,7 @@ impl WebSocket {
         expected.push_str((str)key_b64.data);
         expected.push_str(WS_GUID);
         u8 digest[20];
-        sha1((u8*)expected.data, expected.len, &digest[0]);
+        sha1(expected.data, expected.len, &digest[0]);
         String accept_b64 = ws_base64(&digest[0], 20);
         bool accept_ok = ws_ci_eq((str)accept.data, (str)accept_b64.data);
         accept_b64.drop();
@@ -375,7 +375,7 @@ impl WebSocket {
 
     /// Send a text message.
     Result<i64, Error> send_text(WebSocket* self, str text) {
-        return self.write_frame(WS_OP_TEXT, true, (u8*)text, strlen(text));
+        return self.write_frame(WS_OP_TEXT, true, text, strlen(text));
     }
 
     /// Send a binary message.
@@ -403,7 +403,7 @@ impl WebSocket {
         u8 payload[128];
         payload[0] = (u8)((code >> 8) & 0xff);
         payload[1] = (u8)(code & 0xff);
-        u8* rp = (u8*)reason;
+        u8* rp = reason;
         i64 k = 0;
         while (k < rlen && k < 126) {
             payload[2 + k] = rp[k];

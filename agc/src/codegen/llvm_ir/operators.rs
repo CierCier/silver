@@ -455,7 +455,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return self.emit_strcmp_comparison(lhs, operator, rhs, &whole_expr.span);
                 }
 
-                let lhs = self.emit_expression_value(left)?;
+                let mut lhs = self.emit_expression_value(left)?;
                 // For struct types, use trait method call instead of inline IR
                 if lhs.get_type().is_struct_type()
                     && let Some(method_name) = operator_method_name(operator)
@@ -486,7 +486,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     && rhs.get_type().is_int_type())
                     || (lhs.get_type().is_int_type() && rhs.get_type().is_pointer_type()));
                 if !is_ptr_arith && rhs.get_type() != lhs.get_type() {
-                    rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
+                    if lhs.get_type().is_int_type() && rhs.get_type().is_int_type() {
+                        // Mixed-width integer comparison (e.g. `buf[i] ==
+                        // 'x'`: u8 vs char, or an i32 vs an i64 literal):
+                        // widen the narrower operand to the wider type so
+                        // values are preserved instead of truncated.
+                        let lhs_w = lhs.get_type().into_int_type().get_bit_width();
+                        let rhs_w = rhs.get_type().into_int_type().get_bit_width();
+                        if lhs_w < rhs_w {
+                            let left_unsigned = self.expression_is_unsigned(left);
+                            lhs = self
+                                .widen_int_value(
+                                    lhs.into_int_value(),
+                                    rhs.get_type().into_int_type(),
+                                    left_unsigned,
+                                    &left.span,
+                                )?
+                                .as_basic_value_enum();
+                        } else if rhs_w < lhs_w {
+                            let right_unsigned = self.expression_is_unsigned(right);
+                            rhs = self
+                                .widen_int_value(
+                                    rhs.into_int_value(),
+                                    lhs.get_type().into_int_type(),
+                                    right_unsigned,
+                                    &right.span,
+                                )?
+                                .as_basic_value_enum();
+                        }
+                    } else {
+                        rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
+                    }
                 }
                 let is_unsigned = self.expression_is_unsigned(left);
                 self.emit_binary_values(&lhs, operator, &rhs, whole_expr, is_unsigned)
@@ -1274,7 +1304,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     /// Like `cast_value_to_ast_type`, but widens integer values from an
     /// *unsigned* source with zero-extension. LLVM integer types are signless,
-    /// and the generic int cast sign-extends, which corrupts e.g. `(i32)(u8)255`.
+    /// and the generic int cast sign-extends, which corrupts e.g.
+    /// `(i32)(u8)255`. Widen an integer value to a wider type, zero- or
+    /// sign-extending according to the operand's unsignedness (u8/u16 and
+    /// chars widen by zero; signed ints by sign — identical for values that
+    /// fit).
+    fn widen_int_value(
+        &mut self,
+        value: inkwell::values::IntValue<'ctx>,
+        target: inkwell::types::IntType<'ctx>,
+        is_unsigned: bool,
+        span: &Span,
+    ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
+        if is_unsigned {
+            self.builder
+                .build_int_z_extend_or_bit_cast(value, target, "cmp.zext")
+                .map_err(|e| CodegenError::with_span(format!("zero-extend failed: {e}"), *span))
+        } else {
+            self.builder
+                .build_int_s_extend_or_bit_cast(value, target, "cmp.sext")
+                .map_err(|e| CodegenError::with_span(format!("sign-extend failed: {e}"), *span))
+        }
+    }
+
+    /// Zero-extend (or bit-cast) an integer value to a wider type; used for
+    /// unsigned sources where the generic int cast would sign-extend.
     pub(crate) fn cast_unsigned_value_to_ast_type(
         &mut self,
         value: BasicValueEnum<'ctx>,

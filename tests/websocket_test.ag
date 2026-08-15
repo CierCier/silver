@@ -17,7 +17,7 @@ bool expect_text(WebSocket* ws, str expect) {
     if (m.failed()) { return false; }
     WsMessage msg = m.unwrap();
     bool ok = msg.kind == WS_MSG_TEXT
-        && strcmp((str)msg.payload.data, expect) == 0;
+        && strcmp(msg.payload.data, expect) == 0;
     msg.payload.drop();
     return ok;
 }

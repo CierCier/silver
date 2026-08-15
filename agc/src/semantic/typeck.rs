@@ -1074,6 +1074,20 @@ impl TypeChecker {
                 | ast::BinaryOperator::GreaterEqual => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
+                    // char vs byte (u8/u16): both widen losslessly, so
+                    // `buf[i] == 'x'` needs no cast.
+                    let char_ty = Type::Primitive(ast::PrimitiveType::Char);
+                    let is_byte = |ty: &Type| {
+                        matches!(
+                            ty,
+                            Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::U16)
+                        )
+                    };
+                    if (left_ty == char_ty && (right_ty == char_ty || is_byte(&right_ty)))
+                        || (right_ty == char_ty && is_byte(&left_ty))
+                    {
+                        return Type::Primitive(ast::PrimitiveType::Bool);
+                    }
                     if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
                         if self.common_numeric_type(&left_ty, &right_ty).is_none() {
                             self.error(
@@ -3368,7 +3382,22 @@ impl TypeChecker {
                 )
             ),
             ast::Literal::String(_) => is_string(expected),
-            ast::Literal::Char(_) => matches!(expected, Type::Primitive(ast::PrimitiveType::Char)),
+            ast::Literal::Char(value) => {
+                if matches!(expected, Type::Primitive(ast::PrimitiveType::Char)) {
+                    return true;
+                }
+                // A char literal (a code point, 0..=0x10FFFF) also fits any
+                // integer type whose range covers it: `u8 b = 'a';` needs no
+                // cast.
+                if let Type::Primitive(prim) = expected
+                    && let Some((min, max)) = Self::integer_prim_range(prim)
+                    && i128::from(u32::from(*value)) >= min
+                    && i128::from(u32::from(*value)) <= max
+                {
+                    return true;
+                }
+                false
+            }
             ast::Literal::Bool(_) => is_bool(expected),
         }
     }
@@ -3575,6 +3604,39 @@ impl TypeChecker {
                     inner: f_inner,
                 },
             ) => (!*is_mutable || *f_mut) && e_inner == f_inner,
+            // Byte pointers (u8*/char*) convert implicitly; a mutable source
+            // may become a const target, never the reverse. Volatile pointees
+            // must not silently become plain pointers.
+            (
+                Type::Pointer {
+                    is_mutable: to_mut,
+                    is_volatile: to_vol,
+                    inner: to_inner,
+                },
+                Type::Pointer {
+                    is_mutable: from_mut,
+                    is_volatile: from_vol,
+                    inner: from_inner,
+                },
+            ) if matches!(
+                to_inner.as_ref(),
+                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+            ) && matches!(
+                from_inner.as_ref(),
+                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+            ) =>
+            {
+                !*to_vol && !*from_vol && (!*to_mut || *from_mut)
+            }
+            // str and u8* are the same byte pointer: convert implicitly in
+            // both directions (str is a non-owning view of a NUL-terminated
+            // byte buffer, so mutable u8* is accepted as well).
+            (Type::Primitive(ast::PrimitiveType::Str), Type::Pointer { inner, .. }) => {
+                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+            }
+            (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
+                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+            }
             _ => false,
         };
         if view_compatible {
@@ -4257,10 +4319,41 @@ impl TypeChecker {
                     inner,
                 },
             ) => {
+                // str is a byte pointer; implicit conversion to const char*
+                // or const u8* (mutable targets require an explicit cast).
                 if *is_mutable {
                     return false;
                 }
-                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::Char))
+                matches!(
+                    inner.as_ref(),
+                    Type::Primitive(ast::PrimitiveType::Char | ast::PrimitiveType::U8)
+                )
+            }
+            (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
+                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+            }
+            // Byte pointers (u8*/char*) convert implicitly; a mutable source
+            // may become a const target, never the reverse.
+            (
+                Type::Pointer {
+                    is_mutable: to_mut,
+                    is_volatile: to_vol,
+                    inner: to_inner,
+                },
+                Type::Pointer {
+                    is_mutable: from_mut,
+                    is_volatile: from_vol,
+                    inner: from_inner,
+                },
+            ) if matches!(
+                to_inner.as_ref(),
+                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+            ) && matches!(
+                from_inner.as_ref(),
+                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+            ) =>
+            {
+                !*to_vol && !*from_vol && (!*to_mut || *from_mut)
             }
             (
                 Type::Pointer {

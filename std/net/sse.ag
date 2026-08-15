@@ -122,7 +122,7 @@ impl SseStream {
                 self.line.clear();
                 continue;
             }
-            if (ln[0] == (u8)':') {
+            if (ln[0] == ':') {
                 // Comment: ignore.
                 self.line.clear();
                 continue;
@@ -150,7 +150,7 @@ impl SseStream {
                 continue;
             }
             i64 value_start = colon + 1;
-            if (value_start < ln_len && ln[value_start] == (u8)' ') { value_start = value_start + 1; }
+            if (value_start < ln_len && ln[value_start] == ' ') { value_start = value_start + 1; }
             i64 value_len = ln_len - value_start;
             if (colon == 4 && sse_mem_eq(ln, 4, "data")) {
                 if (data.len > 0) { data.push((u8)'\n'); }
@@ -208,8 +208,8 @@ bool sse_read_line(HttpStream* stream, String* line) {
         u8 byte;
         Result<i64, Error> r = stream.read(&byte, 1);
         if (r.failed() || r.value() == 0) { return false; }
-        if (byte == (u8)'\n') {
-            if (line.len > 0 && line.data[line.len - 1] == (u8)'\r') {
+        if (byte == '\n') {
+            if (line.len > 0 && line.data[line.len - 1] == '\r') {
                 line.len = line.len - 1;
             }
             return true;

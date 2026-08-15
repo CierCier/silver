@@ -1,0 +1,43 @@
+import std.sys.entry;
+
+// Cast ergonomics: implicit str <-> u8* conversion, char literals in
+// integer contexts, and mixed char/byte comparisons with value-preserving
+// widening (no truncation).
+
+i32 main() {
+    // str -> u8* and u8* -> str are implicit (both byte pointers).
+    str s = "abc";
+    u8* p = s;
+    if (p[0] != (u8)97) { return 1; }
+    str back = p;
+    if (strcmp(back, "abc") != 0) { return 2; }
+
+    // char literal into integer variables when the value fits.
+    u8 a = 'a';
+    if (a != (u8)97) { return 3; }
+    i64 big = 'z';
+    if (big != (i64)122) { return 4; }
+
+    // Mixed char/byte comparisons, char on either side, ordered and equal.
+    u8 hi = (u8)233;
+    if (hi != (char)233) { return 5; }
+    if (hi < (char)233) { return 6; }
+    if (hi > (char)233) { return 7; }
+    if ('a' != a) { return 8; }
+    if (a >= 'b') { return 9; }
+    if (a < 'a') { return 10; }
+
+    // Value-preserving widening: a value that does not fit the narrow type
+    // must not truncate into equality.
+    u8 z = (u8)0;
+    if (z == 256) { return 11; }
+    i32 x = 5;
+    if (x == 3000000000) { return 12; }
+    if (x != 5) { return 13; }
+
+    // u8* from address-of converts to str and indexes by byte.
+    u8 buf[3] = { 104, 105, 106 };
+    str bs = &buf[0];
+    if (bs[0] != (u8)104) { return 14; }
+    return 0;
+}
