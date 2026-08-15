@@ -1,0 +1,240 @@
+// std/net/sse.ag — Server-Sent Events (SSE) client.
+//
+// Wraps a streaming HTTP response (std.net.http.HttpStream, which already
+// handles content-length, chunked, and close-delimited framing) and parses
+// the text/event-stream line protocol: `data:` (multiple lines join with
+// \n), `event:`, `id:`, `retry:` (ignored), and `:` comments. The `[DONE]`
+// line (the common "end of stream" marker) and EOF both terminate the
+// stream.
+//
+// All fallible operations return Result<T, Error> — no silent errors.
+
+import std.error;
+import std.net.http;
+import std.string;
+import std.sys.result;
+
+const i64 SSE_ERR_IO = -1;
+const i64 SSE_ERR_MALFORMED = -2;
+
+/// One dispatched SSE event. Owns its strings; free with `free()` after use.
+struct SseEvent {
+    String event; // event type ("message" by default)
+    String id;    // last event id; empty when absent
+    String data;  // data lines joined with \n ("" for data-less events)
+}
+
+impl SseEvent {
+    /// Release the three owned strings. SseEvent has no Drop impl: the
+    /// caller frees events explicitly (mirrors WsMessage.payload in
+    /// std.net.websocket, since enum payload match bindings are copies).
+    void free(SseEvent* self) {
+        self.event.drop();
+        self.id.drop();
+        self.data.drop();
+    }
+}
+
+/// Result of one SSE read: either a dispatched event (`done == false`) or
+/// the end of the stream (`done == true`). The event is owned and must be
+/// freed via `SseEvent.free` when `done == false`.
+struct SseRecv {
+    bool done;
+    SseEvent event;
+}
+
+struct SseStream {
+    HttpStream stream; // owned HTTP body stream
+    String line;       // reusable line buffer
+    bool finished;
+}
+
+impl Drop<SseStream> for SseStream {
+    void drop(SseStream* self) {
+        self.line.drop();
+        self.stream.close();
+    }
+}
+
+impl SseStream {
+    /// Open an SSE stream for `url` through the HTTP client. Accepts any
+    /// 2xx response; the caller may inspect the headers via `headers()`.
+    Result<SseStream, Error> open(HttpClient* client, str url) {
+        Result<HttpStream, Error> opened = client.request_stream("GET", url, (str)0, (str)0);
+        if (opened.failed()) { return Result<SseStream, Error>.Err(opened.get_error()); }
+        HttpStream stream = opened.unwrap();
+        if (stream.status() < 200 || stream.status() >= 300) {
+            Error e = Error.new(SSE_ERR_MALFORMED, "SSE endpoint returned an error status");
+            stream.close();
+            return Result<SseStream, Error>.Err(move e);
+        }
+        SseStream sse;
+        sse.stream = move stream;
+        sse.line = String.new();
+        sse.finished = false;
+        return Result<SseStream, Error>.Ok(move sse);
+    }
+
+    /// True once the stream has ended (recv returned Done).
+    bool finished(SseStream* self) { return self.finished; }
+
+    String get_header(SseStream* self, str name) {
+        return self.stream.get_header(name);
+    }
+
+    /// Read the next event, or a done=true SseRecv at end of stream.
+    /// `data:` lines join with \n; an empty line dispatches the buffered
+    /// event.
+    Result<SseRecv, Error> recv(SseStream* self) {
+        if (self.finished) { return Result<SseRecv, Error>.Ok(done_recv()); }
+        String event = String.new();
+        String id = String.new();
+        String data = String.new();
+        while (true) {
+            bool got_line = sse_read_line(&self.stream, &self.line);
+            if (!got_line) {
+                // EOF: flush any partial event, then finish.
+                self.finished = true;
+                if (data.len > 0) {
+                    SseRecv out = event_recv(move event, move id, move data);
+                    self.line.clear();
+                    return Result<SseRecv, Error>.Ok(move out);
+                }
+                event.drop();
+                id.drop();
+                data.drop();
+                self.line.clear();
+                return Result<SseRecv, Error>.Ok(done_recv());
+            }
+            u8* ln = self.line.data;
+            i64 ln_len = self.line.len;
+            if (ln_len == 0) {
+                // Blank line: dispatch.
+                if (data.len > 0) {
+                    if (event.len == 0) { event.push_str("message"); }
+                    SseRecv out = event_recv(move event, move id, move data);
+                    self.line.clear();
+                    return Result<SseRecv, Error>.Ok(move out);
+                }
+                event.drop();
+                id.drop();
+                data.drop();
+                self.line.clear();
+                continue;
+            }
+            if (ln[0] == (u8)':') {
+                // Comment: ignore.
+                self.line.clear();
+                continue;
+            }
+            // Special-case the [DONE] marker (no colon).
+            if (ln_len == 6 && sse_mem_eq(ln, 6, "[DONE]")) {
+                self.finished = true;
+                if (data.len > 0) {
+                    if (event.len == 0) { event.push_str("message"); }
+                    SseRecv out = event_recv(move event, move id, move data);
+                    self.line.clear();
+                    return Result<SseRecv, Error>.Ok(move out);
+                }
+                event.drop();
+                id.drop();
+                data.drop();
+                self.line.clear();
+                return Result<SseRecv, Error>.Ok(done_recv());
+            }
+            // Field lines: "name:" or "name: value" (one space stripped).
+            i64 colon = sse_find_colon(ln, ln_len);
+            if (colon < 0) {
+                // A line without a colon is ignored (malformed field).
+                self.line.clear();
+                continue;
+            }
+            i64 value_start = colon + 1;
+            if (value_start < ln_len && ln[value_start] == (u8)' ') { value_start = value_start + 1; }
+            i64 value_len = ln_len - value_start;
+            if (colon == 4 && sse_mem_eq(ln, 4, "data")) {
+                if (data.len > 0) { data.push((u8)'\n'); }
+                data.push_bytes(&ln[value_start], value_len);
+            } else if (colon == 5 && sse_mem_eq(ln, 5, "event")) {
+                event.clear();
+                event.push_bytes(&ln[value_start], value_len);
+            } else if (colon == 2 && sse_mem_eq(ln, 2, "id")) {
+                id.clear();
+                id.push_bytes(&ln[value_start], value_len);
+            }
+            // "retry:" and unknown fields are ignored.
+            self.line.clear();
+        }
+        // Unreachable.
+        return Result<SseRecv, Error>.Err(Error.new(SSE_ERR_MALFORMED, "unreachable"));
+    }
+}
+
+/// A done=true SseRecv (end of stream) with zeroed, non-owning strings.
+SseRecv done_recv() {
+    SseRecv out;
+    out.done = true;
+    out.event.event = zero_string();
+    out.event.id = zero_string();
+    out.event.data = zero_string();
+    return out;
+}
+
+/// A dispatched SseRecv taking ownership of the three event strings.
+SseRecv event_recv(String event, String id, String data) {
+    SseRecv out;
+    out.done = false;
+    out.event.event = move event;
+    out.event.id = move id;
+    out.event.data = move data;
+    return out;
+}
+
+/// A non-owning empty String (drop-safe: data == null).
+String zero_string() {
+    String s;
+    s.data = (u8*)0;
+    s.len = 0;
+    s.capacity = 0;
+    return s;
+}
+
+/// Read one LF-terminated line (CR stripped) into `line` from the stream.
+/// Returns false at EOF or read error. Reads one byte at a time through the
+/// HTTP client's buffered transport (no syscall per byte).
+bool sse_read_line(HttpStream* stream, String* line) {
+    line.clear();
+    while (true) {
+        u8 byte;
+        Result<i64, Error> r = stream.read(&byte, 1);
+        if (r.failed() || r.value() == 0) { return false; }
+        if (byte == (u8)'\n') {
+            if (line.len > 0 && line.data[line.len - 1] == (u8)'\r') {
+                line.len = line.len - 1;
+            }
+            return true;
+        }
+        line.push(byte);
+    }
+    // Unreachable: the loop only exits via return.
+    return false;
+}
+
+i64 sse_find_colon(u8* data, i64 len) {
+    i64 i = 0;
+    while (i < len) {
+        if (data[i] == (u8)':') { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+bool sse_mem_eq(u8* data, i64 len, str expected) {
+    u8* exp = (u8*)expected;
+    i64 i = 0;
+    while (i < len) {
+        if (exp[i] == (u8)0 || data[i] != exp[i]) { return false; }
+        i = i + 1;
+    }
+    return exp[i] == (u8)0;
+}

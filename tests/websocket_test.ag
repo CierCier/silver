@@ -1,0 +1,95 @@
+// tests/websocket_test.ag — RFC 6455 WebSocket client against the node
+// ws server on 127.0.0.1:18446.
+//
+// Covers the upgrade handshake (101 + Sec-WebSocket-Accept), text echo,
+// binary echo, ping/pong (auto-pong), fragmented message reassembly, the
+// close handshake, and rejection of a refused upgrade.
+
+import std.error;
+import std.mem.memory;
+import std.net.websocket;
+import std.sys.entry;
+import std.test;
+
+/// Receive a message and require it to be a Text message equal to `expect`.
+bool expect_text(WebSocket* ws, str expect) {
+    Result<WsMessage, Error> m = ws.recv();
+    if (m.failed()) { return false; }
+    WsMessage msg = m.unwrap();
+    bool ok = msg.kind == WS_MSG_TEXT
+        && strcmp((str)msg.payload.data, expect) == 0;
+    msg.payload.drop();
+    return ok;
+}
+
+/// Receive a message and require it to be a Close with the given code.
+bool expect_close(WebSocket* ws, i64 code) {
+    Result<WsMessage, Error> m = ws.recv();
+    if (m.failed()) { return false; }
+    WsMessage msg = m.unwrap();
+    bool ok = msg.kind == WS_MSG_CLOSE && msg.code == code;
+    msg.payload.drop();
+    return ok;
+}
+
+i32 main() {
+    test_start("websocket: echo + control frames");
+
+    Result<WebSocket, Error> c = WebSocket.connect("ws://127.0.0.1:18446/echo", 5);
+    assert_true(c.success(), "ws connect ok");
+    WebSocket ws = c.unwrap();
+
+    // Text echo.
+    Result<i64, Error> s1 = ws.send_text("hello websocket");
+    assert_true(s1.success(), "text send ok");
+    assert_true(expect_text(&ws, "hello websocket"), "text echo round-trips");
+
+    // Binary echo.
+    u8 bin[4] = { 0xde, 0xad, 0xbe, 0xef };
+    Result<i64, Error> s2 = ws.send_binary(&bin[0], 4);
+    assert_true(s2.success(), "binary send ok");
+    Result<WsMessage, Error> m2 = ws.recv();
+    assert_true(m2.success(), "binary echo received");
+    WsMessage msg2 = m2.unwrap();
+    bool bin_ok = msg2.kind == WS_MSG_BINARY && msg2.payload.len == 4
+        && msg2.payload.data[0] == (u8)0xde && msg2.payload.data[1] == (u8)0xad
+        && msg2.payload.data[2] == (u8)0xbe && msg2.payload.data[3] == (u8)0xef;
+    assert_true(bin_ok, "binary echo round-trips");
+    msg2.payload.drop();
+
+    // Ping -> server pong.
+    Result<i64, Error> s3 = ws.send_ping(&bin[0], 2);
+    assert_true(s3.success(), "ping send ok");
+    Result<WsMessage, Error> m3 = ws.recv();
+    assert_true(m3.success(), "pong received");
+    WsMessage msg3 = m3.unwrap();
+    assert_true(msg3.kind == WS_MSG_PONG && msg3.payload.len == 2, "ping answered with pong");
+    msg3.payload.drop();
+
+    // Close handshake: send close, expect the echo.
+    Result<i64, Error> s4 = ws.close(1000, "done");
+    assert_true(s4.success(), "close send ok");
+    assert_true(expect_close(&ws, 1000), "close code round-trips");
+
+    // --- Fragmented message + server ping --------------------------------
+    Result<WebSocket, Error> c2 = WebSocket.connect("ws://127.0.0.1:18446/frag", 5);
+    assert_true(c2.success(), "frag connect ok");
+    WebSocket ws2 = c2.unwrap();
+    assert_true(expect_text(&ws2, "hello"), "fragmented message reassembled");
+    Result<WsMessage, Error> m5 = ws2.recv();
+    assert_true(m5.success(), "server ping received");
+    WsMessage msg5 = m5.unwrap();
+    bool ping_ok = msg5.kind == WS_MSG_PING && msg5.payload.len == 9
+        && memcmp((const void*)msg5.payload.data, (const void*)"frag-ping", 9) == 0;
+    assert_true(ping_ok, "server ping payload intact");
+    msg5.payload.drop();
+    Result<i64, Error> s5 = ws2.close(1000, (str)0);
+    assert_true(s5.success(), "frag close send ok");
+    assert_true(expect_close(&ws2, 1000), "frag close echo received");
+
+    // --- Rejected upgrade ------------------------------------------------
+    Result<WebSocket, Error> c3 = WebSocket.connect("ws://127.0.0.1:18446/reject", 5);
+    assert_true(c3.failed(), "rejected upgrade surfaces an error");
+
+    return done();
+}

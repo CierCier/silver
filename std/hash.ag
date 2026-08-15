@@ -39,3 +39,102 @@ i64 hash_str(str s) {
     }
     return hash_bytes((u8*)s, strlen(s));
 }
+
+// --- SHA-1 (RFC 3174) ----------------------------------------------------
+// Block-based digest used by the WebSocket handshake
+// (Sec-WebSocket-Accept = base64(SHA-1(key + GUID))). Output is written to
+// `out` (exactly 20 bytes); returns false only when `data` is null and
+// `len` is nonzero (an empty hash of null data is valid).
+
+const i64 SHA1_BLOCK = 64;
+const i64 SHA1_OUT = 20;
+
+bool sha1(u8* data, i64 len, u8* out) {
+    if (data == (u8*)0 && len != 0) {
+        return false;
+    }
+    // State is kept in i64 with explicit 32-bit masks: u32 arithmetic has a
+    // codegen hazard in this compiler (see the SIMD session notes), so every
+    // intermediate is masked to 32 bits instead.
+    i64 h0 = (i64)0x67452301;
+    i64 h1 = (i64)0xefcdab89;
+    i64 h2 = (i64)0x98badcfe;
+    i64 h3 = (i64)0x10325476;
+    i64 h4 = (i64)0xc3d2e1f0;
+
+    u64 bit_len = (u64)len * 8;
+    // Total padded length = len + 1 (0x80) + 8 (big-endian bit length),
+    // rounded up to whole 64-byte blocks.
+    i64 blocks = (len + 72) / 64;
+
+    i64 w[80];
+    i64 off = 0;
+    i64 b = 0;
+    while (b < blocks) {
+        u8 block[64];
+        i64 i = 0;
+        while (i < 64) {
+            if (off < len) {
+                block[i] = data[off];
+            } else if (off == len) {
+                block[i] = (u8)0x80;
+            } else if (off >= blocks * 64 - 8) {
+                // The LAST 8 bytes of the padded message carry the
+                // big-endian bit length (RFC 3174 §4.1); zero padding
+                // fills the gap between 0x80 and the length.
+                i64 byte_idx = off - (blocks * 64 - 8);
+                block[i] = (u8)((bit_len >> ((7 - byte_idx) * 8)) & 0xff);
+            } else {
+                block[i] = (u8)0;
+            }
+            off = off + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < 16) {
+            w[i] = ((i64)block[i * 4] << 24) | ((i64)block[i * 4 + 1] << 16)
+                | ((i64)block[i * 4 + 2] << 8) | (i64)block[i * 4 + 3];
+            i = i + 1;
+        }
+        i = 16;
+        while (i < 80) {
+            i64 x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
+            w[i] = ((x << 1) | (x >> 31)) & 0xffffffff;
+            i = i + 1;
+        }
+        i64 a = h0;
+        i64 bv = h1;
+        i64 c = h2;
+        i64 d = h3;
+        i64 e = h4;
+        i = 0;
+        while (i < 80) {
+            i64 f;
+            i64 k;
+            if (i < 20) { f = (bv & c) | ((~bv) & d); k = (i64)0x5a827999; }
+            else if (i < 40) { f = bv ^ c ^ d; k = (i64)0x6ed9eba1; }
+            else if (i < 60) { f = (bv & c) | (bv & d) | (c & d); k = (i64)0x8f1bbcdc; }
+            else { f = bv ^ c ^ d; k = (i64)0xca62c1d6; }
+            i64 tmp = ((((a << 5) | (a >> 27)) & 0xffffffff) + f + e + k + w[i]) & 0xffffffff;
+            e = d;
+            d = c;
+            c = ((bv << 30) | (bv >> 2)) & 0xffffffff;
+            bv = a;
+            a = tmp;
+            i = i + 1;
+        }
+        h0 = (h0 + a) & 0xffffffff;
+        h1 = (h1 + bv) & 0xffffffff;
+        h2 = (h2 + c) & 0xffffffff;
+        h3 = (h3 + d) & 0xffffffff;
+        h4 = (h4 + e) & 0xffffffff;
+        b = b + 1;
+    }
+
+    out[0] = (u8)(h0 >> 24); out[1] = (u8)(h0 >> 16); out[2] = (u8)(h0 >> 8); out[3] = (u8)h0;
+    out[4] = (u8)(h1 >> 24); out[5] = (u8)(h1 >> 16); out[6] = (u8)(h1 >> 8); out[7] = (u8)h1;
+    out[8] = (u8)(h2 >> 24); out[9] = (u8)(h2 >> 16); out[10] = (u8)(h2 >> 8); out[11] = (u8)h2;
+    out[12] = (u8)(h3 >> 24); out[13] = (u8)(h3 >> 16); out[14] = (u8)(h3 >> 8); out[15] = (u8)h3;
+    out[16] = (u8)(h4 >> 24); out[17] = (u8)(h4 >> 16); out[18] = (u8)(h4 >> 8); out[19] = (u8)h4;
+    return true;
+}

@@ -1,0 +1,715 @@
+// std/net/websocket.ag — RFC 6455 WebSocket client.
+//
+// ws:// and wss:// (TLS via the transport seam, registered by std.net.tls)
+// over the same buffered transport as the HTTP client. The handshake is an
+// HTTP/1.1 GET with Upgrade: websocket; frames are masked (client MUST
+// mask), with 7/16/64-bit payload lengths, control frames handled inline
+// (ping -> automatic pong), and fragmented messages reassembled. Messages
+// are owned values: match on WsMessage and drop the payload (Text/Binary/
+// Ping/Pong own their buffer; Close owns the reason string).
+//
+// Error codes: WS_ERR_* below. All fallible operations return
+// Result<T, Error> — no silent errors.
+
+import std.error;
+import std.hash;
+import std.bytes;
+import std.mem.alloc;
+import std.mem.drop;
+import std.mem.memory;
+import std.net.http;
+import std.net.transport;
+import std.string;
+import std.sys.raw.misc;
+import std.sys.result;
+
+const i64 WS_ERR_IO = -1;
+const i64 WS_ERR_MALFORMED = -2;
+const i64 WS_ERR_HANDSHAKE = -3;
+const i64 WS_ERR_PROTOCOL = -4;
+const i64 WS_ERR_LIMIT = -5;
+
+// --- Opcodes (RFC 6455 §5.2) ----------------------------------------------
+
+const i64 WS_OP_CONT = 0x0;
+const i64 WS_OP_TEXT = 0x1;
+const i64 WS_OP_BINARY = 0x2;
+const i64 WS_OP_CLOSE = 0x8;
+const i64 WS_OP_PING = 0x9;
+const i64 WS_OP_PONG = 0xa;
+
+const i64 WS_DEFAULT_MAX_MESSAGE = 16777216; // 16 MiB
+const str WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+// --- URL parsing -----------------------------------------------------------
+
+struct WsUrl {
+    u8 host[255];
+    u16 port;
+    str path; // view into the input url; must outlive it
+    bool tls;
+}
+
+/// Split "ws://host[:port]/path" or "wss://host[:port]/path". Default ports
+/// are 80/443; the path defaults to "/".
+bool ws_parse_url(str url, WsUrl* out) {
+    u8* p = (u8*)url;
+    i64 len = strlen(url);
+    i64 i = 0;
+    bool tls = false;
+    if (len >= 6 && http_equal_ci(p, 0, 6, "wss://")) { tls = true; i = 6; }
+    else if (len >= 5 && http_equal_ci(p, 0, 5, "ws://")) { i = 5; }
+    else { return false; }
+    i64 host_start = i;
+    while (i < len && p[i] != (u8)':' && p[i] != (u8)'/') { i = i + 1; }
+    i64 host_len = i - host_start;
+    if (host_len == 0 || host_len >= 255) { return false; }
+    i64 j = 0;
+    while (j < host_len) {
+        u8 ch = p[host_start + j];
+        if (ch < (u8)0x21 || ch > (u8)0x7e) { return false; }
+        out.host[j] = ch;
+        j = j + 1;
+    }
+    out.host[j] = (u8)0;
+    u16 port = tls ? 443 : 80;
+    if (i < len && p[i] == (u8)':') {
+        i = i + 1;
+        i64 port_start = i;
+        while (i < len && p[i] >= (u8)'0' && p[i] <= (u8)'9') { i = i + 1; }
+        if (i == port_start || i >= len || p[i] != (u8)'/') { return false; }
+        i64 value = 0;
+        j = port_start;
+        while (j < i) {
+            value = value * 10 + (i64)(p[j] - (u8)'0');
+            j = j + 1;
+        }
+        if (value <= 0 || value > 65535) { return false; }
+        port = (u16)value;
+    }
+    if (i < len && p[i] == (u8)'/') {
+        out.path = (str)((i64)p + i);
+    } else {
+        out.path = "/";
+    }
+    out.port = port;
+    out.tls = tls;
+    return true;
+}
+
+// --- Base64 (RFC 4648 §4, with padding) -----------------------------------
+
+const str WS_B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode `len` bytes into a fresh base64 String (caller drops).
+String ws_base64(u8* data, i64 len) {
+    String out = String.new();
+    u8* alpha = (u8*)WS_B64_ALPHABET;
+    i64 i = 0;
+    while (i + 3 <= len) {
+        u32 trio = ((u32)data[i] << 16) | ((u32)data[i + 1] << 8) | (u32)data[i + 2];
+        out.push((u8)alpha[(trio >> 18) & 0x3f]);
+        out.push((u8)alpha[(trio >> 12) & 0x3f]);
+        out.push((u8)alpha[(trio >> 6) & 0x3f]);
+        out.push((u8)alpha[trio & 0x3f]);
+        i = i + 3;
+    }
+    i64 rem = len - i;
+    if (rem == 1) {
+        u32 trio = (u32)data[i] << 16;
+        out.push((u8)alpha[(trio >> 18) & 0x3f]);
+        out.push((u8)alpha[(trio >> 12) & 0x3f]);
+        out.push((u8)'=');
+        out.push((u8)'=');
+    } else if (rem == 2) {
+        u32 trio = ((u32)data[i] << 16) | ((u32)data[i + 1] << 8);
+        out.push((u8)alpha[(trio >> 18) & 0x3f]);
+        out.push((u8)alpha[(trio >> 12) & 0x3f]);
+        out.push((u8)alpha[(trio >> 6) & 0x3f]);
+        out.push((u8)'=');
+    }
+    return out;
+}
+
+/// Fill `len` bytes from the kernel CSPRNG (getrandom(2), retried on EINTR).
+bool ws_random_bytes(u8* out, i64 len) {
+    i64 done = 0;
+    while (done < len) {
+        i64 r = sys_getrandom((i64)((i64)out + done), len - done, 0);
+        if (r < 0) {
+            i64 err = -r;
+            if (err == 4) { continue; } // EINTR
+            return false;
+        }
+        if (r == 0) { return false; }
+        done = done + r;
+    }
+    return true;
+}
+
+// --- Case-insensitive helpers ----------------------------------------------
+
+bool ws_ci_eq(str a, str b) {
+    u8* pa = (u8*)a;
+    u8* pb = (u8*)b;
+    while (true) {
+        u8 ca = pa[0];
+        u8 cb = pb[0];
+        if (ca >= (u8)'A' && ca <= (u8)'Z') { ca = (u8)(ca + 32); }
+        if (cb >= (u8)'A' && cb <= (u8)'Z') { cb = (u8)(cb + 32); }
+        if (ca != cb) { return false; }
+        if (ca == (u8)0) { return true; }
+        pa = (u8*)((i64)pa + 1);
+        pb = (u8*)((i64)pb + 1);
+    }
+    // Unreachable.
+    return false;
+}
+
+/// True when `value` contains a comma-separated token equal (case-insensitive)
+/// to `token` (used for Connection: Upgrade).
+bool ws_header_has_token(str value, str token) {
+    if (value == (str)0) { return false; }
+    u8* v = (u8*)value;
+    u8* t = (u8*)token;
+    i64 vlen = strlen(value);
+    i64 tlen = strlen(token);
+    i64 i = 0;
+    while (i <= vlen) {
+        i64 j = i;
+        while (j < vlen && v[j] != (u8)',') { j = j + 1; }
+        i64 part = j - i;
+        // Trim leading/trailing spaces from the token part.
+        i64 s = i;
+        i64 e = j;
+        while (s < e && (v[s] == (u8)' ' || v[s] == (u8)'\t')) { s = s + 1; }
+        while (e > s && (v[e - 1] == (u8)' ' || v[e - 1] == (u8)'\t')) { e = e - 1; }
+        if (e - s == tlen) {
+            bool same = true;
+            i64 k = 0;
+            while (k < tlen) {
+                u8 ca = v[s + k];
+                u8 cb = t[k];
+                if (ca >= (u8)'A' && ca <= (u8)'Z') { ca = (u8)(ca + 32); }
+                if (cb >= (u8)'A' && cb <= (u8)'Z') { cb = (u8)(cb + 32); }
+                if (ca != cb) { same = false; break; }
+                k = k + 1;
+            }
+            if (same) { return true; }
+        }
+        i = j + 1;
+    }
+    return false;
+}
+
+// --- Frames ----------------------------------------------------------------
+
+struct WsFrame {
+    bool fin;
+    i64 opcode;
+    Bytes payload; // owned; caller frees
+}
+
+impl Drop<WsFrame> for WsFrame {
+    void drop(WsFrame* self) {
+        self.payload.drop();
+    }
+}
+
+/// A fully reassembled WebSocket message. `kind` is one of WS_MSG_*;
+/// `payload` holds the text/binary/ping/pong bytes (text and close reasons
+/// are NUL-terminated so `payload.data` casts to str), and `code` carries
+/// the close status code for WS_MSG_CLOSE. The payload is owned: call
+/// `payload.drop()` after use (no Drop on the struct itself, so callers
+/// control when the buffer is freed).
+struct WsMessage {
+    i64 kind;
+    i64 code;
+    Bytes payload;
+}
+
+const i64 WS_MSG_TEXT = 1;
+const i64 WS_MSG_BINARY = 2;
+const i64 WS_MSG_PING = 3;
+const i64 WS_MSG_PONG = 4;
+const i64 WS_MSG_CLOSE = 5;
+
+// --- The client ------------------------------------------------------------
+
+struct WebSocket {
+    HttpConnection conn; // buffered TCP/TLS transport (http_open)
+    i64 max_message;
+    bool close_sent;
+    bool closed;
+    i64 frag_opcode; // first opcode of an in-progress fragmented message; -1 none
+    Bytes frag_buf;
+}
+
+impl Drop<WebSocket> for WebSocket {
+    void drop(WebSocket* self) {
+        self.frag_buf.drop();
+        self.conn.close();
+    }
+}
+
+impl WebSocket {
+    /// Connect to `url` (ws:// or wss://) with a bounded dial and socket
+    /// timeouts (`timeout_secs` <= 0 = wait indefinitely), verifying the
+    /// handshake (101 + Sec-WebSocket-Accept).
+    Result<WebSocket, Error> connect(str url, i64 timeout_secs) {
+        return WebSocket.connect_ca(url, timeout_secs, (str)0);
+    }
+
+    /// Like connect, with an explicit CA bundle for wss:// (empty = system
+    /// trust store).
+    Result<WebSocket, Error> connect_ca(str url, i64 timeout_secs, str ca_file) {
+        WsUrl parsed;
+        if (!ws_parse_url(url, &parsed)) {
+            return Result<WebSocket, Error>.Err(
+                Error.new(WS_ERR_MALFORMED, "malformed websocket URL"));
+        }
+        Result<HttpConnection, Error> opened = http_open((str)&parsed.host[0], parsed.port, timeout_secs);
+        if (opened.failed()) { return Result<WebSocket, Error>.Err(opened.get_error()); }
+        HttpConnection conn = opened.unwrap();
+        if (timeout_secs > 0) { conn.set_timeout(timeout_secs); }
+        if (parsed.tls) {
+            Error err;
+            bool ok = transport_tls_handshake(&conn.tls_state[0], conn.stream.sock.fd,
+                (str)&parsed.host[0], true, ca_file, &err);
+            if (!ok) {
+                conn.close();
+                return Result<WebSocket, Error>.Err(move err);
+            }
+            conn.use_tls = true;
+        }
+
+        // --- HTTP upgrade handshake ---
+        u8 key_bytes[16];
+        if (!ws_random_bytes(&key_bytes[0], 16)) {
+            conn.close();
+            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_IO, "getrandom failed"));
+        }
+        String key_b64 = ws_base64(&key_bytes[0], 16);
+
+        String host_hdr = String.new();
+        host_hdr.push_str((str)&parsed.host[0]);
+        if ((parsed.tls && parsed.port != 443) || (!parsed.tls && parsed.port != 80)) {
+            host_hdr.push((u8)':');
+            http_append_i64(&mut host_hdr, (i64)parsed.port);
+        }
+
+        HttpRequest req = HttpRequest.new(HttpVersion.Http11, "GET", parsed.path, (str)host_hdr.data);
+        req.headers.push_str("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ");
+        req.headers.push_str((str)key_b64.data);
+        req.headers.push_str("\r\nSec-WebSocket-Version: 13\r\n");
+
+        StreamIo io = http_transport_io(&conn);
+        Result<i64, Error> written = req.write(&io);
+        req.headers.drop();
+        if (written.is_err()) {
+            conn.close();
+            key_b64.drop();
+            host_hdr.drop();
+            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_IO, "handshake write failed"));
+        }
+
+        // --- Response head ---
+        HttpResponse head = HttpResponse.empty();
+        Result<i64, Error> hr = head.read_final_head(&io, 65536);
+        if (hr.is_err()) {
+            conn.close();
+            key_b64.drop();
+            host_hdr.drop();
+            head.drop();
+            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_HANDSHAKE, "no response to upgrade"));
+        }
+        if (head.status != 101) {
+            Error e = Error.new(WS_ERR_HANDSHAKE, "upgrade rejected");
+            conn.close();
+            key_b64.drop();
+            host_hdr.drop();
+            head.drop();
+            return Result<WebSocket, Error>.Err(move e);
+        }
+        String upgrade = head.get_header("Upgrade");
+        String connection = head.get_header("Connection");
+        String accept = head.get_header("Sec-WebSocket-Accept");
+        bool ok = ws_ci_eq((str)upgrade.data, "websocket")
+            && ws_header_has_token((str)connection.data, "upgrade");
+
+        // Expected accept: base64(SHA-1(key + GUID)).
+        String expected = String.new();
+        expected.push_str((str)key_b64.data);
+        expected.push_str(WS_GUID);
+        u8 digest[20];
+        sha1((u8*)expected.data, expected.len, &digest[0]);
+        String accept_b64 = ws_base64(&digest[0], 20);
+        bool accept_ok = ws_ci_eq((str)accept.data, (str)accept_b64.data);
+        accept_b64.drop();
+        expected.drop();
+
+        upgrade.drop();
+        connection.drop();
+        accept.drop();
+        key_b64.drop();
+        host_hdr.drop();
+        head.drop();
+        if (!ok || !accept_ok) {
+            conn.close();
+            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_HANDSHAKE, "invalid upgrade response"));
+        }
+
+        WebSocket ws;
+        ws.conn = move conn;
+        ws.max_message = WS_DEFAULT_MAX_MESSAGE;
+        ws.close_sent = false;
+        ws.closed = false;
+        ws.frag_opcode = -1;
+        ws.frag_buf = Bytes.new();
+        return Result<WebSocket, Error>.Ok(move ws);
+    }
+
+    bool closed(WebSocket* self) { return self.closed; }
+
+    // --- Sending ---------------------------------------------------------
+
+    /// Send a text message.
+    Result<i64, Error> send_text(WebSocket* self, str text) {
+        return self.write_frame(WS_OP_TEXT, true, (u8*)text, strlen(text));
+    }
+
+    /// Send a binary message.
+    Result<i64, Error> send_binary(WebSocket* self, u8* data, i64 len) {
+        return self.write_frame(WS_OP_BINARY, true, data, len);
+    }
+
+    Result<i64, Error> send_ping(WebSocket* self, u8* data, i64 len) {
+        return self.write_frame(WS_OP_PING, true, data, len);
+    }
+
+    Result<i64, Error> send_pong(WebSocket* self, u8* data, i64 len) {
+        return self.write_frame(WS_OP_PONG, true, data, len);
+    }
+
+    /// Send a Close frame (code + reason). The transport stays open until
+    /// the peer's Close echo arrives (recv) or the WebSocket is dropped.
+    Result<i64, Error> close(WebSocket* self, i64 code, str reason) {
+        if (self.close_sent) {
+            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "close already sent"));
+        }
+        self.close_sent = true;
+        i64 rlen = reason == (str)0 ? 0 : strlen(reason);
+        i64 plen = 2 + rlen;
+        u8 payload[128];
+        payload[0] = (u8)((code >> 8) & 0xff);
+        payload[1] = (u8)(code & 0xff);
+        u8* rp = (u8*)reason;
+        i64 k = 0;
+        while (k < rlen && k < 126) {
+            payload[2 + k] = rp[k];
+            k = k + 1;
+        }
+        return self.write_frame(WS_OP_CLOSE, true, &payload[0], plen);
+    }
+
+    /// Write one masked frame. Client frames MUST be masked with a fresh
+    /// 4-byte mask; payloads stream out in 4KB masked chunks.
+    Result<i64, Error> write_frame(WebSocket* self, i64 opcode, bool fin, u8* data, i64 len) {
+        if (self.closed || self.close_sent && opcode != WS_OP_CLOSE) {
+            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "websocket is closed"));
+        }
+        if (len < 0 || len > 0x7fffffffffffffff) {
+            return Result<i64, Error>.Err(Error.new(WS_ERR_LIMIT, "frame too large"));
+        }
+        u8 mask[4];
+        if (!ws_random_bytes(&mask[0], 4)) {
+            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "getrandom failed"));
+        }
+        StreamIo io = http_transport_io(&self.conn);
+        u8 hdr[14];
+        hdr[0] = (u8)((fin ? 0x80 : 0) | (opcode & 0x0f));
+        i64 hdr_len = 2;
+        if (len < 126) {
+            hdr[1] = (u8)(0x80 | len);
+        } else if (len <= 0xffff) {
+            hdr[1] = (u8)(0x80 | 126);
+            hdr[2] = (u8)((len >> 8) & 0xff);
+            hdr[3] = (u8)(len & 0xff);
+            hdr_len = 4;
+        } else {
+            hdr[1] = (u8)(0x80 | 127);
+            i64 k = 0;
+            while (k < 8) {
+                hdr[2 + k] = (u8)((len >> ((7 - k) * 8)) & 0xff);
+                k = k + 1;
+            }
+            hdr_len = 10;
+        }
+        hdr[hdr_len] = mask[0];
+        hdr[hdr_len + 1] = mask[1];
+        hdr[hdr_len + 2] = mask[2];
+        hdr[hdr_len + 3] = mask[3];
+        hdr_len = hdr_len + 4;
+        Result<i64, Error> w = transport_write(&io, &hdr[0], hdr_len);
+        if (w.failed()) { return w; }
+        i64 off = 0;
+        while (off < len) {
+            i64 chunk = len - off;
+            if (chunk > 4096) { chunk = 4096; }
+            u8 tmp[4096];
+            i64 k = 0;
+            while (k < chunk) {
+                tmp[k] = data[off + k] ^ mask[(off + k) % 4];
+                k = k + 1;
+            }
+            Result<i64, Error> r = transport_write(&io, &tmp[0], chunk);
+            if (r.failed()) { return r; }
+            off = off + chunk;
+        }
+        return Result<i64, Error>.Ok(len);
+    }
+
+    // --- Receiving -------------------------------------------------------
+
+    /// Read one message: data frames (with fragmentation reassembly) and
+    /// control frames. Ping frames are answered automatically; Pong and
+    /// Close are delivered. The payload is owned — drop it after use.
+    Result<WsMessage, Error> recv(WebSocket* self) {
+        while (true) {
+            Result<WsFrame, Error> fr = self.read_frame();
+            if (fr.failed()) { return Result<WsMessage, Error>.Err(fr.get_error()); }
+            WsFrame f = fr.unwrap();
+            if (f.opcode >= 0x8) {
+                if (f.opcode == WS_OP_PING) {
+                    // Answer automatically, then deliver the ping to the caller.
+                    Result<i64, Error> w = self.write_frame(WS_OP_PONG, true, f.payload.data, f.payload.len);
+                    if (w.failed()) {
+                        f.payload.drop();
+                        return Result<WsMessage, Error>.Err(w.get_error());
+                    }
+                    WsMessage m;
+                    m.kind = WS_MSG_PING;
+                    m.code = 0;
+                    Bytes f_payload = f.payload;
+                    f.payload = Bytes.new();
+                    m.payload = move f_payload;
+                    return Result<WsMessage, Error>.Ok(move m);
+                }
+                if (f.opcode == WS_OP_PONG) {
+                    WsMessage m;
+                    m.kind = WS_MSG_PONG;
+                    m.code = 0;
+                    Bytes f_payload = f.payload;
+                    f.payload = Bytes.new();
+                    m.payload = move f_payload;
+                    return Result<WsMessage, Error>.Ok(move m);
+                }
+                if (f.opcode == WS_OP_CLOSE) {
+                    WsMessage m;
+                    m.kind = WS_MSG_CLOSE;
+                    m.code = 1005;
+                    m.payload = Bytes.new();
+                    if (f.payload.len >= 2) {
+                        m.code = ((i64)f.payload.data[0] << 8) | (i64)f.payload.data[1];
+                        m.payload.extend(&f.payload.data[2], f.payload.len - 2);
+                    }
+                    ws_nul_terminate(&m.payload);
+                    f.payload.drop();
+                    if (!self.close_sent) {
+                        // Echo the close (RFC 6455 §5.5.1), then treat the
+                        // connection as closed.
+                        self.write_frame(WS_OP_CLOSE, true, m.payload.data, m.payload.len);
+                    }
+                    self.close_sent = true;
+                    self.closed = true;
+                    return Result<WsMessage, Error>.Ok(move m);
+                }
+                f.payload.drop();
+                return Result<WsMessage, Error>.Err(Error.new(WS_ERR_PROTOCOL, "unknown control opcode"));
+            }
+            if (f.opcode == WS_OP_CONT) {
+                if (self.frag_opcode < 0) {
+                    f.payload.drop();
+                    return Result<WsMessage, Error>.Err(
+                        Error.new(WS_ERR_PROTOCOL, "unexpected continuation frame"));
+                }
+                self.frag_buf.extend(f.payload.data, f.payload.len);
+                f.payload.drop();
+                if (f.fin) {
+                    i64 op = self.frag_opcode;
+                    self.frag_opcode = -1;
+                    Bytes done = self.frag_buf;
+                    self.frag_buf = Bytes.new();
+                    WsMessage m = ws_message_from(op, move done);
+                    return Result<WsMessage, Error>.Ok(move m);
+                }
+                continue;
+            }
+            if (self.frag_opcode >= 0) {
+                f.payload.drop();
+                return Result<WsMessage, Error>.Err(
+                    Error.new(WS_ERR_PROTOCOL, "new data frame during fragmented message"));
+            }
+            if (f.fin) {
+                Bytes f_payload = f.payload;
+                    f.payload = Bytes.new();
+                    WsMessage m = ws_message_from(f.opcode, move f_payload);
+                return Result<WsMessage, Error>.Ok(move m);
+            }
+            // Begin a fragmented message.
+            self.frag_opcode = f.opcode;
+            Bytes f_payload = f.payload;
+                f.payload = Bytes.new();
+                self.frag_buf = move f_payload;
+        }
+        // Unreachable.
+        return Result<WsMessage, Error>.Err(Error.new(WS_ERR_PROTOCOL, "unreachable"));
+    }
+
+    /// Read one frame. Server frames must not be masked; control frames
+    /// must be FIN and <= 125 bytes. Payloads larger than max_message are
+    /// rejected (WS_ERR_LIMIT).
+    Result<WsFrame, Error> read_frame(WebSocket* self) {
+        StreamIo io = http_transport_io(&self.conn);
+        u8 b0;
+        u8 b1;
+        if (!ws_read_byte(&io, &mut b0)) {
+            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+        }
+        if (!ws_read_byte(&io, &mut b1)) {
+            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+        }
+        bool fin = (b0 & 0x80) != 0;
+        i64 rsv = (b0 >> 4) & 0x7;
+        i64 opcode = b0 & 0x0f;
+        bool masked = (b1 & 0x80) != 0;
+        if (rsv != 0) {
+            return Result<WsFrame, Error>.Err(
+                Error.new(WS_ERR_PROTOCOL, "RSV bits set (no extensions negotiated)"));
+        }
+        if (masked) {
+            return Result<WsFrame, Error>.Err(
+                Error.new(WS_ERR_PROTOCOL, "server frames must not be masked"));
+        }
+        i64 len7 = b1 & 0x7f;
+        i64 len;
+        if (len7 < 126) {
+            len = len7;
+        } else if (len7 == 126) {
+            u8 e[2];
+            if (!ws_read_bytes(&io, &e[0], 2)) {
+                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+            }
+            len = ((i64)e[0] << 8) | (i64)e[1];
+        } else {
+            u8 e[8];
+            if (!ws_read_bytes(&io, &e[0], 8)) {
+                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+            }
+            len = 0;
+            i64 k = 0;
+            while (k < 8) {
+                len = (len << 8) | (i64)e[k];
+                k = k + 1;
+            }
+            if (len < 0) {
+                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_LIMIT, "frame length overflow"));
+            }
+        }
+        if (len > self.max_message) {
+            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_LIMIT, "frame exceeds max message size"));
+        }
+        if (opcode >= 0x8 && (len > 125 || !fin)) {
+            return Result<WsFrame, Error>.Err(
+                Error.new(WS_ERR_PROTOCOL, "invalid control frame"));
+        }
+        Bytes payload = Bytes.with_capacity(len);
+        if (len > 0) {
+            i64 got = 0;
+            while (got < len) {
+                u8 buf[4096];
+                i64 want = len - got;
+                if (want > 4096) { want = 4096; }
+                if (!ws_read_bytes(&io, &buf[0], want)) {
+                    payload.drop();
+                    return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+                }
+                payload.extend(&buf[0], want);
+                got = got + want;
+            }
+        }
+        WsFrame frame;
+        frame.fin = fin;
+        frame.opcode = opcode;
+        frame.payload = move payload;
+        return Result<WsFrame, Error>.Ok(move frame);
+    }
+}
+
+/// Build the message value for a complete (possibly fragmented) data frame.
+WsMessage ws_message_from(i64 opcode, Bytes payload) {
+    WsMessage m;
+    m.code = 0;
+    if (opcode == WS_OP_TEXT) {
+        m.kind = WS_MSG_TEXT;
+        ws_nul_terminate(&payload);
+        m.payload = move payload;
+        return m;
+    }
+    if (opcode == WS_OP_BINARY) {
+        m.kind = WS_MSG_BINARY;
+        m.payload = move payload;
+        return m;
+    }
+    // Only text/binary may start a message; callers check opcodes first.
+    payload.drop();
+    m.kind = WS_MSG_TEXT;
+    m.payload = Bytes.new();
+    return m;
+}
+
+/// Append a NUL so `data` casts to str (length stays payload.len).
+void ws_nul_terminate(Bytes* payload) {
+    payload.push((u8)0);
+    payload.len = payload.len - 1;
+}
+
+// --- Buffered byte reads ---------------------------------------------------
+// The frame header and payload read through the connection's 4KB buffer, so
+// a frame costs one syscall (or SSL_read) per 4KB, not one per byte.
+
+bool ws_read_byte(StreamIo* io, u8* out) {
+    return ws_read_bytes(io, out, 1);
+}
+
+bool ws_read_bytes(StreamIo* io, u8* out, i64 len) {
+    HttpConnection* conn = (HttpConnection*)io.ctx;
+    i64 got = 0;
+    while (got < len) {
+        i64 avail = conn.read_buf_len - conn.read_buf_pos;
+        if (avail <= 0) {
+            Result<i64, Error> r;
+            if (conn.use_tls) {
+                Result<i64, Error>(void*, u8*, i64) f = g_tls_provider.read;
+                r = f(&conn.tls_state[0], &conn.read_buf[0], 1024);
+            } else {
+                r = conn.stream.read(&conn.read_buf[0], 1024);
+            }
+            if (r.failed()) { return false; }
+            if (r.value() == 0) { return false; }
+            conn.read_buf_len = r.value();
+            conn.read_buf_pos = 0;
+            avail = conn.read_buf_len;
+        }
+        i64 want = len - got;
+        if (want > avail) { want = avail; }
+        i64 k = 0;
+        while (k < want) {
+            out[got + k] = conn.read_buf[conn.read_buf_pos + k];
+            k = k + 1;
+        }
+        conn.read_buf_pos = conn.read_buf_pos + want;
+        got = got + want;
+    }
+    return true;
+}

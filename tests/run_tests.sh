@@ -279,7 +279,9 @@ http_perf_test"
 fi
 if ! command -v node >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
-http2_test"
+http2_test
+websocket_test
+sse_test"
 fi
 
 # Start the node HTTPS server once, before the loop, if tls_test will run.
@@ -302,6 +304,18 @@ if ! is_skipped http2_test; then
     H2_NODE_PID=$!
     for _ in $(seq 1 50); do
         if grep -q H2C_NODE_READY "$WORKDIR/h2_node.log" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+fi
+
+# Start the node WebSocket/SSE server once, before the loop, if websocket_test
+# or sse_test will run.
+WS_NODE_PID=""
+if ! is_skipped websocket_test || ! is_skipped sse_test; then
+    (cd "$ROOT" && exec node tests/ws_server.js >"$WORKDIR/ws_node.log" 2>&1) &
+    WS_NODE_PID=$!
+    for _ in $(seq 1 50); do
+        if grep -q WS_NODE_READY "$WORKDIR/ws_node.log" 2>/dev/null; then break; fi
         sleep 0.1
     done
 fi
@@ -515,6 +529,10 @@ fi
 if [ -n "$H2_NODE_PID" ]; then
     kill "$H2_NODE_PID" 2>/dev/null
     wait "$H2_NODE_PID" 2>/dev/null
+fi
+if [ -n "$WS_NODE_PID" ]; then
+    kill "$WS_NODE_PID" 2>/dev/null
+    wait "$WS_NODE_PID" 2>/dev/null
 fi
 
 # ---- Slowest tests (run time) ----

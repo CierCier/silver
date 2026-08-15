@@ -1,0 +1,62 @@
+// tests/sse_test.ag — Server-Sent Events client against the node ws server
+// (http://127.0.0.1:18446/sse), plus chunked-transfer streaming via
+// HttpClient.request_stream.
+
+import std.error;
+import std.net.http;
+import std.net.sse;
+import std.sys.entry;
+import std.test;
+
+/// Receive one event and require its event/data fields to match, freeing it.
+bool expect_event(SseStream* sse, str want_event, str want_data) {
+    Result<SseRecv, Error> e = sse.recv();
+    if (e.failed()) { return false; }
+    SseRecv r = e.unwrap();
+    // String data is length-tracked, not NUL-terminated: compare with
+    // explicit lengths.
+    bool ok = !r.done
+        && sse_mem_eq(r.event.event.data, r.event.event.len, want_event)
+        && sse_mem_eq(r.event.data.data, r.event.data.len, want_data);
+    r.event.free();
+    return ok;
+}
+
+i32 main() {
+    test_start("sse: event stream + chunked streaming");
+
+    HttpClient client = HttpClient.new();
+
+    // --- SSE events -------------------------------------------------------
+    Result<SseStream, Error> opened = SseStream.open(&client, "http://127.0.0.1:18446/sse");
+    assert_true(opened.success(), "sse open ok");
+    SseStream sse = opened.unwrap();
+
+    assert_true(expect_event(&sse, "greet", "hello sse"), "event 1: greet/hello sse");
+    assert_true(expect_event(&sse, "message", "line one\nline two"), "event 2: multi-line data, default event type");
+    assert_true(expect_event(&sse, "end", "[DONE]"), "event 3: end/[DONE] delivered as a normal event");
+
+    Result<SseRecv, Error> e4 = sse.recv();
+    assert_true(e4.success(), "post-DONE read ok");
+    SseRecv r4 = e4.unwrap();
+    assert_true(r4.done, "stream ends with done=true after [DONE]");
+
+    // --- Chunked-transfer streaming --------------------------------------
+    Result<HttpStream, Error> cs = client.request_stream("GET", "http://127.0.0.1:18446/chunked", (str)0, (str)0);
+    assert_true(cs.success(), "chunked stream open ok");
+    HttpStream stream = cs.unwrap();
+    String body = String.new();
+    u8 buf[16];
+    while (true) {
+        Result<i64, Error> r = stream.read(&buf[0], 16);
+        assert_true(r.success(), "chunked read ok");
+        if (r.value() == 0) { break; }
+        body.push_bytes(&buf[0], r.value());
+    }
+    assert_eq_str("chunk-one;chunk-two", (str)body.data, "chunked body reassembled");
+    body.drop();
+    stream.close();
+
+    client.pool.drop();
+    return done();
+}
