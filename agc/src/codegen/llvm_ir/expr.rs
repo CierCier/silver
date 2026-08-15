@@ -1011,6 +1011,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             )
                         });
                 }
+                // str is a byte pointer: s[i] loads the i-th byte.
+                if let Some(ty) = &object_ty
+                    && matches!(
+                        ty.kind.as_ref(),
+                        ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+                    )
+                {
+                    let base = self.emit_expression_value(object)?;
+                    let idx = self.emit_expression_value(index)?;
+                    let element_ty = self.context.i8_type();
+                    let ptr = unsafe {
+                        self.builder
+                            .build_gep(
+                                element_ty,
+                                base.into_pointer_value(),
+                                &[idx.into_int_value()],
+                                "str.index",
+                            )
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to index string: {e}"),
+                                    expr.span,
+                                )
+                            })?
+                    };
+                    return self
+                        .builder
+                        .build_load(element_ty, ptr, "str.byte")
+                        .map(|v| v.as_basic_value_enum())
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to load string byte: {e}"),
+                                expr.span,
+                            )
+                        });
+                }
                 // For non-pointer types (struct, slice), use the trait path (__index_get)
                 let method_ident = ast::Identifier {
                     name: "__index_get".to_string(),

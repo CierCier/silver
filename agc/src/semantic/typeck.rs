@@ -1039,6 +1039,11 @@ impl TypeChecker {
                     let numeric_expected = expected.filter(|ty| self.is_numeric_type(ty));
                     let left_ty = self.check_expr(left, numeric_expected);
                     let right_ty = self.check_expr(right, numeric_expected);
+                    // Pointer arithmetic: p + i, i + p, p - i (str is a byte
+                    // pointer, so s + n / s - n work too).
+                    if let Some(ptr_ty) = self.pointer_arith_result(&left_ty, &right_ty, operator) {
+                        return ptr_ty;
+                    }
                     if self.is_numeric_type(&left_ty)
                         && self.is_numeric_type(&right_ty)
                         && let Some(common) = self.common_numeric_type(&left_ty, &right_ty)
@@ -1907,6 +1912,16 @@ impl TypeChecker {
                             return Type::Unknown;
                         }
                         (**element).clone()
+                    }
+                    Type::Primitive(ast::PrimitiveType::Str) => {
+                        // str is a byte pointer: s[i] reads the i-th byte (u8).
+                        if !is_integer(&index_ty) {
+                            self.error(
+                                format!("string index must be integer, found {}", index_ty),
+                                index.span,
+                            );
+                        }
+                        Type::Primitive(ast::PrimitiveType::U8)
                     }
                     _ => {
                         if let Some(result_ty) = self.resolve_method_overload_types(
@@ -4327,6 +4342,44 @@ impl TypeChecker {
         self.numeric_type(ty)
             .map(|primitive| is_integer(&Type::Primitive(primitive)))
             .unwrap_or(false)
+    }
+
+    /// Result type of pointer arithmetic, or None when the operand shapes do
+    /// not form a pointer + integer pair. `str` counts as a byte pointer, so
+    /// `s + n`, `n + s`, and `s - n` are valid on strings.
+    fn pointer_arith_result(
+        &self,
+        left: &Type,
+        right: &Type,
+        operator: &ast::BinaryOperator,
+    ) -> Option<Type> {
+        let is_ptr = |ty: &Type| {
+            matches!(
+                ty,
+                Type::Pointer { .. }
+                    | Type::Reference { .. }
+                    | Type::Primitive(ast::PrimitiveType::Str)
+            )
+        };
+        match operator {
+            ast::BinaryOperator::Add => {
+                if is_ptr(left) && self.is_integer_type(right) {
+                    Some(left.clone())
+                } else if is_ptr(right) && self.is_integer_type(left) {
+                    Some(right.clone())
+                } else {
+                    None
+                }
+            }
+            ast::BinaryOperator::Subtract => {
+                if is_ptr(left) && self.is_integer_type(right) {
+                    Some(left.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     fn receiver_compatible(&self, param: &Type, receiver: &Type, score: &mut usize) -> bool {

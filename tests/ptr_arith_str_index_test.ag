@@ -1,0 +1,44 @@
+import std.sys.entry;
+
+// Pointer arithmetic (p + i, i + p, p - i) and str[i] byte indexing.
+// Exercises scaled GEP stepping for byte pointers, struct pointers, and str.
+
+struct Pair {
+    i64 a;
+    i64 b;
+}
+
+i32 main() {
+    // Byte pointer arithmetic with array backing storage.
+    u8 buf[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
+    u8* p = &buf[0];
+    u8* q = p + 3;
+    if (q[0] != (u8)40) { return 1; }
+    u8* r = q - 2;
+    if (r[0] != (u8)20) { return 2; }
+    u8* s = 2 + p; // commutative add
+    if (s[0] != (u8)30) { return 3; }
+
+    // Struct pointer arithmetic steps by sizeof(Pair) = 16 bytes.
+    Pair pairs[2];
+    pairs[0].a = 100;
+    pairs[0].b = 1;
+    pairs[1].a = 2;
+    pairs[1].b = 200;
+    Pair* t = &pairs[0];
+    Pair* u = t + 1;
+    if (u.b != 200) { return 4; }
+    if ((i64)((i64)u - (i64)t) != 16) { return 5; }
+    Pair* v = u - 1;
+    if (v.a != 100) { return 6; }
+
+    // str arithmetic steps in bytes and str[i] reads the i-th byte (u8).
+    str msg = "hello";
+    str m2 = msg + 1;
+    if (strcmp(m2, "ello") != 0) { return 7; }
+    if (msg[0] != (u8)104) { return 8; } // 'h'
+    if (msg[4] != (u8)111) { return 9; } // 'o'
+    if ("abc"[2] != (u8)99) { return 10; } // literal indexing: 'c'
+    if (msg[1] == msg[1]) { } else { return 11; } // u8 comparison
+    return 0;
+}

@@ -476,7 +476,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
                 let mut rhs = self.emit_expression_value(right)?;
-                if rhs.get_type() != lhs.get_type() {
+                // Pointer arithmetic (p + i, i + p, p - i) keeps the pointer
+                // and integer operands at their own types; only numeric and
+                // pointer/pointer pairs are normalized to a common type.
+                let is_ptr_arith = matches!(
+                    operator,
+                    ast::BinaryOperator::Add | ast::BinaryOperator::Subtract
+                ) && ((lhs.get_type().is_pointer_type()
+                    && rhs.get_type().is_int_type())
+                    || (lhs.get_type().is_int_type() && rhs.get_type().is_pointer_type()));
+                if !is_ptr_arith && rhs.get_type() != lhs.get_type() {
                     rhs = self.cast_value_to_basic_type(rhs, lhs.get_type(), &right.span)?;
                 }
                 let is_unsigned = self.expression_is_unsigned(left);
@@ -730,6 +739,41 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         whole_expr: &ast::Expression,
         is_unsigned: bool,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Pointer arithmetic: p + i, i + p, p - i. The offset is scaled by
+        // the pointee size via GEP; str pointers step in bytes. Uses plain
+        // (non-inbounds) GEP so p - n beyond the object stays defined.
+        if matches!(
+            operator,
+            ast::BinaryOperator::Add | ast::BinaryOperator::Subtract
+        ) {
+            let (left_ast, right_ast) = match whole_expr.kind.as_ref() {
+                ast::ExpressionKind::Binary { left, right, .. } => (left.as_ref(), right.as_ref()),
+                _ => (whole_expr, whole_expr),
+            };
+            if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(offset)) =
+                (lhs, rhs)
+            {
+                return self.emit_pointer_arith(
+                    *ptr,
+                    *offset,
+                    operator,
+                    left_ast,
+                    &whole_expr.span,
+                );
+            }
+            if *operator == ast::BinaryOperator::Add
+                && let (BasicValueEnum::IntValue(offset), BasicValueEnum::PointerValue(ptr)) =
+                    (lhs, rhs)
+            {
+                return self.emit_pointer_arith(
+                    *ptr,
+                    *offset,
+                    operator,
+                    right_ast,
+                    &whole_expr.span,
+                );
+            }
+        }
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                 let value = match operator {
@@ -814,6 +858,57 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 whole_expr.span,
             )),
         }
+    }
+
+    /// Lower pointer arithmetic `ptr +/- offset` (scaled by the pointee
+    /// size). The pointer expression's type drives the element width; `str`
+    /// steps in bytes.
+    fn emit_pointer_arith(
+        &mut self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        offset: inkwell::values::IntValue<'ctx>,
+        operator: &ast::BinaryOperator,
+        pointer_expr: &ast::Expression,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let element_ty = self.pointer_arith_element_type(pointer_expr)?;
+        let index = if *operator == ast::BinaryOperator::Subtract {
+            offset.const_neg()
+        } else {
+            offset
+        };
+        let gep = unsafe {
+            self.builder
+                .build_gep(element_ty, ptr, &[index], "ptr.offset")
+                .map_err(|e| {
+                    CodegenError::with_span(format!("pointer arithmetic failed: {e}"), *span)
+                })?
+        };
+        Ok(gep.as_basic_value_enum())
+    }
+
+    /// LLVM element type for pointer arithmetic on `expr` (the pointer side
+    /// of p + i): the pointee type, or i8 for str.
+    fn pointer_arith_element_type(
+        &mut self,
+        pointer_expr: &ast::Expression,
+    ) -> CodegenResult<BasicTypeEnum<'ctx>> {
+        if let Some(ty) = self.resolve_receiver_type(pointer_expr) {
+            match ty.kind.as_ref() {
+                ast::TypeKind::Pointer(pointer) => {
+                    return self.lower_basic_type(&pointer.inner);
+                }
+                ast::TypeKind::Reference(reference) => {
+                    return self.lower_basic_type(&reference.inner);
+                }
+                ast::TypeKind::Primitive(ast::PrimitiveType::Str) => {
+                    return Ok(self.context.i8_type().into());
+                }
+                _ => {}
+            }
+        }
+        // Fall back to byte steps when the type cannot be resolved.
+        Ok(self.context.i8_type().into())
     }
 
     pub(crate) fn emit_binary_values(
