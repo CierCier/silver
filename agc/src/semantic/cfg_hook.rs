@@ -668,18 +668,35 @@ mod tests {
     #[test]
     fn expands_assert_to_debug_guarded_check() {
         let mut program = parse("i32 main() { @assert(x == 1, \"msg\"); return 0; }");
-        let cfg = CfgSet::default(); // debug derived
+        // Mirror the driver: default flags + derived cfg (no -O -> debug).
+        let mut cfg = CfgSet::default();
+        crate::cfg::add_derived_cfgs(&mut cfg, None, None);
         run_hook(&mut program, &cfg);
-        // The outer if folds true (debug) -> collapses to the inner check.
         let body = match &program.items[0].kind {
             ast::ItemKind::Function(f) => &f.body,
             _ => panic!("expected function"),
         };
+        // The outer `if (@cfg(debug))` folds true -> the expansion becomes a
+        // block holding the inner guarded check (a constant-condition if is
+        // replaced by its live branch as a block expression).
         let stmt = &body.statements[0];
-        let cond = match &stmt.kind {
+        let block = match &stmt.kind {
+            ast::StatementKind::Expression(expr) => match &*expr.kind {
+                ast::ExpressionKind::Block(block) => block,
+                other => panic!("expected block, got {other:?}"),
+            },
+            _ => panic!("expected expression statement"),
+        };
+        assert_eq!(
+            block.statements.len(),
+            1,
+            "expected exactly the guarded check"
+        );
+        let inner = &block.statements[0];
+        let cond = match &inner.kind {
             ast::StatementKind::Expression(expr) => match &*expr.kind {
                 ast::ExpressionKind::If { condition, .. } => condition,
-                _ => panic!("expected if, got {:?}", expr.kind),
+                other => panic!("expected if, got {other:?}"),
             },
             _ => panic!("expected expression statement"),
         };
