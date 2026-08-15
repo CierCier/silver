@@ -655,6 +655,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     })
                     .collect::<CodegenResult<Vec<_>>>()?;
                 self.struct_fields.insert(export.name.clone(), fields);
+                // Generic imported structs need their type params recorded so
+                // ensure_named_struct_type can substitute concrete args into
+                // the field types (e.g. Pair<i64> from a Pair<T> template).
+                if !export.type_params.is_empty() {
+                    self.struct_generics
+                        .insert(export.name.clone(), export.type_params.clone());
+                }
             }
         }
 
@@ -662,6 +669,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             for export in &module.exports {
                 match export.kind {
                     crate::module_artifact::ExportKind::Function => {
+                        // Generic function exports have no concrete signature
+                        // to declare here (fn(T) -> T cannot lower); call sites
+                        // monomorphize to mangled instances (identity__i64)
+                        // which are declared from the monomorphized items.
+                        if !export.type_params.is_empty() {
+                            continue;
+                        }
                         let llvm_name = export
                             .link_name
                             .clone()
@@ -760,8 +774,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|variant| (variant.name.clone(), variant.value))
                                 .collect(),
                         );
-                        // Register payload layouts for imported enums with payload variants
-                        {
+                        // Register payload layouts for imported enums with payload
+                        // variants. Generic enums defer layout to the monomorphized
+                        // concrete instantiation (fields may reference T).
+                        if export.type_params.is_empty() {
                             let mut max_payload_size: u64 = 0;
                             let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
                                 HashMap::default();

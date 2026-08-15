@@ -1,6 +1,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::lexer::Span;
+use crate::module_artifact::{ExportKind, ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
 use crate::types::Type;
 
@@ -11,6 +12,10 @@ pub enum MonomorphRequest {
         type_params: Vec<String>,
         mapping: HashMap<String, Type>,
         call_span: Span,
+        /// True when the source came from an imported module (no body in
+        /// this compilation unit): the generated instance is emitted as an
+        /// external declaration only.
+        is_imported: bool,
     },
     ImplMethod {
         impl_item: Box<ast::ImplItem>,
@@ -24,8 +29,15 @@ pub enum MonomorphRequest {
 pub fn append_monomorphs(
     program: &mut ast::Program,
     requests: &[MonomorphRequest],
+    imported_modules: &[ModuleArtifact],
 ) -> Vec<ast::Item> {
-    let generic_types = collect_generic_types(program);
+    let mut generic_types = collect_generic_types(program);
+    // Imported generic structs have no source AST to clone from, so
+    // synthesize templates from the module export metadata (type params +
+    // field type keys). Local templates win on name collisions.
+    for (name, template) in collect_imported_generic_types(imported_modules) {
+        generic_types.entry(name).or_insert(template);
+    }
     let generic_impls = collect_generic_impls(program);
     let generic_fns = collect_generic_fns(program);
     let mut generated = HashSet::default();
@@ -99,6 +111,138 @@ fn collect_generic_types(program: &ast::Program) -> HashMap<String, GenericTypeI
                 );
             }
             _ => {}
+        }
+    }
+    types
+}
+
+/// Rebuild generic struct templates for imported module exports that carry
+/// type params, so the consumer can instantiate them (e.g. `Pair<i64>` from
+/// an exported `Pair<T>`). The library's source is not available; the export
+/// metadata (type param names + field type keys) is sufficient.
+fn collect_imported_generic_types(modules: &[ModuleArtifact]) -> HashMap<String, GenericTypeItem> {
+    let mut types = HashMap::default();
+    for module in modules {
+        for export in &module.exports {
+            if (export.kind != ExportKind::Struct && export.kind != ExportKind::Enum)
+                || export.type_params.is_empty()
+            {
+                continue;
+            }
+            let span = Span::default();
+            let generics = Some(ast::Generics {
+                params: export
+                    .type_params
+                    .iter()
+                    .map(|name| {
+                        ast::GenericParam::Type(ast::TypeParam {
+                            name: ast::Identifier {
+                                name: name.clone(),
+                                span,
+                            },
+                            bounds: Vec::new(),
+                            default: None,
+                            span,
+                        })
+                    })
+                    .collect(),
+                where_clause: None,
+                span,
+            });
+            match export.kind {
+                ExportKind::Struct => {
+                    let fields = export
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            let field_type = ast_type_from_canonical_key(&field.type_key).ok()?;
+                            Some(ast::Field {
+                                name: ast::Identifier {
+                                    name: field.name.clone(),
+                                    span,
+                                },
+                                field_type,
+                                visibility: ast::Visibility::Public,
+                                tags: HashMap::default(),
+                                span,
+                            })
+                        })
+                        .collect();
+                    types.insert(
+                        export.name.clone(),
+                        GenericTypeItem::Struct(ast::StructItem {
+                            name: ast::Identifier {
+                                name: export.name.clone(),
+                                span,
+                            },
+                            generics,
+                            fields,
+                        }),
+                    );
+                }
+                ExportKind::Enum => {
+                    let variants = export
+                        .enum_variants
+                        .iter()
+                        .map(|variant| {
+                            let data = if !variant.payload_fields.is_empty() {
+                                ast::EnumVariantData::Struct(
+                                    variant
+                                        .payload_fields
+                                        .iter()
+                                        .filter_map(|field| {
+                                            let field_type =
+                                                ast_type_from_canonical_key(&field.type_key)
+                                                    .ok()?;
+                                            Some(ast::Field {
+                                                name: ast::Identifier {
+                                                    name: field.name.clone(),
+                                                    span,
+                                                },
+                                                field_type,
+                                                visibility: ast::Visibility::Public,
+                                                tags: HashMap::default(),
+                                                span,
+                                            })
+                                        })
+                                        .collect(),
+                                )
+                            } else if !variant.payload_types.is_empty() {
+                                ast::EnumVariantData::Tuple(
+                                    variant
+                                        .payload_types
+                                        .iter()
+                                        .filter_map(|key| ast_type_from_canonical_key(key).ok())
+                                        .collect(),
+                                )
+                            } else {
+                                ast::EnumVariantData::Unit
+                            };
+                            ast::EnumVariant {
+                                name: ast::Identifier {
+                                    name: variant.name.clone(),
+                                    span,
+                                },
+                                data,
+                                discriminant: Some(variant.value),
+                                span,
+                            }
+                        })
+                        .collect();
+                    types.insert(
+                        export.name.clone(),
+                        GenericTypeItem::Enum(ast::EnumItem {
+                            name: ast::Identifier {
+                                name: export.name.clone(),
+                                span,
+                            },
+                            generics,
+                            variants,
+                        }),
+                    );
+                }
+                _ => {}
+            }
         }
     }
     types
@@ -771,6 +915,7 @@ fn instantiate_requests(
                 type_params,
                 mapping,
                 call_span,
+                is_imported,
             } => {
                 let source = source.as_ref();
                 let args = ordered_args(type_params, mapping);
@@ -807,11 +952,32 @@ fn instantiate_requests(
                 }
                 substitute_block_types(&mut func.body, mapping);
 
+                // Imported generic functions have no body in this unit: emit
+                // an external declaration (marked with the synthetic
+                // `agm_import` attribute; codegen skips the body) so the
+                // mangled instance resolves against the library object.
+                let attributes = if *is_imported {
+                    vec![ast::Attribute {
+                        name: ast::Identifier {
+                            name: "agm_import".to_string(),
+                            span: Span::default(),
+                        },
+                        args: Vec::new(),
+                        span: Span::default(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+
                 items.push(ast::Item {
                     kind: ast::ItemKind::Function(func),
                     span: source.name.span,
-                    visibility: ast::Visibility::Private,
-                    attributes: Vec::new(),
+                    visibility: if *is_imported {
+                        ast::Visibility::Public
+                    } else {
+                        ast::Visibility::Private
+                    },
+                    attributes,
                 });
             }
             MonomorphRequest::ImplMethod {
@@ -2259,6 +2425,7 @@ fn collect_remaining_function_requests(
                     type_params,
                     mapping,
                     call_span,
+                    is_imported: false,
                 });
             }
         }
@@ -2297,7 +2464,7 @@ mod tests {
     #[test]
     fn monomorphizes_generic_structs() {
         let mut program = parse("struct Box<T> { T value; } i32 main() { Box<i32> b; return 0; }");
-        let items = append_monomorphs(&mut program, &[]);
+        let items = append_monomorphs(&mut program, &[], &[]);
         let has_struct = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Struct(struct_item) => struct_item.name.name.starts_with("Box__"),
             _ => false,
@@ -2318,9 +2485,10 @@ mod tests {
             type_params,
             mapping,
             call_span: Span::default(),
+            is_imported: false,
         }];
 
-        let items = append_monomorphs(&mut program, &requests);
+        let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Function(f) => f.name.name == "foo__i32_i32",
             _ => false,
@@ -2343,9 +2511,10 @@ mod tests {
             type_params,
             mapping,
             call_span: Span::default(),
+            is_imported: false,
         }];
 
-        let items = append_monomorphs(&mut program, &requests);
+        let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Function(f) => f.name.name == "bar__i32_f64_i32_f64",
             _ => false,
@@ -2366,9 +2535,10 @@ mod tests {
             type_params,
             mapping,
             call_span: Span::default(),
+            is_imported: false,
         };
 
-        let items = append_monomorphs(&mut program, &[request.clone(), request]);
+        let items = append_monomorphs(&mut program, &[request.clone(), request], &[]);
         let count = items
             .iter()
             .filter(|item| matches!(&item.kind, ast::ItemKind::Function(f) if f.name.name == "foo__i32_i32"))
@@ -2394,9 +2564,10 @@ mod tests {
             type_params,
             mapping,
             call_span: Span::default(),
+            is_imported: false,
         }];
 
-        let items = append_monomorphs(&mut program, &requests);
+        let items = append_monomorphs(&mut program, &requests, &[]);
         let has_fn = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Function(f) => f.name.name == "id__i32_i32",
             _ => false,
@@ -2463,7 +2634,7 @@ mod tests {
         let mut program = parse(
             "struct Wrapper<T> { T inner; } struct Pair<T, U> { T first; U second; } i32 main() { Pair<Wrapper<i32>, i32> p; return 0; }",
         );
-        let items = append_monomorphs(&mut program, &[]);
+        let items = append_monomorphs(&mut program, &[], &[]);
         let has_wrapper = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Struct(s) => s.name.name.starts_with("Wrapper__"),
             _ => false,
@@ -2488,7 +2659,7 @@ mod tests {
     fn monomorphizes_generic_enum() {
         let mut program =
             parse("enum Option<T> { Some(T); None; } i32 main() { Option<i32> x; return 0; }");
-        let items = append_monomorphs(&mut program, &[]);
+        let items = append_monomorphs(&mut program, &[], &[]);
         let has_enum = items.iter().any(|item| match &item.kind {
             ast::ItemKind::Enum(e) => e.name.name.starts_with("Option__"),
             _ => false,
@@ -2556,7 +2727,7 @@ mod tests {
             call_span: Span::default(),
         };
 
-        let items = append_monomorphs(&mut program, &[request]);
+        let items = append_monomorphs(&mut program, &[request], &[]);
 
         // Verify Holder<i32> impl was created
         let has_holder = items.iter().any(|item| match &item.kind {

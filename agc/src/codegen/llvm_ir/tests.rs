@@ -32,7 +32,7 @@ mod tests {
                 &resolved_iter_types,
             );
         }
-        monomorph::append_monomorphs(&mut program, &monomorphs);
+        monomorph::append_monomorphs(&mut program, &monomorphs, &[]);
         program
     }
 

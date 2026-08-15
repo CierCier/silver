@@ -73,6 +73,7 @@ test_specific_flags() {
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
         tls_test|http2_tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
+        module_import_test) echo "-I $MODLIB_DIR" ;;
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
         target_feature_test) echo "--cfg cpu.avx2=1" ;;
@@ -317,6 +318,23 @@ if ! is_skipped http_perf_test; then
         if grep -q PERF_SERVER_READY "$WORKDIR/perf_server.log" 2>/dev/null; then break; fi
         sleep 0.1
     done
+fi
+
+# module_import_test consumes a precompiled module: emit module_lib.agm +
+# module_lib.o into a dedicated directory first, then the consumer resolves
+# `import module_lib;` via -I and auto-links the sibling object.
+MODLIB_DIR="$WORKDIR/modlib"
+if ! is_skipped module_import_test; then
+    mkdir -p "$MODLIB_DIR"
+    if ! (cd "$MODLIB_DIR" && "$AGC" --emit=module "$ROOT/tests/modules/module_lib.ag" >"$WORKDIR/modlib.emit.log" 2>&1); then
+        echo "error: failed to emit module for module_import_test" >&2
+        cat "$WORKDIR/modlib.emit.log" >&2
+        exit 1
+    fi
+    if [ ! -f "$MODLIB_DIR/module_lib.agm" ] || [ ! -f "$MODLIB_DIR/module_lib.o" ]; then
+        echo "error: module emit did not produce module_lib.agm/o" >&2
+        exit 1
+    fi
 fi
 
 passed=0

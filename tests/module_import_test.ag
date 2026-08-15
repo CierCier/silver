@@ -1,0 +1,30 @@
+// Precompiled-module (AGM) consumer: imports module_lib.agm and exercises
+// generic structs, generic enums, and generic functions across the module
+// boundary. The harness emits module_lib.agm + module_lib.o first and passes
+// -I to the module directory.
+
+import module_lib;
+import std.sys.entry;
+
+i32 main() {
+    // Generic struct: local instantiation + field access + lib call.
+    Pair<i64> p;
+    p.first = 3;
+    p.second = 4;
+    if (p.first + p.second != 7) { return 1; }
+    if (pair_sum(&p) != 7) { return 2; }
+
+    // Generic enum: payload construction + lib-side match + unit variant.
+    Maybe<i64> m;
+    m = Maybe<i64>.Just(5);
+    if (maybe_get(m) != 5) { return 3; }
+    Maybe<i64> n;
+    n = Maybe<i64>.Nothing;
+    if (maybe_get(n) != -1) { return 4; }
+
+    // Generic function: monomorphized on the consumer side.
+    if (identity<i64>(42) != 42) { return 5; }
+
+    // Lib-internal generic instantiation must also link (generic_caller).
+    return 0;
+}

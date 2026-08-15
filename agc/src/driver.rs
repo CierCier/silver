@@ -1004,7 +1004,26 @@ pub fn run(cli: Cli) {
                 profiler::end_phase("type check");
 
                 profiler::begin_phase("monomorph");
-                semantic::monomorph::append_monomorphs(&mut ast, &monomorphs);
+                semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &imported_modules);
+                // Module emits: monomorphized instances of the library's own
+                // generic functions/impls (e.g. identity__i64_i64) must be
+                // externally linkable — consumers reference the mangled
+                // symbols defined here. Flip lib-file instances to Public so
+                // collect_exports includes them and codegen emits them with
+                // external linkage. Instances originating from inlined std
+                // carry other file ids and stay private, avoiding duplicate
+                // symbol collisions with consumer-side instantiations.
+                if matches!(plan.emit, EmitKind::Module) {
+                    let lib_file =
+                        crate::lexer::register_source(input.to_str().unwrap_or_default(), &src);
+                    for item in &mut ast.items {
+                        if item.span.file == lib_file
+                            && matches!(item.visibility, ast::Visibility::Private)
+                        {
+                            item.visibility = ast::Visibility::Public;
+                        }
+                    }
+                }
                 profiler::end_phase("monomorph");
                 symbol_table.touch_phase(
                     CompilerPhase::Monomorphize,

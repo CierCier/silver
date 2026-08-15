@@ -1,0 +1,31 @@
+// Module library for the precompiled-module (AGM) integration test.
+// Compiled with `agc --emit=module`; the consumer (module_import_test.ag)
+// imports the resulting module_lib.agm and links against module_lib.o.
+// Covers generic structs, generic enums, and generic functions crossing
+// the module boundary.
+
+struct Pair<T> {
+    T first;
+    T second;
+}
+
+enum Maybe<T> {
+    Nothing;
+    Just(T);
+}
+
+i64 pair_sum(Pair<i64>* p) {
+    return p.first + p.second;
+}
+
+i64 maybe_get(Maybe<i64> m) {
+    return match m { Just(v) : v, Nothing : -1 };
+}
+
+T identity<T>(T value) {
+    return value;
+}
+
+i64 generic_caller() {
+    return identity<i64>(21) + identity<i64>(21);
+}

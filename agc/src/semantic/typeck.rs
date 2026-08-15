@@ -94,6 +94,10 @@ struct FunctionSig {
     bounds: Vec<TypeBoundPredicate>,
     source: ast::FunctionItem,
     is_variadic: bool,
+    /// True when the signature came from an imported module artifact: the
+    /// source is a signature-only placeholder with no body, and any
+    /// monomorphized instance must be emitted as an external declaration.
+    is_imported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -238,10 +242,15 @@ impl TypeChecker {
                         crate::types::parse_canonical_function_signature(&export.signature)
                     {
                         let sig = FunctionSig {
-                            params,
-                            return_type,
+                            params: params.clone(),
+                            return_type: return_type.clone(),
                             type_params: export.type_params.clone(),
                             bounds: Vec::new(),
+                            // Signature-only placeholder: the params/return
+                            // must be carried so monomorphizing the imported
+                            // generic function yields a correctly-typed
+                            // mangled instance (identity__i64). The body stays
+                            // empty; codegen emits an external declaration.
                             source: ast::FunctionItem {
                                 name: ast::Identifier {
                                     name: export.name.clone(),
@@ -249,14 +258,31 @@ impl TypeChecker {
                                 },
                                 generics: Self::export_type_params_to_generics(&export.type_params),
                                 is_variadic: false,
-                                parameters: Vec::new(),
-                                return_type: None,
+                                parameters: params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, param_type)| ast::Parameter {
+                                        name: ast::Identifier {
+                                            name: format!("p{index}"),
+                                            span: Span::default(),
+                                        },
+                                        param_type: param_type.to_ast(),
+                                        is_mutable: false,
+                                        span: Span::default(),
+                                    })
+                                    .collect(),
+                                return_type: if matches!(return_type, Type::Unit) {
+                                    None
+                                } else {
+                                    Some(return_type.to_ast())
+                                },
                                 body: ast::Block {
                                     statements: Vec::new(),
                                     span: Span::default(),
                                 },
                             },
                             is_variadic: false,
+                            is_imported: true,
                         };
                         self.imported_functions
                             .entry(export.name.clone())
@@ -3172,6 +3198,7 @@ impl TypeChecker {
                 bounds,
                 source: func.clone(),
                 is_variadic,
+                is_imported: false,
             });
         let overloads = self.functions.entry(func.name.name.clone()).or_default();
         // Identical redeclarations (e.g. the same `extern "C"` prototype
@@ -3423,6 +3450,7 @@ impl TypeChecker {
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
+            is_imported: candidate.is_imported,
         });
     }
 

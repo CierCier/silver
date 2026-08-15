@@ -466,6 +466,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
         }
 
+        // Monomorphized instances of imported generic functions are
+        // declarations only (the body lives in the library object): declare
+        // the external symbol and emit no body.
+        if attributes.iter().any(|attr| attr.name.name == "agm_import") {
+            return Ok(());
+        }
+
         self.emit_function_body(
             function,
             &func.parameters,
