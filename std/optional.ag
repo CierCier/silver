@@ -24,7 +24,9 @@ enum Optional<T> {
 impl Optional<T> {
     /// Construct a present value.
     Optional<T> some(T thing) {
-        return Optional.Some(thing);
+        // The by-value param owns `thing`; hand it to the enum so the
+        // payload is single-owner (a bare copy would double-own).
+        return Optional.Some(move thing);
     }
 
     /// Construct an absent value.

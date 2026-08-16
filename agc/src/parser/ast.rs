@@ -572,6 +572,10 @@ pub struct Pattern {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind {
     Identifier(Identifier),
+    /// `move x` binding: extracts the value OUT of the matched location,
+    /// zeroing the source so ownership transfers (used on enum payloads:
+    /// `Event(move ev)` takes the payload without leaving a dangling copy).
+    Move(Identifier),
     Tuple(Vec<Pattern>),
     Struct {
         path: Vec<Identifier>,

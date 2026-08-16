@@ -892,7 +892,7 @@ impl Walker<'_> {
 
     fn walk_pattern(&mut self, pattern: &ast::Pattern) {
         match &pattern.kind {
-            ast::PatternKind::Identifier(id) => {
+            ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
                 self.declare_local(&id.name, id.span, SymbolKind::Local);
             }
             ast::PatternKind::Tuple(patterns) => {

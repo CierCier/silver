@@ -860,7 +860,9 @@ impl Analyzer {
 
     fn bind_pattern(&mut self, pattern: &ast::Pattern) {
         match &pattern.kind {
-            ast::PatternKind::Identifier(ident) => self.bind_var(ident, pattern.span),
+            ast::PatternKind::Identifier(ident) | ast::PatternKind::Move(ident) => {
+                self.bind_var(ident, pattern.span);
+            }
             ast::PatternKind::Tuple(items) => {
                 for item in items {
                     self.bind_pattern(item);

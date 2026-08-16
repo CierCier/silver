@@ -40,6 +40,10 @@ pub struct TypeChecker {
     struct_defs: HashMap<String, StructDef>,
     enum_defs: HashMap<String, EnumDef>,
     trait_impls: HashMap<String, HashSet<String>>,
+    /// Base type names that implement Drop (from `impl Drop<X>` — including
+    /// generic impls like `impl<T> Drop<Vec<T>>`), used to require explicit
+    /// `move` when an owned payload enters an enum.
+    drop_owner_bases: HashSet<String>,
     monomorph_requests: Vec<MonomorphRequest>,
     imported_functions: HashMap<String, Vec<FunctionSig>>,
     extern_variables: HashMap<String, Type>,
@@ -521,11 +525,51 @@ impl TypeChecker {
                 continue;
             }
             let self_ty = Type::from_ast(&impl_item.self_type);
-            if !self.is_concrete_type(&self_ty) {
-                continue;
-            }
             let key = self_ty.canonical_key();
-            self.trait_impls.entry(name).or_default().insert(key);
+            if self.is_concrete_type(&self_ty) {
+                self.trait_impls
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(key);
+            }
+            // Record the Drop-owner base name for ANY Drop impl (generic
+            // templates included): Vec<String> must count even though
+            // `impl<T> Drop<Vec<T>>` has a non-concrete self type.
+            if name == "Drop"
+                && let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref()
+            {
+                self.drop_owner_bases.insert(named.path[0].name.clone());
+            }
+            // Record the Drop-owner base name for ANY Drop impl (generic
+            // templates included): Vec<String> must count even though
+            // `impl<T> Drop<Vec<T>>` has a non-concrete self type.
+            if name == "Drop"
+                && let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref()
+            {
+                self.drop_owner_bases.insert(named.path[0].name.clone());
+            }
+        }
+    }
+
+    /// True when `ty` can own resources: its base type implements Drop, or
+    /// it is a generic placeholder (may instantiate to an owned type).
+    fn type_has_drop_impl(&self, ty: &ast::Type) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => {
+                // Base-name check only: concrete payloads whose type (or a
+                // type parameter resolving to a known owner) implements
+                // Drop. Bare type parameters are deliberately NOT treated as
+                // owned here — a concrete enum impl like `impl
+                // Result<i64, Error>` still shows the generic `T` payload, so
+                // flagging it would be a false positive; generic-template
+                // constructions are enforced at their instantiation sites
+                // (the std template bodies already use `move`).
+                named.path.len() == 1 && self.drop_owner_bases.contains(&named.path[0].name)
+            }
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => false,
+            ast::TypeKind::Array(array) => self.type_has_drop_impl(&array.element_type),
+            ast::TypeKind::Tuple(types) => types.iter().any(|t| self.type_has_drop_impl(t)),
+            _ => false,
         }
     }
 
@@ -1732,8 +1776,9 @@ impl TypeChecker {
                     {
                         let expected_count = variant_info.payload.len();
                         let enum_type_params = enum_def.type_params.clone();
+                        let payload_types: Vec<ast::Type> = variant_info.payload.clone();
                         let expected_types: Vec<Type> =
-                            variant_info.payload.iter().map(Type::from_ast).collect();
+                            payload_types.iter().map(Type::from_ast).collect();
                         if arguments.len() != expected_count {
                             self.error(
                                 format!(
@@ -1750,6 +1795,33 @@ impl TypeChecker {
                             let mut arg_types: Vec<Type> = Vec::with_capacity(arguments.len());
                             for (i, arg) in arguments.iter().enumerate() {
                                 arg_types.push(self.check_expr(arg, Some(&expected_types[i])));
+                                // Move-in enforcement: an owned payload (Drop
+                                // type, or a type param that may instantiate
+                                // to one) passed as a named lvalue must be
+                                // `move`d — otherwise the source keeps its
+                                // drop flag and the enum's copy shares the
+                                // same buffers (silent double owner).
+                                let is_named_lvalue = matches!(
+                                    arg.kind.as_ref(),
+                                    ast::ExpressionKind::Identifier(_)
+                                        | ast::ExpressionKind::FieldAccess { .. }
+                                );
+                                // Check the CONCRETE argument type (resolved
+                                // through the expected payload type): in a
+                                // concrete enum impl the arg is i64 even
+                                // though the enum def still shows T.
+                                if is_named_lvalue
+                                    && !matches!(arg.kind.as_ref(), ast::ExpressionKind::Move(_))
+                                    && self.type_has_drop_impl(&arg_types[i].to_ast())
+                                {
+                                    self.error(
+                                        format!(
+                                            "payload of type '{}' must be moved into the enum (it owns a resource)",
+                                            arg_types[i]
+                                        ),
+                                        arg.span,
+                                    );
+                                }
                             }
                             // For a generic enum (`Optional.Some(x)`), infer the
                             // type args from the argument types so the result is
@@ -2022,7 +2094,19 @@ impl TypeChecker {
                         for (arm_index, arm) in arms.iter().enumerate() {
                             self.push_scope();
                             match &arm.pattern.kind {
-                                ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
+                                ast::PatternKind::Wildcard
+                                | ast::PatternKind::Identifier(_)
+                                | ast::PatternKind::Move(_) => {
+                                    // A top-level `move v` pattern is only
+                                    // meaningful on enum payloads; reject it here.
+                                    if matches!(arm.pattern.kind, ast::PatternKind::Move(_)) {
+                                        self.error(
+                                            "move patterns are only supported on enum payload bindings (Event(move v))"
+                                                .to_string(),
+                                            arm.pattern.span,
+                                        );
+                                    }
+                                }
                                 ast::PatternKind::Enum { variant, data, .. } => {
                                     if let Some(data_pattern) = data {
                                         let payload_types = self
@@ -2032,16 +2116,21 @@ impl TypeChecker {
                                             .map(|info| info.payload.clone())
                                             .unwrap_or_default();
                                         match &data_pattern.kind {
-                                            ast::PatternKind::Identifier(binding) => {
+                                            ast::PatternKind::Identifier(binding)
+                                            | ast::PatternKind::Move(binding) => {
                                                 if let Some(pt) = payload_types.first() {
                                                     let bound = self.substitute_type_params(
                                                         &Type::from_ast(pt),
                                                         &enum_type_map,
                                                     );
+                                                    let is_mut = matches!(
+                                                        data_pattern.kind,
+                                                        ast::PatternKind::Move(_)
+                                                    );
                                                     self.bind(
                                                         &binding.name,
                                                         bound,
-                                                        false,
+                                                        is_mut,
                                                         binding.span,
                                                     );
                                                 }
@@ -2385,20 +2474,28 @@ impl TypeChecker {
                 // Resolve to the enum type
                 let enum_name = if path.len() == 1 { &path[0].name } else { "" };
                 if let Some(enum_def) = self.enum_defs.get(enum_name) {
-                    if let Some(info) = enum_def.variants.get(&variant.name)
-                        && info.payload.len() != fields.len()
-                    {
+                    let variant_payload: Vec<ast::Type> = enum_def
+                        .variants
+                        .get(&variant.name)
+                        .map(|info| info.payload.clone())
+                        .unwrap_or_default();
+                    if variant_payload.len() != fields.len() {
                         self.error(
                             format!(
                                 "enum variant '{}' of '{}' expects {} fields, got {}",
                                 variant.name,
                                 enum_name,
-                                info.payload.len(),
+                                variant_payload.len(),
                                 fields.len()
                             ),
                             expr.span,
                         );
                     }
+                    // Move-in enforcement: an owned payload (Drop type, or a
+                    // type parameter that may instantiate to one) passed as a
+                    // named lvalue must be `move`d — otherwise the source
+                    // keeps its drop flag and the enum's copy shares the same
+                    // buffers (silent double owner / dangling payload).
                     Type::Named {
                         path: path.iter().map(|p| p.name.clone()).collect(),
                         generics: Vec::new(),

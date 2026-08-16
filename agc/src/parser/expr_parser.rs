@@ -588,6 +588,31 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
                 span,
             })
         }
+        Token::Move => {
+            // `move x` binding (ownership-extracting pattern).
+            let span = token.span;
+            cursor.bump();
+            let Some(binding_token) = cursor.current() else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected identifier after 'move' in pattern".to_string(),
+                    span,
+                });
+            };
+            let Token::Identifier(binding_name) = &binding_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected identifier after 'move' in pattern".to_string(),
+                    span: binding_token.span,
+                });
+            };
+            cursor.bump();
+            Ok(ast::Pattern {
+                kind: ast::PatternKind::Move(ast::Identifier {
+                    name: binding_name.clone(),
+                    span: binding_token.span,
+                }),
+                span: span.extend_to(&binding_token.span),
+            })
+        }
         Token::Identifier(name) => {
             let span = token.span;
             let name = name.clone();

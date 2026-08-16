@@ -1,0 +1,71 @@
+import std.test;
+import std.string;
+
+// Enum payload ownership: `move`-in construction and `move`-out match
+// bindings. A `move` binding extracts the payload OUT of the enum
+// (zeroing its slot), so the caller owns exactly one copy — no dangling
+// payload in the enum, no double-free, no leak.
+
+i64 g_drops = 0;
+
+struct Inner {
+    String s;
+    i64 v;
+}
+impl Drop<Inner> for Inner {
+    void drop(Inner* self) {
+        g_drops = g_drops + 1;
+        if (self.s.data != (u8*)0) {
+            self.s.drop();
+        }
+    }
+}
+enum Recv {
+    Event(Inner);
+    Done;
+}
+
+i32 main() {
+    // Move-in: the payload must be moved (non-move construction is a
+    // compile error — see enum_move_in_error_test.ag).
+    String st = String.new();
+    st.push_bytes((u8*)"hi", 2);
+    Inner i;
+    i.s = move st;
+    i.v = 7;
+    Recv r = Recv.Event(move i);
+    assert_eq_i64(0, g_drops, "moved payload not dropped at construction");
+
+    // Move-out: extracting the payload transfers ownership; the enum's
+    // slot is zeroed, so a second match sees an inert value and the drop
+    // count stays exact.
+    i64 got = match r {
+        Event(move ev) : consume(&ev),
+        Done : 0
+    };
+    assert_eq_i64(0, got, "move-out extraction succeeded");
+    assert_eq_i64(1, g_drops, "extracted payload dropped exactly once");
+
+    // A plain (non-move) binding still copies for inspection.
+    Inner i2;
+    i2.s = String.from_str("x");
+    i2.v = 3;
+    Recv r2 = Recv.Event(move i2);
+    i64 peek = match r2 {
+        Event(ev) : ev.v,
+        Done : 0
+    };
+    assert_eq_i64(3, peek, "plain binding copies the payload for reads");
+    i64 _ = match r2 {
+        Event(move ev) : consume(&ev),
+        Done : 0
+    };
+    assert_eq_i64(2, g_drops, "second extraction frees the copied payload");
+    return done();
+}
+
+i64 consume(Inner* ev) {
+    i64 v = ev.v;
+    ev.drop();
+    return v == 7 ? 0 : 99;
+}

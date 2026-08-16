@@ -481,7 +481,7 @@ fn let_node(let_stmt: &ast::LetStatement) -> Node {
 
 fn pattern_node(pattern: &ast::Pattern) -> Node {
     match &pattern.kind {
-        ast::PatternKind::Identifier(ident) => {
+        ast::PatternKind::Identifier(ident) | ast::PatternKind::Move(ident) => {
             Node::new(format!("Pattern::Identifier {}", ident.name))
         }
         ast::PatternKind::Tuple(items) => {

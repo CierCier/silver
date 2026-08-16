@@ -2444,17 +2444,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .and_then(|m| m.get(&variant.name))
                                 .cloned()
                                 .unwrap_or_default();
-                            let bindings: Vec<Option<&ast::Identifier>> = match &data_pattern.kind {
-                                ast::PatternKind::Identifier(binding) => vec![Some(binding)],
-                                ast::PatternKind::Tuple(items) => items
-                                    .iter()
-                                    .map(|item| match &item.kind {
-                                        ast::PatternKind::Identifier(binding) => Some(binding),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                                _ => Vec::new(),
-                            };
+                            // (binding, is_move): a `move` binding extracts the
+                            // payload OUT of the scrutinee (zeroing its slot) so
+                            // ownership transfers instead of sharing.
+                            let bindings: Vec<Option<(&ast::Identifier, bool)>> =
+                                match &data_pattern.kind {
+                                    ast::PatternKind::Identifier(binding) => {
+                                        vec![Some((binding, false))]
+                                    }
+                                    ast::PatternKind::Move(binding) => {
+                                        vec![Some((binding, true))]
+                                    }
+                                    ast::PatternKind::Tuple(items) => items
+                                        .iter()
+                                        .map(|item| match &item.kind {
+                                            ast::PatternKind::Identifier(binding) => {
+                                                Some((binding, false))
+                                            }
+                                            ast::PatternKind::Move(binding) => {
+                                                Some((binding, true))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect(),
+                                    _ => Vec::new(),
+                                };
                             if !bindings.is_empty() {
                                 let data_ptr = self
                                     .builder
@@ -2469,7 +2483,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 for (i, pt) in payload_types.iter().enumerate() {
                                     let llvm_ty = self.lower_basic_type(pt)?;
                                     let binding = bindings.get(i).copied().flatten();
-                                    if let Some(binding) = binding {
+                                    if let Some((binding, is_move)) = binding {
                                         let field_ptr =
                                             if byte_offset == 0 {
                                                 data_ptr
@@ -2515,6 +2529,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         self.builder.build_store(alloca, loaded).map_err(|e| {
                                             CodegenError::new(format!("store data binding: {e}"))
                                         })?;
+                                        // Move-out: null the payload slot in the
+                                        // ORIGINAL scrutinee storage so ownership
+                                        // leaves the matched enum (no dangling
+                                        // copy). The per-arm scrut_ptr copy is
+                                        // scratch; the variable itself keeps the
+                                        // zeroed slot.
+                                        if is_move
+                                            && let Ok((orig_ptr, _)) =
+                                                self.resolve_lvalue_ptr(expression)
+                                        {
+                                            let orig_data = self
+                                                .builder
+                                                .build_struct_gep(
+                                                    struct_ty,
+                                                    orig_ptr,
+                                                    1,
+                                                    "match.orig.data",
+                                                )
+                                                .map_err(|e| {
+                                                    CodegenError::new(format!("orig data GEP: {e}"))
+                                                })?;
+                                            let slot_ptr = if byte_offset == 0 {
+                                                orig_data
+                                            } else {
+                                                unsafe {
+                                                    self.builder.build_gep(
+                                                        self.context.i8_type(),
+                                                        orig_data,
+                                                        &[self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_int(byte_offset as u64, false)],
+                                                        "match.orig.slot",
+                                                    )
+                                                }
+                                                .map_err(|e| {
+                                                    CodegenError::new(format!("orig slot GEP: {e}"))
+                                                })?
+                                            };
+                                            self.builder
+                                                .build_store(slot_ptr, llvm_ty.const_zero())
+                                                .map_err(|e| {
+                                                    CodegenError::new(format!(
+                                                        "zero orig payload: {e}"
+                                                    ))
+                                                })?;
+                                        }
                                         if let Some(scope) = self.variables.last_mut() {
                                             scope.insert(
                                                 binding.name.clone(),

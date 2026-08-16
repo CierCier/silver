@@ -1,0 +1,17 @@
+import std.sys.entry;
+import std.string;
+
+struct Inner { String s; }
+impl Drop<Inner> for Inner {
+    void drop(Inner* self) { self.s.drop(); }
+}
+enum Recv { Event(Inner); Done; }
+
+i32 main() {
+    String st = String.new();
+    st.push_bytes((u8*)"hi", 2);
+    Inner i;
+    i.s = move st;
+    Recv r = Recv.Event(i); // must be a compile error: i owns a resource
+    return 0;
+}

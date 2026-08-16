@@ -941,7 +941,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
 
             match &arm.pattern.kind {
-                ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
+                ast::PatternKind::Wildcard
+                | ast::PatternKind::Identifier(_)
+                | ast::PatternKind::Move(_) => {
                     self.builder
                         .build_unconditional_branch(arm_bb)
                         .map_err(|e| CodegenError::new(format!("failed match branch: {e}")))?;
@@ -1047,7 +1049,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.pop_scope();
 
             match arm.pattern.kind {
-                ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
+                ast::PatternKind::Wildcard
+                | ast::PatternKind::Identifier(_)
+                | ast::PatternKind::Move(_) => {
                     cond_bb = next_bb;
                     break;
                 }

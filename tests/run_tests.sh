@@ -99,6 +99,7 @@ cookie_test
 assignment_drop_test
 field_predrop_test
 temp_operator_test
+enum_move_test
 "
 
 # True when a test is compiled with --leak-check.
@@ -119,6 +120,7 @@ expected_compile_failure() {
         static_volatile_negative_test) return 0 ;;
         target_feature_error_test) return 0 ;;
         borrow_origin_escape_error_test) return 0 ;;
+        enum_move_in_error_test) return 0 ;;
         launch_wait_error_test) return 0 ;;
         launch_send_error_test) return 0 ;;
         *) return 1 ;;
