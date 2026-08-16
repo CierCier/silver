@@ -100,6 +100,7 @@ assignment_drop_test
 field_predrop_test
 temp_operator_test
 enum_move_test
+enum_cascade_test
 "
 
 # True when a test is compiled with --leak-check.

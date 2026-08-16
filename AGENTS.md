@@ -185,6 +185,8 @@ The Silver compiler implements a lightweight deterministic memory and resource c
    - When executing `return expr;`, the compiler evaluates the expression value first, saves it in a temporary register, runs all pending `defers` up to the function scope level, and then issues the final return instruction. This avoids use-after-free conditions.
    - Function parameter variables receive drop-flag allocations and are dropped on function exit.
    - *Known Design Limitation (Bug C)*: Local variables declared but not initialized have their drop flags set to `true` by default, which can cause spurious drops on zero-initialized fields if the type does not perform pointer-null checks in its `drop` method.
+6. **Per-Field Drop Flags**: each Drop-typed struct field has its own i1 flag (initialized `false` = "no live value yet"), set on field assignment / struct init / by-value params, cleared on move. The scope-exit field cascade checks per-field flags, so uninitialized fields are never destructed; overwriting a field (`x.f = y`) releases the old value (guarded by the field flag).
+7. **Enum Payload Ownership**: constructing a variant with an owned payload requires `move` (`Res.Ok(move i)` — a bare `Res.Ok(i)` is a compile error). Enums WITHOUT a Drop impl of their own get a tag-aware payload cascade: the active variant's Drop-typed payload is dropped at scope exit (so a never-unwrapped `Result<Owned, E>` does not leak). Extract owned payloads with a `move` binding — `match r { Ok(move v) : v, ... }` — which transfers ownership and zeroes the enum's slot (freeing via a plain binding copy now double-frees, since the cascade still runs). Enums WITH a Drop impl manage their payloads in the drop body and get no cascade.
 
 ---
 

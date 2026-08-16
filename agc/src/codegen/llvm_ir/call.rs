@@ -304,16 +304,59 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ///
     /// True when the callee runs a destructor on this by-value parameter at
     /// function exit: a non-pointer/reference type with a Drop impl.
-    pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> bool {
+    pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
         if matches!(
             ty.kind.as_ref(),
             ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
         ) {
-            return false;
+            return Ok(false);
         }
-        self.get_drop_function_name(ty)
+        if self
+            .get_drop_function_name(ty)
             .map(|drop_fn| drop_fn.is_some())
             .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+        // An enum WITHOUT a Drop impl of its own still drops its payload at
+        // scope exit via the tag-aware cascade — a by-value transfer must
+        // clear the caller's flag for it too.
+        self.enum_has_payload_cascade(ty)
+    }
+
+    /// True when `ty` is an enum with a payload cascade (a payload layout
+    /// whose variants carry Drop-typed values) and no Drop impl of its own.
+    fn enum_has_payload_cascade(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
+        let Some(named) = Self::extract_named_type(ty).cloned() else {
+            return Ok(false);
+        };
+        if named.path.len() != 1 {
+            return Ok(false);
+        }
+        let enum_name = &named.path[0].name;
+        if !self.enum_payload_layouts.contains_key(enum_name) {
+            return Ok(false);
+        }
+        if self
+            .get_drop_function_name(ty)
+            .map(|drop_fn| drop_fn.is_some())
+            .unwrap_or(false)
+        {
+            // Has its own Drop impl: the body manages the payload.
+            return Ok(false);
+        }
+        let Some(payloads) = self.enum_variant_payload_types.get(enum_name).cloned() else {
+            return Ok(false);
+        };
+        let mut has_drop = false;
+        for types in payloads.values() {
+            for pt in types {
+                if self.get_drop_function_name(pt)?.is_some() {
+                    has_drop = true;
+                }
+            }
+        }
+        Ok(has_drop)
     }
 
     /// Clear the tracked drop flag of `expr` when it names a local or
@@ -685,7 +728,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         && signature
                             .params
                             .first()
-                            .is_some_and(|ty| self.param_type_drops_on_exit(ty))
+                            .is_some_and(|ty| self.param_type_drops_on_exit(ty).unwrap_or(false))
                     {
                         self.clear_drop_flag_of(receiver)?;
                     }
@@ -732,7 +775,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // double free; extern functions never drop params.
                     if signature.linkage.is_none()
                         && param_index < signature.params.len()
-                        && self.param_type_drops_on_exit(&signature.params[param_index])
+                        && self
+                            .param_type_drops_on_exit(&signature.params[param_index])
+                            .unwrap_or(false)
                     {
                         self.clear_drop_flag_of(argument)?;
                     }

@@ -1,0 +1,74 @@
+import std.test;
+import std.string;
+
+// Tag-aware payload cascade: enums WITHOUT a Drop impl whose payloads own
+// resources now auto-drop the active variant's payload at scope exit —
+// a Result<String, Error> that is never unwrapped no longer leaks, and
+// move-out unwrap transfers ownership exactly once (no double-free).
+
+i64 g_drops = 0;
+
+struct Inner {
+    String s;
+}
+impl Drop<Inner> for Inner {
+    void drop(Inner* self) {
+        g_drops = g_drops + 1;
+        if (self.s.data != (u8*)0) {
+            self.s.drop();
+        }
+    }
+}
+
+// Mirrors std Result<T, E>: payload enum WITHOUT its own Drop impl.
+enum Res {
+    Ok(Inner);
+    Err(i64);
+}
+impl Res {
+    bool is_ok(&Res self) {
+        return match *self { Ok(v) : true, Err(e) : false };
+    }
+    Inner unwrap(Res self) {
+        Inner dummy;
+        dummy.s = String.new();
+        return match self { Ok(move v) : v, Err(e) : dummy };
+    }
+}
+
+i32 main() {
+    // 1. Never unwrapped: the cascade drops the payload at scope exit.
+    {
+        g_drops = 0;
+        Inner i;
+        i.s = String.from_str("one");
+        Res r = Res.Ok(move i);
+        assert_eq_i64(0, g_drops, "payload alive while the result lives");
+    }
+    assert_eq_i64(1, g_drops, "unwrapped result payload dropped at scope exit");
+
+    // 2. Move-out unwrap: ownership transfers; exactly one drop total.
+    {
+        g_drops = 0;
+        Inner i;
+        i.s = String.from_str("two");
+        Res r = Res.Ok(move i);
+        Inner got = r.unwrap(); // receiver transfer clears r's flag
+        if (strcmp((str)got.s.data, "two") != 0) { return 2; }
+        got.drop();
+        // 2 drops: the extracted value (got) plus unwrap's own zeroed
+        // dummy value; r's payload was moved out, so nothing more.
+        assert_eq_i64(2, g_drops, "move-out unwrap: extracted + helper dummy only");
+    }
+    assert_eq_i64(2, g_drops, "no extra drops after unwrap + scope exit");
+
+    // 3. The Err variant's non-owning payload is untouched by the cascade.
+    {
+        g_drops = 0;
+        Res e = Res.Err(42);
+        i64 code = match e { Ok(v) : -1, Err(c) : c };
+        assert_eq_i64(42, code, "err variant readable");
+    }
+    assert_eq_i64(0, g_drops, "err variant has nothing to drop");
+    return done();
+}

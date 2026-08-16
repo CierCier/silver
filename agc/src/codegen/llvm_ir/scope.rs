@@ -12,6 +12,8 @@ use crate::lexer::Span;
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 use crate::types::Type;
+use inkwell::IntPredicate;
+use inkwell::targets::TargetData;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn set_debug_location(&self, span: &Span) {
@@ -80,6 +82,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 CodegenError::new(format!("failed to call drop: {e}"))
                             })?;
                         }
+                    }
+                    DeferAction::EnumPayloadDrop(enum_name, var_ptr) => {
+                        self.emit_enum_payload_drop(enum_name, *var_ptr)?;
                     }
                 }
 
@@ -242,6 +247,174 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(None)
     }
 
+    /// Emit a tag-switched drop of an enum's payload: load the i16 tag and
+    /// drop the active variant's Drop-typed payload values (enums without a
+    /// Drop impl of their own). Zero-initialized enums carry tag 0; their
+    /// payload is zeroed, so null-guarded drops are no-ops.
+    fn emit_enum_payload_drop(
+        &mut self,
+        enum_name: &str,
+        var_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() else {
+            return Ok(());
+        };
+        let Some(variants) = self.enum_variants.get(enum_name).cloned() else {
+            return Ok(());
+        };
+        let payload_types = self
+            .enum_variant_payload_types
+            .get(enum_name)
+            .cloned()
+            .unwrap_or_default();
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for enum payload drop"))?;
+        let tag_ptr = self
+            .builder
+            .build_struct_gep(struct_ty, var_ptr, 0, "epd.tag.ptr")
+            .map_err(|e| CodegenError::new(format!("enum payload tag GEP: {e}")))?;
+        let tag_val = self
+            .builder
+            .build_load(self.context.i16_type(), tag_ptr, "epd.tag")
+            .map_err(|e| CodegenError::new(format!("enum payload tag load: {e}")))?;
+        let data_ptr = self
+            .builder
+            .build_struct_gep(struct_ty, var_ptr, 1, "epd.data")
+            .map_err(|e| CodegenError::new(format!("enum payload data GEP: {e}")))?;
+        let mut cond_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
+        let after_bb = self.context.append_basic_block(function, "epd.after");
+        let mut any = false;
+        // Variants are compared by their stored tag values.
+        for (variant_name, tag_value) in &variants {
+            let types = payload_types.get(variant_name).cloned().unwrap_or_default();
+            // Compute the payload field drops for this variant (by byte offset).
+            let mut drops: Vec<(u32, String)> = Vec::new();
+            let mut offset: u32 = 0;
+            for pt in &types {
+                let llvm_ty = self.lower_basic_type(pt)?;
+                if let Some(drop_fn) = self.get_drop_function_name(pt)? {
+                    drops.push((offset, drop_fn));
+                }
+                offset += target_data.get_abi_size(&llvm_ty) as u32;
+            }
+            if drops.is_empty() {
+                continue;
+            }
+            any = true;
+            // tag == tag_value -> run this variant's drops.
+            let expected = self.context.i16_type().const_int(*tag_value as u64, false);
+            self.builder.position_at_end(cond_bb);
+            let cond = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag_val.into_int_value(),
+                    expected,
+                    "epd.cmp",
+                )
+                .map_err(|e| CodegenError::new(format!("enum payload tag compare: {e}")))?;
+            let run_bb = self.context.append_basic_block(function, "epd.run");
+            self.builder
+                .build_conditional_branch(cond, run_bb, after_bb)
+                .map_err(|e| CodegenError::new(format!("enum payload branch: {e}")))?;
+            self.builder.position_at_end(run_bb);
+            for (byte_offset, drop_fn) in drops {
+                let field_ptr = if byte_offset == 0 {
+                    data_ptr
+                } else {
+                    unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(),
+                            data_ptr,
+                            &[self.context.i32_type().const_int(byte_offset as u64, false)],
+                            "epd.field",
+                        )
+                    }
+                    .map_err(|e| CodegenError::new(format!("enum payload field GEP: {e}")))?
+                };
+                if let Some(func) = self.module.get_function(&drop_fn) {
+                    let args = vec![BasicMetadataValueEnum::from(field_ptr)];
+                    self.builder
+                        .build_call(func, &args, "epd.drop")
+                        .map_err(|e| CodegenError::new(format!("enum payload drop call: {e}")))?;
+                }
+            }
+            self.builder
+                .build_unconditional_branch(after_bb)
+                .map_err(|e| CodegenError::new(format!("enum payload join: {e}")))?;
+            cond_bb = after_bb;
+        }
+        if any {
+            self.builder.position_at_end(after_bb);
+        }
+        Ok(())
+    }
+
+    /// Register the tag-aware payload cascade for an enum local WITHOUT a
+    /// Drop impl of its own: the active variant's Drop-typed payload values
+    /// are dropped at scope exit (guarded by the variable's drop flag so a
+    /// moved enum skips it).
+    fn register_enum_payload_cascade(
+        &mut self,
+        ty: &ast::Type,
+        var_ptr: PointerValue<'ctx>,
+        name: &str,
+    ) -> CodegenResult<()> {
+        let Some(named) = Self::extract_named_type(ty).cloned() else {
+            return Ok(());
+        };
+        if named.path.len() != 1 {
+            return Ok(());
+        }
+        let enum_name = &named.path[0].name;
+        if !self.enum_payload_layouts.contains_key(enum_name) {
+            return Ok(());
+        }
+        // Only enums whose payloads can carry Drop values need the cascade.
+        let payload_types = self.enum_variant_payload_types.get(enum_name).cloned();
+        let has_drop_payload = payload_types
+            .map(|m| {
+                m.values().any(|types| {
+                    types
+                        .iter()
+                        .any(|pt| self.get_drop_function_name(pt).unwrap_or(None).is_some())
+                })
+            })
+            .unwrap_or(false);
+        if !has_drop_payload {
+            return Ok(());
+        }
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for enum cascade flag"))?;
+        let flag_alloca = self.create_entry_alloca(
+            function,
+            &format!("{name}.drop"),
+            self.context.bool_type().as_basic_type_enum(),
+        )?;
+        self.builder
+            .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+            .map_err(|e| CodegenError::new(format!("failed to init enum flag: {e}")))?;
+        if let Some(scope) = self.variables.last_mut()
+            && let Some(var) = scope.get_mut(name)
+        {
+            var.drop_flag = Some(flag_alloca);
+        }
+        if let Some(scope) = self.defers.last_mut() {
+            scope.push(DeferredEntry {
+                action: DeferAction::EnumPayloadDrop(enum_name.clone(), var_ptr),
+                flag: Some(flag_alloca),
+            });
+        }
+        Ok(())
+    }
+
     /// Allocate a 1-bit drop flag for `name`, initialize it to true, and
     /// register `var_ptr`'s destructor (plus cascaded field drops) as a
     /// deferred drop on the current scope. Records the flag so `move` and
@@ -253,7 +426,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         var_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<()> {
         let Some(drop_fn_name) = self.get_drop_function_name(ty)? else {
-            return Ok(());
+            // No Drop impl of its own. An enum whose payloads can carry Drop
+            // values still needs the tag-aware payload cascade so owned
+            // payloads (Result<String, Error>, Optional<Owned>) are released
+            // at scope exit instead of leaking.
+            return self.register_enum_payload_cascade(ty, var_ptr, name);
         };
         let function = self
             .current_fn

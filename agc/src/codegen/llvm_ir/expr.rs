@@ -2539,6 +2539,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             && let Ok((orig_ptr, _)) =
                                                 self.resolve_lvalue_ptr(expression)
                                         {
+                                            // The extracted payload is no
+                                            // longer owned by the enum: clear
+                                            // its drop flag so the scope-exit
+                                            // cascade skips it.
+                                            if let ast::ExpressionKind::Identifier(ident) =
+                                                expression.kind.as_ref()
+                                                && let Some(var) =
+                                                    self.lookup_variable(&ident.name)
+                                                && let Some(flag) = var.drop_flag
+                                            {
+                                                self.builder
+                                                    .build_store(
+                                                        flag,
+                                                        self.context
+                                                            .bool_type()
+                                                            .const_int(0, false),
+                                                    )
+                                                    .map_err(|e| {
+                                                        CodegenError::new(format!(
+                                                            "clear moved-out flag: {e}"
+                                                        ))
+                                                    })?;
+                                            }
                                             let orig_data = self
                                                 .builder
                                                 .build_struct_gep(

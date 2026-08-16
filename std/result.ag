@@ -27,19 +27,23 @@ impl Result<T, E> {
         return Result.Err(move error);
     }
 
-    bool success(Result<T, E> self) {
-        return match self { Ok(v) : true, Err(e) : false };
+    // Inspection methods take a borrowed receiver: a by-value receiver
+    // would trigger the payload cascade on its own copy and free the
+    // payload before unwrap can extract it.
+    bool success(&Result<T, E> self) {
+        return match *self { Ok(v) : true, Err(e) : false };
     }
 
-    bool failed(Result<T, E> self) {
-        return match self { Ok(v) : false, Err(e) : true };
+    bool failed(&Result<T, E> self) {
+        return match *self { Ok(v) : false, Err(e) : true };
     }
 
-    /// Extract the success value.  Aborts if the result is an error.
+    /// Extract the success value, transferring ownership out of the
+    /// result (move-out binding). Aborts if the result is an error.
     T unwrap(Result<T, E> self) {
         if (self.success()) {
             T dummy;
-            return match self { Ok(v) : v, Err(e) : dummy };
+            return match self { Ok(move v) : v, Err(e) : dummy };
         }
         STDERR.write_str("Result::unwrap: called on an err value\n");
         __result_abort();
@@ -49,14 +53,15 @@ impl Result<T, E> {
     }
 
     T unwrap_or(Result<T, E> self, T fallback) {
-        return match self { Ok(v) : v, Err(e) : fallback };
+        return match self { Ok(move v) : v, Err(e) : fallback };
     }
 
-    /// Extract the error value.  Aborts if the result is ok.
+    /// Extract the error value, transferring ownership out of the result.
+    /// Aborts if the result is ok.
     E get_error(Result<T, E> self) {
         if (self.failed()) {
             E dummy;
-            return match self { Ok(v) : dummy, Err(e) : e };
+            return match self { Ok(v) : dummy, Err(move e) : e };
         }
         STDERR.write_str("Result::get_error: called on an ok value\n");
         __result_abort();

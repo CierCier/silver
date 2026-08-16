@@ -34,19 +34,20 @@ impl Optional<T> {
         return Optional.None;
     }
 
-    bool is_some(Optional<T> self) {
-        return match self { Some(v) : true, None : false };
+    bool is_some(&Optional<T> self) {
+        return match *self { Some(v) : true, None : false };
     }
 
-    bool is_none(Optional<T> self) {
-        return match self { Some(v) : false, None : true };
+    bool is_none(&Optional<T> self) {
+        return match *self { Some(v) : false, None : true };
     }
 
-    /// Extract the contained value.  Aborts if the optional is none.
+    /// Extract the contained value, transferring ownership out of the
+    /// optional (move-out binding). Aborts if the optional is none.
     T unwrap(Optional<T> self) {
         if (self.is_some()) {
             T dummy;
-            return match self { Some(v) : v, None : dummy };
+            return match self { Some(move v) : v, None : dummy };
         }
         STDERR.write_str("Optional::unwrap: called on a none value\n");
         __optional_abort();
@@ -56,6 +57,6 @@ impl Optional<T> {
     }
 
     T unwrap_or(Optional<T> self, T fallback) {
-        return match self { Some(v) : v, None : fallback };
+        return match self { Some(move v) : v, None : fallback };
     }
 }
