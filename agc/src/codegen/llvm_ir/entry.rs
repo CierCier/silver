@@ -1323,7 +1323,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 (1, w_ident)
             }
-            "sprint" => {
+            "sprint" | "format" => {
                 let buf_writer_type = ast::Type {
                     kind: Box::new(ast::TypeKind::Named(ast::NamedType {
                         path: vec![ast::Identifier {
@@ -1552,7 +1552,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.emit_method_call_expression(&writer_expr, &method, &[nl_expr], true, &expr.span)?;
         }
 
-        if name == "sprint" {
+        if name == "sprint" || name == "format" {
             // Write a null terminator at the end of the buffer
             let method = ast::Identifier {
                 name: "write_u8".to_string(),
@@ -1602,6 +1602,135 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(format!("sprint load data failed: {e}"), expr.span)
                 })?;
+
+            if name == "format" {
+                let string_type = ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "String".to_string(),
+                            span: expr.span,
+                        }],
+                        generics: None,
+                    })),
+                    span: expr.span,
+                };
+                let string_llvm_ty = self.lower_basic_type(&string_type)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@format requires an active function", expr.span)
+                })?;
+                let string_tmp =
+                    self.create_entry_alloca(fn_ctx, "format.string", string_llvm_ty)?;
+
+                let data_as_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        data_val.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "format.data.ptr",
+                    )
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format int to ptr failed: {e}"), expr.span)
+                    })?;
+
+                // len in BufWriter includes the NUL byte we just wrote; String len is len - 1
+                let len_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "format.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format struct gep 1 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let len_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), len_ptr, "format.len.val")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format load len failed: {e}"), expr.span)
+                    })?;
+                let one_i64 = self.context.i64_type().const_int(1, false);
+                let str_len_val = self
+                    .builder
+                    .build_int_sub(len_val.into_int_value(), one_i64, "format.str.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format len sub 1 failed: {e}"), expr.span)
+                    })?;
+
+                let cap_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "format.cap")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format struct gep 2 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let cap_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), cap_ptr, "format.cap.val")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format load cap failed: {e}"), expr.span)
+                    })?;
+
+                // Store into String fields: 0=data, 1=len, 2=capacity
+                let str_data_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 0, "str.data")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 0 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_data_slot, data_as_ptr)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str data failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let str_len_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 1, "str.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 1 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_len_slot, str_len_val)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str len failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let str_cap_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 2, "str.cap")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 2 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_cap_slot, cap_val)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str cap failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let loaded_str = self
+                    .builder
+                    .build_load(string_llvm_ty, string_tmp, "format.result")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format load result failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                return Ok(loaded_str);
+            }
+
             let str_val = self
                 .builder
                 .build_int_to_ptr(

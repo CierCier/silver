@@ -25,21 +25,59 @@ use crate::lexer::Span;
 use crate::parser::ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// One move-check diagnostic; same shape as `typeck::TypeError` so the driver
-/// renders them identically.
+/// One move-check diagnostic; same shape as `typeck::TypeError` with optional
+/// secondary note pointing to the earlier move origin.
 #[derive(Debug, Clone)]
 pub struct MoveError {
     pub message: String,
     pub span: Span,
+    pub note_span: Option<Span>,
+    pub note_message: Option<String>,
 }
 
-/// Moved-ness lattice per live variable: 0 = not moved, 1 = moved on some
-/// path, 2 = moved on all paths. Any use with value > 0 is an error.
-type State = FxHashMap<String, u8>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VarState {
+    pub level: u8,
+    pub move_span: Option<Span>,
+    pub move_reason: Option<&'static str>,
+}
+
+impl VarState {
+    pub fn new_live() -> Self {
+        Self {
+            level: 0,
+            move_span: None,
+            move_reason: None,
+        }
+    }
+
+    pub fn mark_moved(&mut self, span: Span, reason: &'static str) {
+        self.level = 2;
+        self.move_span = Some(span);
+        self.move_reason = Some(reason);
+    }
+
+    pub fn is_moved(&self) -> bool {
+        self.level > 0
+    }
+
+    pub fn merge_with(&mut self, other: &VarState) {
+        if other.level > self.level {
+            self.level = other.level;
+            self.move_span = other.move_span;
+            self.move_reason = other.move_reason;
+        } else if self.move_span.is_none() && other.move_span.is_some() {
+            self.move_span = other.move_span;
+            self.move_reason = other.move_reason;
+        }
+    }
+}
+
+/// Moved-ness lattice per live variable: tracks status, move site and reason.
+type State = FxHashMap<String, VarState>;
 
 /// Scope entry: (name, previous state, previous type) so shadowing restores.
-type ScopeEntry = (String, Option<u8>, Option<ast::Type>);
-
+type ScopeEntry = (String, Option<VarState>, Option<ast::Type>);
 /// Program-wide facts used to classify moves (computed once per program).
 #[derive(Default)]
 struct Facts {
@@ -229,7 +267,7 @@ impl MoveChecker {
         if ty.is_some_and(|t| self.is_tracked(t)) {
             let old_state = state.get(name).copied();
             let old_type = var_types.get(name).cloned();
-            state.insert(name.to_string(), 0);
+            state.insert(name.to_string(), VarState::new_live());
             if let Some(t) = ty {
                 var_types.insert(name.to_string(), t.clone());
             }
@@ -266,10 +304,18 @@ impl MoveChecker {
         }
     }
 
-    fn error(&mut self, message: impl Into<String>, span: Span) {
+    fn error_with_note(
+        &mut self,
+        message: impl Into<String>,
+        span: Span,
+        note_span: Option<Span>,
+        note_message: impl Into<String>,
+    ) {
         self.errors.push(MoveError {
             message: message.into(),
             span,
+            note_span,
+            note_message: Some(note_message.into()),
         });
     }
 
@@ -325,8 +371,8 @@ impl MoveChecker {
                 // Field returns (`return x.field;`) are views and do not move.
                 match expr.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
-                        if let Some(moved) = state.get_mut(&ident.name) {
-                            *moved = 2;
+                        if let Some(var) = state.get_mut(&ident.name) {
+                            var.mark_moved(expr.span, "value moved by return");
                         }
                     }
                     _ => self.check_expr(expr, state, scopes, var_types),
@@ -358,8 +404,16 @@ impl MoveChecker {
     ) {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
-                if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
-                    self.error(format!("use of moved value '{}'", ident.name), ident.span);
+                if let Some(var) = state.get(&ident.name)
+                    && var.is_moved()
+                {
+                    let reason = var.move_reason.unwrap_or("value moved here");
+                    self.error_with_note(
+                        format!("use of moved value '{}'", ident.name),
+                        ident.span,
+                        var.move_span,
+                        reason,
+                    );
                 }
             }
             ast::ExpressionKind::Move(inner) => {
@@ -370,8 +424,8 @@ impl MoveChecker {
                 // as a use of `x`.
                 match inner.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
-                        if let Some(moved) = state.get_mut(&ident.name) {
-                            *moved = 2;
+                        if let Some(var) = state.get_mut(&ident.name) {
+                            var.mark_moved(inner.span, "value explicitly moved here");
                         }
                     }
                     _ => self.check_expr(inner, state, scopes, var_types),
@@ -396,9 +450,9 @@ impl MoveChecker {
                 });
                 if consumed {
                     if let ast::ExpressionKind::Identifier(ident) = receiver.kind.as_ref()
-                        && let Some(moved) = state.get_mut(&ident.name)
+                        && let Some(var) = state.get_mut(&ident.name)
                     {
-                        *moved = 2;
+                        var.mark_moved(receiver.span, "value consumed by by-value method call");
                     }
                 } else {
                     self.check_expr(receiver, state, scopes, var_types);
@@ -423,8 +477,8 @@ impl MoveChecker {
                         && state.contains_key(&ident.name)
                         && self.facts.value_args.contains(&(name.clone(), i))
                     {
-                        if let Some(moved) = state.get_mut(&ident.name) {
-                            *moved = 2;
+                        if let Some(var) = state.get_mut(&ident.name) {
+                            var.mark_moved(arg.span, "value moved into by-value parameter");
                         }
                     } else {
                         self.check_expr(arg, state, scopes, var_types);
@@ -445,14 +499,19 @@ impl MoveChecker {
                             if let ast::ExpressionKind::Identifier(ident) = arg.kind.as_ref()
                                 && state.contains_key(&ident.name)
                             {
-                                if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
-                                    self.error(
+                                if let Some(var) = state.get(&ident.name)
+                                    && var.is_moved()
+                                {
+                                    let reason = var.move_reason.unwrap_or("value moved here");
+                                    self.error_with_note(
                                         format!("use of moved value '{}'", ident.name),
                                         ident.span,
+                                        var.move_span,
+                                        reason,
                                     );
                                 }
-                                if let Some(moved) = state.get_mut(&ident.name) {
-                                    *moved = 2;
+                                if let Some(var) = state.get_mut(&ident.name) {
+                                    var.mark_moved(arg.span, "value moved into thread launch");
                                 }
                             } else {
                                 self.check_expr(arg, state, scopes, var_types);
@@ -469,11 +528,19 @@ impl MoveChecker {
                 // tasks[0]`) cannot be tracked per-element in v1.
                 match inner.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
-                        if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
-                            self.error(format!("use of moved value '{}'", ident.name), ident.span);
+                        if let Some(var) = state.get(&ident.name)
+                            && var.is_moved()
+                        {
+                            let reason = var.move_reason.unwrap_or("value moved here");
+                            self.error_with_note(
+                                format!("use of moved value '{}'", ident.name),
+                                ident.span,
+                                var.move_span,
+                                reason,
+                            );
                         }
-                        if let Some(moved) = state.get_mut(&ident.name) {
-                            *moved = 2;
+                        if let Some(var) = state.get_mut(&ident.name) {
+                            var.mark_moved(inner.span, "task handle consumed by wait");
                         }
                     }
                     _ => self.check_expr(inner, state, scopes, var_types),
@@ -497,10 +564,15 @@ impl MoveChecker {
                     // reads the container and counts as a use.
                     match left.kind.as_ref() {
                         ast::ExpressionKind::Identifier(ident) => {
-                            if state.get(&ident.name).is_some_and(|moved| *moved > 0) {
-                                self.error(
+                            if let Some(var) = state.get(&ident.name)
+                                && var.is_moved()
+                            {
+                                let reason = var.move_reason.unwrap_or("value moved here");
+                                self.error_with_note(
                                     format!("cannot assign to moved value '{}'", ident.name),
                                     left.span,
+                                    var.move_span,
+                                    reason,
                                 );
                             }
                         }
@@ -550,18 +622,19 @@ impl MoveChecker {
                 }
                 // Merge: a variable moved on any *fall-through* path is
                 // unusable afterwards.
-                for (name, moved) in state.iter_mut() {
-                    let then = if then_terminates {
-                        0
+                for (name, var) in state.iter_mut() {
+                    let then_var = if then_terminates {
+                        VarState::default()
                     } else {
-                        then_state.get(name).copied().unwrap_or(0)
+                        then_state.get(name).copied().unwrap_or_default()
                     };
-                    let else_ = if else_terminates {
-                        0
+                    let else_var = if else_terminates {
+                        VarState::default()
                     } else {
-                        else_state.get(name).copied().unwrap_or(0)
+                        else_state.get(name).copied().unwrap_or_default()
                     };
-                    *moved = (*moved).max(then).max(else_);
+                    var.merge_with(&then_var);
+                    var.merge_with(&else_var);
                 }
             }
             ast::ExpressionKind::While { condition, body } => {
@@ -576,14 +649,14 @@ impl MoveChecker {
                     let mut body_scopes = scopes.clone();
                     self.check_block(body, &mut body_state, &mut body_scopes, var_types);
                     let mut changed = false;
-                    for (name, moved) in state.iter_mut() {
-                        let body = if body_terminates {
-                            0
+                    for (name, var) in state.iter_mut() {
+                        let body_var = if body_terminates {
+                            VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or(0)
+                            body_state.get(name).copied().unwrap_or_default()
                         };
-                        if body > *moved {
-                            *moved = body;
+                        if body_var.level > var.level {
+                            var.merge_with(&body_var);
                             changed = true;
                         }
                     }
@@ -602,14 +675,14 @@ impl MoveChecker {
                     let mut body_scopes = scopes.clone();
                     self.check_block(body, &mut body_state, &mut body_scopes, var_types);
                     let mut changed = false;
-                    for (name, moved) in state.iter_mut() {
-                        let body = if body_terminates {
-                            0
+                    for (name, var) in state.iter_mut() {
+                        let body_var = if body_terminates {
+                            VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or(0)
+                            body_state.get(name).copied().unwrap_or_default()
                         };
-                        if body > *moved {
-                            *moved = body;
+                        if body_var.level > var.level {
+                            var.merge_with(&body_var);
                             changed = true;
                         }
                     }
@@ -644,14 +717,14 @@ impl MoveChecker {
                     self.check_block(body, &mut body_state, &mut body_scopes, var_types);
                     self.check_expr(increment, &mut body_state, &mut body_scopes, var_types);
                     let mut changed = false;
-                    for (name, moved) in state.iter_mut() {
-                        let body = if body_terminates {
-                            0
+                    for (name, var) in state.iter_mut() {
+                        let body_var = if body_terminates {
+                            VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or(0)
+                            body_state.get(name).copied().unwrap_or_default()
                         };
-                        if body > *moved {
-                            *moved = body;
+                        if body_var.level > var.level {
+                            var.merge_with(&body_var);
                             changed = true;
                         }
                     }
@@ -673,10 +746,10 @@ impl MoveChecker {
                     let mut arm_scopes = scopes.clone();
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
                     if !expression_terminates(&arm.body) {
-                        for (name, moved) in merged.iter_mut() {
-                            let arm = arm_state.get(name).copied().unwrap_or(0);
-                            if arm > *moved {
-                                *moved = arm;
+                        for (name, var) in merged.iter_mut() {
+                            let arm_var = arm_state.get(name).copied().unwrap_or_default();
+                            if arm_var.level > var.level {
+                                var.merge_with(&arm_var);
                             }
                         }
                     }
@@ -885,6 +958,21 @@ mod tests {
         assert!(
             errs.iter().any(|m| m.contains("use of moved value 't'")),
             "expected use-after-move error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn move_error_carries_origin_note() {
+        let program = parse(&format!(
+            "{DROP}i32 f() {{ T t; move t; return (i32)t.p; }}"
+        ));
+        let errs = check_program(&program);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("use of moved value 't'"));
+        assert!(errs[0].note_span.is_some());
+        assert_eq!(
+            errs[0].note_message.as_deref(),
+            Some("value explicitly moved here")
         );
     }
 }

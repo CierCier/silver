@@ -201,9 +201,12 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.
-- Formatting reports: `file:line:col: error/warning: message` followed by the source line text and carets (`^`) pointing to the span.
-- Severity levels are defined by the `Severity` enum (`Error` or `Warning`).
+- Formatting reports: `error: file:line:col: message` or `warn: file:line:col: message` followed by the source line text and carets (`^`) pointing precisely to the span (with automatic tab expansion for character alignment).
+- Severity levels are defined by the `Severity` enum (`Error`, `Warning`, or `Note`).
+- **Multi-Span Move Diagnostics**: `move_check` records the original move site and reason, rendering a secondary `note: file:line:col: value explicitly moved here` under use-after-move errors.
+- **Compiler Warning System & Linter**: Configured via `-Wall`, `-Werror` (treat warnings as errors), `-Wunused`, `-Wunreachable-code`, and `-Wno-*` flags. Detects unused variables/parameters (suppressed with `_` prefix) and unreachable statements following unconditional returns/breaks/continues.
 - **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
+- **In-Memory Formatting (`@format`)**: Builtin macro `@format("...", args...)` builds a formatted heap string into an owned `String` instance.
 - **LSP Diagnostic Routing**: `aglsp` filters diagnostics by `file_id`, mapping errors occurring in inlined/imported files against their original source text and publishing to their respective file URIs without corrupting the open buffer's span ranges.
 ## 7.1 Debugging Support (DWARF by default)
 
@@ -228,6 +231,14 @@ The compiler emits a link-time-resolved symbol table for every function with a b
 - `std/rt/backtrace.ag` walks the rbp chain (inline asm reads rbp), resolves each return address to the entry with the largest `addr <= ret_addr`, and prints `#N  <name> (0x...)` to stderr. `abort()` (in `std/mem/memory.ag`) and `__silver_assert_failed` print the trace before dying.
 - **Exact source lines and argument values** come from a compiler post-pass: after emitting the object, `agc/src/codegen/dwarf_bt.rs` parses the object's ELF + DWARF (`.symtab`, `.debug_line` v4/v5, `.debug_info`/`.debug_abbrev`/`.debug_str` — including relocations) and folds the results into alloc'd, link-time-resolved tables: `__silver_bt_lines` ({fn start, offset, line, file} per line transition) and `__silver_bt_args` ({fn start, count, args} where each arg = {name, rbp-relative fbreg, size}; the DWARF frame base is rbp, so the slot is `rbp + fbreg`). The object is then re-emitted with the tables. Frames print the call-site line (`level3 at probe.ag:4` — the assert's line) and `args: x=42`. Without DWARF (`-O1+`, `-g0`) the tables are empty and the trace falls back to declaration lines, no args.
 - Integration test: `tests/backtrace_test.ag` (exit 134 + the harness greps stderr for the resolved `level1`/`level2`/`level3`/`main` names and `args: x=`).
+
+## 7.3 Leak-Check Allocation Origins
+
+Under `--leak-check`, the debug allocator (`std/mem/alloc.ag`) captures the caller's return address by walking up the `%rbp` frame pointer chain past allocator internals (`__silver_leak_alloc`, `mem_alloc_impl`, `alloc<T>`).
+When unreleased memory remains at process exit, `__silver_leak_check_report()` resolves the return address via `bt_resolve` and `bt_line_lookup`, reporting the exact allocation call site:
+```
+leak-check: leak ptr=0x... size=64 allocated at create_user (test.ag:15)
+```
 
 ---
 

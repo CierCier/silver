@@ -32,6 +32,7 @@ import std.sys.raw.fs;
 import std.sys.raw.memory;
 import std.sys.raw.process;
 import std.mem.memory;
+import std.rt.backtrace;
 import std.atomic;
 // Static free-list head table in .bss — eliminates lazy-init branch on every
 // alloc/free. Zero-initialized by the OS loader at program startup.
@@ -263,6 +264,7 @@ const i64 LEAK_CANARY_DEAD = 0x4445414444454144;  // "DEADDEAD"
 i64 __leak_user_ptrs[65536];
 i64 __leak_raw_ptrs[65536];
 i64 __leak_sizes[65536];
+i64 __leak_callers[65536];
 u8 __leak_states[65536]; // 0 empty, 1 live, 2 freed, 3 ignored (global cache)
 
 // -- Raw stderr helpers (no allocation, no BufWriter) ------------------------
@@ -406,6 +408,35 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
     __leak_raw_ptrs[slot] = (i64)raw;
     __leak_sizes[slot] = size;
     __leak_states[slot] = (u8)1;
+
+    i64 alloc_caller = 0;
+    i64 cur_rbp = bt_read_rbp();
+    i64 depth = 0;
+    while (cur_rbp > 65536 && depth < 8) {
+        i64* p_rbp = (i64*)cur_rbp;
+        i64 next_rbp = *p_rbp;
+        if (next_rbp <= cur_rbp || next_rbp < 65536) {
+            break;
+        }
+        i64* p_ret = (i64*)(cur_rbp + 8);
+        i64 ret_addr = *p_ret;
+        if (ret_addr > 65536) {
+            alloc_caller = ret_addr;
+            i64 idx = bt_resolve(ret_addr);
+            if (idx >= 0) {
+                BtEntry e = __silver_bt_entries[idx];
+                if (e.file != (u8*)0
+                    && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
+                    && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
+                    && strcmp((const char*)e.name, (const char*)"__silver_leak_alloc") != 0) {
+                    break;
+                }
+            }
+        }
+        cur_rbp = next_rbp;
+        depth = depth + 1;
+    }
+    __leak_callers[slot] = alloc_caller;
     return (u8*)user;
 }
 
@@ -468,10 +499,36 @@ i32 __silver_leak_check_report() {
     }
     i32 count = 0;
     for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
-        if (__leak_states[i] == (u8)1) {            __silver_leak_write_str("leak-check: leak ptr=0x");
+        if (__leak_states[i] == (u8)1) {
+            __silver_leak_write_str("leak-check: leak ptr=0x");
             __silver_leak_write_hex(__leak_user_ptrs[i]);
             __silver_leak_write_str(" size=");
             __silver_leak_write_i64(__leak_sizes[i]);
+            i64 caller = __leak_callers[i];
+            if (caller > 0) {
+                i64 idx = bt_resolve(caller);
+                if (idx >= 0) {
+                    BtEntry e = __silver_bt_entries[idx];
+                    __silver_leak_write_str(" allocated at ");
+                    __silver_leak_write_str((str)e.name);
+                    u8* file = (u8*)0;
+                    i64 line = 0;
+                    bt_line_lookup(e.addr, caller, &file, &line);
+                    if (line > 0 && file != (u8*)0) {
+                        __silver_leak_write_str(" (");
+                        __silver_leak_write_str((str)file);
+                        __silver_leak_write_str(":");
+                        __silver_leak_write_i64(line);
+                        __silver_leak_write_str(")");
+                    } else if (e.line > 0 && e.file != (u8*)0) {
+                        __silver_leak_write_str(" (");
+                        __silver_leak_write_str((str)e.file);
+                        __silver_leak_write_str(":");
+                        __silver_leak_write_i64(e.line);
+                        __silver_leak_write_str(")");
+                    }
+                }
+            }
             __silver_leak_write_str("\n");
             count = count + 1;
         }

@@ -845,12 +845,6 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
-                    if self.is_moved(&ident.name) {
-                        self.error(
-                            format!("use of moved variable '{}'", ident.name),
-                            ident.span,
-                        );
-                    }
                     // Array-to-pointer decay: `i64 arr[9]` as an expression
                     // yields `i64*` pointing to the first element.
                     if let Type::Array { element, .. } = &ty {
@@ -1780,9 +1774,17 @@ impl TypeChecker {
                     {
                         let expected_count = variant_info.payload.len();
                         let enum_type_params = enum_def.type_params.clone();
+                        let mut receiver_mapping = HashMap::default();
+                        if let Type::Named { generics, .. } = &receiver_ty {
+                            for (param, concrete) in enum_type_params.iter().zip(generics.iter()) {
+                                receiver_mapping.insert(param.clone(), concrete.clone());
+                            }
+                        }
                         let payload_types: Vec<ast::Type> = variant_info.payload.clone();
-                        let expected_types: Vec<Type> =
-                            payload_types.iter().map(Type::from_ast).collect();
+                        let expected_types: Vec<Type> = payload_types
+                            .iter()
+                            .map(|t| Type::from_ast(t).substitute(&receiver_mapping))
+                            .collect();
                         if arguments.len() != expected_count {
                             self.error(
                                 format!(
@@ -1798,7 +1800,7 @@ impl TypeChecker {
                             // immutable borrow of enum_defs).
                             let mut arg_types: Vec<Type> = Vec::with_capacity(arguments.len());
                             for (i, arg) in arguments.iter().enumerate() {
-                                arg_types.push(self.check_expr(arg, Some(&expected_types[i])));
+                                arg_types.push(self.check_expr(arg, expected_types.get(i)));
                                 // Move-in enforcement: an owned payload (Drop
                                 // type, or a type param that may instantiate
                                 // to one) passed as a named lvalue must be
@@ -1827,6 +1829,9 @@ impl TypeChecker {
                                     );
                                 }
                             }
+                            if !receiver_mapping.is_empty() {
+                                return receiver_ty.clone();
+                            }
                             // For a generic enum (`Optional.Some(x)`), infer the
                             // type args from the argument types so the result is
                             // `Optional<i32>` rather than bare `Optional`.
@@ -1846,23 +1851,24 @@ impl TypeChecker {
                                         break;
                                     }
                                 }
-                                // For payload-less variants (`Optional.None`)
-                                // there are no arguments to infer from; take the
-                                // generic args from the expected type when it is
+                                // For unmapped or partially mapped type parameters
+                                // (e.g. `Optional.None` or `Result.Ok(x)` missing E),
+                                // take the generic args from the expected type when it is
                                 // the same enum with concrete args.
-                                if inferred
-                                    && mapping.is_empty()
-                                    && let Some(Type::Named {
-                                        path: exp_path,
-                                        generics: exp_generics,
-                                    }) = expected
+                                if let Some(Type::Named {
+                                    path: exp_path,
+                                    generics: exp_generics,
+                                }) = expected
                                     && exp_path == ty_path
                                     && exp_generics.len() == enum_type_params.len()
                                 {
-                                    return Type::Named {
-                                        path: ty_path.clone(),
-                                        generics: exp_generics.clone(),
-                                    };
+                                    for (param, exp_arg) in
+                                        enum_type_params.iter().zip(exp_generics.iter())
+                                    {
+                                        mapping
+                                            .entry(param.clone())
+                                            .or_insert_with(|| exp_arg.clone());
+                                    }
                                 }
                                 if inferred {
                                     let generics = enum_type_params
@@ -2061,7 +2067,18 @@ impl TypeChecker {
                         return Type::Unknown;
                     }
                 }
-                if let Some(field_ty) = self.resolve_field_access_type(&object_ty, &field.name) {
+                if let Some(mut field_ty) = self.resolve_field_access_type(&object_ty, &field.name)
+                {
+                    if let Type::Named { path, generics } = &mut field_ty
+                        && generics.is_empty()
+                        && let Some(Type::Named {
+                            path: exp_path,
+                            generics: exp_generics,
+                        }) = expected
+                        && path == exp_path
+                    {
+                        *generics = exp_generics.clone();
+                    }
                     field_ty
                 } else {
                     let suggestion = self.field_suggestion(&object_ty, &field.name);
@@ -4371,6 +4388,10 @@ impl TypeChecker {
         }
 
         match name {
+            "format" => Type::Named {
+                path: vec!["String".to_string()],
+                generics: Vec::new(),
+            },
             "sprint" => Type::Primitive(ast::PrimitiveType::Str),
             _ => Type::Unit,
         }
@@ -5703,6 +5724,7 @@ impl TypeChecker {
             Type::Named { path, .. } if path.len() == 1 => self
                 .enum_defs
                 .get(&path[0])
+                .filter(|enum_def| enum_def.variants.values().all(|v| v.payload.is_empty()))
                 .map(|enum_def| enum_def.backing_type.clone()),
             _ => None,
         }
@@ -5758,15 +5780,6 @@ impl TypeChecker {
     }
     fn lookup_type(&self, name: &str) -> Option<Type> {
         self.lookup(name).map(|(ty, _)| ty)
-    }
-
-    fn is_moved(&self, name: &str) -> bool {
-        for scope in self.moved_locals.iter().rev() {
-            if scope.contains(name) {
-                return true;
-            }
-        }
-        false
     }
 
     /// True if `name` is declared `static` in any enclosing scope.

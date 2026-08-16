@@ -2,10 +2,11 @@ use owo_colors::OwoColorize;
 
 use crate::lexer::{Span, source_file};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
     Warning,
+    Note,
 }
 
 /// Render a diagnostic for `span`. The span carries its own file id and
@@ -60,6 +61,18 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
                 format!("{}: {}", "warn".yellow().bold(), message.bold())
             }
         }
+        Severity::Note => {
+            if line > 0 {
+                format!(
+                    "{}: {}: {}",
+                    "note".cyan().bold(),
+                    format!("{path}:{line}:{col}").bold(),
+                    message
+                )
+            } else {
+                format!("{}: {}", "note".cyan().bold(), message)
+            }
+        }
     };
 
     // No source text (synthetic span or unregistered file): header only.
@@ -106,10 +119,10 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
 
     let line_num_width = line.to_string().len();
     let line_prefix = format!("{:>width$} | ", line, width = line_num_width);
-
     let underline = match severity {
         Severity::Error => underline.red().bold().to_string(),
         Severity::Warning => underline.yellow().bold().to_string(),
+        Severity::Note => underline.cyan().bold().to_string(),
     };
 
     format!(
@@ -117,6 +130,23 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
         "",
         width = line_num_width
     )
+}
+
+/// Render a diagnostic with an optional secondary note pointing to another span.
+pub fn render_with_note(
+    span: Span,
+    message: &str,
+    severity: Severity,
+    note_span: Option<Span>,
+    note_message: Option<&str>,
+) -> String {
+    let main_diag = render(span, message, severity);
+    if let (Some(n_span), Some(n_msg)) = (note_span, note_message)
+        && n_span.start_line > 0
+    {
+        return format!("{}\n{}", main_diag, render(n_span, n_msg, Severity::Note));
+    }
+    main_diag
 }
 
 /// Compute the Levenshtein edit distance between two strings.
@@ -252,7 +282,7 @@ mod tests {
         let text = "i32 main() {\n\t@printl(\"hello\");\n}\n";
         let file = register_source(path, text);
 
-        let (line, col) = line_col_at(text, 14); // offset 14 is '@' on line 2 (text has 13 chars in line 1)
+        let (line, _col) = line_col_at(text, 14); // offset 14 is '@' on line 2 (text has 13 chars in line 1)
         let span = Span {
             start: 14,
             end: 21,

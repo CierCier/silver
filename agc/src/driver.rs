@@ -100,6 +100,10 @@ pub struct Cli {
     #[arg(short = 'l', value_name = "LIB", action = ArgAction::Append)]
     libs: Vec<String>,
 
+    /// Warning options (e.g. -Wall, -Werror, -Wunused, -Wno-unused)
+    #[arg(short = 'W', value_name = "WARNING", action = ArgAction::Append)]
+    warnings: Vec<String>,
+
     /// Compile for the given target triple
     #[arg(long = "target", value_name = "TRIPLE")]
     target: Option<String>,
@@ -212,6 +216,7 @@ pub(crate) struct CompilePlan {
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
     pub(crate) auto_output: bool,
+    pub(crate) warning_config: crate::semantic::linter::WarningConfig,
 }
 
 impl CompilePlan {
@@ -399,6 +404,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         auto_output,
         leak_check: cli.leak_check,
         cfg_flags: cli.cfg_flags,
+        warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
 
@@ -996,13 +1002,30 @@ pub fn run(cli: Cli) {
                     for error in &move_errors {
                         eprintln!(
                             "{}",
-                            diagnostics::render(
+                            diagnostics::render_with_note(
                                 error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
+                                error.note_span,
+                                error.note_message.as_deref(),
                             )
                         );
                     }
+                    std::process::exit(2);
+                }
+
+                let warnings = crate::semantic::linter::lint_program(&ast, &plan.warning_config);
+                let mut had_warning_error = false;
+                for w in &warnings {
+                    let severity = if plan.warning_config.warnings_as_errors {
+                        had_warning_error = true;
+                        diagnostics::Severity::Error
+                    } else {
+                        diagnostics::Severity::Warning
+                    };
+                    eprintln!("{}", diagnostics::render(w.span, &w.message, severity));
+                }
+                if had_warning_error {
                     std::process::exit(2);
                 }
 
@@ -1530,6 +1553,7 @@ mod tests {
             run_mode: false,
             run_args: Vec::new(),
             auto_output: false,
+            warning_config: crate::semantic::linter::WarningConfig::default(),
         }
     }
 

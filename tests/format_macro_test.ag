@@ -1,0 +1,19 @@
+// tests/format_macro_test.ag — test @format macro returning owned String.
+import std.io;
+import std.string;
+
+i32 main() {
+    str name = "Silver";
+    i64 version = 2;
+    String s = @format("Language: {}, v{}", name, version);
+    @println("{}", (str)s);
+    @assert(s.len() == 20, "length mismatch");
+    @assert(strcmp((str)s, "Language: Silver, v2") == 0, "content mismatch");
+
+    String empty = @format("");
+    @assert(empty.len() == 0, "empty length mismatch");
+
+    String num = @format("num: {}", (i64)12345);
+    @assert(strcmp((str)num, "num: 12345") == 0, "num mismatch");
+    return 0;
+}

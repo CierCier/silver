@@ -51,6 +51,7 @@ impl MacroRegistry {
         registry.register("eprintln", Box::new(PrintHandler));
         registry.register("fprint", Box::new(PrintHandler));
         registry.register("sprint", Box::new(PrintHandler));
+        registry.register("format", Box::new(PrintHandler));
         registry.register("memcpy", Box::new(MemcpyHandler));
         registry.register("memset", Box::new(MemsetHandler));
         registry.register("memmove", Box::new(MemmoveHandler));

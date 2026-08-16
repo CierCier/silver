@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod cfg_hook;
 pub mod comptime_cast_hook;
 pub mod escape_check;
+pub mod linter;
 pub mod monomorph;
 pub mod move_check;
 pub mod send_check;
