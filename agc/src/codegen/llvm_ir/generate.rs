@@ -116,10 +116,29 @@ pub(crate) fn run_module_optimization_passes(
 }
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
-    /// Emits the runtime backtrace symbol table: one `{addr, name}` record
-    /// per emitted function (address resolved at link time via ptrtoint),
-    /// plus a count global. The runtime resolves return addresses against
-    /// this table when printing a stack trace on abort/assert.
+    /// Emits a private NUL-terminated string global for the backtrace table.
+    fn emit_bt_string(&mut self, ordinal: usize, text: &str) -> inkwell::values::GlobalValue<'ctx> {
+        let bytes: Vec<u8> = text.bytes().chain(std::iter::once(0)).collect();
+        let name_global = self.module.add_global(
+            self.context.i8_type().array_type(bytes.len() as u32),
+            None,
+            &format!(".bt.str.{ordinal}"),
+        );
+        let chars: Vec<_> = bytes
+            .iter()
+            .map(|b| self.context.i8_type().const_int(*b as u64, false))
+            .collect();
+        let const_str = self.context.i8_type().const_array(&chars);
+        name_global.set_initializer(&const_str);
+        name_global.set_linkage(inkwell::module::Linkage::Private);
+        name_global
+    }
+
+    /// Emits the runtime backtrace symbol table: one
+    /// `{addr, name, file, line}` record per emitted function (address
+    /// resolved at link time via ptrtoint; file/line come from the AST
+    /// spans), plus a count global. The runtime resolves return addresses
+    /// against this table when printing a stack trace on abort/assert.
     fn emit_backtrace_table(&mut self) {
         let functions: Vec<_> = self
             .module
@@ -135,6 +154,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.context
                     .ptr_type(inkwell::AddressSpace::default())
                     .into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+                self.context.i64_type().into(),
             ],
             false,
         );
@@ -142,19 +165,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut records: Vec<LLVMValueRef> = Vec::with_capacity(functions.len());
         for (i, function) in functions.iter().enumerate() {
             let name = function.get_name().to_string_lossy().into_owned();
-            let name_bytes: Vec<u8> = name.bytes().chain(std::iter::once(0)).collect();
-            let name_global = self.module.add_global(
-                self.context.i8_type().array_type(name_bytes.len() as u32),
-                None,
-                &format!(".bt.name.{i}"),
-            );
-            let chars: Vec<_> = name_bytes
-                .iter()
-                .map(|b| self.context.i8_type().const_int(*b as u64, false))
-                .collect();
-            let const_str = self.context.i8_type().const_array(&chars);
-            name_global.set_initializer(&const_str);
-            name_global.set_linkage(inkwell::module::Linkage::Private);
+            let (file, line) = self
+                .fn_source_info
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| ("unknown.ag".to_string(), 0));
+            let name_global = self.emit_bt_string(i, &name);
+            let file_global = self.emit_bt_string(i + functions.len(), &file);
             // ptrtoint (ptr @F to i64) — resolved to the function's
             // address at link time.
             let addr = unsafe {
@@ -164,11 +181,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )
             };
             let name_ptr = name_global.as_pointer_value().as_value_ref();
+            let file_ptr = file_global.as_pointer_value().as_value_ref();
+            let line_const = self
+                .context
+                .i64_type()
+                .const_int(line as u64, false)
+                .as_value_ref();
             let record = unsafe {
                 llvm_sys::core::LLVMConstStructInContext(
                     self.context.as_ctx_ref(),
-                    [addr, name_ptr].as_mut_ptr(),
-                    2,
+                    [addr, name_ptr, file_ptr, line_const].as_mut_ptr(),
+                    4,
                     0,
                 )
             };

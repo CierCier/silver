@@ -8,7 +8,7 @@ use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x05"; // v5: collision-safe hashed symbol mangling (v4 used unsuffixed instance names)
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x06"; // v6: backtrace table records gained file/line (v5: collision-safe hashing)
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {

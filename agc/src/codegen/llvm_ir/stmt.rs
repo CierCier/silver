@@ -36,6 +36,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let frame_ptr_attr = self.context.create_string_attribute("frame-pointer", "all");
         function.add_attribute(inkwell::attributes::AttributeLoc::Function, frame_ptr_attr);
 
+        // Record source info for the runtime backtrace table. The lexer's
+        // source registry holds every file's path; spans carry the line.
+        let src_line = fn_span.start_line.max(1);
+        let src_file = crate::lexer::source_file(fn_span.file)
+            .map(|sf| {
+                std::path::Path::new(&sf.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown.ag")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unknown.ag".to_string());
+        self.fn_source_info
+            .insert(fn_name.to_string(), (src_file, src_line));
+
         let nested_emission = self.debug_nested;
         let ret_di = if nested_emission {
             None

@@ -5,12 +5,13 @@
 //   @__silver_bt_entries = global ptr @__silver_bt_data   // BtEntry array
 //   @__silver_bt_count   = global i64 N
 //
-// where each BtEntry is { i64 addr, u8* name } with `addr` resolved to the
-// function's entry address at link time (ptrtoint in a global initializer).
-// Every function is compiled with the "frame-pointer"="all" attribute, so the
-// runtime can walk the rbp chain and resolve each return address to a
-// function name by scanning the table for the entry with the largest
-// addr <= return address.
+// where each BtEntry is { i64 addr, u8* name, u8* file, i64 line } with
+// `addr` resolved to the function's entry address at link time (ptrtoint in
+// a global initializer) and file/line taken from the function's AST span.
+// Every function is compiled with the "frame-pointer"="all" attribute, so
+// the runtime can walk the rbp chain and resolve each return address to a
+// function name + source position by scanning the table for the entry with
+// the largest addr <= return address.
 //
 // Pure Silver + inline asm; no libc dependency. Used by abort() and
 // __silver_assert_failed to print a named stack trace before dying.
@@ -20,6 +21,8 @@ import std.sys.raw.fs;
 struct BtEntry {
     i64 addr;
     u8* name;
+    u8* file;
+    i64 line;
 }
 
 extern "C" {
@@ -122,6 +125,10 @@ void silver_print_backtrace(i64 skip) {
                 bt_write_cstr(fd, (u8*)"  ");
                 BtEntry e = __silver_bt_entries[idx];
                 bt_write_cstr(fd, e.name);
+                bt_write_cstr(fd, (u8*)" at ");
+                bt_write_cstr(fd, e.file);
+                bt_write_cstr(fd, (u8*)":");
+                bt_write_dec(fd, e.line);
                 bt_write_cstr(fd, (u8*)" (");
                 bt_write_hex(fd, ret_addr);
                 bt_write_cstr(fd, (u8*)")\n");

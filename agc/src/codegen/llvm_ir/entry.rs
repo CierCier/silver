@@ -168,6 +168,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             task_trampoline_counter: 0,
             debug,
             debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             leak_check: false,
         };
@@ -276,6 +277,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             symbol_table: table.clone(),
             debug,
             debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             temp_counter: 0,
             task_trampoline_counter: 0,
@@ -610,6 +612,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             symbol_table: table.clone(),
             debug,
             debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
             abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
             temp_counter: 0,
             task_trampoline_counter: 0,

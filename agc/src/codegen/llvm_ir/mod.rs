@@ -158,6 +158,10 @@ pub struct LlvmIrGenerator<'ctx> {
     /// another function's body). Nested emissions get no debug info: their
     /// scopes would dangle under LLVM 22's DbgRecord DIE construction.
     pub(crate) debug_nested: bool,
+    /// llvm symbol name -> (source file basename, declaration line) for the
+    /// runtime backtrace table (works without -g: the lexer's source
+    /// registry holds the file path, and spans carry precomputed lines).
+    pub(crate) fn_source_info: rustc_hash::FxHashMap<String, (String, u32)>,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
     /// Monotonic counter for per-launch-site trampoline function names.
