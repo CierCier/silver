@@ -196,13 +196,19 @@ Compiler diagnostic messages are rendered using the `diagnostics::render` utilit
 - Formatting reports: `file:line:col: error/warning: message` followed by the source line text and carets (`^`) pointing to the span.
 - Severity levels are defined by the `Severity` enum (`Error` or `Warning`).
 
-## 7.1 Debugging Support (`-g`)
+## 7.1 Debugging Support (DWARF by default)
 
-`agc -g` emits full DWARF (not just line tables):
+DWARF is emitted by default for non-release builds (no `-O` / `-O0`) and
+stripped for release builds (`-O1+`). `-g` forces it on, `-g0` (normalized
+to `--g0` by the `main.rs` shim — clap shorts are single characters) forces
+it off; an explicit flag always wins.
+
+Full DWARF (not just line tables):
 - Basic types (ints, floats, bool, char, str), pointers, arrays, and struct types with member offsets; recursive structs are cycle-guarded (members referencing the type under construction fall back to `u8*`).
 - `DILocalVariable` + `llvm.dbg.declare` records for parameters, let bindings, range/iterator for-loop bindings, and enum payload match bindings — gdb can `print` locals, inspect struct fields, and watch variables. Enum values themselves have no DWARF mapping (prints as raw bytes); pointers to enums show as `u8*`.
 - Multi-file source maps: spans from inlined `std/`/imported files resolve against their own `DIFile`/`SourceMap` in `DebugContext.files`, so breakpoints inside std code hit at the right file/line.
 - Generic instances emitted lazily mid-codegen (`Vec::drop`, `realloc<T>`, ...) are suppressed from debug output (LLVM 22's DbgRecord DIE construction crashes on their dangling scope chains); their enclosing function's debug state is saved/restored around the emission (`debug_nested` flag). Lexical blocks are tagged with their owning subprogram so they never leak into another function's scope chain.
+- **LLVM 22 invariants (all three crash the backend if violated):** (1) a `DILexicalBlock` may never be parented to the compile unit — it materializes as a broken `scope: null` node and ISel's `LexicalScopes::scanFunction` segfaults, so `push_lexical_block` returns false (callers skip the matching pop) when `current_scope()` is the CU; (2) a `DILocation` must never be scoped to the CU (`DwarfDebug::finishEntityDefinitions` dies in `DIE::getUnitDie`), so `set_debug_location` is a no-op while `debug_nested`; (3) nested lazy emissions must save/restore both `debug_nested` and `current_subprogram` — an inner instantiation otherwise leaves the outer function with a None subprogram and its remaining variables get invalid CU-scoped debug info. The full integration suite compiles with DWARF on by default, and `opt -passes=verify` on the emitted IR is clean.
 - Every function carries the `"frame-pointer"="all"` attribute so the runtime backtrace walker can follow the rbp chain at any opt level.
 
 ## 7.2 Runtime Backtraces

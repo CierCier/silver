@@ -14,6 +14,9 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
         .map(|a| {
             if a == "-###" || a == "--###" {
                 OsString::from("--dry-run")
+            } else if a == "-g0" {
+                // clap shorts are single characters; expose clang-style -g0.
+                OsString::from("--g0")
             } else {
                 a
             }

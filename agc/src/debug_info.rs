@@ -206,12 +206,22 @@ impl<'ctx> DebugContext<'ctx> {
         }
     }
 
-    pub fn push_lexical_block(&mut self, span: &Span, line: u32, col: u32) {
+    /// Pushes a lexical block; returns false (and pushes nothing) when the
+    /// current scope would be the compile unit — i.e. a lazily-emitted
+    /// generic instance with no subprogram. LLVM's DILexicalBlock cannot
+    /// parent itself to the CU (it produces a broken scope:null node that
+    /// crashes ISel's LexicalScopes::scanFunction), so such functions get
+    /// no lexical blocks at all.
+    pub fn push_lexical_block(&mut self, span: &Span, line: u32, col: u32) -> bool {
         let scope = self.current_scope();
+        if scope == self.compile_unit.as_debug_info_scope() {
+            return false;
+        }
         let file = self.file_for(span);
         let block = self.dibuilder.create_lexical_block(scope, file, line, col);
         let owner = self.current_subprogram;
         self.current_lexical_blocks.push((block, owner));
+        true
     }
 
     pub fn pop_lexical_block(&mut self) {

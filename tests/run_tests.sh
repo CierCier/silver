@@ -487,6 +487,17 @@ test_stdin() {
         fi
     fi
 
+    # Default builds carry DWARF (-g implied); release builds (-O1+) must
+    # not. cfg_derived_test is the one -O2 compile in the suite.
+    if [ "$name" = "cfg_derived_test" ]; then
+        if readelf -S "$bin" 2>/dev/null | grep -q "\.debug_info"; then
+            printf '  FAIL  %-*s  (release build still contains DWARF)\n' "$COL_NAME" "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            continue
+        fi
+    fi
+
     # For backtrace_test, verify the runtime printed a NAMED stack trace
     # with source positions: the frame-pointer walker must resolve the whole
     # call chain to <name> at <file>:<line>.

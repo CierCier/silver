@@ -69,9 +69,16 @@ pub struct Cli {
     #[arg(short = 'O', value_name = "LEVEL", default_missing_value = "2", num_args = 0..=1)]
     opt_level: Option<String>,
 
-    /// Generate debug information
+    /// Generate debug information. DWARF is on by default for non-release
+    /// builds (no -O / -O0) and stripped for release builds (-O1+);
+    /// `-g` forces it on, `-g0` (normalized to `--g0` by the driver shim)
+    /// forces it off.
     #[arg(short = 'g', action = ArgAction::SetTrue)]
     debug_info: bool,
+
+    /// Disable debug information (clang-style -g0; the shim maps -g0 here).
+    #[arg(long = "g0", action = ArgAction::SetTrue)]
+    no_debug_info: bool,
 
     /// Add directory to include search path
     #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append)]
@@ -336,8 +343,19 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         defines: cli.defines,
         lib_dirs: cli.lib_dirs,
         libs: cli.libs,
+        // DWARF by default in debug builds (no -O / -O0); stripped in release
+        // (-O1+). An explicit -g/-g0 always wins.
+        debug_info: if cli.no_debug_info {
+            false
+        } else if cli.debug_info {
+            true
+        } else {
+            !matches!(
+                cli.opt_level.as_deref(),
+                Some("1" | "2" | "3" | "s" | "z" | "fast")
+            )
+        },
         opt_level: cli.opt_level,
-        debug_info: cli.debug_info,
         target: cli.target,
         sysroot: cli.sysroot,
         no_std: cli.no_std || cli.static_runtime,

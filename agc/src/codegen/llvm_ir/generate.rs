@@ -1182,8 +1182,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_block(&mut self, block: &ast::Block) -> CodegenResult<()> {
         let has_debug_scope = if let Some(debug) = &mut self.debug {
             let (line, col, _, _) = debug.span_to_line_col(&block.span);
-            debug.push_lexical_block(&block.span, line, col);
-            true
+            debug.push_lexical_block(&block.span, line, col)
         } else {
             false
         };

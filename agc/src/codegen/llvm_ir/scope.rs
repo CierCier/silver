@@ -19,6 +19,12 @@ use inkwell::targets::TargetData;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn set_debug_location(&self, span: &Span) {
+        // Lazily-emitted generic instances have no subprogram; a DILocation
+        // scoped to the compile unit is invalid (LLVM rejects it and crashes
+        // DWARF emission). Leave their instructions without locations.
+        if self.debug_nested {
+            return;
+        }
         if let Some(debug) = &self.debug {
             let (line, col, _, _) = debug.span_to_line_col(span);
             let loc = debug.create_debug_location(self.context, line, col);
@@ -231,6 +237,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let file = self.debug.as_mut().expect("debug present").file_for(span);
         let debug = self.debug.as_ref().expect("debug present");
         let scope = debug.current_scope();
+        // The compile unit is not a DILocalScope; LLVM's createAutoVariable
+        // crashes (DILocalScope::getSubprogram) if handed it. Skip instead.
+        if scope == debug.compile_unit.as_debug_info_scope() {
+            return Ok(());
+        }
+        if std::env::var("BT_DEBUG").is_ok() {
+            let kind = unsafe { llvm_sys::debuginfo::LLVMGetMetadataKind(scope.as_mut_ptr()) };
+            let fn_name = self
+                .current_fn
+                .map(|f| f.get_name().to_string_lossy().into_owned())
+                .unwrap_or_default();
+            eprintln!(
+                "DBGVAR {name} fn={fn_name} kind={kind:?} sub={} blocks={}",
+                self.debug
+                    .as_ref()
+                    .map(|d| d.current_subprogram.is_some())
+                    .unwrap_or(false),
+                self.debug
+                    .as_ref()
+                    .map(|d| d.current_lexical_blocks.len())
+                    .unwrap_or(0),
+            );
+        }
         let variable = match arg_no {
             Some(no) => debug.dibuilder.create_parameter_variable(
                 scope,

@@ -1421,9 +1421,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // The semantic monomorph pass never saw this method body;
                 // emit generic free-function instances it calls (e.g.
                 // realloc<i64> in Vec<i64>.push) before emitting the body.
+                let saved_nested = self.debug_nested;
                 self.debug_nested = true;
                 self.emit_missing_generic_free_instances(&mut func.body)?;
-                self.debug_nested = false;
+                self.debug_nested = saved_nested;
 
                 // If the owner is a generic enum being instantiated on the fly
                 // (method call reached before monomorph registered the concrete
@@ -1491,9 +1492,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let saved_block = self.builder.get_insert_block();
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_variables = std::mem::take(&mut self.variables);
+                let saved_subprogram = self.debug.as_mut().and_then(|d| d.current_subprogram);
 
                 self.defers.push(Vec::new());
                 self.variables.push(HashMap::default());
+                // Save/restore: nested emissions must not clobber an outer
+                // lazy emission's suppression flag (their bodies interleave).
+                let saved_nested = self.debug_nested;
                 self.debug_nested = true;
 
                 self.emit_function_body(
@@ -1509,7 +1514,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.defers = saved_defers;
                 self.variables = saved_variables;
                 self.current_fn = saved_fn;
-                self.debug_nested = false;
+                self.debug_nested = saved_nested;
+                // The nested emission reset current_subprogram to None;
+                // restore the enclosing function's so its remaining
+                // variables keep correct scopes.
+                if let Some(sub) = saved_subprogram
+                    && let Some(debug) = self.debug.as_mut()
+                {
+                    debug.current_subprogram = Some(sub);
+                }
                 if let Some(saved_block) = saved_block {
                     self.builder.position_at_end(saved_block);
                 }
