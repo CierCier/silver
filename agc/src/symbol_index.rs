@@ -102,11 +102,24 @@ pub struct Occurrence {
     pub documented: bool,
 }
 
+/// A function/method call site, used for parameter-name inlay hints.
+#[derive(Debug, Clone)]
+pub struct CallSite {
+    /// Byte offset of the `(` that opens the argument list.
+    pub open_paren: usize,
+    /// (start, end) byte spans of each argument expression.
+    pub args: Vec<(usize, usize)>,
+    /// Resolved callee symbol (function or method), when known.
+    pub callee: Option<SymbolId>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SymbolIndex {
     pub text: String,
     pub symbols: Vec<Symbol>,
     pub occurrences: Vec<Occurrence>,
+    /// Call sites in the buffer (parameter-name inlay hints).
+    pub call_sites: Vec<CallSite>,
     /// Expression span (start, end) → formatted type, from the type checker.
     pub expr_types: ExprTypeMap,
     /// Fully qualified module paths seen in `import` statements.
@@ -150,6 +163,7 @@ pub fn analyze(
         buffer_file,
         symbols: Vec::new(),
         occurrences: Vec::new(),
+        call_sites: Vec::new(),
         top_level: HashMap::default(),
         struct_children: HashMap::default(),
         locals: Vec::new(),
@@ -179,6 +193,7 @@ pub fn analyze(
         text: text.to_string(),
         symbols: walker.symbols,
         occurrences: walker.occurrences,
+        call_sites: walker.call_sites,
         expr_types,
         import_paths: walker.import_paths,
         tokens: current_tokens,
@@ -219,6 +234,7 @@ struct Walker<'a> {
     buffer_file: u32,
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
+    call_sites: Vec<CallSite>,
     top_level: HashMap<String, SymbolId>,
     /// container name (struct/enum name) → field/method/variant symbols.
     struct_children: HashMap<String, Vec<SymbolId>>,
@@ -345,6 +361,42 @@ impl Walker<'_> {
             }
         }
         self.top_level.get(name).copied()
+    }
+
+    /// The symbol resolved by the occurrence that starts at `byte`.
+    fn occurrence_symbol_at(&self, byte: usize) -> Option<SymbolId> {
+        self.occurrences
+            .iter()
+            .rev()
+            .find(|o| o.span.start == byte)
+            .and_then(|o| o.symbol)
+    }
+
+    /// Record a buffer-local call site for parameter-name inlay hints.
+    fn record_call_site(
+        &mut self,
+        open_paren: usize,
+        arguments: &[ast::Expression],
+        callee: Option<SymbolId>,
+    ) {
+        if arguments.is_empty() {
+            return;
+        }
+        // Skip call sites inside inlined std/imported code: hint positions
+        // must land in the open buffer.
+        if let Some(first) = arguments.first()
+            && !self.in_buffer(&first.span)
+        {
+            return;
+        }
+        self.call_sites.push(CallSite {
+            open_paren,
+            args: arguments
+                .iter()
+                .map(|a| (a.span.start, a.span.end))
+                .collect(),
+            callee,
+        });
     }
 
     // ----- items -----
@@ -990,6 +1042,8 @@ impl Walker<'_> {
                 arguments,
             } => {
                 self.walk_expr(function);
+                let callee = self.occurrence_symbol_at(function.span.start);
+                self.record_call_site(function.span.end, arguments, callee);
                 for a in arguments {
                     self.walk_expr(a);
                 }
@@ -1007,6 +1061,8 @@ impl Walker<'_> {
                     OccurrenceKind::Method,
                     SymbolKind::Method,
                 );
+                let callee = self.occurrence_symbol_at(method.span.start);
+                self.record_call_site(method.span.end, arguments, callee);
                 for a in arguments {
                     self.walk_expr(a);
                 }

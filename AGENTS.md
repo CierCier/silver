@@ -209,6 +209,9 @@ Compiler diagnostic messages are rendered using the `diagnostics::render` utilit
 - **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
 - **In-Memory Formatting (`@format`)**: Builtin macro `@format("...", args...)` builds a formatted heap string into an owned `String` instance.
 - **LSP Diagnostic Routing**: `aglsp` filters diagnostics by `file_id`, mapping errors occurring in inlined/imported files against their original source text and publishing to their respective file URIs without corrupting the open buffer's span ranges.
+- **LSP Outline (`textDocument/documentSymbol`)**: `aglsp` builds a hierarchical document-symbol tree (structs, enums, traits, functions, globals with methods/fields/variants as children) from the `SymbolIndex` flat list, keyed by the `qualifier: "Name::"` convention; buffer-local symbols are filtered via the `foreign_files` map. See `aglsp/src/document_symbols.rs`.
+- **LSP Inlay Hints (`textDocument/inlayHint`)**: `agc::symbol_index` records `CallSite { open_paren, args, callee }` for every buffer-local `Call`/`MethodCall` (receiver `self` param skipped for instance methods); `aglsp/src/inlay_hints.rs` renders `name:` hints before each argument.
+- **LSP Formatting (`textDocument/formatting`)**: `aglsp/src/format.rs` is a conservative whitespace-only formatter (strip trailing whitespace, collapse blank runs, single trailing newline) that cannot corrupt code.
 ## 7.1 Debugging Support (DWARF by default)
 
 DWARF is emitted by default for non-release builds (no `-O` / `-O0`) and

@@ -5,6 +5,9 @@
 mod completion;
 mod diagnostics;
 mod doc;
+mod document_symbols;
+mod format;
+mod inlay_hints;
 mod references;
 mod semantic_tokens;
 mod util;
@@ -49,6 +52,9 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     ..Default::default()
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 semantic_tokens_provider: Some(semantic_tokens::server_capability()),
                 ..Default::default()
             },
@@ -226,6 +232,58 @@ impl LanguageServer for Backend {
         Ok(Some(SemanticTokensResult::Tokens(
             semantic_tokens::semantic_tokens(analysis),
         )))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let symbols = document_symbols::document_symbols(analysis);
+        if symbols.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let hints = inlay_hints::inlay_hints(analysis);
+        if hints.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(hints))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        let cache = self.cache.lock();
+        let Some(analysis) = cache.get(uri) else {
+            return Ok(None);
+        };
+        let formatted = format::format_silver(&analysis.text);
+        if formatted == analysis.text {
+            return Ok(None);
+        }
+        let end = byte_to_position(&analysis.text, analysis.text.len());
+        Ok(Some(vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end,
+            },
+            new_text: formatted,
+        }]))
     }
 }
 

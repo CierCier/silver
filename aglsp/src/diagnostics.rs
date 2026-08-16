@@ -36,6 +36,7 @@ impl Backend {
                         text: text.to_string(),
                         symbols: Vec::new(),
                         occurrences: Vec::new(),
+                        call_sites: Vec::new(),
                         expr_types: Default::default(),
                         import_paths: Vec::new(),
                         tokens: Vec::new(),
