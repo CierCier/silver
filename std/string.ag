@@ -161,7 +161,9 @@ impl String {
             end = end - 1;
         }
         i64 new_len = end - start;
-        String result = String.with_capacity(new_len);
+        // +1 for the NUL terminator: with_capacity(N) + data[N] = 0 would
+        // write one byte past the allocation.
+        String result = String.with_capacity(new_len + 1);
         result.len = new_len;
         if (new_len > 0) {
             memcpy((void*)result.data, (const void*)&self.data[start], new_len);
@@ -261,7 +263,7 @@ impl String {
         if (start + len > self.len) {
             len = self.len - start;
         }
-        String result = String.with_capacity(len);
+        String result = String.with_capacity(len + 1); // +1 for NUL
         result.len = len;
         if (len > 0) {
             memcpy((void*)result.data, (const void*)&self.data[start], len);
@@ -294,7 +296,7 @@ impl String {
         if (strings.len() > 1) {
             total = total + delim_len * (strings.len() - 1);
         }
-        String result = String.with_capacity(total);
+        String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;
         i64 pos = 0;
         for (i64 i = 0; i < strings.len(); i = i + 1) {
@@ -342,7 +344,7 @@ impl String {
         }
         // Second pass: build the result.
         i64 new_len = self.len - count * needle_len + count * repl_len;
-        String result = String.with_capacity(new_len);
+        String result = String.with_capacity(new_len + 1); // +1 for NUL
         result.len = new_len;
         i64 src = 0;
         i64 dst = 0;
@@ -490,7 +492,7 @@ impl IndexedAccess<String> for String {
 impl Add<String, String> for String {
     String __add(String self, String other) {
         i64 total = self.len + other.len;
-        String result = String.with_capacity(total);
+        String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;
         if (self.len > 0) {
             memcpy((void*)result.data, (const void*)self.data, self.len);
@@ -501,12 +503,8 @@ impl Add<String, String> for String {
         if (total > 0) {
             result.data[total] = (u8)0;
         }
-        self.data = (u8*)0;
-        self.len = 0;
-        self.capacity = 0;
-        other.data = (u8*)0;
-        other.len = 0;
-        other.capacity = 0;
+        // No null-outs: the by-value params are dropped at callee exit, which
+        // frees their buffers exactly once (nulling them would leak).
         return result;
     }
 }
@@ -516,7 +514,7 @@ impl String {
     String __add(String self, str other) {
         i64 other_len = strlen(other);
         i64 total = self.len + other_len;
-        String result = String.with_capacity(total);
+        String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;
         if (self.len > 0) {
             memcpy((void*)result.data, (const void*)self.data, self.len);
@@ -527,9 +525,8 @@ impl String {
         if (total > 0) {
             result.data[total] = (u8)0;
         }
-        self.data = (u8*)0;
-        self.len = 0;
-        self.capacity = 0;
+        // No null-outs: the by-value param is dropped at callee exit, which
+        // frees its buffer exactly once (nulling it would leak).
         return result;
     }
 }

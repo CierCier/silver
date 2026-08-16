@@ -82,6 +82,26 @@ test_specific_flags() {
     esac
 }
 
+# Tests compiled with --leak-check: allocator leak/double-free/overflow
+# detection must report zero leaks or the test fails. Grow this list as
+# leaks get fixed; the goal is to enable it for every test.
+LEAK_CHECK_TESTS="
+memory_pentest
+alloc_validity_test
+string_test
+vec_test
+mem_test
+memmove_scalar_test
+"
+
+# True when a test is compiled with --leak-check.
+leak_check_enabled() {
+    case "$LEAK_CHECK_TESTS" in
+        *"$1"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 
 # Some tests are expected to fail at compile time (e.g., type errors).
 # Return 0 (success) if compilation failure is the expected outcome.
@@ -386,6 +406,9 @@ for t in "${tests[@]}"; do
 
     # ------- Compile step -------
     extra_flags="$(test_specific_flags "$name")"
+    if leak_check_enabled "$name"; then
+        extra_flags="$extra_flags --leak-check"
+    fi
     compile_real_ms=0; compile_cpu_pct=0; compile_mem_kb=0
     # shellcheck disable=SC2086
     if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" \

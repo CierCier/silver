@@ -3,6 +3,19 @@ import std.test;
 import std.string;
 import std.mem.vec;
 
+/// Free the String elements of a Vec before dropping the Vec itself (Vec
+/// owns the backing buffer only, never its elements).
+void drop_vec_strings(Vec<String>* v) {
+    i64 i = 0;
+    while (i < v.len()) {
+        String* p = v.get_ptr(i);
+        String elem = *p;
+        elem.drop();
+        i = i + 1;
+    }
+    v.drop();
+}
+
 i32 main(){
     // -- Existing tests ---------------------------------------------------
     String s = String.new();
@@ -255,7 +268,7 @@ i32 main(){
         String j = String.join(",", &v);
         assert_eq_str("a,b,c", (str)j.to_str(), "join 'a,b,c'");
         j.drop();
-        v.drop();
+        drop_vec_strings(&v);
     }
 
     test_start("join single element");
@@ -265,7 +278,7 @@ i32 main(){
         String j2 = String.join(",", &v2);
         assert_eq_str("only", (str)j2.to_str(), "join single element");
         j2.drop();
-        v2.drop();
+        drop_vec_strings(&v2);
     }
 
     test_start("join empty vec");
@@ -274,7 +287,7 @@ i32 main(){
         String j3 = String.join(",", &v3);
         assert_eq_str("", (str)j3.to_str(), "join empty vec");
         j3.drop();
-        v3.drop();
+        drop_vec_strings(&v3);
     }
 
     test_start("replace");

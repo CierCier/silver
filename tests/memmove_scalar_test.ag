@@ -1,0 +1,55 @@
+import std.sys.entry;
+import std.mem.memory;
+
+// Scalar-path memmove overlap regression.
+//
+// run_tests.sh compiles most tests with --cfg cpu.sse41=1,cpu.avx2=1,
+// cpu.avx512f=1, which routes large copies through SIMD kernels. This test
+// deliberately has NO cpu.* cfgs, so silver_rt_memmove exercises its scalar
+// tail loops — including the forward (dst < src) tail, which used to copy
+// backward and corrupt overlapping regions (mv[0] and mv[7] both wrong).
+
+i32 main() {
+    // dst < src: forward copy must stay ahead of writes.
+    u8* mv = alloc<u8>(32);
+    i32 i = 0;
+    while (i < 16) {
+        mv[i + 8] = (u8)(i + 1);
+        i = i + 1;
+    }
+    silver_rt_memmove(mv, &mv[8], 16);
+    if (mv[0] != (u8)1) { return 1; }   // used to read the overwritten mv[8]
+    if (mv[7] != (u8)8) { return 2; }   // used to read the overwritten mv[15]
+    if (mv[8] != (u8)9) { return 3; }
+    if (mv[15] != (u8)16) { return 4; }
+    free(mv);
+
+    // dst > src: backward copy must stay behind writes.
+    u8* mv2 = alloc<u8>(32);
+    i = 0;
+    while (i < 16) {
+        mv2[i] = (u8)(i + 1);
+        i = i + 1;
+    }
+    silver_rt_memmove(&mv2[8], mv2, 16);
+    if (mv2[8] != (u8)1) { return 5; }
+    if (mv2[15] != (u8)8) { return 6; }
+    if (mv2[23] != (u8)16) { return 7; }
+    free(mv2);
+
+    // Non-overlapping copy both directions.
+    u8* src = alloc<u8>(8);
+    u8* dst = alloc<u8>(8);
+    i = 0;
+    while (i < 8) {
+        src[i] = (u8)(100 + i);
+        i = i + 1;
+    }
+    silver_rt_memmove(dst, src, 8);
+    if (dst[0] != (u8)100 || dst[7] != (u8)107) { return 8; }
+    silver_rt_memmove(src, dst, 8);
+    if (src[3] != (u8)103) { return 9; }
+    free(src);
+    free(dst);
+    return 0;
+}
