@@ -1,0 +1,25 @@
+// tests/backtrace_test.ag — a failing @assert must print a NAMED stack
+// trace to stderr before aborting. Expected to exit 134 (SIGABRT); the
+// harness additionally greps stderr for the resolved function names, which
+// proves the runtime frame-pointer walker and the link-time symbol table
+// work together (level1 -> level2 -> level3 -> assert).
+
+import std.sys.entry;
+
+i64 level3(i64 x) {
+    @assert(x > 100, "backtrace guard");
+    return x;
+}
+
+i64 level2(i64 x) {
+    return level3(x);
+}
+
+i64 level1(i64 x) {
+    return level2(x);
+}
+
+i32 main() {
+    i64 r = level1(42);
+    return (i32)r;
+}

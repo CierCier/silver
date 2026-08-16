@@ -1,0 +1,143 @@
+// std/rt/backtrace.ag — Runtime stack trace printing.
+//
+// The compiler emits a symbol table for every function with a body:
+//
+//   @__silver_bt_entries = global ptr @__silver_bt_data   // BtEntry array
+//   @__silver_bt_count   = global i64 N
+//
+// where each BtEntry is { i64 addr, u8* name } with `addr` resolved to the
+// function's entry address at link time (ptrtoint in a global initializer).
+// Every function is compiled with the "frame-pointer"="all" attribute, so the
+// runtime can walk the rbp chain and resolve each return address to a
+// function name by scanning the table for the entry with the largest
+// addr <= return address.
+//
+// Pure Silver + inline asm; no libc dependency. Used by abort() and
+// __silver_assert_failed to print a named stack trace before dying.
+
+import std.sys.raw.fs;
+
+struct BtEntry {
+    i64 addr;
+    u8* name;
+}
+
+extern "C" {
+    i64 __silver_bt_count;
+    BtEntry* __silver_bt_entries;
+}
+
+/// Read the current frame pointer (rbp). The asm emitter returns rax.
+i64 bt_read_rbp() {
+    return asm("movq %rbp, %rax", [], []);
+}
+
+/// Write a NUL-terminated string to fd via raw write(2).
+void bt_write_cstr(i64 fd, u8* s) {
+    i64 len = 0;
+    while (s[len] != (u8)0) { len = len + 1; }
+    sys_write(fd, (i64)s, len);
+}
+
+/// Write `value` in decimal to fd.
+void bt_write_dec(i64 fd, i64 value) {
+    u8 buf[24];
+    i64 n = 0;
+    if (value == 0) {
+        buf[0] = (u8)'0';
+        n = 1;
+    } else {
+        while (value > 0) {
+            buf[n] = (u8)((u8)'0' + (u8)(value % 10));
+            n = n + 1;
+            value = value / 10;
+        }
+    }
+    i64 i = 0;
+    while (i < n / 2) {
+        u8 tmp = buf[i];
+        buf[i] = buf[n - 1 - i];
+        buf[n - 1 - i] = tmp;
+        i = i + 1;
+    }
+    sys_write(fd, (i64)&buf[0], n);
+}
+
+/// Write `value` as `0x<16 hex digits>` to fd.
+void bt_write_hex(i64 fd, i64 value) {
+    u8 buf[19];
+    buf[0] = (u8)'0';
+    buf[1] = (u8)'x';
+    i64 i = 0;
+    i64 shift = (i64)60;
+    while (i < 16) {
+        i64 digit = (value >> shift) & (i64)0xF;
+        if (digit < (i64)10) {
+            buf[i + 2] = (u8)((u8)'0' + (u8)digit);
+        } else {
+            buf[i + 2] = (u8)((u8)'a' + (u8)(digit - (i64)10));
+        }
+        shift = shift - (i64)4;
+        i = i + 1;
+    }
+    buf[18] = (u8)0;
+    sys_write(fd, (i64)&buf[0], 19);
+}
+
+/// Resolve a return address to the entry with the largest addr <= it
+/// (the function containing the address). Returns -1 when unresolved.
+i64 bt_resolve(i64 ret_addr) {
+    i64 best = -1;
+    i64 best_addr = 0;
+    i64 i = 0;
+    while (i < __silver_bt_count) {
+        BtEntry e = __silver_bt_entries[i];
+        if (e.addr <= ret_addr && e.addr > best_addr) {
+            best = i;
+            best_addr = e.addr;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// Print a named stack trace to stderr (fd 2): walk the rbp chain from the
+/// caller's frame, resolving each return address against the symbol table.
+/// `skip` frames are omitted from the top (the walker's own frame and the
+/// abort/assert frame that invoked it).
+void silver_print_backtrace(i64 skip) {
+    i64 fd = 2;
+    bt_write_cstr(fd, (u8*)"backtrace:\n");
+    i64 rbp = bt_read_rbp();
+    i64 frame = 0;
+    i64 printed = 0;
+    while (rbp != 0 && printed < 24) {
+        if (frame >= skip) {
+            i64* ret_ptr = (i64*)(rbp + 8);
+            i64 ret_addr = *ret_ptr;
+            i64 idx = bt_resolve(ret_addr);
+            bt_write_cstr(fd, (u8*)"  #");
+            bt_write_dec(fd, printed);
+            if (idx >= 0) {
+                bt_write_cstr(fd, (u8*)"  ");
+                BtEntry e = __silver_bt_entries[idx];
+                bt_write_cstr(fd, e.name);
+                bt_write_cstr(fd, (u8*)" (");
+                bt_write_hex(fd, ret_addr);
+                bt_write_cstr(fd, (u8*)")\n");
+            } else {
+                bt_write_cstr(fd, (u8*)"  <unknown> (");
+                bt_write_hex(fd, ret_addr);
+                bt_write_cstr(fd, (u8*)")\n");
+            }
+            printed = printed + 1;
+        }
+        i64* next_ptr = (i64*)rbp;
+        i64 next = *next_ptr;
+        if (next <= rbp && next != 0) {
+            break;  // corrupt chain — stop
+        }
+        rbp = next;
+        frame = frame + 1;
+    }
+}

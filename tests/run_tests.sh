@@ -58,6 +58,9 @@ expected_exit() {
         static_volatile_test) echo 7 ;;
         # A failing @assert prints its message to stderr and aborts (128+6).
         assert_fail_test) echo 134 ;;
+        # backtrace_test: same, plus the harness greps stderr for the named
+        # stack trace (see the post-run check below).
+        backtrace_test) echo 134 ;;
         *) echo 0 ;;
     esac
 }
@@ -478,6 +481,22 @@ test_stdin() {
             : # good
         else
             printf '  FAIL  %-*s  (binary is not static)\n' "$COL_NAME" "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            continue
+        fi
+    fi
+
+    # For backtrace_test, verify the runtime printed a NAMED stack trace:
+    # the frame-pointer walker must resolve the whole call chain.
+    if [ "$name" = "backtrace_test" ]; then
+        if grep -q "level3" "$run_log" && grep -q "level2" "$run_log" \
+           && grep -q "level1" "$run_log" && grep -q "main" "$run_log" \
+           && grep -q "__silver_assert_failed" "$run_log"; then
+            : # good
+        else
+            printf '  FAIL  %-*s  (backtrace did not resolve function names)\n' "$COL_NAME" "$name"
+            sed 's/^/    /' "$run_log"
             failed=$((failed + 1))
             failed_names="$failed_names $name"
             continue

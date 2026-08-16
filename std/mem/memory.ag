@@ -383,8 +383,11 @@ i64 strlen(const char* s) {
 
 import std.sys.raw.fs;
 import std.sys.raw.process;
+import std.rt.backtrace;
 
 void abort() {
+    // Named stack trace before dying (skip = walker frame + this abort frame).
+    silver_print_backtrace(2);
     sys_kill(sys_getpid(), 6);  // SIGABRT
     sys_exit_group(134);        // 128 + SIGABRT
 }

@@ -31,6 +31,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        // Keep a frame pointer in every function so the runtime backtrace
+        // walker can follow the rbp chain at any opt level.
+        let frame_ptr_attr = self.context.create_string_attribute("frame-pointer", "all");
+        function.add_attribute(inkwell::attributes::AttributeLoc::Function, frame_ptr_attr);
+
         let nested_emission = self.debug_nested;
         let ret_di = if nested_emission {
             None

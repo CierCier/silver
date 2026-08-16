@@ -5,9 +5,13 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
 use inkwell::OptimizationLevel;
 use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::context::AsContextRef;
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{TargetData, TargetMachine};
+use inkwell::types::{AnyType, AsTypeRef};
+use inkwell::values::{ArrayValue, AsValueRef};
+use llvm_sys::prelude::LLVMValueRef;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
 use crate::attributes::function_link_name;
@@ -112,6 +116,110 @@ pub(crate) fn run_module_optimization_passes(
 }
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    /// Emits the runtime backtrace symbol table: one `{addr, name}` record
+    /// per emitted function (address resolved at link time via ptrtoint),
+    /// plus a count global. The runtime resolves return addresses against
+    /// this table when printing a stack trace on abort/assert.
+    fn emit_backtrace_table(&mut self) {
+        let functions: Vec<_> = self
+            .module
+            .get_functions()
+            .filter(|f| f.count_basic_blocks() > 0)
+            .collect();
+        if functions.is_empty() {
+            return;
+        }
+        let record_ty = self.context.struct_type(
+            &[
+                self.context.i64_type().into(),
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+            ],
+            false,
+        );
+        let array_ty = record_ty.array_type(functions.len() as u32);
+        let mut records: Vec<LLVMValueRef> = Vec::with_capacity(functions.len());
+        for (i, function) in functions.iter().enumerate() {
+            let name = function.get_name().to_string_lossy().into_owned();
+            let name_bytes: Vec<u8> = name.bytes().chain(std::iter::once(0)).collect();
+            let name_global = self.module.add_global(
+                self.context.i8_type().array_type(name_bytes.len() as u32),
+                None,
+                &format!(".bt.name.{i}"),
+            );
+            let chars: Vec<_> = name_bytes
+                .iter()
+                .map(|b| self.context.i8_type().const_int(*b as u64, false))
+                .collect();
+            let const_str = self.context.i8_type().const_array(&chars);
+            name_global.set_initializer(&const_str);
+            name_global.set_linkage(inkwell::module::Linkage::Private);
+            // ptrtoint (ptr @F to i64) — resolved to the function's
+            // address at link time.
+            let addr = unsafe {
+                llvm_sys::core::LLVMConstPtrToInt(
+                    function.as_value_ref(),
+                    self.context.i64_type().as_any_type_enum().as_type_ref(),
+                )
+            };
+            let name_ptr = name_global.as_pointer_value().as_value_ref();
+            let record = unsafe {
+                llvm_sys::core::LLVMConstStructInContext(
+                    self.context.as_ctx_ref(),
+                    [addr, name_ptr].as_mut_ptr(),
+                    2,
+                    0,
+                )
+            };
+            records.push(record);
+        }
+        let existing_ptr = self.module.get_global("__silver_bt_entries");
+        let existing_count = self.module.get_global("__silver_bt_count");
+        let table = self.module.add_global(array_ty, None, "__silver_bt_data");
+        let array = unsafe {
+            llvm_sys::core::LLVMConstArray2(
+                record_ty.as_any_type_enum().as_type_ref(),
+                records.as_mut_ptr(),
+                records.len() as u64,
+            )
+        };
+        table.set_initializer(&unsafe { ArrayValue::new(array) });
+        table.set_linkage(inkwell::module::Linkage::Private);
+        // Runtime-visible symbols: a pointer to the table (the runtime cannot
+        // declare an array of unknown length) and the entry count. The
+        // runtime's own `extern "C"` declarations may already exist as bare
+        // declarations in the module (inlined std/rt/backtrace.ag) — reuse
+        // them so the definitions land on the same symbols.
+        let table_ptr = if let Some(existing) = existing_ptr {
+            existing
+        } else {
+            self.module.add_global(
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                None,
+                "__silver_bt_entries",
+            )
+        };
+        table_ptr.set_initializer(&table.as_pointer_value());
+        // linkonce_odr: every object (including .agm library modules) emits
+        // this table, and the linker keeps one copy — the application's own
+        // (first in link order), whose addresses match the final binary.
+        table_ptr.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+        let count = if let Some(existing) = existing_count {
+            existing
+        } else {
+            self.module
+                .add_global(self.context.i64_type(), None, "__silver_bt_count")
+        };
+        count.set_initializer(
+            &self
+                .context
+                .i64_type()
+                .const_int(functions.len() as u64, false),
+        );
+        count.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+    }
+
     pub(crate) fn finalize_debug(&mut self) {
         if let Some(debug) = self.debug.take() {
             debug.finalize();
@@ -386,6 +494,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
             self.generate_item(item)?;
         }
+        self.emit_backtrace_table();
         Ok(())
     }
 

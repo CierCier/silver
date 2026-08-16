@@ -6,3 +6,4 @@ import std.rt.runtime;
 import std.rt.type_info;
 import std.rt.types;
 import std.rt.value;
+import std.rt.backtrace;
