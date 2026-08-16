@@ -217,7 +217,8 @@ The compiler emits a link-time-resolved symbol table for every function with a b
 - `@__silver_bt_entries` (linkonce_odr, pointer to a private `[N x {i64 addr, u8* name}]` array; `addr` is `ptrtoint(ptr @F to i64)` in a global initializer, resolved by the linker) and `@__silver_bt_count`.
 - `linkonce_odr` dedups the table when .agm library objects are linked into a consumer — the application's own copy (first in link order) wins, so its addresses match the final binary.
 - `std/rt/backtrace.ag` walks the rbp chain (inline asm reads rbp), resolves each return address to the entry with the largest `addr <= ret_addr`, and prints `#N  <name> (0x...)` to stderr. `abort()` (in `std/mem/memory.ag`) and `__silver_assert_failed` print the trace before dying.
-- Integration test: `tests/backtrace_test.ag` (exit 134 + the harness greps stderr for the resolved `level1`/`level2`/`level3`/`main` names).
+- **Exact source lines and argument values** come from a compiler post-pass: after emitting the object, `agc/src/codegen/dwarf_bt.rs` parses the object's ELF + DWARF (`.symtab`, `.debug_line` v4/v5, `.debug_info`/`.debug_abbrev`/`.debug_str` — including relocations) and folds the results into alloc'd, link-time-resolved tables: `__silver_bt_lines` ({fn start, offset, line, file} per line transition) and `__silver_bt_args` ({fn start, count, args} where each arg = {name, rbp-relative fbreg, size}; the DWARF frame base is rbp, so the slot is `rbp + fbreg`). The object is then re-emitted with the tables. Frames print the call-site line (`level3 at probe.ag:4` — the assert's line) and `args: x=42`. Without DWARF (`-O1+`, `-g0`) the tables are empty and the trace falls back to declaration lines, no args.
+- Integration test: `tests/backtrace_test.ag` (exit 134 + the harness greps stderr for the resolved `level1`/`level2`/`level3`/`main` names and `args: x=`).
 
 ---
 
