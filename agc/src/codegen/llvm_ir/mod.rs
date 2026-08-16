@@ -154,6 +154,10 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) loop_defers_base: Vec<usize>,
     pub(crate) symbol_table: CompilerSymbolTable,
     pub(crate) debug: Option<DebugContext<'ctx>>,
+    /// True while a generic instance is being emitted mid-codegen (inside
+    /// another function's body). Nested emissions get no debug info: their
+    /// scopes would dangle under LLVM 22's DbgRecord DIE construction.
+    pub(crate) debug_nested: bool,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
     /// Monotonic counter for per-launch-site trampoline function names.

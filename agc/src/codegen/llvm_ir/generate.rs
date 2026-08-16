@@ -823,6 +823,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     Self::apply_target_feature_attributes(function, &func.attributes);
                     Self::apply_inline_always_attribute(function, &func.attributes, self.context);
 
+                    let saved_debug = self.debug.as_mut().map(|d| {
+                        (
+                            d.current_subprogram,
+                            std::mem::take(&mut d.current_lexical_blocks),
+                        )
+                    });
                     self.emit_function_body(
                         function,
                         &func.parameters,
@@ -832,6 +838,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &func.name.span,
                         false,
                     )?;
+                    if let Some((saved_subprogram, saved_blocks)) = saved_debug {
+                        let debug = self.debug.as_mut().expect("saved debug state");
+                        debug.current_subprogram = saved_subprogram;
+                        debug.current_lexical_blocks = saved_blocks;
+                    }
                 }
                 ast::ImplItemKind::Cast(cast) => {
                     let cast_method_name = Self::cast_method_name(&cast.target_type);
@@ -870,6 +881,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     // Cast receivers are borrowed: skip the by-value self
                     // param's destructor so it does not free the caller's
                     // resources (see emit_function_body).
+                    let saved_debug = self.debug.as_mut().map(|d| {
+                        (
+                            d.current_subprogram,
+                            std::mem::take(&mut d.current_lexical_blocks),
+                        )
+                    });
                     self.emit_function_body(
                         function,
                         &cast.parameters,
@@ -879,6 +896,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         &cast.span,
                         true,
                     )?;
+                    if let Some((saved_subprogram, saved_blocks)) = saved_debug {
+                        let debug = self.debug.as_mut().expect("saved debug state");
+                        debug.current_subprogram = saved_subprogram;
+                        debug.current_lexical_blocks = saved_blocks;
+                    }
                 }
                 _ => {}
             }
@@ -1027,8 +1049,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     }
     fn generate_block(&mut self, block: &ast::Block) -> CodegenResult<()> {
         let has_debug_scope = if let Some(debug) = &mut self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(&block.span);
-            debug.push_lexical_block(line, col);
+            let (line, col, _, _) = debug.span_to_line_col(&block.span);
+            debug.push_lexical_block(&block.span, line, col);
             true
         } else {
             false

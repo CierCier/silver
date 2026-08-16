@@ -31,16 +31,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        let nested_emission = self.debug_nested;
+        let ret_di = if nested_emission {
+            None
+        } else {
+            return_type.and_then(|rt| self.debug_type_for(rt))
+        };
         if let Some(debug) = &mut self.debug {
-            let (line, _col, _, _) = debug.source_map.span_to_line_col(fn_span);
-            let subroutine_type = debug.create_subroutine_type(
-                return_type.and_then(|_| debug.di_types.get("i32").copied()),
-                &[],
-            );
-            let subprogram =
-                debug.create_function(fn_name, fn_name, line, subroutine_type, false, true, line);
-            function.set_subprogram(subprogram);
-            debug.current_subprogram = Some(subprogram);
+            let (line, _col, _, _) = debug.span_to_line_col(fn_span);
+            let file = debug.file_for(fn_span);
+            let subroutine_type = debug.create_subroutine_type(file, ret_di, &[]);
+            if nested_emission {
+                // Lazily-emitted generic instances: no subprogram / debug
+                // records (their scopes would dangle under LLVM 22's
+                // DbgRecord DIE construction).
+                debug.current_subprogram = None;
+            } else {
+                let subprogram = debug.create_function(
+                    fn_name,
+                    fn_name,
+                    file,
+                    line,
+                    subroutine_type,
+                    false,
+                    true,
+                    line,
+                );
+                function.set_subprogram(subprogram);
+                debug.current_subprogram = Some(subprogram);
+            }
         }
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -78,6 +97,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     },
                 );
             }
+            self.emit_debug_variable(
+                &param.name.name,
+                &param.param_type,
+                &param.name.span,
+                alloca,
+                Some(index as u32 + 1),
+            )?;
         }
 
         // Set up drop flags and defers for parameters that implement Drop.
@@ -380,7 +406,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         binding.name.clone(),
                         VarInfo {
                             ptr: i_ptr,
-                            ty: ast_ty,
+                            ty: ast_ty.clone(),
                             is_mutable,
                             is_volatile: false,
                             drop_flag: None,
@@ -388,6 +414,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         },
                     );
                 }
+                self.emit_debug_variable(&binding.name, &ast_ty, span, i_ptr, None)?;
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
                 let body_bb = self.context.append_basic_block(function, "forin.body");
@@ -648,6 +675,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
                 let ast_ty = self.infer_ast_type_from_value(&thing_loaded, span);
+                let debug_ty = ast_ty.clone();
                 let var_ptr =
                     self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
                 self.builder
@@ -666,6 +694,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         },
                     );
                 }
+                self.emit_debug_variable(&binding.name, &debug_ty, &binding.span, var_ptr, None)?;
 
                 self.generate_block(body)?;
 
@@ -851,6 +880,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 },
             );
         }
+
+        self.emit_debug_variable(
+            &identifier.name,
+            &ty_for_drop,
+            &identifier.span,
+            alloca,
+            None,
+        )?;
 
         // Skip pointer/reference types: the variable is a borrowed view,
         // not an owner.  Only value-type variables get implicit destructors.

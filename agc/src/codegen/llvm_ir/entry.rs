@@ -113,7 +113,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let builder = context.create_builder();
         let debug = if debug_info {
             match (source_path, source_text) {
-                (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
+                (Some(path), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&path.to_string_lossy(), text);
+                    Some(DebugContext::new(
+                        &context,
+                        &module,
+                        main_file_id,
+                        path,
+                        text,
+                    ))
+                }
                 _ => None,
             }
         } else {
@@ -158,6 +167,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             task_trampoline_counter: 0,
             debug,
+            debug_nested: false,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             leak_check: false,
         };
@@ -213,7 +223,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let builder = context.create_builder();
         let debug = if debug_info {
             match (source_path, source_text) {
-                (Some(path), Some(text)) => Some(DebugContext::new(&context, &module, path, text)),
+                (Some(path), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&path.to_string_lossy(), text);
+                    Some(DebugContext::new(
+                        &context,
+                        &module,
+                        main_file_id,
+                        path,
+                        text,
+                    ))
+                }
                 _ => None,
             }
         } else {
@@ -256,6 +275,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
+            debug_nested: false,
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             temp_counter: 0,
             task_trampoline_counter: 0,
@@ -543,7 +563,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let builder = context.create_builder();
         let debug = if debug_info {
             match (source_path, source_text) {
-                (Some(p), Some(text)) => Some(DebugContext::new(&context, &module, p, text)),
+                (Some(p), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&p.to_string_lossy(), text);
+                    Some(DebugContext::new(&context, &module, main_file_id, p, text))
+                }
                 _ => None,
             }
         } else {
@@ -586,6 +609,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_defers_base: Vec::new(),
             symbol_table: table.clone(),
             debug,
+            debug_nested: false,
             abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
             temp_counter: 0,
             task_trampoline_counter: 0,

@@ -2078,8 +2078,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let has_debug_scope = if let Some(debug) = &mut self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(&block.span);
-            debug.push_lexical_block(line, col);
+            let (line, col, _, _) = debug.span_to_line_col(&block.span);
+            debug.push_lexical_block(&block.span, line, col);
             true
         } else {
             false
@@ -2529,6 +2529,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         self.builder.build_store(alloca, loaded).map_err(|e| {
                                             CodegenError::new(format!("store data binding: {e}"))
                                         })?;
+                                        self.emit_debug_variable(
+                                            &binding.name,
+                                            pt,
+                                            &binding.span,
+                                            alloca,
+                                            None,
+                                        )?;
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
                                         // leaves the matched enum (no dangling
@@ -2545,8 +2552,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             // cascade skips it.
                                             if let ast::ExpressionKind::Identifier(ident) =
                                                 expression.kind.as_ref()
-                                                && let Some(var) =
-                                                    self.lookup_variable(&ident.name)
+                                                && let Some(var) = self.lookup_variable(&ident.name)
                                                 && let Some(flag) = var.drop_flag
                                             {
                                                 self.builder

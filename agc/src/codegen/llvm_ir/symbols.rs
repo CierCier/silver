@@ -1008,6 +1008,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .get_function(&instance)
                 .ok_or_else(|| CodegenError::new(format!("missing instance {instance}")))?;
             let saved_block = self.builder.get_insert_block();
+            let saved_debug = self.debug.as_mut().map(|d| {
+                (
+                    d.current_subprogram,
+                    std::mem::take(&mut d.current_lexical_blocks),
+                )
+            });
             self.emit_function_body(
                 function,
                 &func.parameters,
@@ -1017,6 +1023,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 &func.name.span,
                 false,
             )?;
+            if let Some((saved_subprogram, saved_blocks)) = saved_debug {
+                let debug = self.debug.as_mut().expect("saved debug state");
+                debug.current_subprogram = saved_subprogram;
+                debug.current_lexical_blocks = saved_blocks;
+            }
             if let Some(saved_block) = saved_block {
                 self.builder.position_at_end(saved_block);
             }
@@ -1410,7 +1421,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // The semantic monomorph pass never saw this method body;
                 // emit generic free-function instances it calls (e.g.
                 // realloc<i64> in Vec<i64>.push) before emitting the body.
+                self.debug_nested = true;
                 self.emit_missing_generic_free_instances(&mut func.body)?;
+                self.debug_nested = false;
 
                 // If the owner is a generic enum being instantiated on the fly
                 // (method call reached before monomorph registered the concrete
@@ -1481,6 +1494,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 self.defers.push(Vec::new());
                 self.variables.push(HashMap::default());
+                self.debug_nested = true;
 
                 self.emit_function_body(
                     function,
@@ -1495,6 +1509,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.defers = saved_defers;
                 self.variables = saved_variables;
                 self.current_fn = saved_fn;
+                self.debug_nested = false;
                 if let Some(saved_block) = saved_block {
                     self.builder.position_at_end(saved_block);
                 }

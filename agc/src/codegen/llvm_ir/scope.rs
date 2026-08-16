@@ -1,8 +1,10 @@
 use rustc_hash::FxHashMap as HashMap;
 
+use inkwell::AddressSpace;
+use inkwell::debug_info::{AsDIScope, DIFlags, DIFlagsConstants, DIType};
 use inkwell::module::Linkage;
-use inkwell::types::BasicType;
-use inkwell::values::{BasicMetadataValueEnum, PointerValue};
+use inkwell::types::{AnyType, BasicType};
+use inkwell::values::{AsValueRef, BasicMetadataValueEnum, PointerValue};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -18,10 +20,259 @@ use inkwell::targets::TargetData;
 impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn set_debug_location(&self, span: &Span) {
         if let Some(debug) = &self.debug {
-            let (line, col, _, _) = debug.source_map.span_to_line_col(span);
+            let (line, col, _, _) = debug.span_to_line_col(span);
             let loc = debug.create_debug_location(self.context, line, col);
             self.builder.set_current_debug_location(loc);
         }
+    }
+
+    /// Cache key for a Silver type in the DWARF type map.
+    fn debug_type_key(ty: &ast::Type) -> String {
+        format!("{:?}", ty.kind)
+    }
+
+    /// Resolves a Silver type to a DWARF type (basic, pointer, array, struct),
+    /// populating the per-module type cache. Returns `None` for types without
+    /// a meaningful DWARF mapping (complex, function, tuple, unknown named).
+    pub(crate) fn debug_type_for(&mut self, ty: &ast::Type) -> Option<DIType<'ctx>> {
+        self.debug.as_ref()?;
+        let key = Self::debug_type_key(ty);
+        if let Some(cached) = self
+            .debug
+            .as_ref()
+            .and_then(|d| d.di_types.get(&key))
+            .copied()
+        {
+            return Some(cached);
+        }
+        let di = match ty.kind.as_ref() {
+            ast::TypeKind::Primitive(ast::PrimitiveType::Str) => {
+                let inner = self.debug.as_mut()?.byte_type();
+                self.debug
+                    .as_ref()?
+                    .dibuilder
+                    .create_pointer_type("str", inner, 64, 64, AddressSpace::default())
+                    .as_type()
+            }
+            ast::TypeKind::Primitive(p) => {
+                let (name, bits, enc) = match p {
+                    ast::PrimitiveType::I8 => ("i8", 8, crate::debug_info::ate::SIGNED_CHAR),
+                    ast::PrimitiveType::I16 => ("i16", 16, crate::debug_info::ate::SIGNED),
+                    ast::PrimitiveType::I32 => ("i32", 32, crate::debug_info::ate::SIGNED),
+                    ast::PrimitiveType::I64 => ("i64", 64, crate::debug_info::ate::SIGNED),
+                    ast::PrimitiveType::I128 => ("i128", 128, crate::debug_info::ate::SIGNED),
+                    ast::PrimitiveType::U8 => ("u8", 8, crate::debug_info::ate::UNSIGNED_CHAR),
+                    ast::PrimitiveType::U16 => ("u16", 16, crate::debug_info::ate::UNSIGNED),
+                    ast::PrimitiveType::U32 => ("u32", 32, crate::debug_info::ate::UNSIGNED),
+                    ast::PrimitiveType::U64 => ("u64", 64, crate::debug_info::ate::UNSIGNED),
+                    ast::PrimitiveType::U128 => ("u128", 128, crate::debug_info::ate::UNSIGNED),
+                    ast::PrimitiveType::F32 => ("f32", 32, crate::debug_info::ate::FLOAT),
+                    ast::PrimitiveType::F64 => ("f64", 64, crate::debug_info::ate::FLOAT),
+                    ast::PrimitiveType::Bool => ("bool", 1, crate::debug_info::ate::BOOLEAN),
+                    ast::PrimitiveType::Char => ("char", 32, crate::debug_info::ate::UNSIGNED_CHAR),
+                    ast::PrimitiveType::Void
+                    | ast::PrimitiveType::Str
+                    | ast::PrimitiveType::F80
+                    | ast::PrimitiveType::C32
+                    | ast::PrimitiveType::C64
+                    | ast::PrimitiveType::C80 => return None,
+                };
+                self.debug
+                    .as_mut()?
+                    .create_basic_type(name, bits, enc)
+                    .ok()?
+                    .as_type()
+            }
+            ast::TypeKind::Pointer(p) => {
+                let inner = self.debug_type_for(&p.inner).unwrap_or_else(|| {
+                    self.debug
+                        .as_mut()
+                        .map(|d| d.byte_type())
+                        .expect("debug present")
+                });
+                self.debug
+                    .as_ref()?
+                    .dibuilder
+                    .create_pointer_type("ptr", inner, 64, 64, AddressSpace::default())
+                    .as_type()
+            }
+            ast::TypeKind::Reference(p) => {
+                let inner = self.debug_type_for(&p.inner).unwrap_or_else(|| {
+                    self.debug
+                        .as_mut()
+                        .map(|d| d.byte_type())
+                        .expect("debug present")
+                });
+                self.debug
+                    .as_ref()?
+                    .dibuilder
+                    .create_pointer_type("ptr", inner, 64, 64, AddressSpace::default())
+                    .as_type()
+            }
+            ast::TypeKind::Array(a) => {
+                let element = self.debug_type_for(&a.element_type)?;
+                let llvm_ty = self.lower_basic_type(ty).ok()?;
+                let target_data =
+                    TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+                let size = target_data.get_abi_size(&llvm_ty.as_any_type_enum()) * 8;
+                let align = target_data.get_abi_alignment(&llvm_ty.as_any_type_enum()) * 8;
+                self.debug
+                    .as_ref()?
+                    .dibuilder
+                    .create_array_type(element, size, align, std::slice::from_ref(&(0..a.size)))
+                    .as_type()
+            }
+            ast::TypeKind::Named(named) => {
+                let named_key = Self::named_type_key(named);
+                let Some(fields) = self.struct_fields.get(&named_key).cloned() else {
+                    // Enums and unknown named types stay opaque (no DWARF map).
+                    return None;
+                };
+                if self.debug.as_ref()?.building.contains(&named_key) {
+                    // Recursive struct (self-referential via pointer): break the
+                    // cycle — the pointer member falls back to the byte type.
+                    return None;
+                }
+                self.debug.as_mut()?.building.insert(named_key.clone());
+                let scope = self.debug.as_ref()?.compile_unit.as_debug_info_scope();
+                let file = self.debug.as_ref()?.main_file();
+                let mut member_types = Vec::with_capacity(fields.len());
+                let mut offset_bits = 0u64;
+                for (field_name, field_ty) in &fields {
+                    let Some(fdi) = self.debug_type_for(field_ty) else {
+                        continue;
+                    };
+                    let (size, align) = self.debug_type_layout(field_ty).unwrap_or((0, 8));
+                    offset_bits = offset_bits.div_ceil(align) * align;
+                    let member = self.debug.as_ref()?.dibuilder.create_member_type(
+                        scope,
+                        field_name,
+                        file,
+                        0,
+                        size,
+                        align as u32,
+                        offset_bits,
+                        DIFlags::PUBLIC,
+                        fdi,
+                    );
+                    member_types.push(member.as_type());
+                    offset_bits += size;
+                }
+                let (size_bits, align_bits) = self.debug_type_layout(ty).unwrap_or((0, 8));
+                let struct_name = Self::named_type_name(named);
+                let struct_ty = self.debug.as_ref()?.dibuilder.create_struct_type(
+                    scope,
+                    &struct_name,
+                    file,
+                    0,
+                    size_bits,
+                    align_bits as u32,
+                    DIFlags::PUBLIC,
+                    None,
+                    &member_types,
+                    0,
+                    None,
+                    "struct",
+                );
+                self.debug
+                    .as_mut()?
+                    .di_types
+                    .insert(key.clone(), struct_ty.as_type());
+                self.debug.as_mut()?.building.remove(&named_key);
+                struct_ty.as_type()
+            }
+            _ => return None,
+        };
+        self.debug.as_mut()?.di_types.insert(key, di);
+        Some(di)
+    }
+
+    /// (size_bits, align_bits) for a type via the target data layout.
+    fn debug_type_layout(&mut self, ty: &ast::Type) -> Option<(u64, u64)> {
+        let llvm_ty = self.lower_basic_type(ty).ok()?;
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        Some((
+            target_data.get_abi_size(&llvm_ty.as_any_type_enum()) * 8,
+            target_data.get_abi_alignment(&llvm_ty.as_any_type_enum()) as u64 * 8,
+        ))
+    }
+
+    /// Emits a DWARF local/parameter variable for `alloca` so debuggers can
+    /// `print` it and `info locals` lists it. No-op when `-g` is off or the
+    /// type has no DWARF mapping.
+    pub(crate) fn emit_debug_variable(
+        &mut self,
+        name: &str,
+        ty: &ast::Type,
+        span: &Span,
+        alloca: PointerValue<'ctx>,
+        arg_no: Option<u32>,
+    ) -> CodegenResult<()> {
+        if self.debug.is_none() {
+            return Ok(());
+        }
+        // Skip variables inside lazily-emitted generic instances: they carry
+        // no subprogram, and LLVM 22 crashes building their DIE chain.
+        if self.debug_nested {
+            return Ok(());
+        }
+        let Some(di_ty) = self.debug_type_for(ty) else {
+            return Ok(());
+        };
+        if di_ty.get_size_in_bits() == 0 {
+            return Ok(());
+        }
+        let (line, col, _, _) = self
+            .debug
+            .as_mut()
+            .expect("debug present")
+            .span_to_line_col(span);
+        let file = self.debug.as_mut().expect("debug present").file_for(span);
+        let debug = self.debug.as_ref().expect("debug present");
+        let scope = debug.current_scope();
+        let variable = match arg_no {
+            Some(no) => debug.dibuilder.create_parameter_variable(
+                scope,
+                name,
+                no,
+                file,
+                line,
+                di_ty,
+                true,
+                DIFlags::PUBLIC,
+            ),
+            None => debug.dibuilder.create_auto_variable(
+                scope,
+                name,
+                file,
+                line,
+                di_ty,
+                true,
+                DIFlags::PUBLIC,
+                64,
+            ),
+        };
+        let loc = debug.create_debug_location(self.context, line, col);
+        let Some(block) = self.builder.get_insert_block() else {
+            return Ok(());
+        };
+        // inkwell's `insert_declare_at_end` is broken under LLVM 19+ (it casts
+        // the returned DbgRecord to a Value and asserts), so emit the debug
+        // record directly through the C API. The record is attached to the
+        // block as a side effect; the returned handle is discarded.
+        let expr = debug.dibuilder.create_expression(vec![]);
+        unsafe {
+            llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
+                debug.dibuilder.as_mut_ptr(),
+                alloca.as_value_ref(),
+                variable.as_mut_ptr(),
+                expr.as_mut_ptr(),
+                loc.as_mut_ptr(),
+                block.as_mut_ptr(),
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn push_scope(&mut self) {
