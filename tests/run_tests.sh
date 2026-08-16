@@ -92,6 +92,10 @@ string_test
 vec_test
 mem_test
 memmove_scalar_test
+channel_test
+memory_stress
+http_test
+cookie_test
 "
 
 # True when a test is compiled with --leak-check.

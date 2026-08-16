@@ -11,6 +11,9 @@
 // NOTE: Does NOT call T's destructor on last-drop (same as Box/Vec).
 //       The heap memory for T is freed; if T holds owned resources
 //       those must be managed separately.
+//       Rc<T>::new also copies `val` into the heap slot (by-value param
+//       dropped at callee exit), so owned T leaves the Rc holding dangling
+//       pointers — use POD/plain T until move-into-deref is supported.
 import std.mem.alloc;
 import std.mem.drop;
 

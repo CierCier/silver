@@ -333,6 +333,7 @@ i32 run_get_public_case() {
     HttpResponse response = response_result.unwrap();
     @assert(!(response.status != 200), "response.status != 200");
     @assert(!(!response.body.starts_with("{\"ip\":\"")), "check");
+    response.drop();
     return 0;
 }
 

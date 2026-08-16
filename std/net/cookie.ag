@@ -195,11 +195,9 @@ impl Drop<Cookie> for Cookie {
 
 /// Drop every element of `v` (each Cookie owns Strings) and free the buffer.
 void http_cookie_vec_drop(Vec<Cookie>* v) {
-    i64 i = 0;
-    while (i < v.len) {
-        Cookie c = v.take(i);
+    while (v.len > 0) {
+        Cookie c = v.take(0);
         c.drop();
-        i = i + 1;
     }
     v.drop();
 }
@@ -610,11 +608,9 @@ impl CookieJar {
     /// Store every cookie in `incoming`, consuming the vector's elements
     /// (each is stored or dropped). The caller owns the (emptied) buffer.
     void set_cookies(CookieJar* self, str host, str path, Vec<Cookie>* incoming) {
-        i64 i = 0;
-        while (i < incoming.len) {
-            Cookie c = incoming.take(i);
+        while (incoming.len > 0) {
+            Cookie c = incoming.take(0);
             self.set_cookie(host, path, move c);
-            i = i + 1;
         }
         incoming.clear();
     }
@@ -672,13 +668,10 @@ impl Drop<CookieJar> for CookieJar {
     // Vec after this runs, so len is cleared and Vec.drop nulls the buffer
     // to make a second call a no-op (Cookie.drop is itself guarded).
     void drop(CookieJar* self) {
-        i64 i = 0;
-        while (i < self.cookies.len) {
-            Cookie c = self.cookies.take(i);
+        while (self.cookies.len > 0) {
+            Cookie c = self.cookies.take(0);
             c.drop();
-            i = i + 1;
         }
-        self.cookies.len = 0;
         self.cookies.drop();
     }
 }
@@ -718,7 +711,9 @@ void http_jar_store(CookieJar* self, Cookie incoming) {
             && existing.path.equals((str)incoming.path.data)) {
             Cookie old = self.cookies.take(i);
             old.drop();
-            self.cookies.set(i, move incoming);
+            // take() removed index i (tail shifted left); append instead of
+            // overwriting the shifted element.
+            self.cookies.push(move incoming);
             return;
         }
         i = i + 1;

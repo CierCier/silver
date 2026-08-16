@@ -181,20 +181,16 @@ impl ConnectionPool {
 
 impl Drop<ConnectionPool> for ConnectionPool {
     void drop(ConnectionPool* self) {
-        i64 i = 0;
-        while (i < self.entries.len) {
-            PoolEntry e = self.entries.take(i);
+        while (self.entries.len > 0) {
+            PoolEntry e = self.entries.take(0);
             e.conn.close();
-            i = i + 1;
         }
-        self.entries.len = 0;
         self.entries.drop();
     }
 }
 
-/// Remove entry `index` from the pool, returning it. Vec.take leaves the
-/// slot in place (len unchanged), so this swaps the last entry into the hole
-/// and shrinks len.
+/// Remove entry `index` from the pool, returning it. Swap-remove: the last
+/// entry fills the hole and len shrinks (O(1), unlike Vec.take's shift).
 PoolEntry http_pool_remove_at(Vec<PoolEntry>* entries, i64 index) {
     i64 last = entries.len - 1;
     PoolEntry entry = entries.data[index];
@@ -702,7 +698,11 @@ impl HttpResponse {
             }
             header_start = end + 2;
         }
-        self.headers = raw.substr(line_end + 2, raw.len - line_end - 2);
+        // Reuse the headers buffer in place: assigning a fresh substr over
+        // the String.new() empty buffer would leak it (field overwrites have
+        // no pre-drop).
+        self.headers.clear();
+        self.headers.push_bytes(&raw.data[line_end + 2], raw.len - line_end - 2);
         return Result<i64, Error>.Ok(0);
     }
 

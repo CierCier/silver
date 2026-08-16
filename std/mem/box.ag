@@ -2,6 +2,11 @@
 ///
 /// `Box<T>` is a smart pointer that owns a dynamically allocated value of type `T` on the heap.
 /// When the box goes out of scope, its destructor is automatically called, freeing the allocated memory.
+///
+/// LIMITATION: `Box<T>::new` copies `val` into the heap slot (the by-value
+/// param is then dropped at callee exit), so an owned `T` (String, Vec, …)
+/// leaves the box holding dangling pointers — use Box for POD/plain types
+/// until move-into-deref (`*p = move val`) is supported.
 
 import std.mem;
 import std.mem.drop;
@@ -12,6 +17,7 @@ struct Box<T> {
 
 impl Box<T> {
     /// Allocates memory on the heap and moves `val` into it, returning a new `Box<T>`.
+    /// POD-only today (see the struct note): owned T double-frees on drop.
     Box<T> new(T val) {
         T* p = alloc<T>();
         *p = val;

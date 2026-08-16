@@ -129,7 +129,8 @@ impl String {
     }
 
     String from_str(str s) {
-        String out = String.with_capacity(strlen(s));
+        // +1 so push_str's NUL never forces a second allocation.
+        String out = String.with_capacity(strlen(s) + 1);
         out.push_str(s);
         return out;
     }

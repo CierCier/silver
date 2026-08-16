@@ -60,7 +60,7 @@ impl Channel<T> {
         while (true) {
             self.mu.lock();
             if (self.head < self.queue.len()) {
-                T value = self.queue.take(self.head);
+                T value = self.queue.get(self.head);
                 self.head = self.head + 1;
                 self.compact();
                 self.mu.unlock();
@@ -104,7 +104,7 @@ impl Channel<T> {
         i64 n = self.queue.len() - self.head;
         i64 i = 0;
         while (i < n) {
-            T tmp = self.queue.take(self.head + i);
+            T tmp = self.queue.get(self.head + i);
             self.queue.set(i, move tmp);
             i = i + 1;
         }

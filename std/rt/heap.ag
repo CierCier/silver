@@ -383,7 +383,7 @@ impl Heap {
         }
 
         i64 idx = (i64)handle.index;
-        Object object = self.objects.take(idx);
+        Object object = self.objects.get(idx);
         self.occupied.set(idx, false);
         // Invalidate all outstanding handles for this index (wrapping add).
         self.generations.set(idx, self.generations.get(idx) + (u32)1);

@@ -263,7 +263,7 @@ const i64 LEAK_CANARY_DEAD = 0x4445414444454144;  // "DEADDEAD"
 i64 __leak_user_ptrs[65536];
 i64 __leak_raw_ptrs[65536];
 i64 __leak_sizes[65536];
-u8 __leak_states[65536]; // 0 empty, 1 live, 2 freed
+u8 __leak_states[65536]; // 0 empty, 1 live, 2 freed, 3 ignored (global cache)
 
 // -- Raw stderr helpers (no allocation, no BufWriter) ------------------------
 
@@ -356,11 +356,26 @@ i64 __leak_find_empty() {
 
 i64 __leak_find_user(i64 user) {
     for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
-        if (__leak_states[i] == (u8)1 && __leak_user_ptrs[i] == user) {
+        if ((__leak_states[i] == (u8)1 || __leak_states[i] == (u8)3)
+            && __leak_user_ptrs[i] == user) {
             return i;
         }
     }
     return -1;
+}
+
+/// Mark a live allocation as intentionally process-lifetime (a global
+/// cache, a static buffer): the leak report skips it, but frees still work
+/// (an evicted cache entry releases its memory normally).
+void __silver_leak_ignore(u8* ptr) {
+    i64 user = (i64)ptr;
+    if (user < MEM_MIN_VALID_ADDR) {
+        return;
+    }
+    i64 slot = __leak_find_user(user);
+    if (slot >= 0) {
+        __leak_states[slot] = (u8)3;
+    }
 }
 
 // -- Public allocation hooks -------------------------------------------------
@@ -453,8 +468,7 @@ i32 __silver_leak_check_report() {
     }
     i32 count = 0;
     for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
-        if (__leak_states[i] == (u8)1) {
-            __silver_leak_write_str("leak-check: leak ptr=0x");
+        if (__leak_states[i] == (u8)1) {            __silver_leak_write_str("leak-check: leak ptr=0x");
             __silver_leak_write_hex(__leak_user_ptrs[i]);
             __silver_leak_write_str(" size=");
             __silver_leak_write_i64(__leak_sizes[i]);

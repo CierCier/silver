@@ -161,6 +161,8 @@ void dns_cache_put(str hostname, i32 ip, i64 ttl_sec) {
         if (g_cache[i].key.data == (u8*)0) {
             g_cache[i].key = String.with_capacity(64);
             g_cache[i].key.push_str(hostname);
+            // Process-lifetime cache: excluded from leak-check reports.
+            __silver_leak_ignore(g_cache[i].key.data);
             g_cache[i].ip = ip; g_cache[i].expires = expires; return;
         }
         i += 1;
@@ -177,6 +179,8 @@ void dns_cache_put(str hostname, i32 ip, i64 ttl_sec) {
     g_cache[best].key.drop();
     g_cache[best].key = String.with_capacity(64);
     g_cache[best].key.push_str(hostname);
+    // Process-lifetime cache: excluded from leak-check reports.
+    __silver_leak_ignore(g_cache[best].key.data);
     g_cache[best].ip = ip; g_cache[best].expires = expires;
 }
 

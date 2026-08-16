@@ -340,14 +340,25 @@ i32 main(){
         r.drop();
         s.drop();
     }
-    // String + String and String + str are waiting on ABI support
-    // for large struct value passing in operator overload codegen.
-    // See: agc/src/codegen/llvm_ir.rs cast_value_to_basic_type
-    test_start("concat String + String (SKIP)");
-    check(true, "concat op skipped - ABI limitation for large structs");
+    // String + String and String + str now work: the __add overloads free
+    // their by-value operands at callee exit (no null-out leak) and the
+    // result owns a fresh buffer.
+    test_start("concat String + String");
+    {
+        String a = String.from_str("hello ");
+        String b = String.from_str("world");
+        String c = a + b;
+        assert_eq_str("hello world", (str)c.to_str(), "String + String concatenates");
+        c.drop();
+    }
 
-    test_start("concat String + str (SKIP)");
-    check(true, "concat op skipped - ABI limitation for large structs");
+    test_start("concat String + str");
+    {
+        String a = String.from_str("foo");
+        String c = a + "bar";
+        assert_eq_str("foobar", (str)c.to_str(), "String + str concatenates");
+        c.drop();
+    }
 
     // String -> str cast: borrowed NUL-terminated view; the String keeps
     // ownership of the buffer (the by-value cast copy nulls its pointer).

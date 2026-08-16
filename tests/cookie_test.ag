@@ -109,6 +109,8 @@ i32 run_jar_case(u16 port, i32 connections) {
         Result<HttpResponse, Error> r = client.get((str)url.data);
         url.drop();
         if (r.failed()) { thread_join(server_handle); return 8; }
+        HttpResponse rr = r.unwrap();
+        rr.drop(); // Result payloads are owned; release after checking
         k = k + 1;
     }
     @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
@@ -129,8 +131,8 @@ i32 main() {
     {
         Cookie c = Cookie.new("session", "abc");
         c.max_age = 3600;
-        c.path.drop();
-        c.path = String.from_str("/");
+        c.path.clear();
+        c.path.push_str("/");
         c.http_only = true;
         c.same_site = SameSite.Lax;
         String out = String.new();
@@ -178,14 +180,20 @@ i32 main() {
             Result<HttpResponse, Error> r1 = client.get((str)u1.data);
             u1.drop();
             assert_true(!r1.failed(), "setup request");
+            HttpResponse rr1 = r1.unwrap();
+            rr1.drop();
             String u2 = build_url(port, "/");
             Result<HttpResponse, Error> r2 = client.get((str)u2.data);
             u2.drop();
             assert_true(!r2.failed(), "root request");
+            HttpResponse rr2 = r2.unwrap();
+            rr2.drop();
             String u3 = build_url(port, "/admin/dash");
             Result<HttpResponse, Error> r3 = client.get((str)u3.data);
             u3.drop();
             assert_true(!r3.failed(), "admin request");
+            HttpResponse rr3 = r3.unwrap();
+            rr3.drop();
             assert_true(thread_join(server_handle) >= 0, "join");
             assert_eq_i64(g_status, 0, "server status");
         }
@@ -291,6 +299,8 @@ i32 main() {
             Result<HttpResponse, Error> r1 = client.do(&req);
             url.drop();
             assert_true(!r1.failed(), "request");
+            HttpResponse rr = r1.unwrap();
+            rr.drop();
             assert_true(thread_join(server_handle) >= 0, "join");
             assert_eq_i64(g_status, 0, "server status");
         }
