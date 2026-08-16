@@ -228,6 +228,16 @@ impl Drop<BufWriter> for BufWriter {
 
 // ---------------------------------------------------------------------------
 
+/// Release the internal buffer (used at process exit for global writers,
+/// which are never auto-dropped).
+void free_buffer(BufWriter* self) {
+    if (self.cap > 0) {
+        free((void*)self.data);
+        self.data = 0;
+        self.cap = 0;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global buffer flush — called by _start after main() returns.
 // ---------------------------------------------------------------------------
@@ -239,6 +249,10 @@ impl Drop<BufWriter> for BufWriter {
 void __silver_flush_all() {
     STDOUT.flush();
     STDERR.flush();
+    // Globals are never auto-dropped; free their buffers so leak-check
+    // reports stay clean (the 4096-byte lazy-init buffer leaked before).
+    free_buffer(&STDOUT);
+    free_buffer(&STDERR);
 }
 // File — a typed-syscall file descriptor wrapper.
 //
