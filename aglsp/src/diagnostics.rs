@@ -93,6 +93,23 @@ impl Backend {
                 }
             };
 
+        // Mirror the compiler driver: gate #[cfg(...)] items and fold
+        // @cfg(...) expressions BEFORE semantic analysis/type checking —
+        // otherwise @cfg calls reach the macro registry as "unknown builtin
+        // macro '@cfg'". Default cfg set (no --cfg flags) plus derived
+        // debug/arch/os cfgs matches `agc` with no flags.
+        let mut cfg_set = agc::cfg::CfgSet::parse(&[]);
+        agc::cfg::add_derived_cfgs(&mut cfg_set, None, None);
+        for error in agc::cfg::gate_items(&mut program, &cfg_set) {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(text, &error.span),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: error.message.clone(),
+                ..Default::default()
+            });
+        }
+        agc::semantic::cfg_hook::fold_and_prune(&mut program, &cfg_set);
+
         // Type-check (runs the semantic analyzer internally: duplicate
         // symbols, unknown identifiers/types/traits, scoping) and capture
         // expression types for hover.
@@ -138,5 +155,63 @@ impl Backend {
                 .publish_diagnostics(target_uri, diags, None)
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agc::parser::Parser;
+    use agc::symbol_index::analyze;
+
+    /// The frontend pipeline used by `check_diagnostics` for a buffer with no
+    /// imports: lex → parse → cfg gate/fold → type-check. Returns the type
+    /// errors so tests can assert the LSP surfaces exactly what the compiler
+    /// would.
+    fn frontend_type_errors(source: &str) -> Vec<String> {
+        let file_id = lexer::register_source("/tmp/lsp_cfg_test.ag", source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let mut parser = Parser::new(tokens.clone());
+        let (mut program, parse_errors) = parser.parse_program();
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+
+        let mut cfg_set = agc::cfg::CfgSet::parse(&[]);
+        agc::cfg::add_derived_cfgs(&mut cfg_set, None, None);
+        let cfg_errors = agc::cfg::gate_items(&mut program, &cfg_set);
+        assert!(cfg_errors.is_empty(), "cfg errors: {}", cfg_errors.len());
+        agc::semantic::cfg_hook::fold_and_prune(&mut program, &cfg_set);
+
+        let mut tc = TypeChecker::new();
+        let mut table = CompilerSymbolTable::new();
+        let (type_errors, _) = tc.check_program_with_table(&program, &mut table);
+        type_errors.into_iter().map(|e| e.message).collect()
+    }
+
+    #[test]
+    fn cfg_expression_is_not_reported_as_unknown_macro() {
+        // @cfg must fold (debug → true) before typeck; a persistent
+        // "unknown builtin macro '@cfg'" here is the regression.
+        let errors = frontend_type_errors(
+            "i32 main() { i32 x = 1; if (@cfg(debug)) { x = x + 1; } return 0; }",
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.contains("unknown builtin macro '@cfg'")),
+            "got cfg macro errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_item_gating_runs_before_symbol_registration() {
+        // The gated-out function must not produce "unknown function" errors
+        // at its call site (it is removed before analysis).
+        let errors = frontend_type_errors(
+            "i32 main() { i32 x = 0; return x; }\n#[cfg(missing_user_key)]\ni32 gated() { return 1; }",
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("unknown")),
+            "gated item leaked into analysis: {errors:?}"
+        );
     }
 }
