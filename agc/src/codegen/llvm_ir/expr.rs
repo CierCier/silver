@@ -1092,6 +1092,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| {
                             CodegenError::new(format!("failed to clear drop flag: {e}"))
                         })?;
+                    self.clear_field_flags(&ident.name)?;
                 }
                 Ok(value)
             }
@@ -2523,6 +2524,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                     is_mutable: false,
                                                     is_volatile: false,
                                                     drop_flag: None,
+                                                    field_flags: Vec::new(),
                                                 },
                                             );
                                         }
@@ -2613,6 +2615,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: false,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }

@@ -326,6 +326,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.builder
                 .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
                 .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+            self.clear_field_flags(&ident.name)?;
         }
         Ok(())
     }
@@ -778,6 +779,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.builder
                 .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
                 .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+            self.clear_field_flags(&ident.name)?;
         }
 
         // Add byval attributes to call site for large struct arguments

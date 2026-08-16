@@ -490,18 +490,14 @@ impl WebSocket {
                     WsMessage m;
                     m.kind = WS_MSG_PING;
                     m.code = 0;
-                    Bytes f_payload = f.payload;
-                    f.payload = Bytes.new();
-                    m.payload = move f_payload;
+                    m.payload = f.payload.take();
                     return Result<WsMessage, Error>.Ok(move m);
                 }
                 if (f.opcode == WS_OP_PONG) {
                     WsMessage m;
                     m.kind = WS_MSG_PONG;
                     m.code = 0;
-                    Bytes f_payload = f.payload;
-                    f.payload = Bytes.new();
-                    m.payload = move f_payload;
+                    m.payload = f.payload.take();
                     return Result<WsMessage, Error>.Ok(move m);
                 }
                 if (f.opcode == WS_OP_CLOSE) {
@@ -538,8 +534,7 @@ impl WebSocket {
                 if (f.fin) {
                     i64 op = self.frag_opcode;
                     self.frag_opcode = -1;
-                    Bytes done = self.frag_buf;
-                    self.frag_buf = Bytes.new();
+                    Bytes done = self.frag_buf.take();
                     WsMessage m = ws_message_from(op, move done);
                     return Result<WsMessage, Error>.Ok(move m);
                 }
@@ -551,16 +546,13 @@ impl WebSocket {
                     Error.new(WS_ERR_PROTOCOL, "new data frame during fragmented message"));
             }
             if (f.fin) {
-                Bytes f_payload = f.payload;
-                    f.payload = Bytes.new();
-                    WsMessage m = ws_message_from(f.opcode, move f_payload);
+                Bytes done = f.payload.take();
+                WsMessage m = ws_message_from(f.opcode, move done);
                 return Result<WsMessage, Error>.Ok(move m);
             }
             // Begin a fragmented message.
             self.frag_opcode = f.opcode;
-            Bytes f_payload = f.payload;
-                f.payload = Bytes.new();
-                self.frag_buf = move f_payload;
+            self.frag_buf = f.payload.take();
         }
         // Unreachable.
         return Result<WsMessage, Error>.Err(Error.new(WS_ERR_PROTOCOL, "unreachable"));

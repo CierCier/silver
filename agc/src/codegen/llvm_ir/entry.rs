@@ -1243,6 +1243,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: false,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }
@@ -1360,6 +1361,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: false,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }

@@ -387,6 +387,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         CodegenError::with_span(format!("failed assignment: {e}"), whole_expr.span)
                     })?;
                 }
+                // The incoming value now lives in the target: mark the
+                // overwritten field(s) as live so the scope-exit cascade
+                // drops them.
+                match left.kind.as_ref() {
+                    ast::ExpressionKind::FieldAccess { .. } => {
+                        self.set_assigned_field_flags(left)?;
+                    }
+                    ast::ExpressionKind::Identifier(_) => {
+                        self.set_all_field_flags(left)?;
+                    }
+                    _ => {}
+                }
                 Ok(value)
             }
             ast::BinaryOperator::AddAssign
@@ -1369,27 +1381,228 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
-    /// Before overwriting a Drop-typed lvalue (`x = y`), release the value
-    /// currently stored there so it is not leaked; the scope-exit drop then
-    /// frees the incoming value. Only plain variable targets are handled:
-    /// field targets may be zero-initialized (Bug C), so dropping them would
-    /// be a spurious destructor call.
+    /// Split an lvalue into its root variable name and the dotted field
+    /// path from the root outward (`a.b.c` -> `("a", "b.c")`). Returns
+    /// None for non-field/identifier lvalues.
+    fn lvalue_root_and_path(&self, left: &ast::Expression) -> Option<(String, String)> {
+        let mut path = Vec::new();
+        let mut expr = left;
+        loop {
+            match expr.kind.as_ref() {
+                ast::ExpressionKind::Identifier(ident) => {
+                    return Some((ident.name.clone(), path.join(".")));
+                }
+                ast::ExpressionKind::FieldAccess { object, field } => {
+                    path.push(field.name.clone());
+                    expr = object;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// GEP to a dotted field path (`f.g`) from a struct pointer, walking
+    /// struct_fields for each segment.
+    fn resolve_field_path_ptr(
+        &mut self,
+        base_ptr: PointerValue<'ctx>,
+        base_ty: &ast::Type,
+        path: &str,
+        span: &Span,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let mut ptr = base_ptr;
+        let mut ty = base_ty.clone();
+        for segment in path.split('.') {
+            let Some(named) = Self::extract_named_type(&ty).cloned() else {
+                return Err(CodegenError::with_span(
+                    format!("field path {path} crosses a non-struct type"),
+                    *span,
+                ));
+            };
+            let named_key = Self::named_type_key(&named);
+            let fields = self
+                .struct_fields
+                .get(&named_key)
+                .cloned()
+                .unwrap_or_default();
+            let Some(index) = fields.iter().position(|(name, _)| name == segment) else {
+                return Err(CodegenError::with_span(
+                    format!("unknown field '{segment}' in field path {path}"),
+                    *span,
+                ));
+            };
+            let struct_ty = match self.struct_types.get(&named_key) {
+                Some(st) => *st,
+                None => {
+                    return Err(CodegenError::with_span(
+                        format!("no layout for struct '{segment}' in field path"),
+                        *span,
+                    ));
+                }
+            };
+            ptr = self
+                .builder
+                .build_struct_gep(struct_ty, ptr, index as u32, segment)
+                .map_err(|e| CodegenError::with_span(format!("field path GEP: {e}"), *span))?;
+            ty = fields[index].1.clone();
+        }
+        Ok(ptr)
+    }
+
+    /// Before overwriting a Drop-typed lvalue (`x = y` or `x.f = y`),
+    /// release the value currently stored there so it is not leaked; the
+    /// scope-exit drop then frees the incoming value. Field targets are
+    /// guarded by their own per-field flag, which is only set once the
+    /// field has been assigned — uninitialized fields are never dropped.
     fn emit_assignment_pre_drop(
         &mut self,
         left: &ast::Expression,
         target_ptr: PointerValue<'ctx>,
         target_ty: &ast::Type,
     ) -> CodegenResult<()> {
-        if !matches!(left.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
-            return Ok(());
+        match left.kind.as_ref() {
+            ast::ExpressionKind::Identifier(_) => {
+                // Wholesale variable overwrite: own drop plus the live
+                // field cascade, in scope-exit order.
+                let Some(drop_fn) = self.get_drop_function_name(target_ty)? else {
+                    return Ok(());
+                };
+                let Some(flag_ptr) = self.assignment_guard_flag(left) else {
+                    return Ok(());
+                };
+                self.emit_guarded_drop(flag_ptr, &drop_fn, target_ptr, &left.span)?;
+                if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
+                    && let Some(var) = self.lookup_variable(&ident.name)
+                {
+                    // field_flags are in registration order (fields last
+                    // first); reversed = scope-exit order (own drop before
+                    // each field's nested drops, fields in declaration
+                    // order).
+                    for (path, flag) in var.field_flags.iter().rev() {
+                        let field_ptr =
+                            self.resolve_field_path_ptr(target_ptr, target_ty, path, &left.span)?;
+                        let Some(field_drop) = self
+                            .get_drop_function_name(&self.field_type_at_path(target_ty, path)?)?
+                        else {
+                            continue;
+                        };
+                        self.emit_guarded_drop(*flag, &field_drop, field_ptr, &left.span)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::ExpressionKind::FieldAccess { .. } => {
+                let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
+                    return Ok(());
+                };
+                let Some(var) = self.lookup_variable(&root_name) else {
+                    return Ok(());
+                };
+                // Drop the target field's own value plus any nested fields
+                // whose paths extend it, in scope-exit order (own first,
+                // then nested). target_ptr already points at the target
+                // field, so nested paths resolve relative to it.
+                let prefix = format!("{path}.");
+                let mut matching: Vec<&(String, PointerValue<'ctx>)> = var
+                    .field_flags
+                    .iter()
+                    .filter(|(p, _)| *p == path || p.starts_with(&prefix))
+                    .collect();
+                if matching.is_empty() {
+                    return Ok(());
+                }
+                // field_flags are in registration order; reversed matches
+                // scope-exit order.
+                matching.reverse();
+                for (fp, flag) in matching {
+                    let (rel, base_ty) = if *fp == path {
+                        (String::new(), target_ty.clone())
+                    } else {
+                        (fp[prefix.len()..].to_string(), target_ty.clone())
+                    };
+                    let field_ptr = if rel.is_empty() {
+                        target_ptr
+                    } else {
+                        self.resolve_field_path_ptr(target_ptr, &base_ty, &rel, &left.span)?
+                    };
+                    let field_ty = if rel.is_empty() {
+                        base_ty
+                    } else {
+                        self.field_type_at_path(&base_ty, &rel)?
+                    };
+                    let Some(field_drop) = self.get_drop_function_name(&field_ty)? else {
+                        continue;
+                    };
+                    self.emit_guarded_drop(*flag, &field_drop, field_ptr, &left.span)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
-        let Some(drop_fn) = self.get_drop_function_name(target_ty)? else {
+    }
+
+    /// Resolve the type of a dotted field path from a base type.
+    fn field_type_at_path(&self, base_ty: &ast::Type, path: &str) -> CodegenResult<ast::Type> {
+        let mut ty = base_ty.clone();
+        for segment in path.split('.') {
+            let Some(named) = Self::extract_named_type(&ty).cloned() else {
+                return Err(CodegenError::new(format!(
+                    "field path {path} crosses a non-struct type"
+                )));
+            };
+            let named_key = Self::named_type_key(&named);
+            let fields = self
+                .struct_fields
+                .get(&named_key)
+                .cloned()
+                .unwrap_or_default();
+            let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == segment) else {
+                return Err(CodegenError::new(format!(
+                    "unknown field '{segment}' in field path {path}"
+                )));
+            };
+            ty = field_ty.clone();
+        }
+        Ok(ty)
+    }
+
+    /// Set a per-field drop flag (marks a field as holding a live value).
+    fn set_field_flag(&mut self, flag: PointerValue<'ctx>) -> CodegenResult<()> {
+        self.builder
+            .build_store(flag, self.context.bool_type().const_int(1, false))
+            .map_err(|e| CodegenError::new(format!("failed to set field flag: {e}")))?;
+        Ok(())
+    }
+
+    /// After assigning a whole struct value to `left`, mark every registered
+    /// field as live.
+    fn set_all_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
+            && let Some(var) = self.lookup_variable(&ident.name)
+        {
+            for (_, flag) in &var.field_flags {
+                self.set_field_flag(*flag)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// After assigning a field of `left`, mark that field (and any nested
+    /// path extending it) as live.
+    fn set_assigned_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
             return Ok(());
         };
-        let Some(flag_ptr) = self.assignment_guard_flag(left) else {
+        let Some(var) = self.lookup_variable(&root_name) else {
             return Ok(());
         };
-        self.emit_guarded_drop(flag_ptr, &drop_fn, target_ptr, &left.span)
+        let prefix = format!("{path}.");
+        for (p, flag) in &var.field_flags {
+            if *p == path || p.starts_with(&prefix) {
+                self.set_field_flag(*flag)?;
+            }
+        }
+        Ok(())
     }
 
     /// Like `cast_value_to_ast_type`, but widens integer values from an

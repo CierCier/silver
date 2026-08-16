@@ -65,6 +65,14 @@ pub(crate) struct VarInfo<'ctx> {
     /// exit. Lives on the variable (not a name-keyed map) so shadowed
     /// bindings never clear each other's flags.
     pub(crate) drop_flag: Option<PointerValue<'ctx>>,
+    /// Per-field Drop flags (i1* each, initialized false = "field holds no
+    /// live value yet"), for struct-typed variables. Keyed by the dotted
+    /// field path ("f", "f.g", …) as registered by register_field_drops;
+    /// set true when the field is assigned, checked by the scope-exit field
+    /// cascade and the assignment pre-drop. This is the definite-init
+    /// tracking that keeps uninitialized fields from being spuriously
+    /// dropped.
+    pub(crate) field_flags: Vec<(String, PointerValue<'ctx>)>,
 }
 
 #[derive(Clone)]

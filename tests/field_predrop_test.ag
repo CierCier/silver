@@ -1,0 +1,85 @@
+import std.test;
+
+// Per-field drop flags: a field is only dropped once it has been assigned
+// (definite-init — uninitialized fields are never destructed), and
+// overwriting a live field releases the old value (field pre-drop).
+
+i64 g_drops = 0;
+
+struct Tracked {
+    i64 v;
+}
+impl Tracked {
+    Tracked new(i64 v) {
+        Tracked t;
+        t.v = v;
+        return move t;
+    }
+}
+impl Drop<Tracked> for Tracked {
+    void drop(Tracked* self) {
+        g_drops = g_drops + 1;
+    }
+}
+
+struct HasField {
+    Tracked t;
+    i64 plain;
+}
+
+// The compiler cascades field drops after the struct's own drop() returns.
+impl Drop<HasField> for HasField {
+    void drop(HasField* self) {
+    }
+}
+
+i32 main() {
+    // 1. Constructing via field assignment must not spuriously drop the
+    //    zero-initialized field (Bug C for fields).
+    {
+        g_drops = 0;
+        HasField h;
+        Tracked fresh = Tracked.new(5);
+        h.t = move fresh;
+        h.plain = 1;
+        assert_eq_i64(0, g_drops, "first field assignment does not drop the zeroed slot");
+    }
+    assert_eq_i64(1, g_drops, "assigned field dropped once at scope exit");
+
+    // 2. Overwriting a live field releases the old value immediately.
+    {
+        g_drops = 0;
+        HasField h;
+        Tracked f1 = Tracked.new(1);
+        h.t = move f1;
+        Tracked f2 = Tracked.new(2);
+        h.t = move f2; // pre-drop: frees the old t now
+        assert_eq_i64(1, g_drops, "overwritten field value dropped at assignment");
+    }
+    assert_eq_i64(2, g_drops, "new field value dropped at scope exit");
+
+    // 3. Conditional assignment: a field assigned in a branch is dropped
+    //    (runtime flag), an untouched one is not.
+    {
+        g_drops = 0;
+        HasField h;
+        bool branch = true;
+        if (branch) {
+            Tracked f = Tracked.new(9);
+            h.t = move f;
+        }
+    }
+    assert_eq_i64(1, g_drops, "branch-assigned field dropped once");
+
+    // 4. A moved struct transfers its field ownership: no drops anywhere.
+    {
+        g_drops = 0;
+        HasField h;
+        Tracked f = Tracked.new(7);
+        h.t = move f;
+        HasField copy = move h; // wholesale move: h's field flag cleared
+        assert_eq_i64(0, g_drops, "wholesale move clears field flags");
+    }
+    assert_eq_i64(1, g_drops, "moved-to struct dropped once at exit");
+    return done();
+}

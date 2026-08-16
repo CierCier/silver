@@ -74,6 +74,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         is_mutable: param.is_mutable,
                         is_volatile: false,
                         drop_flag: None,
+                        field_flags: Vec::new(),
                     },
                 );
             }
@@ -109,6 +110,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ))
                 })?;
             self.register_drop_flag(&param.name.name, &ty_for_drop, alloca)?;
+            // A by-value param is initialized with the caller's value: its
+            // fields hold live resources, so mark them live for the cascade.
+            if let Some(var) = self.lookup_variable(&param.name.name) {
+                for (_, flag) in var.field_flags {
+                    self.builder
+                        .build_store(flag, self.context.bool_type().const_int(1, false))
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to mark param fields: {e}"),
+                                param.name.span,
+                            )
+                        })?;
+                }
+            }
         }
 
         self.generate_block(body)?;
@@ -369,6 +384,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }
@@ -485,6 +501,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: true,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }
@@ -534,6 +551,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: true,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }
@@ -644,6 +662,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }
@@ -776,6 +795,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         is_mutable: let_stmt.is_mutable,
                         is_volatile: let_stmt.is_volatile,
                         drop_flag: None,
+                        field_flags: Vec::new(),
                     },
                 );
             }
@@ -808,6 +828,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             })?;
         }
 
+        // A struct local declared with an initializer holds live fields;
+        // register_drop_flag (below) will allocate their per-field flags
+        // (initialized false), so mark them live right after registration.
+        // `let x;` without an initializer leaves them false (Bug C: never
+        // drop uninitialized fields).
+        let has_initializer = let_stmt.initializer.is_some();
+        let init_identifier = identifier.name.clone();
+
         let ty = inferred_ty;
         let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
@@ -819,6 +847,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     is_mutable: let_stmt.is_mutable,
                     is_volatile: let_stmt.is_volatile,
                     drop_flag: None,
+                    field_flags: Vec::new(),
                 },
             );
         }
@@ -834,7 +863,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Check if this variable's type implements Drop; if so, set up a
         // drop flag and register the cascade (field drops, then own drop).
-        self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)
+        self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)?;
+        // Fields of an initialized struct local hold live values; mark them
+        // live so the scope-exit cascade drops them (uninitialized `let x;`
+        // leaves them false — Bug C: never drop uninitialized fields).
+        if has_initializer && let Some(var) = self.lookup_variable(&init_identifier) {
+            for (_, flag) in var.field_flags {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(1, false))
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to mark initialized fields: {e}"),
+                            identifier.span,
+                        )
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn infer_ast_type_from_value(
@@ -981,6 +1026,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             is_mutable: false,
                             is_volatile: false,
                             drop_flag: None,
+                            field_flags: Vec::new(),
                         },
                     );
                 }

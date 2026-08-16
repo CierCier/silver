@@ -104,6 +104,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .find_map(|scope| scope.get(name).cloned())
     }
 
+    /// Clear every per-field drop flag of `name` (ownership of the whole
+    /// struct is transferring elsewhere): the fields no longer hold live
+    /// values owned by this variable.
+    pub(crate) fn clear_field_flags(&mut self, name: &str) -> CodegenResult<()> {
+        if let Some(var) = self.lookup_variable(name) {
+            for (_, flag) in var.field_flags {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(format!("failed to clear field flag: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn lookup_extern_global(
         &self,
         name: &str,
@@ -263,8 +277,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Field drops are registered BEFORE the struct's own drop so they
         // fire AFTER it in LIFO order (the struct drop is last-registered,
-        // so it runs first).
-        self.register_field_drops(ty, var_ptr, flag_alloca)?;
+        // so it runs first). Each Drop-typed field gets its own flag
+        // (initialized false — "no live value yet"); the returned list is
+        // stored on the variable for the assignment pre-drop and for
+        // clearing on move/transfer.
+        let field_flags = self.register_field_drops(ty, var_ptr, flag_alloca)?;
+        if let Some(scope) = self.variables.last_mut()
+            && let Some(var) = scope.get_mut(name)
+        {
+            var.field_flags = field_flags;
+        }
 
         if let Some(scope) = self.defers.last_mut() {
             scope.push(DeferredEntry {
@@ -279,10 +301,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         ty: &ast::Type,
         struct_ptr: PointerValue<'ctx>,
-        flag: PointerValue<'ctx>,
-    ) -> CodegenResult<()> {
+        _parent_flag: PointerValue<'ctx>,
+    ) -> CodegenResult<Vec<(String, PointerValue<'ctx>)>> {
         let Some(named) = Self::extract_named_type(ty).cloned() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         // Enums are scalar-backed or payload layouts, not structs with field
         // metadata. Drop registration only cascades through struct fields.
@@ -290,7 +312,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             || (named.path.len() == 1
                 && self.enum_payload_layouts.contains_key(&named.path[0].name))
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let _ = self.ensure_named_struct_type(&named)?;
         let named_key = Self::named_type_key(&named);
@@ -298,14 +320,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // recursively calling self.register_field_drops / get_drop_function_name.
         let fields: Vec<(String, ast::Type)> = match self.struct_fields.get(&named_key) {
             Some(f) => f.clone(),
-            None => return Ok(()),
+            None => return Ok(Vec::new()),
         };
         let struct_ty = match self.struct_types.get(&named_key) {
             Some(ty) => *ty,
-            None => return Ok(()),
+            None => return Ok(Vec::new()),
         };
         // Iterate in reverse so that declaration-order drops fire at runtime
-        // (defers are LIFO, so last-registered fires first).
+        // (defers are LIFO, so last-registered fires first). Each Drop-typed
+        // field gets its own flag, initialized FALSE: a field only holds a
+        // live value once it has been assigned (definite-init tracking —
+        // uninitialized fields must not be dropped).
+        let mut collected: Vec<(String, PointerValue<'ctx>)> = Vec::new();
         for (field_index, (field_name, field_ty)) in fields.iter().enumerate().rev() {
             let field_ptr = self
                 .builder
@@ -315,20 +341,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if !Self::is_pointer_or_reference(field_ty) {
                 // Recursively register drops for nested fields first
                 // (so the parent field's drop fires after its children).
-                self.register_field_drops(field_ty, field_ptr, flag)?;
+                let nested = self.register_field_drops(field_ty, field_ptr, _parent_flag)?;
+                for (nested_path, nested_flag) in nested {
+                    let full_path = format!("{field_name}.{nested_path}");
+                    collected.push((full_path, nested_flag));
+                }
 
                 // Register this field's own drop if it implements Drop.
-                if let Some(drop_fn) = self.get_drop_function_name(field_ty)?
-                    && let Some(scope) = self.defers.last_mut()
-                {
-                    scope.push(DeferredEntry {
-                        action: DeferAction::DropCall(drop_fn, field_ptr),
-                        flag: Some(flag),
-                    });
+                if let Some(drop_fn) = self.get_drop_function_name(field_ty)? {
+                    let function = self.current_fn.ok_or_else(|| {
+                        CodegenError::new("no active function for field drop flag")
+                    })?;
+                    let field_flag = self.create_entry_alloca(
+                        function,
+                        &format!("field.{field_name}.drop"),
+                        self.context.bool_type().as_basic_type_enum(),
+                    )?;
+                    self.builder
+                        .build_store(field_flag, self.context.bool_type().const_int(0, false))
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to init field drop flag: {e}"))
+                        })?;
+                    if let Some(scope) = self.defers.last_mut() {
+                        scope.push(DeferredEntry {
+                            action: DeferAction::DropCall(drop_fn, field_ptr),
+                            flag: Some(field_flag),
+                        });
+                    }
+                    collected.push((field_name.clone(), field_flag));
                 }
             }
         }
-        Ok(())
+        Ok(collected)
     }
 
     pub(crate) fn extract_named_type(ty: &ast::Type) -> Option<&ast::NamedType> {

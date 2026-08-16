@@ -36,6 +36,21 @@ impl Bytes {
         return self.cap;
     }
 
+    /// Take ownership of the buffer out of `self`, leaving it empty
+    /// (allocation-free). Unlike a plain copy-then-replace, the taken
+    /// buffer is not dropped: the caller owns it. `dst = src.take(&src)`
+    /// is the single-owner transfer primitive.
+    Bytes take(Bytes* self) {
+        Bytes out;
+        out.data = self.data;
+        out.len = self.len;
+        out.cap = self.cap;
+        self.data = (u8*)0;
+        self.len = 0;
+        self.cap = 0;
+        return out;
+    }
+
     void push(&mut Bytes self, u8 byte) {
         if (self.len + 1 > self.cap) {
             i64 new_cap = self.cap * 2;

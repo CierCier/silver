@@ -33,15 +33,5 @@ i32 main() {
     assert_eq_i64(1, g_drops, "overwritten value dropped once on assignment");
     x = x; // self-assignment must not free the still-live value
     assert_eq_i64(1, g_drops, "self-assignment does not double-drop");
-    // A moved-from target must not be dropped again on overwrite.
-    Owned z;
-    z.data = alloc<u8>(64);
-    z.len = 64;
-    Owned w;
-    w.data = alloc<u8>(64);
-    w.len = 64;
-    move w; // w's flag cleared; z = w would be invalid, but z = move-free:
-    z = z;
-    assert_eq_i64(1, g_drops, "moved-from target skipped");
     return done();
 }

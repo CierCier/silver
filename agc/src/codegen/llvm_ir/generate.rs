@@ -1144,6 +1144,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             .map_err(|e| {
                                 CodegenError::new(format!("failed to clear drop flag: {e}"))
                             })?;
+                        self.clear_field_flags(&ident.name)?;
                     }
                     if let Some(return_ty) = self.current_return_type.clone() {
                         value = self.cast_value_to_ast_type(value, &return_ty, &expr_span)?;

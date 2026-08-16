@@ -96,6 +96,8 @@ channel_test
 memory_stress
 http_test
 cookie_test
+assignment_drop_test
+field_predrop_test
 "
 
 # True when a test is compiled with --leak-check.
