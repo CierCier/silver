@@ -1,0 +1,48 @@
+import std.test;
+
+// Drop flags must be attached to the binding, not keyed by name: a shadowed
+// variable used to replace the outer binding's flag in the name-keyed map,
+// so moving the outer variable cleared a stale inner flag and the outer was
+// dropped anyway (double free / spurious destructor).
+
+i64 g_drops = 0;
+
+struct T {
+    i64 v;
+}
+impl Drop<T> for T {
+    void drop(T* self) {
+        g_drops = g_drops + 1;
+    }
+}
+
+/// By-value param: ownership transfers; the callee drops it exactly once.
+void consume(T t) {
+}
+
+i32 main() {
+    T x;
+    x.v = 1;
+    {
+        T x;
+        x.v = 2;
+        move x; // inner moved: must not be dropped at inner scope exit
+    }
+    assert_eq_i64(0, g_drops, "shadowed inner moved var is not dropped");
+    move x; // outer moved: must not be dropped at main exit either
+    assert_eq_i64(0, g_drops, "outer moved var is not dropped despite shadowing");
+
+    // By-value transfer path: the callee drops the copy once; the moved
+    // caller variable must not be dropped again at scope exit.
+    T y;
+    y.v = 1;
+    {
+        T y;
+        y.v = 2;
+        consume(move y);
+    }
+    assert_eq_i64(1, g_drops, "by-value transfer drops exactly once (callee)");
+    consume(move y);
+    assert_eq_i64(2, g_drops, "second transfer: exactly two drops total");
+    return done();
+}

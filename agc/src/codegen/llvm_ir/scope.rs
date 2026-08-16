@@ -252,7 +252,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.builder
             .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
             .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
-        self.drop_flags.insert(name.to_string(), flag_alloca);
+        // Attach the flag to the innermost binding so shadowed variables
+        // never clear each other's flags (a name-keyed map lost the outer
+        // flag on shadowing, leaving moved values to be dropped anyway).
+        if let Some(scope) = self.variables.last_mut()
+            && let Some(var) = scope.get_mut(name)
+        {
+            var.drop_flag = Some(flag_alloca);
+        }
 
         // Field drops are registered BEFORE the struct's own drop so they
         // fire AFTER it in LIFO order (the struct drop is last-registered,

@@ -1,0 +1,29 @@
+import std.test;
+
+// A concrete type may share its name with a generic parameter of an
+// unrelated item (std's Result<T, E> registers "T"/"E" program-wide). The
+// generic-placeholder classifier used to treat any type named `T` or `E` as
+// a placeholder, silently skipping every free function mentioning it
+// ("unknown function" at the call site, function never emitted).
+
+struct T {
+    i64 v;
+}
+struct E {
+    i64 v;
+}
+
+i64 consume_t(T t) { return t.v; }
+i64 consume_e(E e) { return e.v; }
+i64 consume_ptr(T* t) { return t.v; }
+
+i32 main() {
+    T t;
+    t.v = 5;
+    E e;
+    e.v = 9;
+    assert_eq_i64(5, consume_t(t), "struct named T: by-value param resolves");
+    assert_eq_i64(9, consume_e(e), "struct named E: by-value param resolves");
+    assert_eq_i64(5, consume_ptr(&t), "struct named T: pointer param resolves");
+    return done();
+}

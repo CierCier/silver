@@ -1,0 +1,33 @@
+import std.test;
+
+// Enum payload construction must evaluate each payload argument exactly
+// once. Regression: a trailing codegen block re-emitted and re-stored
+// fields[0], running its side effects twice and (for multi-field payloads)
+// overwriting the first field.
+
+enum Wrap { One(i32); }
+enum Pair { Twin(i32, i32); }
+
+i64 g_evals = 0;
+
+i64 side_effect() {
+    g_evals = g_evals + 1;
+    return 7;
+}
+
+i32 main() {
+    // Single-field payload: side effect must run once.
+    Wrap w = Wrap.One(side_effect());
+    assert_eq_i64(1, g_evals, "payload expression evaluated exactly once");
+    i32 one = match w { One(v) : v };
+    assert_eq_i32(7, one, "single-field payload value intact");
+
+    // Multi-field payload: first field must not be overwritten by a
+    // re-evaluation of the second.
+    g_evals = 0;
+    Pair p = Pair.Twin(side_effect(), 99);
+    assert_eq_i64(1, g_evals, "multi-field: first arg evaluated once");
+    i32 sum = match p { Twin(a, b) : a + b };
+    assert_eq_i32(106, sum, "multi-field: both values intact (7 + 99)");
+    return done();
+}

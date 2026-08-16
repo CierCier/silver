@@ -73,6 +73,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ty: param.param_type.clone(),
                         is_mutable: param.is_mutable,
                         is_volatile: false,
+                        drop_flag: None,
                     },
                 );
             }
@@ -144,7 +145,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.pop_scope();
         self.current_fn = None;
         self.current_return_type = saved_return_type;
-        self.drop_flags.clear();
         self.static_local_counter = 0;
         if let Some(debug) = &mut self.debug {
             debug.current_subprogram = None;
@@ -368,6 +368,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: ast_ty,
                             is_mutable,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }
@@ -483,6 +484,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: iterable_ast_ty,
                             is_mutable: true,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }
@@ -531,6 +533,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: iter_ast_ty,
                             is_mutable: true,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }
@@ -640,6 +643,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: ast_ty,
                             is_mutable,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }
@@ -771,6 +775,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ty: inferred_ty,
                         is_mutable: let_stmt.is_mutable,
                         is_volatile: let_stmt.is_volatile,
+                        drop_flag: None,
                     },
                 );
             }
@@ -813,6 +818,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ty,
                     is_mutable: let_stmt.is_mutable,
                     is_volatile: let_stmt.is_volatile,
+                    drop_flag: None,
                 },
             );
         }
@@ -974,6 +980,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: inferred,
                             is_mutable: false,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }

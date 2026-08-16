@@ -2,7 +2,7 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::{CodegenError, CodegenResult};
@@ -367,6 +367,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let rhs = self.emit_expression_value(right)?;
                     self.cast_value_to_ast_type(rhs, &target_ty, &right.span)?
                 };
+                // Release the value being overwritten so `x = y` on a
+                // Drop-typed x does not leak the old resource (the scope-exit
+                // drop then frees the new value). Skipped for literal
+                // self-assignment (`x = x`) and unguarded lvalues.
+                let is_self_assign = match (left.kind.as_ref(), right.kind.as_ref()) {
+                    (ast::ExpressionKind::Identifier(l), ast::ExpressionKind::Identifier(r)) => {
+                        l.name == r.name
+                    }
+                    _ => false,
+                };
+                if !is_self_assign {
+                    self.emit_assignment_pre_drop(left, target_ptr, &target_ty)?;
+                }
                 if self.lvalue_is_volatile(left) {
                     self.emit_volatile_store(target_ptr, value)?;
                 } else {
@@ -1300,6 +1313,83 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span("user-defined cast returned void".to_string(), *span)
         })?;
         Ok(Some(result))
+    }
+
+    /// The root variable behind a possibly-nested lvalue (`a.b.c` -> `a`),
+    /// so its drop flag can guard a pre-drop. Returns None for unguarded
+    /// lvalues (index expressions, temporaries).
+    fn assignment_guard_flag(&mut self, left: &ast::Expression) -> Option<PointerValue<'ctx>> {
+        let mut expr = left;
+        loop {
+            match expr.kind.as_ref() {
+                ast::ExpressionKind::Identifier(ident) => {
+                    return self.lookup_variable(&ident.name).and_then(|v| v.drop_flag);
+                }
+                ast::ExpressionKind::FieldAccess { object, .. } => expr = object,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Emit a flag-guarded destructor call for the value about to be
+    /// overwritten by an assignment: load the owner's drop flag and call
+    /// `drop_fn(target_ptr)` only when it is still set (the value was not
+    /// moved out).
+    fn emit_guarded_drop(
+        &mut self,
+        flag_ptr: PointerValue<'ctx>,
+        drop_fn: &str,
+        target_ptr: PointerValue<'ctx>,
+        span: &Span,
+    ) -> CodegenResult<()> {
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for pre-drop"))?;
+        let flag_val = self
+            .builder
+            .build_load(self.context.bool_type(), flag_ptr, "predrop.flag")
+            .map_err(|e| CodegenError::new(format!("failed to load pre-drop flag: {e}")))?;
+        let run_bb = self.context.append_basic_block(function, "predrop.run");
+        let after_bb = self.context.append_basic_block(function, "predrop.after");
+        self.builder
+            .build_conditional_branch(flag_val.into_int_value(), run_bb, after_bb)
+            .map_err(|e| CodegenError::new(format!("failed to branch pre-drop: {e}")))?;
+        self.builder.position_at_end(run_bb);
+        if let Some(func) = self.module.get_function(drop_fn) {
+            let args = vec![BasicMetadataValueEnum::from(target_ptr)];
+            self.builder
+                .build_call(func, &args, "predrop")
+                .map_err(|e| CodegenError::new(format!("failed to call pre-drop: {e}")))?;
+        }
+        self.builder
+            .build_unconditional_branch(after_bb)
+            .map_err(|e| CodegenError::new(format!("failed to join pre-drop: {e}")))?;
+        self.builder.position_at_end(after_bb);
+        let _ = span;
+        Ok(())
+    }
+
+    /// Before overwriting a Drop-typed lvalue (`x = y`), release the value
+    /// currently stored there so it is not leaked; the scope-exit drop then
+    /// frees the incoming value. Only plain variable targets are handled:
+    /// field targets may be zero-initialized (Bug C), so dropping them would
+    /// be a spurious destructor call.
+    fn emit_assignment_pre_drop(
+        &mut self,
+        left: &ast::Expression,
+        target_ptr: PointerValue<'ctx>,
+        target_ty: &ast::Type,
+    ) -> CodegenResult<()> {
+        if !matches!(left.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
+            return Ok(());
+        }
+        let Some(drop_fn) = self.get_drop_function_name(target_ty)? else {
+            return Ok(());
+        };
+        let Some(flag_ptr) = self.assignment_guard_flag(left) else {
+            return Ok(());
+        };
+        self.emit_guarded_drop(flag_ptr, &drop_fn, target_ptr, &left.span)
     }
 
     /// Like `cast_value_to_ast_type`, but widens integer values from an

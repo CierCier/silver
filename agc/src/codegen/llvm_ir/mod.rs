@@ -61,6 +61,10 @@ pub(crate) struct VarInfo<'ctx> {
     pub(crate) ty: ast::Type,
     pub(crate) is_mutable: bool,
     pub(crate) is_volatile: bool,
+    /// Drop flag (i1*): cleared on move/by-value transfer, checked at scope
+    /// exit. Lives on the variable (not a name-keyed map) so shadowed
+    /// bindings never clear each other's flags.
+    pub(crate) drop_flag: Option<PointerValue<'ctx>>,
 }
 
 #[derive(Clone)]
@@ -113,8 +117,10 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) enum_payload_layouts: HashMap<String, StructType<'ctx>>,
     pub(crate) enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     pub(crate) defers: Vec<Vec<DeferredEntry<'ctx>>>,
-    pub(crate) drop_flags: HashMap<String, PointerValue<'ctx>>,
     pub(crate) volatile_globals: HashSet<String>,
+    /// Names declared as `type X = ...` aliases; consulted by the generic-
+    /// placeholder classifier so an alias may share a generic-param name.
+    pub(crate) type_aliases: HashSet<String>,
     pub(crate) static_local_counter: usize,
     pub(crate) method_receivers: HashMap<(String, String), bool>,
     /// Distinct full signatures per `(owner, method)` (params + return +

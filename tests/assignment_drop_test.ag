@@ -1,0 +1,47 @@
+import std.test;
+import std.mem.alloc;
+
+// Assignment must release the value being overwritten: `x = y` on a
+// Drop-typed x used to store over the old resource, leaking it. The new
+// value is freed by the scope-exit drop; self-assignment must not
+// double-drop.
+
+i64 g_drops = 0;
+
+struct Owned {
+    u8* data;
+    i64 len;
+}
+impl Drop<Owned> for Owned {
+    void drop(Owned* self) {
+        g_drops = g_drops + 1;
+        if (self.data != (u8*)0) {
+            free(self.data);
+            self.data = (u8*)0;
+        }
+    }
+}
+
+i32 main() {
+    Owned x;
+    x.data = alloc<u8>(64);
+    x.len = 64;
+    Owned y;
+    y.data = alloc<u8>(64);
+    y.len = 64;
+    x = move y; // overwrites x: old value must be dropped exactly once
+    assert_eq_i64(1, g_drops, "overwritten value dropped once on assignment");
+    x = x; // self-assignment must not free the still-live value
+    assert_eq_i64(1, g_drops, "self-assignment does not double-drop");
+    // A moved-from target must not be dropped again on overwrite.
+    Owned z;
+    z.data = alloc<u8>(64);
+    z.len = 64;
+    Owned w;
+    w.data = alloc<u8>(64);
+    w.len = 64;
+    move w; // w's flag cleared; z = w would be invalid, but z = move-free:
+    z = z;
+    assert_eq_i64(1, g_drops, "moved-from target skipped");
+    return done();
+}

@@ -188,6 +188,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ty: Self::json_type(type_name, span),
                     is_mutable: true,
                     is_volatile: false,
+                    drop_flag: None,
                 },
             );
         }

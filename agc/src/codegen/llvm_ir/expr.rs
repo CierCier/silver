@@ -1084,7 +1084,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Move(inner) => {
                 let value = self.emit_expression_value(inner)?;
                 if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref()
-                    && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+                    && let Some(flag_ptr) =
+                        self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
                 {
                     self.builder
                         .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
@@ -1205,20 +1206,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 })?;
                                 offset += field_size;
                             }
-                            let val = self.emit_expression_value(&fields[0])?;
-                            let val_ptr = self
-                                .builder
-                                .build_pointer_cast(
-                                    data_ptr,
-                                    self.context.ptr_type(AddressSpace::default()),
-                                    "enum.val.cast",
-                                )
-                                .map_err(|e| {
-                                    CodegenError::new(format!("pointer cast enum: {e}"))
-                                })?;
-                            self.builder.build_store(val_ptr, val).map_err(|e| {
-                                CodegenError::new(format!("store enum payload: {e}"))
-                            })?;
                         }
                     }
                     Ok(self
@@ -2535,6 +2522,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                     ty: pt.clone(),
                                                     is_mutable: false,
                                                     is_volatile: false,
+                                                    drop_flag: None,
                                                 },
                                             );
                                         }
@@ -2624,6 +2612,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: inferred,
                             is_mutable: false,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }

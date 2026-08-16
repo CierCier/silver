@@ -139,8 +139,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_variant_payload_types: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::default(),
             volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
             static_local_counter: 0,
             method_receivers: HashMap::default(),
             method_overload_signatures: HashMap::default(),
@@ -238,8 +238,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_variants: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::default(),
             volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
             static_local_counter: 0,
             method_receivers: HashMap::default(),
             method_overload_signatures: HashMap::default(),
@@ -567,8 +567,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             enum_variants: HashMap::default(),
             enum_payload_layouts: HashMap::default(),
             defers: vec![vec![]],
-            drop_flags: HashMap::default(),
             volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
             static_local_counter: 0,
             method_receivers: HashMap::default(),
             method_overload_signatures: HashMap::default(),
@@ -1242,6 +1242,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: ast_ty,
                             is_mutable: false,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }
@@ -1358,6 +1359,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ty: buf_writer_type.clone(),
                             is_mutable: false,
                             is_volatile: false,
+                            drop_flag: None,
                         },
                     );
                 }

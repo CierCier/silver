@@ -1213,7 +1213,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let saved_fn = self.current_fn;
                 let saved_block = self.builder.get_insert_block();
                 let saved_defers = std::mem::take(&mut self.defers);
-                let saved_drop_flags = std::mem::take(&mut self.drop_flags);
                 let saved_variables = std::mem::take(&mut self.variables);
 
                 self.defers.push(Vec::new());
@@ -1230,7 +1229,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )?;
 
                 self.defers = saved_defers;
-                self.drop_flags = saved_drop_flags;
                 self.variables = saved_variables;
                 self.current_fn = saved_fn;
                 if let Some(saved_block) = saved_block {
@@ -1401,6 +1399,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     pub(crate) fn is_generic_placeholder_name(&self, name: &str) -> bool {
+        // A name is only a generic placeholder when no concrete type claims
+        // it: std's Result<T, E> registers "T" and "E" as parameter names
+        // program-wide, so a user struct (or alias) named `T` must not be
+        // misread as a placeholder — doing so silently dropped every free
+        // function mentioning it (never declared, "unknown function" at
+        // call sites).
+        if self.struct_fields.contains_key(name)
+            || self.enum_backing_types.contains_key(name)
+            || self.struct_types.contains_key(name)
+            || self.type_aliases.contains(name)
+        {
+            return false;
+        }
         self.struct_generics
             .values()
             .any(|params| params.iter().any(|p| p == name))

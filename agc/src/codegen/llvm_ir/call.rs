@@ -321,7 +321,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// callee that will run the destructor on its copy.
     pub(crate) fn clear_drop_flag_of(&mut self, expr: &ast::Expression) -> CodegenResult<()> {
         if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
-            && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+            && let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
         {
             self.builder
                 .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
@@ -773,7 +773,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop"
             && let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref()
-            && let Some(flag_ptr) = self.drop_flags.get(&ident.name).copied()
+            && let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
         {
             self.builder
                 .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
