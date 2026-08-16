@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use inkwell::targets::TargetData;
 use inkwell::types::StructType;
@@ -913,7 +913,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Worklist of (template name, concrete type args, value arity).
         let mut pending: Vec<(String, Vec<ast::Type>, usize)> = Vec::new();
         Self::collect_concrete_generic_calls(outer_body, &mut pending);
-        let mut declared: HashSet<String> = HashSet::new();
+        let mut declared: FxHashSet<String> = FxHashSet::default();
         let mut bodies: Vec<(ast::FunctionItem, String)> = Vec::new();
         let mut i = 0;
         while i < pending.len() {
@@ -930,7 +930,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             };
             let mut mapping: HashMap<String, ast::Type> = HashMap::default();
             let mut type_params: Vec<String> = Vec::new();
-            let mut ok = true;
             for param in &generics.params {
                 if let ast::GenericParam::Type(tp) = param {
                     type_params.push(tp.name.name.clone());
@@ -1049,7 +1048,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     {
                         out.push((
                             named.path[0].name.clone(),
-                            generics.iter().cloned().collect(),
+                            generics.to_vec(),
                             arguments.len(),
                         ));
                     }
@@ -1138,8 +1137,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::StatementKind::Expression(expr)
                 | ast::StatementKind::Return(Some(expr))
                 | ast::StatementKind::Break(Some(expr)) => walk_expr(expr, out),
-                ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
-                ast::StatementKind::Continue => {}
                 ast::StatementKind::Defer(inner) => walk_statement(inner, out),
                 _ => {}
             }
