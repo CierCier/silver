@@ -164,6 +164,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 ast::ItemKind::TypeAlias(alias) => {
                     self.type_aliases.insert(alias.name.name.clone());
                 }
+                ast::ItemKind::Function(func) if func.generics.is_some() => {
+                    self.generic_function_templates
+                        .insert(func.name.name.clone(), func.clone());
+                }
                 _ => {}
             }
         }

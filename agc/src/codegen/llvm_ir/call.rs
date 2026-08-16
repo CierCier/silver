@@ -1074,8 +1074,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         *span,
                     ));
                 }
+                // A fence is a void instruction: naming it produces
+                // `%atomic.fence = fence acquire`, which the LLVM verifier
+                // rejects ("instructions returning void cannot have a name")
+                // and crashes the backend. Emit it unnamed.
                 self.builder
-                    .build_fence(ordering, false, "atomic.fence")
+                    .build_fence(ordering, false, "")
                     .map_err(|e| CodegenError::new(format!("fence failed: {e}")))?;
                 Ok(Some(None))
             }

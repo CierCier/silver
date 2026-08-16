@@ -2055,7 +2055,7 @@ fn ordered_args(type_params: &[String], mapping: &HashMap<String, Type>) -> Vec<
 /// Format: `{name}__{K}_{args}__{P}_{params}__{hash}` — explicit arity
 /// counts plus an FNV-1a-64 hash of the complete canonical signature make
 /// distinct instances always distinct (see crate::mangling).
-fn mangle_function_instance(
+pub(crate) fn mangle_function_instance(
     source: &ast::FunctionItem,
     args: &[Type],
     mapping: &HashMap<String, Type>,

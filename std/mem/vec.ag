@@ -91,11 +91,7 @@ impl Vec<T> {
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
-            // realloc_bytes keeps the old block valid on failure; abort
-            // rather than overwriting self.data with null.
-            void* grown = realloc_bytes(self.data, @size(T) * new_cap);
-            if (grown == (void*)0) { abort(); }
-            self.data = (T*)grown;
+            self.data = (T*)(realloc<T>(self.data, new_cap));
             self.cap = new_cap;
         }
         self.data[self.len] = move value;
@@ -134,9 +130,7 @@ impl Vec<T> {
         if (self.cap >= min_capacity) {
             return;
         }
-        void* grown = realloc_bytes(self.data, @size(T) * min_capacity);
-        if (grown == (void*)0) { abort(); }
-        self.data = (T*)grown;
+        self.data = realloc<T>(self.data, min_capacity);
         self.cap = min_capacity;
     }
 
@@ -150,9 +144,7 @@ impl Vec<T> {
             self.cap = 0;
         } else {
             if (self.len < self.cap) {
-                void* grown = realloc_bytes(self.data, @size(T) * self.len);
-                if (grown == (void*)0) { abort(); }
-                self.data = (T*)grown;
+                self.data = realloc<T>(self.data, self.len);
                 self.cap = self.len;
             }
         }

@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
+use std::collections::HashSet;
 
 use inkwell::targets::TargetData;
 use inkwell::types::StructType;
@@ -819,7 +820,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     && let ast::TypeKind::Named(named) = ty.kind.as_mut()
                     && let Some(generics) = &named.generics
                     && !generics.is_empty()
-                    && generics.iter().all(|g| !Self::type_has_type_param(g))
+                    && generics.iter().all(|g| !self.type_has_type_param(g))
                 {
                     // All concrete args -> this is a generic function call.
                     // Monomorphized instances are declared in Pass 1a under
@@ -900,28 +901,290 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Emit generic free-function instances referenced by `block` that the
+    /// semantic monomorph pass never requested — nested calls inside
+    /// lazily instantiated generic impl methods (e.g. `realloc<T>` inside
+    /// `Vec<T>.push`). Two-phase: declare every reachable instance first
+    /// (so call-site rewriting sees them), then emit the bodies.
+    fn emit_missing_generic_free_instances(
+        &mut self,
+        outer_body: &mut ast::Block,
+    ) -> CodegenResult<()> {
+        // Worklist of (template name, concrete type args, value arity).
+        let mut pending: Vec<(String, Vec<ast::Type>, usize)> = Vec::new();
+        Self::collect_concrete_generic_calls(outer_body, &mut pending);
+        let mut declared: HashSet<String> = HashSet::new();
+        let mut bodies: Vec<(ast::FunctionItem, String)> = Vec::new();
+        let mut i = 0;
+        while i < pending.len() {
+            let (fn_name, args, arg_count) = pending[i].clone();
+            i += 1;
+            let Some(template) = self.generic_function_templates.get(&fn_name).cloned() else {
+                continue;
+            };
+            if template.parameters.len() != arg_count {
+                continue;
+            }
+            let Some(generics) = &template.generics else {
+                continue;
+            };
+            let mut mapping: HashMap<String, ast::Type> = HashMap::default();
+            let mut type_params: Vec<String> = Vec::new();
+            let mut ok = true;
+            for param in &generics.params {
+                if let ast::GenericParam::Type(tp) = param {
+                    type_params.push(tp.name.name.clone());
+                }
+            }
+            if type_params.len() != args.len() {
+                continue;
+            }
+            for (p, a) in type_params.iter().zip(args.iter()) {
+                mapping.insert(p.clone(), a.clone());
+            }
+            let sem_args: Vec<crate::types::Type> =
+                args.iter().map(crate::types::Type::from_ast).collect();
+            let sem_mapping: HashMap<String, crate::types::Type> = mapping
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::types::Type::from_ast(v)))
+                .collect();
+            let instance = crate::semantic::monomorph::mangle_function_instance(
+                &template,
+                &sem_args,
+                &sem_mapping,
+            );
+            if self.module.get_function(&instance).is_some() || !declared.insert(instance.clone()) {
+                continue;
+            }
+            // Substitute the body so nested generic calls become concrete
+            // and can be collected into the worklist.
+            let mut func = template;
+            for param in &mut func.parameters {
+                param.param_type = Self::substitute_generic_type(&param.param_type, &mapping);
+            }
+            if let Some(ret) = &mut func.return_type {
+                *ret = Self::substitute_generic_type(ret, &mapping);
+            }
+            Self::substitute_block_types(&mut func.body, &mapping);
+            Self::collect_concrete_generic_calls(&func.body, &mut pending);
+            // Declare (signature + symbol table) before any body emission.
+            self.register_function_signature(
+                &instance,
+                FunctionSig {
+                    params: func
+                        .parameters
+                        .iter()
+                        .map(|p| p.param_type.clone())
+                        .collect(),
+                    return_type: func.return_type.clone(),
+                    is_variadic: func.is_variadic,
+                    linkage: None,
+                },
+                Some(func.name.span),
+                SymbolKind::Function,
+            );
+            self.register_source_function_symbol(&fn_name, &instance);
+            let fn_ty = self.lower_function_type(
+                &func
+                    .parameters
+                    .iter()
+                    .map(|p| p.param_type.clone())
+                    .collect::<Vec<_>>(),
+                func.return_type.as_ref(),
+                func.is_variadic,
+                None,
+            )?;
+            self.module.add_function(&instance, fn_ty, None);
+            bodies.push((func, instance));
+        }
+        // Second phase: rewrite + emit every declared body (all instances
+        // exist now, so call-site rewriting resolves them). Save/restore the
+        // builder position around each nested emission: emit_function_body
+        // leaves the builder in the emitted function, which would truncate
+        // the caller's body.
+        for (mut func, instance) in bodies {
+            self.rewrite_call_sites_in_block(&mut func.body);
+            let function = self
+                .module
+                .get_function(&instance)
+                .ok_or_else(|| CodegenError::new(format!("missing instance {instance}")))?;
+            let saved_block = self.builder.get_insert_block();
+            self.emit_function_body(
+                function,
+                &func.parameters,
+                func.return_type.as_ref(),
+                &func.body,
+                &instance,
+                &func.name.span,
+                false,
+            )?;
+            if let Some(saved_block) = saved_block {
+                self.builder.position_at_end(saved_block);
+            }
+        }
+        // Re-rewrite the outer body now that its callees exist: the earlier
+        // rewrite (before declaration) left concrete generic calls in
+        // TypeName form, which codegen resolves through the legacy mangling.
+        self.rewrite_call_sites_in_block(outer_body);
+        Ok(())
+    }
+
+    /// Collect every free-function call with concrete generic type args
+    /// reachable from `block` into `out` (name, args, value arity).
+    fn collect_concrete_generic_calls(
+        block: &ast::Block,
+        out: &mut Vec<(String, Vec<ast::Type>, usize)>,
+    ) {
+        fn walk_expr(expr: &ast::Expression, out: &mut Vec<(String, Vec<ast::Type>, usize)>) {
+            match expr.kind.as_ref() {
+                ast::ExpressionKind::Call {
+                    function,
+                    arguments,
+                } => {
+                    if let ast::ExpressionKind::TypeName(ty) = function.kind.as_ref()
+                        && let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                        && named.path.len() == 1
+                        && let Some(generics) = &named.generics
+                        && !generics.is_empty()
+                    {
+                        out.push((
+                            named.path[0].name.clone(),
+                            generics.iter().cloned().collect(),
+                            arguments.len(),
+                        ));
+                    }
+                    for arg in arguments {
+                        walk_expr(arg, out);
+                    }
+                }
+                ast::ExpressionKind::Block(b) => walk_block(b, out),
+                ast::ExpressionKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    walk_expr(condition, out);
+                    walk_block(then_branch, out);
+                    if let Some(b) = else_branch {
+                        walk_block(b, out);
+                    }
+                }
+                ast::ExpressionKind::While { condition, body } => {
+                    walk_expr(condition, out);
+                    walk_block(body, out);
+                }
+                ast::ExpressionKind::Binary { left, right, .. } => {
+                    walk_expr(left, out);
+                    walk_expr(right, out);
+                }
+                ast::ExpressionKind::Unary { operand, .. }
+                | ast::ExpressionKind::Postfix { operand, .. }
+                | ast::ExpressionKind::Cast {
+                    expression: operand,
+                    ..
+                }
+                | ast::ExpressionKind::Move(operand)
+                | ast::ExpressionKind::Comptime(operand) => walk_expr(operand, out),
+                ast::ExpressionKind::MethodCall {
+                    receiver,
+                    arguments,
+                    ..
+                } => {
+                    walk_expr(receiver, out);
+                    for arg in arguments {
+                        walk_expr(arg, out);
+                    }
+                }
+                ast::ExpressionKind::FieldAccess { object, .. }
+                | ast::ExpressionKind::Index { object, .. } => walk_expr(object, out),
+                ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                    walk_expr(iterable, out);
+                    walk_block(body, out);
+                }
+                ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+                    for item in items {
+                        walk_expr(item, out);
+                    }
+                }
+                ast::ExpressionKind::Initializer { items } => {
+                    for item in items {
+                        match item {
+                            ast::InitializerItem::Positional(expr) => walk_expr(expr, out),
+                            ast::InitializerItem::Field { value, .. } => walk_expr(value, out),
+                            ast::InitializerItem::Index { value, .. } => walk_expr(value, out),
+                        }
+                    }
+                }
+                ast::ExpressionKind::Ternary {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    walk_expr(condition, out);
+                    walk_expr(then_expr, out);
+                    walk_expr(else_expr, out);
+                }
+                _ => {}
+            }
+        }
+        fn walk_statement(stmt: &ast::Statement, out: &mut Vec<(String, Vec<ast::Type>, usize)>) {
+            match &stmt.kind {
+                ast::StatementKind::Block(b) => walk_block(b, out),
+                ast::StatementKind::Let(let_stmt) => {
+                    if let Some(init) = &let_stmt.initializer {
+                        walk_expr(init, out);
+                    }
+                }
+                ast::StatementKind::Expression(expr)
+                | ast::StatementKind::Return(Some(expr))
+                | ast::StatementKind::Break(Some(expr)) => walk_expr(expr, out),
+                ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+                ast::StatementKind::Continue => {}
+                ast::StatementKind::Defer(inner) => walk_statement(inner, out),
+                _ => {}
+            }
+        }
+        fn walk_block(block: &ast::Block, out: &mut Vec<(String, Vec<ast::Type>, usize)>) {
+            for stmt in &block.statements {
+                walk_statement(stmt, out);
+            }
+        }
+        walk_block(block, out);
+    }
+
     /// Check if an AST type contains any unresolved type parameter (which would
     /// mean it's still a generic type, not a concrete instantiation).
-    pub(crate) fn type_has_type_param(ty: &ast::Type) -> bool {
+    pub(crate) fn type_has_type_param(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(_) => false,
             ast::TypeKind::Named(named) => {
-                // A singleton named type with no generics and uppercase first char
-                // is likely a type parameter
+                // A singleton named type with no generics and uppercase first
+                // char is likely a type parameter — UNLESS a concrete type
+                // claims the name (a user struct may be named `Item` or
+                // `Cookie`, which the uppercase heuristic would otherwise
+                // misread as a parameter and silently skip instantiating).
                 if named.path.len() == 1 && named.generics.is_none() {
-                    let first = named.path[0].name.chars().next();
-                    matches!(first, Some(c) if c.is_uppercase())
+                    let name = &named.path[0].name;
+                    let first = name.chars().next();
+                    if matches!(first, Some(c) if c.is_uppercase())
+                        && !(self.struct_fields.contains_key(name)
+                            || self.enum_backing_types.contains_key(name)
+                            || self.type_aliases.contains(name))
+                    {
+                        return true;
+                    }
+                    false
                 } else if let Some(generics) = &named.generics {
-                    generics.iter().any(Self::type_has_type_param)
+                    generics.iter().any(|g| self.type_has_type_param(g))
                 } else {
                     false
                 }
             }
-            ast::TypeKind::Pointer(ptr) => Self::type_has_type_param(&ptr.inner),
-            ast::TypeKind::Reference(inner) => Self::type_has_type_param(&inner.inner),
-            ast::TypeKind::Optional(inner) => Self::type_has_type_param(inner),
-            ast::TypeKind::Slice(slice) => Self::type_has_type_param(&slice.element_type),
-            ast::TypeKind::Array(arr) => Self::type_has_type_param(&arr.element_type),
+            ast::TypeKind::Pointer(ptr) => self.type_has_type_param(&ptr.inner),
+            ast::TypeKind::Reference(inner) => self.type_has_type_param(&inner.inner),
+            ast::TypeKind::Optional(inner) => self.type_has_type_param(inner),
+            ast::TypeKind::Slice(slice) => self.type_has_type_param(&slice.element_type),
+            ast::TypeKind::Array(arr) => self.type_has_type_param(&arr.element_type),
             _ => false,
         }
     }
@@ -1147,6 +1410,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 );
                 Self::substitute_block_types(&mut func.body, &body_mapping);
                 self.rewrite_call_sites_in_block(&mut func.body);
+                // The semantic monomorph pass never saw this method body;
+                // emit generic free-function instances it calls (e.g.
+                // realloc<i64> in Vec<i64>.push) before emitting the body.
+                self.emit_missing_generic_free_instances(&mut func.body)?;
 
                 // If the owner is a generic enum being instantiated on the fly
                 // (method call reached before monomorph registered the concrete
