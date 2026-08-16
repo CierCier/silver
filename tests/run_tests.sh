@@ -98,6 +98,7 @@ http_test
 cookie_test
 assignment_drop_test
 field_predrop_test
+temp_operator_test
 "
 
 # True when a test is compiled with --leak-check.

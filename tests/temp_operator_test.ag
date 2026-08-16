@@ -1,0 +1,31 @@
+import std.string;
+import std.test;
+
+// The struct __add/__eq dispatch used to evaluate the left operand twice:
+// once to check its LLVM type, then again inside the operator-overload
+// call. A side-effecting lhs (a function call returning a String) ran its
+// allocation twice and leaked the first result. The dispatch now decides
+// from the AST type, evaluating the lhs exactly once.
+
+i32 main() {
+    // Temp on the left of String + str: the temp's buffer must be freed
+    // exactly once (leak-clean under --leak-check).
+    String d = String.from_str("x") + "y";
+    assert_eq_str("xy", (str)d.to_str(), "temp + str concatenates");
+    d.drop();
+
+    String e = String.from_str("a") + String.from_str("b");
+    assert_eq_str("ab", (str)e.to_str(), "temp + temp concatenates");
+    e.drop();
+
+    // Pointer comparisons stay address-based (no __eq dispatch).
+    String* p = (String*)0;
+    bool null_eq = p == (String*)0;
+    assert_true(null_eq, "pointer comparison stays address-based");
+
+    // Plain struct arithmetic (i64) unaffected.
+    i64 a = 5;
+    i64 b = a + 3;
+    assert_eq_i64(8, b, "numeric add unaffected");
+    return done();
+}

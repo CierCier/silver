@@ -480,11 +480,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return self.emit_strcmp_comparison(lhs, operator, rhs, &whole_expr.span);
                 }
 
-                let mut lhs = self.emit_expression_value(left)?;
-                // For struct types, use trait method call instead of inline IR
-                if lhs.get_type().is_struct_type()
-                    && let Some(method_name) = operator_method_name(operator)
-                {
+                // For struct types, use trait method call instead of inline
+                // IR. The struct check must come from the TYPE, not a value:
+                // evaluating the lhs just to inspect it (then again inside
+                // the __add dispatch) ran its side effects twice and leaked
+                // the first result (String.from_str(x) + y).
+                let lhs_struct = self.resolve_receiver_type(left).is_some_and(|ty| {
+                    // Pointers/references compare by address, not by __eq:
+                    // resolve_receiver_type auto-derefs, so exclude them.
+                    !matches!(
+                        ty.kind.as_ref(),
+                        ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                    ) && Self::extract_named_type(&ty)
+                        .map(|named| {
+                            let key = Self::named_type_key(named);
+                            self.struct_fields.contains_key(&key)
+                                || self.enum_payload_layouts.contains_key(&key)
+                        })
+                        .unwrap_or(false)
+                });
+                if lhs_struct && let Some(method_name) = operator_method_name(operator) {
                     let method_ident = ast::Identifier {
                         name: method_name.to_string(),
                         span: whole_expr.span,
@@ -500,6 +515,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         return Ok(val);
                     }
                 }
+                let mut lhs = self.emit_expression_value(left)?;
                 let mut rhs = self.emit_expression_value(right)?;
                 // Pointer arithmetic (p + i, i + p, p - i) keeps the pointer
                 // and integer operands at their own types; only numeric and
