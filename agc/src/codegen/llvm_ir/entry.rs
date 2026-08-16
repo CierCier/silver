@@ -666,7 +666,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     },
                     path.display()
                 ))
-            })
+            })?;
+
+        // Post-pass: the runtime backtrace walker needs exact source lines
+        // and spilled argument offsets, but DWARF sections are not loaded
+        // into the running binary. Parse the object we just emitted and fold
+        // the interesting bits into alloc'd, link-time-resolved tables, then
+        // re-emit (the debug sections are unchanged by the new globals, so
+        // the parsed offsets stay valid).
+        if file_type == FileType::Object
+            && let Ok(obj) = std::fs::read(path)
+        {
+            let mut fn_debug = crate::codegen::dwarf_bt::parse_object_debug_lines(&obj);
+            let targets: rustc_hash::FxHashSet<String> =
+                fn_debug.iter().map(|f| f.name.clone()).collect();
+            let params = crate::codegen::dwarf_bt::parse_object_params(&obj, &targets);
+            let by_name: rustc_hash::FxHashMap<String, usize> = fn_debug
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.clone(), i))
+                .collect();
+            for (name, p) in params {
+                if let Some(&i) = by_name.get(&name) {
+                    fn_debug[i].params = p;
+                }
+            }
+            // Always emit the (possibly empty) tables so the runtime's
+            // extern references resolve even without DWARF.
+            generator.emit_bt_debug_tables(&fn_debug);
+            machine
+                .write_to_file(&generator.module, file_type, path)
+                .map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to re-emit object with backtrace tables to {}: {e}",
+                        path.display()
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     fn declare_imported_modules(

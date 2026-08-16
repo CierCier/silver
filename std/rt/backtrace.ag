@@ -25,9 +25,35 @@ struct BtEntry {
     i64 line;
 }
 
+// Exact source lines: {function start, offset within function, line, file}.
+struct BtLine {
+    i64 addr;
+    i64 offset;
+    i64 line;
+    u8* file;
+}
+
+// Spilled arguments: per function {start, count, args}, each arg = {name,
+// rbp-relative frame offset, byte size}.
+struct BtArg {
+    u8* name;
+    i64 fbreg;
+    i64 size;
+}
+
+struct BtFnArgs {
+    i64 addr;
+    i64 count;
+    BtArg* args;
+}
+
 extern "C" {
     i64 __silver_bt_count;
     BtEntry* __silver_bt_entries;
+    i64 __silver_bt_lines_count;
+    BtLine* __silver_bt_lines;
+    i64 __silver_bt_args_count;
+    BtFnArgs* __silver_bt_args;
 }
 
 /// Read the current frame pointer (rbp). The asm emitter returns rax.
@@ -64,6 +90,16 @@ void bt_write_dec(i64 fd, i64 value) {
         i = i + 1;
     }
     sys_write(fd, (i64)&buf[0], n);
+}
+
+/// Write `b` as two lowercase hex digits (no 0x prefix).
+void bt_write_hex2(i64 fd, i64 b) {
+    u8 buf[2];
+    i64 hi = (b >> 4) & (i64)0xF;
+    i64 lo = b & (i64)0xF;
+    if (hi < 10) { buf[0] = (u8)((u8)'0' + (u8)hi); } else { buf[0] = (u8)((u8)'a' + (u8)(hi - 10)); }
+    if (lo < 10) { buf[1] = (u8)((u8)'0' + (u8)lo); } else { buf[1] = (u8)((u8)'a' + (u8)(lo - 10)); }
+    sys_write(fd, (i64)&buf[0], 2);
 }
 
 /// Write `value` as `0x<16 hex digits>` to fd.
@@ -104,6 +140,71 @@ i64 bt_resolve(i64 ret_addr) {
     return best;
 }
 
+/// Look up the exact source line for a return address: the line table is
+/// scanned for the entry whose function start matches and whose offset is
+/// the largest one <= (ret_addr - fn_start). Returns (file, line) via the
+/// output pointers, or 0 line when unresolved.
+void bt_line_lookup(i64 fn_addr, i64 ret_addr, u8** out_file, i64* out_line) {
+    i64 best = -1;
+    i64 best_off = 0;
+    i64 i = 0;
+    while (i < __silver_bt_lines_count) {
+        BtLine l = __silver_bt_lines[i];
+        if (l.addr == fn_addr) {
+            i64 off = ret_addr - fn_addr;
+            if (off >= l.offset && l.offset >= best_off) {
+                best = i;
+                best_off = l.offset;
+            }
+        }
+        i = i + 1;
+    }
+    if (best >= 0) {
+        BtLine l = __silver_bt_lines[best];
+        *out_file = l.file;
+        *out_line = l.line;
+    } else {
+        *out_line = 0;
+    }
+}
+
+/// Print the spilled arguments of the function whose frame pointer is
+/// `callee_rbp` (frame base = rbp) and whose start address is `fn_addr`.
+void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
+    i64 i = 0;
+    while (i < __silver_bt_args_count) {
+        BtFnArgs fa = __silver_bt_args[i];
+        if (fa.addr != fn_addr) {
+            i = i + 1;
+            continue;
+        }
+        bt_write_cstr(fd, (u8*)"  args: ");
+        i64 j = 0;
+        while (j < fa.count) {
+            BtArg a = fa.args[j];
+            bt_write_cstr(fd, a.name);
+            bt_write_cstr(fd, (u8*)"=");
+            // Assemble the little-endian slot into an unsigned value.
+            u8* slot = (u8*)(callee_rbp + a.fbreg);
+            i64 nbytes = a.size;
+            if (nbytes > 8) { nbytes = 8; }
+            if (nbytes < 1) { nbytes = 1; }
+            i64 value = 0;
+            i64 k = 0;
+            while (k < nbytes) {
+                i64 b = (i64)slot[k];
+                value = value | (b << (k * 8));
+                k = k + 1;
+            }
+            bt_write_dec(fd, value);
+            j = j + 1;
+            if (j < fa.count) { bt_write_cstr(fd, (u8*)" "); }
+        }
+        bt_write_cstr(fd, (u8*)"\n");
+        return;
+    }
+}
+
 /// Print a named stack trace to stderr (fd 2): walk the rbp chain from the
 /// caller's frame, resolving each return address against the symbol table.
 /// `skip` frames are omitted from the top (the walker's own frame and the
@@ -115,9 +216,12 @@ void silver_print_backtrace(i64 skip) {
     i64 frame = 0;
     i64 printed = 0;
     while (rbp != 0 && printed < 24) {
+        i64* ret_ptr = (i64*)(rbp + 8);
+        i64 ret_addr = *ret_ptr;
+        // The callee's own frame pointer (frame base for its args).
+        i64* saved_ptr = (i64*)rbp;
+        i64 callee_rbp = *saved_ptr;
         if (frame >= skip) {
-            i64* ret_ptr = (i64*)(rbp + 8);
-            i64 ret_addr = *ret_ptr;
             i64 idx = bt_resolve(ret_addr);
             bt_write_cstr(fd, (u8*)"  #");
             bt_write_dec(fd, printed);
@@ -125,13 +229,25 @@ void silver_print_backtrace(i64 skip) {
                 bt_write_cstr(fd, (u8*)"  ");
                 BtEntry e = __silver_bt_entries[idx];
                 bt_write_cstr(fd, e.name);
-                bt_write_cstr(fd, (u8*)" at ");
-                bt_write_cstr(fd, e.file);
-                bt_write_cstr(fd, (u8*)":");
-                bt_write_dec(fd, e.line);
+                // Exact call-site line when the DWARF-derived table exists.
+                u8* line_file = (u8*)0;
+                i64 line_num = 0;
+                bt_line_lookup(e.addr, ret_addr, &line_file, &line_num);
+                if (line_num > 0 && line_file != (u8*)0) {
+                    bt_write_cstr(fd, (u8*)" at ");
+                    bt_write_cstr(fd, line_file);
+                    bt_write_cstr(fd, (u8*)":");
+                    bt_write_dec(fd, line_num);
+                } else {
+                    bt_write_cstr(fd, (u8*)" at ");
+                    bt_write_cstr(fd, e.file);
+                    bt_write_cstr(fd, (u8*)":");
+                    bt_write_dec(fd, e.line);
+                }
                 bt_write_cstr(fd, (u8*)" (");
                 bt_write_hex(fd, ret_addr);
                 bt_write_cstr(fd, (u8*)")\n");
+                bt_print_args(fd, callee_rbp, e.addr);
             } else {
                 bt_write_cstr(fd, (u8*)"  <unknown> (");
                 bt_write_hex(fd, ret_addr);
@@ -139,12 +255,10 @@ void silver_print_backtrace(i64 skip) {
             }
             printed = printed + 1;
         }
-        i64* next_ptr = (i64*)rbp;
-        i64 next = *next_ptr;
-        if (next <= rbp && next != 0) {
+        if (callee_rbp <= rbp && callee_rbp != 0) {
             break;  // corrupt chain — stop
         }
-        rbp = next;
+        rbp = callee_rbp;
         frame = frame + 1;
     }
 }

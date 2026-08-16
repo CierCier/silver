@@ -499,17 +499,19 @@ test_stdin() {
     fi
 
     # For backtrace_test, verify the runtime printed a NAMED stack trace
-    # with source positions: the frame-pointer walker must resolve the whole
-    # call chain to <name> at <file>:<line>.
+    # with exact source positions and argument values: the frame-pointer
+    # walker must resolve the call chain to <name> at <call-site file:line>
+    # and print the spilled parameters.
     if [ "$name" = "backtrace_test" ]; then
         if grep -q "level3 at backtrace_test.ag:" "$run_log" \
            && grep -q "level2 at backtrace_test.ag:" "$run_log" \
            && grep -q "level1 at backtrace_test.ag:" "$run_log" \
            && grep -q "main at backtrace_test.ag:" "$run_log" \
-           && grep -q "__silver_assert_failed at " "$run_log"; then
+           && grep -q "__silver_assert_failed at " "$run_log" \
+           && grep -q "args: x=" "$run_log"; then
             : # good
         else
-            printf '  FAIL  %-*s  (backtrace did not resolve names + source)\n' "$COL_NAME" "$name"
+            printf '  FAIL  %-*s  (backtrace did not resolve names/source/args)\n' "$COL_NAME" "$name"
             sed 's/^/    /' "$run_log"
             failed=$((failed + 1))
             failed_names="$failed_names $name"

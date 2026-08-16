@@ -134,6 +134,280 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         name_global
     }
 
+    /// Emits the runtime's exact-line + argument tables parsed from the
+    /// emitted object's DWARF. `__silver_bt_lines` maps (function start,
+    /// offset-within-function) to (line, file); `__silver_bt_args` carries
+    /// each function's formal parameters as rbp-relative frame slots.
+    pub(crate) fn emit_bt_debug_tables(
+        &mut self,
+        fn_debug: &[crate::codegen::dwarf_bt::BtFnDebug],
+    ) {
+        // The runtime always references these symbols (even without DWARF),
+        // so always define them — empty tables (null pointer, count 0) when
+        // no debug info was available.
+        let target_data = inkwell::targets::TargetData::create(
+            self.module.get_data_layout().as_str().to_str().unwrap(),
+        );
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let existing_lines = self.module.get_global("__silver_bt_lines");
+        let existing_args = self.module.get_global("__silver_bt_args");
+
+        // ---- line records: {fn addr, offset, line, file ptr} ----
+        let line_rec_ty = self.context.struct_type(
+            &[
+                self.context.i64_type().into(),
+                self.context.i64_type().into(),
+                self.context.i64_type().into(),
+                ptr_ty.into(),
+            ],
+            false,
+        );
+        let mut line_records: Vec<LLVMValueRef> = Vec::new();
+        let mut file_globals: rustc_hash::FxHashMap<String, inkwell::values::GlobalValue> =
+            rustc_hash::FxHashMap::default();
+        let mut str_ordinal = 0usize;
+        for fd in fn_debug {
+            let Some(function) = self.module.get_function(&fd.name) else {
+                continue;
+            };
+            let addr = unsafe {
+                llvm_sys::core::LLVMConstPtrToInt(
+                    function.as_value_ref(),
+                    self.context.i64_type().as_any_type_enum().as_type_ref(),
+                )
+            };
+            if !fd.lines.is_empty() {
+                for line in &fd.lines {
+                    let file = if let Some(g) = file_globals.get(&line.file) {
+                        *g
+                    } else {
+                        let g = self.emit_bt_string(str_ordinal, &line.file);
+                        str_ordinal += 1;
+                        file_globals.insert(line.file.clone(), g);
+                        g
+                    };
+                    let off_c = self
+                        .context
+                        .i64_type()
+                        .const_int(line.offset, false)
+                        .as_value_ref();
+                    let line_c = self
+                        .context
+                        .i64_type()
+                        .const_int(line.line, false)
+                        .as_value_ref();
+                    let file_c = file.as_pointer_value().as_value_ref();
+                    let rec = unsafe {
+                        llvm_sys::core::LLVMConstStructInContext(
+                            self.context.as_ctx_ref(),
+                            [addr, off_c, line_c, file_c].as_mut_ptr(),
+                            4,
+                            0,
+                        )
+                    };
+                    line_records.push(rec);
+                }
+            }
+        }
+        let lines_array_ty = line_rec_ty.array_type(line_records.len().max(1) as u32);
+        let lines_data = self
+            .module
+            .add_global(lines_array_ty, None, "__silver_bt_lines_data");
+        let lines_arr = unsafe {
+            llvm_sys::core::LLVMConstArray2(
+                line_rec_ty.as_any_type_enum().as_type_ref(),
+                line_records.as_mut_ptr(),
+                line_records.len() as u64,
+            )
+        };
+        lines_data.set_initializer(&unsafe { ArrayValue::new(lines_arr) });
+        lines_data.set_linkage(inkwell::module::Linkage::Private);
+        let lines_ptr = if let Some(existing) = existing_lines {
+            existing
+        } else {
+            self.module.add_global(ptr_ty, None, "__silver_bt_lines")
+        };
+        if line_records.is_empty() {
+            lines_ptr.set_initializer(
+                &self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null(),
+            );
+        } else {
+            lines_ptr.set_initializer(&lines_data.as_pointer_value());
+        }
+        lines_ptr.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+        let lines_count = if let Some(existing) = self.module.get_global("__silver_bt_lines_count")
+        {
+            existing
+        } else {
+            self.module
+                .add_global(self.context.i64_type(), None, "__silver_bt_lines_count")
+        };
+        lines_count.set_initializer(
+            &self
+                .context
+                .i64_type()
+                .const_int(line_records.len() as u64, false),
+        );
+        lines_count.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+
+        // ---- arg records: {fn addr, count, args ptr}; args = {name, fbreg, size} ----
+        let arg_rec_ty = self.context.struct_type(
+            &[
+                ptr_ty.into(),
+                self.context.i64_type().into(),
+                self.context.i64_type().into(),
+            ],
+            false,
+        );
+        let fn_arg_ty = self.context.struct_type(
+            &[
+                self.context.i64_type().into(),
+                self.context.i64_type().into(),
+                ptr_ty.into(),
+            ],
+            false,
+        );
+        let mut fn_arg_records: Vec<LLVMValueRef> = Vec::new();
+        for fd in fn_debug {
+            if fd.params.is_empty() {
+                continue;
+            }
+            let Some(function) = self.module.get_function(&fd.name) else {
+                continue;
+            };
+            let addr = unsafe {
+                llvm_sys::core::LLVMConstPtrToInt(
+                    function.as_value_ref(),
+                    self.context.i64_type().as_any_type_enum().as_type_ref(),
+                )
+            };
+            let mut params: Vec<LLVMValueRef> = Vec::new();
+            for (param_idx, (pname, ploc)) in fd.params.iter().enumerate() {
+                let fbreg = match ploc {
+                    crate::codegen::dwarf_bt::BtParamLoc::Fbreg(v) => Some(*v),
+                    _ => None,
+                };
+                let size = function
+                    .get_nth_param(param_idx as u32)
+                    .map(|p| {
+                        let any = p.get_type().as_any_type_enum();
+                        target_data.get_abi_size(&any).min(8)
+                    })
+                    .unwrap_or(8);
+                let Some(fbreg) = fbreg else { continue };
+                let name_g = self.emit_bt_string(str_ordinal, pname);
+                str_ordinal += 1;
+                let name_c = name_g.as_pointer_value().as_value_ref();
+                let fbreg_c = self
+                    .context
+                    .i64_type()
+                    .const_int(fbreg as u64, false)
+                    .as_value_ref();
+                let size_c = self
+                    .context
+                    .i64_type()
+                    .const_int(size, false)
+                    .as_value_ref();
+                let rec = unsafe {
+                    llvm_sys::core::LLVMConstStructInContext(
+                        self.context.as_ctx_ref(),
+                        [name_c, fbreg_c, size_c].as_mut_ptr(),
+                        3,
+                        0,
+                    )
+                };
+                params.push(rec);
+            }
+            if params.is_empty() {
+                continue;
+            }
+            let params_array_ty = arg_rec_ty.array_type(params.len() as u32);
+            let params_data = self.module.add_global(
+                params_array_ty,
+                None,
+                &format!("__silver_bt_args_data.{}", str_ordinal),
+            );
+            str_ordinal += 1;
+            let params_arr = unsafe {
+                llvm_sys::core::LLVMConstArray2(
+                    arg_rec_ty.as_any_type_enum().as_type_ref(),
+                    params.as_mut_ptr(),
+                    params.len() as u64,
+                )
+            };
+            params_data.set_initializer(&unsafe { ArrayValue::new(params_arr) });
+            params_data.set_linkage(inkwell::module::Linkage::Private);
+            let count_c = self
+                .context
+                .i64_type()
+                .const_int(params.len() as u64, false)
+                .as_value_ref();
+            let ptr_c = params_data.as_pointer_value().as_value_ref();
+            let rec = unsafe {
+                llvm_sys::core::LLVMConstStructInContext(
+                    self.context.as_ctx_ref(),
+                    [addr, count_c, ptr_c].as_mut_ptr(),
+                    3,
+                    0,
+                )
+            };
+            fn_arg_records.push(rec);
+        }
+        let args_count_global =
+            if let Some(existing) = self.module.get_global("__silver_bt_args_count") {
+                existing
+            } else {
+                self.module
+                    .add_global(self.context.i64_type(), None, "__silver_bt_args_count")
+            };
+        args_count_global.set_initializer(
+            &self
+                .context
+                .i64_type()
+                .const_int(fn_arg_records.len() as u64, false),
+        );
+        args_count_global.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+        if !fn_arg_records.is_empty() {
+            let fn_args_array_ty = fn_arg_ty.array_type(fn_arg_records.len() as u32);
+            let fn_args_data =
+                self.module
+                    .add_global(fn_args_array_ty, None, "__silver_bt_args_data");
+            let fn_args_arr = unsafe {
+                llvm_sys::core::LLVMConstArray2(
+                    fn_arg_ty.as_any_type_enum().as_type_ref(),
+                    fn_arg_records.as_mut_ptr(),
+                    fn_arg_records.len() as u64,
+                )
+            };
+            fn_args_data.set_initializer(&unsafe { ArrayValue::new(fn_args_arr) });
+            fn_args_data.set_linkage(inkwell::module::Linkage::Private);
+            let args_ptr = if let Some(existing) = existing_args {
+                existing
+            } else {
+                self.module.add_global(ptr_ty, None, "__silver_bt_args")
+            };
+            args_ptr.set_initializer(&fn_args_data.as_pointer_value());
+            args_ptr.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+        } else {
+            let args_ptr = if let Some(existing) = existing_args {
+                existing
+            } else {
+                self.module.add_global(ptr_ty, None, "__silver_bt_args")
+            };
+            args_ptr.set_initializer(
+                &self
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null(),
+            );
+            args_ptr.set_linkage(inkwell::module::Linkage::LinkOnceODR);
+        }
+    }
+
     /// Emits the runtime backtrace symbol table: one
     /// `{addr, name, file, line}` record per emitted function (address
     /// resolved at link time via ptrtoint; file/line come from the AST
