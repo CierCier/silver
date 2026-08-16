@@ -7,6 +7,7 @@
 //! Warnings are filtered to user source files (inlined standard library files
 //! do not produce lint warnings).
 
+use crate::diagnostics::messages as msg;
 use crate::lexer::{Span, source_file};
 use crate::parser::ast;
 
@@ -111,19 +112,13 @@ impl<'a> Linter<'a> {
                     if b.is_param {
                         if self.config.unused_parameters {
                             self.warnings.push(LintWarning {
-                                message: format!(
-                                    "unused parameter '{}' (help: prefix with _ to ignore: '_{}')",
-                                    b.name, b.name
-                                ),
+                                message: msg::unused_parameter(&b.name),
                                 span: b.span,
                             });
                         }
                     } else if self.config.unused_variables {
                         self.warnings.push(LintWarning {
-                            message: format!(
-                                "unused variable '{}' (help: prefix with _ to ignore: '_{}')",
-                                b.name, b.name
-                            ),
+                            message: msg::unused_variable(&b.name),
                             span: b.span,
                         });
                     }
@@ -213,7 +208,7 @@ impl<'a> Linter<'a> {
             if terminated && self.config.unreachable_code && !warned_unreachable {
                 if self.is_user_file(stmt.span.file) {
                     self.warnings.push(LintWarning {
-                        message: "unreachable statement".to_string(),
+                        message: msg::unreachable_statement().to_string(),
                         span: stmt.span,
                     });
                 }

@@ -1073,7 +1073,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return result;
                 }
                 Err(CodegenError::with_span(
-                    format!("unknown builtin macro '@{}'", name.name),
+                    crate::diagnostics::messages::unknown_builtin_macro(&name.name, ""),
                     expr.span,
                 ))
             }

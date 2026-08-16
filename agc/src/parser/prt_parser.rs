@@ -2863,7 +2863,8 @@ impl PRT_Parser {
 
         if predicates.is_empty() {
             return Err(ParseError::InvalidSyntax {
-                message: "where clause requires at least one predicate".to_string(),
+                message: crate::diagnostics::messages::where_clause_requires_predicate()
+                    .to_string(),
                 span: tokens[start].span,
             });
         }

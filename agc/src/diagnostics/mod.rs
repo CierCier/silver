@@ -1,3 +1,5 @@
+pub mod messages;
+
 use owo_colors::OwoColorize;
 
 use crate::lexer::{Span, source_file};

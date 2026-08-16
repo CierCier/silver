@@ -155,7 +155,8 @@ fn eval_cfg_attrs(
     for attr in cfg_attrs {
         if attr.args.is_empty() {
             errors.push(CfgError {
-                message: "#[cfg] requires at least one argument".to_string(),
+                message: crate::diagnostics::messages::cfg_requires_at_least_one_argument()
+                    .to_string(),
                 span: attr.span,
             });
             keep = false;

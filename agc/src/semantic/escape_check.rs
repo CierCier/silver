@@ -12,6 +12,7 @@
 //! global stores through reference parameters are not detected, and unknown
 //! calls/casts are treated as independent outliving values.
 
+use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -437,12 +438,7 @@ impl Checker {
                 {
                     match source {
                         Source::Local => {
-                            self.error(
-                                "returned reference does not outlive the function (it borrows a \
-                                 local value; return a reference to a global or a reference \
-                                 parameter instead)",
-                                expr.span,
-                            );
+                            self.error(msg::returned_reference_escapes(), expr.span);
                         }
                         Source::Escapable { origins } => {
                             let mut borrow_params: Vec<String> = origins.into_iter().collect();
@@ -512,14 +508,7 @@ impl Checker {
                         )
                         && source == Source::Local
                     {
-                        self.error(
-                            format!(
-                                "reference to a local value stored into global '{}' — it \
-                                 would dangle after the function returns",
-                                target.name
-                            ),
-                            right.span,
-                        );
+                        self.error(msg::reference_stored_into_global(&target.name), right.span);
                     }
                     // Propagate reference sources through variable assignment.
                     if let ast::ExpressionKind::Identifier(target) = left.kind.as_ref()

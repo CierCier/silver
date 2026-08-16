@@ -21,6 +21,7 @@
 //! - assignments to a moved variable are rejected (no re-initialization);
 //! - `break`/`continue` are handled conservatively through the loop merge.
 
+use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -372,7 +373,7 @@ impl MoveChecker {
                 match expr.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
                         if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(expr.span, "value moved by return");
+                            var.mark_moved(expr.span, msg::note_value_moved_by_return());
                         }
                     }
                     _ => self.check_expr(expr, state, scopes, var_types),
@@ -407,9 +408,11 @@ impl MoveChecker {
                 if let Some(var) = state.get(&ident.name)
                     && var.is_moved()
                 {
-                    let reason = var.move_reason.unwrap_or("value moved here");
+                    let reason = var
+                        .move_reason
+                        .unwrap_or(msg::note_value_explicitly_moved());
                     self.error_with_note(
-                        format!("use of moved value '{}'", ident.name),
+                        msg::use_of_moved_value(&ident.name),
                         ident.span,
                         var.move_span,
                         reason,
@@ -425,7 +428,7 @@ impl MoveChecker {
                 match inner.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
                         if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(inner.span, "value explicitly moved here");
+                            var.mark_moved(inner.span, msg::note_value_explicitly_moved());
                         }
                     }
                     _ => self.check_expr(inner, state, scopes, var_types),
@@ -452,7 +455,7 @@ impl MoveChecker {
                     if let ast::ExpressionKind::Identifier(ident) = receiver.kind.as_ref()
                         && let Some(var) = state.get_mut(&ident.name)
                     {
-                        var.mark_moved(receiver.span, "value consumed by by-value method call");
+                        var.mark_moved(receiver.span, msg::note_value_consumed_by_method());
                     }
                 } else {
                     self.check_expr(receiver, state, scopes, var_types);
@@ -478,7 +481,7 @@ impl MoveChecker {
                         && self.facts.value_args.contains(&(name.clone(), i))
                     {
                         if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(arg.span, "value moved into by-value parameter");
+                            var.mark_moved(arg.span, msg::note_value_moved_into_param());
                         }
                     } else {
                         self.check_expr(arg, state, scopes, var_types);
@@ -502,16 +505,18 @@ impl MoveChecker {
                                 if let Some(var) = state.get(&ident.name)
                                     && var.is_moved()
                                 {
-                                    let reason = var.move_reason.unwrap_or("value moved here");
+                                    let reason = var
+                                        .move_reason
+                                        .unwrap_or(msg::note_value_explicitly_moved());
                                     self.error_with_note(
-                                        format!("use of moved value '{}'", ident.name),
+                                        msg::use_of_moved_value(&ident.name),
                                         ident.span,
                                         var.move_span,
                                         reason,
                                     );
                                 }
                                 if let Some(var) = state.get_mut(&ident.name) {
-                                    var.mark_moved(arg.span, "value moved into thread launch");
+                                    var.mark_moved(arg.span, msg::note_value_moved_into_launch());
                                 }
                             } else {
                                 self.check_expr(arg, state, scopes, var_types);
@@ -531,16 +536,18 @@ impl MoveChecker {
                         if let Some(var) = state.get(&ident.name)
                             && var.is_moved()
                         {
-                            let reason = var.move_reason.unwrap_or("value moved here");
+                            let reason = var
+                                .move_reason
+                                .unwrap_or(msg::note_value_explicitly_moved());
                             self.error_with_note(
-                                format!("use of moved value '{}'", ident.name),
+                                msg::use_of_moved_value(&ident.name),
                                 ident.span,
                                 var.move_span,
                                 reason,
                             );
                         }
                         if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(inner.span, "task handle consumed by wait");
+                            var.mark_moved(inner.span, msg::note_task_handle_consumed());
                         }
                     }
                     _ => self.check_expr(inner, state, scopes, var_types),
@@ -567,9 +574,11 @@ impl MoveChecker {
                             if let Some(var) = state.get(&ident.name)
                                 && var.is_moved()
                             {
-                                let reason = var.move_reason.unwrap_or("value moved here");
+                                let reason = var
+                                    .move_reason
+                                    .unwrap_or(msg::note_value_explicitly_moved());
                                 self.error_with_note(
-                                    format!("cannot assign to moved value '{}'", ident.name),
+                                    msg::cannot_assign_to_moved_value(&ident.name),
                                     left.span,
                                     var.move_span,
                                     reason,
@@ -972,7 +981,7 @@ mod tests {
         assert!(errs[0].note_span.is_some());
         assert_eq!(
             errs[0].note_message.as_deref(),
-            Some("value explicitly moved here")
+            Some(msg::note_value_explicitly_moved())
         );
     }
 }

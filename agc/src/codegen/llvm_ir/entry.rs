@@ -1465,14 +1465,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::ExpressionKind::Literal(ast::Literal::String(s)) => s.clone(),
                 _ => {
                     return Err(CodegenError::with_span(
-                        "format string must be a literal".to_string(),
+                        crate::diagnostics::messages::format_string_must_be_literal().to_string(),
                         e.span,
                     ));
                 }
             },
             _ => {
                 return Err(CodegenError::with_span(
-                    "format string must be a literal".to_string(),
+                    crate::diagnostics::messages::format_string_must_be_literal().to_string(),
                     expr.span,
                 ));
             }

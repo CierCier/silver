@@ -1,6 +1,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::attributes::validate_global_attributes;
+use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
@@ -579,7 +580,7 @@ impl TypeChecker {
             if attr.name.name == "link_name" {
                 if attr.args.len() != 1 {
                     errors.push(TypeError {
-                        message: "#[link_name] expects exactly one argument".to_string(),
+                        message: msg::link_name_expects_one().to_string(),
                         span: attr.span,
                     });
                 } else if let Some(arg) = attr.args.first() {
@@ -603,7 +604,7 @@ impl TypeChecker {
             } else if attr.name.name == "inline" {
                 if attr.args.len() != 1 {
                     errors.push(TypeError {
-                        message: "#[inline] expects exactly one argument (always)".to_string(),
+                        message: msg::inline_expects_one().to_string(),
                         span: attr.span,
                     });
                 } else if !matches!(
@@ -611,14 +612,14 @@ impl TypeChecker {
                     ast::AttributeArg::Identifier(id) if id.name == "always"
                 ) {
                     errors.push(TypeError {
-                        message: "#[inline] only supports #[inline(always)]".to_string(),
+                        message: msg::inline_only_always().to_string(),
                         span: attr.span,
                     });
                 }
             } else if attr.name.name == "target_feature" {
                 if attr.args.len() != 1 {
                     errors.push(TypeError {
-                        message: "#[target_feature] expects exactly one argument".to_string(),
+                        message: msg::target_feature_exactly_one().to_string(),
                         span: attr.span,
                     });
                 } else if let Some(arg) = attr.args.first() {
@@ -626,17 +627,14 @@ impl TypeChecker {
                         ast::AttributeArg::Literal(ast::Literal::String(name)) => {
                             if crate::attributes::llvm_target_feature(name).is_none() {
                                 errors.push(TypeError {
-                                    message: format!(
-                                        "unknown target feature '{name}': expected one of \
-                                         sse41, sse42, popcnt, fma, avx, avx2, avx512f"
-                                    ),
+                                    message: msg::unknown_target_feature(name),
                                     span: attr.span,
                                 });
                             }
                         }
                         _ => {
                             errors.push(TypeError {
-                                message: "#[target_feature] requires a string literal".to_string(),
+                                message: msg::target_feature_string_literal().to_string(),
                                 span: attr.span,
                             });
                         }
@@ -713,7 +711,7 @@ impl TypeChecker {
             ast::StatementKind::Block(block) => self.check_block(block),
             ast::StatementKind::Let(let_stmt) => {
                 let Some(annotation) = let_stmt.type_annotation.as_ref() else {
-                    self.error("local bindings must include a type annotation", stmt.span);
+                    self.error(msg::local_bindings_need_type_annotation(), stmt.span);
                     return;
                 };
 
@@ -725,10 +723,7 @@ impl TypeChecker {
                     if !self.is_assignable(&declared, &init_type)
                         && !self.is_implicitly_castable(&init_type, &declared)
                     {
-                        self.error(
-                            format!("type mismatch: expected {}, found {}", declared, init_type),
-                            init.span,
-                        );
+                        self.error(msg::type_mismatch(&declared, &init_type), init.span);
                     }
                 }
 
@@ -771,48 +766,30 @@ impl TypeChecker {
             }
             ast::StatementKind::Return(value) => {
                 if self.defer_depth > 0 {
-                    self.error(
-                        "return statement is not allowed inside a defer block",
-                        stmt.span,
-                    );
+                    self.error(msg::return_not_allowed_in_defer(), stmt.span);
                 }
                 let expected = self.current_return.clone().unwrap_or(Type::Unit);
                 match value {
                     Some(expr) => {
                         let found = self.check_expr(expr, Some(&expected));
                         if Self::is_void_like(&expected) {
-                            self.error("void function cannot return a value", expr.span);
+                            self.error(msg::void_func_cannot_return_value(), expr.span);
                         } else if !self.is_assignable(&expected, &found)
                             && !self.is_implicitly_castable(&found, &expected)
                         {
-                            self.error(
-                                format!(
-                                    "return type mismatch: expected {}, found {}",
-                                    expected, found
-                                ),
-                                expr.span,
-                            );
+                            self.error(msg::return_type_mismatch(&expected, &found), expr.span);
                         }
                     }
                     None => {
                         if !Self::is_void_like(&expected) {
-                            self.error(
-                                format!(
-                                    "return type mismatch: expected {:?}, found unit",
-                                    expected
-                                ),
-                                stmt.span,
-                            );
+                            self.error(msg::return_type_mismatch_unit(&expected), stmt.span);
                         }
                     }
                 }
             }
             ast::StatementKind::Break(value) => {
                 if self.defer_depth > 0 {
-                    self.error(
-                        "break statement is not allowed inside a defer block",
-                        stmt.span,
-                    );
+                    self.error(msg::break_not_allowed_in_defer(), stmt.span);
                 }
                 if let Some(expr) = value {
                     self.check_expr(expr, None);
@@ -820,10 +797,7 @@ impl TypeChecker {
             }
             ast::StatementKind::Continue => {
                 if self.defer_depth > 0 {
-                    self.error(
-                        "continue statement is not allowed inside a defer block",
-                        stmt.span,
-                    );
+                    self.error(msg::continue_not_allowed_in_defer(), stmt.span);
                 }
             }
             ast::StatementKind::Defer(inner) => {
@@ -891,7 +865,7 @@ impl TypeChecker {
                     }
                     let suggestion = self.identifier_suggestion(&ident.name);
                     self.error(
-                        format!("unknown identifier '{}'{suggestion}", ident.name),
+                        msg::unknown_identifier(&ident.name, &suggestion),
                         ident.span,
                     );
                     Type::Unknown
@@ -1063,7 +1037,7 @@ impl TypeChecker {
                         operand_ty
                     }
                     _ => {
-                        self.error("invalid postfix operator", expr.span);
+                        self.error(msg::invalid_postfix_operator(), expr.span);
                         Type::Unknown
                     }
                 }
@@ -1259,7 +1233,7 @@ impl TypeChecker {
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
-                            format!("assignment type mismatch: {} = {}", left_ty, right_ty),
+                            msg::assignment_type_mismatch(&left_ty, &right_ty),
                             expr.span,
                         );
                     }
@@ -1268,20 +1242,14 @@ impl TypeChecker {
                         && let Some((_, is_mut)) = self.lookup(&ident.name)
                         && !is_mut
                     {
-                        self.error(
-                            format!("cannot assign to const variable '{}'", ident.name),
-                            ident.span,
-                        );
+                        self.error(msg::cannot_assign_const(&ident.name), ident.span);
                     }
                     if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref()
                         && let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref()
                         && let Some((_, is_mut)) = self.lookup(&ident.name)
                         && !is_mut
                     {
-                        self.error(
-                            format!("cannot assign to field of const variable '{}'", ident.name),
-                            ident.span,
-                        );
+                        self.error(msg::cannot_assign_const_field(&ident.name), ident.span);
                     }
                     // Try operator overload for compound assignment
                     if !self.is_primitive_type(&left_ty)
@@ -1466,7 +1434,7 @@ impl TypeChecker {
                 let from = self.check_expr(expression, None);
                 let to = Type::from_ast(target_type);
                 if !self.is_castable(&from, &to) {
-                    self.error(format!("invalid cast: {} -> {}", from, to), expr.span);
+                    self.error(msg::invalid_cast(&from, &to), expr.span);
                 }
                 to
             }
@@ -1535,7 +1503,7 @@ impl TypeChecker {
                         );
                     }
                 } else {
-                    self.error("move operand must be an identifier", inner.span);
+                    self.error(msg::move_operand_identifier(), inner.span);
                 }
                 ty
             }
@@ -1589,7 +1557,7 @@ impl TypeChecker {
                 match self.check_expr(inner, None) {
                     Type::Task(inner_ty) => *inner_ty,
                     other => {
-                        self.error(format!("'wait' requires a Task, got {}", other), expr.span);
+                        self.error(msg::wait_requires_task(&other), expr.span);
                         Type::Unknown
                     }
                 }
@@ -1671,7 +1639,7 @@ impl TypeChecker {
                             }
                             *return_type.clone()
                         } else {
-                            self.error(format!("'{}' is not callable", ident.name), expr.span);
+                            self.error(msg::not_callable(&ident.name), expr.span);
                             Type::Unknown
                         }
                     }
@@ -1696,13 +1664,7 @@ impl TypeChecker {
                                 for arg in arguments {
                                     self.check_expr(arg, None);
                                 }
-                                self.error(
-                                    format!(
-                                        "type '{}' is not callable: no function with that name",
-                                        named.path[0].name
-                                    ),
-                                    expr.span,
-                                );
+                                self.error(msg::type_not_callable(&named.path[0].name), expr.span);
                                 Type::Unknown
                             }
                         } else {
@@ -1719,7 +1681,7 @@ impl TypeChecker {
                         for arg in arguments {
                             self.check_expr(arg, None);
                         }
-                        self.error("type expression is not callable".to_string(), expr.span);
+                        self.error(msg::type_expression_not_callable(), expr.span);
                         Type::Unknown
                     }
                 } else {
@@ -1749,10 +1711,7 @@ impl TypeChecker {
                         for arg in arguments {
                             self.check_expr(arg, None);
                         }
-                        self.error(
-                            format!("expression is not callable (type {})", fn_ty),
-                            expr.span,
-                        );
+                        self.error(msg::expr_not_callable(&fn_ty), expr.span);
                         Type::Unknown
                     }
                 }
@@ -1787,11 +1746,10 @@ impl TypeChecker {
                             .collect();
                         if arguments.len() != expected_count {
                             self.error(
-                                format!(
-                                    "variant '{}' expects {} arguments, got {}",
-                                    method.name,
+                                msg::variant_arg_count_mismatch(
+                                    &method.name,
                                     expected_count,
-                                    arguments.len()
+                                    arguments.len(),
                                 ),
                                 expr.span,
                             );
@@ -1820,13 +1778,7 @@ impl TypeChecker {
                                     && !matches!(arg.kind.as_ref(), ast::ExpressionKind::Move(_))
                                     && self.type_has_drop_impl(&arg_types[i].to_ast())
                                 {
-                                    self.error(
-                                        format!(
-                                            "payload of type '{}' must be moved into the enum (it owns a resource)",
-                                            arg_types[i]
-                                        ),
-                                        arg.span,
-                                    );
+                                    self.error(msg::payload_must_be_moved(&arg_types[i]), arg.span);
                                 }
                             }
                             if !receiver_mapping.is_empty() {
@@ -2060,10 +2012,7 @@ impl TypeChecker {
                         )
                     );
                     if !is_type_scoped_access {
-                        self.error(
-                            "enum members must be accessed through the enum type name",
-                            object.span,
-                        );
+                        self.error(msg::enum_members_type_scoped(), object.span);
                         return Type::Unknown;
                     }
                 }
@@ -2083,10 +2032,7 @@ impl TypeChecker {
                 } else {
                     let suggestion = self.field_suggestion(&object_ty, &field.name);
                     self.error(
-                        format!(
-                            "unknown field '{}' on type {}{suggestion}",
-                            field.name, object_ty
-                        ),
+                        msg::unknown_field(&field.name, &object_ty, &suggestion),
                         field.span,
                     );
                     Type::Unknown
@@ -2226,10 +2172,7 @@ impl TypeChecker {
                         }
                     } else {
                         let suggestion = self.type_suggestion(&path[0]);
-                        self.error(
-                            format!("unknown enum type '{}'{suggestion}", path[0]),
-                            expr.span,
-                        );
+                        self.error(msg::unknown_enum_type(&path[0], &suggestion), expr.span);
                         for arm in arms {
                             self.check_expr(&arm.body, None);
                         }
@@ -2380,7 +2323,7 @@ impl TypeChecker {
                         let suggestion =
                             crate::diagnostics::suggestion_suffix(&name.name, known_macros);
                         self.error(
-                            format!("unknown builtin macro '@{}'{suggestion}", name.name),
+                            msg::unknown_builtin_macro(&name.name, &suggestion),
                             expr.span,
                         );
                         Type::Unknown
@@ -2532,12 +2475,11 @@ impl TypeChecker {
                         .unwrap_or_default();
                     if variant_payload.len() != fields.len() {
                         self.error(
-                            format!(
-                                "enum variant '{}' of '{}' expects {} fields, got {}",
-                                variant.name,
+                            msg::enum_variant_field_count_mismatch(
+                                &variant.name,
                                 enum_name,
                                 variant_payload.len(),
-                                fields.len()
+                                fields.len(),
                             ),
                             expr.span,
                         );
@@ -2553,10 +2495,7 @@ impl TypeChecker {
                     }
                 } else {
                     let suggestion = self.type_suggestion(enum_name);
-                    self.error(
-                        format!("unknown enum '{}'{suggestion}", enum_name),
-                        expr.span,
-                    );
+                    self.error(msg::unknown_enum(enum_name, &suggestion), expr.span);
                     Type::Unknown
                 }
             }
@@ -2754,10 +2693,7 @@ impl TypeChecker {
 
         let Some(candidate_ids) = self.functions.get(&ident.name).cloned() else {
             let suggestion = self.function_suggestion(&ident.name);
-            self.error(
-                format!("unknown function '{}'{suggestion}", ident.name),
-                span,
-            );
+            self.error(msg::unknown_function(&ident.name, &suggestion), span);
             return (Type::Unknown, arg_types);
         };
 
@@ -2857,10 +2793,6 @@ impl TypeChecker {
                 let args: Vec<String> = arg_types.iter().map(|t| t.to_string()).collect();
                 format!("({})", args.join(", "))
             };
-            let mut msg = format!(
-                "no matching overload for '{}', given {}",
-                ident.name, arg_desc
-            );
             let candidates: Vec<String> = candidate_ids
                 .iter()
                 .filter_map(|id| {
@@ -2870,11 +2802,10 @@ impl TypeChecker {
                     })
                 })
                 .collect();
-            if !candidates.is_empty() {
-                msg.push_str(", expected one of: ");
-                msg.push_str(&candidates.join(", "));
-            }
-            self.error(msg, span);
+            self.error(
+                msg::no_matching_overload(&ident.name, &arg_desc, &candidates, ""),
+                span,
+            );
             return (Type::Unknown, arg_types);
         }
         matches.sort_by_key(|(score, _, _, _)| *score);
@@ -2885,7 +2816,6 @@ impl TypeChecker {
             .collect();
 
         if best_matches.len() > 1 {
-            let mut msg = format!("ambiguous overload for '{}'", ident.name);
             let candidates: Vec<String> = best_matches
                 .iter()
                 .map(|(_, _, _, c)| {
@@ -2893,11 +2823,7 @@ impl TypeChecker {
                     format!("{}({})", ident.name, params.join(", "))
                 })
                 .collect();
-            if candidates.len() > 1 {
-                msg.push_str(", candidates: ");
-                msg.push_str(&candidates.join(", "));
-            }
-            self.error(msg, span);
+            self.error(msg::ambiguous_overload(&ident.name, &candidates), span);
             return (Type::Unknown, arg_types);
         }
 
@@ -2961,26 +2887,7 @@ impl TypeChecker {
                     format!("({})", args.join(", "))
                 };
                 let key = (self.method_key(receiver_ty), method.name.clone());
-                let mut msg = format!(
-                    "no matching overload for '{}', given {}",
-                    method.name, arg_desc
-                );
-                if let Some(candidate_ids) = self.methods.get(&key) {
-                    let candidates: Vec<String> = candidate_ids
-                        .iter()
-                        .filter_map(|id| {
-                            self.method_symbols.get(id).map(|c| {
-                                let params: Vec<String> =
-                                    c.params.iter().map(|p| p.to_string()).collect();
-                                format!("{}({})", method.name, params.join(", "))
-                            })
-                        })
-                        .collect();
-                    if !candidates.is_empty() {
-                        msg.push_str(", expected one of: ");
-                        msg.push_str(&candidates.join(", "));
-                    }
-                } else {
+                let suggestion = {
                     let target_key = self.method_key(receiver_ty);
                     let method_names: Vec<&str> = self
                         .methods
@@ -2988,13 +2895,28 @@ impl TypeChecker {
                         .filter(|(ty, _)| ty == &target_key)
                         .map(|(_, m)| m.as_str())
                         .collect();
-                    let suggestion =
-                        crate::diagnostics::suggestion_suffix(&method.name, method_names);
-                    if !suggestion.is_empty() {
-                        msg.push_str(&suggestion);
-                    }
-                }
-                self.error(msg, span);
+                    crate::diagnostics::suggestion_suffix(&method.name, method_names)
+                };
+                let candidates: Vec<String> = self
+                    .methods
+                    .get(&key)
+                    .map(|candidate_ids| {
+                        candidate_ids
+                            .iter()
+                            .filter_map(|id| {
+                                self.method_symbols.get(id).map(|c| {
+                                    let params: Vec<String> =
+                                        c.params.iter().map(|p| p.to_string()).collect();
+                                    format!("{}({})", method.name, params.join(", "))
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.error(
+                    msg::no_matching_overload(&method.name, &arg_desc, &candidates, &suggestion),
+                    span,
+                );
                 Type::Unknown
             }
         }
@@ -3203,7 +3125,6 @@ impl TypeChecker {
             .filter(|(score, _, _, _)| *score == best_score)
             .collect();
         if best_matches.len() > 1 {
-            let mut msg = format!("ambiguous overload for '{}'", name);
             let candidates: Vec<String> = best_matches
                 .iter()
                 .map(|(_, _, _, c)| {
@@ -3211,11 +3132,7 @@ impl TypeChecker {
                     format!("{}({})", name, params.join(", "))
                 })
                 .collect();
-            if candidates.len() > 1 {
-                msg.push_str(", candidates: ");
-                msg.push_str(&candidates.join(", "));
-            }
-            self.error(msg, span);
+            self.error(msg::ambiguous_overload(name, &candidates), span);
             return None;
         }
 
@@ -3342,13 +3259,7 @@ impl TypeChecker {
             if !self.is_assignable(&declared, &init_type)
                 && !self.is_implicitly_castable(&init_type, &declared)
             {
-                self.error(
-                    format!(
-                        "type mismatch: expected {:?}, found {:?}",
-                        declared, init_type
-                    ),
-                    init.span,
-                );
+                self.error(msg::type_mismatch(&declared, &init_type), init.span);
             }
         }
     }
@@ -4011,13 +3922,13 @@ impl TypeChecker {
 
     pub(crate) fn size_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@size expects exactly one argument", expr.span);
+            self.error(msg::size_exactly_one(), expr.span);
             return Type::Unknown;
         }
         let inner_expr = match args.first() {
             Some(ast::MacroArg::Expression(e)) => e,
             _ => {
-                self.error("@size requires an expression argument", expr.span);
+                self.error(msg::size_expression(), expr.span);
                 return Type::Unknown;
             }
         };
@@ -4054,13 +3965,13 @@ impl TypeChecker {
 
     pub(crate) fn align_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@align expects exactly one argument", expr.span);
+            self.error(msg::align_exactly_one(), expr.span);
             return Type::Unknown;
         }
         let inner_expr = match args.first() {
             Some(ast::MacroArg::Expression(e)) => e,
             _ => {
-                self.error("@align requires an expression argument", expr.span);
+                self.error(msg::align_expression(), expr.span);
                 return Type::Unknown;
             }
         };
@@ -4097,11 +4008,11 @@ impl TypeChecker {
 
     pub(crate) fn hash_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 1 {
-            self.error("@hash expects exactly one argument", expr.span);
+            self.error(msg::hash_exactly_one(), expr.span);
             return Type::Unknown;
         }
         let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
-            self.error("@hash requires an expression argument", expr.span);
+            self.error(msg::hash_expression(), expr.span);
             return Type::Unknown;
         };
         // Type-check the inner expression (emits errors if invalid, returns type)
@@ -4112,10 +4023,7 @@ impl TypeChecker {
 
     pub(crate) fn memcpy_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 3 {
-            self.error(
-                "@memcpy expects exactly 3 arguments (dst, src, len)",
-                expr.span,
-            );
+            self.error(msg::memcpy_expects_three(), expr.span);
             return Type::Unknown;
         }
         // dst
@@ -4140,10 +4048,7 @@ impl TypeChecker {
 
     pub(crate) fn memset_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if args.len() != 3 {
-            self.error(
-                "@memset expects exactly 3 arguments (dst, value, len)",
-                expr.span,
-            );
+            self.error(msg::memset_expects_three(), expr.span);
             return Type::Unknown;
         }
         // dst
@@ -4171,10 +4076,7 @@ impl TypeChecker {
         args: &[ast::MacroArg],
     ) -> Type {
         if args.len() != 3 {
-            self.error(
-                "@memmove expects exactly 3 arguments (dst, src, len)",
-                expr.span,
-            );
+            self.error(msg::memmove_expects_three(), expr.span);
             return Type::Unknown;
         }
         // dst
@@ -4198,17 +4100,14 @@ impl TypeChecker {
 
     pub(crate) fn json_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if !(1..=2).contains(&args.len()) {
-            self.error(
-                "@json expects a value and optional string prefix",
-                expr.span,
-            );
+            self.error(msg::json_arg_count(), expr.span);
             return Type::Unknown;
         }
 
         let value_expr = match &args[0] {
             ast::MacroArg::Expression(value) => value,
             _ => {
-                self.error("@json requires an expression value", expr.span);
+                self.error(msg::json_expression(), expr.span);
                 return Type::Unknown;
             }
         };
@@ -4226,10 +4125,10 @@ impl TypeChecker {
                 ast::MacroArg::Expression(prefix) => {
                     let prefix_ty = self.check_expr(prefix, None);
                     if prefix_ty != Type::Primitive(ast::PrimitiveType::Str) {
-                        self.error("@json prefix must have type str", prefix.span);
+                        self.error(msg::json_prefix_type(), prefix.span);
                     }
                 }
-                _ => self.error("@json prefix must be a string expression", expr.span),
+                _ => self.error(msg::json_prefix_string(), expr.span),
             }
         }
 
@@ -4242,16 +4141,13 @@ impl TypeChecker {
         args: &[ast::MacroArg],
     ) -> Type {
         if args.len() != 2 {
-            self.error(
-                "@from_json expects a target type and input string",
-                expr.span,
-            );
+            self.error(msg::from_json_arg_count(), expr.span);
             return Type::Unknown;
         }
         let target = match &args[0] {
             ast::MacroArg::Expression(target) => target,
             _ => {
-                self.error("@from_json requires a target type", expr.span);
+                self.error(msg::from_json_target(), expr.span);
                 return Type::Unknown;
             }
         };
@@ -4272,18 +4168,18 @@ impl TypeChecker {
             _ => Type::Unknown,
         };
         if target_ty == Type::Unknown {
-            self.error("@from_json requires a named target type", target.span);
+            self.error(msg::from_json_named_target(), target.span);
             return Type::Unknown;
         }
         let input = match &args[1] {
             ast::MacroArg::Expression(input) => input,
             _ => {
-                self.error("@from_json requires an input expression", expr.span);
+                self.error(msg::from_json_input(), expr.span);
                 return Type::Unknown;
             }
         };
         if self.check_expr(input, None) != Type::Primitive(ast::PrimitiveType::Str) {
-            self.error("@from_json input must have type str", input.span);
+            self.error(msg::from_json_input_type(), input.span);
         }
         if !self.has_json_trait_impl("FromJson", &target_ty) {
             self.error(
@@ -4329,10 +4225,7 @@ impl TypeChecker {
         // Minimum args: format string (+ BufWriter for @fprint)
         let min_args = fmt_arg_idx + 1;
         if args.len() < min_args {
-            self.error(
-                format!("`@{name}` requires at least {min_args} argument(s)"),
-                expr.span,
-            );
+            self.error(msg::macro_requires_min_args(name, min_args), expr.span);
             return Type::Unknown;
         }
 
@@ -4349,12 +4242,12 @@ impl TypeChecker {
                         .count()
                 }
                 _ => {
-                    self.error("format string must be a literal", e.span);
+                    self.error(msg::format_string_must_be_literal(), e.span);
                     return Type::Unknown;
                 }
             },
             _ => {
-                self.error("format string must be a literal", expr.span);
+                self.error(msg::format_string_must_be_literal(), expr.span);
                 return Type::Unknown;
             }
         };
@@ -4365,9 +4258,7 @@ impl TypeChecker {
 
         if placeholder_count != value_args_count {
             self.error(
-                format!(
-                    "`@{name}` expected {placeholder_count} format argument(s), got {value_args_count}"
-                ),
+                msg::macro_expected_format_args(name, placeholder_count, value_args_count),
                 expr.span,
             );
             return Type::Unknown;
@@ -4722,12 +4613,7 @@ impl TypeChecker {
         let payload_types: Vec<Type> = variant_info.payload.iter().map(Type::from_ast).collect();
         if arguments.len() != payload_types.len() {
             self.error(
-                format!(
-                    "variant '{}' expects {} arguments, got {}",
-                    variant,
-                    payload_types.len(),
-                    arguments.len()
-                ),
+                msg::variant_arg_count_mismatch(variant, payload_types.len(), arguments.len()),
                 *span,
             );
             return None;
@@ -5662,10 +5548,7 @@ impl TypeChecker {
                 Some(next) => next,
                 None => {
                     self.error(
-                        format!(
-                            "enum variant '{}' overflows automatic discriminant resolution",
-                            variant.name.name
-                        ),
+                        msg::enum_discriminant_overflow(&variant.name.name),
                         variant.span,
                     );
                     value
@@ -5760,7 +5643,7 @@ impl TypeChecker {
             scope.insert(name.to_string(), (ty, is_mutable));
         }
         if duplicate {
-            self.error(format!("duplicate binding for '{}'", name), span);
+            self.error(msg::duplicate_binding(name), span);
         }
     }
 

@@ -201,6 +201,7 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.
+- **Centralized message catalog**: every user-facing diagnostic string lives in `agc/src/diagnostics/messages.rs` as a named function (`msg::unknown_identifier`, `msg::type_mismatch`, `msg::use_of_moved_value`, ...). Passes import `crate::diagnostics::messages as msg` and call catalog functions instead of inlining literals — editing/translating messages is a single-file change.
 - Formatting reports: `error: file:line:col: message` or `warn: file:line:col: message` followed by the source line text and carets (`^`) pointing precisely to the span (with automatic tab expansion for character alignment).
 - Severity levels are defined by the `Severity` enum (`Error`, `Warning`, or `Note`).
 - **Multi-Span Move Diagnostics**: `move_check` records the original move site and reason, rendering a secondary `note: file:line:col: value explicitly moved here` under use-after-move errors.

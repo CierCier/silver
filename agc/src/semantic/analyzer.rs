@@ -1,5 +1,6 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::module_artifact::{ExportKind, ModuleArtifact};
 use crate::parser::ast;
@@ -346,7 +347,7 @@ impl Analyzer {
                     if self.has_symbol(&name).is_none() {
                         let suggestion = self.trait_suggestion(&name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'{suggestion}", name),
+                            message: msg::unknown_trait(&name, &suggestion),
                             span: trait_ref.span,
                         });
                     }
@@ -360,7 +361,7 @@ impl Analyzer {
                             && !func.parameters.is_empty()
                         {
                             self.errors.push(SemanticError {
-                                message: "inherent method 'drop' is not a Drop trait impl; consider 'impl Drop<T> for T' instead".to_string(),
+                                message: msg::inherent_drop_not_trait_impl().to_string(),
                                 span: func.name.span,
                             });
                         }
@@ -451,7 +452,7 @@ impl Analyzer {
                     if self.has_symbol(name).is_none() && !self.imported_types.contains(name) {
                         let suggestion = self.type_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown type '{}'{suggestion}", name),
+                            message: msg::unknown_type(name, &suggestion),
                             span: named.path[0].span,
                         });
                     }
@@ -467,7 +468,7 @@ impl Analyzer {
                     {
                         let suggestion = self.type_suggestion(&name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown type '{}'{suggestion}", name),
+                            message: msg::unknown_type(&name, &suggestion),
                             span: named
                                 .path
                                 .last()
@@ -490,7 +491,7 @@ impl Analyzer {
                 {
                     let suggestion = self.type_suggestion(&generic.name.name);
                     self.errors.push(SemanticError {
-                        message: format!("unknown type '{}'{suggestion}", generic.name.name),
+                        message: msg::unknown_type(&generic.name.name, &suggestion),
                         span: generic.name.span,
                     });
                 }
@@ -736,14 +737,14 @@ impl Analyzer {
                     Some(SymbolKind::Trait) => {}
                     Some(_) => {
                         self.errors.push(SemanticError {
-                            message: format!("'{}' is not a trait", name),
+                            message: msg::not_a_trait(name),
                             span: path[0].span,
                         });
                     }
                     None => {
                         let suggestion = self.trait_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'{suggestion}", name),
+                            message: msg::unknown_trait(name, &suggestion),
                             span: path[0].span,
                         });
                     }
@@ -754,14 +755,14 @@ impl Analyzer {
                     Some(SymbolKind::Trait) => {}
                     Some(_) => {
                         self.errors.push(SemanticError {
-                            message: format!("'{}' is not a trait", name),
+                            message: msg::not_a_trait(name),
                             span: last.span,
                         });
                     }
                     None => {
                         let suggestion = self.trait_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'{suggestion}", name),
+                            message: msg::unknown_trait(name, &suggestion),
                             span: last.span,
                         });
                     }
@@ -858,7 +859,7 @@ impl Analyzer {
         let bind = self.table_backend.bind_var(&ident.name, span);
         if bind == BindVarResult::DuplicateInScope {
             self.errors.push(SemanticError {
-                message: format!("duplicate variable '{}'", ident.name),
+                message: msg::duplicate_variable(&ident.name),
                 span,
             });
         }
@@ -896,19 +897,12 @@ impl Analyzer {
         if self.table_backend.resolve_var(&ident.name) {
             return;
         }
-
-        // Compiler intrinsics (e.g. `__atomic_*`) are recognized by name and
-        // handled by later pipeline stages; they never live in the symbol table.
         if crate::intrinsics::is_atomic_intrinsic_name(&ident.name) {
             return;
         }
-
-        // Bare enum constructors (`Some`, `None`, `Ok`, `Err`) are resolved by
-        // typeck's expected-type inference, not the symbol table.
         if matches!(ident.name.as_str(), "Some" | "None" | "Ok" | "Err") {
             return;
         }
-
         match self.has_symbol(&ident.name) {
             Some(SymbolKind::Function)
             | Some(SymbolKind::GlobalVariable)
@@ -921,7 +915,7 @@ impl Analyzer {
 
         let suggestion = self.identifier_suggestion(&ident.name);
         self.errors.push(SemanticError {
-            message: format!("unknown identifier '{}'{suggestion}", ident.name),
+            message: msg::unknown_identifier(&ident.name, &suggestion),
             span: ident.span,
         });
     }
@@ -939,7 +933,7 @@ impl Analyzer {
             }
             let suggestion = self.identifier_suggestion(&name);
             self.errors.push(SemanticError {
-                message: format!("unknown identifier '{}'{suggestion}", name),
+                message: msg::unknown_identifier(&name, &suggestion),
                 span: expr.span,
             });
         }
