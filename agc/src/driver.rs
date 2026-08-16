@@ -645,7 +645,6 @@ pub fn run(cli: Cli) {
                             let (ast, errors) = parser.parse_program();
 
                             if !errors.is_empty() {
-                                eprintln!("agc: parser errors:");
                                 for error in &errors {
                                     eprintln!(
                                         "{}",
@@ -790,7 +789,6 @@ pub fn run(cli: Cli) {
                 profiler::end_phase("parse");
 
                 if !errors.is_empty() {
-                    eprintln!("agc: parser errors:");
                     for error in &errors {
                         eprintln!(
                             "{}",
@@ -855,7 +853,6 @@ pub fn run(cli: Cli) {
                 );
                 let cfg_errors = cfg::gate_items(&mut ast, &cfg_set);
                 if !cfg_errors.is_empty() {
-                    eprintln!("agc: cfg errors:");
                     for error in &cfg_errors {
                         eprintln!(
                             "{}",
@@ -880,7 +877,6 @@ pub fn run(cli: Cli) {
                     run_semantic_hooks(&mut ast, &mut symbol_table, &imported_modules);
                 profiler::end_phase("semantic");
                 if !semantic_errors.is_empty() {
-                    eprintln!("agc: semantic errors:");
                     for error in &semantic_errors {
                         eprintln!(
                             "{}",
@@ -965,7 +961,6 @@ pub fn run(cli: Cli) {
                     );
                 }
                 if !type_errors.is_empty() {
-                    eprintln!("agc: type errors:");
                     for error in &type_errors {
                         eprintln!(
                             "{}",
@@ -983,7 +978,6 @@ pub fn run(cli: Cli) {
                 // a use-after-free, reported alongside type errors.
                 let escape_errors = crate::semantic::escape_check::check_program(&ast);
                 if !escape_errors.is_empty() {
-                    eprintln!("agc: escape errors:");
                     for error in &escape_errors {
                         eprintln!(
                             "{}",
@@ -999,7 +993,6 @@ pub fn run(cli: Cli) {
 
                 let move_errors = crate::semantic::move_check::check_program(&ast);
                 if !move_errors.is_empty() {
-                    eprintln!("agc: move errors:");
                     for error in &move_errors {
                         eprintln!(
                             "{}",

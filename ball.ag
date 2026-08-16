@@ -1,0 +1,6 @@
+import std.io;
+
+i32 main(){
+	@printl("Hello, Nigga!");
+	return 0;
+}

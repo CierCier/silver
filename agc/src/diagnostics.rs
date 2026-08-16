@@ -36,18 +36,30 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
     };
 
     let header = match severity {
-        Severity::Error => format!(
-            "{}: {}: {}",
-            format!("{path}:{line}:{col}").bold(),
-            "error".red().bold(),
-            message.bold()
-        ),
-        Severity::Warning => format!(
-            "{}: {}: {}",
-            format!("{path}:{line}:{col}").bold(),
-            "warning".yellow().bold(),
-            message.bold()
-        ),
+        Severity::Error => {
+            if line > 0 {
+                format!(
+                    "{}: {}: {}",
+                    "error".red().bold(),
+                    format!("{path}:{line}:{col}").bold(),
+                    message.bold()
+                )
+            } else {
+                format!("{}: {}", "error".red().bold(), message.bold())
+            }
+        }
+        Severity::Warning => {
+            if line > 0 {
+                format!(
+                    "{}: {}: {}",
+                    "warn".yellow().bold(),
+                    format!("{path}:{line}:{col}").bold(),
+                    message.bold()
+                )
+            } else {
+                format!("{}: {}", "warn".yellow().bold(), message.bold())
+            }
+        }
     };
 
     // No source text (synthetic span or unregistered file): header only.
@@ -55,25 +67,45 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
         return header;
     }
 
-    let mut caret_start = span.start_col.saturating_sub(1);
-    let mut caret_len = (span.end.saturating_sub(span.start)) as u32;
-    if caret_len == 0 {
-        caret_len = 1;
+    let col_idx = col.saturating_sub(1) as usize;
+    let span_len = span.end.saturating_sub(span.start);
+    let span_chars = span_len.max(1);
+
+    let mut rendered_line = String::new();
+    let mut underline = String::new();
+
+    let mut char_count = 0usize;
+    for (char_idx, ch) in line_text.chars().enumerate() {
+        char_count += 1;
+        let is_in_span = char_idx >= col_idx && char_idx < col_idx + span_chars;
+        let is_before_span = char_idx < col_idx;
+
+        if ch == '\t' {
+            rendered_line.push_str("    ");
+            if is_before_span {
+                underline.push_str("    ");
+            } else if is_in_span {
+                underline.push_str("^^^^");
+            }
+        } else {
+            rendered_line.push(ch);
+            if is_before_span {
+                underline.push(' ');
+            } else if is_in_span {
+                underline.push('^');
+            }
+        }
     }
 
-    let line_len = line_text.chars().count() as u32;
-    if caret_start >= line_len {
-        caret_start = line_len.saturating_sub(1);
-    }
-    if caret_start + caret_len > line_len {
-        caret_len = line_len.saturating_sub(caret_start).max(1);
+    // If span started past the line end, point at the end of the line.
+    if col_idx >= char_count && !rendered_line.is_empty() {
+        underline.clear();
+        underline.push_str(&" ".repeat(rendered_line.chars().count().saturating_sub(1)));
+        underline.push('^');
     }
 
     let line_num_width = line.to_string().len();
     let line_prefix = format!("{:>width$} | ", line, width = line_num_width);
-    let mut underline = String::new();
-    underline.push_str(&" ".repeat(caret_start as usize));
-    underline.push_str(&"^".repeat(caret_len as usize));
 
     let underline = match severity {
         Severity::Error => underline.red().bold().to_string(),
@@ -81,7 +113,7 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
     };
 
     format!(
-        "{header}\n{line_prefix}{line_text}\n{:>width$} | {underline}",
+        "{header}\n{line_prefix}{rendered_line}\n{:>width$} | {underline}",
         "",
         width = line_num_width
     )
@@ -212,6 +244,34 @@ mod tests {
         );
         assert!(out.contains("    u8 bad = 300;"), "line text: {out}");
         assert!(out.contains("^^^"), "caret: {out}");
+    }
+
+    #[test]
+    fn renders_tab_indented_line_with_aligned_carets() {
+        let path = "/tmp/diag_tab_test.ag";
+        let text = "i32 main() {\n\t@printl(\"hello\");\n}\n";
+        let file = register_source(path, text);
+
+        let (line, col) = line_col_at(text, 14); // offset 14 is '@' on line 2 (text has 13 chars in line 1)
+        let span = Span {
+            start: 14,
+            end: 21,
+            file,
+            start_line: line,
+            start_col: 2, // '@' is column 2 after the tab
+            end_line: line,
+            end_col: 9,
+        };
+        let out = render(span, "unknown builtin macro '@printl'", Severity::Error);
+        assert!(
+            out.contains("/tmp/diag_tab_test.ag:2:2"),
+            "header location: {out}"
+        );
+        assert!(
+            out.contains("2 |     @printl(\"hello\");"),
+            "expanded line: {out}"
+        );
+        assert!(out.contains("^^^^^^^"), "aligned carets: {out}");
     }
 
     #[test]
