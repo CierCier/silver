@@ -895,7 +895,11 @@ impl TypeChecker {
                             generics: Vec::new(),
                         };
                     }
-                    self.error(format!("unknown identifier '{}'", ident.name), ident.span);
+                    let suggestion = self.identifier_suggestion(&ident.name);
+                    self.error(
+                        format!("unknown identifier '{}'{suggestion}", ident.name),
+                        ident.span,
+                    );
                     Type::Unknown
                 }
             },
@@ -2060,8 +2064,12 @@ impl TypeChecker {
                 if let Some(field_ty) = self.resolve_field_access_type(&object_ty, &field.name) {
                     field_ty
                 } else {
+                    let suggestion = self.field_suggestion(&object_ty, &field.name);
                     self.error(
-                        format!("unknown field '{}' on type {}", field.name, object_ty),
+                        format!(
+                            "unknown field '{}' on type {}{suggestion}",
+                            field.name, object_ty
+                        ),
                         field.span,
                     );
                     Type::Unknown
@@ -2200,7 +2208,11 @@ impl TypeChecker {
                             Type::Unit
                         }
                     } else {
-                        self.error(format!("unknown enum type '{}'", path[0]), expr.span);
+                        let suggestion = self.type_suggestion(&path[0]);
+                        self.error(
+                            format!("unknown enum type '{}'{suggestion}", path[0]),
+                            expr.span,
+                        );
                         for arm in arms {
                             self.check_expr(&arm.body, None);
                         }
@@ -2331,7 +2343,29 @@ impl TypeChecker {
                 match crate::builtin_macros::handle_typeck(&name.name, self, expr, args) {
                     Some(ty) => ty,
                     None => {
-                        self.error(format!("unknown builtin macro '@{}'", name.name), expr.span);
+                        let known_macros = [
+                            "print",
+                            "println",
+                            "eprint",
+                            "eprintln",
+                            "fprint",
+                            "sprint",
+                            "assert",
+                            "align",
+                            "size",
+                            "json",
+                            "from_json",
+                            "hash",
+                            "memcpy",
+                            "memset",
+                            "memmove",
+                        ];
+                        let suggestion =
+                            crate::diagnostics::suggestion_suffix(&name.name, known_macros);
+                        self.error(
+                            format!("unknown builtin macro '@{}'{suggestion}", name.name),
+                            expr.span,
+                        );
                         Type::Unknown
                     }
                 }
@@ -2501,7 +2535,11 @@ impl TypeChecker {
                         generics: Vec::new(),
                     }
                 } else {
-                    self.error(format!("unknown enum '{}'", enum_name), expr.span);
+                    let suggestion = self.type_suggestion(enum_name);
+                    self.error(
+                        format!("unknown enum '{}'{suggestion}", enum_name),
+                        expr.span,
+                    );
                     Type::Unknown
                 }
             }
@@ -2698,7 +2736,11 @@ impl TypeChecker {
             .collect::<Vec<_>>();
 
         let Some(candidate_ids) = self.functions.get(&ident.name).cloned() else {
-            self.error(format!("unknown function '{}'", ident.name), span);
+            let suggestion = self.function_suggestion(&ident.name);
+            self.error(
+                format!("unknown function '{}'{suggestion}", ident.name),
+                span,
+            );
             return (Type::Unknown, arg_types);
         };
 
@@ -2920,6 +2962,19 @@ impl TypeChecker {
                     if !candidates.is_empty() {
                         msg.push_str(", expected one of: ");
                         msg.push_str(&candidates.join(", "));
+                    }
+                } else {
+                    let target_key = self.method_key(receiver_ty);
+                    let method_names: Vec<&str> = self
+                        .methods
+                        .keys()
+                        .filter(|(ty, _)| ty == &target_key)
+                        .map(|(_, m)| m.as_str())
+                        .collect();
+                    let suggestion =
+                        crate::diagnostics::suggestion_suffix(&method.name, method_names);
+                    if !suggestion.is_empty() {
+                        msg.push_str(&suggestion);
                     }
                 }
                 self.error(msg, span);
@@ -5132,6 +5187,62 @@ impl TypeChecker {
         Some(field_ty.substitute(&mapping))
     }
 
+    fn identifier_suggestion(&self, name: &str) -> String {
+        let mut candidates: Vec<&str> = Vec::new();
+        for scope in self.scopes.iter().rev() {
+            candidates.extend(scope.keys().map(|s| s.as_str()));
+        }
+        candidates.extend(self.global_variables.keys().map(|s| s.as_str()));
+        candidates.extend(self.extern_variables.keys().map(|s| s.as_str()));
+        candidates.extend(self.functions.keys().map(|s| s.as_str()));
+        candidates.extend(self.imported_functions.keys().map(|s| s.as_str()));
+        candidates.extend(self.known_types.keys().map(|s| s.as_str()));
+        crate::diagnostics::suggestion_suffix(name, candidates)
+    }
+
+    fn function_suggestion(&self, name: &str) -> String {
+        let mut candidates: Vec<&str> = Vec::new();
+        candidates.extend(self.functions.keys().map(|s| s.as_str()));
+        candidates.extend(self.imported_functions.keys().map(|s| s.as_str()));
+        for scope in self.scopes.iter().rev() {
+            candidates.extend(scope.keys().map(|s| s.as_str()));
+        }
+        crate::diagnostics::suggestion_suffix(name, candidates)
+    }
+
+    fn field_suggestion(&self, object_ty: &Type, field_name: &str) -> String {
+        let mut current = object_ty;
+        while let Type::Reference { inner, .. } | Type::Pointer { inner, .. } = current {
+            current = inner.as_ref();
+        }
+        let Type::Named { path, .. } = current else {
+            return String::new();
+        };
+        let Some(type_name) = path.last() else {
+            return String::new();
+        };
+        if let Some(enum_def) = self.enum_defs.get(type_name) {
+            return crate::diagnostics::suggestion_suffix(field_name, enum_def.variants.keys());
+        }
+        if let Some(struct_def) = self.struct_defs.get(type_name) {
+            return crate::diagnostics::suggestion_suffix(field_name, struct_def.fields.keys());
+        }
+        String::new()
+    }
+
+    fn type_suggestion(&self, name: &str) -> String {
+        let mut candidates: Vec<&str> = Vec::new();
+        candidates.extend(self.known_types.keys().map(|s| s.as_str()));
+        candidates.extend(self.struct_defs.keys().map(|s| s.as_str()));
+        candidates.extend(self.enum_defs.keys().map(|s| s.as_str()));
+        candidates.extend(self.type_aliases.keys().map(|s| s.as_str()));
+        candidates.extend([
+            "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64",
+            "bool", "str", "char", "void",
+        ]);
+        crate::diagnostics::suggestion_suffix(name, candidates)
+    }
+
     fn collect_struct_layouts(&mut self, program: &ast::Program) {
         for item in &program.items {
             let ast::ItemKind::Struct(struct_item) = &item.kind else {
@@ -6897,6 +7008,57 @@ mod tests {
                 .values()
                 .any(|r| r.enum_name == "Result" && r.variant == "Ok"),
             "expected a Result::Ok rewrite, got {rewrites:?}"
+        );
+    }
+
+    #[test]
+    fn typo_suggestion_for_unknown_identifier() {
+        let program = parse("i32 main() { i32 my_counter = 10; return my_countr; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("did you mean 'my_counter'?")),
+            "expected typo suggestion for identifier, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typo_suggestion_for_unknown_field() {
+        let program = parse("struct Point { i64 x; i64 y; } i32 main() { Point p; return p.xx; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("did you mean 'x'?")),
+            "expected typo suggestion for field, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typo_suggestion_for_unknown_method() {
+        let program = parse(
+            "struct Counter { i64 val; } \
+             impl Counter { i64 get_count(Counter* self) { return self.val; } } \
+             i32 main() { Counter c; return c.get_coun(); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("did you mean 'get_count'?")),
+            "expected typo suggestion for method, got {errors:?}"
+        );
+    }
+    #[test]
+    fn typo_suggestion_for_unknown_macro() {
+        let program = parse("i32 main() { @printlln(\"hello\"); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("did you mean 'println'?")),
+            "expected typo suggestion for macro, got {errors:?}"
         );
     }
 

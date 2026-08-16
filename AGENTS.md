@@ -65,7 +65,15 @@ silver/
    ```
 3. **Compile a Silver file**:
    ```bash
-   cargo run -p agc -- path/to/file.ag
+   cargo run -p agc -- path/to/file.ag -o out
+   ```
+4. **Fast Frontend-Only Typecheck (`agc check`)**:
+   ```bash
+   cargo run -p agc -- check path/to/file.ag
+   ```
+5. **Compile and Run (`agc run`)**:
+   ```bash
+   cargo run -p agc -- run path/to/file.ag [args...]
    ```
 
 ---
@@ -195,7 +203,8 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.
 - Formatting reports: `file:line:col: error/warning: message` followed by the source line text and carets (`^`) pointing to the span.
 - Severity levels are defined by the `Severity` enum (`Error` or `Warning`).
-
+- **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
+- **LSP Diagnostic Routing**: `aglsp` filters diagnostics by `file_id`, mapping errors occurring in inlined/imported files against their original source text and publishing to their respective file URIs without corrupting the open buffer's span ranges.
 ## 7.1 Debugging Support (DWARF by default)
 
 DWARF is emitted by default for non-release builds (no `-O` / `-O0`) and

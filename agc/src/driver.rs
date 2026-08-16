@@ -150,12 +150,26 @@ pub struct Cli {
     /// gate on the runtime CPU probe (see std/cpu.ag).
     #[arg(long = "cfg", value_name = "KEY=VALUE,...", action = ArgAction::Append)]
     cfg_flags: Vec<String>,
+
+    /// Check only: run syntax, semantic, type, and borrow/move checks without codegen or linking
+    #[arg(long = "check", action = ArgAction::SetTrue)]
+    pub check_only: bool,
+
+    /// Run mode: compile and immediately execute the output binary
+    #[arg(long = "run", action = ArgAction::SetTrue)]
+    pub run_mode: bool,
+
+    /// Arguments to forward to the target binary in run mode
+    #[arg(long = "run-arg", value_name = "ARG", action = ArgAction::Append)]
+    pub run_args: Vec<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
 pub(crate) enum EmitKind {
     /// Link an executable.
     Exe,
+    /// Run frontend checks only (lex, parse, semantic, typeck, move/escape checks).
+    Check,
     /// Emit an object file.
     Obj,
     /// Emit assembly.
@@ -195,6 +209,9 @@ pub(crate) struct CompilePlan {
     pub(crate) profile: bool,
     pub(crate) leak_check: bool,
     pub(crate) cfg_flags: Vec<String>,
+    pub(crate) run_mode: bool,
+    pub(crate) run_args: Vec<String>,
+    pub(crate) auto_output: bool,
 }
 
 impl CompilePlan {
@@ -246,6 +263,9 @@ impl CompilePlan {
 }
 
 fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
+    if cli.check_only {
+        return Ok(EmitKind::Check);
+    }
     if let Some(e) = cli.emit {
         return Ok(e);
     }
@@ -284,6 +304,7 @@ fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
 fn default_output_for(emit: EmitKind, inputs: &[PathBuf]) -> PathBuf {
     match emit {
         EmitKind::Exe => PathBuf::from("a.out"),
+        EmitKind::Check => PathBuf::from(""),
         EmitKind::Obj => with_ext_or_default(inputs, "o"),
         EmitKind::Asm => with_ext_or_default(inputs, "s"),
         EmitKind::LlvmIr => with_ext_or_default(inputs, "ll"),
@@ -325,9 +346,17 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         }
     }
 
-    let output = cli
-        .output
-        .unwrap_or_else(|| default_output_for(emit, &cli.inputs));
+    let auto_output = cli.output.is_none();
+    let output = if cli.run_mode && auto_output {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        env::temp_dir().join(format!("agc_run_{}_{}", std::process::id(), timestamp))
+    } else {
+        cli.output
+            .unwrap_or_else(|| default_output_for(emit, &cli.inputs))
+    };
     let package_root = match cli.root {
         Some(root) => root,
         None => env::current_dir()
@@ -365,6 +394,9 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         verbose: cli.verbose,
         dry_run: cli.dry_run,
         profile: cli.profile,
+        run_mode: cli.run_mode,
+        run_args: cli.run_args,
+        auto_output,
         leak_check: cli.leak_check,
         cfg_flags: cli.cfg_flags,
     })
@@ -981,6 +1013,13 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
+                if plan.emit == EmitKind::Check {
+                    if plan.verbose {
+                        eprintln!("agc: check passed for {}", input.display());
+                    }
+                    continue;
+                }
+
                 let program_link_libs = match collect_program_link_libraries(&ast) {
                     Ok(libs) => libs,
                     Err(error) => {
@@ -1333,6 +1372,9 @@ pub fn run(cli: Cli) {
                 profiler::print_report();
                 return;
             }
+            if plan.emit == EmitKind::Check {
+                return;
+            }
 
             if matches!(plan.emit, EmitKind::Exe) {
                 if exe_object_files.is_empty() {
@@ -1353,6 +1395,27 @@ pub fn run(cli: Cli) {
                 // Clean up temp dir
                 if let Some(dir) = &exe_temp_dir {
                     let _ = std::fs::remove_dir_all(dir);
+                }
+                if plan.run_mode {
+                    let mut cmd = std::process::Command::new(&plan.output);
+                    cmd.args(&plan.run_args);
+                    let status = cmd.status();
+                    if plan.auto_output {
+                        let _ = std::fs::remove_file(&plan.output);
+                    }
+                    match status {
+                        Ok(s) => {
+                            std::process::exit(s.code().unwrap_or(1));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "agc: {}: failed to execute {}: {e}",
+                                "error".red().bold(),
+                                plan.output.display()
+                            );
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 profiler::print_report();
                 return;
@@ -1471,6 +1534,9 @@ mod tests {
             profile: false,
             leak_check: false,
             cfg_flags: Vec::new(),
+            run_mode: false,
+            run_args: Vec::new(),
+            auto_output: false,
         }
     }
 

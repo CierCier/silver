@@ -1,13 +1,13 @@
 use agc::lexer;
 use agc::parser::{FileImportResolverHook, Parser};
 use agc::semantic::typeck::TypeChecker;
+use agc::symbol_index::{SymbolIndex, analyze};
 use agc::symbol_table::CompilerSymbolTable;
+use rustc_hash::FxHashMap as HashMap;
 use tower_lsp_server::ls_types::*;
 
 use crate::Backend;
 use crate::util::*;
-use agc::symbol_index::{SymbolIndex, analyze};
-
 impl Backend {
     pub(crate) async fn check_diagnostics(&self, uri: &Uri, text: &str) {
         // Register the buffer with the source registry and lex with its file
@@ -100,19 +100,42 @@ impl Backend {
         let (type_errors, _monomorphs) = tc.check_program_with_table(&program, &mut table);
         let expr_types = std::mem::take(&mut tc.expr_types);
 
+        let mut by_uri: HashMap<Uri, Vec<Diagnostic>> = HashMap::default();
+        by_uri.insert(uri.clone(), diagnostics);
+
         for err in &type_errors {
-            diagnostics.push(Diagnostic {
-                range: span_to_range(text, &err.span),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: err.message.clone(),
-                ..Default::default()
-            });
+            if err.span.file == file_id || err.span.file == 0 {
+                by_uri.entry(uri.clone()).or_default().push(Diagnostic {
+                    range: span_to_range(text, &err.span),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: err.message.clone(),
+                    ..Default::default()
+                });
+            } else if let Some(source_file) = lexer::source_file(err.span.file) {
+                if let Some(imported_uri) = Uri::from_file_path(&source_file.path) {
+                    by_uri.entry(imported_uri).or_default().push(Diagnostic {
+                        range: span_to_range(&source_file.text, &err.span),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: err.message.clone(),
+                        ..Default::default()
+                    });
+                } else {
+                    by_uri.entry(uri.clone()).or_default().push(Diagnostic {
+                        range: Range::default(),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: format!("{}: {}", source_file.path, err.message),
+                        ..Default::default()
+                    });
+                }
+            }
         }
 
         let analysis = analyze(&program, text, &tokens, expr_types, file_id);
         self.cache.lock().insert(uri.clone(), analysis);
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
+        for (target_uri, diags) in by_uri {
+            self.client
+                .publish_diagnostics(target_uri, diags, None)
+                .await;
+        }
     }
 }

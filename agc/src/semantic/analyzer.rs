@@ -344,8 +344,9 @@ impl Analyzer {
                 {
                     let name = trait_ref.path[0].name.clone();
                     if self.has_symbol(&name).is_none() {
+                        let suggestion = self.trait_suggestion(&name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'", name),
+                            message: format!("unknown trait '{}'{suggestion}", name),
                             span: trait_ref.span,
                         });
                     }
@@ -448,8 +449,9 @@ impl Analyzer {
                         return;
                     }
                     if self.has_symbol(name).is_none() && !self.imported_types.contains(name) {
+                        let suggestion = self.type_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown type '{}'", name),
+                            message: format!("unknown type '{}'{suggestion}", name),
                             span: named.path[0].span,
                         });
                     }
@@ -463,8 +465,9 @@ impl Analyzer {
                         && self.has_symbol(&name).is_none()
                         && !self.imported_types.contains(&name)
                     {
+                        let suggestion = self.type_suggestion(&name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown type '{}'", name),
+                            message: format!("unknown type '{}'{suggestion}", name),
                             span: named
                                 .path
                                 .last()
@@ -485,8 +488,9 @@ impl Analyzer {
                     && self.has_symbol(&generic.name.name).is_none()
                     && !self.imported_types.contains(&generic.name.name)
                 {
+                    let suggestion = self.type_suggestion(&generic.name.name);
                     self.errors.push(SemanticError {
-                        message: format!("unknown type '{}'", generic.name.name),
+                        message: format!("unknown type '{}'{suggestion}", generic.name.name),
                         span: generic.name.span,
                     });
                 }
@@ -737,8 +741,9 @@ impl Analyzer {
                         });
                     }
                     None => {
+                        let suggestion = self.trait_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'", name),
+                            message: format!("unknown trait '{}'{suggestion}", name),
                             span: path[0].span,
                         });
                     }
@@ -754,8 +759,9 @@ impl Analyzer {
                         });
                     }
                     None => {
+                        let suggestion = self.trait_suggestion(name);
                         self.errors.push(SemanticError {
-                            message: format!("unknown trait '{}'", name),
+                            message: format!("unknown trait '{}'{suggestion}", name),
                             span: last.span,
                         });
                     }
@@ -913,8 +919,9 @@ impl Analyzer {
             None => {}
         }
 
+        let suggestion = self.identifier_suggestion(&ident.name);
         self.errors.push(SemanticError {
-            message: format!("unknown identifier '{}'", ident.name),
+            message: format!("unknown identifier '{}'{suggestion}", ident.name),
             span: ident.span,
         });
     }
@@ -930,8 +937,9 @@ impl Analyzer {
             ) {
                 return;
             }
+            let suggestion = self.identifier_suggestion(&name);
             self.errors.push(SemanticError {
-                message: format!("unknown identifier '{}'", name),
+                message: format!("unknown identifier '{}'{suggestion}", name),
                 span: expr.span,
             });
         }
@@ -946,6 +954,47 @@ impl Analyzer {
             ast::ExpressionKind::Move(inner) => self.lvalue_root(inner),
             _ => None,
         }
+    }
+
+    fn trait_suggestion(&self, name: &str) -> String {
+        let candidates: Vec<&str> = self
+            .symbols
+            .iter()
+            .filter(|(_, k)| **k == SymbolKind::Trait)
+            .map(|(s, _)| s.as_str())
+            .chain(self.imported_traits.iter().map(|s| s.as_str()))
+            .collect();
+        crate::diagnostics::suggestion_suffix(name, candidates)
+    }
+
+    fn type_suggestion(&self, name: &str) -> String {
+        let candidates: Vec<&str> = self
+            .symbols
+            .iter()
+            .filter(|(_, k)| {
+                matches!(
+                    **k,
+                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
+                )
+            })
+            .map(|(s, _)| s.as_str())
+            .chain(self.imported_types.iter().map(|s| s.as_str()))
+            .chain([
+                "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64",
+                "bool", "str", "char", "void",
+            ])
+            .collect();
+        crate::diagnostics::suggestion_suffix(name, candidates)
+    }
+
+    fn identifier_suggestion(&self, name: &str) -> String {
+        let candidates: Vec<&str> = self
+            .symbols
+            .keys()
+            .map(|s| s.as_str())
+            .chain(self.imported_symbols.keys().map(|s| s.as_str()))
+            .collect();
+        crate::diagnostics::suggestion_suffix(name, candidates)
     }
 }
 

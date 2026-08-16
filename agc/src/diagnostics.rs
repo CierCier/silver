@@ -87,6 +87,94 @@ pub fn render(span: Span, message: &str, severity: Severity) -> String {
     )
 }
 
+/// Compute the Levenshtein edit distance between two strings.
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    if a == b {
+        return 0;
+    }
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev_row: Vec<usize> = (0..=b_len).collect();
+    let mut curr_row: Vec<usize> = vec![0; b_len + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        curr_row[0] = i + 1;
+        for (j, &cb) in b_chars.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr_row[j + 1] = (prev_row[j + 1] + 1)
+                .min(curr_row[j] + 1)
+                .min(prev_row[j] + cost);
+        }
+        prev_row.copy_from_slice(&curr_row);
+    }
+    prev_row[b_len]
+}
+
+/// Find the best matching candidate for `name` among `candidates`.
+/// Returns `Some(best_match)` if a candidate is sufficiently close.
+pub fn find_best_match<I, S>(name: &str, candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let name_len = name.chars().count();
+    if name_len == 0 {
+        return None;
+    }
+    // Allow edit distance scaled to name length.
+    let max_dist = match name_len {
+        0..=2 => 1,
+        3..=5 => 2,
+        6..=10 => 3,
+        _ => (name_len / 3).max(3),
+    };
+
+    let name_lower = name.to_lowercase();
+    let mut best_candidate: Option<String> = None;
+    let mut best_dist = usize::MAX;
+
+    for cand in candidates {
+        let cand_str = cand.as_ref();
+        if cand_str == name {
+            continue;
+        }
+        let cand_lower = cand_str.to_lowercase();
+        let dist = if name_lower == cand_lower {
+            0
+        } else {
+            levenshtein(&name_lower, &cand_lower)
+        };
+
+        if dist <= max_dist && dist < best_dist {
+            best_dist = dist;
+            best_candidate = Some(cand_str.to_string());
+        }
+    }
+
+    best_candidate
+}
+
+/// Helper that formats a typo suggestion suffix, e.g. `", did you mean 'len'?"`
+pub fn suggestion_suffix<I, S>(name: &str, candidates: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if let Some(best) = find_best_match(name, candidates) {
+        format!(", did you mean '{}'?", best)
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +229,44 @@ mod tests {
         // 'café' = 4 chars (é is one char, two bytes): é starts at byte 14, col 4.
         let (l2, c2) = line_col_at(text, 14);
         assert_eq!((l2, c2), (2, 4));
+    }
+
+    #[test]
+    fn test_levenshtein_distance() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("hello", "hello"), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+    }
+
+    #[test]
+    fn test_find_best_match() {
+        let candidates = ["len", "capacity", "push", "pop", "is_empty"];
+        assert_eq!(
+            find_best_match("lenght", candidates),
+            Some("len".to_string())
+        );
+        assert_eq!(
+            find_best_match("capcity", candidates),
+            Some("capacity".to_string())
+        );
+        assert_eq!(
+            find_best_match("PUSH", candidates),
+            Some("push".to_string())
+        );
+        assert_eq!(
+            find_best_match("xyz_completely_different", candidates),
+            None
+        );
+    }
+
+    #[test]
+    fn test_suggestion_suffix() {
+        let candidates = ["println", "print", "assert"];
+        assert_eq!(
+            suggestion_suffix("printl", candidates),
+            ", did you mean 'println'?"
+        );
+        assert_eq!(suggestion_suffix("xyz", candidates), "");
     }
 }
