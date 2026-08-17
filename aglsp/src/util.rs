@@ -207,6 +207,13 @@ pub(crate) fn find_std_search_dirs() -> Vec<PathBuf> {
 
 pub(crate) fn build_lsp_loader() -> ModuleLoader {
     let mut loader = ModuleLoader::new();
+    if let Ok(root) = std::env::current_dir() {
+        loader.add_search_dir(&root);
+        let local_lib = root.join("lib").join("silver");
+        if local_lib.is_dir() {
+            loader.add_search_dir(local_lib);
+        }
+    }
     for dir in find_std_search_dirs() {
         loader.add_search_dir(dir);
     }
