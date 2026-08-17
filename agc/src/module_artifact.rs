@@ -8,7 +8,8 @@ use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x06"; // v6: backtrace table records gained file/line (v5: collision-safe hashing)
+const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x07"; // v7: foreign library search paths
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -23,6 +24,7 @@ pub struct ModuleArtifact {
     pub transitive_deps: Vec<String>,
     pub exports: Vec<ModuleExport>,
     pub native_libs: Vec<String>,
+    pub native_lib_paths: Vec<String>,
     pub artifact_path: Option<PathBuf>,
 }
 
@@ -186,6 +188,7 @@ impl ModuleArtifact {
             transitive_deps,
             exports,
             native_libs,
+            native_lib_paths: Vec::new(),
             artifact_path: None,
         }
     }
@@ -255,18 +258,23 @@ impl ModuleArtifact {
         for lib in &self.native_libs {
             write_string(&mut out, lib)?;
         }
+        write_len(&mut out, self.native_lib_paths.len())?;
+        for path in &self.native_lib_paths {
+            write_string(&mut out, path)?;
+        }
         Ok(out)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        let has_field_tags = if magic == MODULE_MAGIC {
+        let has_field_tags = if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V6 {
             true
         } else if magic == MODULE_MAGIC_V2 {
             false
         } else {
             return Err("invalid module interface header".to_string());
         };
+        let has_lib_paths = magic == MODULE_MAGIC;
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -394,6 +402,16 @@ impl ModuleArtifact {
         for _ in 0..libs_len {
             native_libs.push(read_string(bytes, &mut cursor)?);
         }
+        let native_lib_paths = if has_lib_paths {
+            let paths_len = read_len(bytes, &mut cursor)? as usize;
+            let mut paths = Vec::with_capacity(paths_len);
+            for _ in 0..paths_len {
+                paths.push(read_string(bytes, &mut cursor)?);
+            }
+            paths
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             module_name,
             module_path,
@@ -406,6 +424,7 @@ impl ModuleArtifact {
             transitive_deps,
             exports,
             native_libs,
+            native_lib_paths,
             artifact_path: None,
         })
     }
@@ -1269,6 +1288,7 @@ mod tests {
                 },
             ],
             native_libs: vec!["c".to_string()],
+            native_lib_paths: Vec::new(),
             artifact_path: None,
         };
 

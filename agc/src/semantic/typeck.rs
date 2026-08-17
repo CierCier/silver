@@ -6282,6 +6282,7 @@ mod tests {
                 trait_items: Vec::new(),
             }],
             native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
             artifact_path: None,
         };
 

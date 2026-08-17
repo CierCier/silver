@@ -1,14 +1,57 @@
-use std::env;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
-fn main() {
-    let wants_help = env::args().any(|arg| arg == "--help" || arg == "-h");
-    if wants_help || env::args().len() == 1 {
-        println!(
-            "agsm - Silver foreign sourcemap module builder\n\nUsage:\n  agsm build [OPTIONS] [SOURCEMAP]\n\nOptions:\n  -o, --output <PATH>  Write the generated .agm to PATH\n  -h, --help           Print help"
-        );
-        return;
+use clap::{Args, CommandFactory, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "agsm", about = "Silver foreign sourcemap module builder")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Build(BuildArgs),
+}
+
+#[derive(Debug, Args)]
+struct BuildArgs {
+    #[arg(default_value = "sourcemap.toml")]
+    sourcemap: PathBuf,
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(short = 'I', long = "include-path", value_name = "DIR")]
+    include_paths: Vec<PathBuf>,
+    #[arg(short = 'L', long = "lib-path", value_name = "DIR")]
+    lib_paths: Vec<PathBuf>,
+    #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
+    defines: Vec<String>,
+}
+
+fn main() -> ExitCode {
+    let Some(Command::Build(args)) = Cli::parse().command else {
+        println!("{}", Cli::command().render_help());
+        return ExitCode::SUCCESS;
+    };
+    let options = agsm::build::BuildOptions {
+        sourcemap: args.sourcemap,
+        output: args.output,
+        target: args.target,
+        include_paths: args.include_paths,
+        lib_paths: args.lib_paths,
+        defines: args.defines,
+    };
+    match agsm::build::build(&options) {
+        Ok(output) => {
+            println!("{}", output.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("agsm: error: {error}");
+            ExitCode::from(2)
+        }
     }
-
-    eprintln!("agsm: command implementation is not available yet; use --help");
-    std::process::exit(2);
 }
