@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
@@ -14,6 +15,12 @@ pub struct SourcemapConfig {
     pub defines: Vec<String>,
     pub libs: Vec<String>,
     targets: BTreeMap<String, TargetConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedConfig {
+    pub path: PathBuf,
+    pub config: SourcemapConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +98,10 @@ pub struct TargetResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
+    Io {
+        path: PathBuf,
+        message: String,
+    },
     Parse(String),
     MissingField(&'static str),
     InvalidField {
@@ -100,6 +111,16 @@ pub enum ConfigError {
 }
 
 impl SourcemapConfig {
+    pub fn load(path: impl AsRef<Path>) -> Result<LoadedConfig, ConfigError> {
+        let path = path.as_ref().to_path_buf();
+        let source = fs::read_to_string(&path).map_err(|error| ConfigError::Io {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        let config = Self::parse(&source)?;
+        Ok(LoadedConfig { path, config })
+    }
+
     pub fn parse(source: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig =
             toml::from_str(source).map_err(|error| ConfigError::Parse(error.to_string()))?;
@@ -184,6 +205,27 @@ impl SourcemapConfig {
     }
 }
 
+impl ResolvedConfig {
+    pub fn append_cli(
+        &mut self,
+        include_paths: impl IntoIterator<Item = PathBuf>,
+        lib_paths: impl IntoIterator<Item = PathBuf>,
+        defines: impl IntoIterator<Item = String>,
+    ) {
+        self.include_paths.extend(include_paths);
+        self.lib_paths.extend(lib_paths);
+        self.defines.extend(defines);
+    }
+
+    pub fn resolve_path(&self, base_dir: &Path, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base_dir.join(path)
+        }
+    }
+}
+
 fn validate_name(name: &str) -> Result<(), ConfigError> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         return Err(ConfigError::InvalidField {
@@ -197,6 +239,9 @@ fn validate_name(name: &str) -> Result<(), ConfigError> {
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Io { path, message } => {
+                write!(formatter, "failed to read {}: {message}", path.display())
+            }
             Self::Parse(message) => write!(formatter, "invalid sourcemap.toml: {message}"),
             Self::MissingField(field) => write!(formatter, "missing required field `{field}`"),
             Self::InvalidField { field, message } => {
