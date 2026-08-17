@@ -1,0 +1,4 @@
+name = "raylib"
+standard = "c11"
+includes = ["raylib.h"]
+libs = ["raylib"]

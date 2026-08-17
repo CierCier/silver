@@ -14,6 +14,9 @@ pub struct SourcemapConfig {
     pub lib_paths: Vec<PathBuf>,
     pub defines: Vec<String>,
     pub libs: Vec<String>,
+    pub export_types: bool,
+    pub export_opaque_types: bool,
+    pub opaque_types: Vec<String>,
     targets: BTreeMap<String, TargetConfig>,
 }
 
@@ -59,6 +62,8 @@ struct TargetConfig {
     lib_paths: Option<Vec<PathBuf>>,
     defines: Option<Vec<String>>,
     libs: Option<Vec<String>>,
+    export_opaque_types: Option<bool>,
+    export_types: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,8 +79,18 @@ struct RawConfig {
     defines: Vec<String>,
     #[serde(default)]
     libs: Vec<String>,
+    #[serde(default)]
+    export_opaque_types: bool,
+    #[serde(default)]
+    opaque_types: Vec<String>,
+    #[serde(default = "default_export_types")]
+    export_types: bool,
     #[serde(flatten)]
     targets: BTreeMap<String, TargetConfig>,
+}
+
+fn default_export_types() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,9 +99,12 @@ pub struct ResolvedConfig {
     pub standard: CStandard,
     pub includes: Vec<PathBuf>,
     pub include_paths: Vec<PathBuf>,
+    pub export_opaque_types: bool,
+    pub opaque_types: Vec<String>,
     pub lib_paths: Vec<PathBuf>,
     pub defines: Vec<String>,
     pub libs: Vec<String>,
+    pub export_types: bool,
     pub target: Option<String>,
 }
 
@@ -142,10 +160,12 @@ impl SourcemapConfig {
             lib_paths: raw.lib_paths,
             defines: raw.defines,
             libs: raw.libs,
+            export_types: raw.export_types,
+            export_opaque_types: raw.export_opaque_types,
+            opaque_types: raw.opaque_types,
             targets: raw.targets,
         })
     }
-
     pub fn resolve_target(&self, target: Option<&str>) -> TargetResolution {
         let Some(target_name) = target else {
             return TargetResolution {
@@ -153,7 +173,6 @@ impl SourcemapConfig {
                 warnings: Vec::new(),
             };
         };
-
         let Some(overrides) = self.targets.get(target_name) else {
             return TargetResolution {
                 config: self.base_config(Some(target_name.to_string())),
@@ -162,7 +181,6 @@ impl SourcemapConfig {
                 )],
             };
         };
-
         let config = ResolvedConfig {
             name: self.name.clone(),
             standard: overrides.standard.unwrap_or(self.standard),
@@ -183,6 +201,11 @@ impl SourcemapConfig {
                 .clone()
                 .unwrap_or_else(|| self.defines.clone()),
             libs: overrides.libs.clone().unwrap_or_else(|| self.libs.clone()),
+            export_types: overrides.export_types.unwrap_or(self.export_types),
+            export_opaque_types: overrides
+                .export_opaque_types
+                .unwrap_or(self.export_opaque_types),
+            opaque_types: self.opaque_types.clone(),
             target: Some(target_name.to_string()),
         };
         TargetResolution {
@@ -198,8 +221,11 @@ impl SourcemapConfig {
             includes: self.includes.clone(),
             include_paths: self.include_paths.clone(),
             lib_paths: self.lib_paths.clone(),
-            defines: self.defines.clone(),
             libs: self.libs.clone(),
+            defines: self.defines.clone(),
+            export_types: self.export_types,
+            export_opaque_types: self.export_opaque_types,
+            opaque_types: self.opaque_types.clone(),
             target,
         }
     }

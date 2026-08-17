@@ -1,0 +1,6 @@
+name = "rlgl"
+standard = "c11"
+includes = ["rlgl.h"]
+libs = ["raylib"]
+export_types = false
+opaque_types = ["rlRenderBatch"]

@@ -751,6 +751,19 @@ impl<'a> TypeParser<'a> {
         }
         Ok(items)
     }
+    fn parse_usize(&mut self) -> Result<usize, String> {
+        self.skip_ws();
+        let start = self.pos;
+        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        if start == self.pos {
+            return Err(format!("expected array size in type '{}'", self.text));
+        }
+        self.text[start..self.pos]
+            .parse()
+            .map_err(|_| format!("invalid array size in type '{}'", self.text))
+    }
 
     fn parse_type(&mut self) -> Result<Type, String> {
         self.skip_ws();
@@ -799,7 +812,18 @@ impl<'a> TypeParser<'a> {
                 return_type: Box::new(return_type),
             });
         }
-        // Type::Array removed — use Slice<T> canonical key instead
+        if self.consume_str("Array<") {
+            let element = self.parse_type()?;
+            self.skip_ws();
+            self.expect_byte(b',')?;
+            let size = self.parse_usize()?;
+            self.skip_ws();
+            self.expect_byte(b'>')?;
+            return Ok(Type::Array {
+                element: Box::new(element),
+                size,
+            });
+        }
         if self.consume_byte(b'(') {
             let items = self.parse_type_list(b')')?;
             return Ok(Type::Tuple(items));

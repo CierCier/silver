@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agc::module_artifact::{
     ExportKind, ModuleAbi, ModuleArtifact, ModuleCodeArtifacts, ModuleEnumVariant, ModuleExport,
@@ -45,7 +45,7 @@ pub fn build_artifact(
         .includes
         .iter()
         .map(|header| {
-            let path = config.resolve_path(base_dir, header);
+            let path = resolve_header(config, base_dir, header);
             format!("#include \"{}\"\n", include_literal(&path))
         })
         .collect::<String>();
@@ -105,12 +105,23 @@ pub fn build_artifact(
         let Some(name) = entity.get_name() else {
             continue;
         };
-        let Some(export) = export_entity(&entity, &name)? else {
+        let Some(export) = export_entity(
+            &entity,
+            &name,
+            config.export_types,
+            config.export_opaque_types || config.opaque_types.iter().any(|ty| ty == &name),
+        )?
+        else {
             continue;
         };
         let key = format!("{:?}:{}:{}", export.kind, export.name, export.signature);
         if seen.insert(key) {
             exports.push(export);
+        }
+    }
+    for name in &config.opaque_types {
+        if seen.insert(format!("{:?}:{}:struct{{}}", ExportKind::Struct, name)) {
+            exports.push(export_opaque_record(name));
         }
     }
 
@@ -136,15 +147,53 @@ pub fn build_artifact(
     })
 }
 
-fn export_entity(entity: &Entity<'_>, name: &str) -> Result<Option<ModuleExport>, ExtractError> {
+fn export_entity(
+    entity: &Entity<'_>,
+    name: &str,
+    export_types: bool,
+    export_opaque_types: bool,
+) -> Result<Option<ModuleExport>, ExtractError> {
     match entity.get_kind() {
         EntityKind::FunctionDecl => export_function(entity, name).map(Some),
-        EntityKind::StructDecl => export_record(entity, name, false).map(Some),
-        EntityKind::UnionDecl => Err(ExtractError::Unsupported(format!(
-            "C union `{name}` is not representable in Silver metadata yet"
-        ))),
-        EntityKind::EnumDecl => export_enum(entity, name).map(Some),
-        EntityKind::TypedefDecl => Ok(None),
+        EntityKind::StructDecl => {
+            let Some(record_type) = entity.get_type() else {
+                return Ok(None);
+            };
+            if record_type.get_sizeof().is_err() {
+                if export_opaque_types {
+                    Ok(Some(export_opaque_record(name)))
+                } else {
+                    Ok(None)
+                }
+            } else if export_types {
+                export_record(entity, name, false).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::UnionDecl => {
+            if export_types {
+                Err(ExtractError::Unsupported(format!(
+                    "C union `{name}` is not representable in Silver metadata yet"
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::EnumDecl => {
+            if export_types {
+                export_enum(entity, name).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::TypedefDecl => {
+            if export_opaque_types {
+                Ok(Some(export_opaque_record(name)))
+            } else {
+                Ok(None)
+            }
+        }
         EntityKind::VarDecl | EntityKind::MacroDefinition | EntityKind::InclusionDirective => {
             Ok(None)
         }
@@ -188,6 +237,24 @@ fn export_function(entity: &Entity<'_>, name: &str) -> Result<ModuleExport, Extr
         enum_variants: Vec::new(),
         trait_items: Vec::new(),
     })
+}
+
+fn export_opaque_record(name: &str) -> ModuleExport {
+    ModuleExport {
+        kind: ExportKind::Struct,
+        name: name.to_string(),
+        signature: "struct{}".to_string(),
+        type_params: Vec::new(),
+        link_name: None,
+        abi: None,
+        is_variadic: false,
+        type_key: Some(name.to_string()),
+        fields: Vec::new(),
+        layout: None,
+        enum_backing_type: None,
+        enum_variants: Vec::new(),
+        trait_items: Vec::new(),
+    }
 }
 
 fn export_record(
@@ -413,6 +480,20 @@ fn standard_name(standard: CStandard) -> &'static str {
     }
 }
 
+fn resolve_header(config: &ResolvedConfig, base_dir: &Path, header: &Path) -> PathBuf {
+    let candidate = config.resolve_path(base_dir, header);
+    if candidate.is_file() {
+        return candidate;
+    }
+    for include_path in &config.include_paths {
+        let candidate = config.resolve_path(base_dir, include_path).join(header);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(header)
+}
+
 fn include_literal(path: &Path) -> String {
     path.display()
         .to_string()
@@ -423,7 +504,7 @@ fn include_literal(path: &Path) -> String {
 fn hash_inputs(config: &ResolvedConfig, base_dir: &Path) -> u64 {
     let mut input = format!("{}\n{:?}\n", config.name, config.standard);
     for path in &config.includes {
-        let path = config.resolve_path(base_dir, path);
+        let path = resolve_header(config, base_dir, path);
         input.push_str(&path.display().to_string());
         input.push('\n');
         if let Ok(contents) = std::fs::read_to_string(&path) {

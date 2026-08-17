@@ -62,7 +62,11 @@ pub fn build(options: &BuildOptions) -> Result<PathBuf, BuildError> {
         options.defines.clone(),
     );
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let artifact = build_artifact(&resolved, base_dir, options.target.as_deref())?;
+    let base_dir = fs::canonicalize(base_dir).map_err(|error| BuildError::Io {
+        path: base_dir.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let artifact = build_artifact(&resolved, &base_dir, options.target.as_deref())?;
     let output = options
         .output
         .clone()
