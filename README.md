@@ -3,8 +3,8 @@
 Silver is an open-source, statically typed systems programming language built on LLVM.
 It explores a pragmatic design space between C-level control and modern ergonomics:
 deterministic destruction, zero-cost iterators, first-class RAII, and a module system
-with packaged compilation. The compiler (`agc`) implements parsing, semantic analysis,
-type checking, and LLVM-based code generation, all from a single self-hosted pipeline.
+with packaged compilation. The compiler (`agc`, written in Rust) implements parsing,
+semantic analysis, type checking, and LLVM-based code generation.
 
 The project currently includes:
 - `agc`, the Silver compiler
@@ -28,14 +28,13 @@ Silver is still under active development. Expect sharp edges, incomplete feature
   with no hidden allocation or dispatch.
 - **Module system** — packaged `.agm` artifacts with metadata for dependency resolution;
   supports both source imports and precompiled module imports.
-- **Bootstrap pipeline** — the compiler compiles itself and the standard library through
-  a cached bootstrap cycle.
+- **Bootstrap pipeline** — builds and caches the standard library and runtime artifacts.
 - **Memory safety primitives** — `Box<T>`, `Vec<T>`, slices, and a borrow-checker-light
   ownership model, all testable via a memory-pentest suite.
 
 ## Repository Layout
 
-- `agc/` - compiler sources
+- `agc/` - compiler sources (Rust)
 - `std/` - standard library sources
 - `vendor/` - third-party library headers
 - `bootstrap/` - generated bootstrap compiler and stdlib outputs
@@ -74,6 +73,30 @@ Run the test suite:
 cargo test -p agc
 ```
 
+Compile a Silver source file:
+
+```bash
+cargo run -p agc -- path/to/file.ag -o out
+```
+
+Fast frontend-only type checking:
+
+```bash
+cargo run -p agc -- check path/to/file.ag
+```
+
+Compile and run directly:
+
+```bash
+cargo run -p agc -- run path/to/file.ag [args...]
+```
+
+Run with leak checker enabled:
+
+```bash
+cargo run -p agc -- --leak-check run path/to/file.ag
+```
+
 Refresh the bootstrap toolchain and stdlib artifacts:
 
 ```bash
@@ -90,12 +113,6 @@ Tag, build, and publish a GitHub release locally:
 
 ```bash
 bash ./scripts/release-local.sh v0.1.0
-```
-
-Compile a Silver source file:
-
-```bash
-cargo run -p agc -- path/to/file.ag
 ```
 
 Emit a packaged module:

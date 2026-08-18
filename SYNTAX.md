@@ -37,9 +37,7 @@ Silver source files use UTF-8 encoding and the `.ag` extension.
 
 ### Identifiers
 
-Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.  The identifier `type` is a **soft
-keyword** — it behaves as an identifier but is recognized specially at the start
-of a top-level item (type alias) or inside a trait (associated type).
+Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.
 
 ```silver
 i32 my_variable_1 = 100;
@@ -54,7 +52,7 @@ These are hard keywords — they cannot be used as identifiers:
 |---|---|---|---|
 | `struct` | Struct definition | `enum` | Enum definition |
 | `impl` | Implementation block | `trait` | Trait definition |
-| `mut` | Mutable modifier | `const` | Constant declaration (parsed, not enforced) |
+| `mut` | Mutable modifier | `const` | Constant declaration (enforced immutability) |
 | `static` | Static local / internal-linkage global | `volatile` | Volatile load/store qualifier |
 | `if` | Conditional branch | `else` | Alternative branch |
 | `while` | Condition loop | `for` | Counter or iterator loop |
@@ -67,8 +65,9 @@ These are hard keywords — they cannot be used as identifiers:
 | `private` | Private visibility modifier | `asm` | Inline assembly block |
 | `macro` | Macro declaration | `true` / `false` | Boolean literals |
 | `void` | Empty/unit return type | `match` | Match expression |
+| `type` | Type alias / associated type | `Self` | Implementing type keyword |
 
-**Not keywords** (treated as identifiers): `Self`, `type` (soft keyword), `let`,
+**Not keywords**: `pub` (items are public by default; `private` restricts visibility), `let`, `fn`.
 
 ### Literals
 
@@ -198,30 +197,29 @@ Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
 
 ### Type Aliases
 
-`type` is a soft keyword — recognized at item-start position only.
-
 ```silver
 type Distance = f64;
-pub type Handler = void(i32);
+type Handler = void(i32);
 ```
 
 ### Global & Constant Variables
 
 ```silver
 str g_app_name = "SilverApp";      // global variable
-pub const f64 PI = 3.1415926535;   // const (parsed; immutability not enforced)
+const f64 PI = 3.1415926535;       // const (enforced immutability)
 ```
 
-`pub mut i32 g_counter` is **not** valid — `mut` cannot start a type declaration.
+`mut i32 g_counter` is **not** valid — `mut` cannot start a type declaration (variables are mutable by default).
 
 ### Functions
 
 Silver uses **C-style syntax** for top-level functions: the return type precedes
-the function name.  There is no `fn` keyword for top-level functions.
+the function name.  There is no `fn` keyword for top-level functions. Items are
+public by default; use `private` to restrict visibility.
 
 ```silver
 // Standard function with generics and where clause
-pub T max<T>(T a, T b) where T: Lt<T> {
+T max<T>(T a, T b) where T: Lt<T> {
     if (a < b) { return b; }
     return a;
 }
@@ -229,22 +227,22 @@ pub T max<T>(T a, T b) where T: Lt<T> {
 // C-style return type
 i32 main() { return 0; }
 
-// Void return
-pub void log_message(str msg) {
+// Void return (private to module)
+private void log_message(str msg) {
     @println("[LOG] {}", msg);
 }
 
 // External variadic function
-pub extern "C" i32 printf(const char* fmt, ...);
+extern "C" i32 printf(const char* fmt, ...);
 ```
 
 ### Struct Definitions
 
-Fields are separated by `;`.  Field visibility modifiers (`pub`) on individual
-fields are **not** parsed — all fields are implicitly private.
+Fields are separated by `;`. All struct fields are private to the struct.
+Struct items are public by default; use `private struct ...` to restrict visibility.
 
 ```silver
-pub struct Point<T> {
+struct Point<T> {
     T x;
     T y;
 }
@@ -263,7 +261,7 @@ All three variant kinds are supported.
 
 ```silver
 // Unit enum with discriminants
-pub enum SYSCALL {
+enum SYSCALL {
     READ = 0;
     WRITE = 1;
     OPEN = 2;
@@ -271,7 +269,7 @@ pub enum SYSCALL {
 }
 
 // Algebraic data type
-pub enum Shape {
+enum Shape {
     Circle(f64);                          // tuple variant
     Rectangle { f64 width; f64 height; }  // struct variant
     Point;                                // unit variant
@@ -284,18 +282,17 @@ Traits define interface contracts, associated types, and optional default method
 bodies.  Methods use **C-style syntax**: return type before name.
 
 ```silver
-pub trait Display {
+trait Display {
     str to_string(Self* self);
 }
 
-pub trait Iterator<Self> {
+trait Iterator<Self> {
     type Item;
     Optional<Item> next(Self* self);
 }
 ```
 
-> **Note**: `Self` is a regular identifier conventionally naming the
-> implementing type.  It has no special substitution behavior.
+> **Note**: `Self` is a keyword referencing the implementing type in trait and method declarations.
 
 ### Implementation Blocks (`impl`)
 
@@ -357,8 +354,9 @@ extern "C" f64 c_pow(f64 base, f64 exp);
 
 ### Macro Definitions
 
-Macro definitions parse but are **not expanded** — only built-in macros
-(`@println`, `@size`, `@align`, `@hash`, `@memcpy`, `@memset`, `@memmove`) work.
+Macro definitions parse but are **not expanded** — only built-in compiler macros
+(`@print`, `@println`, `@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`,
+`@size`, `@align`, `@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, `@memmove`) work.
 
 ```silver
 macro swap(a, b) {
@@ -610,6 +608,7 @@ Builtin macros use `@name(...)` syntax:
 @print("Value: {}", x);
 @println("Formatted {} {}", val1, val2);
 @eprintln("Error: {}", err_msg);
+String formatted = @format("Coordinate: ({}, {})", point.x, point.y);
 
 i64 struct_size = @size(Vector2);
 i64 struct_align = @align(Vector2);
@@ -846,7 +845,7 @@ The allocator (`std.mem.alloc`) provides three tiers:
 | `T* self` | Raw-pointer receiver — escape hatch (FFI, heap-backed state); creates no borrow constraint |
 | `T self` | Consuming transfer or copy semantics |
 
-Constructors return by value: `pub Vec<T> new() { ... return move v; }`.
+Constructors return by value: `Vec<T> new() { ... return move v; }`.
 Prefer `&T`/`&mut T` receivers for methods that inspect or mutate
 caller-owned state; keep `T*` for methods whose state lives on the heap or
 behind an FFI boundary.
