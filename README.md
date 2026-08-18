@@ -1,138 +1,154 @@
-# Silver — A Systems Programming Language Experiment
+# Silver — A Modern Systems Programming Language
 
-Silver is an open-source, statically typed systems programming language built on LLVM.
-It explores a pragmatic design space between C-level control and modern ergonomics:
-deterministic destruction, zero-cost iterators, first-class RAII, and a module system
-with packaged compilation. The compiler (`agc`, written in Rust) implements parsing,
-semantic analysis, type checking, and LLVM-based code generation.
+Silver is a statically typed, LLVM-backed systems programming language designed to occupy the sweet spot between raw C-level control and modern ergonomic safety.
 
-The project currently includes:
-- `agc`, the Silver compiler
-- `std`, the standard library sources used for bootstrapping
-- `vendor`, imports/includes for third-party libraries
-- `bootstrap`, generated compiler and standard library artifacts for local development
+It combines **deterministic RAII destruction**, **compile-time escape-checked borrowing**, **first-class structured concurrency (`launch`/`wait`)**, and **zero-cost abstractions** on top of a **pure freestanding static runtime** — with no garbage collector and no libc dependency.
 
-Silver is still under active development. Expect sharp edges, incomplete features, and regular iteration on syntax, semantics, and tooling.
+---
 
-## Features
+## Core Pillars & Unique Design
 
-- **Mutable by default, `const` for immutability** — variables are mutable unless declared
-  `const`. Constness propagates through pointers: `&x` on a `const` variable yields an
-  immutable pointer. The compiler enforces immutability in assignments, field writes, and
-  pointer dereferences.
-- **LLVM code generation** — compiles to native code via LLVM with optimizations,
-  debug info, and target-specific back ends.
-- **Deterministic destruction** — RAII-style resource management with `drop` trait and
-  guaranteed cleanup at scope exit.
-- **Zero-cost iterators** — `for x in iter` compiles to explicit state-machine loops
-  with no hidden allocation or dispatch.
-- **Module system** — packaged `.agm` artifacts with metadata for dependency resolution;
-  supports both source imports and precompiled module imports.
-- **Bootstrap pipeline** — builds and caches the standard library and runtime artifacts.
-- **Memory safety primitives** — `Box<T>`, `Vec<T>`, slices, and a borrow-checker-light
-  ownership model, all testable via a memory-pentest suite.
+### 1. Deterministic Resource Management (RAII) & Ownership
+- **Automatic Field Destruction**: Scoped cleanup via compiler-generated drop flags. Destructors and struct field cleanup cascade automatically without explicit manual drop chains.
+- **Explicit Moves (`move`)**: Ownership transfers are declared explicitly with `move x`, invalidating the source drop flag to prevent double destruction.
+- **Enforced Borrowing (`&T`, `&mut T`)**: References serve as borrow origins. The compiler statically enforces that returned references only derive from valid origins and never escape stack-local frames.
+- **Unchecked Escape Hatch (`T*`)**: Raw pointers remain available for FFI, heap-backed abstractions, and manual memory arithmetic without borrow constraints.
 
-## Repository Layout
+### 2. First-Class Concurrency & Static Send Gate
+- **1:1 OS Thread Tasks**: Spawn background tasks with `launch f(args...)`, which returns a typed `Task<T>` handle. Arguments are moved across the thread boundary.
+- **Explicit Joining**: Join tasks using `wait task` to move out and consume results.
+- **Compile-Time Send Gate**: The compiler inspects types moved into tasks, disallowing un-Send data (such as non-atomic `Rc<T>`, raw pointers `T*`, or borrows `&T`) from crossing thread boundaries.
+- **Synchronization Primitives**: Pure-Silver RAII `Mutex<T>` / `Guard<T>`, low-level futex `RawMutex`, unbounded MPSC `Channel<T>`, `WaitGroup`, and atomic operations (`std.atomic`).
 
-- `agc/` - compiler sources (Rust)
-- `std/` - standard library sources
-- `vendor/` - third-party library headers
-- `bootstrap/` - generated bootstrap compiler and stdlib outputs
-- `examples/` - sample Silver programs
-- `tests/` - project test inputs and supporting material
-- `plan/` - architectural plans and migration roadmaps
-- `aglsp/` - Silver language server (LSP)
+### 3. Freestanding Static Runtime
+- Applications compile to native binaries running on a pure-Silver runtime (`std/rt/`, `std/sys/entry`).
+- Freestanding execution without libc bloat or hidden runtime dispatch.
 
-## Getting Started
+### 4. Zero-Cost Ergonomics
+- **Monomorphized Generics**: Full compile-time monomorphization of generic functions, structs, and traits.
+- **Algebraic Data Types & Match**: Enums with unit, tuple, and struct variants paired with expression-level `match` pattern matching and tag-aware payload cleanup.
+- **Zero-Cost Iterators**: `for x in iter` lowers directly into state-machine loops via `Iterator` and `IntoIterator` traits.
+- **Operator Overloading**: Double-underscored method protocols (`__add`, `__index_get`, `__index_set`, etc.) backed by `std.ops`.
 
-Prerequisites:
-- Rust toolchain with Cargo
-- LLVM 22 compatible development environment for `inkwell`
-- a working system C toolchain for linking
+### 5. Developer Tooling & Safety Diagnostics
+- **Built-in Leak Checker (`--leak-check`)**: Tracks allocations and resolves exact allocation sites (function, file, and line) if memory remains unreleased at exit.
+- **Runtime Backtraces**: Built-in DWARF-backed backtrace walker reporting exact function names, source lines, and arguments on crashes/assertions.
+- **DWARF by Default**: Native debug information emission for seamless GDB/LLDB debugging and variable inspection.
+- **LSP Support (`aglsp`)**: Language server providing real-time diagnostics, symbol outlines, inlay hints, and go-to-definition.
 
-A minimal Silver program:
+---
+
+## Language Tour
 
 ```silver
 import std.io;
 
+struct Point {
+    f64 x;
+    f64 y;
+}
+
+i64 compute(i64 val) {
+    return val * 2;
+}
+
 i32 main() {
-    println("Hello, world!");
+    // RAII and formatted printing
+    Point p = { .x = 10.0, .y = 20.0 };
+    @println("Point: ({}, {})", p.x, p.y);
+
+    // First-class structured concurrency
+    Task<i64> task = launch compute(21);
+    
+    // Explicit join consuming the task handle
+    i64 answer = wait task;
+    @println("Computed answer: {}", answer);
+
     return 0;
 }
 ```
 
-Build the compiler:
+---
+
+## Repository Layout
+
+- `agc/` — Reference Silver compiler (written in Rust, powered by LLVM via `inkwell`)
+- `std/` — Standard library sources (memory management, concurrency, I/O, collections, runtime)
+- `aglsp/` — Silver Language Server Protocol implementation
+- `agsm/` — Source maps and module artifact tools
+- `vendor/` — Third-party library headers and bindings (e.g. `vendor.gfx`)
+- `bootstrap/` — Generated compiler and standard library artifacts
+- `tests/` — Test suites including language unit tests, memory pentests, and integration tests
+- `examples/` — Sample Silver programs
+
+---
+
+## Getting Started
+
+### Prerequisites
+- **Rust Toolchain** with Cargo (1.75+)
+- **LLVM 22** development environment for `inkwell`
+- A working system C toolchain / linker (`cc` or `ld.lld`)
+
+### Building the Compiler
 
 ```bash
 cargo build -p agc
 ```
 
-Run the test suite:
+### Running Tests
 
 ```bash
 cargo test -p agc
 ```
 
-Compile a Silver source file:
+### Compiling & Running Programs
 
+Compile a source file to an executable:
 ```bash
 cargo run -p agc -- path/to/file.ag -o out
 ```
 
-Fast frontend-only type checking:
-
+Fast frontend-only type checking (`agc check`):
 ```bash
 cargo run -p agc -- check path/to/file.ag
 ```
 
-Compile and run directly:
-
+Compile and run directly in one step (`agc run`):
 ```bash
 cargo run -p agc -- run path/to/file.ag [args...]
 ```
 
-Run with leak checker enabled:
-
+Run with leak checking enabled:
 ```bash
 cargo run -p agc -- --leak-check run path/to/file.ag
 ```
 
-Refresh the bootstrap toolchain and stdlib artifacts:
+### Modules & Packaging
 
-```bash
-bash ./update-bootstrap.sh
-```
-
-Create a Linux release bundle:
-
-```bash
-bash ./scripts/create-linux-bundle.sh 2026-03-27
-```
-
-Tag, build, and publish a GitHub release locally:
-
-```bash
-bash ./scripts/release-local.sh v0.1.0
-```
-
-Emit a packaged module:
-
+Emit a precompiled module artifact (`.agm`):
 ```bash
 cargo run -p agc -- path/to/file.ag --emit=module -o path/to/file.agm
 ```
 
 Emit a shared packaged module:
-
 ```bash
 cargo run -p agc -- path/to/file.ag --emit=module --shared -o path/to/file.agm
 ```
 
+Refresh bootstrap artifacts:
+```bash
+bash ./update-bootstrap.sh
+```
+
+---
+
 ## Contributing
 
-Contributions are welcome. Please read `CONTRIBUTING.md` before opening a pull request.
+Contributions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before submitting pull requests.
 
-Please also read `CODE_OF_CONDUCT.md` before participating in discussions or reviews.
+For detailed technical specifications of the compiler architecture and pipeline, see [AGENTS.md](AGENTS.md) and [SYNTAX.md](SYNTAX.md).
 
 ## License
 
-This project is available under the MIT License. See `LICENSE` for details.
+This project is available under the MIT License. See [LICENSE](LICENSE) for details.
