@@ -389,8 +389,9 @@ fn canonical_type(type_: Type<'_>) -> Result<String, ExtractError> {
             let pointee = type_
                 .get_pointee_type()
                 .ok_or_else(|| ExtractError::Unsupported("pointer without pointee".to_string()))?;
+            let is_const = pointee.is_const_qualified();
             let pointee_key = canonical_type(pointee)?;
-            if type_.is_const_qualified() {
+            if is_const {
                 format!("*const {pointee_key}")
             } else {
                 format!("*mut {pointee_key}")
