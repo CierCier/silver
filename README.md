@@ -6,7 +6,7 @@ It combines **deterministic RAII destruction**, **compile-time escape-checked bo
 
 ---
 
-## Core Pillars & Unique Design
+## Design
 
 ### 1. Deterministic Resource Management (RAII) & Ownership
 - **Automatic Field Destruction**: Scoped cleanup via compiler-generated drop flags. Destructors and struct field cleanup cascade automatically without explicit manual drop chains.
@@ -59,7 +59,7 @@ i32 main() {
 
     // First-class structured concurrency
     Task<i64> task = launch compute(21);
-    
+
     // Explicit join consuming the task handle
     i64 answer = wait task;
     @println("Computed answer: {}", answer);
@@ -136,10 +136,6 @@ Emit a shared packaged module:
 cargo run -p agc -- path/to/file.ag --emit=module --shared -o path/to/file.agm
 ```
 
-Refresh bootstrap artifacts:
-```bash
-bash ./update-bootstrap.sh
-```
 
 ---
 
