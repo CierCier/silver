@@ -461,7 +461,7 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     }
 
     let expected_version = env!("CARGO_PKG_VERSION");
-    if module.compiler_version != expected_version {
+    if module.compiler_version != "foreign" && module.compiler_version != expected_version {
         return Some(format!(
             "module `{}` was built by compiler version `{}` but current compiler is `{expected_version}`",
             module.module_path, module.compiler_version
@@ -524,7 +524,7 @@ fn collect_dependency_link_artifacts(
 /// Execute the full compile pipeline for a parsed CLI.
 pub fn run(cli: Cli) {
     match derive_plan(cli) {
-        Ok(plan) => {
+        Ok(mut plan) => {
             if plan.verbose || std::env::var_os("AGC_VERBOSE").is_some() {
                 eprintln!("{}", plan.describe_for_driver());
                 for input in &plan.inputs {
@@ -1054,6 +1054,12 @@ pub fn run(cli: Cli) {
                 extend_unique_libs(&mut native_libs, &program_link_libs);
                 for module in &imported_modules {
                     extend_unique_libs(&mut native_libs, &module.native_libs);
+                    for path in &module.native_lib_paths {
+                        let path = PathBuf::from(path);
+                        if !plan.lib_dirs.contains(&path) {
+                            plan.lib_dirs.push(path);
+                        }
+                    }
                 }
                 match collect_dependency_link_artifacts(
                     &loader,
@@ -1581,6 +1587,7 @@ mod tests {
             transitive_deps: Vec::new(),
             exports: Vec::new(),
             native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
             artifact_path: None,
         }
     }
