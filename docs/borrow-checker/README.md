@@ -30,9 +30,9 @@ The borrow and ownership documentation is organized into focused architectural s
 | Document | Description |
 |---|---|
 | [**1. Ownership & Move Semantics**](./ownership-and-moves.md) | Value ownership, drop flags, flow-sensitive move tracking, use-after-move detection, and move reasons. |
-| [**2. Borrowing & Escape Analysis**](./borrow-and-escape.md) | Reference types (`&T`, `&mut T`), borrow origin classification, parameter lifetime tracking, and escape prevention. |
+| [**2. Borrowing & Escape Analysis**](./borrow-and-escape.md) | Reference types (`&T`, `&mut T`), borrow origin classification, parameter lifetime tracking, escape prevention, and NLL last-use loan expiration. |
 | [**3. Concurrency & Send Safety**](./thread-safety-send.md) | Task isolation, structural Send validation, and preventing reference escapes across thread boundaries. |
-| [**4. Current State & Future Roadmap**](./current-limitations-and-roadmap.md) | Comprehensive audit of current v1 capabilities, design invariants, known limitations, and roadmap toward full NLL. |
+| [**4. Current State & Future Roadmap**](./current-limitations-and-roadmap.md) | Comprehensive audit of current capabilities (including statement-level NLL), design invariants, known limitations, and the roadmap beyond NLL. |
 
 ---
 

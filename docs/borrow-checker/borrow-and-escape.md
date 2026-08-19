@@ -127,6 +127,11 @@ The active borrow checker enforces the fundamental aliasing and mutability rule:
 
 $$\text{For any memory location } P \text{ at any program point}: \quad (\text{Any number of } \&P) \oplus (\text{Exactly one } \&\text{mut } P)$$
 
+A borrow is **active** from its creation until the last use of the reference
+binding that holds it, at which point the loan expires (see §5). This is
+checked at statement granularity, so code after the borrow's last use is
+unconstrained.
+
 ### Key Rules & Invariants
 
 1. **Shared Borrows (`&T`)**:
@@ -146,3 +151,70 @@ $$\text{For any memory location } P \text{ at any program point}: \quad (\text{A
 6. **Reference Parameter & Reborrow Ergonomics**:
    - Passing an existing mutable reference `m: &mut T` automatically reborrows (`&mut *m`), suspending `m` until the callee/reborrow finishes.
    - Method receivers (`&mut Self self`) provide exclusive access to mutate fields without self-conflicting.
+
+---
+
+## 5. Non-Lexical Lifetimes (NLL): Loans Expire at Last Use
+
+A borrow's loan ends at the statement boundary *after* its binding's last
+use, not at the end of the enclosing block. Short-lived references no longer
+need artificial `{ ... }` sub-blocks to release the root for later mutation or
+moves:
+
+```silver
+struct Point { i64 x; i64 y; }
+
+i64 read_x(&Point p) {
+    return p.x;
+}
+
+void example() {
+    Point pt;
+    pt.x = 10;
+    pt.y = 20;
+
+    &Point r = &pt;
+    i64 v = read_x(r);   // last use of 'r' — the loan ends here
+
+    pt.x = 100;          // OK — 'r' is no longer live, no { ... } needed
+}
+```
+
+### How Last-Use Is Tracked
+
+The checker walks each block statement-by-statement and records which
+reference bindings the statement uses (any expression position: reads, field
+access, call/method-call arguments, derefs, moves, control-flow conditions,
+macro arguments). A loan whose borrower was last used in a previous statement
+is removed before the next statement is checked, so later code sees no
+conflict.
+
+### Boundary Cases
+
+1. **Unused reference bindings stay live for the whole block**:
+   `&Point r = &pt;` followed by `pt.x = 100;` is still rejected, because the
+   checker never observes a last use — `r` may still be read later.
+
+   ```silver
+   &Point r = &pt;       // never used again
+   pt.x = 100;           // COMPILE ERROR: cannot assign to 'pt.x' because it is borrowed
+   ```
+
+2. **Reference parameters never expire**: a `&T` / `&mut T` parameter's loan
+   lives for the entire function — the caller still holds the borrow, so the
+   callee cannot assume it ended.
+
+3. **Reborrow chains survive expiry**: the source binding's loan is kept
+   alive by the statement that reborrows from it, so the chain stays tracked:
+
+   ```silver
+   &Point r = &pt;
+   read_x(r);            // last direct use of 'r'
+   &Point m = &*r;       // reborrow keeps the loan on 'pt' alive through 'm'
+   pt.x = 100;           // COMPILE ERROR: 'm' is still live (used below)
+   read_x(m);            // 'm' is used after the mutation, so the loan had not expired
+   ```
+
+4. **Conflicts before the last use are unchanged**: taking `&mut pt` while a
+   shared `r` still has uses ahead of it is still rejected, as are
+   mutations/moves of a root whose borrow has not yet expired.
