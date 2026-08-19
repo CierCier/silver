@@ -1014,6 +1014,23 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
+                let borrow_errors = crate::semantic::borrow_check::check_program(&ast);
+                if !borrow_errors.is_empty() {
+                    for error in &borrow_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render_with_note(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                                error.note_span,
+                                error.note_message.as_deref(),
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
                 let warnings = crate::semantic::linter::lint_program(&ast, &plan.warning_config);
                 let mut had_warning_error = false;
                 for w in &warnings {

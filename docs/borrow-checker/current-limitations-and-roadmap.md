@@ -20,6 +20,11 @@ As of compiler version `0.2.1`, the Silver borrow and ownership system provides:
 - ✅ **Enum Payload Cascade & Generic Instantiation**:
   - Generic enums (`Result<T, E>`, `Optional<T>`) safely cascade payload drops on scope exit.
   - Pattern matching move bindings (`match r { Ok(move v) : v, ... }`) safely zero payload slots and transfer ownership without premature destruction.
+- ✅ **Active Borrow Conflict Checking (`semantic/borrow_check.rs`)**:
+  - Enforces Aliasing $\oplus$ Mutability: $(N \times \&P) \oplus (1 \times \&\text{mut } P)$.
+  - Rejects overlapping mutable and shared borrows on the same path.
+  - Rejects mutating or moving values while actively borrowed.
+  - Supports path-aware disjoint field borrowing (`&mut p.left` and `&mut p.right` permitted concurrently).
 - ✅ **Escape Analysis (`semantic/escape_check.rs`)**:
   - Distinguishes function-local stack borrows (`Source::Local`) from caller-owned parameters (`Source::Escapable`).
   - Rejects returning local stack references or storing local stack references in globals.
@@ -34,26 +39,14 @@ As of compiler version `0.2.1`, the Silver borrow and ownership system provides:
 
 ## 2. Current Limitations & Known Boundaries
 
-While the v1 system is sound (no false-positive acceptance of escaping stack references), future phases will expand compile-time expressiveness:
+While the borrow checking system is sound and prevents aliased mutability and use-after-moves, future phases will expand compile-time expressiveness:
 
-### 1. Simultaneous Borrow Conflict Checking (Aliasing XOR Mutability)
-Currently, Silver typechecks `&T` (read-only) and `&mut T` (read-write), but does not yet construct a simultaneous active-borrow conflict graph within the same lexical scope:
+### 1. Non-Lexical Lifetimes (NLL / Liveness-Based Expiration)
+Currently, named reference bindings (`let r = &x`) remain active until the end of their enclosing lexical `{ ... }` block scope rather than expiring at their last use statement.
 
-```silver
-// Current behavior: Escape check verifies origins, but simultaneous borrow
-// conflict detection (holding &x while calling &mut x) is not fully enforced in v1.
-Pair p;
-i64* r1 = &p.left;
-p.bump(); // &mut p called while r1 is in scope
-```
-*Target*: Active borrow table enforcing exclusive access during mutable borrows.
-
-### 4. Structs Containing References (Lifetime Annotations)
+### 2. Structs Containing Named Lifetimes (`Struct<'a>`)
 Structs cannot currently declare named generic lifetime parameters (e.g. `struct StringView<'a>`):
-- References stored inside struct fields are currently treated as opaque views or raw pointers.
-
-### 5. Lexical vs Non-Lexical Lifetimes (NLL)
-Borrows currently expire at lexical block scope boundaries rather than at the point of their last actual use (Non-Lexical Lifetimes).
+- References stored inside struct fields are currently treated as views or raw pointers.
 
 ---
 

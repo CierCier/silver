@@ -127,6 +127,7 @@ expected_compile_failure() {
         enum_move_in_error_test) return 0 ;;
         launch_wait_error_test) return 0 ;;
         launch_send_error_test) return 0 ;;
+        borrow_conflict_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

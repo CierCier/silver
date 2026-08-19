@@ -118,3 +118,31 @@ impl Pair {
 Borrowing a field (`&p.field`) or an array element (`&arr[i]`) preserves the borrow origin of the parent container:
 - `&local_struct.field` $\rightarrow$ `Source::Local`
 - `&param_ref.field` $\rightarrow$ `Source::Escapable { "param_ref" }`
+
+---
+
+## 4. Active Borrow Conflict Checker (`semantic/borrow_check.rs`)
+
+The active borrow checker enforces the fundamental aliasing and mutability rule:
+
+$$\text{For any memory location } P \text{ at any program point}: \quad (\text{Any number of } \&P) \oplus (\text{Exactly one } \&\text{mut } P)$$
+
+### Key Rules & Invariants
+
+1. **Shared Borrows (`&T`)**:
+   - Multiple active shared borrows (`&x`, `&p.left`) may coexist simultaneously.
+   - Taking `&mut x` while any shared borrow of `x` is active is rejected with a multi-span error.
+2. **Exclusive Borrows (`&mut T`)**:
+   - Only one active mutable borrow of a path can exist at a time.
+   - Taking `&x` or another `&mut x` while `&mut x` is active is rejected.
+   - Reading or mutating `x` directly while `&mut x` is active is rejected.
+3. **Disjoint Field Borrows**:
+   - Borrows on disjoint struct fields (`&mut p.left` and `&mut p.right` or `&mut n.pair.left` and `&mut n.pair.right`) target independent paths and are permitted simultaneously.
+   - Borrowing a parent path (`&p`) conflicts with borrows on child fields (`&mut p.left`).
+4. **Move Protection**:
+   - Moving a variable (`move x`) or field (`move p.left`) while any borrow is active on that path is rejected with `cannot move out of '...' because it is borrowed`.
+5. **Raw Pointer Exemption**:
+   - Raw C-style pointers (`T*`) are unchecked views that bypass borrow checking, preserving zero-overhead C FFI and low-level allocator ergonomics.
+6. **Reference Parameter & Reborrow Ergonomics**:
+   - Passing an existing mutable reference `m: &mut T` automatically reborrows (`&mut *m`), suspending `m` until the callee/reborrow finishes.
+   - Method receivers (`&mut Self self`) provide exclusive access to mutate fields without self-conflicting.

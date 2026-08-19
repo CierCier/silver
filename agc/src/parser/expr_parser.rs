@@ -1582,16 +1582,16 @@ fn parse_unary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseErro
 
     if matches!(token.kind, Token::BitwiseAnd | Token::And) {
         cursor.bump();
-        // `&mut x` explicitly marks a mutable reference; `&x` keeps the
-        // legacy always-mutable spelling (the type checker derives the
-        // effective mutability from the source variable).
-        if matches!(cursor.current().map(|t| &t.kind), Some(Token::Mut)) {
+        let is_mutable = if matches!(cursor.current().map(|t| &t.kind), Some(Token::Mut)) {
             cursor.bump();
-        }
+            true
+        } else {
+            false
+        };
         let inner = parse_unary(cursor)?;
         return Ok(ast::Expression {
             kind: Box::new(ast::ExpressionKind::Reference {
-                is_mutable: true,
+                is_mutable,
                 expression: Box::new(inner.clone()),
             }),
             span: token.span.with_end(inner.span.end),

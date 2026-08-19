@@ -518,6 +518,12 @@ impl PRT_Parser {
         if matches!(token, Token::Identifier(_)) {
             return self.classify_identifier_as_type_start(tokens, start);
         }
+        if matches!(token, Token::BitwiseAnd) {
+            if let Some((_, after_type)) = self.parse_type_prefix(tokens, start, end) {
+                return matches!(tokens.get(after_type).map(|t| &t.kind), Some(Token::Identifier(_)));
+            }
+            return false;
+        }
         Self::is_type_start_token(token)
     }
 
@@ -613,6 +619,7 @@ impl PRT_Parser {
                 | Token::Static
                 | Token::Volatile
                 | Token::LeftBracket
+                | Token::BitwiseAnd
                 | Token::I8
                 | Token::I16
                 | Token::I32

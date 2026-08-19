@@ -206,6 +206,34 @@ pub fn note_task_handle_consumed() -> &'static str {
     "task handle consumed by wait"
 }
 
+pub fn cannot_borrow_as_mutable_while_shared(name: &str) -> String {
+    format!("cannot borrow '{name}' as mutable because it is already borrowed as shared")
+}
+
+pub fn cannot_borrow_as_mutable_more_than_once(name: &str) -> String {
+    format!("cannot borrow '{name}' as mutable more than once at a time")
+}
+
+pub fn cannot_borrow_as_shared_while_mutable(name: &str) -> String {
+    format!("cannot borrow '{name}' as shared because it is already borrowed as mutable")
+}
+
+pub fn cannot_assign_to_borrowed(name: &str) -> String {
+    format!("cannot assign to '{name}' because it is borrowed")
+}
+
+pub fn cannot_move_out_of_borrowed(name: &str) -> String {
+    format!("cannot move out of '{name}' because it is borrowed")
+}
+
+pub fn cannot_use_mutably_borrowed(name: &str) -> String {
+    format!("cannot use '{name}' because it was mutably borrowed")
+}
+
+pub fn note_previous_borrow_here(kind: &str) -> String {
+    format!("previous {kind} borrow occurs here")
+}
+
 pub fn returned_reference_escapes() -> &'static str {
     "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)"
 }

@@ -1,0 +1,104 @@
+import std.sys.entry;
+
+struct Point {
+    i64 x;
+    i64 y;
+}
+
+struct Pair {
+    i64 left;
+    i64 right;
+}
+
+struct Node {
+    Pair pair;
+    i64 val;
+}
+
+void modify_point(&mut Point p, i64 nx, i64 ny) {
+    p.x = nx;
+    p.y = ny;
+}
+
+i64 sum_point(&Point p) {
+    return p.x + p.y;
+}
+
+i64 test_shared_borrows() {
+    Point pt;
+    pt.x = 10;
+    pt.y = 20;
+
+    &Point r1 = &pt;
+    &Point r2 = &pt;
+
+    i64 s1 = sum_point(r1);
+    i64 s2 = sum_point(r2);
+    @assert(s1 == 30, "shared borrow r1 sum");
+    @assert(s2 == 30, "shared borrow r2 sum");
+    return 0;
+}
+
+i64 test_mutable_borrow_sequential() {
+    Point pt;
+    pt.x = 1;
+    pt.y = 2;
+
+    {
+        &mut Point m = &mut pt;
+        m.x = 100;
+        m.y = 200;
+    }
+
+    @assert(pt.x == 100, "mutated point x");
+    @assert(pt.y == 200, "mutated point y");
+
+    modify_point(&mut pt, 300, 400);
+    @assert(pt.x == 300, "function call &mut x");
+    @assert(pt.y == 400, "function call &mut y");
+    return 0;
+}
+
+i64 test_disjoint_field_borrows() {
+    Pair p;
+    p.left = 11;
+    p.right = 22;
+
+    &mut i64 l = &mut p.left;
+    &mut i64 r = &mut p.right;
+
+    *l = 111;
+    *r = 222;
+
+    @assert(p.left == 111, "disjoint field left");
+    @assert(p.right == 222, "disjoint field right");
+    return 0;
+}
+
+i64 test_nested_subfield_disjoint() {
+    Node n;
+    n.pair.left = 1;
+    n.pair.right = 2;
+    n.val = 3;
+
+    &mut i64 l = &mut n.pair.left;
+    &mut i64 r = &mut n.pair.right;
+    &mut i64 v = &mut n.val;
+
+    *l = 10;
+    *r = 20;
+    *v = 30;
+
+    @assert(n.pair.left == 10, "nested left");
+    @assert(n.pair.right == 20, "nested right");
+    @assert(n.val == 30, "nested val");
+    return 0;
+}
+
+i64 main() {
+    test_shared_borrows();
+    test_mutable_borrow_sequential();
+    test_disjoint_field_borrows();
+    test_nested_subfield_disjoint();
+    return 0;
+}

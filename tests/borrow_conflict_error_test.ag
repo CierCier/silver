@@ -1,0 +1,17 @@
+// Negative test: Active borrow conflict checker rejects simultaneous mutable and shared borrows.
+
+struct Point {
+    i64 x;
+    i64 y;
+}
+
+i64 main() {
+    Point pt;
+    pt.x = 1;
+    pt.y = 2;
+
+    &Point r = &pt;
+    &mut Point m = &mut pt; // Expected compile error: cannot borrow 'pt' as mutable because it is already borrowed as shared
+
+    return 0;
+}
