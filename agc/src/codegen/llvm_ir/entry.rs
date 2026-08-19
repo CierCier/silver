@@ -143,6 +143,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
             enum_variant_payload_types: HashMap::default(),
@@ -254,6 +255,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
             enum_backing_types: HashMap::default(),
             enum_variant_payload_types: HashMap::default(),
             enum_variants: HashMap::default(),
@@ -589,6 +591,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
             enum_variant_payload_types: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
@@ -812,23 +815,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                     crate::module_artifact::ExportKind::Struct => {
+                        let is_union = export.trait_items.iter().any(|item| {
+                            item.name == "__foreign_record_kind" && item.signature == "union"
+                        });
+                        if is_union {
+                            self.union_types.insert(export.name.clone());
+                        }
                         let Some(struct_ty) = self.struct_types.get(&export.name).copied() else {
                             continue;
                         };
-                        let field_types = export
-                            .fields
-                            .iter()
-                            .map(|field| {
-                                ast_type_from_canonical_key(&field.type_key)
-                                    .map_err(CodegenError::new)
-                            })
-                            .collect::<CodegenResult<Vec<_>>>()?;
-                        let llvm_fields = field_types
-                            .iter()
-                            .map(|field| self.lower_basic_type(field))
-                            .collect::<CodegenResult<Vec<_>>>()?;
-                        if struct_ty.count_fields() == 0 {
-                            struct_ty.set_body(&llvm_fields, false);
+                        if is_union {
+                            let size = export.layout.and_then(|l| l.size).unwrap_or(0);
+                            let i8_arr = self.context.i8_type().array_type(size as u32);
+                            if struct_ty.count_fields() == 0 {
+                                struct_ty.set_body(&[i8_arr.into()], false);
+                            }
+                        } else {
+                            let field_types = export
+                                .fields
+                                .iter()
+                                .map(|field| {
+                                    ast_type_from_canonical_key(&field.type_key)
+                                        .map_err(CodegenError::new)
+                                })
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            let llvm_fields = field_types
+                                .iter()
+                                .map(|field| self.lower_basic_type(field))
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if struct_ty.count_fields() == 0 {
+                                struct_ty.set_body(&llvm_fields, false);
+                            }
                         }
                     }
                     crate::module_artifact::ExportKind::Enum => {
@@ -893,6 +910,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                     crate::module_artifact::ExportKind::Trait => {}
+                    crate::module_artifact::ExportKind::Constant | crate::module_artifact::ExportKind::Global => {
+                        let link_name = export
+                            .link_name
+                            .clone()
+                            .unwrap_or_else(|| export.name.clone());
+                        let ty_ast = export
+                            .type_key
+                            .as_deref()
+                            .map(ast_type_from_canonical_key)
+                            .transpose()
+                            .map_err(CodegenError::new)?;
+                        if let Some(ast_ty) = ty_ast {
+                            self.extern_globals.insert(export.name.clone(), ast_ty.clone());
+                            let llvm_ty = self.lower_basic_type(&ast_ty)?;
+                            if self.module.get_global(&link_name).is_none() {
+                                let global = self.module.add_global(
+                                    llvm_ty,
+                                    Some(inkwell::AddressSpace::default()),
+                                    &link_name,
+                                );
+                                global.set_linkage(inkwell::module::Linkage::External);
+                                if export.kind == crate::module_artifact::ExportKind::Constant {
+                                    global.set_constant(true);
+                                }
+                            }
+                        }
+                    }
+                    crate::module_artifact::ExportKind::TypeAlias => {
+                        self.type_aliases.insert(export.name.clone());
+                    }
                 }
             }
         }

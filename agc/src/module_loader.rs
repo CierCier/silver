@@ -164,6 +164,12 @@ impl ModuleLoader {
             if candidate.is_file() {
                 return Some(candidate);
             }
+            let submodule_config = candidate.with_extension("submodule.toml");
+            if submodule_config.is_file() {
+                if let Ok(compiled) = ensure_submodule_built(&submodule_config, &candidate) {
+                    return Some(compiled);
+                }
+            }
         }
         None
     }
@@ -260,6 +266,81 @@ impl ModuleLoader {
     }
 }
 
+fn find_agsm_binary() -> Option<PathBuf> {
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let candidate = parent.join("agsm");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let debug_candidate = cwd.join("target").join("debug").join("agsm");
+        if debug_candidate.is_file() {
+            return Some(debug_candidate);
+        }
+        let release_candidate = cwd.join("target").join("release").join("agsm");
+        if release_candidate.is_file() {
+            return Some(release_candidate);
+        }
+    }
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("agsm");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn ensure_submodule_built(submodule_config: &Path, output_path: &Path) -> Result<PathBuf, String> {
+    let needs_rebuild = if !output_path.is_file() {
+        true
+    } else {
+        match (std::fs::metadata(submodule_config), std::fs::metadata(output_path)) {
+            (Ok(cfg_meta), Ok(out_meta)) => {
+                match (cfg_meta.modified(), out_meta.modified()) {
+                    (Ok(cfg_time), Ok(out_time)) => cfg_time > out_time,
+                    _ => false,
+                }
+            }
+            _ => true,
+        }
+    };
+
+    if !needs_rebuild {
+        return Ok(output_path.to_path_buf());
+    }
+
+    let agsm_bin = find_agsm_binary()
+        .ok_or_else(|| format!("`agsm` binary not found to compile {}", submodule_config.display()))?;
+
+    let output = std::process::Command::new(agsm_bin)
+        .arg("build")
+        .arg(submodule_config)
+        .arg("-o")
+        .arg(output_path)
+        .output()
+        .map_err(|err| format!("failed to execute agsm: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "agsm build failed for {}: {}",
+            submodule_config.display(),
+            stderr.trim()
+        ));
+    }
+
+    Ok(output_path.to_path_buf())
+}
+
 fn resolve_source_in_root(
     root: &Path,
     segments: &[&str],
@@ -279,6 +360,14 @@ fn resolve_source_in_root(
     let binary_path = joined.with_extension("agm");
     if binary_path.is_file() {
         return Some((binary_path, ResolvedSourceImportKind::Module));
+    }
+
+    // On-demand build from submodule configuration (.submodule.toml)
+    let submodule_config = joined.with_extension("submodule.toml");
+    if submodule_config.is_file() {
+        if let Ok(compiled) = ensure_submodule_built(&submodule_config, &binary_path) {
+            return Some((compiled, ResolvedSourceImportKind::Module));
+        }
     }
 
     None
@@ -408,6 +497,9 @@ fn export_kind_label(kind: ExportKind) -> &'static str {
         ExportKind::Struct => "struct",
         ExportKind::Enum => "enum",
         ExportKind::Trait => "trait",
+        ExportKind::Constant => "constant",
+        ExportKind::Global => "global",
+        ExportKind::TypeAlias => "type alias",
     }
 }
 
@@ -637,6 +729,42 @@ mod tests {
         let error = collect_imported_artifacts(&program, &loader, None).unwrap_err();
         assert!(error.contains("import conflict for `add`"));
         assert!(error.contains("duplicate function signature"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_submodule_config_when_binary_missing() {
+        let root = unique_temp_dir("submodule-ondemand");
+        std::fs::create_dir_all(root.join("vendor").join("math")).unwrap();
+
+        let header_path = root.join("vendor").join("math").join("math.h");
+        let config_path = root.join("vendor").join("math").join("math.submodule.toml");
+        let binary_path = root.join("vendor").join("math").join("math.agm");
+
+        std::fs::write(&header_path, "int add(int a, int b);").unwrap();
+        std::fs::write(
+            &config_path,
+            r#"
+name = "math"
+standard = "c99"
+includes = ["math.h"]
+"#,
+        )
+        .unwrap();
+
+        let mut loader = ModuleLoader::new();
+        loader.add_search_dir(&root);
+
+        // Resolving import when .agm is missing will compile on demand if agsm binary is available
+        if find_agsm_binary().is_some() {
+            let catalog = loader
+                .resolve_source_imports(&import_program(&["vendor", "math", "math"]), None)
+                .unwrap();
+            assert_eq!(catalog.imports[0].kind, ResolvedSourceImportKind::Module);
+            assert_eq!(catalog.imports[0].source_path, binary_path);
+            assert!(binary_path.is_file());
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

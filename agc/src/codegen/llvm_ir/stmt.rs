@@ -922,18 +922,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // drop flag and register the cascade (field drops, then own drop).
         self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)?;
         // Fields of an initialized struct local hold live values; mark them
-        // live so the scope-exit cascade drops them (uninitialized `let x;`
-        // leaves them false — Bug C: never drop uninitialized fields).
-        if has_initializer && let Some(var) = self.lookup_variable(&init_identifier) {
-            for (_, flag) in var.field_flags {
-                self.builder
-                    .build_store(flag, self.context.bool_type().const_int(1, false))
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to mark initialized fields: {e}"),
-                            identifier.span,
-                        )
-                    })?;
+        // live so the scope-exit cascade drops them. Uninitialized locals (`let x;`)
+        // have their own drop flag and field flags cleared to 0 so uninitialized
+        // values are never destructed on scope exit / return.
+        if let Some(var) = self.lookup_variable(&init_identifier) {
+            if has_initializer {
+                for (_, flag) in var.field_flags {
+                    self.builder
+                        .build_store(flag, self.context.bool_type().const_int(1, false))
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to mark initialized fields: {e}"),
+                                identifier.span,
+                            )
+                        })?;
+                }
+            } else {
+                if let Some(flag) = var.drop_flag {
+                    self.builder
+                        .build_store(flag, self.context.bool_type().const_int(0, false))
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to clear uninitialized drop flag: {e}"),
+                                identifier.span,
+                            )
+                        })?;
+                }
             }
         }
         Ok(())

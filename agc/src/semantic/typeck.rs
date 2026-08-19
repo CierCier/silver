@@ -364,6 +364,20 @@ impl TypeChecker {
                 crate::module_artifact::ExportKind::Trait => {
                     self.imported_traits.insert(export.name.clone());
                 }
+                crate::module_artifact::ExportKind::Constant | crate::module_artifact::ExportKind::Global => {
+                    if let Some(type_key) = &export.type_key {
+                        if let Ok(ty) = crate::types::Type::from_canonical_key(type_key) {
+                            self.global_variables.insert(export.name.clone(), ty);
+                        }
+                    }
+                }
+                crate::module_artifact::ExportKind::TypeAlias => {
+                    if let Some(type_key) = &export.type_key {
+                        if let Ok(ast_ty) = ast_type_from_canonical_key(type_key) {
+                            self.type_aliases.insert(export.name.clone(), ast_ty);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1502,6 +1516,8 @@ impl TypeChecker {
                             expr.span,
                         );
                     }
+                } else if matches!(inner.kind.as_ref(), ast::ExpressionKind::FieldAccess { .. }) {
+                    // Valid field-level move (e.g. `move x.field` or `move n.pair.left`).
                 } else {
                     self.error(msg::move_operand_identifier(), inner.span);
                 }
@@ -6280,6 +6296,8 @@ mod tests {
                 enum_backing_type: None,
                 enum_variants: Vec::new(),
                 trait_items: Vec::new(),
+                const_value: None,
+                is_mutable: false,
             }],
             native_libs: Vec::new(),
             native_lib_paths: Vec::new(),

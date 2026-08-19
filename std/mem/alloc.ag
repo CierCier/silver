@@ -653,6 +653,10 @@ void* realloc_bytes(void* ptr, i64 new_size) {
     return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
 }
 
+void* realloc(void* ptr, i64 new_size) {
+    return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
+}
+
 void free(void* ptr) {
     mem_free_impl((u8*)ptr);
 }

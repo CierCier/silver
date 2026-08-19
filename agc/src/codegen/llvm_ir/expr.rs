@@ -1083,16 +1083,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )),
             ast::ExpressionKind::Move(inner) => {
                 let value = self.emit_expression_value(inner)?;
-                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref()
-                    && let Some(flag_ptr) =
+                if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
+                    if let Some(flag_ptr) =
                         self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
-                {
-                    self.builder
-                        .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
-                        .map_err(|e| {
-                            CodegenError::new(format!("failed to clear drop flag: {e}"))
-                        })?;
+                    {
+                        self.builder
+                            .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                            .map_err(|e| {
+                                CodegenError::new(format!("failed to clear drop flag: {e}"))
+                            })?;
+                    }
                     self.clear_field_flags(&ident.name)?;
+                } else if let Some((root_name, path)) = self.lvalue_root_and_path(inner) {
+                    self.clear_field_flags_for_path(&root_name, &path)?;
                 }
                 Ok(value)
             }
@@ -2443,6 +2446,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .and_then(|m| m.get(&variant.name))
                                 .cloned()
                                 .unwrap_or_default();
+                            let substitutions: HashMap<String, ast::Type> = if let Some(ty) = self.resolve_receiver_type(expression)
+                                && let Some(named) = Self::extract_named_type(&ty)
+                                && let Some(params) = self.struct_generics.get(&enum_name)
+                                && let Some(args) = &named.generics
+                                && params.len() == args.len()
+                            {
+                                params.iter().cloned().zip(args.iter().cloned()).collect()
+                            } else {
+                                HashMap::default()
+                            };
                             // (binding, is_move): a `move` binding extracts the
                             // payload OUT of the scrutinee (zeroing its slot) so
                             // ownership transfers instead of sharing.
@@ -2480,7 +2493,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 );
                                 let mut byte_offset: u32 = 0;
                                 for (i, pt) in payload_types.iter().enumerate() {
-                                    let llvm_ty = self.lower_basic_type(pt)?;
+                                    let concrete_pt = if substitutions.is_empty() {
+                                        pt.clone()
+                                    } else {
+                                        Self::substitute_generic_type(pt, &substitutions)
+                                    };
+                                    let llvm_ty = self.lower_basic_type(&concrete_pt)?;
                                     let binding = bindings.get(i).copied().flatten();
                                     if let Some((binding, is_move)) = binding {
                                         let field_ptr =
@@ -2530,11 +2548,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         })?;
                                         self.emit_debug_variable(
                                             &binding.name,
-                                            pt,
+                                            &concrete_pt,
                                             &binding.span,
                                             alloca,
                                             None,
                                         )?;
+                                        if let Some(scope) = self.variables.last_mut() {
+                                            scope.insert(
+                                                binding.name.clone(),
+                                                VarInfo {
+                                                    ptr: alloca,
+                                                    ty: concrete_pt.clone(),
+                                                    is_mutable: false,
+                                                    is_volatile: false,
+                                                    drop_flag: None,
+                                                    field_flags: Vec::new(),
+                                                },
+                                            );
+                                        }
+                                        self.register_drop_flag(&binding.name, &concrete_pt, alloca)?;
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
                                         // leaves the matched enum (no dangling
@@ -2603,19 +2635,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                         "zero orig payload: {e}"
                                                     ))
                                                 })?;
-                                        }
-                                        if let Some(scope) = self.variables.last_mut() {
-                                            scope.insert(
-                                                binding.name.clone(),
-                                                VarInfo {
-                                                    ptr: alloca,
-                                                    ty: pt.clone(),
-                                                    is_mutable: false,
-                                                    is_volatile: false,
-                                                    drop_flag: None,
-                                                    field_flags: Vec::new(),
-                                                },
-                                            );
                                         }
                                     }
                                     byte_offset += target_data.get_abi_size(&llvm_ty) as u32;
@@ -2711,6 +2730,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
 
             let mut arm_value = self.emit_expression_value(&arm.body)?;
+            // If the arm body is an identifier yielding a droppable value as
+            // the match result, clear its drop flag so it transfers out cleanly.
+            if let ast::ExpressionKind::Identifier(ident) = arm.body.kind.as_ref() {
+                if let Some(var) = self.lookup_variable(&ident.name) {
+                    if let Some(flag) = var.drop_flag {
+                        self.builder
+                            .build_store(flag, self.context.bool_type().const_int(0, false))
+                            .map_err(|e| CodegenError::new(format!("clear match result drop flag: {e}")))?;
+                    }
+                    self.clear_field_flags(&ident.name)?;
+                }
+            }
             // Cast to first arm's type if needed (handles i32 vs i64 mismatch)
             if let Some((first_value, _)) = incoming.first() {
                 let target_ty = first_value.get_type();
@@ -2934,15 +2965,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
 
-                let field_ptr = self
-                    .builder
-                    .build_struct_gep(struct_ty, struct_ptr, field_index as u32, &field.name)
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed struct field access: {e}"),
-                            field.span,
-                        )
-                    })?;
+                let field_ptr = if self.union_types.contains(&owner_name) {
+                    struct_ptr
+                } else {
+                    self.builder
+                        .build_struct_gep(struct_ty, struct_ptr, field_index as u32, &field.name)
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed struct field access: {e}"),
+                                field.span,
+                            )
+                        })?
+                };
 
                 Ok((field_ptr, field_ty.clone()))
             }

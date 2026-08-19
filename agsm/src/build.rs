@@ -50,7 +50,7 @@ impl From<ExtractError> for BuildError {
 
 pub fn build(options: &BuildOptions) -> Result<PathBuf, BuildError> {
     let LoadedConfig { path, config } = crate::config::SourcemapConfig::load(&options.sourcemap)?;
-    let target_resolution = config.resolve_target(options.target.as_deref());
+    let target_resolution = config.resolve_target(options.target.as_deref())?;
     for warning in &target_resolution.warnings {
         eprintln!("warning: {}:{}: {}", path.display(), 1, warning);
     }

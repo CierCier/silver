@@ -403,6 +403,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    /// Clear per-field drop flag for a specific field path (or any subfield of it).
+    pub(crate) fn clear_field_flags_for_path(&mut self, root_name: &str, path: &str) -> CodegenResult<()> {
+        if let Some(var) = self.lookup_variable(root_name) {
+            let prefix = format!("{path}.");
+            for (p, flag) in &var.field_flags {
+                if *p == path || p.starts_with(&prefix) {
+                    self.builder
+                        .build_store(*flag, self.context.bool_type().const_int(0, false))
+                        .map_err(|e| CodegenError::new(format!("failed to clear field flag: {e}")))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn lookup_extern_global(
         &self,
         name: &str,
@@ -533,9 +548,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// payload is zeroed, so null-guarded drops are no-ops.
     fn emit_enum_payload_drop(
         &mut self,
-        enum_name: &str,
+        enum_type: &ast::Type,
         var_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<()> {
+        let Some(named) = Self::extract_named_type(enum_type).cloned() else {
+            return Ok(());
+        };
+        let enum_name = &named.path[0].name;
         let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() else {
             return Ok(());
         };
@@ -547,6 +566,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .get(enum_name)
             .cloned()
             .unwrap_or_default();
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+            && let Some(args) = &named.generics
+            && params.len() == args.len()
+        {
+            params.iter().cloned().zip(args.iter().cloned()).collect()
+        } else {
+            HashMap::default()
+        };
         let target_data =
             TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         let function = self
@@ -577,8 +604,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let mut drops: Vec<(u32, String)> = Vec::new();
             let mut offset: u32 = 0;
             for pt in &types {
-                let llvm_ty = self.lower_basic_type(pt)?;
-                if let Some(drop_fn) = self.get_drop_function_name(pt)? {
+                let concrete_pt = if substitutions.is_empty() {
+                    pt.clone()
+                } else {
+                    Self::substitute_generic_type(pt, &substitutions)
+                };
+                let llvm_ty = self.lower_basic_type(&concrete_pt)?;
+                if let Some(drop_fn) = self.get_drop_function_name(&concrete_pt)? {
                     drops.push((offset, drop_fn));
                 }
                 offset += target_data.get_abi_size(&llvm_ty) as u32;
@@ -656,14 +688,28 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if !self.enum_payload_layouts.contains_key(enum_name) {
             return Ok(());
         }
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+            && let Some(args) = &named.generics
+            && params.len() == args.len()
+        {
+            params.iter().cloned().zip(args.iter().cloned()).collect()
+        } else {
+            HashMap::default()
+        };
+
         // Only enums whose payloads can carry Drop values need the cascade.
         let payload_types = self.enum_variant_payload_types.get(enum_name).cloned();
         let has_drop_payload = payload_types
             .map(|m| {
                 m.values().any(|types| {
-                    types
-                        .iter()
-                        .any(|pt| self.get_drop_function_name(pt).unwrap_or(None).is_some())
+                    types.iter().any(|pt| {
+                        let concrete_pt = if substitutions.is_empty() {
+                            pt.clone()
+                        } else {
+                            Self::substitute_generic_type(pt, &substitutions)
+                        };
+                        self.get_drop_function_name(&concrete_pt).unwrap_or(None).is_some()
+                    })
                 })
             })
             .unwrap_or(false);
@@ -688,7 +734,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         if let Some(scope) = self.defers.last_mut() {
             scope.push(DeferredEntry {
-                action: DeferAction::EnumPayloadDrop(enum_name.clone(), var_ptr),
+                action: DeferAction::EnumPayloadDrop(ty.clone(), var_ptr),
                 flag: Some(flag_alloca),
             });
         }
@@ -705,51 +751,58 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         ty: &ast::Type,
         var_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<()> {
-        let Some(drop_fn_name) = self.get_drop_function_name(ty)? else {
-            // No Drop impl of its own. An enum whose payloads can carry Drop
-            // values still needs the tag-aware payload cascade so owned
-            // payloads (Result<String, Error>, Optional<Owned>) are released
-            // at scope exit instead of leaking.
-            return self.register_enum_payload_cascade(ty, var_ptr, name);
-        };
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
-        let flag_alloca = self.create_entry_alloca(
-            function,
-            &format!("{name}.drop"),
-            self.context.bool_type().as_basic_type_enum(),
-        )?;
-        self.builder
-            .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
-            .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
-        // Attach the flag to the innermost binding so shadowed variables
-        // never clear each other's flags (a name-keyed map lost the outer
-        // flag on shadowing, leaving moved values to be dropped anyway).
-        if let Some(scope) = self.variables.last_mut()
-            && let Some(var) = scope.get_mut(name)
-        {
-            var.drop_flag = Some(flag_alloca);
-        }
+        let drop_fn_name = self.get_drop_function_name(ty)?;
+        if let Some(drop_fn_name) = drop_fn_name {
+            let function = self
+                .current_fn
+                .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
+            let flag_alloca = self.create_entry_alloca(
+                function,
+                &format!("{name}.drop"),
+                self.context.bool_type().as_basic_type_enum(),
+            )?;
+            self.builder
+                .build_store(flag_alloca, self.context.bool_type().const_int(1, false))
+                .map_err(|e| CodegenError::new(format!("failed to init drop flag: {e}")))?;
+            if let Some(scope) = self.variables.last_mut()
+                && let Some(var) = scope.get_mut(name)
+            {
+                var.drop_flag = Some(flag_alloca);
+            }
 
-        // Field drops are registered BEFORE the struct's own drop so they
-        // fire AFTER it in LIFO order (the struct drop is last-registered,
-        // so it runs first). Each Drop-typed field gets its own flag
-        // (initialized false — "no live value yet"); the returned list is
-        // stored on the variable for the assignment pre-drop and for
-        // clearing on move/transfer.
-        let field_flags = self.register_field_drops(ty, var_ptr, flag_alloca)?;
-        if let Some(scope) = self.variables.last_mut()
-            && let Some(var) = scope.get_mut(name)
-        {
-            var.field_flags = field_flags;
-        }
+            let field_flags = self.register_field_drops(ty, var_ptr, flag_alloca)?;
+            if let Some(scope) = self.variables.last_mut()
+                && let Some(var) = scope.get_mut(name)
+            {
+                var.field_flags = field_flags;
+            }
 
-        if let Some(scope) = self.defers.last_mut() {
-            scope.push(DeferredEntry {
-                action: DeferAction::DropCall(drop_fn_name, var_ptr),
-                flag: Some(flag_alloca),
-            });
+            if let Some(scope) = self.defers.last_mut() {
+                scope.push(DeferredEntry {
+                    action: DeferAction::DropCall(drop_fn_name, var_ptr),
+                    flag: Some(flag_alloca),
+                });
+            }
+        } else {
+            // Struct without its own Drop impl: register field drop cascade if any fields have Drop.
+            let function = self
+                .current_fn
+                .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
+            let dummy_flag = self.create_entry_alloca(
+                function,
+                &format!("{name}.field_guard"),
+                self.context.bool_type().as_basic_type_enum(),
+            )?;
+            let field_flags = self.register_field_drops(ty, var_ptr, dummy_flag)?;
+            if !field_flags.is_empty() {
+                if let Some(scope) = self.variables.last_mut()
+                    && let Some(var) = scope.get_mut(name)
+                {
+                    var.field_flags = field_flags;
+                }
+            } else {
+                return self.register_enum_payload_cascade(ty, var_ptr, name);
+            }
         }
         Ok(())
     }
@@ -763,12 +816,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(named) = Self::extract_named_type(ty).cloned() else {
             return Ok(Vec::new());
         };
-        // Enums are scalar-backed or payload layouts, not structs with field
-        // metadata. Drop registration only cascades through struct fields.
-        if self.enum_backing_type_for_named(&named).is_some()
+        let base_name = named.path.last().map(|s| &s.name[..]).unwrap_or_default();
+        if base_name == "Task"
+            || self.enum_backing_type_for_named(&named).is_some()
             || (named.path.len() == 1
                 && self.enum_payload_layouts.contains_key(&named.path[0].name))
         {
+            return Ok(Vec::new());
+        }
+        let named_key = Self::named_type_key(&named);
+        if !self.struct_fields.contains_key(base_name) && !self.struct_fields.contains_key(&named_key) {
             return Ok(Vec::new());
         }
         let _ = self.ensure_named_struct_type(&named)?;

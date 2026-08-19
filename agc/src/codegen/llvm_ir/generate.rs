@@ -1566,15 +1566,16 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     // Only direct identifier roots transfer; computed
                     // expressions (`return x + y;`, `return x.field;`, ternaries)
                     // leave the variable owned and still require explicit `move`.
-                    if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
-                        && let Some(flag_ptr) =
+                    if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref() {
+                        if let Some(flag_ptr) =
                             self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
-                    {
-                        self.builder
-                            .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
-                            .map_err(|e| {
-                                CodegenError::new(format!("failed to clear drop flag: {e}"))
-                            })?;
+                        {
+                            self.builder
+                                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to clear drop flag: {e}"))
+                                })?;
+                        }
                         self.clear_field_flags(&ident.name)?;
                     }
                     if let Some(return_ty) = self.current_return_type.clone() {

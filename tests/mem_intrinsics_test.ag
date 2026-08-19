@@ -50,15 +50,17 @@ i32 main() {
     memmove((u8*)((i64)buf + 50), (u8*)((i64)buf + 150), 2000);
     i = 0;
     while (i < 2000) { @assert(!(buf[50 + i] != (u8)((50 + i) % 7)), "buf[50 + i] != (u8)((50 + i) % 7)"); i = i + 1; }
-    // memchr: first occurrence, absent, heap buffer above 4GB near the end.
-    @assert(!(memchr((u8*)"hello world", (u8)'w', 11) != 6), "check");
-    @assert(!(memchr((u8*)"hello world", (u8)'x', 11) != -1), "check");
-    @assert(!(memchr((u8*)"abcabc", (u8)'b', 6) != 1), "check");
+    // mem_find_byte: first occurrence, absent, heap buffer above 4GB near the end.
+    @assert(!(mem_find_byte((u8*)"hello world", (u8)'w', 11) != 6), "check");
+    @assert(!(mem_find_byte((u8*)"hello world", (u8)'x', 11) != -1), "check");
+    @assert(!(mem_find_byte((u8*)"abcabc", (u8)'b', 6) != 1), "check");
     u8* hay = (u8*)malloc(4096 * 8);
     i = 0;
     while (i < 4096 * 8) { hay[i] = (u8)'a'; i = i + 1; }
     hay[4096 * 8 - 3] = (u8)'Z';
-    @assert(!(memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3), "memchr(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3");
+    @assert(!(mem_find_byte(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3), "mem_find_byte(hay, (u8)'Z', 4096 * 8) != 4096 * 8 - 3");
+    @assert(!(memchr(hay, (i32)'Z', 4096 * 8) != (u8*)((i64)hay + 4096 * 8 - 3)), "memchr pointer match");
+    @assert(!(memchr(hay, (i32)'?', 4096 * 8) != (u8*)0), "memchr null when absent");
 
     // String single-byte search fast paths (SSE2 memchr).
     String q = String.from_str("the quick brown fox");

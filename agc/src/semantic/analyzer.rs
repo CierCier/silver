@@ -26,6 +26,7 @@ enum SymbolKind {
     Function,
     GlobalVariable,
     ExternVariable,
+    TypeAlias,
 }
 
 pub struct Analyzer {
@@ -79,6 +80,15 @@ impl Analyzer {
                         self.imported_symbols
                             .insert(export.name.clone(), SymbolKind::Trait);
                         self.imported_traits.insert(export.name.clone());
+                    }
+                    ExportKind::Constant | ExportKind::Global => {
+                        self.imported_symbols
+                            .insert(export.name.clone(), SymbolKind::GlobalVariable);
+                    }
+                    ExportKind::TypeAlias => {
+                        self.imported_symbols
+                            .insert(export.name.clone(), SymbolKind::TypeAlias);
+                        self.imported_types.insert(export.name.clone());
                     }
                 }
             }
@@ -217,6 +227,7 @@ impl Analyzer {
                 SymbolKind::ExternVariable => {
                     format!("duplicate extern variable '{}'", ident.name)
                 }
+                SymbolKind::TypeAlias => format!("duplicate type alias '{}'", ident.name),
             };
             self.errors.push(SemanticError {
                 message,
@@ -909,7 +920,8 @@ impl Analyzer {
             | Some(SymbolKind::Struct)
             | Some(SymbolKind::Enum)
             | Some(SymbolKind::Trait)
-            | Some(SymbolKind::ExternVariable) => return,
+            | Some(SymbolKind::ExternVariable)
+            | Some(SymbolKind::TypeAlias) => return,
             None => {}
         }
 
@@ -968,7 +980,7 @@ impl Analyzer {
             .filter(|(_, k)| {
                 matches!(
                     **k,
-                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
+                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
                 )
             })
             .map(|(s, _)| s.as_str())

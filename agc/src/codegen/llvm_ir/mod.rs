@@ -85,11 +85,11 @@ pub(crate) enum DeferAction<'ctx> {
     Statement(ast::Statement),
     /// Call the drop function for a variable: (mangled_fn_name, ptr_to_var)
     DropCall(String, PointerValue<'ctx>),
-    /// Tag-aware drop of an enum's payload: (enum_base_name, ptr_to_enum).
+    /// Tag-aware drop of an enum's payload: (enum_type, ptr_to_enum).
     /// Switches on the i16 tag and drops the active variant's Drop-typed
     /// payload values (for enums WITHOUT a Drop impl of their own — those
     /// manage payloads in the drop body).
-    EnumPayloadDrop(String, PointerValue<'ctx>),
+    EnumPayloadDrop(ast::Type, PointerValue<'ctx>),
 }
 
 #[derive(Clone)]
@@ -125,6 +125,7 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) global_const_values: HashMap<String, i128>,
     pub(crate) struct_types: HashMap<String, StructType<'ctx>>,
     pub(crate) struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
+    pub(crate) union_types: HashSet<String>,
     pub(crate) enum_backing_types: HashMap<String, ast::PrimitiveType>,
     pub(crate) enum_variants: HashMap<String, HashMap<String, i128>>,
     pub(crate) enum_payload_layouts: HashMap<String, StructType<'ctx>>,

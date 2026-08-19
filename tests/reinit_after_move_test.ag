@@ -1,0 +1,130 @@
+i64 drop_count = 0;
+i64 alloc_count = 0;
+
+struct Resource {
+    i64 id;
+    u8* ptr;
+}
+
+impl Drop<Resource> for Resource {
+    void drop(Resource* self) {
+        drop_count = drop_count + 1;
+        if (self.ptr != (u8*)0) {
+            free(self.ptr);
+            self.ptr = (u8*)0;
+        }
+    }
+}
+
+Resource make_res(i64 id) {
+    alloc_count = alloc_count + 1;
+    Resource r;
+    r.id = id;
+    r.ptr = (u8*)malloc(32);
+    return r;
+}
+
+void consume(Resource _r) {
+    // _r is dropped here upon leaving consume
+}
+
+impl Resource {
+    void bump(&mut Resource self) {
+        self.id = self.id + 100;
+    }
+}
+
+void test_simple_reinit() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Resource r = make_res(1);
+    @assert(!(r.id != 1), "r.id == 1");
+
+    // Move r to consume
+    consume(move r);
+    @assert(!(drop_count != 1), "drop_count == 1 after consume");
+
+    // Re-initialize r with a new value
+    r = make_res(2);
+    @assert(!(r.id != 2), "r.id == 2 after reinit");
+
+    // Mutate through &mut method
+    r.bump();
+    @assert(!(r.id != 102), "r.id == 102 after bump");
+
+    // Use r again
+    @assert(!(r.ptr == (u8*)0), "r.ptr is valid");
+
+    // Move r again
+    consume(move r);
+    @assert(!(drop_count != 2), "drop_count == 2 after second consume");
+
+    // Re-initialize once more, let scope exit drop it
+    r = make_res(3);
+    @assert(!(r.id != 3), "r.id == 3");
+}
+
+void test_loop_reinit() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Resource r = make_res(0);
+
+    for (i64 i = 1; i <= 5; i = i + 1) {
+        // Move previous r
+        consume(move r);
+        // Re-initialize for next iteration / use
+        r = make_res(i);
+        @assert(!(r.id != i), "r.id == i in loop");
+    }
+
+    // After loop, r is holding id=5, will be dropped on scope exit
+}
+
+void test_conditional_reinit(bool take_path) {
+    Resource r = make_res(50);
+    if (take_path) {
+        consume(move r);
+        r = make_res(60);
+    }
+    // In both branches, r ends up live (either original id=50 or re-initialized id=60)
+    @assert(!(r.id < 50), "r.id >= 50");
+    consume(move r);
+}
+
+void test_overwrite_live() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Resource r = make_res(10);
+    // Overwriting a live value must drop the old value first, then take new
+    r = make_res(20);
+    @assert(!(drop_count != 1), "overwriting live dropped old value");
+    @assert(!(r.id != 20), "new id is 20");
+
+    // Move it out
+    consume(move r);
+    @assert(!(drop_count != 2), "drop_count == 2");
+}
+
+i64 main() {
+    test_simple_reinit();
+    // Scope exit for test_simple_reinit should have dropped id=3
+    @assert(!(drop_count != 3), "test_simple_reinit total drops == 3");
+    @assert(!(alloc_count != 3), "test_simple_reinit total allocs == 3");
+
+    test_loop_reinit();
+    // 5 iterations: 5 moves into consume + 1 scope exit drop = 6 drops, 6 allocs
+    @assert(!(drop_count != 6), "test_loop_reinit total drops == 6");
+    @assert(!(alloc_count != 6), "test_loop_reinit total allocs == 6");
+
+    test_conditional_reinit(true);
+    test_conditional_reinit(false);
+
+    test_overwrite_live();
+    @assert(!(drop_count != 2), "test_overwrite_live total drops == 2");
+    @assert(!(alloc_count != 2), "test_overwrite_live total allocs == 2");
+
+    return 0;
+}

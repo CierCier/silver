@@ -1,4 +1,5 @@
 name = "raylib"
 standard = "c11"
 includes = ["raylib.h"]
+pkg_config = "raylib"
 libs = ["raylib"]

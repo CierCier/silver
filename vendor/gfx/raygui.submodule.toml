@@ -1,0 +1,8 @@
+name = "raygui"
+standard = "c11"
+includes = ["raylib.h", "raygui.h"]
+pkg_config = ["raygui", "raylib"]
+libs = ["raylib", "m", "c"]
+defines = ["RAYGUI_IMPLEMENTATION"]
+prefix_strip = ["Gui"]
+allow = ["Gui*", "GUI_*", "RAYGUI_*", "TEXT_*", "SCROLLBAR_*", "ARROW_*", "CHECK_*", "COLOR_*", "SLIDER_*", "PROGRESSBAR_*", "COMBOBOX_*", "DROPDOWNBOX_*", "TEXTBOX_*", "VALUEBOX_*", "SPINNER_*", "LISTVIEW_*", "COLORPICKER_*"]

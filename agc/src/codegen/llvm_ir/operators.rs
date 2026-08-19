@@ -1400,12 +1400,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Split an lvalue into its root variable name and the dotted field
     /// path from the root outward (`a.b.c` -> `("a", "b.c")`). Returns
     /// None for non-field/identifier lvalues.
-    fn lvalue_root_and_path(&self, left: &ast::Expression) -> Option<(String, String)> {
+    pub(crate) fn lvalue_root_and_path(&self, left: &ast::Expression) -> Option<(String, String)> {
         let mut path = Vec::new();
         let mut expr = left;
         loop {
             match expr.kind.as_ref() {
                 ast::ExpressionKind::Identifier(ident) => {
+                    path.reverse();
                     return Some((ident.name.clone(), path.join(".")));
                 }
                 ast::ExpressionKind::FieldAccess { object, field } => {
@@ -1456,10 +1457,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ));
                 }
             };
-            ptr = self
-                .builder
-                .build_struct_gep(struct_ty, ptr, index as u32, segment)
-                .map_err(|e| CodegenError::with_span(format!("field path GEP: {e}"), *span))?;
+            ptr = if self.union_types.contains(&named_key) {
+                ptr
+            } else {
+                self.builder
+                    .build_struct_gep(struct_ty, ptr, index as u32, segment)
+                    .map_err(|e| CodegenError::with_span(format!("field path GEP: {e}"), *span))?
+            };
             ty = fields[index].1.clone();
         }
         Ok(ptr)
@@ -1596,6 +1600,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
             && let Some(var) = self.lookup_variable(&ident.name)
         {
+            if let Some(drop_flag) = var.drop_flag {
+                self.set_field_flag(drop_flag)?;
+            }
             for (_, flag) in &var.field_flags {
                 self.set_field_flag(*flag)?;
             }
@@ -1604,7 +1611,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// After assigning a field of `left`, mark that field (and any nested
-    /// path extending it) as live.
+    /// path extending it) as live, as well as the root container.
     fn set_assigned_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
         let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
             return Ok(());
@@ -1612,6 +1619,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let Some(var) = self.lookup_variable(&root_name) else {
             return Ok(());
         };
+        if let Some(drop_flag) = var.drop_flag {
+            self.set_field_flag(drop_flag)?;
+        }
         let prefix = format!("{path}.");
         for (p, flag) in &var.field_flags {
             if *p == path || p.starts_with(&prefix) {

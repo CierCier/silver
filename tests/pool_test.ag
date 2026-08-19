@@ -219,8 +219,8 @@ i32 main() {
         i32 rb = bind_loopback(&listener_b, &port_b);
         assert_eq_i64(0, ra, "bind a");
         assert_eq_i64(0, rb, "bind b");
-        g_listener_a = listener_a;
-        g_listener_b = listener_b;
+        g_listener_a = move listener_a;
+        g_listener_b = move listener_b;
         g_redirect_port = port_b;
         g_status = -1;
         TaskRecord* server_a = thread_spawn(cross_server_a_main, 0);
@@ -238,6 +238,7 @@ i32 main() {
         if (!r.failed()) {
             HttpResponse response = r.unwrap();
             assert_eq_i64(response.status, 200, "final status");
+            response.drop();
         }
         assert_true(thread_join(server_a) >= 0, "join a");
         assert_true(thread_join(server_b) >= 0, "join b");
@@ -253,7 +254,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         assert_eq_i64(0, run_requests(port, 2, 2), "two requests");
         assert_eq_i64(g_accepts_a, 1, "one accepted connection reused");
     }
@@ -265,7 +266,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         // One request per connection: after the first response the server
         // closes, so the pooled connection is stale for request two.
         assert_eq_i64(0, run_requests(port, 2, 1), "two requests");
@@ -284,8 +285,8 @@ i32 main() {
         assert_eq_i64(0, ra, "bind a");
         assert_eq_i64(0, rb, "bind b");
 
-        g_listener_a = listener_a;
-        g_listener_b = listener_b;
+        g_listener_a = move listener_a;
+        g_listener_b = move listener_b;
         g_per_conn = 10;
         g_total_a = 2; // A serves A1 and (after eviction) A2
         g_total_b = 1;

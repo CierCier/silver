@@ -1,3 +1,4 @@
+use crate::codegen::llvm_ir::HashMap;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
@@ -217,6 +218,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let mut value = self.emit_expression_value(argument)?;
             if index < declared_param_count {
                 if let Some(signature) = &signature {
+                    // By-value argument of a Drop type: the callee's
+                    // parameter destructor runs on exit, transferring
+                    // ownership. Clear the caller's flag to avoid a
+                    // double free; extern functions never drop params.
+                    if signature.linkage.is_none() {
+                        let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                            self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
+                        } else if index < signature.params.len() {
+                            self.param_type_drops_on_exit(&signature.params[index]).unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if arg_drops {
+                            self.clear_drop_flag_of(argument)?;
+                        }
+                    }
+
                     // Prefer a user-defined cast method (e.g. a struct arg that
                     // `cast i32`s into an i32 parameter) over builtin casts.
                     if let Some(casted) = self.try_apply_user_cast(
@@ -303,7 +321,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// collected impl metadata / function signature.
     ///
     /// True when the callee runs a destructor on this by-value parameter at
-    /// function exit: a non-pointer/reference type with a Drop impl.
+    /// function exit: a non-pointer/reference type with a Drop impl, cascaded
+    /// struct field drops, or an enum payload cascade.
     pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
         if matches!(
             ty.kind.as_ref(),
@@ -318,10 +337,45 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         {
             return Ok(true);
         }
+        // Struct without its own Drop impl but with droppable fields:
+        if self.struct_has_field_drops(ty)? {
+            return Ok(true);
+        }
         // An enum WITHOUT a Drop impl of its own still drops its payload at
         // scope exit via the tag-aware cascade — a by-value transfer must
         // clear the caller's flag for it too.
         self.enum_has_payload_cascade(ty)
+    }
+
+    fn struct_has_field_drops(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
+        let Some(named) = Self::extract_named_type(ty).cloned() else {
+            return Ok(false);
+        };
+        let base_name = named.path.last().map(|s| &s.name[..]).unwrap_or_default();
+        if base_name == "Task"
+            || self.enum_backing_type_for_named(&named).is_some()
+            || (named.path.len() == 1
+                && self.enum_payload_layouts.contains_key(&named.path[0].name))
+        {
+            return Ok(false);
+        }
+        let named_key = Self::named_type_key(&named);
+        if !self.struct_fields.contains_key(base_name) && !self.struct_fields.contains_key(&named_key) {
+            return Ok(false);
+        }
+        let fields: Vec<(String, ast::Type)> = match self.struct_fields.get(&named_key) {
+            Some(f) => f.clone(),
+            None => match self.struct_fields.get(base_name) {
+                Some(f) => f.clone(),
+                None => return Ok(false),
+            },
+        };
+        for (_, fty) in fields {
+            if self.param_type_drops_on_exit(&fty)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// True when `ty` is an enum with a payload cascade (a payload layout
@@ -345,13 +399,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // Has its own Drop impl: the body manages the payload.
             return Ok(false);
         }
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+            && let Some(args) = &named.generics
+            && params.len() == args.len()
+        {
+            params.iter().cloned().zip(args.iter().cloned()).collect()
+        } else {
+            HashMap::default()
+        };
         let Some(payloads) = self.enum_variant_payload_types.get(enum_name).cloned() else {
             return Ok(false);
         };
         let mut has_drop = false;
         for types in payloads.values() {
             for pt in types {
-                if self.get_drop_function_name(pt)?.is_some() {
+                let concrete_pt = if substitutions.is_empty() {
+                    pt.clone()
+                } else {
+                    Self::substitute_generic_type(pt, &substitutions)
+                };
+                if self.get_drop_function_name(&concrete_pt)?.is_some() {
                     has_drop = true;
                 }
             }
@@ -363,13 +430,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// parameter: ownership of the value is being transferred to a by-value
     /// callee that will run the destructor on its copy.
     pub(crate) fn clear_drop_flag_of(&mut self, expr: &ast::Expression) -> CodegenResult<()> {
-        if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref()
-            && let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
-        {
-            self.builder
-                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
-                .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+        if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref() {
+            if let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag) {
+                self.builder
+                    .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+            }
             self.clear_field_flags(&ident.name)?;
+        } else if let Some((root_name, path)) = self.lvalue_root_and_path(expr) {
+            self.clear_field_flags_for_path(&root_name, &path)?;
         }
         Ok(())
     }
@@ -723,12 +792,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // both the callee's copy and the original free the same
                     // resources (double free). Extern functions never drop
                     // their parameters and are excluded.
-                    if let Some(signature) = &signature
-                        && signature.linkage.is_none()
-                        && signature
+                    let receiver_drops = if let Some(receiver_ty) = &receiver_ty {
+                        self.param_type_drops_on_exit(receiver_ty).unwrap_or(false)
+                    } else if let Some(signature) = &signature {
+                        signature
                             .params
                             .first()
                             .is_some_and(|ty| self.param_type_drops_on_exit(ty).unwrap_or(false))
+                    } else {
+                        false
+                    };
+                    if receiver_drops
+                        && signature
+                            .as_ref()
+                            .map(|s| s.linkage.is_none())
+                            .unwrap_or(true)
                     {
                         self.clear_drop_flag_of(receiver)?;
                     }
@@ -773,13 +851,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // parameter destructor runs on exit, transferring
                     // ownership. Clear the caller's flag to avoid a
                     // double free; extern functions never drop params.
-                    if signature.linkage.is_none()
-                        && param_index < signature.params.len()
-                        && self
-                            .param_type_drops_on_exit(&signature.params[param_index])
-                            .unwrap_or(false)
-                    {
-                        self.clear_drop_flag_of(argument)?;
+                    if signature.linkage.is_none() {
+                        let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                            self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
+                        } else if param_index < signature.params.len() {
+                            self.param_type_drops_on_exit(&signature.params[param_index]).unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if arg_drops {
+                            self.clear_drop_flag_of(argument)?;
+                        }
                     }
                     // Prefer a user-defined cast method over builtin casts.
                     if let Some(casted) = self.try_apply_user_cast(
@@ -819,11 +901,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop"
             && let ast::ExpressionKind::Identifier(ident) = &receiver.kind.as_ref()
-            && let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
         {
-            self.builder
-                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
-                .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+            if let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag) {
+                self.builder
+                    .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(format!("failed to clear drop flag: {e}")))?;
+            }
             self.clear_field_flags(&ident.name)?;
         }
 

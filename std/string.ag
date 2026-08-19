@@ -216,7 +216,7 @@ impl String {
             // Single byte: SSE2 memchr scan instead of per-position memcmp.
             u8* n = (u8*)needle;
             u8 first = n[0];
-            return memchr(&self.data[0], first, self.len) >= 0;
+            return mem_find_byte(&self.data[0], first, self.len) >= 0;
         }
         for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
@@ -241,7 +241,7 @@ impl String {
             // Single byte: SSE2 memchr scan instead of per-position memcmp.
             u8* n = (u8*)needle;
             u8 first = n[0];
-            return memchr(&self.data[0], first, self.len);
+            return mem_find_byte(&self.data[0], first, self.len);
         }
         for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {

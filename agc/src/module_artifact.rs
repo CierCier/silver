@@ -9,7 +9,8 @@ use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
 const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x07"; // v7: foreign library search paths
+const MODULE_MAGIC_V7: &[u8; 6] = b"AGM\x00\x00\x07";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x08"; // v8: constant expressions and globals
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -49,6 +50,8 @@ pub struct ModuleExport {
     pub enum_backing_type: Option<String>,
     pub enum_variants: Vec<ModuleEnumVariant>,
     pub trait_items: Vec<ModuleTraitItem>,
+    pub const_value: Option<String>,
+    pub is_mutable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,9 @@ pub enum ExportKind {
     Struct,
     Enum,
     Trait,
+    Constant,
+    Global,
+    TypeAlias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +110,9 @@ impl ExportKind {
             ExportKind::Struct => 2,
             ExportKind::Enum => 3,
             ExportKind::Trait => 4,
+            ExportKind::Constant => 5,
+            ExportKind::Global => 6,
+            ExportKind::TypeAlias => 7,
         }
     }
 }
@@ -149,6 +158,18 @@ impl ModuleExport {
 
     pub fn is_trait(&self) -> bool {
         matches!(self.kind, ExportKind::Trait)
+    }
+
+    pub fn is_constant(&self) -> bool {
+        matches!(self.kind, ExportKind::Constant)
+    }
+
+    pub fn is_global(&self) -> bool {
+        matches!(self.kind, ExportKind::Global)
+    }
+
+    pub fn is_type_alias(&self) -> bool {
+        matches!(self.kind, ExportKind::TypeAlias)
     }
 }
 
@@ -253,6 +274,8 @@ impl ModuleArtifact {
                 write_string(&mut out, &item.name)?;
                 write_string(&mut out, &item.signature)?;
             }
+            write_optional_string(&mut out, export.const_value.as_deref())?;
+            out.push(export.is_mutable as u8);
         }
         write_len(&mut out, self.native_libs.len())?;
         for lib in &self.native_libs {
@@ -267,14 +290,15 @@ impl ModuleArtifact {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        let has_field_tags = if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V6 {
+        let has_field_tags = if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7 || magic == MODULE_MAGIC_V6 {
             true
         } else if magic == MODULE_MAGIC_V2 {
             false
         } else {
             return Err("invalid module interface header".to_string());
         };
-        let has_lib_paths = magic == MODULE_MAGIC;
+        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7;
+        let has_constants_and_globals = magic == MODULE_MAGIC;
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -308,6 +332,9 @@ impl ModuleArtifact {
                 2 => ExportKind::Struct,
                 3 => ExportKind::Enum,
                 4 => ExportKind::Trait,
+                5 => ExportKind::Constant,
+                6 => ExportKind::Global,
+                7 => ExportKind::TypeAlias,
                 other => return Err(format!("unknown export kind {other}")),
             };
             let name = read_string(bytes, &mut cursor)?;
@@ -381,6 +408,14 @@ impl ModuleArtifact {
                     signature: read_string(bytes, &mut cursor)?,
                 });
             }
+            let (const_value, is_mutable) = if has_constants_and_globals {
+                (
+                    read_optional_string(bytes, &mut cursor)?,
+                    read_u8(bytes, &mut cursor)? != 0,
+                )
+            } else {
+                (None, false)
+            };
             exports.push(ModuleExport {
                 kind,
                 name,
@@ -395,6 +430,8 @@ impl ModuleArtifact {
                 enum_backing_type,
                 enum_variants,
                 trait_items,
+                const_value,
+                is_mutable,
             });
         }
         let libs_len = read_len(bytes, &mut cursor)? as usize;
@@ -661,6 +698,8 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
                 });
             }
             ast::ItemKind::ExternFunction(func) => {
@@ -695,6 +734,8 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
                 });
             }
             ast::ItemKind::Struct(s) => {
@@ -763,6 +804,8 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
                 });
             }
             ast::ItemKind::Enum(e) => {
@@ -813,6 +856,8 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: Some(Type::Primitive(backing_type.clone()).canonical_key()),
                     enum_variants: variants,
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
                 });
             }
             ast::ItemKind::Trait(t) => {
@@ -872,6 +917,34 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: items,
+                    const_value: None,
+                    is_mutable: false,
+                });
+            }
+            ast::ItemKind::GlobalVariable(global) => {
+                let ty = Type::from_ast(&global.var_type).canonical_key();
+                let is_mutable = global.is_mutable;
+                let kind = if !is_mutable {
+                    ExportKind::Constant
+                } else {
+                    ExportKind::Global
+                };
+                exports.push(ModuleExport {
+                    kind,
+                    name: global.name.name.clone(),
+                    signature: ty.clone(),
+                    type_params: Vec::new(),
+                    link_name: Some(global.name.name.clone()),
+                    abi: Some(ModuleAbi::Silver),
+                    is_variadic: false,
+                    type_key: Some(ty),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable,
                 });
             }
             ast::ItemKind::ExternBlock(block) => {
@@ -903,8 +976,30 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         enum_backing_type: None,
                         enum_variants: Vec::new(),
                         trait_items: Vec::new(),
+                        const_value: None,
+                        is_mutable: false,
                     });
                 }
+            }
+            ast::ItemKind::TypeAlias(alias) => {
+                let ty = Type::from_ast(&alias.type_def).canonical_key();
+                exports.push(ModuleExport {
+                    kind: ExportKind::TypeAlias,
+                    name: alias.name.name.clone(),
+                    signature: format!("type {ty}"),
+                    type_params: Vec::new(),
+                    link_name: None,
+                    abi: None,
+                    is_variadic: false,
+                    type_key: Some(ty),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                });
             }
             _ => {}
         }
@@ -1254,6 +1349,8 @@ mod tests {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
                 },
                 ModuleExport {
                     kind: ExportKind::Struct,
@@ -1285,6 +1382,42 @@ mod tests {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                },
+                ModuleExport {
+                    kind: ExportKind::Constant,
+                    name: "MAX_BUFFER_SIZE".to_string(),
+                    signature: "i32".to_string(),
+                    type_params: Vec::new(),
+                    link_name: None,
+                    abi: None,
+                    is_variadic: false,
+                    type_key: Some("i32".to_string()),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: Some("4096".to_string()),
+                    is_mutable: false,
+                },
+                ModuleExport {
+                    kind: ExportKind::Global,
+                    name: "global_errno".to_string(),
+                    signature: "i32".to_string(),
+                    type_params: Vec::new(),
+                    link_name: Some("errno".to_string()),
+                    abi: Some(ModuleAbi::C),
+                    is_variadic: false,
+                    type_key: Some("i32".to_string()),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: true,
                 },
             ],
             native_libs: vec!["c".to_string()],
@@ -1306,7 +1439,7 @@ mod tests {
             Some("raw")
         );
         assert_eq!(decoded.module_deps, vec!["std.mem".to_string()]);
-        assert_eq!(decoded.exports.len(), 2);
+        assert_eq!(decoded.exports.len(), 4);
         assert_eq!(decoded.exports[0].type_params, vec!["T".to_string()]);
         assert_eq!(
             decoded.exports[0].link_name.as_deref(),
@@ -1314,5 +1447,9 @@ mod tests {
         );
         assert_eq!(decoded.exports[1].fields.len(), 2);
         assert_eq!(decoded.exports[1].layout.unwrap().size, Some(16));
+        assert_eq!(decoded.exports[2].kind, ExportKind::Constant);
+        assert_eq!(decoded.exports[2].const_value.as_deref(), Some("4096"));
+        assert_eq!(decoded.exports[3].kind, ExportKind::Global);
+        assert!(decoded.exports[3].is_mutable);
     }
 }

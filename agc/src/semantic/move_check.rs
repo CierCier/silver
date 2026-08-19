@@ -17,8 +17,6 @@
 //!
 //! v1 limitations (safe, no false positives, but incomplete):
 //! - generic-typed bindings (`T x` inside a generic function) are not tracked;
-//! - `move x.field` moves the whole variable (no per-field moves);
-//! - assignments to a moved variable are rejected (no re-initialization);
 //! - `break`/`continue` are handled conservatively through the loop merge.
 
 use crate::diagnostics::messages as msg;
@@ -36,11 +34,12 @@ pub struct MoveError {
     pub note_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VarState {
-    pub level: u8,
+    pub level: u8, // 0 = live, 1 = partially moved, 2 = fully moved
     pub move_span: Option<Span>,
     pub move_reason: Option<&'static str>,
+    pub moved_fields: FxHashMap<String, (Span, &'static str)>,
 }
 
 impl VarState {
@@ -49,6 +48,7 @@ impl VarState {
             level: 0,
             move_span: None,
             move_reason: None,
+            moved_fields: FxHashMap::default(),
         }
     }
 
@@ -56,10 +56,56 @@ impl VarState {
         self.level = 2;
         self.move_span = Some(span);
         self.move_reason = Some(reason);
+        self.moved_fields.clear();
+    }
+
+    pub fn mark_field_moved(&mut self, path: &str, span: Span, reason: &'static str) {
+        if self.level < 2 {
+            self.level = 1;
+            if self.move_span.is_none() {
+                self.move_span = Some(span);
+                self.move_reason = Some(reason);
+            }
+            self.moved_fields.insert(path.to_string(), (span, reason));
+        }
+    }
+
+    pub fn mark_field_reinitialized(&mut self, path: &str) {
+        if self.level == 1 {
+            self.moved_fields.remove(path);
+            let prefix = format!("{path}.");
+            self.moved_fields.retain(|k, _| !k.starts_with(&prefix));
+            if self.moved_fields.is_empty() {
+                self.level = 0;
+                self.move_span = None;
+                self.move_reason = None;
+            }
+        }
     }
 
     pub fn is_moved(&self) -> bool {
         self.level > 0
+    }
+
+    pub fn is_fully_moved(&self) -> bool {
+        self.level >= 2
+    }
+
+    pub fn is_field_moved(&self, path: &str) -> Option<(Span, &'static str)> {
+        if self.is_fully_moved() {
+            return self.move_span.zip(self.move_reason);
+        }
+        if let Some(&(span, reason)) = self.moved_fields.get(path) {
+            return Some((span, reason));
+        }
+        let mut curr = path;
+        while let Some(idx) = curr.rfind('.') {
+            curr = &curr[..idx];
+            if let Some(&(span, reason)) = self.moved_fields.get(curr) {
+                return Some((span, reason));
+            }
+        }
+        None
     }
 
     pub fn merge_with(&mut self, other: &VarState) {
@@ -70,6 +116,32 @@ impl VarState {
         } else if self.move_span.is_none() && other.move_span.is_some() {
             self.move_span = other.move_span;
             self.move_reason = other.move_reason;
+        }
+
+        for (k, &(s, r)) in &other.moved_fields {
+            self.moved_fields.entry(k.clone()).or_insert((s, r));
+        }
+        if !self.moved_fields.is_empty() && self.level == 0 {
+            self.level = 1;
+        }
+    }
+}
+
+/// Helper to split an expression into its root variable name and dot-separated field path.
+fn expr_root_and_path(expr: &ast::Expression) -> Option<(String, String)> {
+    let mut path = Vec::new();
+    let mut curr = expr;
+    loop {
+        match curr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                path.reverse();
+                return Some((ident.name.clone(), path.join(".")));
+            }
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                path.push(field.name.clone());
+                curr = object;
+            }
+            _ => return None,
         }
     }
 }
@@ -88,6 +160,8 @@ struct Facts {
     value_receivers: FxHashSet<(String, String)>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
+    /// Struct field names and types for known struct types.
+    struct_fields: FxHashMap<String, Vec<(String, ast::Type)>>,
 }
 
 impl Facts {
@@ -95,6 +169,14 @@ impl Facts {
         let mut facts = Facts::default();
         for item in &program.items {
             match &item.kind {
+                ast::ItemKind::Struct(strct) => {
+                    let fields = strct
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.name.clone(), f.field_type.clone()))
+                        .collect();
+                    facts.struct_fields.insert(strct.name.name.clone(), fields);
+                }
                 ast::ItemKind::Impl(imp) => {
                     let owner = Self::owner_key(&imp.self_type);
                     if imp
@@ -250,10 +332,49 @@ impl MoveChecker {
             ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),
             ast::TypeKind::Tuple(types) => types.iter().any(|t| self.is_tracked(t)),
             ast::TypeKind::Named(named) => {
+                let owner = Facts::owner_key(ty);
                 (named.path.len() == 1 && named.path[0].name == "Task")
-                    || self.facts.drop_owners.contains(&Facts::owner_key(ty))
+                    || self.facts.drop_owners.contains(&owner)
+                    || self.facts.struct_fields.get(&owner).is_some_and(|fields| {
+                        fields.iter().any(|(_, fty)| self.is_tracked(fty))
+                    })
             }
             _ => self.facts.drop_owners.contains(&Facts::owner_key(ty)),
+        }
+    }
+
+    fn get_field_type(
+        &self,
+        root_name: &str,
+        path: &str,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> Option<ast::Type> {
+        let mut curr_ty = var_types.get(root_name)?.clone();
+        if path.is_empty() {
+            return Some(curr_ty);
+        }
+        for segment in path.split('.') {
+            let owner = Facts::owner_key(&curr_ty);
+            let fields = self.facts.struct_fields.get(&owner)?;
+            let (_, next_ty) = fields.iter().find(|(name, _)| name == segment)?;
+            curr_ty = next_ty.clone();
+        }
+        Some(curr_ty)
+    }
+
+    fn is_path_tracked(
+        &self,
+        root_name: &str,
+        path: &str,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        if path.is_empty() {
+            return true;
+        }
+        if let Some(ty) = self.get_field_type(root_name, path, var_types) {
+            self.is_tracked(&ty)
+        } else {
+            false
         }
     }
 
@@ -266,7 +387,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         if ty.is_some_and(|t| self.is_tracked(t)) {
-            let old_state = state.get(name).copied();
+            let old_state = state.get(name).cloned();
             let old_type = var_types.get(name).cloned();
             state.insert(name.to_string(), VarState::new_live());
             if let Some(t) = ty {
@@ -405,33 +526,87 @@ impl MoveChecker {
     ) {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
-                if let Some(var) = state.get(&ident.name)
-                    && var.is_moved()
-                {
-                    let reason = var
-                        .move_reason
-                        .unwrap_or(msg::note_value_explicitly_moved());
-                    self.error_with_note(
-                        msg::use_of_moved_value(&ident.name),
-                        ident.span,
-                        var.move_span,
-                        reason,
-                    );
+                if let Some(var) = state.get(&ident.name) {
+                    if var.is_fully_moved() {
+                        let reason = var
+                            .move_reason
+                            .unwrap_or(msg::note_value_explicitly_moved());
+                        self.error_with_note(
+                            msg::use_of_moved_value(&ident.name),
+                            ident.span,
+                            var.move_span,
+                            reason,
+                        );
+                    } else if var.level == 1 {
+                        let reason = var
+                            .move_reason
+                            .unwrap_or(msg::note_value_explicitly_moved());
+                        self.error_with_note(
+                            format!("use of partially moved value '{}'", &ident.name),
+                            ident.span,
+                            var.move_span,
+                            reason,
+                        );
+                    }
                 }
             }
             ast::ExpressionKind::Move(inner) => {
-                // Only `move x` (pure identifier) transfers the whole
-                // variable. `move x.field` extracts a field — the common
-                // null-out idiom — and does not invalidate `x` itself
-                // (per-field move tracking is a later phase); it still counts
-                // as a use of `x`.
-                match inner.kind.as_ref() {
-                    ast::ExpressionKind::Identifier(ident) => {
-                        if let Some(var) = state.get_mut(&ident.name) {
+                if let Some((root_name, path)) = expr_root_and_path(inner) {
+                    if !self.is_path_tracked(&root_name, &path, var_types) {
+                        self.check_expr(inner, state, scopes, var_types);
+                    } else if path.is_empty() {
+                        // `move x` (whole variable)
+                        if let Some(var) = state.get_mut(&root_name) {
+                            if var.is_fully_moved() {
+                                let reason = var
+                                    .move_reason
+                                    .unwrap_or(msg::note_value_explicitly_moved());
+                                self.error_with_note(
+                                    msg::use_of_moved_value(&root_name),
+                                    inner.span,
+                                    var.move_span,
+                                    reason,
+                                );
+                            } else if var.level == 1 {
+                                let reason = var
+                                    .move_reason
+                                    .unwrap_or(msg::note_value_explicitly_moved());
+                                self.error_with_note(
+                                    format!("cannot move already partially moved value '{root_name}'"),
+                                    inner.span,
+                                    var.move_span,
+                                    reason,
+                                );
+                            }
                             var.mark_moved(inner.span, msg::note_value_explicitly_moved());
                         }
+                    } else {
+                        // `move x.field` (partial field move)
+                        if let Some(var) = state.get_mut(&root_name) {
+                            if var.is_fully_moved() {
+                                let reason = var
+                                    .move_reason
+                                    .unwrap_or(msg::note_value_explicitly_moved());
+                                self.error_with_note(
+                                    msg::use_of_moved_value(&root_name),
+                                    inner.span,
+                                    var.move_span,
+                                    reason,
+                                );
+                            } else if let Some((move_span, reason)) = var.is_field_moved(&path) {
+                                self.error_with_note(
+                                    format!("use of moved field '{root_name}.{path}'"),
+                                    inner.span,
+                                    Some(move_span),
+                                    reason,
+                                );
+                            } else {
+                                var.mark_field_moved(&path, inner.span, msg::note_value_explicitly_moved());
+                            }
+                        }
                     }
-                    _ => self.check_expr(inner, state, scopes, var_types),
+                } else {
+                    self.check_expr(inner, state, scopes, var_types);
                 }
             }
             ast::ExpressionKind::MethodCall {
@@ -439,23 +614,30 @@ impl MoveChecker {
                 method,
                 arguments,
             } => {
-                // Only a pure-identifier receiver (`x.consume()`) transfers x;
-                // field receivers (`x.field.consume()`) borrow or copy the
-                // field without moving the container.
-                let consumed = matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(ident) if {
-                    method.name == "drop"
-                        || var_types.get(&ident.name).is_some_and(|ty| {
-                            self.facts.value_receivers.contains(&(
-                                Facts::owner_key(ty),
-                                method.name.clone(),
-                            ))
-                        })
-                });
-                if consumed {
-                    if let ast::ExpressionKind::Identifier(ident) = receiver.kind.as_ref()
-                        && let Some(var) = state.get_mut(&ident.name)
+                let is_consuming = method.name == "drop"
+                    || match receiver.kind.as_ref() {
+                        ast::ExpressionKind::Identifier(ident) => {
+                            var_types.get(&ident.name).is_some_and(|ty| {
+                                self.facts.value_receivers.contains(&(
+                                    Facts::owner_key(ty),
+                                    method.name.clone(),
+                                ))
+                            })
+                        }
+                        _ => false,
+                    };
+                if is_consuming {
+                    if let Some((root_name, path)) = expr_root_and_path(receiver)
+                        && state.contains_key(&root_name)
+                        && self.is_path_tracked(&root_name, &path, var_types)
                     {
-                        var.mark_moved(receiver.span, msg::note_value_consumed_by_method());
+                        if path.is_empty() {
+                            if let Some(var) = state.get_mut(&root_name) {
+                                var.mark_moved(receiver.span, msg::note_value_consumed_by_method());
+                            }
+                        } else if let Some(var) = state.get_mut(&root_name) {
+                            var.mark_field_moved(&path, receiver.span, msg::note_value_consumed_by_method());
+                        }
                     }
                 } else {
                     self.check_expr(receiver, state, scopes, var_types);
@@ -473,15 +655,20 @@ impl MoveChecker {
                     _ => None,
                 };
                 for (i, arg) in arguments.iter().enumerate() {
-                    // Only a pure-identifier argument (`f(x)`) transfers x;
-                    // `f(x.field)` copies the field value.
-                    if let Some(name) = &fn_name
-                        && let ast::ExpressionKind::Identifier(ident) = arg.kind.as_ref()
-                        && state.contains_key(&ident.name)
-                        && self.facts.value_args.contains(&(name.clone(), i))
+                    let is_val_arg = fn_name.as_ref().is_some_and(|name| {
+                        self.facts.value_args.contains(&(name.clone(), i))
+                    });
+                    if is_val_arg
+                        && let Some((root_name, path)) = expr_root_and_path(arg)
+                        && state.contains_key(&root_name)
+                        && self.is_path_tracked(&root_name, &path, var_types)
                     {
-                        if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(arg.span, msg::note_value_moved_into_param());
+                        if path.is_empty() {
+                            if let Some(var) = state.get_mut(&root_name) {
+                                var.mark_moved(arg.span, msg::note_value_moved_into_param());
+                            }
+                        } else if let Some(var) = state.get_mut(&root_name) {
+                            var.mark_field_moved(&path, arg.span, msg::note_value_moved_into_param());
                         }
                     } else {
                         self.check_expr(arg, state, scopes, var_types);
@@ -497,26 +684,40 @@ impl MoveChecker {
                         arguments,
                     } => {
                         for arg in arguments {
-                            // Pure-identifier arguments transfer the whole
-                            // variable; anything else is an evaluated value.
-                            if let ast::ExpressionKind::Identifier(ident) = arg.kind.as_ref()
-                                && state.contains_key(&ident.name)
+                            if let Some((root_name, path)) = expr_root_and_path(arg)
+                                && state.contains_key(&root_name)
                             {
-                                if let Some(var) = state.get(&ident.name)
-                                    && var.is_moved()
-                                {
-                                    let reason = var
-                                        .move_reason
-                                        .unwrap_or(msg::note_value_explicitly_moved());
-                                    self.error_with_note(
-                                        msg::use_of_moved_value(&ident.name),
-                                        ident.span,
-                                        var.move_span,
-                                        reason,
-                                    );
-                                }
-                                if let Some(var) = state.get_mut(&ident.name) {
-                                    var.mark_moved(arg.span, msg::note_value_moved_into_launch());
+                                if path.is_empty() {
+                                    if let Some(var) = state.get(&root_name)
+                                        && var.is_moved()
+                                    {
+                                        let reason = var
+                                            .move_reason
+                                            .unwrap_or(msg::note_value_explicitly_moved());
+                                        self.error_with_note(
+                                            msg::use_of_moved_value(&root_name),
+                                            arg.span,
+                                            var.move_span,
+                                            reason,
+                                        );
+                                    }
+                                    if let Some(var) = state.get_mut(&root_name) {
+                                        var.mark_moved(arg.span, msg::note_value_moved_into_launch());
+                                    }
+                                } else {
+                                    if let Some(var) = state.get(&root_name)
+                                        && let Some((move_span, reason)) = var.is_field_moved(&path)
+                                    {
+                                        self.error_with_note(
+                                            format!("use of moved field '{root_name}.{path}'"),
+                                            arg.span,
+                                            Some(move_span),
+                                            reason,
+                                        );
+                                    }
+                                    if let Some(var) = state.get_mut(&root_name) {
+                                        var.mark_field_moved(&path, arg.span, msg::note_value_moved_into_launch());
+                                    }
                                 }
                             } else {
                                 self.check_expr(arg, state, scopes, var_types);
@@ -553,8 +754,33 @@ impl MoveChecker {
                     _ => self.check_expr(inner, state, scopes, var_types),
                 }
             }
-            ast::ExpressionKind::FieldAccess { object, .. }
-            | ast::ExpressionKind::Index { object, .. } => {
+            ast::ExpressionKind::FieldAccess { object, .. } => {
+                if let Some((root_name, path)) = expr_root_and_path(expr) {
+                    if let Some(var) = state.get(&root_name) {
+                        if var.is_fully_moved() {
+                            let reason = var
+                                .move_reason
+                                .unwrap_or(msg::note_value_explicitly_moved());
+                            self.error_with_note(
+                                msg::use_of_moved_value(&root_name),
+                                expr.span,
+                                var.move_span,
+                                reason,
+                            );
+                        } else if let Some((move_span, reason)) = var.is_field_moved(&path) {
+                            self.error_with_note(
+                                format!("use of moved field '{root_name}.{path}'"),
+                                expr.span,
+                                Some(move_span),
+                                reason,
+                            );
+                        }
+                    }
+                } else {
+                    self.check_expr(object, state, scopes, var_types);
+                }
+            }
+            ast::ExpressionKind::Index { object, .. } => {
                 self.check_expr(object, state, scopes, var_types);
             }
             ast::ExpressionKind::Reference { expression, .. } => {
@@ -566,28 +792,33 @@ impl MoveChecker {
                 right,
             } => {
                 if *operator == ast::BinaryOperator::Assign {
-                    // `x = v` is a definition of x (no re-initialization of a
-                    // moved variable is supported); any other target shape
-                    // reads the container and counts as a use.
-                    match left.kind.as_ref() {
-                        ast::ExpressionKind::Identifier(ident) => {
-                            if let Some(var) = state.get(&ident.name)
-                                && var.is_moved()
-                            {
+                    // Evaluate RHS first (in case it uses or moves resources).
+                    self.check_expr(right, state, scopes, var_types);
+
+                    // Re-initialization handling
+                    if let Some((root_name, path)) = expr_root_and_path(left) {
+                        if path.is_empty() {
+                            if state.contains_key(&root_name) {
+                                state.insert(root_name.clone(), VarState::new_live());
+                            }
+                        } else if let Some(var) = state.get_mut(&root_name) {
+                            if var.is_fully_moved() {
                                 let reason = var
                                     .move_reason
                                     .unwrap_or(msg::note_value_explicitly_moved());
                                 self.error_with_note(
-                                    msg::cannot_assign_to_moved_value(&ident.name),
+                                    msg::use_of_moved_value(&root_name),
                                     left.span,
                                     var.move_span,
                                     reason,
                                 );
+                            } else {
+                                var.mark_field_reinitialized(&path);
                             }
                         }
-                        _ => self.check_expr(left, state, scopes, var_types),
+                    } else {
+                        self.check_expr(left, state, scopes, var_types);
                     }
-                    self.check_expr(right, state, scopes, var_types);
                 } else {
                     self.check_expr(left, state, scopes, var_types);
                     self.check_expr(right, state, scopes, var_types);
@@ -635,12 +866,12 @@ impl MoveChecker {
                     let then_var = if then_terminates {
                         VarState::default()
                     } else {
-                        then_state.get(name).copied().unwrap_or_default()
+                        then_state.get(name).cloned().unwrap_or_default()
                     };
                     let else_var = if else_terminates {
                         VarState::default()
                     } else {
-                        else_state.get(name).copied().unwrap_or_default()
+                        else_state.get(name).cloned().unwrap_or_default()
                     };
                     var.merge_with(&then_var);
                     var.merge_with(&else_var);
@@ -662,7 +893,7 @@ impl MoveChecker {
                         let body_var = if body_terminates {
                             VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or_default()
+                            body_state.get(name).cloned().unwrap_or_default()
                         };
                         if body_var.level > var.level {
                             var.merge_with(&body_var);
@@ -688,7 +919,7 @@ impl MoveChecker {
                         let body_var = if body_terminates {
                             VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or_default()
+                            body_state.get(name).cloned().unwrap_or_default()
                         };
                         if body_var.level > var.level {
                             var.merge_with(&body_var);
@@ -730,7 +961,7 @@ impl MoveChecker {
                         let body_var = if body_terminates {
                             VarState::default()
                         } else {
-                            body_state.get(name).copied().unwrap_or_default()
+                            body_state.get(name).cloned().unwrap_or_default()
                         };
                         if body_var.level > var.level {
                             var.merge_with(&body_var);
@@ -756,7 +987,7 @@ impl MoveChecker {
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
                     if !expression_terminates(&arm.body) {
                         for (name, var) in merged.iter_mut() {
-                            let arm_var = arm_state.get(name).copied().unwrap_or_default();
+                            let arm_var = arm_state.get(name).cloned().unwrap_or_default();
                             if arm_var.level > var.level {
                                 var.merge_with(&arm_var);
                             }
@@ -935,12 +1166,28 @@ mod tests {
     }
 
     #[test]
-    fn assignment_to_moved_value_errors() {
-        let errs = errors("void g() { T t; move t; t = T.new(); }");
+    fn reassignment_to_moved_value_reinitializes() {
+        let errs = errors("void g() { T t; move t; t = T.new(); (i32)t.p; }");
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn field_assignment_on_moved_value_errors() {
+        let errs = errors("void g() { T t; move t; t.p = (i32*)0; }");
         assert!(
             errs.iter()
-                .any(|m| m.contains("cannot assign to moved value 't'")),
-            "expected assign-to-moved error, got {errs:?}"
+                .any(|m| m.contains("use of moved value 't'")),
+            "expected use-of-moved error for field write, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn use_after_second_move_errors() {
+        let errs = errors("void g() { T t; move t; t = T.new(); move t; (i32)t.p; }");
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("use of moved value 't'")),
+            "expected use-of-moved error, got {errs:?}"
         );
     }
 
@@ -983,5 +1230,54 @@ mod tests {
             errs[0].note_message.as_deref(),
             Some(msg::note_value_explicitly_moved())
         );
+    }
+
+    #[test]
+    fn partial_field_move_allows_other_fields() {
+        let errs = errors(
+            "struct Pair { T left; T right; }\n\
+             void consume(T _t) { }\n\
+             void f() {\n\
+                 Pair p;\n\
+                 consume(move p.left);\n\
+                 consume(move p.right);\n\
+             }",
+        );
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn partial_field_move_prevents_whole_use() {
+        let errs = errors(
+            "struct Pair { T left; T right; }\n\
+             void consume(T _t) { }\n\
+             void consume_pair(Pair _p) { }\n\
+             void f() {\n\
+                 Pair p;\n\
+                 consume(move p.left);\n\
+                 consume_pair(move p);\n\
+             }",
+        );
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("partially moved value 'p'")),
+            "expected partially moved error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn partial_field_move_reinitialization_restores_whole_use() {
+        let errs = errors(
+            "struct Pair { T left; T right; }\n\
+             void consume(T _t) { }\n\
+             void consume_pair(Pair _p) { }\n\
+             void f() {\n\
+                 Pair p;\n\
+                 consume(move p.left);\n\
+                 p.left = T.new();\n\
+                 consume_pair(move p);\n\
+             }",
+        );
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
     }
 }

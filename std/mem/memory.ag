@@ -281,7 +281,7 @@ i64 silver_rt_strlen(const char* s) {
 /// Returns the byte index, or -1 when absent. Scans 16 bytes per iteration
 /// with SSE2 (baseline); the block reads never pass `p + n`, so there is no
 /// over-read and no page hazard on arbitrary buffers.
-i64 memchr(u8* p, u8 c, i64 n) {
+i64 mem_find_byte(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return -1;
     }
@@ -301,6 +301,16 @@ i64 memchr(u8* p, u8 c, i64 n) {
         i = i + 1;
     }
     return -1;
+}
+
+/// Standard C memchr: returns pointer to first occurrence, or null.
+u8* memchr(const void* s, i32 c, i64 n) {
+    u8* p = (u8*)s;
+    i64 idx = mem_find_byte(p, (u8)c, n);
+    if (idx < 0) {
+        return (u8*)0;
+    }
+    return (u8*)((i64)p + idx);
 }
 
 /// Compare the first `n` bytes of two regions. Returns 0 when equal, else the

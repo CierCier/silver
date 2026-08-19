@@ -194,8 +194,10 @@ impl Drop<ConnectionPool> for ConnectionPool {
 PoolEntry http_pool_remove_at(Vec<PoolEntry>* entries, i64 index) {
     i64 last = entries.len - 1;
     PoolEntry entry = entries.data[index];
+    entries.data[index].conn.read_buf = (u8*)0;
     if (index != last) {
         entries.data[index] = entries.data[last];
+        entries.data[last].conn.read_buf = (u8*)0;
     }
     entries.len = last;
     return entry;
@@ -1165,7 +1167,7 @@ impl HttpClient {
             if (best >= 0) {
                 PoolEntry entry = http_pool_remove_at(&self.pool.entries, best);
                 self.pool.lock.unlock();
-                HttpConnection pooled = entry.conn;
+                HttpConnection pooled = move entry.conn;
                 *reused = true;
                 return Result<HttpConnection, Error>.Ok(move pooled);
             }

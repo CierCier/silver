@@ -120,7 +120,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n0123456789abcdefghij";
         g_wire1 = (str)0;
         g_connections = 1;
@@ -159,7 +159,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n";
         g_wire1 = (str)0;
         g_connections = 1;
@@ -193,7 +193,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = "HTTP/1.1 200 OK\r\n\r\nstream-body-data";
         g_wire1 = (str)0;
         g_connections = 1;
@@ -235,7 +235,7 @@ i32 main() {
             wire.push((u8)'a' + (u8)(i % 26));
             i = i + 1;
         }
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = (str)wire.data;
         g_wire1 = (str)0;
         g_connections = 1;
@@ -279,7 +279,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nstream-ok";
         g_wire1 = (str)0;
         g_connections = 1;
@@ -317,7 +317,7 @@ i32 main() {
         u16 port = 0;
         i32 r = bind_loopback(&listener, &port);
         assert_eq_i64(0, r, "bind");
-        g_listener_a = listener;
+        g_listener_a = move listener;
         g_wire0 = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n";
         g_wire1 = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         g_connections = 2;

@@ -1,0 +1,130 @@
+// Integration test for Section 2: Partial Moves and Field-Level Deconstruction.
+
+i64 drop_count = 0;
+i64 alloc_count = 0;
+
+struct Resource {
+    i64 id;
+    u8* ptr;
+}
+
+impl Drop<Resource> for Resource {
+    void drop(Resource* self) {
+        drop_count = drop_count + 1;
+        if (self.ptr != (u8*)0) {
+            free(self.ptr);
+            self.ptr = (u8*)0;
+        }
+    }
+}
+
+Resource make_res(i64 id) {
+    alloc_count = alloc_count + 1;
+    Resource r;
+    r.id = id;
+    r.ptr = (u8*)malloc(32);
+    return r;
+}
+
+struct Pair {
+    Resource left;
+    Resource right;
+}
+
+void consume(Resource _r) {
+    // _r dropped on exit
+}
+
+void test_partial_move_independent_fields() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Pair p;
+    p.left = make_res(1);
+    p.right = make_res(2);
+
+    @assert(!(p.left.id != 1), "p.left.id == 1");
+    @assert(!(p.right.id != 2), "p.right.id == 2");
+
+    // Move only p.left
+    consume(move p.left);
+    @assert(!(drop_count != 1), "drop_count == 1 after consume(move p.left)");
+
+    // p.right is still fully accessible and live!
+    @assert(!(p.right.id != 2), "p.right.id is still 2");
+    @assert(!(p.right.ptr == (u8*)0), "p.right.ptr is valid");
+
+    // Move p.right
+    consume(move p.right);
+    @assert(!(drop_count != 2), "drop_count == 2 after consume(move p.right)");
+}
+
+void test_partial_move_with_field_reinit() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Pair p;
+    p.left = make_res(10);
+    p.right = make_res(20);
+
+    // Move p.left
+    consume(move p.left);
+    @assert(!(drop_count != 1), "drop_count == 1");
+
+    // Re-initialize only p.left!
+    p.left = make_res(11);
+    @assert(!(p.left.id != 11), "p.left.id == 11");
+    @assert(!(p.right.id != 20), "p.right.id == 20");
+
+    // Move p.left again
+    consume(move p.left);
+    @assert(!(drop_count != 2), "drop_count == 2");
+
+    // Let scope exit drop p.right automatically!
+}
+
+struct Nested {
+    Pair pair;
+    Resource extra;
+}
+
+void test_nested_partial_move() {
+    drop_count = 0;
+    alloc_count = 0;
+
+    Nested n;
+    n.pair.left = make_res(100);
+    n.pair.right = make_res(200);
+    n.extra = make_res(300);
+
+    // Move nested field
+    consume(move n.pair.left);
+    @assert(!(drop_count != 1), "drop_count == 1 after consume(move n.pair.left)");
+
+    // Other nested field and outer field remain live
+    @assert(!(n.pair.right.id != 200), "n.pair.right.id == 200");
+    @assert(!(n.extra.id != 300), "n.extra.id == 300");
+
+    consume(move n.extra);
+    @assert(!(drop_count != 2), "drop_count == 2 after consume(move n.extra)");
+
+    // n.pair.right will be dropped at scope exit!
+}
+
+i64 main() {
+    test_partial_move_independent_fields();
+    @assert(!(drop_count != 2), "test_partial_move_independent_fields total drops == 2");
+    @assert(!(alloc_count != 2), "test_partial_move_independent_fields total allocs == 2");
+
+    test_partial_move_with_field_reinit();
+    // 2 moves into consume + 1 scope exit drop for p.right = 3 drops, 3 allocs
+    @assert(!(drop_count != 3), "test_partial_move_with_field_reinit total drops == 3");
+    @assert(!(alloc_count != 3), "test_partial_move_with_field_reinit total allocs == 3");
+
+    test_nested_partial_move();
+    // 2 moves into consume + 1 scope exit drop for n.pair.right = 3 drops, 3 allocs
+    @assert(!(drop_count != 3), "test_nested_partial_move total drops == 3");
+    @assert(!(alloc_count != 3), "test_nested_partial_move total allocs == 3");
+
+    return 0;
+}
