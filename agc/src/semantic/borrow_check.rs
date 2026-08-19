@@ -60,6 +60,13 @@ pub struct ActiveBorrow {
     pub kind: BorrowKind,
     pub span: Span,
     pub borrower: Option<String>,
+    /// Statement index (within the enclosing block) after which this loan
+    /// expires, if it was last used there (NLL); `None` = live until scope exit
+    /// (reference parameters, or last use not yet observed).
+    pub last_use: Option<usize>,
+    /// Reference-parameter loan: stays live for the whole function (the caller
+    /// still holds the borrow), never NLL-expired.
+    pub param: bool,
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<BorrowError> {
@@ -195,7 +202,10 @@ impl BorrowChecker {
                 {
                     continue;
                 }
-                if b.root == root && b.kind == BorrowKind::Exclusive && Self::paths_overlap(&b.path, path) {
+                if b.root == root
+                    && b.kind == BorrowKind::Exclusive
+                    && Self::paths_overlap(&b.path, path)
+                {
                     return Some(b);
                 }
             }
@@ -250,6 +260,17 @@ impl BorrowChecker {
                             span: param.name.span,
                         },
                     );
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.push(ActiveBorrow {
+                            root: param.name.name.clone(),
+                            path: String::new(),
+                            kind,
+                            span: param.name.span,
+                            borrower: Some(param.name.name.clone()),
+                            last_use: None,
+                            param: true,
+                        });
+                    }
                 }
                 ast::TypeKind::Pointer(_) => {
                     self.raw_ptr_vars.insert(param.name.name.clone());
@@ -263,10 +284,236 @@ impl BorrowChecker {
 
     fn check_block(&mut self, block: &ast::Block) {
         self.push_scope();
-        for stmt in &block.statements {
+        for (i, stmt) in block.statements.iter().enumerate() {
+            // Collect the reference bindings this statement uses BEFORE
+            // expiring: loans whose last use was a previous statement end
+            // here, but a borrower needed by the current statement (e.g. a
+            // reborrow `m = &*r`) must stay live so its loan chain survives.
+            let uses = self.collect_stmt_uses(stmt);
+            self.expire_loans_used_in(i, &uses);
             self.check_statement(stmt);
+            self.set_last_use(uses, i);
         }
+        // Final statement boundary: expire loans used only in the last statement.
+        self.expire_loans_used_in(block.statements.len(), &FxHashSet::default());
         self.pop_scope();
+    }
+
+    /// Mark every loan whose borrower appears in `uses` as expiring at
+    /// statement `i` (its last observed use).
+    fn set_last_use(&mut self, uses: FxHashSet<String>, i: usize) {
+        for scope in &mut self.scopes {
+            for b in scope.iter_mut() {
+                if !b.param
+                    && let Some(ref name) = b.borrower
+                    && uses.contains(name)
+                {
+                    b.last_use = Some(i);
+                }
+            }
+        }
+    }
+
+    /// Remove loans whose last use was statement `i` or earlier and whose
+    /// borrower is not used again by the current statement (`still_used`):
+    /// they no longer constrain later code.
+    fn expire_loans_used_in(&mut self, i: usize, still_used: &FxHashSet<String>) {
+        let mut expired: FxHashSet<String> = FxHashSet::default();
+        for scope in &mut self.scopes {
+            let mut kept: Vec<ActiveBorrow> = Vec::with_capacity(scope.len());
+            for b in scope.drain(..) {
+                let used_now = b
+                    .borrower
+                    .as_deref()
+                    .is_some_and(|n| still_used.contains(n));
+                if !b.param && !used_now && b.last_use.is_some_and(|u| u <= i) {
+                    if let Some(ref name) = b.borrower {
+                        expired.insert(name.clone());
+                    }
+                } else {
+                    kept.push(b);
+                }
+            }
+            *scope = kept;
+        }
+        if !expired.is_empty() {
+            self.ref_bindings.retain(|name, _| !expired.contains(name));
+        }
+    }
+
+    /// Names of reference bindings used anywhere in `stmt` (NLL last-use scan).
+    fn collect_stmt_uses(&self, stmt: &ast::Statement) -> FxHashSet<String> {
+        let mut uses = FxHashSet::default();
+        match &stmt.kind {
+            ast::StatementKind::Let(let_stmt) => {
+                if let Some(init) = &let_stmt.initializer {
+                    self.collect_expr_uses(init, &mut uses);
+                }
+            }
+            ast::StatementKind::Expression(expr) | ast::StatementKind::Return(Some(expr)) => {
+                self.collect_expr_uses(expr, &mut uses);
+            }
+            ast::StatementKind::Defer(inner) => {
+                self.collect_stmt_uses(inner);
+            }
+            _ => {}
+        }
+        uses
+    }
+
+    /// Collect identifiers that name a live reference binding (borrow uses).
+    fn collect_expr_uses(&self, expr: &ast::Expression, uses: &mut FxHashSet<String>) {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                if self.ref_bindings.contains_key(&ident.name) {
+                    uses.insert(ident.name.clone());
+                }
+            }
+            ast::ExpressionKind::Binary { left, right, .. } => {
+                self.collect_expr_uses(left, uses);
+                self.collect_expr_uses(right, uses);
+            }
+            ast::ExpressionKind::Postfix { operand, .. } => {
+                self.collect_expr_uses(operand, uses);
+            }
+            ast::ExpressionKind::Unary { operand, .. }
+            | ast::ExpressionKind::Cast {
+                expression: operand,
+                ..
+            }
+            | ast::ExpressionKind::Move(operand)
+            | ast::ExpressionKind::Reference {
+                expression: operand,
+                ..
+            }
+            | ast::ExpressionKind::Launch(operand)
+            | ast::ExpressionKind::Wait(operand)
+            | ast::ExpressionKind::Comptime(operand) => {
+                self.collect_expr_uses(operand, uses);
+            }
+            ast::ExpressionKind::Call {
+                function,
+                arguments,
+            }
+            | ast::ExpressionKind::MethodCall {
+                receiver: function,
+                arguments,
+                ..
+            } => {
+                self.collect_expr_uses(function, uses);
+                for arg in arguments {
+                    self.collect_expr_uses(arg, uses);
+                }
+            }
+            ast::ExpressionKind::FieldAccess { object, .. }
+            | ast::ExpressionKind::Index { object, .. } => {
+                self.collect_expr_uses(object, uses);
+                if let ast::ExpressionKind::Index { index, .. } = expr.kind.as_ref() {
+                    self.collect_expr_uses(index, uses);
+                }
+            }
+            ast::ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.collect_expr_uses(condition, uses);
+                for stmt in &then_branch.statements {
+                    uses.extend(self.collect_stmt_uses(stmt));
+                }
+                if let Some(else_b) = else_branch {
+                    for stmt in &else_b.statements {
+                        uses.extend(self.collect_stmt_uses(stmt));
+                    }
+                }
+            }
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.collect_expr_uses(condition, uses);
+                self.collect_expr_uses(then_expr, uses);
+                self.collect_expr_uses(else_expr, uses);
+            }
+            ast::ExpressionKind::While { condition, body } => {
+                self.collect_expr_uses(condition, uses);
+                for stmt in &body.statements {
+                    uses.extend(self.collect_stmt_uses(stmt));
+                }
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                self.collect_expr_uses(iterable, uses);
+                for stmt in &body.statements {
+                    uses.extend(self.collect_stmt_uses(stmt));
+                }
+            }
+            ast::ExpressionKind::For {
+                condition, body, ..
+            } => {
+                self.collect_expr_uses(condition, uses);
+                for stmt in &body.statements {
+                    uses.extend(self.collect_stmt_uses(stmt));
+                }
+            }
+            ast::ExpressionKind::Match { expression, arms } => {
+                self.collect_expr_uses(expression, uses);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_expr_uses(guard, uses);
+                    }
+                    self.collect_expr_uses(&arm.body, uses);
+                }
+            }
+            ast::ExpressionKind::Block(block) => {
+                for stmt in &block.statements {
+                    uses.extend(self.collect_stmt_uses(stmt));
+                }
+            }
+            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+                for item in items {
+                    self.collect_expr_uses(item, uses);
+                }
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                for item in items {
+                    match item {
+                        ast::InitializerItem::Positional(e)
+                        | ast::InitializerItem::Field { value: e, .. }
+                        | ast::InitializerItem::Index { value: e, .. } => {
+                            self.collect_expr_uses(e, uses);
+                        }
+                    }
+                }
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                for f in fields {
+                    self.collect_expr_uses(&f.value, uses);
+                }
+            }
+            ast::ExpressionKind::EnumVariant { fields, .. } => {
+                for f in fields {
+                    self.collect_expr_uses(f, uses);
+                }
+            }
+            ast::ExpressionKind::Asm { inputs, .. } => {
+                for input in inputs {
+                    self.collect_expr_uses(input, uses);
+                }
+            }
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                for arg in args {
+                    match arg {
+                        ast::MacroArg::Expression(e) => self.collect_expr_uses(e, uses),
+                        ast::MacroArg::Statement(s) => {
+                            uses.extend(self.collect_stmt_uses(s));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn check_statement(&mut self, stmt: &ast::Statement) {
@@ -288,8 +535,13 @@ impl BorrowChecker {
                 if let Some(ref init) = let_stmt.initializer {
                     if let Some(ref name) = name {
                         // Check if initializer is a borrow expression:
-                        if let ast::ExpressionKind::Reference { is_mutable, expression } = init.kind.as_ref() {
-                            let kind = if let Some(ast::Type { kind, .. }) = &let_stmt.type_annotation
+                        if let ast::ExpressionKind::Reference {
+                            is_mutable,
+                            expression,
+                        } = init.kind.as_ref()
+                        {
+                            let kind = if let Some(ast::Type { kind, .. }) =
+                                &let_stmt.type_annotation
                                 && let ast::TypeKind::Reference(r) = kind.as_ref()
                             {
                                 if r.is_mutable {
@@ -302,12 +554,7 @@ impl BorrowChecker {
                             } else {
                                 BorrowKind::Shared
                             };
-                            self.register_named_borrow(
-                                name,
-                                expression,
-                                kind,
-                                init.span,
-                            );
+                            self.register_named_borrow(name, expression, kind, init.span);
                         } else if let ast::ExpressionKind::Identifier(ident) = init.kind.as_ref() {
                             // Reborrow from an existing reference binding:
                             if let Some(existing) = self.ref_bindings.get(&ident.name).cloned() {
@@ -317,6 +564,8 @@ impl BorrowChecker {
                                     kind: existing.kind,
                                     span: init.span,
                                     borrower: Some(name.clone()),
+                                    last_use: None,
+                                    param: false,
                                 };
                                 self.ref_bindings.insert(
                                     name.clone(),
@@ -357,14 +606,21 @@ impl BorrowChecker {
     }
 
     /// Extract root variable name, field path, and whether accessed through a reference variable.
-    fn extract_root_and_path(&self, expr: &ast::Expression) -> Option<(String, String, Option<String>)> {
+    fn extract_root_and_path(
+        &self,
+        expr: &ast::Expression,
+    ) -> Option<(String, String, Option<String>)> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if self.raw_ptr_vars.contains(&ident.name) {
                     return None;
                 }
                 if let Some(existing) = self.ref_bindings.get(&ident.name) {
-                    return Some((existing.root.clone(), existing.path.clone(), Some(ident.name.clone())));
+                    return Some((
+                        existing.root.clone(),
+                        existing.path.clone(),
+                        Some(ident.name.clone()),
+                    ));
                 }
                 Some((ident.name.clone(), String::new(), None))
             }
@@ -377,15 +633,11 @@ impl BorrowChecker {
                 };
                 Some((root, path, ref_var))
             }
-            ast::ExpressionKind::Index { object, .. } => {
-                self.extract_root_and_path(object)
-            }
+            ast::ExpressionKind::Index { object, .. } => self.extract_root_and_path(object),
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 operand,
-            } => {
-                self.extract_root_and_path(operand)
-            }
+            } => self.extract_root_and_path(operand),
             _ => None,
         }
     }
@@ -432,6 +684,8 @@ impl BorrowChecker {
                 kind,
                 span,
                 borrower: Some(binding_name.to_string()),
+                last_use: None,
+                param: false,
             };
             self.ref_bindings.insert(
                 binding_name.to_string(),
@@ -471,7 +725,10 @@ impl BorrowChecker {
 
     fn check_expr(&mut self, expr: &ast::Expression) {
         match expr.kind.as_ref() {
-            ast::ExpressionKind::Reference { is_mutable, expression } => {
+            ast::ExpressionKind::Reference {
+                is_mutable,
+                expression,
+            } => {
                 let kind = if *is_mutable {
                     BorrowKind::Exclusive
                 } else {
@@ -483,7 +740,9 @@ impl BorrowChecker {
                     } else {
                         format!("{root}.{path}")
                     };
-                    if let Some(conflict) = self.find_conflict(&root, &path, kind, ref_var.as_deref()) {
+                    if let Some(conflict) =
+                        self.find_conflict(&root, &path, kind, ref_var.as_deref())
+                    {
                         let msg = match (kind, conflict.kind) {
                             (BorrowKind::Shared, BorrowKind::Exclusive) => {
                                 msg::cannot_borrow_as_shared_while_mutable(&full_target)
@@ -538,7 +797,11 @@ impl BorrowChecker {
                     );
                 }
             }
-            ast::ExpressionKind::Binary { left, operator, right } => {
+            ast::ExpressionKind::Binary {
+                left,
+                operator,
+                right,
+            } => {
                 if *operator == ast::BinaryOperator::Assign {
                     self.check_expr(right);
                     self.check_assignment_target(left);
@@ -557,26 +820,41 @@ impl BorrowChecker {
                 self.check_expr(object);
                 self.check_expr(index);
             }
-            ast::ExpressionKind::Call { function, arguments } => {
+            ast::ExpressionKind::Call {
+                function,
+                arguments,
+            } => {
                 self.check_expr(function);
                 for arg in arguments {
                     self.check_expr(arg);
                 }
             }
-            ast::ExpressionKind::MethodCall { receiver, arguments, .. } => {
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
                 self.check_expr(receiver);
                 for arg in arguments {
                     self.check_expr(arg);
                 }
             }
-            ast::ExpressionKind::If { condition, then_branch, else_branch } => {
+            ast::ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.check_expr(condition);
                 self.check_block(then_branch);
                 if let Some(else_b) = else_branch {
                     self.check_block(else_b);
                 }
             }
-            ast::ExpressionKind::Ternary { condition, then_expr, else_expr } => {
+            ast::ExpressionKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 self.check_expr(condition);
                 self.check_expr(then_expr);
                 self.check_expr(else_expr);
@@ -602,7 +880,11 @@ mod tests {
         let tokens = crate::lexer::lex(source).expect("lex failed");
         let mut parser = crate::parser::Parser::new(tokens);
         let (program, errors) = parser.parse_program();
-        assert!(errors.is_empty(), "parse errors in test source: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "parse errors in test source: {:?}",
+            errors
+        );
         program
     }
 
@@ -641,7 +923,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'pt' as mutable because it is already borrowed as shared"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as mutable because it is already borrowed as shared")
+        );
     }
 
     #[test]
@@ -658,7 +944,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'pt' as shared because it is already borrowed as mutable"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as shared because it is already borrowed as mutable")
+        );
     }
 
     #[test]
@@ -675,7 +965,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'pt' as mutable more than once at a time"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as mutable more than once at a time")
+        );
     }
 
     #[test]
@@ -708,7 +1002,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'p.left' as mutable more than once at a time"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'p.left' as mutable more than once at a time")
+        );
     }
 
     #[test]
@@ -725,7 +1023,9 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'p.left' as mutable because it is already borrowed as shared"));
+        assert!(errors[0].message.contains(
+            "cannot borrow 'p.left' as mutable because it is already borrowed as shared"
+        ));
     }
 
     #[test]
@@ -742,7 +1042,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot assign to 'pt.x' because it is borrowed"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot assign to 'pt.x' because it is borrowed")
+        );
     }
 
     #[test]
@@ -760,7 +1064,11 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot move out of 'pt' because it is borrowed"));
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot move out of 'pt' because it is borrowed")
+        );
     }
 
     #[test]
@@ -810,7 +1118,9 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("cannot borrow 'n.pair.left' as mutable because it is already borrowed as shared"));
+        assert!(errors[0].message.contains(
+            "cannot borrow 'n.pair.left' as mutable because it is already borrowed as shared"
+        ));
     }
 
     #[test]
@@ -853,5 +1163,138 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn allows_mutation_after_ref_last_use() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            i32 read(i64 v) { return 0; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                read(r.x);
+                pt.x = 100;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn allows_mut_borrow_after_shared_last_use() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            i32 read(i64 v) { return 0; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                read(r.x);
+                &mut Point m = &mut pt;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn rejects_mutation_when_ref_never_used() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                pt.x = 100;
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot assign to 'pt.x' because it is borrowed")
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_mut_borrow_before_shared_use() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            i32 read(i64 v) { return 0; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                &mut Point m = &mut pt;
+                read(r.x);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as mutable because it is already borrowed as shared")
+        );
+    }
+
+    #[test]
+    fn ref_param_borrow_survives_unused_body() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void touch(&Point p) {}
+            void test() {
+                Point pt;
+                pt.x = 1;
+                touch(&pt);
+                pt.x = 2;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn reborrow_after_last_use_keeps_loan_chain() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            i32 read(i64 v) { return 0; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                read(r.x);
+                &Point m = &*r;
+                read(m.x);
+                pt.x = 100;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn rejects_mutation_while_reborrow_still_live() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                &Point r = &pt;
+                &Point m = &*r;
+                pt.x = 100;
+                i64 v = m.x;
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot assign to 'pt.x' because it is borrowed")
+        );
     }
 }

@@ -95,10 +95,31 @@ i64 test_nested_subfield_disjoint() {
     return 0;
 }
 
+i64 test_nll_last_use() {
+    Point pt;
+    pt.x = 10;
+    pt.y = 20;
+
+    // The shared borrow's loan ends at its last use — no artificial
+    // { ... } block needed to mutate pt afterwards (NLL).
+    &Point r = &pt;
+    i64 s = sum_point(r);
+    @assert(s == 30, "nll sum before mutation");
+
+    pt.x = 100;
+    @assert(pt.x == 100, "nll mutation after last use");
+
+    &mut Point m = &mut pt;
+    m.x = 7;
+    @assert(m.x == 7, "nll mut borrow after shared borrow expired");
+    return 0;
+}
+
 i64 main() {
     test_shared_borrows();
     test_mutable_borrow_sequential();
     test_disjoint_field_borrows();
     test_nested_subfield_disjoint();
+    test_nll_last_use();
     return 0;
 }
