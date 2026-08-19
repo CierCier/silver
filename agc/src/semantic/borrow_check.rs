@@ -79,6 +79,12 @@ struct BorrowChecker {
     errors: Vec<BorrowError>,
     /// Stack of lexical scopes containing active loans registered in each block.
     scopes: Vec<Vec<ActiveBorrow>>,
+    /// Stack of last-use maps per lexical block.
+    block_last_uses: Vec<FxHashMap<String, usize>>,
+    /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
+    struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
+    /// Maps local variable name -> struct type name.
+    var_types: FxHashMap<String, String>,
     /// Active reference variables currently in scope (`r -> RefVarInfo`).
     ref_bindings: FxHashMap<String, RefVarInfo>,
     /// Variables declared as raw pointers (`T*`), whose dereferences bypass borrow check.
@@ -90,9 +96,21 @@ impl BorrowChecker {
         Self {
             errors: Vec::new(),
             scopes: vec![Vec::new()],
+            block_last_uses: Vec::new(),
+            struct_ref_fields: FxHashMap::default(),
+            var_types: FxHashMap::default(),
             ref_bindings: FxHashMap::default(),
             raw_ptr_vars: FxHashSet::default(),
         }
+    }
+
+    fn get_last_use_for(&self, name: &str) -> Option<usize> {
+        for map in self.block_last_uses.iter().rev() {
+            if let Some(pos) = map.get(name) {
+                return Some(*pos);
+            }
+        }
+        None
     }
 
     fn error_with_note(
@@ -214,6 +232,19 @@ impl BorrowChecker {
     }
 
     fn check_program(&mut self, program: &ast::Program) {
+        self.struct_ref_fields.clear();
+        for item in &program.items {
+            if let ast::ItemKind::Struct(st) = &item.kind {
+                let mut ref_fields = FxHashSet::default();
+                for f in &st.fields {
+                    if matches!(f.field_type.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                        ref_fields.insert(f.name.name.clone());
+                    }
+                }
+                self.struct_ref_fields.insert(st.name.name.clone(), ref_fields);
+            }
+        }
+
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Function(func) => {
@@ -240,10 +271,17 @@ impl BorrowChecker {
     fn check_function(&mut self, parameters: &[ast::Parameter], body: &ast::Block) {
         self.scopes.clear();
         self.scopes.push(Vec::new());
+        self.block_last_uses.clear();
+        self.var_types.clear();
         self.ref_bindings.clear();
         self.raw_ptr_vars.clear();
 
         for param in parameters {
+            if let ast::TypeKind::Named(named) = param.param_type.kind.as_ref() {
+                if let Some(last) = named.path.last() {
+                    self.var_types.insert(param.name.name.clone(), last.name.clone());
+                }
+            }
             match param.param_type.kind.as_ref() {
                 ast::TypeKind::Reference(r) => {
                     let kind = if r.is_mutable {
@@ -284,49 +322,35 @@ impl BorrowChecker {
 
     fn check_block(&mut self, block: &ast::Block) {
         self.push_scope();
-        for (i, stmt) in block.statements.iter().enumerate() {
-            // Collect the reference bindings this statement uses BEFORE
-            // expiring: loans whose last use was a previous statement end
-            // here, but a borrower needed by the current statement (e.g. a
-            // reborrow `m = &*r`) must stay live so its loan chain survives.
-            let uses = self.collect_stmt_uses(stmt);
-            self.expire_loans_used_in(i, &uses);
-            self.check_statement(stmt);
-            self.set_last_use(uses, i);
-        }
-        // Final statement boundary: expire loans used only in the last statement.
-        self.expire_loans_used_in(block.statements.len(), &FxHashSet::default());
-        self.pop_scope();
-    }
 
-    /// Mark every loan whose borrower appears in `uses` as expiring at
-    /// statement `i` (its last observed use).
-    fn set_last_use(&mut self, uses: FxHashSet<String>, i: usize) {
-        for scope in &mut self.scopes {
-            for b in scope.iter_mut() {
-                if !b.param
-                    && let Some(ref name) = b.borrower
-                    && uses.contains(name)
-                {
-                    b.last_use = Some(i);
-                }
+        // Precompute the final use statement index for every variable in this block (NLL)
+        let mut block_last_use = FxHashMap::default();
+        for (i, stmt) in block.statements.iter().enumerate() {
+            let uses = self.collect_stmt_uses(stmt);
+            for name in uses {
+                block_last_use.insert(name, i);
             }
         }
+        self.block_last_uses.push(block_last_use);
+
+        for (i, stmt) in block.statements.iter().enumerate() {
+            self.expire_loans_before(i);
+            self.check_statement(stmt);
+        }
+        // Final statement boundary: expire loans whose last use was within this block.
+        self.expire_loans_before(block.statements.len());
+        self.pop_scope();
+        self.block_last_uses.pop();
     }
 
-    /// Remove loans whose last use was statement `i` or earlier and whose
-    /// borrower is not used again by the current statement (`still_used`):
-    /// they no longer constrain later code.
-    fn expire_loans_used_in(&mut self, i: usize, still_used: &FxHashSet<String>) {
+    /// Remove loans whose last use was strictly before statement `i`:
+    /// they no longer constrain statement `i` or later code.
+    fn expire_loans_before(&mut self, i: usize) {
         let mut expired: FxHashSet<String> = FxHashSet::default();
         for scope in &mut self.scopes {
             let mut kept: Vec<ActiveBorrow> = Vec::with_capacity(scope.len());
             for b in scope.drain(..) {
-                let used_now = b
-                    .borrower
-                    .as_deref()
-                    .is_some_and(|n| still_used.contains(n));
-                if !b.param && !used_now && b.last_use.is_some_and(|u| u <= i) {
+                if !b.param && b.last_use.is_some_and(|last| last < i) {
                     if let Some(ref name) = b.borrower {
                         expired.insert(name.clone());
                     }
@@ -361,13 +385,11 @@ impl BorrowChecker {
         uses
     }
 
-    /// Collect identifiers that name a live reference binding (borrow uses).
+    /// Collect identifiers that appear in expression (for NLL last-use scan).
     fn collect_expr_uses(&self, expr: &ast::Expression, uses: &mut FxHashSet<String>) {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
-                if self.ref_bindings.contains_key(&ident.name) {
-                    uses.insert(ident.name.clone());
-                }
+                uses.insert(ident.name.clone());
             }
             ast::ExpressionKind::Binary { left, right, .. } => {
                 self.collect_expr_uses(left, uses);
@@ -529,11 +551,31 @@ impl BorrowChecker {
                         if matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_)) {
                             self.raw_ptr_vars.insert(name.clone());
                         }
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            if let Some(last) = named.path.last() {
+                                self.var_types.insert(name.clone(), last.name.clone());
+                            }
+                        }
                     }
                 }
 
                 if let Some(ref init) = let_stmt.initializer {
                     if let Some(ref name) = name {
+                        // If initializer is TypeName.new(...) or TypeName { ... }, record struct type
+                        if let ast::ExpressionKind::MethodCall { receiver, .. } = init.kind.as_ref() {
+                            if let ast::ExpressionKind::TypeName(ty) = receiver.kind.as_ref() {
+                                if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                                    if let Some(last) = named.path.last() {
+                                        self.var_types.insert(name.clone(), last.name.clone());
+                                    }
+                                }
+                            }
+                        } else if let ast::ExpressionKind::StructLiteral { path, .. } = init.kind.as_ref() {
+                            if let Some(last) = path.last() {
+                                self.var_types.insert(name.clone(), last.name.clone());
+                            }
+                        }
+
                         // Check if initializer is a borrow expression:
                         if let ast::ExpressionKind::Reference {
                             is_mutable,
@@ -564,7 +606,7 @@ impl BorrowChecker {
                                     kind: existing.kind,
                                     span: init.span,
                                     borrower: Some(name.clone()),
-                                    last_use: None,
+                                    last_use: self.get_last_use_for(name),
                                     param: false,
                                 };
                                 self.ref_bindings.insert(
@@ -581,6 +623,23 @@ impl BorrowChecker {
                                 }
                             } else {
                                 self.check_expr(init);
+                            }
+                        } else if let ast::ExpressionKind::StructLiteral { fields, .. } =
+                            init.kind.as_ref()
+                        {
+                            for f in fields {
+                                self.check_aggregate_field_borrow(name, Some(f.name.name.as_str()), &f.value);
+                            }
+                        } else if let ast::ExpressionKind::Initializer { items } =
+                            init.kind.as_ref()
+                        {
+                            for item in items {
+                                let (val, field_name) = match item {
+                                    ast::InitializerItem::Positional(e) => (e, None),
+                                    ast::InitializerItem::Field { name, value } => (value, Some(name.name.as_str())),
+                                    ast::InitializerItem::Index { value, .. } => (value, None),
+                                };
+                                self.check_aggregate_field_borrow(name, field_name, val);
                             }
                         } else {
                             self.check_expr(init);
@@ -684,7 +743,7 @@ impl BorrowChecker {
                 kind,
                 span,
                 borrower: Some(binding_name.to_string()),
-                last_use: None,
+                last_use: self.get_last_use_for(binding_name),
                 param: false,
             };
             self.ref_bindings.insert(
@@ -701,6 +760,54 @@ impl BorrowChecker {
             }
         } else {
             self.check_expr(target);
+        }
+    }
+
+    fn check_aggregate_field_borrow(
+        &mut self,
+        owner_name: &str,
+        field_name_opt: Option<&str>,
+        field_expr: &ast::Expression,
+    ) {
+        if let Some(field_name) = field_name_opt {
+            if let Some(struct_name) = self.var_types.get(owner_name) {
+                if let Some(ref_fields) = self.struct_ref_fields.get(struct_name) {
+                    if !ref_fields.contains(field_name) {
+                        return;
+                    }
+                }
+            }
+        }
+        if let ast::ExpressionKind::Reference {
+            is_mutable,
+            expression,
+        } = field_expr.kind.as_ref()
+        {
+            let kind = if *is_mutable {
+                BorrowKind::Exclusive
+            } else {
+                BorrowKind::Shared
+            };
+            self.register_named_borrow(owner_name, expression, kind, field_expr.span);
+        } else if let ast::ExpressionKind::Identifier(ident) = field_expr.kind.as_ref() {
+            if let Some(existing) = self.ref_bindings.get(&ident.name).cloned() {
+                let loan = ActiveBorrow {
+                    root: existing.root.clone(),
+                    path: existing.path.clone(),
+                    kind: existing.kind,
+                    span: field_expr.span,
+                    borrower: Some(owner_name.to_string()),
+                    last_use: self.get_last_use_for(owner_name),
+                    param: false,
+                };
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.push(loan);
+                }
+            } else {
+                self.check_expr(field_expr);
+            }
+        } else {
+            self.check_expr(field_expr);
         }
     }
 
@@ -805,6 +912,14 @@ impl BorrowChecker {
                 if *operator == ast::BinaryOperator::Assign {
                     self.check_expr(right);
                     self.check_assignment_target(left);
+                    if let Some((root, path, _)) = self.extract_root_and_path(left) {
+                        let field = if path.is_empty() {
+                            None
+                        } else {
+                            Some(path.as_str())
+                        };
+                        self.check_aggregate_field_borrow(&root, field, right);
+                    }
                 } else {
                     self.check_expr(left);
                     self.check_expr(right);
@@ -878,14 +993,8 @@ mod tests {
 
     fn parse(source: &str) -> ast::Program {
         let tokens = crate::lexer::lex(source).expect("lex failed");
-        let mut parser = crate::parser::Parser::new(tokens);
-        let (program, errors) = parser.parse_program();
-        assert!(
-            errors.is_empty(),
-            "parse errors in test source: {:?}",
-            errors
-        );
-        program
+        let mut parser = crate::parser::prt_parser::PRT_Parser::new(None);
+        parser.parse_program(&tokens).expect("parse failed")
     }
 
     fn check_source(source: &str) -> Vec<BorrowError> {
@@ -1296,5 +1405,46 @@ mod tests {
                 .message
                 .contains("cannot assign to 'pt.x' because it is borrowed")
         );
+    }
+
+    #[test]
+    fn struct_literal_with_borrow_locks_referent() {
+        let src = r#"
+            struct StringView<'a> { &'a i64 data; i64 len; }
+            i64 read_view(StringView v) { return *v.data; }
+            void test() {
+                i64 val = 42;
+                StringView view;
+                view.data = &val;
+                view.len = 1;
+                val = 100;
+                read_view(view);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot assign to 'val' because it is borrowed")
+        );
+    }
+
+    #[test]
+    fn struct_literal_with_borrow_unlocked_after_nll_last_use() {
+        let src = r#"
+            struct StringView<'a> { &'a i64 data; i64 len; }
+            i64 read_view(StringView v) { return *v.data; }
+            void test() {
+                i64 val = 42;
+                StringView view;
+                view.data = &val;
+                view.len = 1;
+                read_view(view);
+                val = 100;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
     }
 }

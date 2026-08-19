@@ -218,3 +218,44 @@ conflict.
 4. **Conflicts before the last use are unchanged**: taking `&mut pt` while a
    shared `r` still has uses ahead of it is still rejected, as are
    mutations/moves of a root whose borrow has not yet expired.
+
+---
+
+## 6. Named Lifetime Parameters & Struct-Held Borrows (`Struct<'a>`)
+
+Silver supports declaring named generic lifetime parameters on structs and functions (e.g. `<'a, 'b: 'a>`) to hold borrowed views inside aggregate structures:
+
+```silver
+struct StringView<'a> {
+    &'a i64 data;
+    i64 len;
+}
+
+i64 read_view_data(StringView v) {
+    return *v.data;
+}
+
+void test_struct_borrow() {
+    i64 val = 42;
+    StringView view;
+    view.data = &val;
+    view.len = 1;
+
+    i64 d = read_view_data(view);
+    // After view's last use, val is unlocked via NLL
+    val = 100; // OK
+}
+```
+
+### Struct Borrow Invariants
+
+1. **Borrow Lock Tracking**:
+   - Initializing a struct with a reference (`StringView view = { .data = &val, .len = 1 };`) or assigning to a reference field (`view.data = &val;`) registers a loan on the referent (`val`) owned by the struct variable (`view`).
+   - Mutating or moving the referent while `view` is live is rejected at compile time.
+2. **NLL Integration for Aggregates**:
+   - When the struct instance (`view`) reaches its last use in the block, all loans held by its fields expire, unlocking the underlying values.
+3. **Raw Pointer Distinction**:
+   - Assigning addresses to raw pointer fields (`RawNode* next = &b;`) does not create borrow checker loans, preserving low-level manual graph nodes and C FFI structures without artificial lifetime locks.
+4. **Compile-Time Lifetimes with Zero Monomorphization Overhead**:
+   - Lifetime parameters (`<'a>`) are strictly static verification annotations; they are erased prior to LLVM code generation and do not generate duplicate monomorphized struct types.
+

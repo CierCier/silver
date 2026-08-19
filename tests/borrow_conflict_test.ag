@@ -115,11 +115,36 @@ i64 test_nll_last_use() {
     return 0;
 }
 
+struct StringView<'a> {
+    &'a i64 data;
+    i64 len;
+}
+
+i64 read_view_data(StringView v) {
+    return *v.data;
+}
+
+i64 test_named_lifetime_struct() {
+    i64 val = 42;
+    StringView view;
+    view.data = &val;
+    view.len = 1;
+
+    i64 d = read_view_data(view);
+    @assert(d == 42, "read named lifetime struct data");
+
+    // After view's last use, val is unlocked via NLL
+    val = 100;
+    @assert(val == 100, "val mutated after view last use");
+    return 0;
+}
+
 i64 main() {
     test_shared_borrows();
     test_mutable_borrow_sequential();
     test_disjoint_field_borrows();
     test_nested_subfield_disjoint();
     test_nll_last_use();
+    test_named_lifetime_struct();
     return 0;
 }

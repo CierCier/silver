@@ -27,6 +27,7 @@ pub enum Token {
     ComplexLiteral(f64, f64), // (real, imaginary)
     StringLiteral(String),
     CharLiteral(char),
+    Lifetime(String),
     BoolLiteral(bool),
 
     // Keywords
@@ -735,6 +736,15 @@ impl Lexer {
         }
 
         let ch = self.advance();
+        if ch != '\\' && (ch.is_alphabetic() || ch == '_') && (self.is_at_end() || self.peek() != '\'') {
+            let mut name = String::new();
+            name.push(ch);
+            while !self.is_at_end() && (self.peek().is_alphanumeric() || self.peek() == '_') {
+                name.push(self.advance());
+            }
+            return Ok(Token::Lifetime(name));
+        }
+
         let value = if ch == '\\' {
             // Handle escape sequences
             if self.is_at_end() {
@@ -1131,6 +1141,7 @@ impl fmt::Display for Token {
             Token::ComplexLiteral(r, i) => write!(f, "{}+{}i", r, i),
             Token::StringLiteral(s) => write!(f, "\"{}\"", s),
             Token::CharLiteral(c) => write!(f, "'{}'", c),
+            Token::Lifetime(l) => write!(f, "'{}", l),
             Token::BoolLiteral(b) => write!(f, "{}", b),
             Token::Identifier(s) => write!(f, "{}", s),
             _ => write!(f, "{:?}", self),

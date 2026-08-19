@@ -51,9 +51,19 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         }
     }
 
-    // Reference types: `&T` / `&mut T` inside casts (elided lifetime).
+    // Reference types: `&T` / `&mut T` / `&'a T` / `&'a mut T` inside casts.
     if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
         cursor += 1;
+        let lifetime = if let Some(Token::Lifetime(lt_name)) = tokens.get(cursor).map(|t| &t.kind) {
+            let lt_span = tokens[cursor].span;
+            cursor += 1;
+            Some(ast::Lifetime {
+                name: lt_name.clone(),
+                span: lt_span,
+            })
+        } else {
+            None
+        };
         let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
             cursor += 1;
             true
@@ -65,7 +75,7 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         return Some(ast::Type {
             kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                 is_mutable,
-                lifetime: None,
+                lifetime,
                 inner: Box::new(inner),
             })),
             span,

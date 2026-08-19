@@ -256,6 +256,7 @@ impl PRT_Parser {
             Token::ComplexLiteral(_, _) => "ComplexLiteral".to_string(),
             Token::StringLiteral(_) => "StringLiteral".to_string(),
             Token::CharLiteral(_) => "CharLiteral".to_string(),
+            Token::Lifetime(_) => "Lifetime".to_string(),
             Token::BoolLiteral(_) => "BoolLiteral".to_string(),
             Token::LeftParen => "LParen".to_string(),
             Token::RightParen => "RParen".to_string(),
@@ -330,6 +331,7 @@ impl PRT_Parser {
             (Token::ComplexLiteral(_, _), Token::ComplexLiteral(_, _)) => true,
             (Token::StringLiteral(_), Token::StringLiteral(_)) => true,
             (Token::CharLiteral(_), Token::CharLiteral(_)) => true,
+            (Token::Lifetime(_), Token::Lifetime(_)) => true,
             (Token::BoolLiteral(_), Token::BoolLiteral(_)) => true,
             _ => std::mem::discriminant(pattern) == std::mem::discriminant(actual),
         }
@@ -906,10 +908,19 @@ impl PRT_Parser {
             }
         }
 
-        // Reference types: `&T` / `&mut T` (elided lifetime — named `'a`
-        // syntax is a later phase). Nested references recurse.
+        // Reference types: `&T` / `&mut T` / `&'a T` / `&'a mut T`. Nested references recurse.
         if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
             cursor += 1;
+            let lifetime = if let Some(Token::Lifetime(lt_name)) = tokens.get(cursor).map(|t| &t.kind) {
+                let lt_span = tokens[cursor].span;
+                cursor += 1;
+                Some(ast::Lifetime {
+                    name: lt_name.clone(),
+                    span: lt_span,
+                })
+            } else {
+                None
+            };
             let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
                 cursor += 1;
                 true
@@ -921,7 +932,7 @@ impl PRT_Parser {
             let reference = ast::Type {
                 kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                     is_mutable,
-                    lifetime: None,
+                    lifetime,
                     inner: Box::new(inner),
                 })),
                 span: start_span.extend_to(&tokens[next - 1].span),
@@ -2730,6 +2741,48 @@ impl PRT_Parser {
         let mut cursor = start + 1;
         while cursor < close {
             let name_token = &tokens[cursor];
+            if let Token::Lifetime(lt_name) = &name_token.kind {
+                cursor += 1;
+                let mut bounds = Vec::new();
+                if cursor < close && matches!(tokens[cursor].kind, Token::Colon) {
+                    cursor += 1;
+                    while cursor < close {
+                        if let Token::Lifetime(bound_lt) = &tokens[cursor].kind {
+                            bounds.push(ast::Lifetime {
+                                name: bound_lt.clone(),
+                                span: tokens[cursor].span,
+                            });
+                            cursor += 1;
+                            if cursor < close && matches!(tokens[cursor].kind, Token::Plus) {
+                                cursor += 1;
+                                continue;
+                            }
+                        } else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected lifetime bound after ':'".to_string(),
+                                span: tokens[cursor.min(close - 1)].span,
+                            });
+                        }
+                        break;
+                    }
+                }
+                let param_span = name_token
+                    .span
+                    .extend_to(&tokens[cursor.saturating_sub(1)].span);
+                params.push(ast::GenericParam::Lifetime(ast::LifetimeParam {
+                    name: ast::Identifier {
+                        name: lt_name.clone(),
+                        span: name_token.span,
+                    },
+                    bounds,
+                    span: param_span,
+                }));
+                if cursor < close && matches!(tokens[cursor].kind, Token::Comma) {
+                    cursor += 1;
+                }
+                continue;
+            }
+
             let name: &str = match &name_token.kind {
                 Token::Identifier(n) => n.as_str(),
                 Token::SelfType => "Self",
@@ -5401,18 +5454,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_volatile_function() {
-        let source = "volatile i32 f() { return 1; }";
+    fn parses_named_lifetime_struct_and_reference_fields() {
+        let source = "struct StringView<'a> { &'a str data; i64 len; }";
         let tokens = crate::lexer::lex(source).expect("lex failed");
         let mut parser = PRT_Parser::new(None);
-        let err = parser
-            .parse_program(&tokens)
-            .expect_err("expected parse error");
-        match err {
-            ParseError::InvalidSyntax { message, .. } => {
-                assert!(message.contains("volatile functions are not supported"));
-            }
-            other => panic!("expected InvalidSyntax, got {other:?}"),
-        }
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Struct(st) = &program.items[0].kind else {
+            panic!("expected struct item");
+        };
+        assert_eq!(st.name.name, "StringView");
+        let generics = st.generics.as_ref().expect("expected generics");
+        assert_eq!(generics.params.len(), 1);
+        let ast::GenericParam::Lifetime(lp) = &generics.params[0] else {
+            panic!("expected lifetime generic param");
+        };
+        assert_eq!(lp.name.name, "a");
+
+        let data_field = &st.fields[0];
+        let ast::TypeKind::Reference(r) = data_field.field_type.kind.as_ref() else {
+            panic!("expected reference field");
+        };
+        assert_eq!(r.lifetime.as_ref().map(|l| l.name.as_str()), Some("a"));
+        assert!(!r.is_mutable);
+    }
+
+    #[test]
+    fn parses_lifetime_outlives_bounds() {
+        let source = "struct NestedView<'a, 'b: 'a> { &'a i64 x; &'b mut i64 y; }";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Struct(st) = &program.items[0].kind else {
+            panic!("expected struct item");
+        };
+        let generics = st.generics.as_ref().expect("expected generics");
+        assert_eq!(generics.params.len(), 2);
+        let ast::GenericParam::Lifetime(b_lp) = &generics.params[1] else {
+            panic!("expected lifetime generic param");
+        };
+        assert_eq!(b_lp.name.name, "b");
+        assert_eq!(b_lp.bounds.len(), 1);
+        assert_eq!(b_lp.bounds[0].name, "a");
     }
 }

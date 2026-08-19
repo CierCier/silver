@@ -4447,6 +4447,22 @@ impl TypeChecker {
                 },
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
             (
+                Type::Pointer { is_mutable: from_mut, inner: from_inner, .. },
+                Type::Reference { is_mutable: to_mut, inner: to_inner },
+            )
+            | (
+                Type::Reference { is_mutable: from_mut, inner: from_inner },
+                Type::Pointer { is_mutable: to_mut, inner: to_inner, .. },
+            )
+            | (
+                Type::Reference { is_mutable: from_mut, inner: from_inner },
+                Type::Reference { is_mutable: to_mut, inner: to_inner },
+            ) => {
+                (!*to_mut || *from_mut)
+                    && (from_inner == to_inner
+                        || self.is_implicitly_castable(from_inner, to_inner))
+            }
+            (
                 Type::Pointer { inner, .. },
                 Type::Function {
                     params,

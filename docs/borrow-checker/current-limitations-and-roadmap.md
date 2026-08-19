@@ -64,15 +64,15 @@ flowchart TD
     Current["Current State (v1)\n• Escape Analysis\n• Flow-Sensitive Move Checking\n• Drop-Flag Machine"] --> P1["Phase 1: Variable Re-initialization ✅\n• Re-assignment resets drop flags\n• Re-activation in move lattice"]
     P1 --> P2["Phase 2: Active Borrow Conflict Graph ✅\n• Shared vs Exclusive borrow tracking\n• Enforce Aliasing XOR Mutability"]
     P2 --> P3["Phase 3: Non-Lexical Lifetimes (NLL) ✅\n• Statement-level last-use loan expiration\n• Early borrow expiration"]
-    P3 --> P4["Phase 4: Named Lifetime Parameters\n• Structs with reference fields: Struct<'a>\n• Lifetime bound propagation"]
+    P3 --> P4["Phase 4: Named Lifetime Parameters ✅\n• Structs with reference fields: Struct<'a>\n• Aggregate loan tracking & NLL"]
 ```
 
-### Phase 1: Variable Re-Initialization
+### Phase 1: Variable Re-Initialization — ✅ Implemented
 - Update `semantic/move_check.rs` to detect assignment statements (`ast::StatementKind::Assignment`) whose target is a moved variable.
 - Reset the variable state in the lattice back to `VarState::new_live()`.
 - In codegen, store `1` into `{var_name}.drop` on re-assignment.
 
-### Phase 2: Active Borrow Conflict Graph
+### Phase 2: Active Borrow Conflict Graph — ✅ Implemented
 - Build an active borrow table in `semantic/escape_check.rs` recording `(Variable, BorrowKind, ScopeRange)`.
 - Disallow taking `&mut x` while any active `&x` or `&mut x` borrow is alive.
 - Disallow moving `x` while any borrow of `x` is active.
@@ -85,9 +85,10 @@ flowchart TD
   block.
 - Reference parameters keep their loans for the whole function; reborrow
   chains (`&Point m = &*r;`) keep the loan alive through the reborrow.
-- Remaining refinement: registering temporary call-argument borrows as loans
-  (see §2, Current Limitations).
 
-### Phase 4: Named Struct Lifetimes
-- Add lifetime parameters to parser AST (`struct View<'a> { & 'a [u8] data; }`).
-- Propagate lifetime bounds across function call boundaries and return signatures.
+### Phase 4: Named Struct Lifetimes & Struct-Held Borrows — ✅ Implemented
+- Lexer and PRT parser support for named lifetimes (`'a`, `'static`) and lifetime bounds (`<'a, 'b: 'a>`).
+- Support for reference fields (`&'a T` and `&'a mut T`) in struct definitions.
+- Struct-held borrow tracking in `borrow_check`: initializing structs or assigning reference fields registers loans on referents owned by the struct variable.
+- Full integration with NLL: loans held by aggregate fields expire when the struct reaches its last use.
+- Compile-time lifetime erasure: zero runtime overhead or monomorphization duplication for lifetime-only parameters.

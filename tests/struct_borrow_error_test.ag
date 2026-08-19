@@ -1,0 +1,21 @@
+// Negative test: mutating a variable while held by a struct reference field is rejected by the borrow checker.
+
+struct StringView<'a> {
+    &'a i64 data;
+    i64 len;
+}
+
+i64 read_view(StringView v) {
+    return *v.data;
+}
+
+i64 main() {
+    i64 val = 42;
+    StringView view;
+    view.data = &val;
+    view.len = 1;
+
+    val = 100; // Expected compile error: cannot assign to 'val' because it is borrowed
+    read_view(view);
+    return 0;
+}

@@ -988,7 +988,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     ast::GenericParam::Lifetime(_) => None,
                 })
                 .collect::<Vec<_>>();
-            self.struct_generics.insert(name, params);
+            if !params.is_empty() {
+                self.struct_generics.insert(name, params);
+            }
         }
     }
 
