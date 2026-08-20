@@ -226,7 +226,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
                             self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
                         } else if index < signature.params.len() {
-                            self.param_type_drops_on_exit(&signature.params[index]).unwrap_or(false)
+                            self.param_type_drops_on_exit(&signature.params[index])
+                                .unwrap_or(false)
                         } else {
                             false
                         };
@@ -360,7 +361,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(false);
         }
         let named_key = Self::named_type_key(&named);
-        if !self.struct_fields.contains_key(base_name) && !self.struct_fields.contains_key(&named_key) {
+        if !self.struct_fields.contains_key(base_name)
+            && !self.struct_fields.contains_key(&named_key)
+        {
             return Ok(false);
         }
         let fields: Vec<(String, ast::Type)> = match self.struct_fields.get(&named_key) {
@@ -399,7 +402,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // Has its own Drop impl: the body manages the payload.
             return Ok(false);
         }
-        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+            self.struct_generics.get(enum_name)
             && let Some(args) = &named.generics
             && params.len() == args.len()
         {
@@ -855,7 +859,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
                             self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
                         } else if param_index < signature.params.len() {
-                            self.param_type_drops_on_exit(&signature.params[param_index]).unwrap_or(false)
+                            self.param_type_drops_on_exit(&signature.params[param_index])
+                                .unwrap_or(false)
                         } else {
                             false
                         };

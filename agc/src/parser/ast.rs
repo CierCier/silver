@@ -319,6 +319,16 @@ pub enum TypeKind {
     Tuple(Vec<Type>),
 }
 
+impl TypeKind {
+    /// True for the bare `Self` type name (receiver-sugar marker).
+    pub fn is_self_named(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::Named(named) if named.path.len() == 1 && named.path[0].name == "Self"
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveType {
     // Signed integers

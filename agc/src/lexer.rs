@@ -736,7 +736,10 @@ impl Lexer {
         }
 
         let ch = self.advance();
-        if ch != '\\' && (ch.is_alphabetic() || ch == '_') && (self.is_at_end() || self.peek() != '\'') {
+        if ch != '\\'
+            && (ch.is_alphabetic() || ch == '_')
+            && (self.is_at_end() || self.peek() != '\'')
+        {
             let mut name = String::new();
             name.push(ch);
             while !self.is_at_end() && (self.peek().is_alphanumeric() || self.peek() == '_') {

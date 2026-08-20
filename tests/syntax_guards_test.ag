@@ -1,0 +1,49 @@
+// Implicit Self, inferred operator guards, and receiver sugar.
+import std.test;
+
+trait ReadValue {
+    i64 read(&self);
+}
+
+trait BumpValue {
+    void bump(&mut self);
+}
+
+trait ConsumeValue {
+    i64 consume(self);
+}
+
+struct Counter {
+    i64 value;
+}
+
+impl ReadValue for Counter {
+    i64 read(&self) { return self.value; }
+}
+
+impl BumpValue for Counter {
+    void bump(&mut self) { self.value = self.value + 1; }
+}
+
+impl ConsumeValue for Counter {
+    i64 consume(self) { return self.value; }
+}
+
+T add<T>(T left, T right) {
+    return left + right;
+}
+
+i64 main() {
+    Counter c;
+    c.value = 4;
+    i64 before = c.read();
+    c.bump();
+    i64 after = c.read();
+    i64 consumed = c.consume();
+    i64 sum = add((i64)2, (i64)3);
+    @assert(before == 4, "&self receiver");
+    @assert(after == 5, "&mut self receiver");
+    @assert(consumed == 5, "self receiver");
+    @assert(sum == 5, "implicit operator guard");
+    return 0;
+}

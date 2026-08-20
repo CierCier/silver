@@ -11,7 +11,7 @@ impl OwnedBuf {
         return b;
     }
 }
-impl Drop<OwnedBuf> for OwnedBuf {
+impl Drop for OwnedBuf {
     void drop(OwnedBuf* self) {
         if (self.data != (i8*)0) {
             free(self.data);

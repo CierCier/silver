@@ -6,7 +6,7 @@ struct Resource {
     u8* ptr;
 }
 
-impl Drop<Resource> for Resource {
+impl Drop for Resource {
     void drop(Resource* self) {
         drop_count = drop_count + 1;
         if (self.ptr != (u8*)0) {

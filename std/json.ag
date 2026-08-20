@@ -18,11 +18,11 @@ impl JsonError {
     }
 }
 
-trait ToJson<Self> {
+trait ToJson {
     void to_json(Self* self, JsonWriter* out);
 }
 
-trait FromJson<Self> {
+trait FromJson {
     Result<Self, JsonError> from_json(JsonReader* input);
 }
 
@@ -429,20 +429,20 @@ impl JsonReader {
     }
 }
 
-impl ToJson<i8> for i8 { void to_json(i8* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson<i16> for i16 { void to_json(i16* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson<i32> for i32 { void to_json(i32* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson<i64> for i64 { void to_json(i64* self, JsonWriter* out) { out.write_i64(*self); } }
-impl ToJson<u8> for u8 { void to_json(u8* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson<u16> for u16 { void to_json(u16* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson<u32> for u32 { void to_json(u32* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson<u64> for u64 { void to_json(u64* self, JsonWriter* out) { out.write_u64(*self); } }
-impl ToJson<f64> for f64 { void to_json(f64* self, JsonWriter* out) { out.write_f64(*self); } }
-impl ToJson<f32> for f32 { void to_json(f32* self, JsonWriter* out) { out.write_f64((f64)*self); } }
-impl ToJson<bool> for bool { void to_json(bool* self, JsonWriter* out) { out.write_bool(*self); } }
-impl ToJson<str> for str { void to_json(str* self, JsonWriter* out) { out.write_string(*self); } }
-impl ToJson<String> for String { void to_json(String* self, JsonWriter* out) { out.write_string((str)self.data); } }
-impl ToJson<Optional<i32>> for Optional<i32> {
+impl ToJson for i8 { void to_json(i8* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i16 { void to_json(i16* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i32 { void to_json(i32* self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i64 { void to_json(i64* self, JsonWriter* out) { out.write_i64(*self); } }
+impl ToJson for u8 { void to_json(u8* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u16 { void to_json(u16* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u32 { void to_json(u32* self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u64 { void to_json(u64* self, JsonWriter* out) { out.write_u64(*self); } }
+impl ToJson for f64 { void to_json(f64* self, JsonWriter* out) { out.write_f64(*self); } }
+impl ToJson for f32 { void to_json(f32* self, JsonWriter* out) { out.write_f64((f64)*self); } }
+impl ToJson for bool { void to_json(bool* self, JsonWriter* out) { out.write_bool(*self); } }
+impl ToJson for str { void to_json(str* self, JsonWriter* out) { out.write_string(*self); } }
+impl ToJson for String { void to_json(String* self, JsonWriter* out) { out.write_string((str)self.data); } }
+impl ToJson for Optional<i32> {
     void to_json(Optional<i32>* self, JsonWriter* out) {
         Optional<i32> value = *self;
         if (value.is_some()) {
@@ -453,7 +453,7 @@ impl ToJson<Optional<i32>> for Optional<i32> {
         }
     }
 }
-impl ToJson<Optional<f64>> for Optional<f64> {
+impl ToJson for Optional<f64> {
     void to_json(Optional<f64>* self, JsonWriter* out) {
         Optional<f64> value = *self;
         if (value.is_some()) {
@@ -466,7 +466,7 @@ impl ToJson<Optional<f64>> for Optional<f64> {
 }
 
 
-impl FromJson<i64> for i64 {
+impl FromJson for i64 {
     Result<i64, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&mut value)) {
@@ -477,7 +477,7 @@ impl FromJson<i64> for i64 {
     }
 }
 
-impl FromJson<i32> for i32 {
+impl FromJson for i32 {
     Result<i32, JsonError> from_json(JsonReader* input) {
         i32 value = 0;
         if (!input.read_i32(&mut value)) {
@@ -488,7 +488,7 @@ impl FromJson<i32> for i32 {
     }
 }
 
-impl FromJson<bool> for bool {
+impl FromJson for bool {
     Result<bool, JsonError> from_json(JsonReader* input) {
         bool value = false;
         if (!input.read_bool(&mut value)) {
@@ -498,7 +498,7 @@ impl FromJson<bool> for bool {
         return Result<bool, JsonError>.ok(value);
     }
 }
-impl FromJson<String> for String {
+impl FromJson for String {
     Result<String, JsonError> from_json(JsonReader* input) {
         String value = input.read_string();
         if (input.failed) {
@@ -510,7 +510,7 @@ impl FromJson<String> for String {
     }
 }
 
-impl FromJson<i8> for i8 {
+impl FromJson for i8 {
     Result<i8, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
@@ -521,7 +521,7 @@ impl FromJson<i8> for i8 {
     }
 }
 
-impl FromJson<i16> for i16 {
+impl FromJson for i16 {
     Result<i16, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
@@ -532,7 +532,7 @@ impl FromJson<i16> for i16 {
     }
 }
 
-impl FromJson<u8> for u8 {
+impl FromJson for u8 {
     Result<u8, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
@@ -543,7 +543,7 @@ impl FromJson<u8> for u8 {
     }
 }
 
-impl FromJson<u16> for u16 {
+impl FromJson for u16 {
     Result<u16, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
@@ -554,7 +554,7 @@ impl FromJson<u16> for u16 {
     }
 }
 
-impl FromJson<u32> for u32 {
+impl FromJson for u32 {
     Result<u32, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
@@ -565,7 +565,7 @@ impl FromJson<u32> for u32 {
     }
 }
 
-impl FromJson<u64> for u64 {
+impl FromJson for u64 {
     Result<u64, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
@@ -576,7 +576,7 @@ impl FromJson<u64> for u64 {
     }
 }
 
-impl FromJson<f32> for f32 {
+impl FromJson for f32 {
     Result<f32, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
@@ -587,7 +587,7 @@ impl FromJson<f32> for f32 {
     }
 }
 
-impl FromJson<f64> for f64 {
+impl FromJson for f64 {
     Result<f64, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
@@ -598,7 +598,7 @@ impl FromJson<f64> for f64 {
     }
 }
 
-impl FromJson<Optional<i32>> for Optional<i32> {
+impl FromJson for Optional<i32> {
     Result<Optional<i32>, JsonError> from_json(JsonReader* input) {
         input.skip_whitespace();
         u8* bytes = (u8*)input.input;
@@ -618,7 +618,7 @@ impl FromJson<Optional<i32>> for Optional<i32> {
     }
 }
 
-impl FromJson<Optional<f64>> for Optional<f64> {
+impl FromJson for Optional<f64> {
     Result<Optional<f64>, JsonError> from_json(JsonReader* input) {
         input.skip_whitespace();
         u8* bytes = (u8*)input.input;

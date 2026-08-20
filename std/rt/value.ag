@@ -311,7 +311,7 @@ impl Value {
     }
 }
 
-impl Drop<Value> for Value {
+impl Drop for Value {
     /// Release owned payloads: the string buffer, the boxed optional inner,
     /// and every element of the items vector before its buffer.  Idempotent
     /// (String/Vec drops null-check internally; inner is re-nulled).
@@ -373,7 +373,7 @@ impl ValueResult {
     }
 }
 
-impl Drop<ValueResult> for ValueResult {
+impl Drop for ValueResult {
     void drop(ValueResult* self) {
         self.value.drop();
         self.msg.drop();

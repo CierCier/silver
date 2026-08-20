@@ -107,7 +107,7 @@ impl Queue<T> {
     }
 }
 
-impl<T> Drop<Queue<T>> for Queue<T> {
+impl<T> Drop for Queue<T> {
     /// Frees the backing buffer.
     void drop(Queue<T>* self) {
         if (self.data != (T*)0) {

@@ -152,7 +152,7 @@ impl Deque<T> {
     }
 }
 
-impl<T> Drop<Deque<T>> for Deque<T> {
+impl<T> Drop for Deque<T> {
     /// Frees the backing buffer.
     void drop(Deque<T>* self) {
         if (self.data != (T*)0) {

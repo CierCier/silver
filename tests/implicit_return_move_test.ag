@@ -15,7 +15,7 @@ struct Tracked {
     i64 payload;
 }
 
-impl Drop<Tracked> for Tracked {
+impl Drop for Tracked {
     void drop(Tracked* self) {
         drop_count = drop_count + 1;
     }

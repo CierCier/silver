@@ -62,8 +62,24 @@ pub struct TypeChecker {
     /// Used to populate the ForIn AST node after typeck for codegen.
     pub resolved_iter_types: HashMap<(usize, usize), Box<ast::Type>>,
     /// Bare enum constructors (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
-    /// via expected-type inference; applied to the AST after typeck.
+    /// via expected-type inference during typeck; applied to the AST after typeck.
     pub bare_constructors: HashMap<(usize, usize), BareConstructorRewrite>,
+    /// Implicit guards: binary operators on bare type params recorded while
+    /// checking a generic function body, keyed by function/method signature.
+    /// Checked at every concrete monomorphization request.
+    current_implicit_reqs: Vec<ImplicitReq>,
+    implicit_reqs: HashMap<String, Vec<ImplicitReq>>,
+}
+
+/// A binary operation on a type parameter recorded during generic body
+/// checking. The requirement is enforced at each concrete instantiation:
+/// the substituted operand types must support the operator (builtin or
+/// `__<op>` overload), or the call site errors.
+#[derive(Debug, Clone)]
+struct ImplicitReq {
+    left: Type,
+    right: Type,
+    op: ast::BinaryOperator,
 }
 
 /// A bare enum constructor (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
@@ -226,6 +242,30 @@ impl TypeChecker {
             format!("type checking done (errors={})", self.errors.len()),
         );
         let requests = std::mem::take(&mut self.monomorph_requests);
+        for request in &requests {
+            match request {
+                MonomorphRequest::Function {
+                    source,
+                    mapping,
+                    call_span,
+                    ..
+                } => self.check_implicit_guards(&Self::free_fn_key(source), mapping, *call_span),
+                MonomorphRequest::ImplMethod {
+                    impl_item,
+                    method,
+                    mapping,
+                    call_span,
+                    ..
+                } => {
+                    let self_ty = Type::from_ast(&impl_item.self_type);
+                    self.check_implicit_guards(
+                        &Self::impl_method_key(&self_ty, method),
+                        mapping,
+                        *call_span,
+                    );
+                }
+            }
+        }
         (std::mem::take(&mut self.errors), requests)
     }
 
@@ -364,7 +404,8 @@ impl TypeChecker {
                 crate::module_artifact::ExportKind::Trait => {
                     self.imported_traits.insert(export.name.clone());
                 }
-                crate::module_artifact::ExportKind::Constant | crate::module_artifact::ExportKind::Global => {
+                crate::module_artifact::ExportKind::Constant
+                | crate::module_artifact::ExportKind::Global => {
                     if let Some(type_key) = &export.type_key {
                         if let Ok(ty) = crate::types::Type::from_canonical_key(type_key) {
                             self.global_variables.insert(export.name.clone(), ty);
@@ -660,6 +701,7 @@ impl TypeChecker {
     }
 
     fn check_function(&mut self, func: &ast::FunctionItem) {
+        self.current_implicit_reqs = Vec::new();
         let return_type = func
             .return_type
             .as_ref()
@@ -676,9 +718,11 @@ impl TypeChecker {
         self.check_block(&func.body);
         self.pop_scope();
         self.current_return = None;
+        self.store_implicit_reqs(Self::free_fn_key(func));
     }
 
     fn check_impl_method(&mut self, self_ty: &Type, func: &ast::ImplFunction) {
+        self.current_implicit_reqs = Vec::new();
         let return_type = func
             .return_type
             .as_ref()
@@ -695,6 +739,7 @@ impl TypeChecker {
         self.check_block(&func.body);
         self.pop_scope();
         self.current_return = None;
+        self.store_implicit_reqs(Self::impl_method_key(self_ty, func));
     }
 
     fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast) {
@@ -1081,6 +1126,10 @@ impl TypeChecker {
                         return common;
                     }
 
+                    if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                        return left_ty;
+                    }
+
                     if let Some(ty) =
                         self.resolve_operator_overload(&left_ty, &right_ty, operator, expr)
                     {
@@ -1137,14 +1186,15 @@ impl TypeChecker {
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
-                    // Matching generic type params: allow ==/!= without explicit overload.
-                    // The concrete type comparison is checked at monomorphization time.
+                    // Matching generic type params: the comparison is checked
+                    // at monomorphization time via the recorded implicit guard.
                     if left_ty == right_ty
                         && let Type::Named { path, generics } = &left_ty
                         && path.len() == 1
                         && generics.is_empty()
                         && !self.known_types.contains_key(&path[0])
                     {
+                        self.defer_operator_if_generic(&left_ty, &right_ty, operator);
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
@@ -1162,6 +1212,9 @@ impl TypeChecker {
                     }
 
                     if left_ty != right_ty {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                            return Type::Primitive(ast::PrimitiveType::Bool);
+                        }
                         self.error(
                             format!(
                                 "comparison operands must match, got {} and {}",
@@ -1207,6 +1260,7 @@ impl TypeChecker {
                         if !(self.is_integer_type(&left_ty)
                             && self.is_integer_type(&right_ty)
                             && self.common_numeric_type(&left_ty, &right_ty).is_some())
+                            && !self.defer_operator_if_generic(&left_ty, &right_ty, operator)
                         {
                             self.error(
                                 format!(
@@ -1218,6 +1272,9 @@ impl TypeChecker {
                         }
                     }
                     if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                            return left_ty;
+                        }
                         self.error(
                             format!(
                                 "bitwise operator requires integer operands, got {} and {}",
@@ -4447,20 +4504,39 @@ impl TypeChecker {
                 },
             ) if is_void(inner.as_ref()) => !*to_mut || *from_mut,
             (
-                Type::Pointer { is_mutable: from_mut, inner: from_inner, .. },
-                Type::Reference { is_mutable: to_mut, inner: to_inner },
+                Type::Pointer {
+                    is_mutable: from_mut,
+                    inner: from_inner,
+                    ..
+                },
+                Type::Reference {
+                    is_mutable: to_mut,
+                    inner: to_inner,
+                },
             )
             | (
-                Type::Reference { is_mutable: from_mut, inner: from_inner },
-                Type::Pointer { is_mutable: to_mut, inner: to_inner, .. },
+                Type::Reference {
+                    is_mutable: from_mut,
+                    inner: from_inner,
+                },
+                Type::Pointer {
+                    is_mutable: to_mut,
+                    inner: to_inner,
+                    ..
+                },
             )
             | (
-                Type::Reference { is_mutable: from_mut, inner: from_inner },
-                Type::Reference { is_mutable: to_mut, inner: to_inner },
+                Type::Reference {
+                    is_mutable: from_mut,
+                    inner: from_inner,
+                },
+                Type::Reference {
+                    is_mutable: to_mut,
+                    inner: to_inner,
+                },
             ) => {
                 (!*to_mut || *from_mut)
-                    && (from_inner == to_inner
-                        || self.is_implicitly_castable(from_inner, to_inner))
+                    && (from_inner == to_inner || self.is_implicitly_castable(from_inner, to_inner))
             }
             (
                 Type::Pointer { inner, .. },
@@ -4870,12 +4946,218 @@ impl TypeChecker {
             expr.span,
         );
         if result.is_none() {
+            if self.defer_operator_if_generic(left, right, operator) {
+                // Recorded as an implicit guard; enforced at instantiation.
+                return None;
+            }
             self.error(
                 format!("missing operator overload '{}' for {:?}", name, left),
                 expr.span,
             );
         }
         result
+    }
+
+    /// True for a bare type-parameter reference (`T`, not `Vec<T>` and not a
+    /// known concrete type) — the operands whose operators become implicit
+    /// guards on generic functions.
+    fn is_bare_type_param(&self, ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Named { path, generics }
+                if path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0])
+        )
+    }
+
+    fn is_generic_operand(&self, left: &Type, right: &Type) -> bool {
+        self.is_bare_type_param(left) || self.is_bare_type_param(right)
+    }
+
+    /// Record an operator-on-type-param requirement during generic body
+    /// checking. Returns true when the operands are bare type params (the
+    /// check is deferred to instantiation); false for concrete operands.
+    fn defer_operator_if_generic(
+        &mut self,
+        left: &Type,
+        right: &Type,
+        op: &ast::BinaryOperator,
+    ) -> bool {
+        if !self.is_generic_operand(left, right) {
+            return false;
+        }
+        self.current_implicit_reqs.push(ImplicitReq {
+            left: left.clone(),
+            right: right.clone(),
+            op: op.clone(),
+        });
+        true
+    }
+
+    fn store_implicit_reqs(&mut self, key: String) {
+        let reqs = std::mem::take(&mut self.current_implicit_reqs);
+        if !reqs.is_empty() {
+            self.implicit_reqs.insert(key, reqs);
+        }
+    }
+
+    fn params_key(params: &[ast::Parameter]) -> String {
+        params
+            .iter()
+            .map(|p| Type::from_ast(&p.param_type).canonical_key())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn free_fn_key(func: &ast::FunctionItem) -> String {
+        format!(
+            "fn:{}:{}",
+            func.name.name,
+            Self::params_key(&func.parameters)
+        )
+    }
+
+    fn impl_method_key(self_ty: &Type, func: &ast::ImplFunction) -> String {
+        format!(
+            "m:{}:{}:{}",
+            self_ty.canonical_key(),
+            func.name.name,
+            Self::params_key(&func.parameters)
+        )
+    }
+
+    fn binary_operator_symbol(op: &ast::BinaryOperator) -> &'static str {
+        use ast::BinaryOperator::*;
+        match op {
+            Add | AddAssign => "+",
+            Subtract | SubtractAssign => "-",
+            Multiply | MultiplyAssign => "*",
+            Divide | DivideAssign => "/",
+            Modulo | ModuloAssign => "%",
+            Equal => "==",
+            NotEqual => "!=",
+            Less => "<",
+            Greater => ">",
+            LessEqual => "<=",
+            GreaterEqual => ">=",
+            BitwiseAnd => "&",
+            BitwiseOr => "|",
+            BitwiseXor => "^",
+            LeftShift => "<<",
+            RightShift => ">>",
+            LogicalAnd => "&&",
+            LogicalOr => "||",
+            Assign => "=",
+            Range => "..",
+        }
+    }
+
+    /// Enforce recorded implicit guards for one concrete instantiation. The
+    /// substituted operand types must support the operator (builtin or an
+    /// `__<op>` overload), otherwise the call site errors.
+    fn check_implicit_guards(&mut self, key: &str, mapping: &HashMap<String, Type>, span: Span) {
+        let Some(reqs) = self.implicit_reqs.get(key).cloned() else {
+            return;
+        };
+        for req in reqs {
+            let left = req.left.substitute(mapping);
+            let right = req.right.substitute(mapping);
+            if !self.is_concrete_type(&left) || !self.is_concrete_type(&right) {
+                continue;
+            }
+            if self
+                .operator_is_supported(&left, &right, &req.op, span)
+                .is_none()
+            {
+                self.error(
+                    msg::implicit_guard_missing(
+                        Self::binary_operator_symbol(&req.op),
+                        &left,
+                        &right,
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// Whether a binary operator is supported on these (concrete) operand
+    /// types: a builtin numeric/pointer/string path or a `__<op>` overload.
+    /// Mirrors the body-check logic in the binary-expression arms.
+    fn operator_is_supported(
+        &mut self,
+        left: &Type,
+        right: &Type,
+        op: &ast::BinaryOperator,
+        span: Span,
+    ) -> Option<Type> {
+        use ast::BinaryOperator::*;
+        let bool_ty = Type::Primitive(ast::PrimitiveType::Bool);
+        match op {
+            Add | Subtract | Multiply | Divide | Modulo => {
+                if let Some(ptr_ty) = self.pointer_arith_result(left, right, op) {
+                    return Some(ptr_ty);
+                }
+                if self.is_numeric_type(left) && self.is_numeric_type(right) {
+                    return self.common_numeric_type(left, right);
+                }
+                self.operator_overload_probe(left, right, op, span)
+            }
+            Equal | NotEqual | Less | Greater | LessEqual | GreaterEqual => {
+                let char_ty = Type::Primitive(ast::PrimitiveType::Char);
+                let is_byte = |ty: &Type| {
+                    matches!(
+                        ty,
+                        Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::U16)
+                    )
+                };
+                if (left == &char_ty && (right == &char_ty || is_byte(right)))
+                    || (right == &char_ty && is_byte(left))
+                {
+                    return Some(bool_ty);
+                }
+                if self.is_numeric_type(left) && self.is_numeric_type(right) {
+                    return self.common_numeric_type(left, right).map(|_| bool_ty);
+                }
+                if left == right && matches!(left, Type::Pointer { .. } | Type::Reference { .. }) {
+                    return Some(bool_ty);
+                }
+                // str equality/inequality lowers to strcmp.
+                if matches!(op, Equal | NotEqual) && is_string(left) && is_string(right) {
+                    return Some(bool_ty);
+                }
+                self.operator_overload_probe(left, right, op, span)
+            }
+            BitwiseAnd | BitwiseOr | BitwiseXor | LeftShift | RightShift => {
+                if self.is_integer_type(left) && self.is_integer_type(right) {
+                    return Some(left.clone());
+                }
+                self.operator_overload_probe(left, right, op, span)
+            }
+            _ => None,
+        }
+    }
+
+    /// Probe for a `__<op>` overload without emitting errors.
+    fn operator_overload_probe(
+        &mut self,
+        left: &Type,
+        right: &Type,
+        op: &ast::BinaryOperator,
+        span: Span,
+    ) -> Option<Type> {
+        if self.is_primitive_type(left) {
+            return None;
+        }
+        let name = operator_method_name(op)?;
+        self.resolve_method_overload_types(
+            left,
+            name,
+            std::slice::from_ref(right),
+            None,
+            MethodCallStyle::Instance,
+            None,
+            span,
+        )
     }
 
     fn method_call_style(&self, receiver: &ast::Expression) -> MethodCallStyle {

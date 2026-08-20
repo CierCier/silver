@@ -11,7 +11,7 @@ i64 g_drops = 0;
 struct Inner {
     String s;
 }
-impl Drop<Inner> for Inner {
+impl Drop for Inner {
     void drop(Inner* self) {
         g_drops = g_drops + 1;
         if (self.s.data != (u8*)0) {

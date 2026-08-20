@@ -6,10 +6,19 @@
 use crate::lexer::{LexToken, Span, Token};
 use crate::parser::{ParseError, ast};
 
+/// A callback the expression parser invokes when it needs to parse a block
+/// of statements (currently only inside match-arm `{ ... }` bodies).  The
+/// PRT parser supplies its own `parse_block_reduction`; when `None` (legacy
+/// callers / unit tests) the block is emitted with an empty statement list
+/// (preserving the old behaviour).
+type BlockParser<'a> =
+    Option<Box<dyn 'a + FnMut(&[LexToken], usize, usize) -> Result<ast::Block, ParseError>>>;
+
 struct ExprCursor<'a> {
     tokens: &'a [LexToken],
     pos: usize,
     end: usize,
+    block_parser: BlockParser<'a>,
 }
 
 impl<'a> ExprCursor<'a> {
@@ -846,9 +855,14 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                     let block_span = cursor.tokens[block_start]
                         .span
                         .extend_to(&cursor.tokens[close].span);
+                    let statements = if let Some(parse_block) = cursor.block_parser.as_mut() {
+                        parse_block(cursor.tokens, block_start, close + 1)?.statements
+                    } else {
+                        Vec::new()
+                    };
                     ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Block(ast::Block {
-                            statements: Vec::new(),
+                            statements,
                             span: block_span,
                         })),
                         span: block_span,
@@ -1996,15 +2010,21 @@ fn parse_assignment(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
 }
 
 /// Parse the token range `[start, end)` as an expression.
+///
+/// `block_parser` lets the caller (PRT parser) supply a function that parses
+/// a `{ ... }` block of statements, which the expression parser needs when a
+/// match arm body is a block.  Pass `None` for legacy callers.
 pub(crate) fn parse_expression(
     tokens: &[LexToken],
     start: usize,
     end: usize,
+    block_parser: BlockParser<'_>,
 ) -> Result<ast::Expression, ParseError> {
     let mut cursor = ExprCursor {
         tokens,
         pos: start,
         end,
+        block_parser,
     };
     let expr = parse_assignment(&mut cursor)?;
     if cursor.pos != end {

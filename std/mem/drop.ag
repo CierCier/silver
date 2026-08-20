@@ -4,6 +4,6 @@
 /// Types implementing `Drop` must define the `drop` method, which takes a pointer
 /// to the instance and is called automatically by the compiler.
 
-trait Drop<Self> {
+trait Drop {
     void drop(Self* self);
 }

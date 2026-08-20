@@ -49,7 +49,7 @@ struct SseStream {
     bool finished;
 }
 
-impl Drop<SseStream> for SseStream {
+impl Drop for SseStream {
     void drop(SseStream* self) {
         self.line.drop();
         self.stream.close();

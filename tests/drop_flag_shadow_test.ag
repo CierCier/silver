@@ -10,7 +10,7 @@ i64 g_drops = 0;
 struct T {
     i64 v;
 }
-impl Drop<T> for T {
+impl Drop for T {
     void drop(T* self) {
         g_drops = g_drops + 1;
     }

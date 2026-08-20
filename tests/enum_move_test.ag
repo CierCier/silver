@@ -12,7 +12,7 @@ struct Inner {
     String s;
     i64 v;
 }
-impl Drop<Inner> for Inner {
+impl Drop for Inner {
     void drop(Inner* self) {
         g_drops = g_drops + 1;
         if (self.s.data != (u8*)0) {

@@ -557,7 +557,7 @@ impl Scanner {
     }
 }
 
-impl Drop<Scanner> for Scanner {
+impl Drop for Scanner {
     /// Free the internal buffer.
     void drop(Scanner* self) {
         if (self.buf != (u8*)0) {

@@ -129,7 +129,7 @@ impl BinaryHeap<T> {
     }
 }
 
-impl<T> Drop<BinaryHeap<T>> for BinaryHeap<T> {
+impl<T> Drop for BinaryHeap<T> {
     /// Frees the backing buffer.
     void drop(BinaryHeap<T>* self) {
         if (self.data != (T*)0) {

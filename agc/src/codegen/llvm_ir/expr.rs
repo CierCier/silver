@@ -2446,7 +2446,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .and_then(|m| m.get(&variant.name))
                                 .cloned()
                                 .unwrap_or_default();
-                            let substitutions: HashMap<String, ast::Type> = if let Some(ty) = self.resolve_receiver_type(expression)
+                            let substitutions: HashMap<String, ast::Type> = if let Some(ty) =
+                                self.resolve_receiver_type(expression)
                                 && let Some(named) = Self::extract_named_type(&ty)
                                 && let Some(params) = self.struct_generics.get(&enum_name)
                                 && let Some(args) = &named.generics
@@ -2566,7 +2567,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 },
                                             );
                                         }
-                                        self.register_drop_flag(&binding.name, &concrete_pt, alloca)?;
+                                        self.register_drop_flag(
+                                            &binding.name,
+                                            &concrete_pt,
+                                            alloca,
+                                        )?;
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
                                         // leaves the matched enum (no dangling
@@ -2737,7 +2742,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if let Some(flag) = var.drop_flag {
                         self.builder
                             .build_store(flag, self.context.bool_type().const_int(0, false))
-                            .map_err(|e| CodegenError::new(format!("clear match result drop flag: {e}")))?;
+                            .map_err(|e| {
+                                CodegenError::new(format!("clear match result drop flag: {e}"))
+                            })?;
                     }
                     self.clear_field_flags(&ident.name)?;
                 }

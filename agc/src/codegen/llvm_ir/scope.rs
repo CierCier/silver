@@ -404,14 +404,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// Clear per-field drop flag for a specific field path (or any subfield of it).
-    pub(crate) fn clear_field_flags_for_path(&mut self, root_name: &str, path: &str) -> CodegenResult<()> {
+    pub(crate) fn clear_field_flags_for_path(
+        &mut self,
+        root_name: &str,
+        path: &str,
+    ) -> CodegenResult<()> {
         if let Some(var) = self.lookup_variable(root_name) {
             let prefix = format!("{path}.");
             for (p, flag) in &var.field_flags {
                 if *p == path || p.starts_with(&prefix) {
                     self.builder
                         .build_store(*flag, self.context.bool_type().const_int(0, false))
-                        .map_err(|e| CodegenError::new(format!("failed to clear field flag: {e}")))?;
+                        .map_err(|e| {
+                            CodegenError::new(format!("failed to clear field flag: {e}"))
+                        })?;
                 }
             }
         }
@@ -566,7 +572,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .get(enum_name)
             .cloned()
             .unwrap_or_default();
-        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+            self.struct_generics.get(enum_name)
             && let Some(args) = &named.generics
             && params.len() == args.len()
         {
@@ -688,7 +695,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if !self.enum_payload_layouts.contains_key(enum_name) {
             return Ok(());
         }
-        let substitutions: HashMap<String, ast::Type> = if let Some(params) = self.struct_generics.get(enum_name)
+        let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+            self.struct_generics.get(enum_name)
             && let Some(args) = &named.generics
             && params.len() == args.len()
         {
@@ -708,7 +716,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         } else {
                             Self::substitute_generic_type(pt, &substitutions)
                         };
-                        self.get_drop_function_name(&concrete_pt).unwrap_or(None).is_some()
+                        self.get_drop_function_name(&concrete_pt)
+                            .unwrap_or(None)
+                            .is_some()
                     })
                 })
             })
@@ -753,9 +763,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<()> {
         let drop_fn_name = self.get_drop_function_name(ty)?;
         if let Some(drop_fn_name) = drop_fn_name {
-            let function = self
-                .current_fn
-                .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
+            let function = self.current_fn.ok_or_else(|| {
+                CodegenError::new("no active function for destructor".to_string())
+            })?;
             let flag_alloca = self.create_entry_alloca(
                 function,
                 &format!("{name}.drop"),
@@ -785,9 +795,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         } else {
             // Struct without its own Drop impl: register field drop cascade if any fields have Drop.
-            let function = self
-                .current_fn
-                .ok_or_else(|| CodegenError::new("no active function for destructor".to_string()))?;
+            let function = self.current_fn.ok_or_else(|| {
+                CodegenError::new("no active function for destructor".to_string())
+            })?;
             let dummy_flag = self.create_entry_alloca(
                 function,
                 &format!("{name}.field_guard"),
@@ -825,7 +835,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(Vec::new());
         }
         let named_key = Self::named_type_key(&named);
-        if !self.struct_fields.contains_key(base_name) && !self.struct_fields.contains_key(&named_key) {
+        if !self.struct_fields.contains_key(base_name)
+            && !self.struct_fields.contains_key(&named_key)
+        {
             return Ok(Vec::new());
         }
         let _ = self.ensure_named_struct_type(&named)?;

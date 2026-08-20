@@ -63,7 +63,7 @@ impl Rc<T> {
     }
 }
 
-impl<T> Drop<Rc<T>> for Rc<T> {
+impl<T> Drop for Rc<T> {
     /// Drop one handle — decrements the reference count.
     /// Frees the value and count when it reaches zero.
     void drop(Rc<T>* self) {

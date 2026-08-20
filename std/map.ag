@@ -253,7 +253,7 @@ impl HashMap<K, V> {
     }
 }
 
-impl<K, V> Drop<HashMap<K, V>> for HashMap<K, V> {
+impl<K, V> Drop for HashMap<K, V> {
     /// Free all memory. Does NOT call per-element destructors.
     void drop(HashMap<K, V>* self) {
         if (self.state != (i64*)0) {

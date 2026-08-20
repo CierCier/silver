@@ -16,7 +16,7 @@ impl Tracked {
         return move t;
     }
 }
-impl Drop<Tracked> for Tracked {
+impl Drop for Tracked {
     void drop(Tracked* self) {
         g_drops = g_drops + 1;
     }
@@ -28,7 +28,7 @@ struct HasField {
 }
 
 // The compiler cascades field drops after the struct's own drop() returns.
-impl Drop<HasField> for HasField {
+impl Drop for HasField {
     void drop(HasField* self) {
     }
 }

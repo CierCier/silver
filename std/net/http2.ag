@@ -128,7 +128,7 @@ void h2_free_response(H2Response* r) {
 /// the HPACK dynamic table (same owning-type convention as the rest of
 /// std/net). Multiplexed responses live in c.streams[*].resp and are owned
 /// by the connection — callers read them, never free them by hand.
-impl Drop<H2Connection> for H2Connection {
+impl Drop for H2Connection {
     void drop(H2Connection* self) {
         i64 i = 0;
         while (i < H2_MAX_STREAMS) {

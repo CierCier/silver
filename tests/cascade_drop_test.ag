@@ -16,7 +16,7 @@ impl Inner {
     }
 }
 
-impl Drop<Inner> for Inner {
+impl Drop for Inner {
     void drop(Inner* self) {
         inner_total = inner_total + 1;
     }
@@ -36,7 +36,7 @@ impl Outer {
     }
 }
 
-impl Drop<Outer> for Outer {
+impl Drop for Outer {
     void drop(Outer* self) {
         outer_drop_count = outer_drop_count + 1;
         // No manual field drops — cascading handles them automatically.

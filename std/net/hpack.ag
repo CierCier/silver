@@ -264,7 +264,7 @@ void hpack_clear_table(HpackDecoder* d) {
 /// RAII for a standalone HpackDecoder: the dynamic table is released when
 /// the decoder goes out of scope (embedded in H2Connection, whose own Drop
 /// clears it first; the double clear is a no-op).
-impl Drop<HpackDecoder> for HpackDecoder {
+impl Drop for HpackDecoder {
     void drop(HpackDecoder* self) {
         hpack_clear_table(self);
     }

@@ -347,6 +347,10 @@ fn collect_item_instantiations(
         }
         ast::ItemKind::Trait(trait_item) => {
             push_type_params(scopes, trait_item.generics.as_ref());
+            // `Self` is the implicit first type parameter of every trait.
+            if let Some(scope) = scopes.last_mut() {
+                scope.insert("Self".to_string());
+            }
             // Register associated type names so they're treated as type params
             for item in &trait_item.items {
                 if let ast::TraitItemKind::AssociatedType(assoc) = item

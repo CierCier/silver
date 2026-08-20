@@ -210,7 +210,7 @@ struct WsFrame {
     Bytes payload; // owned; caller frees
 }
 
-impl Drop<WsFrame> for WsFrame {
+impl Drop for WsFrame {
     void drop(WsFrame* self) {
         self.payload.drop();
     }
@@ -245,7 +245,7 @@ struct WebSocket {
     Bytes frag_buf;
 }
 
-impl Drop<WebSocket> for WebSocket {
+impl Drop for WebSocket {
     void drop(WebSocket* self) {
         self.frag_buf.drop();
         self.conn.close();

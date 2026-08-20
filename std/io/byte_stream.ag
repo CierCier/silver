@@ -113,7 +113,7 @@ impl ByteStream {
     }
 }
 
-impl Drop<ByteStream> for ByteStream {
+impl Drop for ByteStream {
     void drop(ByteStream* self) {
         if (self.buf != (u8*)0) {
             free(self.buf);

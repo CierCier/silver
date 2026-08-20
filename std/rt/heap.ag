@@ -265,7 +265,7 @@ impl Object {
     }
 }
 
-impl Drop<Object> for Object {
+impl Drop for Object {
     /// Release owned payload (string buffer and value vector).
     /// RtValue elements own no resources, so dropping the Vec buffer
     /// is sufficient.
@@ -474,7 +474,7 @@ impl Heap {
     }
 }
 
-impl Drop<Heap> for Heap {
+impl Drop for Heap {
     /// Release every live object, then the backing vectors.
     void drop(Heap* self) {
         i64 i = 0;

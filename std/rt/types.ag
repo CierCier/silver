@@ -101,7 +101,7 @@ impl TypeResult {
     }
 }
 
-impl Drop<TypeResult> for TypeResult {
+impl Drop for TypeResult {
     void drop(TypeResult* self) {
         self.msg.drop();
     }
@@ -639,7 +639,7 @@ impl TypeRegistry {
     }
 }
 
-impl Drop<TypeRegistry> for TypeRegistry {
+impl Drop for TypeRegistry {
     /// Frees every interned Type (names, fields, variants, payloads), the
     /// name/interning maps, and the owned fn-cache key strings.  Idempotent.
     void drop(TypeRegistry* self) {

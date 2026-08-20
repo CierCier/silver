@@ -115,7 +115,7 @@ struct Field {
     TypeId ty;
 }
 
-impl Drop<Field> for Field {
+impl Drop for Field {
     void drop(Field* self) {
         self.name.drop();
     }
@@ -133,7 +133,7 @@ impl StructType {
     }
 }
 
-impl Drop<StructType> for StructType {
+impl Drop for StructType {
     void drop(StructType* self) {
         i64 i = 0;
         while (i < self.fields.len()) {
@@ -151,7 +151,7 @@ struct EnumVariant {
     Vec<TypeId> payload;
 }
 
-impl Drop<EnumVariant> for EnumVariant {
+impl Drop for EnumVariant {
     void drop(EnumVariant* self) {
         self.name.drop();
         self.payload.drop();
@@ -170,7 +170,7 @@ impl EnumType {
     }
 }
 
-impl Drop<EnumType> for EnumType {
+impl Drop for EnumType {
     void drop(EnumType* self) {
         i64 i = 0;
         while (i < self.variants.len()) {
@@ -196,7 +196,7 @@ impl FunctionType {
     }
 }
 
-impl Drop<FunctionType> for FunctionType {
+impl Drop for FunctionType {
     void drop(FunctionType* self) {
         self.params.drop();
     }
@@ -236,7 +236,7 @@ impl Type {
     }
 }
 
-impl Drop<Type> for Type {
+impl Drop for Type {
     void drop(Type* self) {
         self.name.drop();
         self.struct_data.drop();

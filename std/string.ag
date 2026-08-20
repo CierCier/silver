@@ -465,7 +465,7 @@ impl String {
     }
 }
 
-impl Drop<String> for String {
+impl Drop for String {
     void drop(String* self) {
         if (self.data != (u8*)0) {
             free(self.data);
@@ -475,7 +475,7 @@ impl Drop<String> for String {
         self.capacity = 0;
     }
 }
-impl IndexedAccess<String> for String {
+impl IndexedAccess for String {
     type Item = u8;
     u8 __index_get(String* self, i64 index) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
@@ -490,7 +490,7 @@ impl IndexedAccess<String> for String {
 // String+String and String+str are overloads of the same `__add` name; the
 // compiler resolves them by argument type (see codegen overload handling).
 // Both take the by-value receiver as their first parameter.
-impl Add<String, String> for String {
+impl Add<String> for String {
     String __add(String self, String other) {
         i64 total = self.len + other.len;
         String result = String.with_capacity(total + 1); // +1 for NUL
@@ -544,7 +544,7 @@ struct SplitIter {
     bool has_saved;
 }
 
-impl Iterator<SplitIter> for SplitIter {
+impl Iterator for SplitIter {
     type Item = str;
     Optional<str> next(SplitIter* self) {
         if (self.data == (u8*)0) {

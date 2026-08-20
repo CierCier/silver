@@ -315,6 +315,9 @@ impl TraitRegistry {
                     subst.insert(name.clone(), Type::from_ast(ty));
                 }
             }
+            // `Self` is the implicit first trait type parameter; bind it to
+            // the impl's self type so trait signatures using `Self` unify.
+            subst.insert("Self".to_string(), Type::from_ast(&impl_item.self_type));
 
             for (param_name, bounds) in &trait_def.type_param_bounds {
                 let Some(arg_type) = subst.get(param_name) else {
@@ -362,6 +365,9 @@ impl TraitRegistry {
                     subst.insert(name.clone(), Type::from_ast(ty));
                 }
             }
+            // `Self` is the implicit first trait type parameter; bind it to
+            // the impl's self type so trait signatures using `Self` unify.
+            subst.insert("Self".to_string(), Type::from_ast(&impl_item.self_type));
 
             let mut impl_methods: HashMap<String, ast::ImplFunction> = HashMap::default();
             let mut impl_assoc: HashMap<String, ast::ImplAssociatedType> = HashMap::default();

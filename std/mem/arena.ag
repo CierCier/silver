@@ -41,7 +41,7 @@ impl Arena {
     }
 }
 
-impl Drop<Arena> for Arena {
+impl Drop for Arena {
     /// Free the entire arena memory.
     void drop(Arena* self) {
         if (self.base != (u8*)0) {

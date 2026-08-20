@@ -241,7 +241,8 @@ impl BorrowChecker {
                         ref_fields.insert(f.name.name.clone());
                     }
                 }
-                self.struct_ref_fields.insert(st.name.name.clone(), ref_fields);
+                self.struct_ref_fields
+                    .insert(st.name.name.clone(), ref_fields);
             }
         }
 
@@ -279,7 +280,8 @@ impl BorrowChecker {
         for param in parameters {
             if let ast::TypeKind::Named(named) = param.param_type.kind.as_ref() {
                 if let Some(last) = named.path.last() {
-                    self.var_types.insert(param.name.name.clone(), last.name.clone());
+                    self.var_types
+                        .insert(param.name.name.clone(), last.name.clone());
                 }
             }
             match param.param_type.kind.as_ref() {
@@ -562,7 +564,8 @@ impl BorrowChecker {
                 if let Some(ref init) = let_stmt.initializer {
                     if let Some(ref name) = name {
                         // If initializer is TypeName.new(...) or TypeName { ... }, record struct type
-                        if let ast::ExpressionKind::MethodCall { receiver, .. } = init.kind.as_ref() {
+                        if let ast::ExpressionKind::MethodCall { receiver, .. } = init.kind.as_ref()
+                        {
                             if let ast::ExpressionKind::TypeName(ty) = receiver.kind.as_ref() {
                                 if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
                                     if let Some(last) = named.path.last() {
@@ -570,7 +573,9 @@ impl BorrowChecker {
                                     }
                                 }
                             }
-                        } else if let ast::ExpressionKind::StructLiteral { path, .. } = init.kind.as_ref() {
+                        } else if let ast::ExpressionKind::StructLiteral { path, .. } =
+                            init.kind.as_ref()
+                        {
                             if let Some(last) = path.last() {
                                 self.var_types.insert(name.clone(), last.name.clone());
                             }
@@ -628,7 +633,11 @@ impl BorrowChecker {
                             init.kind.as_ref()
                         {
                             for f in fields {
-                                self.check_aggregate_field_borrow(name, Some(f.name.name.as_str()), &f.value);
+                                self.check_aggregate_field_borrow(
+                                    name,
+                                    Some(f.name.name.as_str()),
+                                    &f.value,
+                                );
                             }
                         } else if let ast::ExpressionKind::Initializer { items } =
                             init.kind.as_ref()
@@ -636,7 +645,9 @@ impl BorrowChecker {
                             for item in items {
                                 let (val, field_name) = match item {
                                     ast::InitializerItem::Positional(e) => (e, None),
-                                    ast::InitializerItem::Field { name, value } => (value, Some(name.name.as_str())),
+                                    ast::InitializerItem::Field { name, value } => {
+                                        (value, Some(name.name.as_str()))
+                                    }
                                     ast::InitializerItem::Index { value, .. } => (value, None),
                                 };
                                 self.check_aggregate_field_borrow(name, field_name, val);
@@ -981,6 +992,9 @@ impl BorrowChecker {
                     self.check_expr(&arm.body);
                     self.pop_scope();
                 }
+            }
+            ast::ExpressionKind::Block(block) => {
+                self.check_block(block);
             }
             _ => {}
         }
@@ -1446,5 +1460,34 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn rejects_mutation_in_match_arm_while_borrowed() {
+        // Regression: match arm { ... } bodies must be borrow-checked.
+        // Previously the parser produced Expr::Block with an empty statement
+        // list, so all statements inside match arm braces were silently
+        // discarded — including borrow violations.
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void test() {
+                Point pt;
+                pt.x = 1;
+                pt.y = 2;
+                &mut Point r = &mut pt;
+                i64 v = 0;
+                match v {
+                    0 : { pt.x = 100; }
+                    _ : { v = r.x; }
+                };
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("cannot assign to 'pt.x' because it is borrowed")),
+            "expected borrow conflict in match arm, got: {errors:?}"
+        );
     }
 }

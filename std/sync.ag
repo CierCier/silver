@@ -162,7 +162,7 @@ impl<T> Guard<T> {
     }
 }
 
-impl<T> Drop<Guard<T>> for Guard<T> {
+impl<T> Drop for Guard<T> {
     /// Release the lock.  Runs automatically at scope exit / early return.
     void drop(Guard<T>* self) {
         self.owner.mu.unlock();

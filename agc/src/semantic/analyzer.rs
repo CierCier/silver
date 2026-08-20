@@ -278,6 +278,10 @@ impl Analyzer {
             ast::ItemKind::Trait(trait_item) => {
                 self.push_type_params(trait_item.generics.as_ref());
                 self.check_generics_bounds(trait_item.generics.as_ref());
+                // `Self` is the implicit first type parameter of every trait.
+                if let Some(scope) = self.type_params.last_mut() {
+                    scope.insert("Self".to_string());
+                }
                 // Register associated type names so method signatures can reference them
                 for item in &trait_item.items {
                     if let ast::TraitItemKind::AssociatedType(assoc) = item
@@ -980,7 +984,10 @@ impl Analyzer {
             .filter(|(_, k)| {
                 matches!(
                     **k,
-                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
+                    SymbolKind::Struct
+                        | SymbolKind::Enum
+                        | SymbolKind::Trait
+                        | SymbolKind::TypeAlias
                 )
             })
             .map(|(s, _)| s.as_str())

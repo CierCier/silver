@@ -14,7 +14,7 @@ struct Slice<T> {
 }
 
 /// Indexed access implementation for Slice.
-impl<T> IndexedAccess<Slice<T>> for Slice<T> {
+impl<T> IndexedAccess for Slice<T> {
     type Item = T;
 
     /// Returns the element at `index`, aborting if out of bounds.

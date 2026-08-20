@@ -101,7 +101,7 @@ impl MethodResult {
     }
 }
 
-impl Drop<MethodResult> for MethodResult {
+impl Drop for MethodResult {
     void drop(MethodResult* self) {
         self.msg.drop();
     }
@@ -395,7 +395,7 @@ impl MethodRegistry {
     }
 }
 
-impl Drop<MethodRegistry> for MethodRegistry {
+impl Drop for MethodRegistry {
     /// Release the tables and every interned name.  The borrowed
     /// TypeRegistry/Heap are NOT referenced (the caller owns them).  Idempotent.
     void drop(MethodRegistry* self) {

@@ -910,7 +910,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                     crate::module_artifact::ExportKind::Trait => {}
-                    crate::module_artifact::ExportKind::Constant | crate::module_artifact::ExportKind::Global => {
+                    crate::module_artifact::ExportKind::Constant
+                    | crate::module_artifact::ExportKind::Global => {
                         let link_name = export
                             .link_name
                             .clone()
@@ -922,7 +923,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .transpose()
                             .map_err(CodegenError::new)?;
                         if let Some(ast_ty) = ty_ast {
-                            self.extern_globals.insert(export.name.clone(), ast_ty.clone());
+                            self.extern_globals
+                                .insert(export.name.clone(), ast_ty.clone());
                             let llvm_ty = self.lower_basic_type(&ast_ty)?;
                             if self.module.get_global(&link_name).is_none() {
                                 let global = self.module.add_global(

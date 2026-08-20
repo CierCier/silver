@@ -7,7 +7,7 @@ struct Pair {
     i64 second;
 }
 
-impl Compare<Pair> for Pair {
+impl Compare for Pair {
     i32 compare(Pair* self, Pair* other) {
         if (self.first < other.first) { return -1; }
         if (self.first > other.first) { return 1; }

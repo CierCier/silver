@@ -335,9 +335,11 @@ impl MoveChecker {
                 let owner = Facts::owner_key(ty);
                 (named.path.len() == 1 && named.path[0].name == "Task")
                     || self.facts.drop_owners.contains(&owner)
-                    || self.facts.struct_fields.get(&owner).is_some_and(|fields| {
-                        fields.iter().any(|(_, fty)| self.is_tracked(fty))
-                    })
+                    || self
+                        .facts
+                        .struct_fields
+                        .get(&owner)
+                        .is_some_and(|fields| fields.iter().any(|(_, fty)| self.is_tracked(fty)))
             }
             _ => self.facts.drop_owners.contains(&Facts::owner_key(ty)),
         }
@@ -572,7 +574,9 @@ impl MoveChecker {
                                     .move_reason
                                     .unwrap_or(msg::note_value_explicitly_moved());
                                 self.error_with_note(
-                                    format!("cannot move already partially moved value '{root_name}'"),
+                                    format!(
+                                        "cannot move already partially moved value '{root_name}'"
+                                    ),
                                     inner.span,
                                     var.move_span,
                                     reason,
@@ -601,7 +605,11 @@ impl MoveChecker {
                                     reason,
                                 );
                             } else {
-                                var.mark_field_moved(&path, inner.span, msg::note_value_explicitly_moved());
+                                var.mark_field_moved(
+                                    &path,
+                                    inner.span,
+                                    msg::note_value_explicitly_moved(),
+                                );
                             }
                         }
                     }
@@ -618,10 +626,9 @@ impl MoveChecker {
                     || match receiver.kind.as_ref() {
                         ast::ExpressionKind::Identifier(ident) => {
                             var_types.get(&ident.name).is_some_and(|ty| {
-                                self.facts.value_receivers.contains(&(
-                                    Facts::owner_key(ty),
-                                    method.name.clone(),
-                                ))
+                                self.facts
+                                    .value_receivers
+                                    .contains(&(Facts::owner_key(ty), method.name.clone()))
                             })
                         }
                         _ => false,
@@ -636,7 +643,11 @@ impl MoveChecker {
                                 var.mark_moved(receiver.span, msg::note_value_consumed_by_method());
                             }
                         } else if let Some(var) = state.get_mut(&root_name) {
-                            var.mark_field_moved(&path, receiver.span, msg::note_value_consumed_by_method());
+                            var.mark_field_moved(
+                                &path,
+                                receiver.span,
+                                msg::note_value_consumed_by_method(),
+                            );
                         }
                     }
                 } else {
@@ -655,9 +666,9 @@ impl MoveChecker {
                     _ => None,
                 };
                 for (i, arg) in arguments.iter().enumerate() {
-                    let is_val_arg = fn_name.as_ref().is_some_and(|name| {
-                        self.facts.value_args.contains(&(name.clone(), i))
-                    });
+                    let is_val_arg = fn_name
+                        .as_ref()
+                        .is_some_and(|name| self.facts.value_args.contains(&(name.clone(), i)));
                     if is_val_arg
                         && let Some((root_name, path)) = expr_root_and_path(arg)
                         && state.contains_key(&root_name)
@@ -668,7 +679,11 @@ impl MoveChecker {
                                 var.mark_moved(arg.span, msg::note_value_moved_into_param());
                             }
                         } else if let Some(var) = state.get_mut(&root_name) {
-                            var.mark_field_moved(&path, arg.span, msg::note_value_moved_into_param());
+                            var.mark_field_moved(
+                                &path,
+                                arg.span,
+                                msg::note_value_moved_into_param(),
+                            );
                         }
                     } else {
                         self.check_expr(arg, state, scopes, var_types);
@@ -702,7 +717,10 @@ impl MoveChecker {
                                         );
                                     }
                                     if let Some(var) = state.get_mut(&root_name) {
-                                        var.mark_moved(arg.span, msg::note_value_moved_into_launch());
+                                        var.mark_moved(
+                                            arg.span,
+                                            msg::note_value_moved_into_launch(),
+                                        );
                                     }
                                 } else {
                                     if let Some(var) = state.get(&root_name)
@@ -716,7 +734,11 @@ impl MoveChecker {
                                         );
                                     }
                                     if let Some(var) = state.get_mut(&root_name) {
-                                        var.mark_field_moved(&path, arg.span, msg::note_value_moved_into_launch());
+                                        var.mark_field_moved(
+                                            &path,
+                                            arg.span,
+                                            msg::note_value_moved_into_launch(),
+                                        );
                                     }
                                 }
                             } else {
@@ -1175,8 +1197,7 @@ mod tests {
     fn field_assignment_on_moved_value_errors() {
         let errs = errors("void g() { T t; move t; t.p = (i32*)0; }");
         assert!(
-            errs.iter()
-                .any(|m| m.contains("use of moved value 't'")),
+            errs.iter().any(|m| m.contains("use of moved value 't'")),
             "expected use-of-moved error for field write, got {errs:?}"
         );
     }
@@ -1185,8 +1206,7 @@ mod tests {
     fn use_after_second_move_errors() {
         let errs = errors("void g() { T t; move t; t = T.new(); move t; (i32)t.p; }");
         assert!(
-            errs.iter()
-                .any(|m| m.contains("use of moved value 't'")),
+            errs.iter().any(|m| m.contains("use of moved value 't'")),
             "expected use-of-moved error, got {errs:?}"
         );
     }
@@ -1259,8 +1279,7 @@ mod tests {
              }",
         );
         assert!(
-            errs.iter()
-                .any(|m| m.contains("partially moved value 'p'")),
+            errs.iter().any(|m| m.contains("partially moved value 'p'")),
             "expected partially moved error, got {errs:?}"
         );
     }

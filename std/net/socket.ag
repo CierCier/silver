@@ -73,7 +73,7 @@ impl Socket {
     }
 }
 
-impl Drop<Socket> for Socket {
+impl Drop for Socket {
     void drop(Socket* self) {
         if (self.is_open && self.fd >= 0) {
             try_close(self.fd);
@@ -163,7 +163,7 @@ impl UdpSocket {
     }
 }
 
-impl Drop<UdpSocket> for UdpSocket {
+impl Drop for UdpSocket {
     void drop(UdpSocket* self) {
         self.sock.drop();
     }

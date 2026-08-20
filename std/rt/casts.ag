@@ -276,7 +276,7 @@ impl CastResult {
     }
 }
 
-impl Drop<CastResult> for CastResult {
+impl Drop for CastResult {
     void drop(CastResult* self) {
         self.msg.drop();
     }
@@ -628,7 +628,7 @@ impl CastRegistry {
     }
 }
 
-impl Drop<CastRegistry> for CastRegistry {
+impl Drop for CastRegistry {
     void drop(CastRegistry* self) {
         self.by_type.drop();
     }

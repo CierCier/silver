@@ -279,6 +279,11 @@ pub fn macro_expected_format_args(name: &str, expected: usize, got: usize) -> St
 pub fn invalid_postfix_operator() -> &'static str {
     "invalid postfix operator"
 }
+pub fn implicit_guard_missing(symbol: &str, left: &impl Display, right: &impl Display) -> String {
+    format!(
+        "generic call requires '{left} {symbol} {right}', but no overload exists for that operator"
+    )
+}
 pub fn invalid_cast(from: &impl Display, to: &impl Display) -> String {
     format!("invalid cast: {from} -> {to}")
 }

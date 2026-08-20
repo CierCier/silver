@@ -110,7 +110,7 @@ impl Bytes {
     }
 }
 
-impl Drop<Bytes> for Bytes {
+impl Drop for Bytes {
     void drop(Bytes* self) {
         if (self.data != (u8*)0) {
             free(self.data);
@@ -121,7 +121,7 @@ impl Drop<Bytes> for Bytes {
     }
 }
 
-impl IndexedAccess<Bytes> for Bytes {
+impl IndexedAccess for Bytes {
     type Item = u8;
     u8 __index_get(Bytes* self, i64 index) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }

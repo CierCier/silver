@@ -73,7 +73,7 @@ impl Runtime {
     }
 }
 
-impl Drop<Runtime> for Runtime {
+impl Drop for Runtime {
     void drop(Runtime* self) {
         self.methods.drop();
         self.casts.drop();

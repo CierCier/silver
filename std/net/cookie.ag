@@ -184,7 +184,7 @@ impl Cookie {
     }
 }
 
-impl Drop<Cookie> for Cookie {
+impl Drop for Cookie {
     void drop(Cookie* self) {
         self.name.drop();
         self.value.drop();
@@ -663,7 +663,7 @@ impl CookieJar {
     }
 }
 
-impl Drop<CookieJar> for CookieJar {
+impl Drop for CookieJar {
     // Idempotent: the compiler may also register a field-drop for the inner
     // Vec after this runs, so len is cleared and Vec.drop nulls the buffer
     // to make a second call a no-op (Cookie.drop is itself guarded).

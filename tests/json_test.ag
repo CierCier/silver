@@ -5,7 +5,7 @@ struct User {
     i32 id;
     str name;
 }
-impl ToJson<User> for User {
+impl ToJson for User {
     void to_json(User* self, JsonWriter* out) {
         out.begin_object();
         out.field("id");

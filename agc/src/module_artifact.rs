@@ -290,13 +290,14 @@ impl ModuleArtifact {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        let has_field_tags = if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7 || magic == MODULE_MAGIC_V6 {
-            true
-        } else if magic == MODULE_MAGIC_V2 {
-            false
-        } else {
-            return Err("invalid module interface header".to_string());
-        };
+        let has_field_tags =
+            if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7 || magic == MODULE_MAGIC_V6 {
+                true
+            } else if magic == MODULE_MAGIC_V2 {
+                false
+            } else {
+                return Err("invalid module interface header".to_string());
+            };
         let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7;
         let has_constants_and_globals = magic == MODULE_MAGIC;
         let module_name = read_string(bytes, &mut cursor)?;

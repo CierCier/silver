@@ -154,7 +154,7 @@ impl TcpStream {
     }
 }
 
-impl Drop<TcpStream> for TcpStream {
+impl Drop for TcpStream {
     void drop(TcpStream* self) {
         self.sock.drop();
     }
@@ -230,7 +230,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
     }
 }
 
-impl Drop<TcpListener> for TcpListener {
+impl Drop for TcpListener {
     void drop(TcpListener* self) {
         self.sock.drop();
     }

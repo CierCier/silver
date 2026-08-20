@@ -151,7 +151,7 @@ impl Vec<T> {
     }
 }
 
-impl<T> Drop<Vec<T>> for Vec<T> {
+impl<T> Drop for Vec<T> {
     /// Frees the backing buffer.  Does NOT call per-element destructors
     /// (the type system currently does not iterate elements on drop).
     void drop(Vec<T>* self) {
@@ -163,7 +163,7 @@ impl<T> Drop<Vec<T>> for Vec<T> {
         self.cap = 0;
     }
 }
-impl<T> IndexedAccess<Vec<T>> for Vec<T> {
+impl<T> IndexedAccess for Vec<T> {
     type Item = T;
     T __index_get(Vec<T>* self, i64 index) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
@@ -191,7 +191,7 @@ struct VecIter<T> {
     i64 idx;
 }
 
-impl<T> Drop<VecIter<T>> for VecIter<T> {
+impl<T> Drop for VecIter<T> {
     void drop(VecIter<T>* self) {
         if (self.data != (T*)0) {
             free(self.data);
@@ -218,7 +218,7 @@ impl<T> Vec<T> {
     }
 }
 
-impl<T> Iterator<VecIter<T>> for VecIter<T> {
+impl<T> Iterator for VecIter<T> {
     type Item = T;
     /// Returns the next element in the iteration sequence, or an empty Optional when done.
     Optional<T> next(VecIter<T>* self) {

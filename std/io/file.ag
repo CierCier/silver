@@ -214,7 +214,7 @@ impl BufWriter {
 
 }
 
-impl Drop<BufWriter> for BufWriter {
+impl Drop for BufWriter {
     /// Drop: flush remaining data, then free the buffer.
     void drop(BufWriter* self) {
         self.flush();
@@ -581,7 +581,7 @@ impl File {
     }
 }
 
-impl Drop<File> for File {
+impl Drop for File {
     void drop(File* self) {
         self.close();
     }

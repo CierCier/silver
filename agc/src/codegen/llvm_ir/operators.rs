@@ -514,6 +514,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if let Some(val) = result {
                         return Ok(val);
                     }
+                    return Err(CodegenError::with_span(
+                        format!("operator '{method_name}' is not implemented for struct type"),
+                        whole_expr.span,
+                    ));
                 }
                 let mut lhs = self.emit_expression_value(left)?;
                 let mut rhs = self.emit_expression_value(right)?;

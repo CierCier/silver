@@ -522,7 +522,10 @@ impl PRT_Parser {
         }
         if matches!(token, Token::BitwiseAnd) {
             if let Some((_, after_type)) = self.parse_type_prefix(tokens, start, end) {
-                return matches!(tokens.get(after_type).map(|t| &t.kind), Some(Token::Identifier(_)));
+                return matches!(
+                    tokens.get(after_type).map(|t| &t.kind),
+                    Some(Token::Identifier(_))
+                );
             }
             return false;
         }
@@ -911,16 +914,17 @@ impl PRT_Parser {
         // Reference types: `&T` / `&mut T` / `&'a T` / `&'a mut T`. Nested references recurse.
         if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
             cursor += 1;
-            let lifetime = if let Some(Token::Lifetime(lt_name)) = tokens.get(cursor).map(|t| &t.kind) {
-                let lt_span = tokens[cursor].span;
-                cursor += 1;
-                Some(ast::Lifetime {
-                    name: lt_name.clone(),
-                    span: lt_span,
-                })
-            } else {
-                None
-            };
+            let lifetime =
+                if let Some(Token::Lifetime(lt_name)) = tokens.get(cursor).map(|t| &t.kind) {
+                    let lt_span = tokens[cursor].span;
+                    cursor += 1;
+                    Some(ast::Lifetime {
+                        name: lt_name.clone(),
+                        span: lt_span,
+                    })
+                } else {
+                    None
+                };
             let is_mutable = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Mut)) {
                 cursor += 1;
                 true
@@ -1820,12 +1824,18 @@ impl PRT_Parser {
     }
 
     fn parse_expression_reduction(
-        &self,
+        &mut self,
         tokens: &[LexToken],
         start: usize,
         end: usize,
     ) -> Result<ast::Expression, ParseError> {
-        crate::parser::expr_parser::parse_expression(tokens, start, end)
+        // Bridge to the expression parser, supplying our block parser so that
+        // match arm `{ ... }` bodies get their statements parsed instead of
+        // being silently dropped.
+        let block_parser: Box<
+            dyn FnMut(&[LexToken], usize, usize) -> Result<ast::Block, ParseError>,
+        > = Box::new(|toks, s, e| self.parse_block_reduction(toks, s, e));
+        crate::parser::expr_parser::parse_expression(tokens, start, end, Some(block_parser))
     }
 
     fn parse_statement_reduction(
@@ -3431,6 +3441,22 @@ impl PRT_Parser {
         let (mut generics, next) = self.parse_generics_prefix(tokens, cursor, end)?;
         cursor = next;
 
+        // `Self` is implicit in trait declarations — the first (unnamed) type
+        // parameter. A declared `Self` param is the old explicit form; reject
+        // it so the migration to implicit Self is forced and unambiguous.
+        if let Some(generics) = &generics {
+            for param in generics.params.iter() {
+                if let ast::GenericParam::Type(type_param) = param
+                    && type_param.name.name == "Self"
+                {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "type parameter 'Self' is implicit in trait declarations; remove it from the parameter list".to_string(),
+                        span: type_param.name.span,
+                    });
+                }
+            }
+        }
+
         let mut super_traits = Vec::new();
         if cursor < end && matches!(tokens[cursor].kind, Token::Colon) {
             cursor += 1;
@@ -3580,6 +3606,19 @@ impl PRT_Parser {
             } else {
                 0
             };
+
+            // `self` / `&self` / `&mut self` receiver sugar (first param only).
+            if parameters.is_empty()
+                && let Some((param, next)) = self.try_parse_receiver_param(tokens, cursor, end)
+            {
+                parameters.push(param);
+                cursor = next;
+                if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                    cursor += 1;
+                }
+                continue;
+            }
+
             let (param_type, after_param_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {
@@ -4023,8 +4062,31 @@ impl PRT_Parser {
             });
         };
         let method_end = rbrace + 1;
-        let function = self.parse_function_reduction(tokens, item_start, method_end)?;
+        let mut function = self.parse_function_reduction(tokens, item_start, method_end)?;
         let method_kind = Self::classify_impl_method(&function.parameters, impl_self_type);
+        // Receiver-sugar parameters (`self` / `&self` / `&mut self`) parsed as
+        // `Self`-typed; rewrite to the concrete impl self type so downstream
+        // passes (typeck, monomorph, codegen) see the real type.
+        if method_kind != ast::MethodKind::Static
+            && let Some(first) = function.parameters.first_mut()
+        {
+            match first.param_type.kind.as_mut() {
+                ast::TypeKind::Named(named)
+                    if named.path.len() == 1 && named.path[0].name == "Self" =>
+                {
+                    first.param_type = impl_self_type.clone();
+                }
+                ast::TypeKind::Reference(reference)
+                    if reference.inner.kind.as_ref().is_self_named() =>
+                {
+                    reference.inner = Box::new(impl_self_type.clone());
+                }
+                ast::TypeKind::Pointer(pointer) if pointer.inner.kind.as_ref().is_self_named() => {
+                    pointer.inner = Box::new(impl_self_type.clone());
+                }
+                _ => {}
+            }
+        }
         Ok(Some((
             ast::ImplFunction {
                 name: function.name,
@@ -4148,6 +4210,33 @@ impl PRT_Parser {
             return ast::MethodKind::Static;
         }
 
+        // Receiver-sugar forms (`self` / `&self` / `&mut self`) parse with a
+        // `Self`-typed parameter; the concrete impl type is substituted in
+        // `parse_impl_method` after classification.
+        let is_self_shaped = |ty: &ast::Type| {
+            matches!(
+                ty.kind.as_ref(),
+                ast::TypeKind::Named(named) if named.path.len() == 1 && named.path[0].name == "Self"
+            )
+        };
+        if is_self_shaped(&first_param.param_type) {
+            return ast::MethodKind::InstanceValue;
+        }
+        if let ast::TypeKind::Pointer(pointer) = first_param.param_type.kind.as_ref() {
+            if is_self_shaped(&pointer.inner) {
+                return ast::MethodKind::InstancePointer {
+                    is_mutable: pointer.is_mutable,
+                };
+            }
+        }
+        if let ast::TypeKind::Reference(reference) = first_param.param_type.kind.as_ref() {
+            if is_self_shaped(&reference.inner) {
+                return ast::MethodKind::InstancePointer {
+                    is_mutable: reference.is_mutable,
+                };
+            }
+        }
+
         if Self::same_type_shape(&first_param.param_type, impl_self_type) {
             return ast::MethodKind::InstanceValue;
         }
@@ -4222,6 +4311,86 @@ impl PRT_Parser {
             }
             _ => false,
         }
+    }
+
+    /// Detect `self` / `&self` / `&mut self` receiver forms at `cursor` (valid
+    /// only in the first parameter position). Returns the desugared parameter
+    /// and the cursor after it, or None when the tokens aren't a receiver form.
+    /// The desugar emits a `Self`-typed parameter; impl methods rewrite it to
+    /// the concrete impl self type in `parse_impl_method`, trait methods keep
+    /// it abstract.
+    fn try_parse_receiver_param(
+        &self,
+        tokens: &[LexToken],
+        cursor: usize,
+        end: usize,
+    ) -> Option<(ast::Parameter, usize)> {
+        let is_self_ident = |idx: usize| {
+            matches!(
+                tokens.get(idx).map(|t| &t.kind),
+                Some(Token::Identifier(n)) if n == "self"
+            )
+        };
+        let ends_param = |idx: usize| {
+            matches!(
+                tokens.get(idx).map(|t| &t.kind),
+                Some(Token::RightParen) | Some(Token::Comma)
+            )
+        };
+        let self_type = |span: crate::lexer::Span| ast::Type {
+            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                path: vec![ast::Identifier {
+                    name: "Self".to_string(),
+                    span,
+                }],
+                generics: None,
+            })),
+            span,
+        };
+        // `self` — by-value receiver.
+        if is_self_ident(cursor) && ends_param(cursor + 1) && cursor < end {
+            let span = tokens[cursor].span;
+            let param = ast::Parameter {
+                name: ast::Identifier {
+                    name: "self".to_string(),
+                    span,
+                },
+                param_type: self_type(span),
+                is_mutable: true,
+                span,
+            };
+            return Some((param, cursor + 1));
+        }
+        // `&self` / `&mut self` — borrowed receivers.
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::BitwiseAnd)) {
+            let (is_mut, name_idx) =
+                if matches!(tokens.get(cursor + 1).map(|t| &t.kind), Some(Token::Mut)) {
+                    (true, cursor + 2)
+                } else {
+                    (false, cursor + 1)
+                };
+            if is_self_ident(name_idx) && ends_param(name_idx + 1) && name_idx < end {
+                let span = tokens[cursor].span.extend_to(&tokens[name_idx].span);
+                let param = ast::Parameter {
+                    name: ast::Identifier {
+                        name: "self".to_string(),
+                        span: tokens[name_idx].span,
+                    },
+                    param_type: ast::Type {
+                        kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
+                            is_mutable: is_mut,
+                            lifetime: None,
+                            inner: Box::new(self_type(tokens[name_idx].span)),
+                        })),
+                        span,
+                    },
+                    is_mutable: is_mut,
+                    span,
+                };
+                return Some((param, name_idx + 1));
+            }
+        }
+        None
     }
 
     fn parse_function_reduction(
@@ -4303,6 +4472,19 @@ impl PRT_Parser {
             } else {
                 0
             };
+
+            // `self` / `&self` / `&mut self` receiver sugar (first param only).
+            if parameters.is_empty()
+                && let Some((param, next)) = self.try_parse_receiver_param(tokens, cursor, end)
+            {
+                parameters.push(param);
+                cursor = next;
+                if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
+                    cursor += 1;
+                }
+                continue;
+            }
+
             let (param_type, next_after_type) = self
                 .parse_type_prefix(tokens, cursor, end)
                 .ok_or_else(|| ParseError::InvalidSyntax {

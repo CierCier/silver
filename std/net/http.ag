@@ -89,7 +89,7 @@ struct HttpConnection {
     i64 read_buf_pos;
 }
 
-impl Drop<HttpConnection> for HttpConnection {
+impl Drop for HttpConnection {
     void drop(HttpConnection* self) {
         self.close();
     }
@@ -179,7 +179,7 @@ impl ConnectionPool {
     }
 }
 
-impl Drop<ConnectionPool> for ConnectionPool {
+impl Drop for ConnectionPool {
     void drop(ConnectionPool* self) {
         while (self.entries.len > 0) {
             PoolEntry e = self.entries.take(0);
@@ -593,7 +593,7 @@ impl HttpRequest {
     }
 }
 
-impl Drop<HttpRequest> for HttpRequest {
+impl Drop for HttpRequest {
     void drop(HttpRequest* self) {
         self.headers.drop();
     }
@@ -881,7 +881,7 @@ impl HttpResponse {
     }
 }
 
-impl Drop<HttpResponse> for HttpResponse {
+impl Drop for HttpResponse {
     void drop(HttpResponse* self) {
         self.reason.drop();
         self.headers.drop();
@@ -1049,7 +1049,7 @@ impl HttpStream {
     }
 }
 
-impl Drop<HttpStream> for HttpStream {
+impl Drop for HttpStream {
     void drop(HttpStream* self) {
         self.close();
     }
@@ -1660,7 +1660,7 @@ impl HttpClient {
     }
 }
 
-impl Drop<HttpClient> for HttpClient {
+impl Drop for HttpClient {
     void drop(HttpClient* self) {
         self.jar.drop();
         self.tls_ca_file.drop();

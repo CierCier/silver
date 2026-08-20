@@ -303,13 +303,14 @@ fn ensure_submodule_built(submodule_config: &Path, output_path: &Path) -> Result
     let needs_rebuild = if !output_path.is_file() {
         true
     } else {
-        match (std::fs::metadata(submodule_config), std::fs::metadata(output_path)) {
-            (Ok(cfg_meta), Ok(out_meta)) => {
-                match (cfg_meta.modified(), out_meta.modified()) {
-                    (Ok(cfg_time), Ok(out_time)) => cfg_time > out_time,
-                    _ => false,
-                }
-            }
+        match (
+            std::fs::metadata(submodule_config),
+            std::fs::metadata(output_path),
+        ) {
+            (Ok(cfg_meta), Ok(out_meta)) => match (cfg_meta.modified(), out_meta.modified()) {
+                (Ok(cfg_time), Ok(out_time)) => cfg_time > out_time,
+                _ => false,
+            },
             _ => true,
         }
     };
@@ -318,8 +319,12 @@ fn ensure_submodule_built(submodule_config: &Path, output_path: &Path) -> Result
         return Ok(output_path.to_path_buf());
     }
 
-    let agsm_bin = find_agsm_binary()
-        .ok_or_else(|| format!("`agsm` binary not found to compile {}", submodule_config.display()))?;
+    let agsm_bin = find_agsm_binary().ok_or_else(|| {
+        format!(
+            "`agsm` binary not found to compile {}",
+            submodule_config.display()
+        )
+    })?;
 
     let output = std::process::Command::new(agsm_bin)
         .arg("build")

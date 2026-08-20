@@ -50,7 +50,7 @@ impl HashSet<K> {
     }
 }
 
-impl<K> Drop<HashSet<K>> for HashSet<K> {
+impl<K> Drop for HashSet<K> {
     /// Drops the underlying HashMap.
     void drop(HashSet<K>* self) {
         self.map.drop();

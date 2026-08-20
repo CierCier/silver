@@ -2,7 +2,7 @@ import std.sys.entry;
 import std.string;
 
 struct Inner { String s; }
-impl Drop<Inner> for Inner {
+impl Drop for Inner {
     void drop(Inner* self) { self.s.drop(); }
 }
 enum Recv { Event(Inner); Done; }

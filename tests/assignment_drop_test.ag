@@ -12,7 +12,7 @@ struct Owned {
     u8* data;
     i64 len;
 }
-impl Drop<Owned> for Owned {
+impl Drop for Owned {
     void drop(Owned* self) {
         g_drops = g_drops + 1;
         if (self.data != (u8*)0) {

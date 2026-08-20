@@ -11,7 +11,7 @@ struct ApiRequest {
     str method;
 }
 
-impl ToJson<ApiRequest> for ApiRequest {
+impl ToJson for ApiRequest {
     void to_json(ApiRequest* self, JsonWriter* out) {
         out.begin_object();
         out.field("id");
