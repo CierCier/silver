@@ -187,9 +187,13 @@ pub struct Cli {
     #[arg(long = "show-graph", action = ArgAction::SetTrue)]
     pub show_graph: bool,
 
-    /// Show build progress (auto-detected on interactive terminals)
+    /// Show build progress (defaults to on in interactive terminals)
     #[arg(long = "progress", action = ArgAction::SetTrue)]
     pub progress: bool,
+
+    /// Disable build progress
+    #[arg(long = "no-progress", action = ArgAction::SetTrue)]
+    pub no_progress: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -439,7 +443,18 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         clean: cli.clean,
         jobs: cli.jobs,
         show_graph: cli.show_graph,
-        progress: cli.progress,
+        progress: {
+            use std::io::IsTerminal;
+            if cli.no_progress {
+                false
+            } else if cli.progress {
+                true
+            } else {
+                (std::io::stderr().is_terminal() || std::io::stdout().is_terminal())
+                    && !cli.verbose
+                    && !cli.dry_run
+            }
+        },
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
@@ -798,14 +813,15 @@ pub fn run(cli: Cli) {
                     graph.display_graph();
                 }
 
+                let total_steps = graph.nodes.len() + if matches!(plan.emit, EmitKind::Exe) { 1 } else { 0 };
+                let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
+                    total_steps,
+                    progress_enabled,
+                    plan.verbose,
+                ));
+
                 if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
                     if let Some(store) = &loader.cache_store {
-                        let total_steps = graph.nodes.len() + if matches!(plan.emit, EmitKind::Exe) { 1 } else { 0 };
-                        let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
-                            total_steps,
-                            progress_enabled,
-                            plan.verbose,
-                        ));
                         let executor = crate::build_graph::ParallelGraphExecutor::new(
                             &graph,
                             &loader,
@@ -817,9 +833,9 @@ pub fn run(cli: Cli) {
                             cached_count = report.cache_hits;
                             compiled_count = report.compiled_modules;
                         }
-                        active_progress = Some(progress);
                     }
                 }
+                active_progress = Some(progress);
             }
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
@@ -1474,6 +1490,11 @@ pub fn run(cli: Cli) {
                             .and_then(|s| s.to_str())
                             .unwrap_or("input");
                         let temp_o = temp_dir.join(format!("{stem}.o"));
+                        let root_elements = crate::build_graph::CodegenElements::from_program(&ast);
+                        let start_time = std::time::Instant::now();
+                        if let Some(p) = &active_progress {
+                            p.on_start(stem, &root_elements);
+                        }
                         let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
                                 &ast,
                                 &imported_modules,
@@ -1487,6 +1508,11 @@ pub fn run(cli: Cli) {
                                 plan.leak_check,
                             );
                         profiler::end_phase("codegen");
+                        if let Some(p) = &active_progress {
+                            if result.is_ok() {
+                                p.on_finish(stem, &root_elements, false, start_time.elapsed());
+                            }
+                        }
                         if let Err(error) = result {
                             if let Some(span) = error.span {
                                 eprintln!(
