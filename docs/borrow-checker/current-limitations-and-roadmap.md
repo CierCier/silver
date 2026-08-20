@@ -25,11 +25,15 @@ As of compiler version `0.2.1`, the Silver borrow and ownership system provides:
   - Rejects overlapping mutable and shared borrows on the same path.
   - Rejects mutating or moving values while actively borrowed.
   - Supports path-aware disjoint field borrowing (`&mut p.left` and `&mut p.right` permitted concurrently).
+  - **Intra-Call Argument Conflict Checking**: Analyzes argument and method receiver borrows across single function or method invocations as a collective set, rejecting overlapping $(\&mut P, \&P)$, $(\&mut P, \&mut P)$, and $(\&mut P, \text{Read } P)$.
   - **Non-Lexical Lifetimes (NLL)**: a named borrow's loan expires at the statement boundary after its binding's last use, so short-lived references no longer require artificial `{ ... }` scopes to release the root for later mutation or moves. Reference parameters and reborrow chains stay live for their full extent.
 - ✅ **Escape Analysis (`semantic/escape_check.rs`)**:
   - Distinguishes function-local stack borrows (`Source::Local`) from caller-owned parameters (`Source::Escapable`).
   - Rejects returning local stack references or storing local stack references in globals.
   - Propagates borrow origins through struct field access, array indexing, and instance method receivers (`&self`, `&mut self`).
+- ✅ **Pattern Match Guards (`ast`, `prt_parser`, `typeck`, `move_check`, `codegen`)**:
+  - Comma-separated match guards (`match val { Pattern, cond : body, ... }`) supported on both enum and value patterns.
+  - Guards execute with shared read-only access; `move` pattern bindings are prohibited in guarded arms to guarantee clean fallthrough.
 - ✅ **Deterministic RAII Codegen**:
   - Stack-allocated 1-bit drop flags (`{var}.drop`) cleared on move and checked on scope exit.
   - Return temporary saving ensuring scope defers execute cleanly before function exit without use-after-free.
@@ -38,33 +42,15 @@ As of compiler version `0.2.1`, the Silver borrow and ownership system provides:
 
 ---
 
-## 2. Current Limitations & Known Boundaries
-
-While the borrow checking system is sound and prevents aliased mutability and use-after-moves, future phases will expand compile-time expressiveness:
-
-### 1. Temporary Borrows in Call Arguments Are Not Registered
-Loan conflicts are tracked for named reference bindings and reference
-parameters. A temporary borrow passed inline to a call (`f(&mut pt, pt.x)`,
-`g(&*r, ...)`) is checked for conflicts with existing named loans but is not
-itself registered as a loan, so overlapping access within a single call is not
-flagged. This is a pre-existing boundary of the active-borrow checker
-(independent of NLL); tracking call-argument borrows through the statement
-would close it.
-
-### 2. Structs Containing Named Lifetimes (`Struct<'a>`)
-Structs cannot currently declare named generic lifetime parameters (e.g. `struct StringView<'a>`):
-- References stored inside struct fields are currently treated as views or raw pointers.
-
----
-
-## 3. Future Roadmap & Development Phases
+## 2. Future Roadmap & Development Phases
 
 ```mermaid
 flowchart TD
-    Current["Current State (v1)\n• Escape Analysis\n• Flow-Sensitive Move Checking\n• Drop-Flag Machine"] --> P1["Phase 1: Variable Re-initialization ✅\n• Re-assignment resets drop flags\n• Re-activation in move lattice"]
+    Current["Borrow System\n• Escape Analysis\n• Flow-Sensitive Move Checking\n• Drop-Flag Machine"] --> P1["Phase 1: Variable Re-initialization ✅\n• Re-assignment resets drop flags\n• Re-activation in move lattice"]
     P1 --> P2["Phase 2: Active Borrow Conflict Graph ✅\n• Shared vs Exclusive borrow tracking\n• Enforce Aliasing XOR Mutability"]
     P2 --> P3["Phase 3: Non-Lexical Lifetimes (NLL) ✅\n• Statement-level last-use loan expiration\n• Early borrow expiration"]
     P3 --> P4["Phase 4: Named Lifetime Parameters ✅\n• Structs with reference fields: Struct<'a>\n• Aggregate loan tracking & NLL"]
+    P4 --> P5["Phase 5: Intra-Call Tracking & Match Guards ✅\n• Intra-call argument conflict detection\n• Comma-separated match guards"]
 ```
 
 ### Phase 1: Variable Re-Initialization — ✅ Implemented
@@ -92,3 +78,7 @@ flowchart TD
 - Struct-held borrow tracking in `borrow_check`: initializing structs or assigning reference fields registers loans on referents owned by the struct variable.
 - Full integration with NLL: loans held by aggregate fields expire when the struct reaches its last use.
 - Compile-time lifetime erasure: zero runtime overhead or monomorphization duplication for lifetime-only parameters.
+
+### Phase 5: Intra-Call Argument Tracking & Pattern Match Guards — ✅ Implemented
+- **Intra-Call Argument Conflicts**: Simultaneous argument set evaluation across function and method calls (`f(&mut a, a.x)` rejected).
+- **Match Guards**: Comma-separated conditional boolean filter expressions on match arms (`match opt { Some(x), x > 0 : handle(x), _ : default_handle }`) with compile-time move safety and LLVM conditional branching fallthrough.

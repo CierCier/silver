@@ -2231,6 +2231,23 @@ impl TypeChecker {
                                     );
                                 }
                             }
+                            if let Some(guard) = &arm.guard {
+                                let guard_ty = self.check_expr(
+                                    guard,
+                                    Some(&Type::Primitive(ast::PrimitiveType::Bool)),
+                                );
+                                if guard_ty != Type::Primitive(ast::PrimitiveType::Bool)
+                                    && guard_ty != Type::Unknown
+                                {
+                                    self.error(
+                                        format!(
+                                            "match guard expression must have type 'bool', found '{}'",
+                                            guard_ty
+                                        ),
+                                        guard.span,
+                                    );
+                                }
+                            }
                             // Later arms infer their type from the first arm so
                             // integer literals like `Rect2.E : 0` widen to i64
                             // instead of defaulting to i32.
@@ -2295,7 +2312,10 @@ impl TypeChecker {
                     for (arm_index, arm) in arms.iter().enumerate() {
                         self.push_scope();
                         match &arm.pattern.kind {
-                            ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {}
+                            ast::PatternKind::Wildcard => {}
+                            ast::PatternKind::Identifier(ident) => {
+                                self.bind(&ident.name, scrutinee_ty.clone(), false, ident.span);
+                            }
                             ast::PatternKind::Literal(lit) => {
                                 let ok = match (prim, lit) {
                                     (
@@ -2337,6 +2357,23 @@ impl TypeChecker {
                                         scrutinee_ty
                                     ),
                                     arm.pattern.span,
+                                );
+                            }
+                        }
+                        if let Some(guard) = &arm.guard {
+                            let guard_ty = self.check_expr(
+                                guard,
+                                Some(&Type::Primitive(ast::PrimitiveType::Bool)),
+                            );
+                            if guard_ty != Type::Primitive(ast::PrimitiveType::Bool)
+                                && guard_ty != Type::Unknown
+                            {
+                                self.error(
+                                    format!(
+                                        "match guard expression must have type 'bool', found '{}'",
+                                        guard_ty
+                                    ),
+                                    guard.span,
                                 );
                             }
                         }

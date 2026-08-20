@@ -428,6 +428,15 @@ impl MoveChecker {
         }
     }
 
+    fn error(&mut self, message: impl Into<String>, span: Span) {
+        self.errors.push(MoveError {
+            message: message.into(),
+            span,
+            note_span: None,
+            note_message: None,
+        });
+    }
+
     fn error_with_note(
         &mut self,
         message: impl Into<String>,
@@ -1001,6 +1010,12 @@ impl MoveChecker {
                 // arms that never fall through do not contribute.
                 let mut merged = state.clone();
                 for arm in arms {
+                    if arm.guard.is_some() && Self::pattern_has_move(&arm.pattern) {
+                        self.error(
+                            "cannot move out of payload in a match arm with a guard".to_string(),
+                            arm.pattern.span,
+                        );
+                    }
                     if let Some(guard) = &arm.guard {
                         self.check_expr(guard, state, scopes, var_types);
                     }
@@ -1065,6 +1080,17 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::Literal(_) | ast::ExpressionKind::TypeName(_) => {}
+        }
+    }
+
+    fn pattern_has_move(pattern: &ast::Pattern) -> bool {
+        match &pattern.kind {
+            ast::PatternKind::Move(_) => true,
+            ast::PatternKind::Enum { data, .. } => {
+                data.as_ref().is_some_and(|p| Self::pattern_has_move(p))
+            }
+            ast::PatternKind::Tuple(items) => items.iter().any(Self::pattern_has_move),
+            _ => false,
         }
     }
 }

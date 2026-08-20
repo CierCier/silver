@@ -829,6 +829,12 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let mut arms = Vec::new();
             while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBrace)) {
                 let pattern = parse_match_pattern(cursor)?;
+                let guard = if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+                    cursor.bump();
+                    Some(parse_assignment(cursor)?)
+                } else {
+                    None
+                };
                 let Some(colon) = cursor.current() else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected ':' after match pattern".to_string(),
@@ -873,7 +879,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let arm_span = pattern.span.extend_to(&body.span);
                 arms.push(ast::MatchArm {
                     pattern,
-                    guard: None,
+                    guard,
                     body,
                     span: arm_span,
                 });

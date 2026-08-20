@@ -2253,12 +2253,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .append_basic_block(function, &format!("match.expr.next.{arm_index}"));
 
             self.builder.position_at_end(cond_bb);
-            if arm.guard.is_some() {
-                return Err(CodegenError::with_span(
-                    "match guards are not supported in LLVM IR codegen yet",
-                    arm.span,
-                ));
-            }
 
             match &arm.pattern.kind {
                 ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
@@ -2734,6 +2728,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
 
+            if let Some(guard) = &arm.guard {
+                let guard_val = self.emit_expression_value(guard)?;
+                let guard_cond = match guard_val {
+                    BasicValueEnum::IntValue(v) => v,
+                    _ => {
+                        return Err(CodegenError::with_span(
+                            "match guard must evaluate to a boolean condition",
+                            guard.span,
+                        ));
+                    }
+                };
+                let function = self.current_fn.ok_or_else(|| {
+                    CodegenError::new("no active function for match guard")
+                })?;
+                let body_bb = self
+                    .context
+                    .append_basic_block(function, &format!("match.expr.body.{arm_index}"));
+                self.builder
+                    .build_conditional_branch(guard_cond, body_bb, next_bb)
+                    .map_err(|e| CodegenError::new(format!("failed match guard branch: {e}")))?;
+                self.builder.position_at_end(body_bb);
+            }
+
             let mut arm_value = self.emit_expression_value(&arm.body)?;
             // If the arm body is an identifier yielding a droppable value as
             // the match result, clear its drop flag so it transfers out cleanly.
@@ -2773,8 +2790,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             match arm.pattern.kind {
                 ast::PatternKind::Wildcard | ast::PatternKind::Identifier(_) => {
                     cond_bb = next_bb;
-                    catch_all = true;
-                    break;
+                    if arm.guard.is_none() {
+                        catch_all = true;
+                        break;
+                    }
                 }
                 _ => {
                     cond_bb = next_bb;

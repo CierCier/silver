@@ -1,0 +1,26 @@
+// Negative test: Moving out of a payload in a match arm with a guard is rejected.
+
+struct Resource {
+    i64* ptr;
+}
+
+impl Drop for Resource {
+    void drop(&mut self) {
+    }
+}
+
+enum Holder {
+    Item(Resource);
+    Empty;
+}
+
+void consume(Resource r) {}
+
+i64 main() {
+    Holder h = Holder.Empty;
+    match h {
+        Holder.Item(move r), r.ptr != (i64*)0 : consume(move r), // Expected compile error: cannot move out of payload in a match arm with a guard
+        _ : {},
+    };
+    return 0;
+}

@@ -1120,6 +1120,9 @@ impl BorrowChecker {
                 self.check_expr(expression);
                 for arm in arms {
                     self.push_scope();
+                    if let Some(guard) = &arm.guard {
+                        self.check_expr(guard);
+                    }
                     self.check_expr(&arm.body);
                     self.pop_scope();
                 }

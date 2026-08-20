@@ -579,6 +579,14 @@ fn collect_expression_instantiations(
         ast::ExpressionKind::Match { expression, arms } => {
             collect_expression_instantiations(expression, generic_structs, instantiations, scopes);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expression_instantiations(
+                        guard,
+                        generic_structs,
+                        instantiations,
+                        scopes,
+                    );
+                }
                 collect_expression_instantiations(
                     &arm.body,
                     generic_structs,
@@ -1163,6 +1171,9 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
         ast::ExpressionKind::Match { expression, arms } => {
             substitute_expression_types(expression, mapping);
             for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    substitute_expression_types(guard, mapping);
+                }
                 substitute_expression_types(&mut arm.body, mapping);
             }
         }
@@ -1445,6 +1456,16 @@ fn rewrite_expression_function_calls(
         ast::ExpressionKind::Match { expression, arms } => {
             rewrite_expression_function_calls(expression, name, args, mangled, span, param_count);
             for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_expression_function_calls(
+                        guard,
+                        name,
+                        args,
+                        mangled,
+                        span,
+                        param_count,
+                    );
+                }
                 rewrite_expression_function_calls(
                     &mut arm.body,
                     name,
@@ -1751,6 +1772,9 @@ fn rewrite_expression_method_calls(
         ast::ExpressionKind::Match { expression, arms } => {
             rewrite_expression_method_calls(expression, base, method, args, span);
             for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_expression_method_calls(guard, base, method, args, span);
+                }
                 rewrite_expression_method_calls(&mut arm.body, base, method, args, span);
             }
         }
@@ -2221,6 +2245,9 @@ fn collect_expression_remaining_calls(
         ast::ExpressionKind::Match { expression, arms } => {
             results.extend(collect_expression_remaining_calls(expression, generic_fns));
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    results.extend(collect_expression_remaining_calls(guard, generic_fns));
+                }
                 results.extend(collect_expression_remaining_calls(&arm.body, generic_fns));
             }
         }

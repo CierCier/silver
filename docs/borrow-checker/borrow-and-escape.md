@@ -259,3 +259,25 @@ void test_struct_borrow() {
 4. **Compile-Time Lifetimes with Zero Monomorphization Overhead**:
    - Lifetime parameters (`<'a>`) are strictly static verification annotations; they are erased prior to LLVM code generation and do not generate duplicate monomorphized struct types.
 
+---
+
+## 7. Intra-Call Argument Borrow Conflict Checking
+
+Silver evaluates all arguments (and instance method receivers) passed into a function or method call as a **simultaneous access set**, enforcing the Aliasing $\oplus$ Mutability invariant:
+
+$$\text{Within any single call } f(a_1, \dots, a_n) \text{ or } r.m(a_1, \dots, a_n): \quad \text{No overlapping } (\&mut P, \&P), (\&mut P, \&mut P), \text{ or } (\&mut P, \text{Read } P)$$
+
+```silver
+void call_two(&mut Point a, &Point b) {}
+void call_mix(&mut Point a, i64 val) {}
+void call_fields(&mut i64 a, &mut i64 b) {}
+
+void test_intra_call() {
+    Point pt;
+
+    call_two(&mut pt, &pt);       // COMPILE ERROR: cannot borrow 'pt' as mutable and shared in the same call
+    call_mix(&mut pt, pt.x);      // COMPILE ERROR: cannot access 'pt' while mutably borrowed in the same call
+    call_fields(&mut pt.x, &mut pt.y); // OK: disjoint fields do not conflict
+}
+```
+

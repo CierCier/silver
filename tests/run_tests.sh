@@ -130,6 +130,7 @@ expected_compile_failure() {
         borrow_conflict_error_test) return 0 ;;
         struct_borrow_error_test) return 0 ;;
         call_borrow_conflict_error_test) return 0 ;;
+        match_guard_move_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }

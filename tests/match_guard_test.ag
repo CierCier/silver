@@ -1,0 +1,62 @@
+// Integration test for Track B: Comma-separated match guards
+
+import std.io;
+
+enum Number {
+    Pos(i64);
+    Zero;
+    Neg(i64);
+}
+
+i64 classify_number(Number num) {
+    return match num {
+        Number.Pos(val), val > 100 : 3,
+        Number.Pos(val), val > 10 : 2,
+        Number.Pos(val) : 1,
+        Number.Zero : 0,
+        Number.Neg(val), val < -100 : -3,
+        Number.Neg(val) : -1,
+    };
+}
+
+i64 classify_scalar(i64 x) {
+    return match x {
+        v, v > 50 : 100,
+        v, v > 10 : 50,
+        0 : 0,
+        _ : -1,
+    };
+}
+
+i64 main() {
+    // Test enum match with guards
+    Number a = Number.Pos(150);
+    Number b = Number.Pos(42);
+    Number c = Number.Pos(5);
+    Number d = Number.Zero;
+    Number e = Number.Neg(-150);
+    Number f = Number.Neg(-10);
+
+    i64 res_a = classify_number(a);
+    i64 res_b = classify_number(b);
+    i64 res_c = classify_number(c);
+    i64 res_d = classify_number(d);
+    i64 res_e = classify_number(e);
+    i64 res_f = classify_number(f);
+
+    if (res_a != 3) { return 1; }
+    if (res_b != 2) { return 2; }
+    if (res_c != 1) { return 3; }
+    if (res_d != 0) { return 4; }
+    if (res_e != -3) { return 5; }
+    if (res_f != -1) { return 6; }
+
+    // Test scalar match with guards
+    if (classify_scalar(75) != 100) { return 7; }
+    if (classify_scalar(25) != 50) { return 8; }
+    if (classify_scalar(0) != 0) { return 9; }
+    if (classify_scalar(-5) != -1) { return 10; }
+
+    println("Match guards OK!");
+    return 0;
+}
