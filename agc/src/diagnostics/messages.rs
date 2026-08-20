@@ -284,6 +284,16 @@ pub fn implicit_guard_missing(symbol: &str, left: &impl Display, right: &impl Di
         "generic call requires '{left} {symbol} {right}', but no overload exists for that operator"
     )
 }
+pub fn implicit_method_guard_missing(
+    name: &str,
+    receiver: &impl Display,
+    args: &[String],
+) -> String {
+    format!(
+        "generic call requires method '{name}' on '{receiver}' with arguments ({})",
+        args.join(", ")
+    )
+}
 pub fn invalid_cast(from: &impl Display, to: &impl Display) -> String {
     format!("invalid cast: {from} -> {to}")
 }

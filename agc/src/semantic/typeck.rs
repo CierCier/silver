@@ -69,6 +69,10 @@ pub struct TypeChecker {
     /// Checked at every concrete monomorphization request.
     current_implicit_reqs: Vec<ImplicitReq>,
     implicit_reqs: HashMap<String, Vec<ImplicitReq>>,
+    /// Trait-style method calls on bare type params, deferred until concrete
+    /// monomorphization.
+    current_implicit_method_reqs: Vec<ImplicitMethodReq>,
+    implicit_method_reqs: HashMap<String, Vec<ImplicitMethodReq>>,
 }
 
 /// A binary operation on a type parameter recorded during generic body
@@ -80,6 +84,13 @@ struct ImplicitReq {
     left: Type,
     right: Type,
     op: ast::BinaryOperator,
+}
+
+#[derive(Debug, Clone)]
+struct ImplicitMethodReq {
+    receiver: Type,
+    name: String,
+    args: Vec<Type>,
 }
 
 /// A bare enum constructor (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
@@ -249,7 +260,11 @@ impl TypeChecker {
                     mapping,
                     call_span,
                     ..
-                } => self.check_implicit_guards(&Self::free_fn_key(source), mapping, *call_span),
+                } => {
+                    let key = Self::free_fn_key(source);
+                    self.check_implicit_guards(&key, mapping, *call_span);
+                    self.check_implicit_method_guards(&key, mapping, *call_span);
+                }
                 MonomorphRequest::ImplMethod {
                     impl_item,
                     method,
@@ -258,11 +273,9 @@ impl TypeChecker {
                     ..
                 } => {
                     let self_ty = Type::from_ast(&impl_item.self_type);
-                    self.check_implicit_guards(
-                        &Self::impl_method_key(&self_ty, method),
-                        mapping,
-                        *call_span,
-                    );
+                    let key = Self::impl_method_key(&self_ty, method);
+                    self.check_implicit_guards(&key, mapping, *call_span);
+                    self.check_implicit_method_guards(&key, mapping, *call_span);
                 }
             }
         }
@@ -702,6 +715,7 @@ impl TypeChecker {
 
     fn check_function(&mut self, func: &ast::FunctionItem) {
         self.current_implicit_reqs = Vec::new();
+        self.current_implicit_method_reqs = Vec::new();
         let return_type = func
             .return_type
             .as_ref()
@@ -718,11 +732,13 @@ impl TypeChecker {
         self.check_block(&func.body);
         self.pop_scope();
         self.current_return = None;
-        self.store_implicit_reqs(Self::free_fn_key(func));
+        let key = Self::free_fn_key(func);
+        self.store_implicit_reqs(key.clone());
+        self.store_implicit_method_reqs(key);
     }
-
     fn check_impl_method(&mut self, self_ty: &Type, func: &ast::ImplFunction) {
         self.current_implicit_reqs = Vec::new();
+        self.current_implicit_method_reqs = Vec::new();
         let return_type = func
             .return_type
             .as_ref()
@@ -739,7 +755,9 @@ impl TypeChecker {
         self.check_block(&func.body);
         self.pop_scope();
         self.current_return = None;
-        self.store_implicit_reqs(Self::impl_method_key(self_ty, func));
+        let key = Self::impl_method_key(self_ty, func);
+        self.store_implicit_reqs(key.clone());
+        self.store_implicit_method_reqs(key);
     }
 
     fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast) {
@@ -2953,6 +2971,14 @@ impl TypeChecker {
         ) {
             Some(ty) => ty,
             None => {
+                if self.is_bare_type_param(receiver_ty) {
+                    self.current_implicit_method_reqs.push(ImplicitMethodReq {
+                        receiver: receiver_ty.clone(),
+                        name: method.name.clone(),
+                        args: arg_types,
+                    });
+                    return expected.cloned().unwrap_or(Type::Unknown);
+                }
                 let arg_desc: String = if arg_types.len() == 1 {
                     format!("{}", arg_types[0])
                 } else {
@@ -4992,6 +5018,12 @@ impl TypeChecker {
         });
         true
     }
+    fn store_implicit_method_reqs(&mut self, key: String) {
+        let reqs = std::mem::take(&mut self.current_implicit_method_reqs);
+        if !reqs.is_empty() {
+            self.implicit_method_reqs.insert(key, reqs);
+        }
+    }
 
     fn store_implicit_reqs(&mut self, key: String) {
         let reqs = std::mem::take(&mut self.current_implicit_reqs);
@@ -5074,6 +5106,47 @@ impl TypeChecker {
                         &left,
                         &right,
                     ),
+                    span,
+                );
+            }
+        }
+    }
+    fn check_implicit_method_guards(
+        &mut self,
+        key: &str,
+        mapping: &HashMap<String, Type>,
+        span: Span,
+    ) {
+        let Some(reqs) = self.implicit_method_reqs.get(key).cloned() else {
+            return;
+        };
+        for req in reqs {
+            let receiver = req.receiver.substitute(mapping);
+            let args = req
+                .args
+                .iter()
+                .map(|arg| arg.substitute(mapping))
+                .collect::<Vec<_>>();
+            if !self.is_concrete_type(&receiver)
+                || args.iter().any(|arg| !self.is_concrete_type(arg))
+            {
+                continue;
+            }
+            if self
+                .resolve_method_overload_types(
+                    &receiver,
+                    &req.name,
+                    &args,
+                    None,
+                    MethodCallStyle::Instance,
+                    None,
+                    span,
+                )
+                .is_none()
+            {
+                let arg_strings = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+                self.error(
+                    msg::implicit_method_guard_missing(&req.name, &receiver, &arg_strings),
                     span,
                 );
             }

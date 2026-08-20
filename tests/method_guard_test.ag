@@ -1,0 +1,30 @@
+// Generic method calls become implicit guards.
+import std.test;
+
+trait Normalize {
+    Self normalize(&self);
+}
+
+struct Number {
+    i64 value;
+}
+
+impl Normalize for Number {
+    Number normalize(&self) {
+        Number out;
+        out.value = self.value + 1;
+        return out;
+    }
+}
+
+T normalize_value<T>(T value) {
+    return value.normalize();
+}
+
+i64 main() {
+    Number n;
+    n.value = 6;
+    Number result = normalize_value(n);
+    @assert(result.value == 7, "implicit method guard");
+    return 0;
+}
