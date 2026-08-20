@@ -1190,11 +1190,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     })?
                                 };
                                 let mut val = self.emit_expression_value(field)?;
-                                val = self.cast_value_to_basic_type(
-                                    val,
-                                    target_llvm_ty,
-                                    &field.span,
-                                )?;
+                                if val.get_type() != target_llvm_ty
+                                    && !val.is_struct_value()
+                                    && !target_llvm_ty.is_struct_type()
+                                {
+                                    val = self.cast_value_to_basic_type(
+                                        val,
+                                        target_llvm_ty,
+                                        &field.span,
+                                    )?;
+                                }
                                 let val_ptr = self
                                     .builder
                                     .build_pointer_cast(
@@ -1305,7 +1310,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| CodegenError::new(format!("GEP enum field: {e}")))?
                         };
                         let mut val = self.emit_expression_value(arg)?;
-                        val = self.cast_value_to_basic_type(val, target_llvm_ty, &arg.span)?;
+                        if val.get_type() != target_llvm_ty
+                            && !val.is_struct_value()
+                            && !target_llvm_ty.is_struct_type()
+                        {
+                            val = self.cast_value_to_basic_type(val, target_llvm_ty, &arg.span)?;
+                        }
                         let val_ptr = self
                             .builder
                             .build_pointer_cast(

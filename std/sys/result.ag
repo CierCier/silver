@@ -15,14 +15,10 @@
 // libc symbols with an incompatible (sret struct return) ABI while the
 // toolchain still links against libc.
 
-import std.error;
-import std.result;
-import std.sys.errno;
-import std.sys.raw.fs;
-import std.sys.raw.memory;
-import std.sys.raw.process;
-
-// --- Flag constants used by the typed wrappers ---
+// --- Well-known file descriptors and flag constants ---
+const i32 STDIN_FD = 0;
+const i32 STDOUT_FD = 1;
+const i32 STDERR_FD = 2;
 
 // mmap protection bits (asm-generic/mman-common.h).
 const i64 PROT_NONE = 0;
@@ -64,10 +60,12 @@ const i64 SEEK_SET = 0;
 const i64 SEEK_CUR = 1;
 const i64 SEEK_END = 2;
 
-// Well-known file descriptors.
-const i32 STDIN_FD = 0;
-const i32 STDOUT_FD = 1;
-const i32 STDERR_FD = 2;
+import std.error;
+import std.result;
+import std.sys.errno;
+import std.sys.raw.fs;
+import std.sys.raw.memory;
+import std.sys.raw.process;
 
 // --- Result<i64, Error> syscall helpers ---
 //
