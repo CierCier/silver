@@ -1,6 +1,7 @@
 // Silver compiler frontend library — reusable by LSP and other tools.
 pub mod ast_tree;
 pub mod attributes;
+pub mod build_graph;
 pub mod builtin_macros;
 pub mod cache_store;
 pub mod cfg;

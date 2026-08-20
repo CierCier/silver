@@ -171,6 +171,10 @@ pub struct Cli {
     #[arg(long = "clean", alias = "clean-cache", action = ArgAction::SetTrue)]
     pub clean: bool,
 
+    /// Number of parallel compilation jobs (defaults to CPU count)
+    #[arg(short = 'j', long = "jobs", value_name = "N", default_value_t = 0)]
+    pub jobs: usize,
+
     /// Run mode: compile and immediately execute the output binary
     #[arg(long = "run", action = ArgAction::SetTrue)]
     pub run_mode: bool,
@@ -228,6 +232,7 @@ pub(crate) struct CompilePlan {
     pub(crate) cache_dir: Option<PathBuf>,
     pub(crate) no_cache: bool,
     pub(crate) clean: bool,
+    pub(crate) jobs: usize,
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
     pub(crate) auto_output: bool,
@@ -422,6 +427,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         cache_dir: cli.cache_dir,
         no_cache: cli.no_cache,
         clean: cli.clean,
+        jobs: cli.jobs,
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
@@ -764,6 +770,15 @@ pub fn run(cli: Cli) {
                 plan.profile,
                 plan.profile && plan.verbose,
             ));
+
+            if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
+                if let Some(store) = &loader.cache_store {
+                    if let Ok(graph) = crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
+                        let executor = crate::build_graph::ParallelGraphExecutor::new(&graph, &loader, store, plan.jobs);
+                        let _ = executor.execute();
+                    }
+                }
+            }
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
             let mut exe_object_files: Vec<PathBuf> = Vec::new();
@@ -1531,7 +1546,7 @@ fn _is_ag_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("ag")
 }
 
-fn run_semantic_hooks(
+pub(crate) fn run_semantic_hooks(
     program: &mut parser::Program,
     symbol_table: &mut CompilerSymbolTable,
     imported_modules: &[ModuleArtifact],
@@ -1629,6 +1644,7 @@ mod tests {
             cache_dir: None,
             no_cache: false,
             clean: false,
+            jobs: 0,
             run_mode: false,
             run_args: Vec::new(),
             auto_output: false,
