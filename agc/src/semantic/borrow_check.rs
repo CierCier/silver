@@ -69,6 +69,30 @@ pub struct ActiveBorrow {
     pub param: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallAccessKind {
+    Exclusive,
+    Shared,
+    Read,
+}
+
+impl CallAccessKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exclusive => "mutable",
+            Self::Shared => "shared",
+            Self::Read => "direct read",
+        }
+    }
+}
+
+struct CallArgAccess {
+    root: String,
+    path: String,
+    kind: CallAccessKind,
+    span: Span,
+}
+
 pub fn check_program(program: &ast::Program) -> Vec<BorrowError> {
     let mut checker = BorrowChecker::new();
     checker.check_program(program);
@@ -841,6 +865,111 @@ impl BorrowChecker {
         }
     }
 
+    fn extract_call_access(&self, expr: &ast::Expression) -> Option<CallArgAccess> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Reference {
+                is_mutable,
+                expression,
+            } => {
+                let (root, path, _) = self.extract_root_and_path(expression)?;
+                if self.raw_ptr_vars.contains(&root) {
+                    return None;
+                }
+                let kind = if *is_mutable {
+                    CallAccessKind::Exclusive
+                } else {
+                    CallAccessKind::Shared
+                };
+                Some(CallArgAccess {
+                    root,
+                    path,
+                    kind,
+                    span: expr.span,
+                })
+            }
+            _ => {
+                let (root, path, _) = self.extract_root_and_path(expr)?;
+                if self.raw_ptr_vars.contains(&root) {
+                    return None;
+                }
+                Some(CallArgAccess {
+                    root,
+                    path,
+                    kind: CallAccessKind::Read,
+                    span: expr.span,
+                })
+            }
+        }
+    }
+
+    /// Check for intra-call argument and receiver borrow conflicts.
+    fn check_call_arguments(
+        &mut self,
+        receiver: Option<&ast::Expression>,
+        arguments: &[ast::Expression],
+    ) {
+        let mut accesses = Vec::new();
+        if let Some(recv) = receiver {
+            if let Some(acc) = self.extract_call_access(recv) {
+                accesses.push(acc);
+            }
+        }
+        for arg in arguments {
+            if let Some(acc) = self.extract_call_access(arg) {
+                accesses.push(acc);
+            }
+        }
+
+        for i in 0..accesses.len() {
+            for j in (i + 1)..accesses.len() {
+                let a = &accesses[i];
+                let b = &accesses[j];
+                if a.root == b.root && Self::paths_overlap(&a.path, &b.path) {
+                    let full_target = if a.path.is_empty() {
+                        a.root.clone()
+                    } else {
+                        format!("{}.{}", a.root, a.path)
+                    };
+                    match (a.kind, b.kind) {
+                        (CallAccessKind::Exclusive, CallAccessKind::Exclusive) => {
+                            self.error_with_note(
+                                msg::cannot_borrow_as_mutable_more_than_once_in_same_call(
+                                    &full_target,
+                                ),
+                                b.span,
+                                Some(a.span),
+                                Some(msg::note_argument_borrow_here(a.kind.as_str())),
+                            );
+                        }
+                        (CallAccessKind::Exclusive, CallAccessKind::Shared)
+                        | (CallAccessKind::Shared, CallAccessKind::Exclusive) => {
+                            self.error_with_note(
+                                msg::cannot_borrow_as_mutable_and_shared_in_same_call(
+                                    &full_target,
+                                ),
+                                b.span,
+                                Some(a.span),
+                                Some(msg::note_argument_borrow_here(a.kind.as_str())),
+                            );
+                        }
+                        (CallAccessKind::Exclusive, CallAccessKind::Read)
+                        | (CallAccessKind::Read, CallAccessKind::Exclusive) => {
+                            self.error_with_note(
+                                msg::cannot_access_while_mutably_borrowed_in_same_call(
+                                    &full_target,
+                                ),
+                                b.span,
+                                Some(a.span),
+                                Some(msg::note_argument_borrow_here(a.kind.as_str())),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     fn check_expr(&mut self, expr: &ast::Expression) {
         match expr.kind.as_ref() {
             ast::ExpressionKind::Reference {
@@ -951,6 +1080,7 @@ impl BorrowChecker {
                 arguments,
             } => {
                 self.check_expr(function);
+                self.check_call_arguments(None, arguments);
                 for arg in arguments {
                     self.check_expr(arg);
                 }
@@ -961,6 +1091,7 @@ impl BorrowChecker {
                 ..
             } => {
                 self.check_expr(receiver);
+                self.check_call_arguments(Some(receiver.as_ref()), arguments);
                 for arg in arguments {
                     self.check_expr(arg);
                 }
@@ -1489,5 +1620,90 @@ mod tests {
                 .contains("cannot assign to 'pt.x' because it is borrowed")),
             "expected borrow conflict in match arm, got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn rejects_intra_call_mutable_and_shared_borrow_conflict() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void call_two(&mut Point a, &Point b) {}
+            void test() {
+                Point pt;
+                call_two(&mut pt, &pt);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as mutable and shared in the same call")
+        );
+    }
+
+    #[test]
+    fn rejects_intra_call_multiple_mutable_borrows() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void call_mut(&mut Point a, &mut Point b) {}
+            void test() {
+                Point pt;
+                call_mut(&mut pt, &mut pt);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'pt' as mutable more than once in the same call")
+        );
+    }
+
+    #[test]
+    fn rejects_intra_call_mutable_borrow_and_direct_read() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void call_mix(&mut Point a, i64 val) {}
+            void test() {
+                Point pt;
+                call_mix(&mut pt, pt.x);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot access 'pt' while mutably borrowed in the same call")
+        );
+    }
+
+    #[test]
+    fn allows_intra_call_disjoint_field_borrows() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void call_fields(&mut i64 a, &mut i64 b) {}
+            void test() {
+                Point pt;
+                call_fields(&mut pt.x, &mut pt.y);
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn allows_intra_call_multiple_shared_borrows() {
+        let src = r#"
+            struct Point { i64 x; i64 y; }
+            void call_reads(&Point a, &Point b) {}
+            void test() {
+                Point pt;
+                call_reads(&pt, &pt);
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
     }
 }

@@ -1,0 +1,18 @@
+// Negative test: Intra-call argument borrow conflicts are rejected at compile time.
+
+struct Point {
+    i64 x;
+    i64 y;
+}
+
+void call_two(&mut Point a, &Point b) {
+}
+
+i64 main() {
+    Point pt;
+    pt.x = 1;
+    pt.y = 2;
+
+    call_two(&mut pt, &pt); // Expected compile error: cannot borrow 'pt' as mutable and shared in the same call
+    return 0;
+}

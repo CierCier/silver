@@ -230,6 +230,22 @@ pub fn cannot_use_mutably_borrowed(name: &str) -> String {
     format!("cannot use '{name}' because it was mutably borrowed")
 }
 
+pub fn cannot_borrow_as_mutable_and_shared_in_same_call(name: &str) -> String {
+    format!("cannot borrow '{name}' as mutable and shared in the same call")
+}
+
+pub fn cannot_borrow_as_mutable_more_than_once_in_same_call(name: &str) -> String {
+    format!("cannot borrow '{name}' as mutable more than once in the same call")
+}
+
+pub fn cannot_access_while_mutably_borrowed_in_same_call(name: &str) -> String {
+    format!("cannot access '{name}' while mutably borrowed in the same call")
+}
+
+pub fn note_argument_borrow_here(kind: &str) -> String {
+    format!("argument {kind} borrow occurs here")
+}
+
 pub fn note_previous_borrow_here(kind: &str) -> String {
     format!("previous {kind} borrow occurs here")
 }

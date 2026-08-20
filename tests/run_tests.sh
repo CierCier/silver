@@ -129,6 +129,7 @@ expected_compile_failure() {
         launch_send_error_test) return 0 ;;
         borrow_conflict_error_test) return 0 ;;
         struct_borrow_error_test) return 0 ;;
+        call_borrow_conflict_error_test) return 0 ;;
         *) return 1 ;;
     esac
 }
