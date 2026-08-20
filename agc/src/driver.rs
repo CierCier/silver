@@ -159,6 +159,18 @@ pub struct Cli {
     #[arg(long = "check", action = ArgAction::SetTrue)]
     pub check_only: bool,
 
+    /// Override default on-disk cache directory (defaults to XDG $XDG_CACHE_HOME/silver)
+    #[arg(long = "cache-dir", value_name = "DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable artifact caching
+    #[arg(long = "no-cache", action = ArgAction::SetTrue)]
+    pub no_cache: bool,
+
+    /// Clean the on-disk compiler cache directory
+    #[arg(long = "clean-cache", action = ArgAction::SetTrue)]
+    pub clean_cache: bool,
+
     /// Run mode: compile and immediately execute the output binary
     #[arg(long = "run", action = ArgAction::SetTrue)]
     pub run_mode: bool,
@@ -213,6 +225,9 @@ pub(crate) struct CompilePlan {
     pub(crate) profile: bool,
     pub(crate) leak_check: bool,
     pub(crate) cfg_flags: Vec<String>,
+    pub(crate) cache_dir: Option<PathBuf>,
+    pub(crate) no_cache: bool,
+    pub(crate) clean_cache: bool,
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
     pub(crate) auto_output: bool,
@@ -404,12 +419,24 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         auto_output,
         leak_check: cli.leak_check,
         cfg_flags: cli.cfg_flags,
+        cache_dir: cli.cache_dir,
+        no_cache: cli.no_cache,
+        clean_cache: cli.clean_cache,
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
 
 fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     let mut loader = ModuleLoader::new();
+    if !plan.no_cache {
+        let cache_store = match &plan.cache_dir {
+            Some(dir) => crate::cache_store::CacheStore::with_dir(dir.clone()),
+            None => crate::cache_store::CacheStore::new(),
+        };
+        if let Ok(store) = cache_store {
+            loader.add_search_dir(store.agm_dir());
+        }
+    }
     // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
     loader.add_search_dir(&plan.package_root);
 
@@ -549,6 +576,21 @@ pub fn run(cli: Cli) {
             // Once codegen exists, this becomes an actual compile.
             if plan.dry_run || env::var_os("AGC_DRY_RUN").is_some() {
                 println!("{}", plan.describe_for_driver());
+                return;
+            }
+
+            if plan.clean_cache {
+                let store = match plan.cache_dir.clone() {
+                    Some(dir) => crate::cache_store::CacheStore::with_dir(dir),
+                    None => crate::cache_store::CacheStore::new(),
+                };
+                if let Ok(store) = store {
+                    let root = store.root_dir().to_path_buf();
+                    let _ = std::fs::remove_dir_all(&root);
+                    if plan.verbose {
+                        eprintln!("agc: cleaned cache directory {}", root.display());
+                    }
+                }
                 return;
             }
 
@@ -1573,6 +1615,9 @@ mod tests {
             profile: false,
             leak_check: false,
             cfg_flags: Vec::new(),
+            cache_dir: None,
+            no_cache: false,
+            clean_cache: false,
             run_mode: false,
             run_args: Vec::new(),
             auto_output: false,
