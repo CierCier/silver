@@ -164,12 +164,12 @@ pub struct Cli {
     pub cache_dir: Option<PathBuf>,
 
     /// Disable artifact caching
-    #[arg(long = "no-cache", action = ArgAction::SetTrue)]
+    #[arg(long = "no-cache", alias = "nc", action = ArgAction::SetTrue)]
     pub no_cache: bool,
 
-    /// Clean the on-disk compiler cache directory
-    #[arg(long = "clean-cache", action = ArgAction::SetTrue)]
-    pub clean_cache: bool,
+    /// Clean the on-disk compiler cache before building
+    #[arg(long = "clean", alias = "clean-cache", action = ArgAction::SetTrue)]
+    pub clean: bool,
 
     /// Run mode: compile and immediately execute the output binary
     #[arg(long = "run", action = ArgAction::SetTrue)]
@@ -227,7 +227,7 @@ pub(crate) struct CompilePlan {
     pub(crate) cfg_flags: Vec<String>,
     pub(crate) cache_dir: Option<PathBuf>,
     pub(crate) no_cache: bool,
-    pub(crate) clean_cache: bool,
+    pub(crate) clean: bool,
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
     pub(crate) auto_output: bool,
@@ -421,13 +421,20 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         cfg_flags: cli.cfg_flags,
         cache_dir: cli.cache_dir,
         no_cache: cli.no_cache,
-        clean_cache: cli.clean_cache,
+        clean: cli.clean,
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
 
 fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
     let mut loader = ModuleLoader::new();
+    loader.no_cache = plan.no_cache;
+    loader.target = plan.target.clone();
+    loader.opt_level = plan.opt_level.clone();
+    loader.debug_info = plan.debug_info;
+    loader.leak_check = plan.leak_check;
+    loader.cfg_flags = plan.cfg_flags.clone();
+
     if !plan.no_cache {
         let cache_store = match &plan.cache_dir {
             Some(dir) => crate::cache_store::CacheStore::with_dir(dir.clone()),
@@ -435,6 +442,7 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
         };
         if let Ok(store) = cache_store {
             loader.add_search_dir(store.agm_dir());
+            loader.cache_store = Some(std::sync::Arc::new(store));
         }
     }
     // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
@@ -579,7 +587,7 @@ pub fn run(cli: Cli) {
                 return;
             }
 
-            if plan.clean_cache {
+            if plan.clean {
                 let store = match plan.cache_dir.clone() {
                     Some(dir) => crate::cache_store::CacheStore::with_dir(dir),
                     None => crate::cache_store::CacheStore::new(),
@@ -587,11 +595,14 @@ pub fn run(cli: Cli) {
                 if let Ok(store) = store {
                     let root = store.root_dir().to_path_buf();
                     let _ = std::fs::remove_dir_all(&root);
+                    let _ = store.ensure_dirs();
                     if plan.verbose {
                         eprintln!("agc: cleaned cache directory {}", root.display());
                     }
                 }
-                return;
+                if plan.inputs.is_empty() {
+                    return;
+                }
             }
 
             if let Some(target) = plan.target.as_deref()
@@ -1617,7 +1628,7 @@ mod tests {
             cfg_flags: Vec::new(),
             cache_dir: None,
             no_cache: false,
-            clean_cache: false,
+            clean: false,
             run_mode: false,
             run_args: Vec::new(),
             auto_output: false,

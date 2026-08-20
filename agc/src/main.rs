@@ -57,6 +57,8 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
         } else if arg_str == "-g0" {
             // clap shorts are single characters; expose clang-style -g0.
             out.push(OsString::from("--g0"));
+        } else if arg_str == "-nc" {
+            out.push(OsString::from("--no-cache"));
         } else if is_run && !arg_str.starts_with('-') {
             if !seen_input_file {
                 seen_input_file = true;

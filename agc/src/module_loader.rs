@@ -31,13 +31,22 @@ pub enum ResolvedSourceImportKind {
 }
 
 use parking_lot::Mutex;
+use std::sync::Arc;
+use crate::cache_store::{CacheStore, CacheKey, CacheKeyBuilder, CachedModule};
 
 #[derive(Debug)]
 pub struct ModuleLoader {
-    search_dirs: Vec<PathBuf>,
-    cwd: Option<PathBuf>,
+    pub search_dirs: Vec<PathBuf>,
+    pub cwd: Option<PathBuf>,
     /// Cache of loaded module artifacts keyed by module path (e.g. "std.mem.vec").
-    module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
+    pub module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
+    pub cache_store: Option<Arc<CacheStore>>,
+    pub no_cache: bool,
+    pub target: Option<String>,
+    pub opt_level: Option<String>,
+    pub debug_info: bool,
+    pub leak_check: bool,
+    pub cfg_flags: Vec<String>,
 }
 
 impl Default for ModuleLoader {
@@ -52,7 +61,41 @@ impl ModuleLoader {
             search_dirs: Vec::new(),
             cwd: std::env::current_dir().ok(),
             module_cache: Mutex::new(HashMap::default()),
+            cache_store: None,
+            no_cache: false,
+            target: None,
+            opt_level: None,
+            debug_info: false,
+            leak_check: false,
+            cfg_flags: Vec::new(),
         }
+    }
+
+    pub fn compute_cache_key(&self, source_path: &Path, module_path: &str) -> Option<CacheKey> {
+        let mut builder = CacheKeyBuilder::new(module_path);
+        if builder.add_file(source_path).is_err() {
+            return None;
+        }
+        builder.add_compiler_version(env!("CARGO_PKG_VERSION"));
+        builder.add_target(self.target.as_deref().unwrap_or("default"));
+        builder.add_opt_level(self.opt_level.as_deref());
+        builder.add_flags(&self.cfg_flags);
+        if self.debug_info {
+            builder.add_str("debug_info");
+        }
+        if self.leak_check {
+            builder.add_str("leak_check");
+        }
+        Some(builder.finish())
+    }
+
+    pub fn get_cached_module(&self, source_path: &Path, module_path: &str) -> Option<CachedModule> {
+        if self.no_cache {
+            return None;
+        }
+        let store = self.cache_store.as_ref()?;
+        let key = self.compute_cache_key(source_path, module_path)?;
+        store.get(&key)
     }
 
     pub fn add_search_dir(&mut self, dir: impl Into<PathBuf>) {

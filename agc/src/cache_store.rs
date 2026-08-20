@@ -288,6 +288,7 @@ pub struct CachedModule {
     pub obj_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
 pub struct CacheStore {
     root_dir: PathBuf,
 }

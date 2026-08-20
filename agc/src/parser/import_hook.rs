@@ -213,6 +213,20 @@ impl<'a> FileImportResolverHook<'a> {
                 .ok_or_else(|| format!("import `{module_path}` could not be resolved"))?;
             match resolved.kind {
                 ResolvedSourceImportKind::File => {
+                    // Check on-disk module cache
+                    if let Some(cached) = self.loader.get_cached_module(&resolved.source_path, &module_path) {
+                        if let Ok(artifact) = ModuleArtifact::from_path(&cached.agm_path) {
+                            if crate::profiler::verbose() {
+                                crate::profiler::skip_phase(&format!(
+                                    "import {module_path} (cache hit: {})",
+                                    cached.key.hash_hex
+                                ));
+                            }
+                            self.module_imports.push((resolved.module_path.clone(), artifact));
+                            continue;
+                        }
+                    }
+
                     if !self.mark_file_seen(&resolved.source_path) {
                         if crate::profiler::verbose() {
                             crate::profiler::skip_phase(&format!(
