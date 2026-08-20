@@ -263,12 +263,17 @@ impl TraitRegistry {
                 });
                 continue;
             }
-            let Some(trait_def) = self.traits.get(&trait_name) else {
-                errors.push(TraitError {
-                    message: format!("unknown trait '{}'", trait_key),
-                    span: trait_ref.span,
-                });
-                continue;
+            let trait_def = match self.traits.get(&trait_name) {
+                Some(def) => def,
+                None => {
+                    if !self.trait_names.contains(&trait_name) {
+                        errors.push(TraitError {
+                            message: format!("unknown trait '{}'", trait_key),
+                            span: trait_ref.span,
+                        });
+                    }
+                    continue;
+                }
             };
 
             let self_key = type_key(&Type::from_ast(&impl_item.self_type));

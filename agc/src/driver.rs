@@ -182,6 +182,14 @@ pub struct Cli {
     /// Arguments to forward to the target binary in run mode
     #[arg(long = "run-arg", value_name = "ARG", action = ArgAction::Append)]
     pub run_args: Vec<String>,
+
+    /// Show module dependency build graph and codegen elements
+    #[arg(long = "show-graph", action = ArgAction::SetTrue)]
+    pub show_graph: bool,
+
+    /// Show build progress (auto-detected on interactive terminals)
+    #[arg(long = "progress", action = ArgAction::SetTrue)]
+    pub progress: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -235,6 +243,8 @@ pub(crate) struct CompilePlan {
     pub(crate) jobs: usize,
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
+    pub(crate) show_graph: bool,
+    pub(crate) progress: bool,
     pub(crate) auto_output: bool,
     pub(crate) warning_config: crate::semantic::linter::WarningConfig,
 }
@@ -351,8 +361,8 @@ fn with_ext_or_default(inputs: &[PathBuf], ext: &str) -> PathBuf {
 fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     let emit = derive_emit(&cli)?;
 
-    if cli.inputs.is_empty() && emit != EmitKind::Grammar {
-        return Err("at least one input file is required (except for --emit=grammar)".to_string());
+    if cli.inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean {
+        return Err("at least one input file is required (except for --emit=grammar or --clean)".to_string());
     }
 
     // For now keep multi-input support limited to link stage, like most compilers.
@@ -428,6 +438,8 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         no_cache: cli.no_cache,
         clean: cli.clean,
         jobs: cli.jobs,
+        show_graph: cli.show_graph,
+        progress: cli.progress,
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
     })
 }
@@ -771,11 +783,41 @@ pub fn run(cli: Cli) {
                 plan.profile && plan.verbose,
             ));
 
-            if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
-                if let Some(store) = &loader.cache_store {
-                    if let Ok(graph) = crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
-                        let executor = crate::build_graph::ParallelGraphExecutor::new(&graph, &loader, store, plan.jobs);
-                        let _ = executor.execute();
+            let show_graph = plan.show_graph;
+            let progress_enabled = plan.progress;
+            let mut active_progress: Option<std::sync::Arc<crate::build_graph::BuildProgress>> = None;
+            let mut total_graph_elements = crate::build_graph::CodegenElements::default();
+            let mut total_modules = 0;
+            let mut cached_count = 0;
+            let mut compiled_count = 0;
+
+            if let Ok(graph) = crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
+                total_graph_elements = graph.total_codegen_elements();
+                total_modules = graph.nodes.len();
+                if show_graph || plan.verbose {
+                    graph.display_graph();
+                }
+
+                if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
+                    if let Some(store) = &loader.cache_store {
+                        let total_steps = graph.nodes.len() + if matches!(plan.emit, EmitKind::Exe) { 1 } else { 0 };
+                        let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
+                            total_steps,
+                            progress_enabled,
+                            plan.verbose,
+                        ));
+                        let executor = crate::build_graph::ParallelGraphExecutor::new(
+                            &graph,
+                            &loader,
+                            store,
+                            plan.jobs,
+                            Some(progress.clone()),
+                        );
+                        if let Ok(report) = executor.execute() {
+                            cached_count = report.cache_hits;
+                            compiled_count = report.compiled_modules;
+                        }
+                        active_progress = Some(progress);
                     }
                 }
             }
@@ -1181,10 +1223,24 @@ pub fn run(cli: Cli) {
                     let lib_file =
                         crate::lexer::register_source(input.to_str().unwrap_or_default(), &src);
                     for item in &mut ast.items {
-                        if item.span.file == lib_file
-                            && matches!(item.visibility, ast::Visibility::Private)
-                        {
+                        if item.span.file == lib_file {
                             item.visibility = ast::Visibility::Public;
+                            if let ast::ItemKind::Impl(impl_item) = &mut item.kind {
+                                for member in &mut impl_item.items {
+                                    if let ast::ImplItemKind::Function(func) = member {
+                                        func.visibility = ast::Visibility::Public;
+                                    }
+                                }
+                            }
+                        } else {
+                            item.visibility = ast::Visibility::Private;
+                            if let ast::ItemKind::Impl(impl_item) = &mut item.kind {
+                                for member in &mut impl_item.items {
+                                    if let ast::ImplItemKind::Function(func) = member {
+                                        func.visibility = ast::Visibility::Private;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1488,6 +1544,9 @@ pub fn run(cli: Cli) {
                     eprintln!("agc: {}: no object files to link", "error".red().bold());
                     std::process::exit(2);
                 }
+                if let Some(p) = &active_progress {
+                    p.on_link(&plan.output);
+                }
                 profiler::begin_phase("link");
                 if let Err(e) = link_exe(
                     &plan,
@@ -1499,6 +1558,9 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
                 profiler::end_phase("link");
+                if let Some(p) = &active_progress {
+                    p.on_complete(total_modules, &total_graph_elements, cached_count, compiled_count);
+                }
                 // Clean up temp dir
                 if let Some(dir) = &exe_temp_dir {
                     let _ = std::fs::remove_dir_all(dir);
@@ -1647,6 +1709,8 @@ mod tests {
             jobs: 0,
             run_mode: false,
             run_args: Vec::new(),
+            show_graph: false,
+            progress: false,
             auto_output: false,
             warning_config: crate::semantic::linter::WarningConfig::default(),
         }

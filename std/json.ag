@@ -7,6 +7,8 @@
 import std.io.file;
 import std.string;
 import std.result;
+import std.fmt;
+import std.mem.memory;
 
 enum JsonError {
     Invalid;

@@ -112,6 +112,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(struct_ty);
         }
 
+        if let Some(layout) = self
+            .enum_payload_layouts
+            .get(&key)
+            .or_else(|| self.enum_payload_layouts.get(&base_name))
+        {
+            return Ok(*layout);
+        }
+        if self.enum_backing_types.contains_key(&base_name)
+            || self.enum_variants.contains_key(&base_name)
+        {
+            let backing = self
+                .enum_backing_types
+                .get(&base_name)
+                .cloned()
+                .unwrap_or(ast::PrimitiveType::I32);
+            let llvm_ty = self.lower_basic_type(&ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(backing)),
+                span: crate::lexer::Span::default(),
+            })?;
+            struct_ty.set_body(&[llvm_ty], false);
+            return Ok(struct_ty);
+        }
+
         let template_fields = self.struct_fields.get(&base_name).cloned().ok_or_else(|| {
             CodegenError::new(format!("missing field metadata for struct `{base_name}`"))
         })?;

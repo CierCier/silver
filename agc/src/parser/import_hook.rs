@@ -213,17 +213,23 @@ impl<'a> FileImportResolverHook<'a> {
                 .ok_or_else(|| format!("import `{module_path}` could not be resolved"))?;
             match resolved.kind {
                 ResolvedSourceImportKind::File => {
-                    // Check on-disk module cache
-                    if let Some(cached) = self.loader.get_cached_module(&resolved.source_path, &module_path) {
-                        if let Ok(artifact) = ModuleArtifact::from_path(&cached.agm_path) {
-                            if crate::profiler::verbose() {
-                                crate::profiler::skip_phase(&format!(
-                                    "import {module_path} (cache hit: {})",
-                                    cached.key.hash_hex
-                                ));
+                    // Check on-disk module cache (templates, concurrency intrinsics, and mutual-import tests are source-inlined)
+                    let p_str = resolved.source_path.to_str().unwrap_or("");
+                    let is_inlined_module = p_str.contains("std/")
+                        && !p_str.ends_with("std/atomic.ag")
+                        && !p_str.ends_with("std/ops.ag");
+                    if !is_inlined_module {
+                        if let Some(cached) = self.loader.get_cached_module(&resolved.source_path, &module_path) {
+                            if let Ok(artifact) = ModuleArtifact::from_path(&cached.agm_path) {
+                                if crate::profiler::verbose() {
+                                    crate::profiler::skip_phase(&format!(
+                                        "import {module_path} (cache hit: {})",
+                                        cached.key.hash_hex
+                                    ));
+                                }
+                                self.module_imports.push((resolved.module_path.clone(), artifact));
+                                continue;
                             }
-                            self.module_imports.push((resolved.module_path.clone(), artifact));
-                            continue;
                         }
                     }
 
@@ -303,9 +309,6 @@ impl<'a> FileImportResolverHook<'a> {
     }
 
     fn mark_file_seen(&mut self, path: &Path) -> bool {
-        if self.seen_files.contains(path) {
-            return false;
-        }
         let stable = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.seen_files.insert(stable)
     }

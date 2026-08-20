@@ -783,9 +783,10 @@ impl<'a> TypeParser<'a> {
             });
         }
         if self.consume_byte(b'&') {
+            let is_mutable = self.consume_str("mut ");
             let inner = self.parse_type()?;
             return Ok(Type::Reference {
-                is_mutable: true,
+                is_mutable,
                 inner: Box::new(inner),
             });
         }

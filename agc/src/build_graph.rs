@@ -14,11 +14,92 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::cache_store::{CacheStore, CachedModule};
 use crate::module_loader::{ModuleLoader, ResolvedSourceImportKind};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CodegenElements {
+    pub functions: usize,
+    pub methods: usize,
+    pub structs: usize,
+    pub enums: usize,
+    pub globals: usize,
+    pub traits: usize,
+    pub type_aliases: usize,
+}
+
+impl CodegenElements {
+    pub fn from_program(program: &crate::parser::ast::Program) -> Self {
+        let mut elements = Self::default();
+        for item in &program.items {
+            match &item.kind {
+                crate::parser::ast::ItemKind::Function(_) => elements.functions += 1,
+                crate::parser::ast::ItemKind::Struct(_) => elements.structs += 1,
+                crate::parser::ast::ItemKind::Enum(_) => elements.enums += 1,
+                crate::parser::ast::ItemKind::GlobalVariable(_) => elements.globals += 1,
+                crate::parser::ast::ItemKind::Trait(_) => elements.traits += 1,
+                crate::parser::ast::ItemKind::TypeAlias(_) => elements.type_aliases += 1,
+                crate::parser::ast::ItemKind::Impl(impl_item) => {
+                    elements.methods += impl_item.items.len();
+                }
+                _ => {}
+            }
+        }
+        elements
+    }
+
+    pub fn total(&self) -> usize {
+        self.functions
+            + self.methods
+            + self.structs
+            + self.enums
+            + self.globals
+            + self.traits
+            + self.type_aliases
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.functions += other.functions;
+        self.methods += other.methods;
+        self.structs += other.structs;
+        self.enums += other.enums;
+        self.globals += other.globals;
+        self.traits += other.traits;
+        self.type_aliases += other.type_aliases;
+    }
+
+    pub fn summary(&self) -> String {
+        let total = self.total();
+        let mut parts = Vec::new();
+        if self.functions > 0 {
+            parts.push(format!("{} fns", self.functions));
+        }
+        if self.methods > 0 {
+            parts.push(format!("{} methods", self.methods));
+        }
+        if self.structs > 0 {
+            parts.push(format!("{} structs", self.structs));
+        }
+        if self.enums > 0 {
+            parts.push(format!("{} enums", self.enums));
+        }
+        if self.globals > 0 {
+            parts.push(format!("{} globals", self.globals));
+        }
+        if self.traits > 0 {
+            parts.push(format!("{} traits", self.traits));
+        }
+        if parts.is_empty() {
+            format!("{total} items")
+        } else {
+            format!("{total} items ({})", parts.join(", "))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModuleNode {
     pub module_path: String,
     pub source_path: PathBuf,
     pub dependencies: Vec<String>,
+    pub codegen_elements: CodegenElements,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -31,6 +112,66 @@ impl DependencyGraph {
         Self {
             nodes: HashMap::default(),
         }
+    }
+
+    pub fn total_codegen_elements(&self) -> CodegenElements {
+        let mut total = CodegenElements::default();
+        for node in self.nodes.values() {
+            total.add(&node.codegen_elements);
+        }
+        total
+    }
+
+    pub fn display_graph(&self) {
+        use owo_colors::OwoColorize;
+
+        let total_elem = self.total_codegen_elements();
+        eprintln!(
+            "{} ({} modules, {})",
+            "Module Build Graph".bold().cyan(),
+            self.nodes.len().to_string().bold(),
+            total_elem.summary().dimmed(),
+        );
+
+        let layers = match self.topological_layers() {
+            Ok(l) => l,
+            Err(_) => {
+                for (name, node) in &self.nodes {
+                    eprintln!(
+                        "  • {} ({})",
+                        name.bold(),
+                        node.codegen_elements.summary().dimmed()
+                    );
+                }
+                return;
+            }
+        };
+
+        for (layer_idx, layer) in layers.iter().enumerate() {
+            let layer_title = format!("Layer {layer_idx}");
+            eprintln!("  {}", layer_title.bold().yellow());
+            for (idx, mod_name) in layer.iter().enumerate() {
+                let is_last = idx + 1 == layer.len();
+                let prefix = if is_last { "    └── " } else { "    ├── " };
+                let node = self.nodes.get(mod_name);
+                let elem_str = node
+                    .map(|n| format!(" ({})", n.codegen_elements.summary()))
+                    .unwrap_or_default();
+                let deps_str = node
+                    .filter(|n| !n.dependencies.is_empty())
+                    .map(|n| format!(" [deps: {}]", n.dependencies.join(", ")))
+                    .unwrap_or_default();
+
+                eprintln!(
+                    "{}{}{}{}",
+                    prefix.dimmed(),
+                    mod_name.bold().green(),
+                    elem_str.dimmed(),
+                    deps_str.dimmed()
+                );
+            }
+        }
+        eprintln!();
     }
 
     /// Recursively discovers all transitive module dependencies starting from the root inputs.
@@ -70,6 +211,7 @@ impl DependencyGraph {
 
         let mut parser = crate::parser::Parser::new_with_source(tokens, source_path.display().to_string());
         let (ast, _) = parser.parse_program();
+        let codegen_elements = CodegenElements::from_program(&ast);
 
         let current_module_path = module_path.unwrap_or_else(|| {
             source_path
@@ -99,71 +241,328 @@ impl DependencyGraph {
             }
         }
 
+        let p_str = source_path.to_str().unwrap_or("");
+        if p_str.contains("std/")
+            && !p_str.ends_with("std/atomic.ag")
+            && !p_str.ends_with("std/ops.ag")
+        {
+            return Ok(Some(current_module_path));
+        }
+
         self.nodes.insert(
             current_module_path.clone(),
             ModuleNode {
                 module_path: current_module_path.clone(),
                 source_path: source_path.to_path_buf(),
                 dependencies: direct_deps,
+                codegen_elements,
             },
         );
 
         Ok(Some(current_module_path))
     }
 
-    /// Computes topological concurrency layers for parallel execution.
-    /// Each layer contains modules whose dependencies have been satisfied in prior layers.
-    pub fn topological_layers(&self) -> Result<Vec<Vec<String>>, String> {
-        let mut in_degree: HashMap<String, usize> = HashMap::default();
-        let mut dependents: HashMap<String, Vec<String>> = HashMap::default();
+    /// Finds all strongly connected components (SCCs) using Tarjan's algorithm.
+    pub fn strongly_connected_components(&self) -> Vec<Vec<String>> {
+        let mut index = 0usize;
+        let mut stack = Vec::new();
+        let mut indices: HashMap<String, usize> = HashMap::default();
+        let mut lowlink: HashMap<String, usize> = HashMap::default();
+        let mut on_stack: HashSet<String> = HashSet::default();
+        let mut sccs = Vec::new();
 
-        for (name, node) in &self.nodes {
-            in_degree.entry(name.clone()).or_insert(0);
+        for node_name in self.nodes.keys() {
+            if !indices.contains_key(node_name) {
+                self.strongconnect(
+                    node_name,
+                    &mut index,
+                    &mut stack,
+                    &mut indices,
+                    &mut lowlink,
+                    &mut on_stack,
+                    &mut sccs,
+                );
+            }
+        }
+
+        sccs
+    }
+
+    fn strongconnect(
+        &self,
+        node_name: &str,
+        index: &mut usize,
+        stack: &mut Vec<String>,
+        indices: &mut HashMap<String, usize>,
+        lowlink: &mut HashMap<String, usize>,
+        on_stack: &mut HashSet<String>,
+        sccs: &mut Vec<Vec<String>>,
+    ) {
+        indices.insert(node_name.to_string(), *index);
+        lowlink.insert(node_name.to_string(), *index);
+        *index += 1;
+        stack.push(node_name.to_string());
+        on_stack.insert(node_name.to_string());
+
+        if let Some(node) = self.nodes.get(node_name) {
             for dep in &node.dependencies {
                 if self.nodes.contains_key(dep) {
-                    *in_degree.entry(name.clone()).or_insert(0) += 1;
-                    dependents
-                        .entry(dep.clone())
-                        .or_default()
-                        .push(name.clone());
+                    if !indices.contains_key(dep) {
+                        self.strongconnect(
+                            dep,
+                            index,
+                            stack,
+                            indices,
+                            lowlink,
+                            on_stack,
+                            sccs,
+                        );
+                        let dep_low = lowlink[dep];
+                        let cur_low = lowlink.get_mut(node_name).unwrap();
+                        *cur_low = (*cur_low).min(dep_low);
+                    } else if on_stack.contains(dep) {
+                        let dep_idx = indices[dep];
+                        let cur_low = lowlink.get_mut(node_name).unwrap();
+                        *cur_low = (*cur_low).min(dep_idx);
+                    }
+                }
+            }
+        }
+
+        if lowlink[node_name] == indices[node_name] {
+            let mut scc = Vec::new();
+            while let Some(w) = stack.pop() {
+                on_stack.remove(&w);
+                scc.push(w.clone());
+                if w == node_name {
+                    break;
+                }
+            }
+            sccs.push(scc);
+        }
+    }
+
+    /// Computes topological concurrency layers for parallel execution using the condensation DAG.
+    /// Each layer contains modules whose dependencies have been satisfied in prior layers.
+    pub fn topological_layers(&self) -> Result<Vec<Vec<String>>, String> {
+        let sccs = self.strongly_connected_components();
+        let mut node_to_scc: HashMap<String, usize> = HashMap::default();
+        for (scc_idx, scc) in sccs.iter().enumerate() {
+            for node in scc {
+                node_to_scc.insert(node.clone(), scc_idx);
+            }
+        }
+
+        let mut scc_in_degree: HashMap<usize, usize> = HashMap::default();
+        let mut scc_dependents: HashMap<usize, HashSet<usize>> = HashMap::default();
+
+        for (scc_idx, scc) in sccs.iter().enumerate() {
+            scc_in_degree.entry(scc_idx).or_insert(0);
+            for node in scc {
+                if let Some(node_item) = self.nodes.get(node) {
+                    for dep in &node_item.dependencies {
+                        if let Some(&dep_scc) = node_to_scc.get(dep) {
+                            if dep_scc != scc_idx && scc_dependents.entry(dep_scc).or_default().insert(scc_idx) {
+                                *scc_in_degree.entry(scc_idx).or_insert(0) += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         let mut layers = Vec::new();
-        let mut current_layer: Vec<String> = in_degree
+        let mut current_sccs: Vec<usize> = scc_in_degree
             .iter()
             .filter(|&(_, deg)| *deg == 0)
-            .map(|(k, _)| k.clone())
+            .map(|(&idx, _)| idx)
             .collect();
 
-        let mut processed = 0;
-        while !current_layer.is_empty() {
-            processed += current_layer.len();
-            let mut next_layer = Vec::new();
+        while !current_sccs.is_empty() {
+            let mut layer_modules = Vec::new();
+            let mut next_sccs = Vec::new();
 
-            for node_name in &current_layer {
-                if let Some(deps) = dependents.get(node_name) {
-                    for dep in deps {
-                        if let Some(deg) = in_degree.get_mut(dep) {
+            for &scc_idx in &current_sccs {
+                layer_modules.extend(sccs[scc_idx].clone());
+                if let Some(deps) = scc_dependents.get(&scc_idx) {
+                    for &dep_scc in deps {
+                        if let Some(deg) = scc_in_degree.get_mut(&dep_scc) {
                             *deg -= 1;
                             if *deg == 0 {
-                                next_layer.push(dep.clone());
+                                next_sccs.push(dep_scc);
                             }
                         }
                     }
                 }
             }
 
-            layers.push(current_layer);
-            current_layer = next_layer;
-        }
-
-        if processed != self.nodes.len() {
-            return Err("cyclic dependency detected in module import graph".to_string());
+            layers.push(layer_modules);
+            current_sccs = next_sccs;
         }
 
         Ok(layers)
+    }
+}
+
+// ===========================================================================
+// Build Progress Visualizer
+// ===========================================================================
+
+pub struct BuildProgress {
+    total_steps: usize,
+    completed: std::sync::atomic::AtomicUsize,
+    is_terminal: bool,
+    enabled: bool,
+    verbose: bool,
+    start_time: std::time::Instant,
+    active: std::sync::Mutex<HashSet<String>>,
+}
+
+impl BuildProgress {
+    pub fn new(total_steps: usize, enabled: bool, verbose: bool) -> Self {
+        use std::io::IsTerminal;
+        let is_terminal = std::io::stderr().is_terminal();
+        Self {
+            total_steps,
+            completed: std::sync::atomic::AtomicUsize::new(0),
+            is_terminal,
+            enabled,
+            verbose,
+            start_time: std::time::Instant::now(),
+            active: std::sync::Mutex::new(HashSet::default()),
+        }
+    }
+
+    pub fn on_start(&self, module_name: &str, elements: &CodegenElements) {
+        if !self.enabled && !self.verbose {
+            return;
+        }
+        let mut active = self.active.lock().unwrap();
+        active.insert(module_name.to_string());
+        let current = self.completed.load(Ordering::Relaxed) + 1;
+        let total = self.total_steps;
+        let percent = if total > 0 { (current * 100) / total } else { 100 };
+
+        use owo_colors::OwoColorize;
+        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent);
+        let active_list = if active.len() > 1 {
+            let names: Vec<_> = active.iter().cloned().collect();
+            format!(" [active: {}]", names.join(", "))
+        } else {
+            String::new()
+        };
+
+        if self.is_terminal && !self.verbose {
+            eprint!(
+                "\r\x1b[2K{} {} {}{}{}",
+                step_prefix.dimmed(),
+                "compiling".bold().cyan(),
+                module_name.bold(),
+                format!(" ({})", elements.summary()).dimmed(),
+                active_list.dimmed()
+            );
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        } else if self.verbose {
+            eprintln!(
+                "{} {} {}{}",
+                step_prefix.dimmed(),
+                "compiling".bold().cyan(),
+                module_name.bold(),
+                format!(" ({})", elements.summary()).dimmed()
+            );
+        }
+    }
+
+    pub fn on_finish(
+        &self,
+        module_name: &str,
+        elements: &CodegenElements,
+        is_cached: bool,
+        duration: std::time::Duration,
+    ) {
+        let mut active = self.active.lock().unwrap();
+        active.remove(module_name);
+        let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = self.total_steps;
+        let percent = if total > 0 { (current * 100) / total } else { 100 };
+
+        if !self.enabled && !self.verbose {
+            return;
+        }
+
+        use owo_colors::OwoColorize;
+        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent);
+        let status = if is_cached {
+            "[cached]".bold().green().to_string()
+        } else {
+            format!("{} in {:.1?}", "compiled".bold().green(), duration)
+        };
+
+        if self.is_terminal && !self.verbose {
+            eprintln!(
+                "\r\x1b[2K{} {} {}{}",
+                step_prefix.dimmed(),
+                status,
+                module_name.bold(),
+                format!(" ({})", elements.summary()).dimmed()
+            );
+        } else {
+            eprintln!(
+                "{} {} {}{}",
+                step_prefix.dimmed(),
+                status,
+                module_name.bold(),
+                format!(" ({})", elements.summary()).dimmed()
+            );
+        }
+    }
+
+    pub fn on_link(&self, target_path: &Path) {
+        if !self.enabled && !self.verbose {
+            return;
+        }
+        let current = self.total_steps;
+        let total = self.total_steps;
+        use owo_colors::OwoColorize;
+        let step_prefix = format!("[{:>2}/{:<2}] 100%", current, total);
+        if self.is_terminal && !self.verbose {
+            eprintln!(
+                "\r\x1b[2K{} {} {}",
+                step_prefix.dimmed(),
+                "linking".bold().magenta(),
+                target_path.display().to_string().bold()
+            );
+        } else {
+            eprintln!(
+                "{} {} {}",
+                step_prefix.dimmed(),
+                "linking".bold().magenta(),
+                target_path.display().to_string().bold()
+            );
+        }
+    }
+
+    pub fn on_complete(
+        &self,
+        total_modules: usize,
+        total_elements: &CodegenElements,
+        cached_count: usize,
+        compiled_count: usize,
+    ) {
+        if !self.enabled && !self.verbose {
+            return;
+        }
+        use owo_colors::OwoColorize;
+        let elapsed = self.start_time.elapsed();
+        eprintln!(
+            "{} in {:.2?} ({} modules, {}, {} cached, {} compiled)",
+            "Build finished".bold().green(),
+            elapsed,
+            total_modules.to_string().bold(),
+            total_elements.summary().bold(),
+            cached_count.to_string().green(),
+            compiled_count.to_string().cyan()
+        );
     }
 }
 
@@ -183,6 +582,7 @@ pub struct ParallelGraphExecutor<'a> {
     pub loader: &'a ModuleLoader,
     pub store: &'a CacheStore,
     pub jobs: usize,
+    pub progress: Option<Arc<BuildProgress>>,
 }
 
 impl<'a> ParallelGraphExecutor<'a> {
@@ -191,12 +591,14 @@ impl<'a> ParallelGraphExecutor<'a> {
         loader: &'a ModuleLoader,
         store: &'a CacheStore,
         jobs: usize,
+        progress: Option<Arc<BuildProgress>>,
     ) -> Self {
         Self {
             graph,
             loader,
             store,
             jobs: if jobs == 0 { num_cpus() } else { jobs },
+            progress,
         }
     }
 
@@ -230,6 +632,9 @@ impl<'a> ParallelGraphExecutor<'a> {
                         if let Some(cached) = self.loader.get_cached_module(&node.source_path, &node.module_path) {
                             total_hits += 1;
                             object_artifacts.push(cached.obj_path);
+                            if let Some(p) = &self.progress {
+                                p.on_finish(&node.module_path, &node.codegen_elements, true, std::time::Duration::ZERO);
+                            }
                         } else {
                             layer_misses.push(node.clone());
                         }
@@ -280,6 +685,21 @@ impl<'a> ParallelGraphExecutor<'a> {
     }
 
     fn compile_single_module(&self, node: &ModuleNode) -> Result<CachedModule, String> {
+        let start = std::time::Instant::now();
+        if let Some(p) = &self.progress {
+            p.on_start(&node.module_path, &node.codegen_elements);
+        }
+        let res = self.compile_single_module_inner(node);
+        let elapsed = start.elapsed();
+        if let Some(p) = &self.progress {
+            if res.is_ok() {
+                p.on_finish(&node.module_path, &node.codegen_elements, false, elapsed);
+            }
+        }
+        res
+    }
+
+    fn compile_single_module_inner(&self, node: &ModuleNode) -> Result<CachedModule, String> {
         let key = self
             .loader
             .compute_cache_key(&node.source_path, &node.module_path)
@@ -330,11 +750,27 @@ impl<'a> ParallelGraphExecutor<'a> {
 
         crate::semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &import_lowering.module_artifacts);
 
-        // Mark library items public
-        let lib_file = crate::lexer::register_source(node.source_path.to_str().unwrap_or_default(), &src);
+        // Mark library items public and inlined non-library items private
+        let lib_file = file_id;
         for item in &mut ast.items {
-            if item.span.file == lib_file && matches!(item.visibility, crate::parser::ast::Visibility::Private) {
+            if item.span.file == lib_file {
                 item.visibility = crate::parser::ast::Visibility::Public;
+                if let crate::parser::ast::ItemKind::Impl(impl_item) = &mut item.kind {
+                    for member in &mut impl_item.items {
+                        if let crate::parser::ast::ImplItemKind::Function(func) = member {
+                            func.visibility = crate::parser::ast::Visibility::Public;
+                        }
+                    }
+                }
+            } else {
+                item.visibility = crate::parser::ast::Visibility::Private;
+                if let crate::parser::ast::ItemKind::Impl(impl_item) = &mut item.kind {
+                    for member in &mut impl_item.items {
+                        if let crate::parser::ast::ImplItemKind::Function(func) = member {
+                            func.visibility = crate::parser::ast::Visibility::Private;
+                        }
+                    }
+                }
             }
         }
 
@@ -345,6 +781,15 @@ impl<'a> ParallelGraphExecutor<'a> {
                 .unwrap_or("x86_64-unknown-linux-gnu")
                 .to_string()
         });
+
+        let mut module_native_libs = crate::attributes::collect_program_link_libraries(&ast).unwrap_or_default();
+        for imp_art in &import_lowering.module_artifacts {
+            for lib in &imp_art.native_libs {
+                if !module_native_libs.contains(lib) {
+                    module_native_libs.push(lib.clone());
+                }
+            }
+        }
 
         let artifact = crate::module_artifact::ModuleArtifact::from_program(
             node.module_path.clone(),
@@ -359,7 +804,7 @@ impl<'a> ParallelGraphExecutor<'a> {
             },
             import_lowering.module_dependencies,
             import_lowering.transitive_module_deps,
-            Vec::new(),
+            module_native_libs,
         );
 
         let agm_bytes = artifact.to_bytes().map_err(|e| format!("failed to encode .agm: {e}"))?;
@@ -406,6 +851,7 @@ mod tests {
                 module_path: "a".to_string(),
                 source_path: PathBuf::from("a.ag"),
                 dependencies: vec![],
+                codegen_elements: CodegenElements::default(),
             },
         );
         graph.nodes.insert(
@@ -414,6 +860,7 @@ mod tests {
                 module_path: "b".to_string(),
                 source_path: PathBuf::from("b.ag"),
                 dependencies: vec![],
+                codegen_elements: CodegenElements::default(),
             },
         );
 
@@ -431,6 +878,7 @@ mod tests {
                 module_path: "leaf1".to_string(),
                 source_path: PathBuf::from("leaf1.ag"),
                 dependencies: vec![],
+                codegen_elements: CodegenElements::default(),
             },
         );
         graph.nodes.insert(
@@ -439,6 +887,7 @@ mod tests {
                 module_path: "leaf2".to_string(),
                 source_path: PathBuf::from("leaf2.ag"),
                 dependencies: vec![],
+                codegen_elements: CodegenElements::default(),
             },
         );
         graph.nodes.insert(
@@ -447,6 +896,7 @@ mod tests {
                 module_path: "mid".to_string(),
                 source_path: PathBuf::from("mid.ag"),
                 dependencies: vec!["leaf1".to_string(), "leaf2".to_string()],
+                codegen_elements: CodegenElements::default(),
             },
         );
         graph.nodes.insert(
@@ -455,6 +905,7 @@ mod tests {
                 module_path: "root".to_string(),
                 source_path: PathBuf::from("root.ag"),
                 dependencies: vec!["mid".to_string()],
+                codegen_elements: CodegenElements::default(),
             },
         );
 
@@ -474,6 +925,7 @@ mod tests {
                 module_path: "a".to_string(),
                 source_path: PathBuf::from("a.ag"),
                 dependencies: vec!["b".to_string()],
+                codegen_elements: CodegenElements::default(),
             },
         );
         graph.nodes.insert(
@@ -482,9 +934,12 @@ mod tests {
                 module_path: "b".to_string(),
                 source_path: PathBuf::from("b.ag"),
                 dependencies: vec!["a".to_string()],
+                codegen_elements: CodegenElements::default(),
             },
         );
 
-        assert!(graph.topological_layers().is_err());
+        let layers = graph.topological_layers().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].len(), 2);
     }
 }

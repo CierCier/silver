@@ -71,9 +71,10 @@ impl ModuleLoader {
         }
     }
 
-    pub fn compute_cache_key(&self, source_path: &Path, module_path: &str) -> Option<CacheKey> {
-        let mut builder = CacheKeyBuilder::new(module_path);
-        if builder.add_file(source_path).is_err() {
+    pub fn compute_cache_key(&self, source_path: &Path, _module_path: &str) -> Option<CacheKey> {
+        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        let mut builder = CacheKeyBuilder::new(&canonical.display().to_string());
+        if builder.add_file(&canonical).is_err() {
             return None;
         }
         builder.add_compiler_version(env!("CARGO_PKG_VERSION"));
@@ -107,9 +108,29 @@ impl ModuleLoader {
         if let Some(entry) = cache.get(module_path) {
             return entry.clone();
         }
-        let artifact_path = self
-            .find_module_path(module_path)
-            .ok_or_else(|| format!("module `{module_path}` not found"))?;
+        let artifact_path = if let Some(path) = self.find_module_path(module_path) {
+            Some(path)
+        } else {
+            let idents: Vec<crate::parser::ast::Identifier> = module_path
+                .split('.')
+                .map(|name| crate::parser::ast::Identifier {
+                    name: name.to_string(),
+                    span: crate::lexer::Span::default(),
+                })
+                .collect();
+            if let Some(resolved) = self.find_source_import(&idents, None) {
+                if let Some(cached) = self.get_cached_module(&resolved.source_path, module_path) {
+                    Some(cached.agm_path)
+                } else if resolved.kind == ResolvedSourceImportKind::Module {
+                    Some(resolved.source_path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let artifact_path = artifact_path.ok_or_else(|| format!("module `{module_path}` not found"))?;
         let result = ModuleArtifact::from_path(&artifact_path);
         let cached = result.clone();
         cache.insert(module_path.to_string(), cached);
@@ -244,8 +265,9 @@ impl ModuleLoader {
                 continue;
             }
             for dep in &module.module_deps {
-                let dep_module = self.load_cached_module(dep)?;
-                self.resolve_module_closure_dfs(std::slice::from_ref(&dep_module), seen, resolved)?;
+                if let Ok(dep_module) = self.load_cached_module(dep) {
+                    self.resolve_module_closure_dfs(std::slice::from_ref(&dep_module), seen, resolved)?;
+                }
             }
             resolved.push(module.clone());
         }
@@ -492,8 +514,12 @@ pub fn validate_import_conflicts<'a>(
     let mut non_function_exports: HashMap<String, (String, ExportKind)> = HashMap::default();
     let mut function_exports: HashMap<String, HashMap<String, String>> = HashMap::default();
     let mut function_owner: HashMap<String, String> = HashMap::default();
+    let mut seen_source_hashes = std::collections::HashSet::new();
 
     for (module_path, module) in imports {
+        if !seen_source_hashes.insert(module.source_hash_fnv1a64) {
+            continue;
+        }
         for export in &module.exports {
             let name = export.name.clone();
             match export.kind {

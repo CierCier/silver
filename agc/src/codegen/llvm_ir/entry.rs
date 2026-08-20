@@ -44,7 +44,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         function: FunctionValue<'ctx>,
         visibility: &ast::Visibility,
     ) {
-        if Self::is_private(visibility) {
+        let fn_name = function.get_name().to_str().unwrap_or("");
+        // Monomorphized generic instances (e.g. alloc__1_u8__...) carry arity markers `__\d+_`
+        // and use linkonce_odr so they are shared and deduplicated across compilation units.
+        let is_monomorph = (0..=9).any(|d| fn_name.contains(&format!("__{d}_")));
+        if is_monomorph {
+            function.set_linkage(Linkage::LinkOnceODR);
+        } else if Self::is_private(visibility) {
             function.set_linkage(Linkage::Internal);
         } else {
             function.set_linkage(Linkage::External);
@@ -285,7 +291,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             task_trampoline_counter: 0,
             leak_check,
         };
-        generator.declare_imported_modules(imported_modules)?;
+        generator.declare_imported_modules(program, imported_modules)?;
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())
@@ -621,7 +627,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             task_trampoline_counter: 0,
             leak_check,
         };
-        generator.declare_imported_modules(imported_modules)?;
+        generator.declare_imported_modules(program, imported_modules)?;
 
         Target::initialize_all(&InitializationConfig::default());
         let triple = target_triple
@@ -711,33 +717,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     fn declare_imported_modules(
         &mut self,
+        program: &ast::Program,
         imported_modules: &[ModuleArtifact],
     ) -> CodegenResult<()> {
         for module in imported_modules {
             for export in &module.exports {
-                if !export.is_struct() {
-                    continue;
+                if export.is_struct() {
+                    self.struct_types
+                        .entry(export.name.clone())
+                        .or_insert_with(|| self.context.opaque_struct_type(&export.name));
+                    let fields = export
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            ast_type_from_canonical_key(&field.type_key)
+                                .map(|ty| (field.name.clone(), ty))
+                                .map_err(CodegenError::new)
+                        })
+                        .collect::<CodegenResult<Vec<_>>>()?;
+                    self.struct_fields.insert(export.name.clone(), fields);
+                    if !export.type_params.is_empty() {
+                        self.struct_generics
+                            .insert(export.name.clone(), export.type_params.clone());
+                    }
+                } else if export.is_enum() {
+                    if let Some(backing) = &export.enum_backing_type {
+                        if let Ok(ty) = ast_type_from_canonical_key(backing) {
+                            if let ast::TypeKind::Primitive(primitive) = *ty.kind {
+                                self.enum_backing_types
+                                    .insert(export.name.clone(), primitive);
+                            }
+                        }
+                    }
                 }
-                self.struct_types
-                    .entry(export.name.clone())
-                    .or_insert_with(|| self.context.opaque_struct_type(&export.name));
-                let fields = export
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        ast_type_from_canonical_key(&field.type_key)
-                            .map(|ty| (field.name.clone(), ty))
-                            .map_err(CodegenError::new)
-                    })
-                    .collect::<CodegenResult<Vec<_>>>()?;
-                self.struct_fields.insert(export.name.clone(), fields);
-                // Generic imported structs need their type params recorded so
-                // ensure_named_struct_type can substitute concrete args into
-                // the field types (e.g. Pair<i64> from a Pair<T> template).
-                if !export.type_params.is_empty() {
-                    self.struct_generics
-                        .insert(export.name.clone(), export.type_params.clone());
+            }
+        }
+
+        // Register program structs and enums metadata before declaring imported functions
+        for item in &program.items {
+            match &item.kind {
+                ast::ItemKind::Struct(struct_item) => {
+                    self.register_struct_fields(struct_item);
                 }
+                ast::ItemKind::Enum(enum_item) => {
+                    self.enum_backing_types
+                        .insert(enum_item.name.name.clone(), ast::PrimitiveType::I32);
+                }
+                _ => {}
             }
         }
 
@@ -912,6 +938,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     crate::module_artifact::ExportKind::Trait => {}
                     crate::module_artifact::ExportKind::Constant
                     | crate::module_artifact::ExportKind::Global => {
+                        if let Some(const_val_str) = &export.const_value {
+                            if let Ok(val) = const_val_str.parse::<i128>() {
+                                self.global_const_values.insert(export.name.clone(), val);
+                            }
+                        }
                         let link_name = export
                             .link_name
                             .clone()

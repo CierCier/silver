@@ -52,6 +52,7 @@ pub struct TypeChecker {
     imported_types: HashSet<String>,
     imported_traits: HashSet<String>,
     imported_modules: Vec<ModuleArtifact>,
+    imported_source_hashes: HashSet<u64>,
     casts: HashMap<(String, String), ()>,
     type_aliases: HashMap<String, ast::Type>,
     /// Expression type cache for LSP hover support.
@@ -293,6 +294,9 @@ impl TypeChecker {
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
+        if !self.imported_source_hashes.insert(module.source_hash_fnv1a64) {
+            return;
+        }
         for export in &module.exports {
             match export.kind {
                 crate::module_artifact::ExportKind::Function => {
@@ -346,6 +350,62 @@ impl TypeChecker {
                             .entry(export.name.clone())
                             .or_default()
                             .push(sig);
+
+                        if let Some((owner_name, method_name)) = export.name.split_once("::") {
+                            let owner_ty = Type::from_canonical_key(owner_name).unwrap_or_else(|_| Type::Named {
+                                path: vec![owner_name.to_string()],
+                                generics: Vec::new(),
+                            });
+                            let owner_key = self.method_key(&owner_ty);
+                            let method_sig = MethodSig {
+                                params: params.clone(),
+                                return_type: return_type.clone(),
+                                type_params: export.type_params.clone(),
+                                owner: owner_ty.clone(),
+                                bounds: Vec::new(),
+                                source_impl: ast::ImplItem {
+                                    generics: None,
+                                    trait_ref: None,
+                                    self_type: owner_ty.to_ast(),
+                                    items: Vec::new(),
+                                },
+                                source_method: ast::ImplFunction {
+                                    name: ast::Identifier {
+                                        name: method_name.to_string(),
+                                        span: Span::default(),
+                                    },
+                                    generics: None,
+                                    is_variadic: export.is_variadic,
+                                    parameters: params.iter().enumerate().map(|(i, p)| ast::Parameter {
+                                        name: ast::Identifier {
+                                            name: format!("p{i}"),
+                                            span: Span::default(),
+                                        },
+                                        param_type: p.to_ast(),
+                                        is_mutable: false,
+                                        span: Span::default(),
+                                    }).collect(),
+                                    method_kind: if let Some(first) = params.first() {
+                                        match first {
+                                            Type::Pointer { .. } => ast::MethodKind::InstancePointer { is_mutable: true },
+                                            Type::Reference { is_mutable, .. } => ast::MethodKind::InstancePointer { is_mutable: *is_mutable },
+                                            _ if *first == owner_ty => ast::MethodKind::InstanceValue,
+                                            _ => ast::MethodKind::Static,
+                                        }
+                                    } else {
+                                        ast::MethodKind::Static
+                                    },
+                                    visibility: ast::Visibility::Public,
+                                    return_type: if matches!(return_type, Type::Unit) { None } else { Some(return_type.to_ast()) },
+                                    body: ast::Block { statements: Vec::new(), span: Span::default() },
+                                    attributes: Vec::new(),
+                                    span: Span::default(),
+                                },
+                            };
+                            let symbol_id = (self.method_symbols.len() + 100_000 + self.methods.len()) as u64;
+                            self.method_symbols.insert(symbol_id, method_sig);
+                            self.methods.entry((owner_key, method_name.to_string())).or_default().push(symbol_id);
+                        }
                     }
                 }
                 crate::module_artifact::ExportKind::Struct => {

@@ -515,7 +515,22 @@ impl ModuleArtifact {
             return None;
         }
         let artifact_path = self.artifact_path.as_ref()?;
-        Some(artifact_path.with_extension("o"))
+        let direct_o = artifact_path.with_extension("o");
+        if direct_o.exists() {
+            return Some(direct_o);
+        }
+        if let Some(parent) = artifact_path.parent()
+            && let Some(grandparent) = parent.parent()
+            && parent.file_name().and_then(|n| n.to_str()) == Some("agm")
+        {
+            if let Some(file_name) = artifact_path.file_name() {
+                let obj_path = grandparent.join("obj").join(file_name).with_extension("o");
+                if obj_path.exists() {
+                    return Some(obj_path);
+                }
+            }
+        }
+        Some(direct_o)
     }
 
     pub fn shared_library_path(&self) -> Option<PathBuf> {
@@ -930,6 +945,15 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                 } else {
                     ExportKind::Global
                 };
+                let const_value = if !is_mutable && let Some(init) = &global.initializer {
+                    match &init.kind.as_ref() {
+                        ast::ExpressionKind::Literal(ast::Literal::Integer(v)) => Some(v.to_string()),
+                        ast::ExpressionKind::Literal(ast::Literal::Bool(v)) => Some((*v as i32).to_string()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 exports.push(ModuleExport {
                     kind,
                     name: global.name.name.clone(),
@@ -944,7 +968,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
-                    const_value: None,
+                    const_value,
                     is_mutable,
                 });
             }
@@ -963,12 +987,15 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         .map(Type::from_ast)
                         .unwrap_or(Type::Unit)
                         .canonical_key();
+                    let link_name = function_link_name(&func.attributes)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| func.name.name.clone());
                     exports.push(ModuleExport {
                         kind: ExportKind::Function,
                         name: func.name.name.clone(),
-                        signature: format!("{ret}({})", params.join(",")),
+                        signature: format!("fn({}) -> {ret}", params.join(",")),
                         type_params: Vec::new(),
-                        link_name: Some(func.name.name.clone()),
+                        link_name: Some(link_name),
                         abi: Some(ModuleAbi::from_linkage(&block.linkage)),
                         is_variadic: func.signature.is_variadic,
                         type_key: None,
@@ -979,6 +1006,27 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: false,
+                    });
+                }
+                for var in &block.variables {
+                    let ty = Type::from_ast(&var.var_type).canonical_key();
+                    let link_name = var.name.name.clone();
+                    exports.push(ModuleExport {
+                        kind: ExportKind::Global,
+                        name: var.name.name.clone(),
+                        signature: ty.clone(),
+                        type_params: Vec::new(),
+                        link_name: Some(link_name),
+                        abi: Some(ModuleAbi::from_linkage(&block.linkage)),
+                        is_variadic: false,
+                        type_key: Some(ty),
+                        fields: Vec::new(),
+                        layout: None,
+                        enum_backing_type: None,
+                        enum_variants: Vec::new(),
+                        trait_items: Vec::new(),
+                        const_value: None,
+                        is_mutable: true,
                     });
                 }
             }
@@ -1001,6 +1049,66 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     const_value: None,
                     is_mutable: false,
                 });
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                let self_ty = Type::from_ast(&impl_item.self_type);
+                let self_type_name = self_ty.canonical_key();
+                for member in &impl_item.items {
+                    let ast::ImplItemKind::Function(func) = member else {
+                        continue;
+                    };
+                    if matches!(func.visibility, ast::Visibility::Private) {
+                        continue;
+                    }
+                    let params = func
+                        .parameters
+                        .iter()
+                        .map(|p| Type::from_ast(&p.param_type).canonical_key())
+                        .collect::<Vec<_>>();
+                    let ret = func
+                        .return_type
+                        .as_ref()
+                        .map(Type::from_ast)
+                        .unwrap_or(Type::Unit)
+                        .canonical_key();
+                    let mut type_params = Vec::new();
+                    if let Some(generics) = &impl_item.generics {
+                        for param in &generics.params {
+                            if let ast::GenericParam::Type(tp) = param {
+                                type_params.push(tp.name.name.clone());
+                            }
+                        }
+                    }
+                    if let Some(generics) = &func.generics {
+                        for param in &generics.params {
+                            if let ast::GenericParam::Type(tp) = param {
+                                type_params.push(tp.name.name.clone());
+                            }
+                        }
+                    }
+                    let method_name = &func.name.name;
+                    let ret_opt = if ret == "()" { None } else { Some(ret.as_str()) };
+                    let link_name = function_link_name(&func.attributes)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| crate::mangling::method_symbol(&self_type_name, method_name, &params, ret_opt, func.is_variadic));
+                    exports.push(ModuleExport {
+                        kind: ExportKind::Function,
+                        name: format!("{self_type_name}::{method_name}"),
+                        signature: format!("fn({}) -> {ret}", params.join(",")),
+                        type_params,
+                        link_name: Some(link_name),
+                        abi: Some(ModuleAbi::Silver),
+                        is_variadic: func.is_variadic,
+                        type_key: None,
+                        fields: Vec::new(),
+                        layout: None,
+                        enum_backing_type: None,
+                        enum_variants: Vec::new(),
+                        trait_items: Vec::new(),
+                        const_value: None,
+                        is_mutable: false,
+                    });
+                }
             }
             _ => {}
         }

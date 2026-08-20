@@ -552,6 +552,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut candidates = Vec::new();
         for owner_name in &owners {
             candidates.extend(self.overloaded_method_candidates(owner_name, &method.name));
+            let method_key = format!("{owner_name}::{}", method.name);
+            if let Some(imported_link) = self.imported_function_links.get(&method_key) {
+                if !candidates.contains(imported_link) {
+                    candidates.push(imported_link.clone());
+                }
+            }
         }
         candidates.push(method.name.clone());
 
