@@ -291,6 +291,10 @@ impl<'a> Linter<'a> {
                 self.lint_expr(then_expr);
                 self.lint_expr(else_expr);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.lint_expr(value);
+                self.lint_expr(fallback);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

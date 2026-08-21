@@ -129,6 +129,10 @@ fn rewrite_expression(expression: &mut ast::Expression) {
             rewrite_expression(then_expr);
             rewrite_expression(else_expr);
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            rewrite_expression(value);
+            rewrite_expression(fallback);
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression(condition);
             rewrite_block(body);

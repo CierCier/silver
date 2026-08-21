@@ -622,6 +622,12 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children.push(expression_node(else_expr));
             n
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            let mut n = Node::new("Expr::UnwrapOr");
+            n.children.push(expression_node(value));
+            n.children.push(expression_node(fallback));
+            n
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,

@@ -672,6 +672,12 @@ pub enum ExpressionKind {
         then_expr: Box<Expression>,
         else_expr: Box<Expression>,
     },
+    /// `value ? fallback` — unwrap Optional<T>, Result<T, E>, or nullable pointer
+    /// yielding the inner T/pointer on success or evaluating fallback on absence/error.
+    UnwrapOr {
+        value: Box<Expression>,
+        fallback: Box<Expression>,
+    },
     While {
         condition: Box<Expression>,
         body: Block,

@@ -1090,6 +1090,10 @@ impl Walker<'_> {
                 self.walk_expr(then_expr);
                 self.walk_expr(else_expr);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.walk_expr(value);
+                self.walk_expr(fallback);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

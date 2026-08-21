@@ -222,6 +222,10 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
                 rewrite_expression(else_expr, cfg);
             }
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            rewrite_expression(value, cfg);
+            rewrite_expression(fallback, cfg);
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression(condition, cfg);
             rewrite_block(body, cfg);

@@ -568,6 +568,10 @@ impl Checker {
                 self.check_expr(then_expr, scopes, ref_sources, ptr_locals, ref_params);
                 self.check_expr(else_expr, scopes, ref_sources, ptr_locals, ref_params);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.check_expr(value, scopes, ref_sources, ptr_locals, ref_params);
+                self.check_expr(fallback, scopes, ref_sources, ptr_locals, ref_params);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

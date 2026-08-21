@@ -873,6 +873,10 @@ impl MoveChecker {
                 self.check_expr(then_expr, state, scopes, var_types);
                 self.check_expr(else_expr, state, scopes, var_types);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.check_expr(value, state, scopes, var_types);
+                self.check_expr(fallback, state, scopes, var_types);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

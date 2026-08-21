@@ -470,6 +470,10 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
             scan_expr_for_bare_ctor(then_expr, ctor, found);
             scan_expr_for_bare_ctor(else_expr, ctor, found);
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            scan_expr_for_bare_ctor(value, ctor, found);
+            scan_expr_for_bare_ctor(fallback, ctor, found);
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,

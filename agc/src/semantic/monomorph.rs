@@ -535,6 +535,10 @@ fn collect_expression_instantiations(
             collect_expression_instantiations(then_expr, generic_structs, instantiations, scopes);
             collect_expression_instantiations(else_expr, generic_structs, instantiations, scopes);
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            collect_expression_instantiations(value, generic_structs, instantiations, scopes);
+            collect_expression_instantiations(fallback, generic_structs, instantiations, scopes);
+        }
         ast::ExpressionKind::Binary { left, right, .. } => {
             collect_expression_instantiations(left, generic_structs, instantiations, scopes);
             collect_expression_instantiations(right, generic_structs, instantiations, scopes);
@@ -1080,6 +1084,10 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
             substitute_expression_types(then_expr, mapping);
             substitute_expression_types(else_expr, mapping);
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            substitute_expression_types(value, mapping);
+            substitute_expression_types(fallback, mapping);
+        }
         ast::ExpressionKind::TypeName(ty) => {
             *ty = substitute_ast_type(ty, mapping);
         }
@@ -1349,6 +1357,10 @@ fn rewrite_expression_function_calls(
             rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
             rewrite_expression_function_calls(then_expr, name, args, mangled, span, param_count);
             rewrite_expression_function_calls(else_expr, name, args, mangled, span, param_count);
+        }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            rewrite_expression_function_calls(value, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(fallback, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Call {
             function,
@@ -1654,6 +1666,10 @@ fn rewrite_expression_method_calls(
             rewrite_expression_method_calls(condition, base, method, args, span);
             rewrite_expression_method_calls(then_expr, base, method, args, span);
             rewrite_expression_method_calls(else_expr, base, method, args, span);
+        }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            rewrite_expression_method_calls(value, base, method, args, span);
+            rewrite_expression_method_calls(fallback, base, method, args, span);
         }
         ast::ExpressionKind::MethodCall {
             receiver,
@@ -2164,6 +2180,10 @@ fn collect_expression_remaining_calls(
             results.extend(collect_expression_remaining_calls(condition, generic_fns));
             results.extend(collect_expression_remaining_calls(then_expr, generic_fns));
             results.extend(collect_expression_remaining_calls(else_expr, generic_fns));
+        }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            results.extend(collect_expression_remaining_calls(value, generic_fns));
+            results.extend(collect_expression_remaining_calls(fallback, generic_fns));
         }
         ast::ExpressionKind::Call {
             function,

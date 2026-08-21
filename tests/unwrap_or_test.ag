@@ -1,0 +1,89 @@
+// tests/unwrap_or_test.ag — test unwrap-or (?) fallback operator
+
+import std.test;
+import std.optional;
+import std.result;
+
+i32 side_effects = 0;
+
+i32 fallback_with_side_effect(i32 val) {
+    side_effects = side_effects + 1;
+    return val;
+}
+
+Optional<i32> get_some_port() {
+    Optional<i32> p = Some(8080);
+    return p;
+}
+
+Optional<i32> get_none_port() {
+    Optional<i32> p = None;
+    return p;
+}
+
+Result<i32, str> get_ok_code() {
+    Result<i32, str> r = Ok(200);
+    return r;
+}
+
+Result<i32, str> get_err_code() {
+    Result<i32, str> r = Err("not found");
+    return r;
+}
+
+i32 main() {
+    test_start("optional unwrap-or");
+    Optional<i32> some_p = get_some_port();
+    i32 p1 = some_p ? 80;
+    assert_eq_i32(p1, 8080, "some_port ? 80 yields 8080");
+
+    Optional<i32> none_p = get_none_port();
+    i32 p2 = none_p ? 80;
+    assert_eq_i32(p2, 80, "none_port ? 80 yields 80");
+
+    test_start("result unwrap-or");
+    Result<i32, str> ok_res = get_ok_code();
+    i32 c1 = ok_res ? 500;
+    assert_eq_i32(c1, 200, "ok_code ? 500 yields 200");
+
+    Result<i32, str> err_res = get_err_code();
+    i32 c2 = err_res ? 500;
+    assert_eq_i32(c2, 500, "err_code ? 500 yields 500");
+
+    test_start("pointer unwrap-or");
+    i32 default_val = 999;
+    i32 actual_val = 123;
+    i32* non_null = &actual_val;
+    i32* null_ptr = (i32*)0;
+
+    i32* r1 = non_null ? &default_val;
+    assert_eq_i32(*r1, 123, "non_null ? &default yields non_null");
+
+    i32* r2 = null_ptr ? &default_val;
+    assert_eq_i32(*r2, 999, "null_ptr ? &default yields &default");
+
+    test_start("chained unwrap-or");
+    Optional<i32> o1 = None;
+    Optional<i32> o2 = Some(42);
+    i32 chained = o1 ? o2 ? 100;
+    assert_eq_i32(chained, 42, "o1 ? o2 ? 100 yields 42");
+
+    Optional<i32> o3 = None;
+    Optional<i32> o4 = None;
+    i32 chained_default = o3 ? o4 ? 100;
+    assert_eq_i32(chained_default, 100, "o3 ? o4 ? 100 yields 100");
+
+    test_start("short-circuiting");
+    side_effects = 0;
+    Optional<i32> has_val = Some(777);
+    i32 sc1 = has_val ? fallback_with_side_effect(111);
+    assert_eq_i32(sc1, 777, "has_val unwrap");
+    assert_eq_i32(side_effects, 0, "fallback NOT called when value present");
+
+    Optional<i32> is_none = None;
+    i32 sc2 = is_none ? fallback_with_side_effect(111);
+    assert_eq_i32(sc2, 111, "is_none fallback");
+    assert_eq_i32(side_effects, 1, "fallback IS called when value absent");
+
+    return done();
+}

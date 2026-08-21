@@ -615,6 +615,10 @@ impl Analyzer {
                 self.check_expression(then_expr);
                 self.check_expression(else_expr);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.check_expression(value);
+                self.check_expression(fallback);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,

@@ -484,6 +484,10 @@ impl BorrowChecker {
                 self.collect_expr_uses(then_expr, uses);
                 self.collect_expr_uses(else_expr, uses);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.collect_expr_uses(value, uses);
+                self.collect_expr_uses(fallback, uses);
+            }
             ast::ExpressionKind::While { condition, body } => {
                 self.collect_expr_uses(condition, uses);
                 for stmt in &body.statements {
@@ -1115,6 +1119,10 @@ impl BorrowChecker {
                 self.check_expr(condition);
                 self.check_expr(then_expr);
                 self.check_expr(else_expr);
+            }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.check_expr(value);
+                self.check_expr(fallback);
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.check_expr(expression);

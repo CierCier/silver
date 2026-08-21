@@ -975,6 +975,166 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 self.emit_if_expression_value(condition, &then_block, &else_block, &expr.span)
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                let val_ty = self.resolve_receiver_type(value);
+                let is_pointer = val_ty
+                    .as_ref()
+                    .map(|t| matches!(t.kind.as_ref(), ast::TypeKind::Pointer(_)))
+                    .unwrap_or(false);
+                if is_pointer {
+                    let null_expr = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
+                        span: value.span,
+                    };
+                    let cond = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Binary {
+                            operator: ast::BinaryOperator::NotEqual,
+                            left: value.clone(),
+                            right: Box::new(null_expr),
+                        }),
+                        span: value.span,
+                    };
+                    let then_block = ast::Block {
+                        statements: vec![ast::Statement {
+                            kind: ast::StatementKind::Expression((**value).clone()),
+                            span: value.span,
+                        }],
+                        span: value.span,
+                    };
+                    let else_block = ast::Block {
+                        statements: vec![ast::Statement {
+                            kind: ast::StatementKind::Expression((**fallback).clone()),
+                            span: fallback.span,
+                        }],
+                        span: fallback.span,
+                    };
+                    self.emit_if_expression_value(&cond, &then_block, &else_block, &expr.span)
+                } else {
+                    let is_result = if let Some(ty) = &val_ty {
+                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
+                            named.path.last().map(|s| s.name.as_str()) == Some("Result")
+                                || named.path.last().map(|s| s.name.as_str()) == Some("SysResult")
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_result {
+                        let arms = vec![
+                            ast::MatchArm {
+                                pattern: ast::Pattern {
+                                    kind: ast::PatternKind::Enum {
+                                        path: vec![ast::Identifier {
+                                            name: "Result".to_string(),
+                                            span: value.span,
+                                        }],
+                                        variant: ast::Identifier {
+                                            name: "Ok".to_string(),
+                                            span: value.span,
+                                        },
+                                        data: Some(Box::new(ast::Pattern {
+                                            kind: ast::PatternKind::Move(ast::Identifier {
+                                                name: "__unwrap_val".to_string(),
+                                                span: value.span,
+                                            }),
+                                            span: value.span,
+                                        })),
+                                    },
+                                    span: value.span,
+                                },
+                                guard: None,
+                                body: ast::Expression {
+                                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                        name: "__unwrap_val".to_string(),
+                                        span: value.span,
+                                    })),
+                                    span: value.span,
+                                },
+                                span: value.span,
+                            },
+                            ast::MatchArm {
+                                pattern: ast::Pattern {
+                                    kind: ast::PatternKind::Enum {
+                                        path: vec![ast::Identifier {
+                                            name: "Result".to_string(),
+                                            span: value.span,
+                                        }],
+                                        variant: ast::Identifier {
+                                            name: "Err".to_string(),
+                                            span: value.span,
+                                        },
+                                        data: Some(Box::new(ast::Pattern {
+                                            kind: ast::PatternKind::Wildcard,
+                                            span: value.span,
+                                        })),
+                                    },
+                                    span: fallback.span,
+                                },
+                                guard: None,
+                                body: (**fallback).clone(),
+                                span: fallback.span,
+                            },
+                        ];
+                        self.emit_match_expression_value(value, &arms, &expr.span)
+                    } else {
+                        let arms = vec![
+                            ast::MatchArm {
+                                pattern: ast::Pattern {
+                                    kind: ast::PatternKind::Enum {
+                                        path: vec![ast::Identifier {
+                                            name: "Optional".to_string(),
+                                            span: value.span,
+                                        }],
+                                        variant: ast::Identifier {
+                                            name: "Some".to_string(),
+                                            span: value.span,
+                                        },
+                                        data: Some(Box::new(ast::Pattern {
+                                            kind: ast::PatternKind::Move(ast::Identifier {
+                                                name: "__unwrap_val".to_string(),
+                                                span: value.span,
+                                            }),
+                                            span: value.span,
+                                        })),
+                                    },
+                                    span: value.span,
+                                },
+                                guard: None,
+                                body: ast::Expression {
+                                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                        name: "__unwrap_val".to_string(),
+                                        span: value.span,
+                                    })),
+                                    span: value.span,
+                                },
+                                span: value.span,
+                            },
+                            ast::MatchArm {
+                                pattern: ast::Pattern {
+                                    kind: ast::PatternKind::Enum {
+                                        path: vec![ast::Identifier {
+                                            name: "Optional".to_string(),
+                                            span: value.span,
+                                        }],
+                                        variant: ast::Identifier {
+                                            name: "None".to_string(),
+                                            span: value.span,
+                                        },
+                                        data: None,
+                                    },
+                                    span: fallback.span,
+                                },
+                                guard: None,
+                                body: (**fallback).clone(),
+                                span: fallback.span,
+                            },
+                        ];
+                        self.emit_match_expression_value(value, &arms, &expr.span)
+                    }
+                }
+            }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.emit_match_expression_value(expression, arms, &expr.span)
             }

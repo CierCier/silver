@@ -1487,6 +1487,57 @@ impl TypeChecker {
                     then_ty
                 }
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                let val_ty = self.check_expr(value, None);
+                let target_ty = match &val_ty {
+                    Type::Optional { inner } => Some((**inner).clone()),
+                    Type::Named { path, generics } => {
+                        let name = path.last().map(|s| s.as_str());
+                        if name == Some("Optional") || name == Some("Result") || name == Some("SysResult") {
+                            generics.first().cloned()
+                        } else {
+                            None
+                        }
+                    }
+                    Type::Pointer {
+                        is_mutable,
+                        is_volatile,
+                        inner,
+                    } => Some(Type::Pointer {
+                        is_mutable: *is_mutable,
+                        is_volatile: *is_volatile,
+                        inner: inner.clone(),
+                    }),
+                    _ => None,
+                };
+
+                if let Some(target) = target_ty {
+                    let fallback_ty = self.check_expr(fallback, Some(&target));
+                    if self.is_assignable(&target, &fallback_ty) {
+                        target
+                    } else {
+                        self.error(
+                            format!(
+                                "unwrap-or fallback type mismatch: expected {}, found {}",
+                                target, fallback_ty
+                            ),
+                            fallback.span,
+                        );
+                        target
+                    }
+                } else if val_ty != Type::Unknown {
+                    self.error(
+                        format!(
+                            "unwrap-or operator '?' requires Optional, Result, or pointer on left-hand side, found {}",
+                            val_ty
+                        ),
+                        value.span,
+                    );
+                    Type::Unknown
+                } else {
+                    Type::Unknown
+                }
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,
@@ -6392,6 +6443,10 @@ fn rewrite_expression_bare_constructors(
             rewrite_expression_bare_constructors(then_expr, rewrites);
             rewrite_expression_bare_constructors(else_expr, rewrites);
         }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            rewrite_expression_bare_constructors(value, rewrites);
+            rewrite_expression_bare_constructors(fallback, rewrites);
+        }
         ast::ExpressionKind::While { condition, body } => {
             rewrite_expression_bare_constructors(condition, rewrites);
             rewrite_block_bare_constructors(body, rewrites);
@@ -7442,6 +7497,62 @@ mod tests {
                 .iter()
                 .any(|e| e.message.contains("did you mean 'println'?")),
             "expected typo suggestion for macro, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn type_checks_unwrap_or_on_optional() {
+        let program = parse(
+            "enum Optional<T> { None; Some(T); } \
+             i32 main() { Optional<i32> opt = Some(42); i32 val = opt ? 10; return val; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_unwrap_or_on_result() {
+        let program = parse(
+            "enum Result<T, E> { Ok(T); Err(E); } \
+             i32 main() { Result<i32, str> res = Ok(42); i32 val = res ? 10; return val; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_unwrap_or_on_pointer() {
+        let program = parse(
+            "i32 main() { i32 x = 42; i32* p = &x; i32 y = 10; i32* r = p ? &y; return *r; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    }
+
+    #[test]
+    fn rejects_unwrap_or_on_invalid_lhs() {
+        let program = parse("i32 main() { i32 x = 42; i32 val = x ? 10; return val; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("unwrap-or operator '?' requires Optional, Result, or pointer")),
+            "expected unwrap-or invalid lhs error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unwrap_or_on_type_mismatch() {
+        let program = parse(
+            "enum Optional<T> { None; Some(T); } \
+             i32 main() { Optional<i32> opt = Some(42); i32 val = opt ? \"fallback\"; return val; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("unwrap-or fallback type mismatch")),
+            "expected fallback type mismatch error, got {errors:?}"
         );
     }
 

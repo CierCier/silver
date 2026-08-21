@@ -637,6 +637,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Self::substitute_expression_types(then_expr, mapping);
                 Self::substitute_expression_types(else_expr, mapping);
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                Self::substitute_expression_types(value, mapping);
+                Self::substitute_expression_types(fallback, mapping);
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,
@@ -1157,6 +1161,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     walk_expr(then_expr, out);
                     walk_expr(else_expr, out);
                 }
+                ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                    walk_expr(value, out);
+                    walk_expr(fallback, out);
+                }
                 _ => {}
             }
         }
@@ -1654,6 +1662,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }),
                 _ => self.resolve_receiver_type(operand),
             },
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                if let Some(val_ty) = self.resolve_receiver_type(value) {
+                    match val_ty.kind.as_ref() {
+                        ast::TypeKind::Optional(inner) => Some((**inner).clone()),
+                        ast::TypeKind::Named(named) => {
+                            let name = named.path.last().map(|s| s.name.as_str());
+                            if name == Some("Optional") || name == Some("Result") || name == Some("SysResult") {
+                                if let Some(gens) = &named.generics {
+                                    gens.first().cloned()
+                                } else {
+                                    self.resolve_receiver_type(fallback)
+                                }
+                            } else {
+                                self.resolve_receiver_type(fallback)
+                            }
+                        }
+                        ast::TypeKind::Pointer(_) => Some(val_ty.clone()),
+                        _ => self.resolve_receiver_type(fallback),
+                    }
+                } else {
+                    self.resolve_receiver_type(fallback)
+                }
+            }
             _ => None,
         }
     }
