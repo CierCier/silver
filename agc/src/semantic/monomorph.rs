@@ -38,8 +38,53 @@ pub fn append_monomorphs(
     for (name, template) in collect_imported_generic_types(imported_modules) {
         generic_types.entry(name).or_insert(template);
     }
-    let generic_impls = collect_generic_impls(program);
-    let generic_fns = collect_generic_fns(program);
+
+    let mut imported_generic_items = Vec::new();
+    for module in imported_modules {
+        for template_src in &module.generic_templates {
+            let file_id = crate::lexer::register_source(&module.source_path, template_src);
+            if let Ok(tokens) = crate::lexer::lex_with_source(template_src, file_id) {
+                let mut parser =
+                    crate::parser::Parser::new_with_source(tokens, module.source_path.clone());
+                let (prog, _) = parser.parse_program();
+                for item in prog.items {
+                    match &item.kind {
+                        ast::ItemKind::Struct(s) if s.generics.is_some() => {
+                            generic_types
+                                .entry(s.name.name.clone())
+                                .or_insert(GenericTypeItem::Struct(s.clone()));
+                        }
+                        ast::ItemKind::Enum(e) if e.generics.is_some() => {
+                            generic_types
+                                .entry(e.name.name.clone())
+                                .or_insert(GenericTypeItem::Enum(e.clone()));
+                        }
+                        _ => {}
+                    }
+                    imported_generic_items.push(item);
+                }
+            }
+        }
+    }
+
+    let mut generic_impls = collect_generic_impls(program);
+    for item in &imported_generic_items {
+        if let ast::ItemKind::Impl(impl_item) = &item.kind {
+            if impl_item.generics.is_some() || is_generic_self_type(&impl_item.self_type) {
+                generic_impls.push(impl_item.clone());
+            }
+        }
+    }
+
+    let mut generic_fns = collect_generic_fns(program);
+    for item in &imported_generic_items {
+        if let ast::ItemKind::Function(func) = &item.kind {
+            if func.generics.is_some() {
+                generic_fns.insert(func.name.name.clone());
+            }
+        }
+    }
+
     let mut generated = HashSet::default();
     let mut all_new_items = Vec::new();
 
@@ -72,8 +117,13 @@ pub fn append_monomorphs(
 
         // Scan ALL new items (including newly generated impl items) for remaining
         // generic calls with concrete type args.
-        current_requests =
-            collect_remaining_function_requests(program, &all_new_items, &generic_fns, &generated);
+        current_requests = collect_remaining_function_requests(
+            program,
+            &imported_generic_items,
+            &all_new_items,
+            &generic_fns,
+            &generated,
+        );
     }
     all_new_items
 }
@@ -2148,10 +2198,11 @@ fn collect_generic_fns(program: &ast::Program) -> HashSet<String> {
 /// Find a generic function by name and parameter count.
 fn find_generic_fn<'a>(
     program: &'a ast::Program,
+    imported_items: &'a [ast::Item],
     name: &str,
     param_count: usize,
 ) -> Option<&'a ast::FunctionItem> {
-    for item in &program.items {
+    for item in program.items.iter().chain(imported_items.iter()) {
         if let ast::ItemKind::Function(func) = &item.kind
             && func.name.name == name
             && func.generics.is_some()
@@ -2400,6 +2451,7 @@ fn is_concrete(ty: &Type) -> bool {
 /// Returns MonomorphRequest values to be processed in a subsequent round.
 fn collect_remaining_function_requests(
     program: &ast::Program,
+    imported_items: &[ast::Item],
     items: &[ast::Item],
     generic_fns: &HashSet<String>,
     generated: &HashSet<String>,
@@ -2423,7 +2475,7 @@ fn collect_remaining_function_requests(
         }
     }
     for (fn_name, concrete_args, call_span, param_count) in found_calls {
-        if let Some(source) = find_generic_fn(program, &fn_name, param_count) {
+        if let Some(source) = find_generic_fn(program, imported_items, &fn_name, param_count) {
             let mapping = build_mapping_from_generics(source.generics.as_ref(), &concrete_args);
             let full_mangled = mangle_function_instance(source, &concrete_args, &mapping);
             let key = format!("fn::{full_mangled}");
@@ -2807,5 +2859,53 @@ mod tests {
             _ => false,
         });
         assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");
+    }
+
+    #[test]
+    fn monomorphizes_imported_generic_template_struct_and_methods() {
+        let mut program = parse("struct Box<T> {} i32 main() { Box<i32> b; return 0; }");
+        program
+            .items
+            .retain(|item| !matches!(&item.kind, ast::ItemKind::Struct(s) if s.name.name == "Box"));
+        let artifact = ModuleArtifact {
+            module_name: "box".to_string(),
+            module_path: "std.box".to_string(),
+            source_path: "std/box.ag".to_string(),
+            source_hash_fnv1a64: 0,
+            compiler_version: "test".to_string(),
+            target_triple: "unknown".to_string(),
+            code_artifacts: crate::module_artifact::ModuleCodeArtifacts {
+                has_static_library: true,
+                has_shared_library: false,
+            },
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: Vec::new(),
+            native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
+            generic_templates: vec![
+                "struct Box<T> { T* ptr; }".to_string(),
+                "impl Box<T> { T* get(Box<T>* self) { return self.ptr; } }".to_string(),
+            ],
+            artifact_path: None,
+        };
+
+        let items = append_monomorphs(&mut program, &[], &[artifact]);
+        let has_box_struct = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Struct(s) => s.name.name == "Box__i32",
+            _ => false,
+        });
+        assert!(has_box_struct, "expected monomorphized Box__i32 struct");
+
+        let has_box_impl = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Impl(i) => {
+                i.items.iter().any(|m| match m {
+                    ast::ImplItemKind::Function(f) => f.name.name == "get",
+                    _ => false,
+                })
+            }
+            _ => false,
+        });
+        assert!(has_box_impl, "expected monomorphized Box impl with get method");
     }
 }

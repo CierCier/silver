@@ -26,6 +26,12 @@ T identity<T>(T value) {
     return value;
 }
 
+impl Pair<T> {
+    T get_first(Pair<T>* self) {
+        return self.first;
+    }
+}
+
 i64 generic_caller() {
     return identity<i64>(21) + identity<i64>(21);
 }

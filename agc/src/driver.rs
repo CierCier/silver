@@ -1767,6 +1767,7 @@ mod tests {
             exports: Vec::new(),
             native_libs: Vec::new(),
             native_lib_paths: Vec::new(),
+            generic_templates: Vec::new(),
             artifact_path: None,
         }
     }

@@ -5398,11 +5398,29 @@ impl TypeChecker {
     }
 
     fn collect_impl_methods(&mut self, program: &ast::Program, table: &mut CompilerSymbolTable) {
+        let mut all_impls: Vec<ast::ImplItem> = Vec::new();
         for item in &program.items {
-            let ast::ItemKind::Impl(impl_item) = &item.kind else {
-                continue;
-            };
+            if let ast::ItemKind::Impl(impl_item) = &item.kind {
+                all_impls.push(impl_item.clone());
+            }
+        }
+        for module in &self.imported_modules {
+            for template_src in &module.generic_templates {
+                let file_id = crate::lexer::register_source(&module.source_path, template_src);
+                if let Ok(tokens) = crate::lexer::lex_with_source(template_src, file_id) {
+                    let mut parser =
+                        crate::parser::Parser::new_with_source(tokens, module.source_path.clone());
+                    let (prog, _) = parser.parse_program();
+                    for item in prog.items {
+                        if let ast::ItemKind::Impl(impl_item) = item.kind {
+                            all_impls.push(impl_item);
+                        }
+                    }
+                }
+            }
+        }
 
+        for impl_item in &all_impls {
             let self_ty = Type::from_ast(&impl_item.self_type);
             let self_key = self.method_key(&self_ty);
 
@@ -6824,6 +6842,7 @@ mod tests {
             }],
             native_libs: Vec::new(),
             native_lib_paths: Vec::new(),
+            generic_templates: Vec::new(),
             artifact_path: None,
         };
 

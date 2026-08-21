@@ -584,7 +584,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut instance_fallback: Option<(String, FunctionValue<'ctx>)> = None;
         let mut static_fallback: Option<(String, FunctionValue<'ctx>)> = None;
         for name in &candidates {
-            let Some(function) = self.module.get_function(name) else {
+            let function = if let Some(function) = self.module.get_function(name) {
+                function
+            } else if let Some(sig) = self.signature_for_name(name) {
+                let fn_ty = self.lower_function_type(
+                    &sig.params,
+                    sig.return_type.as_ref(),
+                    sig.is_variadic,
+                    None,
+                )?;
+                let function = self.module.add_function(name, fn_ty, None);
+                Self::apply_function_linkage(function, &ast::Visibility::Public);
+                function
+            } else {
                 continue;
             };
             let signature = self.signature_for_name(name);

@@ -25,6 +25,9 @@ i32 main() {
     // Generic function: monomorphized on the consumer side.
     if (identity<i64>(42) != 42) { return 5; }
 
+    // Generic method: instantiated from imported AGM template.
+    if (p.get_first() != 3) { return 6; }
+
     // Lib-internal generic instantiation must also link (generic_caller).
     return 0;
 }

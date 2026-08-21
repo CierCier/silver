@@ -10,7 +10,8 @@ use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struc
 const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
 const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
 const MODULE_MAGIC_V7: &[u8; 6] = b"AGM\x00\x00\x07";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x08"; // v8: constant expressions and globals
+const MODULE_MAGIC_V8: &[u8; 6] = b"AGM\x00\x00\x08";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x09"; // v9: generic AST template serialization
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -26,6 +27,7 @@ pub struct ModuleArtifact {
     pub exports: Vec<ModuleExport>,
     pub native_libs: Vec<String>,
     pub native_lib_paths: Vec<String>,
+    pub generic_templates: Vec<String>,
     pub artifact_path: Option<PathBuf>,
 }
 
@@ -197,6 +199,26 @@ impl ModuleArtifact {
         // with file id 0 are excluded too).
         let lib_file = crate::lexer::register_source(&source_path, source_text);
         let exports = collect_exports(program, lib_file);
+        let mut generic_templates = Vec::new();
+        for item in &program.items {
+            let is_generic = match &item.kind {
+                ast::ItemKind::Function(func) => func.generics.is_some(),
+                ast::ItemKind::Impl(impl_item) => {
+                    impl_item.generics.is_some() || is_type_or_named_generic(&impl_item.self_type)
+                }
+                ast::ItemKind::Struct(s) => s.generics.is_some(),
+                ast::ItemKind::Enum(e) => e.generics.is_some(),
+                ast::ItemKind::Trait(t) => t.generics.is_some(),
+                _ => false,
+            };
+            if item.span.file == lib_file && is_generic {
+                let start = item.span.start;
+                let end = item.span.end;
+                if end <= source_text.len() && start < end {
+                    generic_templates.push(source_text[start..end].to_string());
+                }
+            }
+        }
         Self {
             module_name,
             module_path,
@@ -210,6 +232,7 @@ impl ModuleArtifact {
             exports,
             native_libs,
             native_lib_paths: Vec::new(),
+            generic_templates,
             artifact_path: None,
         }
     }
@@ -285,21 +308,29 @@ impl ModuleArtifact {
         for path in &self.native_lib_paths {
             write_string(&mut out, path)?;
         }
+        write_len(&mut out, self.generic_templates.len())?;
+        for template in &self.generic_templates {
+            write_string(&mut out, template)?;
+        }
         Ok(out)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        let has_field_tags =
-            if magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7 || magic == MODULE_MAGIC_V6 {
-                true
-            } else if magic == MODULE_MAGIC_V2 {
-                false
-            } else {
-                return Err("invalid module interface header".to_string());
-            };
-        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V7;
-        let has_constants_and_globals = magic == MODULE_MAGIC;
+        let has_field_tags = if magic == MODULE_MAGIC
+            || magic == MODULE_MAGIC_V8
+            || magic == MODULE_MAGIC_V7
+            || magic == MODULE_MAGIC_V6
+        {
+            true
+        } else if magic == MODULE_MAGIC_V2 {
+            false
+        } else {
+            return Err("invalid module interface header".to_string());
+        };
+        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V8 || magic == MODULE_MAGIC_V7;
+        let has_constants_and_globals = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V8;
+        let has_generic_templates = magic == MODULE_MAGIC;
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -450,6 +481,16 @@ impl ModuleArtifact {
         } else {
             Vec::new()
         };
+        let generic_templates = if has_generic_templates {
+            let templates_len = read_len(bytes, &mut cursor)? as usize;
+            let mut templates = Vec::with_capacity(templates_len);
+            for _ in 0..templates_len {
+                templates.push(read_string(bytes, &mut cursor)?);
+            }
+            templates
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             module_name,
             module_path,
@@ -463,6 +504,7 @@ impl ModuleArtifact {
             exports,
             native_libs,
             native_lib_paths,
+            generic_templates,
             artifact_path: None,
         })
     }
@@ -1051,6 +1093,9 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                 });
             }
             ast::ItemKind::Impl(impl_item) => {
+                if impl_item.generics.is_some() || is_type_or_named_generic(&impl_item.self_type) {
+                    continue;
+                }
                 let self_ty = Type::from_ast(&impl_item.self_type);
                 let self_type_name = self_ty.canonical_key();
                 for member in &impl_item.items {
@@ -1078,6 +1123,8 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                                 type_params.push(tp.name.name.clone());
                             }
                         }
+                    } else {
+                        collect_implicit_type_params(&impl_item.self_type, &mut type_params);
                     }
                     if let Some(generics) = &func.generics {
                         for param in &generics.params {
@@ -1531,6 +1578,7 @@ mod tests {
             ],
             native_libs: vec!["c".to_string()],
             native_lib_paths: Vec::new(),
+            generic_templates: vec!["pub struct Wrapper<T> { pub T val; }".to_string()],
             artifact_path: None,
         };
 
@@ -1560,5 +1608,39 @@ mod tests {
         assert_eq!(decoded.exports[2].const_value.as_deref(), Some("4096"));
         assert_eq!(decoded.exports[3].kind, ExportKind::Global);
         assert!(decoded.exports[3].is_mutable);
+        assert_eq!(decoded.generic_templates.len(), 1);
+    }
+}
+
+fn is_type_or_named_generic(ty: &ast::Type) -> bool {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => named.generics.is_some(),
+        ast::TypeKind::Pointer(ptr) => is_type_or_named_generic(&ptr.inner),
+        ast::TypeKind::Optional(inner) => is_type_or_named_generic(inner),
+        ast::TypeKind::Array(arr) => is_type_or_named_generic(&arr.element_type),
+        _ => false,
+    }
+}
+
+fn collect_implicit_type_params(ty: &ast::Type, params: &mut Vec<String>) {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => {
+            if let Some(generics) = &named.generics {
+                for g in generics {
+                    if let ast::TypeKind::Named(g_named) = g.kind.as_ref() {
+                        if g_named.generics.is_none() && g_named.path.len() == 1 {
+                            let name = g_named.path[0].name.clone();
+                            if !params.contains(&name) {
+                                params.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ast::TypeKind::Pointer(ptr) => collect_implicit_type_params(&ptr.inner, params),
+        ast::TypeKind::Optional(inner) => collect_implicit_type_params(inner, params),
+        ast::TypeKind::Array(arr) => collect_implicit_type_params(&arr.element_type, params),
+        _ => {}
     }
 }

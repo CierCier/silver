@@ -543,6 +543,155 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .const_int(self.leak_check as u64, false);
         global.set_initializer(&initializer);
     }
+
+    pub(crate) fn declare_function_item(
+        &mut self,
+        func: &ast::FunctionItem,
+        visibility: &ast::Visibility,
+        attributes: &[ast::Attribute],
+    ) -> CodegenResult<()> {
+        if func.generics.is_some() {
+            return Ok(());
+        }
+        if self.has_generic_placeholder_signature(&func.parameters, func.return_type.as_ref()) {
+            return Ok(());
+        }
+
+        let link_name = function_link_name(attributes);
+        let symbol_name = self.free_function_symbol_name(
+            &func.name.name,
+            &Self::free_signature_from_ast(
+                &func.parameters,
+                func.return_type.as_ref(),
+                func.is_variadic,
+            ),
+        );
+        let llvm_name = link_name.unwrap_or(&symbol_name);
+
+        self.register_source_function_symbol(&func.name.name, &symbol_name);
+
+        self.register_function_signature(
+            llvm_name,
+            FunctionSig {
+                params: func
+                    .parameters
+                    .iter()
+                    .map(|param| param.param_type.clone())
+                    .collect(),
+                return_type: func.return_type.clone(),
+                is_variadic: func.is_variadic,
+                linkage: None,
+            },
+            Some(func.name.span),
+            SymbolKind::Function,
+        );
+
+        if link_name.is_some() {
+            self.imported_function_links
+                .insert(func.name.name.clone(), llvm_name.to_string());
+            self.register_function_signature(
+                &func.name.name,
+                FunctionSig {
+                    params: func
+                        .parameters
+                        .iter()
+                        .map(|param| param.param_type.clone())
+                        .collect(),
+                    return_type: func.return_type.clone(),
+                    is_variadic: func.is_variadic,
+                    linkage: None,
+                },
+                Some(func.name.span),
+                SymbolKind::Function,
+            );
+        }
+
+        if self.module.get_function(llvm_name).is_none() {
+            let fn_ty = self.lower_function_type(
+                &func
+                    .parameters
+                    .iter()
+                    .map(|param| param.param_type.clone())
+                    .collect::<Vec<_>>(),
+                func.return_type.as_ref(),
+                func.is_variadic,
+                None,
+            )?;
+            let function = self.module.add_function(llvm_name, fn_ty, None);
+            Self::apply_function_linkage(function, visibility);
+        }
+
+        let Some(function) = self.module.get_function(llvm_name) else {
+            return Err(CodegenError::with_span(
+                format!("function `{}` declaration is missing", func.name.name),
+                func.name.span,
+            ));
+        };
+        Self::apply_function_linkage(function, visibility);
+        Self::apply_target_feature_attributes(function, attributes);
+        Self::apply_inline_always_attribute(function, attributes, self.context);
+
+        if llvm_name == "_start" {
+            let body_is_pure_asm = func.body.statements.len() == 1
+                && match &func.body.statements[0].kind {
+                    ast::StatementKind::Expression(expr) => {
+                        matches!(&*expr.kind, ast::ExpressionKind::Asm { .. })
+                    }
+                    _ => false,
+                };
+            if body_is_pure_asm {
+                let naked_kind = Attribute::get_named_enum_kind_id("naked");
+                let naked_attr = self.context.create_enum_attribute(naked_kind, 0);
+                function.add_attribute(AttributeLoc::Function, naked_attr);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn emit_function_item_body(
+        &mut self,
+        func: &ast::FunctionItem,
+        attributes: &[ast::Attribute],
+    ) -> CodegenResult<()> {
+        if func.generics.is_some() {
+            return Ok(());
+        }
+        if self.has_generic_placeholder_signature(&func.parameters, func.return_type.as_ref()) {
+            return Ok(());
+        }
+
+        if attributes.iter().any(|attr| attr.name.name == "agm_import") {
+            return Ok(());
+        }
+
+        let link_name = function_link_name(attributes);
+        let symbol_name = self.free_function_symbol_name(
+            &func.name.name,
+            &Self::free_signature_from_ast(
+                &func.parameters,
+                func.return_type.as_ref(),
+                func.is_variadic,
+            ),
+        );
+        let llvm_name = link_name.unwrap_or(&symbol_name);
+
+        let Some(function) = self.module.get_function(llvm_name) else {
+            return Err(CodegenError::with_span(
+                format!("function `{}` declaration is missing", func.name.name),
+                func.name.span,
+            ));
+        };
+
+        self.emit_function_body(
+            function,
+            &func.parameters,
+            func.return_type.as_ref(),
+            &func.body,
+            llvm_name,
+            &func.name.span,
+            false,
+        )
+    }
 }
 
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
@@ -732,7 +881,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     self.generate_struct_item(struct_item, &item.visibility, &item.attributes)?;
                 }
                 ast::ItemKind::Function(function_item) => {
-                    self.generate_function_item(function_item, &item.visibility, &item.attributes)?;
+                    self.declare_function_item(function_item, &item.visibility, &item.attributes)?;
                 }
                 ast::ItemKind::ExternFunction(extern_function_item) => {
                     self.generate_extern_function_item(
@@ -798,7 +947,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
     fn generate_item(&mut self, item: &ast::Item) -> CodegenResult<()> {
         match &item.kind {
             ast::ItemKind::Function(function_item) => {
-                self.generate_function_item(function_item, &item.visibility, &item.attributes)
+                self.emit_function_item_body(function_item, &item.attributes)
             }
             ast::ItemKind::GlobalVariable(global_variable_item) => {
                 self.generate_global_variable_item(global_variable_item, &item.visibility)
@@ -846,124 +995,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         visibility: &ast::Visibility,
         attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        if func.generics.is_some() {
-            return Ok(());
-        }
-        if self.has_generic_placeholder_signature(&func.parameters, func.return_type.as_ref()) {
-            return Ok(());
-        }
-
-        let link_name = function_link_name(attributes);
-        let symbol_name = self.free_function_symbol_name(
-            &func.name.name,
-            &Self::free_signature_from_ast(
-                &func.parameters,
-                func.return_type.as_ref(),
-                func.is_variadic,
-            ),
-        );
-        let llvm_name = link_name.unwrap_or(&symbol_name);
-
-        self.register_source_function_symbol(&func.name.name, &symbol_name);
-
-        self.register_function_signature(
-            llvm_name,
-            FunctionSig {
-                params: func
-                    .parameters
-                    .iter()
-                    .map(|param| param.param_type.clone())
-                    .collect(),
-                return_type: func.return_type.clone(),
-                is_variadic: func.is_variadic,
-                linkage: None,
-            },
-            Some(func.name.span),
-            SymbolKind::Function,
-        );
-        // Also register under source name so callers using it can resolve, and
-        // record the source → linked-symbol mapping so call sites emit the
-        // renamed symbol.
-        if link_name.is_some() {
-            self.imported_function_links
-                .insert(func.name.name.clone(), llvm_name.to_string());
-            self.register_function_signature(
-                &func.name.name,
-                FunctionSig {
-                    params: func
-                        .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect(),
-                    return_type: func.return_type.clone(),
-                    is_variadic: func.is_variadic,
-                    linkage: None,
-                },
-                Some(func.name.span),
-                SymbolKind::Function,
-            );
-        }
-
-        if self.module.get_function(llvm_name).is_none() {
-            let fn_ty = self.lower_function_type(
-                &func
-                    .parameters
-                    .iter()
-                    .map(|param| param.param_type.clone())
-                    .collect::<Vec<_>>(),
-                func.return_type.as_ref(),
-                func.is_variadic,
-                None,
-            )?;
-            let function = self.module.add_function(llvm_name, fn_ty, None);
-            Self::apply_function_linkage(function, visibility);
-        }
-
-        let Some(function) = self.module.get_function(llvm_name) else {
-            return Err(CodegenError::with_span(
-                format!("function `{}` declaration is missing", func.name.name),
-                func.name.span,
-            ));
-        };
-        Self::apply_function_linkage(function, visibility);
-        Self::apply_target_feature_attributes(function, attributes);
-        Self::apply_inline_always_attribute(function, attributes, self.context);
-        // Functions named `_start` are entry points for no-libc binaries. Only
-        // apply the `naked` attribute when the body is a single asm statement —
-        // a user-written `_start` with non-asm body should NOT get naked (the
-        // compiler will emit a normal prologue, crashing at runtime, but that
-        // is better than silent UB with naked).
-        if llvm_name == "_start" {
-            let body_is_pure_asm = func.body.statements.len() == 1
-                && match &func.body.statements[0].kind {
-                    ast::StatementKind::Expression(expr) => {
-                        matches!(&*expr.kind, ast::ExpressionKind::Asm { .. })
-                    }
-                    _ => false,
-                };
-            if body_is_pure_asm {
-                let naked_kind = Attribute::get_named_enum_kind_id("naked");
-                let naked_attr = self.context.create_enum_attribute(naked_kind, 0);
-                function.add_attribute(AttributeLoc::Function, naked_attr);
-            }
-        }
-
-        // Monomorphized instances of imported generic functions are
-        // declarations only (the body lives in the library object): declare
-        // the external symbol and emit no body.
-        if attributes.iter().any(|attr| attr.name.name == "agm_import") {
-            return Ok(());
-        }
-
-        self.emit_function_body(
-            function,
-            &func.parameters,
-            func.return_type.as_ref(),
-            &func.body,
-            llvm_name,
-            &func.name.span,
-            false,
-        )
+        self.declare_function_item(func, visibility, attributes)?;
+        self.emit_function_item_body(func, attributes)
     }
 
     /// Register a struct's field metadata and generic parameters without
