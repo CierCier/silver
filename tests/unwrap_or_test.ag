@@ -6,6 +6,11 @@ import std.result;
 
 i32 side_effects = 0;
 
+struct Client {
+    i32 id;
+    str name;
+}
+
 i32 fallback_with_side_effect(i32 val) {
     side_effects = side_effects + 1;
     return val;
@@ -31,6 +36,18 @@ Result<i32, str> get_err_code() {
     return r;
 }
 
+Result<Client, str> new_client(i32 id) {
+    if (id > 0) {
+        Client c;
+        c.id = id;
+        c.name = "connected";
+        Result<Client, str> r = Ok(move c);
+        return r;
+    }
+    Result<Client, str> r = Err("invalid id");
+    return r;
+}
+
 i32 main() {
     test_start("optional unwrap-or");
     Optional<i32> some_p = get_some_port();
@@ -49,6 +66,23 @@ i32 main() {
     Result<i32, str> err_res = get_err_code();
     i32 c2 = err_res ? 500;
     assert_eq_i32(c2, 500, "err_code ? 500 yields 500");
+
+    test_start("direct function call unwrap-or");
+    i32 direct_port = get_some_port() ? 80;
+    assert_eq_i32(direct_port, 8080, "get_some_port() ? 80 yields 8080");
+
+    i32 direct_none = get_none_port() ? 80;
+    assert_eq_i32(direct_none, 80, "get_none_port() ? 80 yields 80");
+
+    Client default_c;
+    default_c.id = 0;
+    default_c.name = "default";
+
+    Client c_ok = new_client(42) ? default_c;
+    assert_eq_i32(c_ok.id, 42, "new_client(42) ? default_c yields id 42");
+
+    Client c_err = new_client(-1) ? default_c;
+    assert_eq_i32(c_err.id, 0, "new_client(-1) ? default_c yields default id 0");
 
     test_start("pointer unwrap-or");
     i32 default_val = 999;
