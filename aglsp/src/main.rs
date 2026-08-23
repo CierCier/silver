@@ -56,7 +56,7 @@ impl LanguageServer for Backend {
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
-                document_formatting_provider: Some(OneOf::Left(true)),
+                // The current formatter is whitespace-only, so it is not advertised as document formatting.
                 semantic_tokens_provider: Some(semantic_tokens::server_capability()),
                 ..Default::default()
             },
