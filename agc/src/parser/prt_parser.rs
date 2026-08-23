@@ -873,6 +873,7 @@ impl PRT_Parser {
                 | Token::IntLiteral(_)
                 | Token::Const
                 | Token::Mut
+                | Token::Lifetime(_)
                 | Token::BitwiseAnd
         )
     }

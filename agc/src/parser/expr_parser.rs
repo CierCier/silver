@@ -277,6 +277,7 @@ fn is_type_like(token: &Token) -> bool {
             | Token::IntLiteral(_)
             | Token::Const
             | Token::Mut
+            | Token::Lifetime(_)
             | Token::BitwiseAnd
     )
 }
