@@ -49,6 +49,24 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
             });
         }
     }
+    for symbol in &analysis.symbols {
+        let Some(ty) = symbol.inferred_type.as_deref() else {
+            continue;
+        };
+        if symbol.kind != SymbolKind::Local {
+            continue;
+        }
+        hints.push(InlayHint {
+            position: byte_to_position(&analysis.text, symbol.span.start),
+            label: InlayHintLabel::String(format!(": {ty}")),
+            kind: Some(InlayHintKind::TYPE),
+            padding_left: Some(false),
+            padding_right: Some(true),
+            tooltip: None,
+            text_edits: None,
+            data: None,
+        });
+    }
     hints
 }
 

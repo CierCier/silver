@@ -69,6 +69,8 @@ pub struct Symbol {
     pub qualifier: Option<String>,
     pub is_mutable: bool,
     pub is_static: bool,
+    /// Inferred type for an unannotated local binding, when known.
+    pub inferred_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +285,7 @@ impl Walker<'_> {
             qualifier,
             is_mutable,
             is_static,
+            inferred_type: None,
         });
         if let Some(container) = container {
             self.struct_children
@@ -925,6 +928,20 @@ impl Walker<'_> {
             ast::StatementKind::Block(b) => self.walk_block(b),
             ast::StatementKind::Expression(e) => self.walk_expr(e),
             ast::StatementKind::Let(ls) => {
+                let inferred = if ls.type_annotation.is_none() {
+                    match (&ls.pattern.kind, ls.initializer.as_ref()) {
+                        (
+                            ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id),
+                            Some(init),
+                        ) => self
+                            .type_of(init)
+                            .map(str::to_owned)
+                            .map(|ty| (id.span, ty)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 if let Some(ty) = &ls.type_annotation {
                     self.walk_type(ty);
                 }
@@ -932,6 +949,16 @@ impl Walker<'_> {
                     self.walk_expr(init);
                 }
                 self.walk_pattern(&ls.pattern);
+                if let Some((span, ty)) = inferred
+                    && self.in_buffer(&span)
+                    && let Some(symbol) = self
+                        .symbols
+                        .iter_mut()
+                        .rev()
+                        .find(|symbol| symbol.kind == SymbolKind::Local && symbol.span == span)
+                {
+                    symbol.inferred_type = Some(ty);
+                }
             }
             ast::StatementKind::Return(Some(e)) => self.walk_expr(e),
             ast::StatementKind::Return(None)
