@@ -243,10 +243,10 @@ fn identifier_completion(analysis: &SymbolIndex, offset: usize) -> Vec<Completio
     let prefix = &text[start..offset];
 
     let mut items: Vec<CompletionItem> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::default();
+    let mut seen: Vec<(String, Option<String>, Option<CompletionItemKind>)> = Vec::new();
 
     for sym in &analysis.symbols {
-        if !sym.name.starts_with(prefix) || !seen.insert(sym.name.clone()) {
+        if !sym.name.starts_with(prefix) {
             continue;
         }
         // Locals/parameters only before their declaration point.
@@ -259,6 +259,12 @@ fn identifier_completion(analysis: &SymbolIndex, offset: usize) -> Vec<Completio
             _ => {}
         }
         let item = symbol_item(sym);
+        if seen.iter().any(|(name, detail, kind)| {
+            name == &item.label && detail == &item.detail && kind == &item.kind
+        }) {
+            continue;
+        }
+        seen.push((item.label.clone(), item.detail.clone(), item.kind));
         items.push(item);
     }
 
@@ -321,11 +327,15 @@ fn sort_dedupe(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
         ka.cmp(kb).then_with(|| a.label.cmp(&b.label))
     });
     let mut out: Vec<CompletionItem> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::default();
+    let mut seen: Vec<(String, Option<String>, Option<CompletionItemKind>)> = Vec::new();
     for item in items {
-        if seen.insert(item.label.clone()) {
-            out.push(item);
+        if seen.iter().any(|(label, detail, kind)| {
+            label == &item.label && detail == &item.detail && kind == &item.kind
+        }) {
+            continue;
         }
+        seen.push((item.label.clone(), item.detail.clone(), item.kind));
+        out.push(item);
     }
     out
 }
