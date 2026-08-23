@@ -1288,6 +1288,12 @@ impl PRT_Parser {
         allow_initializers: bool,
         allow_tags: bool,
     ) -> Result<(ast::Type, Vec<ParsedDeclarator>), ParseError> {
+        if matches!(tokens.get(start).map(|token| &token.kind), Some(Token::Mut)) {
+            return Err(ParseError::InvalidSyntax {
+                message: "`mut` is not a declaration qualifier; variables are mutable by default, use `const` for immutable values".to_string(),
+                span: tokens[start].span,
+            });
+        }
         let (base_type, after_type) =
             self.parse_type_prefix(tokens, start, end).ok_or_else(|| {
                 ParseError::InvalidSyntax {
@@ -4886,6 +4892,15 @@ impl PRT_Parser {
             if Self::at_eof(tokens, item_start) {
                 break;
             }
+            if matches!(
+                tokens.get(item_start).map(|token| &token.kind),
+                Some(Token::Mut)
+            ) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "`mut` is not a declaration qualifier; variables are mutable by default, use `const` for immutable values".to_string(),
+                    span: tokens[item_start].span,
+                });
+            }
 
             let Some(production) = self.predict_item_production(tokens, item_start) else {
                 return Err(ParseError::InvalidSyntax {
@@ -5622,6 +5637,7 @@ mod tests {
     #[test]
     fn rejects_static_function() {
         let source = "static i32 f() { return 1; }";
+
         let tokens = crate::lexer::lex(source).expect("lex failed");
         let mut parser = PRT_Parser::new(None);
         let err = parser
@@ -5630,6 +5646,21 @@ mod tests {
         match err {
             ParseError::InvalidSyntax { message, .. } => {
                 assert!(message.contains("static functions are not supported"));
+            }
+            other => panic!("expected InvalidSyntax, got {other:?}"),
+        }
+    }
+    #[test]
+    fn explains_mut_declaration_qualifier() {
+        let source = "mut i32 x;";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser
+            .parse_program(&tokens)
+            .expect_err("expected parse error");
+        match err {
+            ParseError::InvalidSyntax { message, .. } => {
+                assert!(message.contains("`mut` is not a declaration qualifier"));
             }
             other => panic!("expected InvalidSyntax, got {other:?}"),
         }
