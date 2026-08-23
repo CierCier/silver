@@ -510,8 +510,8 @@ void take(&Buffer b) { ... }
 take(&b2);            // borrow of b2 — escape-checked
 ```
 
-`ref mut` is **not** a distinct syntax; `&mut` appears only in parameter
-types (`&mut Buffer b`), never as an expression prefix.
+`ref mut` is not a distinct syntax. `&T` and `&mut T` are valid reference
+types and `&expr` / `&mut expr` produce reference expressions.
 
 ### Cast & Conversion Expressions
 
@@ -520,6 +520,13 @@ f64 float_val = (f64)int_val;     // primitive numeric cast
 void* raw_ptr = (void*)buffer;    // pointer cast
 f64 magnitude = (f64)p;           // custom struct cast (triggers cast block)
 ```
+
+Cast syntax is `(Type)expression`. Pointer casts and primitive type names are
+unambiguous. A bare user-defined type name in `(Type)expression` can be
+ambiguous with a parenthesized expression; use a pointer cast, a fully
+qualified/function type, or an implemented `cast` block when the parser cannot
+disambiguate it. The `cast` declaration form defines a user conversion; it is
+not a prefix cast operator.
 
 ### Compile-Time (`comptime`) Expressions
 
