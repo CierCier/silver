@@ -162,12 +162,22 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = position_to_byte(&analysis.text, pos);
-        let occurrences =
-            references::symbol_occurrences(analysis, offset, params.context.include_declaration);
-        let locations: Vec<Location> = occurrences
+        let analyses: HashMap<Uri, SymbolIndex> = cache
             .iter()
-            .filter_map(|occ| references::location_for_span(analysis, uri, &occ.span))
+            .map(|(cached_uri, analysis)| (cached_uri.clone(), analysis.clone()))
             .collect();
+        drop(cache);
+        let locations = references::symbol_occurrences_across_buffers(
+            &analyses,
+            uri,
+            offset,
+            params.context.include_declaration,
+        )
+        .into_iter()
+        .filter_map(|(cached_uri, analysis, occ)| {
+            references::location_for_span(analysis, cached_uri, &occ.span)
+        })
+        .collect();
         Ok(Some(locations))
     }
 
@@ -186,8 +196,13 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = position_to_byte(&analysis.text, pos);
+        let analyses: HashMap<Uri, SymbolIndex> = cache
+            .iter()
+            .map(|(cached_uri, analysis)| (cached_uri.clone(), analysis.clone()))
+            .collect();
+        drop(cache);
         Ok(references::rename_edit(
-            analysis,
+            &analyses,
             uri,
             offset,
             &params.new_name,

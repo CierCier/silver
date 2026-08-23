@@ -5,7 +5,26 @@ use rustc_hash::FxHashMap as HashMap;
 use tower_lsp_server::ls_types::*;
 
 use crate::util::*;
-use agc::symbol_index::{Occurrence, SymbolIndex};
+use agc::symbol_index::{Occurrence, SymbolIndex, SymbolKind};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SymbolIdentity {
+    file: u32,
+    start: usize,
+    end: usize,
+    kind: SymbolKind,
+}
+
+impl SymbolIdentity {
+    fn from_symbol(symbol: &agc::symbol_index::Symbol) -> Self {
+        Self {
+            file: symbol.span.file,
+            start: symbol.span.start,
+            end: symbol.span.end,
+            kind: symbol.kind,
+        }
+    }
+}
 
 /// All occurrences of the symbol under `offset`: every identifier use that
 /// resolved to the same symbol, plus (optionally) the definition.
@@ -20,10 +39,44 @@ pub(crate) fn symbol_occurrences(
     let Some(symbol_id) = cursor.symbol else {
         return Vec::new();
     };
+
     analysis
         .occurrences
         .iter()
         .filter(|occ| occ.symbol == Some(symbol_id) && (include_declaration || !occ.is_definition))
+        .collect()
+}
+/// Find the selected symbol's occurrences in every cached open buffer.
+///
+/// Symbol IDs are local to each index, so buffers are matched by the
+/// source-backed identity of their resolved symbols instead.
+pub(crate) fn symbol_occurrences_across_buffers<'a>(
+    analyses: &'a HashMap<Uri, SymbolIndex>,
+    buffer_uri: &Uri,
+    offset: usize,
+    include_declaration: bool,
+) -> Vec<(&'a Uri, &'a SymbolIndex, &'a Occurrence)> {
+    let Some(active) = analyses.get(buffer_uri) else {
+        return Vec::new();
+    };
+    let Some(target) = symbol_under_cursor(active, offset) else {
+        return Vec::new();
+    };
+    let target_identity = SymbolIdentity::from_symbol(target);
+
+    analyses
+        .iter()
+        .flat_map(|(uri, analysis)| {
+            analysis.occurrences.iter().filter_map(move |occ| {
+                let symbol_id = occ.symbol?;
+                let symbol = analysis.symbols.get(symbol_id)?;
+                let identity = SymbolIdentity::from_symbol(symbol);
+                let same_identity =
+                    identity == target_identity && (target_identity.file != 0 || uri == buffer_uri);
+                (same_identity && (include_declaration || !occ.is_definition))
+                    .then_some((uri, analysis, occ))
+            })
+        })
         .collect()
 }
 
@@ -73,25 +126,25 @@ pub(crate) fn is_valid_identifier(name: &str) -> bool {
 }
 
 /// Build a workspace edit renaming the symbol under `offset` to `new_name`
-/// across the buffer and any inlined imported files that reference it.
+/// across all cached open buffers and any inlined imported files.
 pub(crate) fn rename_edit(
-    analysis: &SymbolIndex,
+    analyses: &HashMap<Uri, SymbolIndex>,
     buffer_uri: &Uri,
     offset: usize,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
-    let occurrences = symbol_occurrences(analysis, offset, true);
+    let occurrences = symbol_occurrences_across_buffers(analyses, buffer_uri, offset, true);
     if occurrences.is_empty() {
         return None;
     }
     // Group edits by file.
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::default();
-    for occ in occurrences {
-        let (uri, text) = match analysis.foreign_files.get(&occ.span.file) {
+    for (uri, analysis, occ) in occurrences {
+        let (target_uri, text) = match analysis.foreign_files.get(&occ.span.file) {
             Some((path, text)) => (Uri::from_file_path(path.as_str())?, text),
-            None => (buffer_uri.clone(), &analysis.text),
+            None => (uri.clone(), &analysis.text),
         };
-        changes.entry(uri.clone()).or_default().push(TextEdit {
+        changes.entry(target_uri).or_default().push(TextEdit {
             range: span_to_range(text, &occ.span),
             new_text: new_name.to_string(),
         });
