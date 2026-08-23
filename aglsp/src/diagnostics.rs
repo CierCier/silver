@@ -74,8 +74,13 @@ impl Backend {
             })
             .collect();
 
-        // Resolve imports with per-file caching via FileImportResolverHook.
         let base_dir = source_path.as_ref().and_then(|p| p.parent());
+        // Keep the user's import span before lowering mutates the item list.
+        let import_span = program.items.iter().find_map(|item| {
+            matches!(item.kind, agc::parser::ast::ItemKind::Import(_))
+                .then_some(item.span)
+                .filter(|span| span.file == file_id)
+        });
         let imported_modules =
             match FileImportResolverHook::with_cache(&self.loader, &self.file_cache)
                 .lower_program_imports(&mut program, base_dir, source_path.as_deref())
@@ -83,16 +88,10 @@ impl Backend {
                 Ok(result) => result.module_artifacts,
                 Err(e) => {
                     diagnostics.push(Diagnostic {
-                        range: Range {
-                            start: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                        },
+                        range: import_span
+                            .as_ref()
+                            .map(|span| span_to_range(text, span))
+                            .unwrap_or_default(),
                         severity: Some(DiagnosticSeverity::ERROR),
                         message: format!("import error: {e}"),
                         ..Default::default()
