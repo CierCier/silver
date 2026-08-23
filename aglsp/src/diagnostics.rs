@@ -121,6 +121,19 @@ impl Backend {
         let mut by_uri: HashMap<Uri, Vec<Diagnostic>> = HashMap::default();
         by_uri.insert(uri.clone(), diagnostics);
 
+        // Lint only the active buffer. Imported files may be user sources too,
+        // but their warnings must not be published as diagnostics for this URI.
+        let warning_config = agc::semantic::linter::WarningConfig::default();
+        for warning in agc::semantic::linter::lint_program(&program, &warning_config) {
+            if warning.span.file == file_id || warning.span.file == 0 {
+                by_uri.entry(uri.clone()).or_default().push(Diagnostic {
+                    range: span_to_range(text, &warning.span),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    message: warning.message,
+                    ..Default::default()
+                });
+            }
+        }
         for err in &type_errors {
             if err.span.file == file_id || err.span.file == 0 {
                 by_uri.entry(uri.clone()).or_default().push(Diagnostic {
