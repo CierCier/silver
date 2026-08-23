@@ -187,12 +187,11 @@ void() callback;             // function pointer: no params → void
 ### Module Imports
 
 ```silver
-// Single module import
+// Imports currently bring all public module items into scope.
 import std.io;
-// import parts of a module
-import std.io { print, println as pln };
 ```
 
+Selective imports and aliases are planned but are not implemented yet.
 Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
 
 ### Type Aliases
