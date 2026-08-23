@@ -401,7 +401,7 @@ pub(crate) fn signature_help(analysis: &SymbolIndex, offset: usize) -> Option<Si
 
     // Active parameter: number of top-level commas between `(` and cursor.
     let open_end = tokens[idx].span.end;
-    let mut commas = 0;
+    let mut commas: u32 = 0;
     let mut depth = 0;
     for t in tokens {
         if t.span.end <= open_end {
@@ -422,7 +422,15 @@ pub(crate) fn signature_help(analysis: &SymbolIndex, offset: usize) -> Option<Si
             _ => {}
         }
     }
-    let active = (commas as u32).min(sym.parameters.len() as u32 - 1);
+    let receiver_offset = if sym.kind == SymbolKind::Method && !sym.is_static {
+        1
+    } else {
+        0
+    };
+    let active = commas
+        .saturating_add(receiver_offset)
+        .min((sym.parameters.len() as u32).saturating_sub(1))
+        .saturating_sub(receiver_offset);
     Some(SignatureHelp {
         signatures: vec![signature],
         active_signature: Some(0),
