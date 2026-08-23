@@ -40,6 +40,8 @@ pub struct TypeChecker {
     known_types: HashMap<String, SymbolId>,
     struct_defs: HashMap<String, StructDef>,
     enum_defs: HashMap<String, EnumDef>,
+    /// Default type arguments for local aggregate definitions.
+    generic_defaults: HashMap<String, Vec<Option<ast::Type>>>,
     trait_impls: HashMap<String, HashSet<String>>,
     /// Base type names that implement Drop (from `impl Drop<X>` — including
     /// generic impls like `impl<T> Drop<Vec<T>>`), used to require explicit
@@ -166,6 +168,18 @@ enum MethodCallStyle {
 impl TypeChecker {
     pub fn new() -> Self {
         Self::default()
+    }
+    fn type_from_ast(&mut self, source: &ast::Type) -> Type {
+        let mut normalized = source.clone();
+        let defaults = self
+            .generic_defaults
+            .iter()
+            .map(|(name, params)| (name.clone(), params.clone()))
+            .collect::<Vec<_>>();
+        if let Err(message) = ast::apply_generic_defaults(&mut normalized, &defaults) {
+            self.error(message, source.span);
+        }
+        Type::from_ast(&normalized)
     }
 
     pub fn with_imported_modules(mut self, modules: &[ModuleArtifact]) -> Self {
@@ -581,6 +595,22 @@ impl TypeChecker {
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
+                    let defaults = struct_item
+                        .generics
+                        .as_ref()
+                        .map(|generics| {
+                            generics
+                                .params
+                                .iter()
+                                .map(|param| match param {
+                                    ast::GenericParam::Type(param) => param.default.clone(),
+                                    ast::GenericParam::Lifetime(_) => None,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.generic_defaults
+                        .insert(struct_item.name.name.clone(), defaults);
                     let fields = struct_item
                         .fields
                         .iter()
@@ -595,6 +625,22 @@ impl TypeChecker {
                     );
                 }
                 ast::ItemKind::Enum(enum_item) => {
+                    let defaults = enum_item
+                        .generics
+                        .as_ref()
+                        .map(|generics| {
+                            generics
+                                .params
+                                .iter()
+                                .map(|param| match param {
+                                    ast::GenericParam::Type(param) => param.default.clone(),
+                                    ast::GenericParam::Lifetime(_) => None,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.generic_defaults
+                        .insert(enum_item.name.name.clone(), defaults);
                     let type_id = table.intern_symbol(
                         format!("type::{}", enum_item.name.name),
                         SymbolKind::Enum,
@@ -608,29 +654,6 @@ impl TypeChecker {
                         self.register_enum_layout(&enum_item.name.name, &enum_def.backing_type);
                         self.enum_defs.insert(enum_item.name.name.clone(), enum_def);
                     }
-                }
-                ast::ItemKind::Trait(trait_item) => {
-                    let type_id = table.intern_symbol(
-                        format!("type::{}", trait_item.name.name),
-                        SymbolKind::Trait,
-                        Some(trait_item.name.span),
-                        CompilerPhase::TypeCheck,
-                    );
-                    self.known_type_ids.insert(type_id);
-                    self.known_types
-                        .insert(trait_item.name.name.clone(), type_id);
-                }
-                ast::ItemKind::TypeAlias(alias) => {
-                    let type_id = table.intern_symbol(
-                        format!("type::{}", alias.name.name),
-                        SymbolKind::Struct,
-                        Some(alias.name.span),
-                        CompilerPhase::TypeCheck,
-                    );
-                    self.known_type_ids.insert(type_id);
-                    self.known_types.insert(alias.name.name.clone(), type_id);
-                    self.type_aliases
-                        .insert(alias.name.name.clone(), alias.type_def.clone());
                 }
                 _ => {}
             }
@@ -852,7 +875,7 @@ impl TypeChecker {
                     return;
                 };
 
-                let declared = Type::from_ast(annotation);
+                let declared = self.type_from_ast(annotation);
                 self.reject_plain_void_value_type(&declared, annotation.span);
 
                 if let Some(init) = &let_stmt.initializer {

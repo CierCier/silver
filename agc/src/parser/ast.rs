@@ -419,6 +419,75 @@ pub struct TraitRef {
     pub generics: Option<Vec<Type>>,
     pub span: Span,
 }
+/// Fill omitted trailing type arguments for a local struct or enum reference.
+/// The caller supplies only local aggregate definitions and owns diagnostics.
+pub fn apply_generic_defaults(
+    ty: &mut Type,
+    defaults: &[(String, Vec<Option<Type>>)],
+) -> Result<(), String> {
+    fn visit(ty: &mut Type, defaults: &[(String, Vec<Option<Type>>)]) -> Result<(), String> {
+        match ty.kind.as_mut() {
+            TypeKind::Named(named) => {
+                if let Some(args) = named.generics.as_mut() {
+                    for arg in args {
+                        visit(arg, defaults)?;
+                    }
+                }
+                for (name, params) in defaults {
+                    if named.path.len() != 1 || named.path[0].name != *name {
+                        continue;
+                    }
+                    let args = named.generics.get_or_insert_with(Vec::new);
+                    if args.len() > params.len() {
+                        return Err(format!(
+                            "too many type arguments for '{}': expected at most {}, found {}",
+                            name,
+                            params.len(),
+                            args.len()
+                        ));
+                    }
+                    for index in args.len()..params.len() {
+                        let Some(default) = &params[index] else {
+                            return Err(format!(
+                                "missing required type argument {} for '{}'",
+                                index + 1,
+                                name
+                            ));
+                        };
+                        let mut default = default.clone();
+                        visit(&mut default, defaults)?;
+                        args.push(default);
+                    }
+                    break;
+                }
+            }
+            TypeKind::Generic(generic) => {
+                for arg in &mut generic.args {
+                    visit(arg, defaults)?;
+                }
+            }
+            TypeKind::Reference(reference) => visit(&mut reference.inner, defaults)?,
+            TypeKind::Pointer(pointer) => visit(&mut pointer.inner, defaults)?,
+            TypeKind::Slice(slice) => visit(&mut slice.element_type, defaults)?,
+            TypeKind::Array(array) => visit(&mut array.element_type, defaults)?,
+            TypeKind::Optional(inner) => visit(inner, defaults)?,
+            TypeKind::Function(function) => {
+                for param in &mut function.parameters {
+                    visit(param, defaults)?;
+                }
+                visit(&mut function.return_type, defaults)?;
+            }
+            TypeKind::Tuple(items) => {
+                for item in items {
+                    visit(item, defaults)?;
+                }
+            }
+            TypeKind::Primitive(_) => {}
+        }
+        Ok(())
+    }
+    visit(ty, defaults)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitBound {

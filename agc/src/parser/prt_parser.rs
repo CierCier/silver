@@ -2783,6 +2783,23 @@ impl PRT_Parser {
                         break;
                     }
                 }
+                if cursor < close && matches!(tokens[cursor].kind, Token::Assign) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "lifetime parameters cannot have defaults".to_string(),
+                        span: tokens[cursor].span,
+                    });
+                }
+                if params.iter().any(|param| {
+                    matches!(
+                        param,
+                        ast::GenericParam::Type(type_param) if type_param.default.is_some()
+                    )
+                }) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "generic parameters with defaults must be trailing".to_string(),
+                        span: name_token.span,
+                    });
+                }
                 let param_span = name_token
                     .span
                     .extend_to(&tokens[cursor.saturating_sub(1)].span);
@@ -2819,7 +2836,10 @@ impl PRT_Parser {
                     let bound_start = cursor;
                     let mut bound_end = cursor;
                     while bound_end < close
-                        && !matches!(tokens[bound_end].kind, Token::Plus | Token::Comma)
+                        && !matches!(
+                            tokens[bound_end].kind,
+                            Token::Plus | Token::Comma | Token::Assign
+                        )
                     {
                         bound_end += 1;
                     }
@@ -2843,6 +2863,40 @@ impl PRT_Parser {
                 }
             }
 
+            let default = if cursor < close && matches!(tokens[cursor].kind, Token::Assign) {
+                cursor += 1;
+                let default_start = cursor;
+                let (default_type, next) = self
+                    .parse_type_prefix(tokens, cursor, close)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected type after generic parameter default".to_string(),
+                        span: tokens[cursor.min(close - 1)].span,
+                    })?;
+                if next == default_start {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected type after generic parameter default".to_string(),
+                        span: tokens[cursor.min(close - 1)].span,
+                    });
+                }
+                cursor = next;
+                Some(default_type)
+            } else {
+                None
+            };
+
+            if default.is_none()
+                && params.iter().any(|param| {
+                    matches!(
+                        param,
+                        ast::GenericParam::Type(type_param) if type_param.default.is_some()
+                    )
+                })
+            {
+                return Err(ParseError::InvalidSyntax {
+                    message: "generic parameters with defaults must be trailing".to_string(),
+                    span: name_token.span,
+                });
+            }
             let param_span = name_token
                 .span
                 .extend_to(&tokens[cursor.saturating_sub(1)].span);
@@ -2852,7 +2906,7 @@ impl PRT_Parser {
                     span: name_token.span,
                 },
                 bounds,
-                default: None,
+                default,
                 span: param_span,
             }));
 
@@ -2860,6 +2914,7 @@ impl PRT_Parser {
                 cursor += 1;
             }
         }
+
 
         Ok((
             Some(ast::Generics {

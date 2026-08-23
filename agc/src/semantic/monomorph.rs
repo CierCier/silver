@@ -31,8 +31,9 @@ pub fn append_monomorphs(
     requests: &[MonomorphRequest],
     imported_modules: &[ModuleArtifact],
 ) -> Vec<ast::Item> {
+    let defaults = collect_local_generic_defaults(program);
+    normalize_program_defaults(program, &defaults);
     let mut generic_types = collect_generic_types(program);
-    // Imported generic structs have no source AST to clone from, so
     // synthesize templates from the module export metadata (type params +
     // field type keys). Local templates win on name collisions.
     for (name, template) in collect_imported_generic_types(imported_modules) {
@@ -108,6 +109,7 @@ pub fn append_monomorphs(
 
     // Process function/method monomorphization requests to fixpoint.
     let mut current_requests: Vec<MonomorphRequest> = requests.to_vec();
+    normalize_requests_defaults(&mut current_requests, &defaults);
     while !current_requests.is_empty() {
         let new_items = instantiate_requests(program, &current_requests, &mut generated);
         for item in &new_items {
@@ -126,6 +128,340 @@ pub fn append_monomorphs(
         );
     }
     all_new_items
+}
+
+fn collect_local_generic_defaults(
+    program: &ast::Program,
+) -> Vec<(String, Vec<Option<ast::Type>>)> {
+    program
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ast::ItemKind::Struct(item) => Some((&item.name.name, &item.generics)),
+            ast::ItemKind::Enum(item) => Some((&item.name.name, &item.generics)),
+            _ => None,
+        })
+        .filter_map(|(name, generics)| {
+            generics.as_ref().map(|generics| {
+                (
+                    name.clone(),
+                    generics
+                        .params
+                        .iter()
+                        .map(|param| match param {
+                            ast::GenericParam::Type(param) => param.default.clone(),
+                            ast::GenericParam::Lifetime(_) => None,
+                        })
+                        .collect(),
+                )
+            })
+        })
+        .collect()
+}
+
+fn normalize_type(ty: &mut ast::Type, defaults: &[(String, Vec<Option<ast::Type>>)]) {
+    let _ = ast::apply_generic_defaults(ty, defaults);
+}
+
+fn normalize_program_defaults(
+    program: &mut ast::Program,
+    defaults: &[(String, Vec<Option<ast::Type>>)],
+) {
+    for item in &mut program.items {
+        match &mut item.kind {
+            ast::ItemKind::Function(function) => {
+                for parameter in &mut function.parameters {
+                    normalize_type(&mut parameter.param_type, defaults);
+                }
+                if let Some(return_type) = &mut function.return_type {
+                    normalize_type(return_type, defaults);
+                }
+                normalize_block(&mut function.body, defaults);
+            }
+            ast::ItemKind::GlobalVariable(variable) => {
+                normalize_type(&mut variable.var_type, defaults);
+                if let Some(initializer) = &mut variable.initializer {
+                    normalize_expression(initializer, defaults);
+                }
+            }
+            ast::ItemKind::Struct(item) => {
+                for field in &mut item.fields {
+                    normalize_type(&mut field.field_type, defaults);
+                }
+            }
+            ast::ItemKind::Enum(item) => {
+                for variant in &mut item.variants {
+                    match &mut variant.data {
+                        ast::EnumVariantData::Unit => {}
+                        ast::EnumVariantData::Tuple(types) => {
+                            for ty in types {
+                                normalize_type(ty, defaults);
+                            }
+                        }
+                        ast::EnumVariantData::Struct(fields) => {
+                            for field in fields {
+                                normalize_type(&mut field.field_type, defaults);
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ItemKind::Impl(item) => {
+                normalize_type(&mut item.self_type, defaults);
+                for child in &mut item.items {
+                    if let ast::ImplItemKind::Function(function) = child {
+                        for parameter in &mut function.parameters {
+                            normalize_type(&mut parameter.param_type, defaults);
+                        }
+                        if let Some(return_type) = &mut function.return_type {
+                            normalize_type(return_type, defaults);
+                        }
+                        normalize_block(&mut function.body, defaults);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn normalize_requests_defaults(
+    requests: &mut [MonomorphRequest],
+    defaults: &[(String, Vec<Option<ast::Type>>)],
+) {
+    for request in requests {
+        match request {
+            MonomorphRequest::Function { source, .. } => {
+                for parameter in &mut source.parameters {
+                    normalize_type(&mut parameter.param_type, defaults);
+                }
+                if let Some(return_type) = &mut source.return_type {
+                    normalize_type(return_type, defaults);
+                }
+                normalize_block(&mut source.body, defaults);
+            }
+            MonomorphRequest::ImplMethod {
+                impl_item, method, ..
+            } => {
+                normalize_type(&mut impl_item.self_type, defaults);
+                for parameter in &mut method.parameters {
+                    normalize_type(&mut parameter.param_type, defaults);
+                }
+                if let Some(return_type) = &mut method.return_type {
+                    normalize_type(return_type, defaults);
+                }
+                normalize_block(&mut method.body, defaults);
+            }
+        }
+    }
+}
+
+fn normalize_block(block: &mut ast::Block, defaults: &[(String, Vec<Option<ast::Type>>)]) {
+    for statement in &mut block.statements {
+        match &mut statement.kind {
+            ast::StatementKind::Block(block) => normalize_block(block, defaults),
+            ast::StatementKind::Let(statement) => {
+                if let Some(ty) = &mut statement.type_annotation {
+                    normalize_type(ty, defaults);
+                }
+                if let Some(expression) = &mut statement.initializer {
+                    normalize_expression(expression, defaults);
+                }
+            }
+            ast::StatementKind::Expression(expression)
+            | ast::StatementKind::Return(Some(expression))
+            | ast::StatementKind::Break(Some(expression)) => {
+                normalize_expression(expression, defaults)
+            }
+            ast::StatementKind::Defer(statement) => normalize_statement(statement, defaults),
+            ast::StatementKind::Return(None)
+            | ast::StatementKind::Break(None)
+            | ast::StatementKind::Continue => {}
+        }
+    }
+}
+
+fn normalize_statement(
+    statement: &mut ast::Statement,
+    defaults: &[(String, Vec<Option<ast::Type>>)],
+) {
+    match &mut statement.kind {
+        ast::StatementKind::Block(block) => normalize_block(block, defaults),
+        ast::StatementKind::Let(statement) => {
+            if let Some(ty) = &mut statement.type_annotation {
+                normalize_type(ty, defaults);
+            }
+            if let Some(expression) = &mut statement.initializer {
+                normalize_expression(expression, defaults);
+            }
+        }
+        ast::StatementKind::Expression(expression)
+        | ast::StatementKind::Return(Some(expression))
+        | ast::StatementKind::Break(Some(expression)) => normalize_expression(expression, defaults),
+        ast::StatementKind::Defer(statement) => normalize_statement(statement, defaults),
+        ast::StatementKind::Return(None)
+        | ast::StatementKind::Break(None)
+        | ast::StatementKind::Continue => {}
+    }
+}
+
+fn normalize_expression(
+    expression: &mut ast::Expression,
+    defaults: &[(String, Vec<Option<ast::Type>>)],
+) {
+    match expression.kind.as_mut() {
+        ast::ExpressionKind::TypeName(ty) => normalize_type(ty, defaults),
+        ast::ExpressionKind::Cast {
+            expression,
+            target_type,
+        } => {
+            normalize_expression(expression, defaults);
+            normalize_type(target_type, defaults);
+        }
+        ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } => {
+            normalize_expression(function, defaults);
+            for argument in arguments {
+                normalize_expression(argument, defaults);
+            }
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            normalize_expression(receiver, defaults);
+            for argument in arguments {
+                normalize_expression(argument, defaults);
+            }
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            normalize_expression(left, defaults);
+            normalize_expression(right, defaults);
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. }
+        | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Comptime(operand)
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand) => normalize_expression(operand, defaults),
+        ast::ExpressionKind::Reference { expression, .. } => {
+            normalize_expression(expression, defaults)
+        }
+        ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } => normalize_expression(object, defaults),
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            normalize_expression(condition, defaults);
+            normalize_block(then_branch, defaults);
+            if let Some(else_branch) = else_branch {
+                normalize_block(else_branch, defaults);
+            }
+        }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            normalize_expression(condition, defaults);
+            normalize_expression(then_expr, defaults);
+            normalize_expression(else_expr, defaults);
+        }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            normalize_expression(value, defaults);
+            normalize_expression(fallback, defaults);
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            normalize_expression(condition, defaults);
+            normalize_block(body, defaults);
+        }
+        ast::ExpressionKind::ForIn {
+            iterable,
+            body,
+            item_type,
+            iterator_type,
+            ..
+        } => {
+            normalize_expression(iterable, defaults);
+            normalize_block(body, defaults);
+            if let Some(item_type) = item_type {
+                normalize_type(item_type, defaults);
+            }
+            if let Some(iterator_type) = iterator_type {
+                normalize_type(iterator_type, defaults);
+            }
+        }
+        ast::ExpressionKind::For {
+            init,
+            condition,
+            increment,
+            body,
+        } => {
+            if let Some(ty) = &mut init.type_annotation {
+                normalize_type(ty, defaults);
+            }
+            if let Some(expression) = &mut init.initializer {
+                normalize_expression(expression, defaults);
+            }
+            normalize_expression(condition, defaults);
+            normalize_expression(increment, defaults);
+            normalize_block(body, defaults);
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            normalize_expression(expression, defaults);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    normalize_expression(guard, defaults);
+                }
+                normalize_expression(&mut arm.body, defaults);
+            }
+        }
+        ast::ExpressionKind::Block(block) => normalize_block(block, defaults),
+        ast::ExpressionKind::Initializer { items } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(value)
+                    | ast::InitializerItem::Field { value, .. } => {
+                        normalize_expression(value, defaults)
+                    }
+                    ast::InitializerItem::Index { index, value } => {
+                        normalize_expression(index, defaults);
+                        normalize_expression(value, defaults);
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Asm { inputs, .. }
+        | ast::ExpressionKind::Array(inputs)
+        | ast::ExpressionKind::Tuple(inputs) => {
+            for input in inputs {
+                normalize_expression(input, defaults);
+            }
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                normalize_expression(&mut field.value, defaults);
+            }
+        }
+        ast::ExpressionKind::EnumVariant { fields, .. } => {
+            for field in fields {
+                normalize_expression(field, defaults);
+            }
+        }
+        ast::ExpressionKind::MacroCall { args, .. } => {
+            for arg in args {
+                if let ast::MacroArg::Expression(expression) = arg {
+                    normalize_expression(expression, defaults);
+                }
+            }
+        }
+        ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Identifier(_) => {}
+    }
 }
 
 #[derive(Clone)]
@@ -736,7 +1072,29 @@ fn collect_type_instantiations(
     instantiations: &mut HashMap<String, TypeInstance>,
     scopes: &Vec<HashSet<String>>,
 ) {
-    if let Some((base, args)) = concrete_named_type(ty, scopes)
+    let mut normalized = ty.clone();
+    let defaults = generic_structs
+        .iter()
+        .map(|(name, item)| {
+            let generics = match item {
+                GenericTypeItem::Struct(item) => item.generics.as_ref(),
+                GenericTypeItem::Enum(item) => item.generics.as_ref(),
+            };
+            (
+                name.clone(),
+                generics
+                    .into_iter()
+                    .flat_map(|generics| generics.params.iter())
+                    .map(|param| match param {
+                        ast::GenericParam::Type(param) => param.default.clone(),
+                        ast::GenericParam::Lifetime(_) => None,
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let _ = ast::apply_generic_defaults(&mut normalized, &defaults);
+    if let Some((base, args)) = concrete_named_type(&normalized, scopes)
         && let Some(item) = generic_structs.get(&base)
     {
         let (generics, instance_item) = match item {
@@ -766,7 +1124,7 @@ fn collect_type_instantiations(
         }
     }
 
-    match ty.kind.as_ref() {
+    match normalized.kind.as_ref() {
         ast::TypeKind::Named(named) => {
             if let Some(generics) = &named.generics {
                 for arg in generics {
@@ -814,6 +1172,7 @@ fn collect_type_instantiations(
         ast::TypeKind::Primitive(_) => {}
     }
 }
+
 
 fn instantiate_struct(
     struct_item: &ast::StructItem,
@@ -2266,6 +2625,7 @@ fn collect_expression_remaining_calls(
             ..
         } => {
             results.extend(collect_expression_remaining_calls(receiver, generic_fns));
+
             for arg in arguments {
                 results.extend(collect_expression_remaining_calls(arg, generic_fns));
             }
@@ -2549,6 +2909,30 @@ mod tests {
                 None
             })
             .expect("function not found")
+    }
+ 
+    #[test]
+    fn normalizes_local_generic_defaults_before_monomorphization() {
+        let mut program = parse(
+            "struct Box<T = i32> { T value; } \
+             i64 main() { Box b; b.value = 7; return b.value; }",
+        );
+        let items = append_monomorphs(&mut program, &[], &[]);
+        let main = find_function(&program, "main");
+        let ast::StatementKind::Let(statement) = &main.body.statements[0].kind else {
+            panic!("expected local declaration");
+        };
+        let Some(annotation) = &statement.type_annotation else {
+            panic!("expected local type annotation");
+        };
+        let ast::TypeKind::Named(named) = annotation.kind.as_ref() else {
+            panic!("expected named local type");
+        };
+        assert_eq!(named.generics.as_ref().map(Vec::len), Some(1));
+        assert!(items.iter().any(|item| matches!(
+            &item.kind,
+            ast::ItemKind::Struct(item) if item.name.name == "Box__i32"
+        )));
     }
 
     #[test]
