@@ -4,7 +4,9 @@ use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 use tower_lsp_server::ls_types::*;
 
-/// Convert byte offset to 0‑based line/col from source text.
+/// Convert a byte offset to a 0-based LSP position.
+///
+/// LSP columns are UTF-16 code units, not Unicode scalar values.
 pub(crate) fn byte_to_position(text: &str, offset: usize) -> Position {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
@@ -16,7 +18,7 @@ pub(crate) fn byte_to_position(text: &str, offset: usize) -> Position {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
     }
     Position {
@@ -32,19 +34,22 @@ pub(crate) fn span_to_range(text: &str, span: &Span) -> Range {
     }
 }
 
-/// Convert an LSP position (UTF‑16 code units) to a byte offset.
+/// Convert an LSP position (UTF-16 code units) to a byte offset.
 pub(crate) fn position_to_byte(text: &str, pos: Position) -> usize {
     let mut line: u32 = 0;
     let mut col: u32 = 0;
     for (i, ch) in text.char_indices() {
-        if line == pos.line && col == pos.character {
+        if line == pos.line && col >= pos.character {
             return i;
         }
         if ch == '\n' {
+            if line == pos.line {
+                return i;
+            }
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
     }
     text.len()
@@ -214,8 +219,73 @@ pub(crate) fn build_lsp_loader() -> ModuleLoader {
             loader.add_search_dir(local_lib);
         }
     }
+
     for dir in find_std_search_dirs() {
         loader.add_search_dir(dir);
     }
     loader
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_count_utf16_units() {
+        let text = "a🚀b";
+        assert_eq!(
+            byte_to_position(text, 1),
+            Position {
+                line: 0,
+                character: 1
+            }
+        );
+        assert_eq!(
+            byte_to_position(text, 5),
+            Position {
+                line: 0,
+                character: 3
+            }
+        );
+        assert_eq!(
+            byte_to_position(text, text.len()),
+            Position {
+                line: 0,
+                character: 4
+            }
+        );
+    }
+
+    #[test]
+    fn positions_round_trip_utf16_offsets() {
+        let text = "a🚀b\nc";
+        for offset in [0, 1, 5, 7, 8] {
+            let position = byte_to_position(text, offset);
+            assert_eq!(position_to_byte(text, position), offset);
+        }
+    }
+
+    #[test]
+    fn positions_clamp_to_line_end() {
+        let text = "abc\ndef";
+        assert_eq!(
+            position_to_byte(
+                text,
+                Position {
+                    line: 0,
+                    character: 99
+                }
+            ),
+            3
+        );
+        assert_eq!(
+            position_to_byte(
+                text,
+                Position {
+                    line: 9,
+                    character: 0
+                }
+            ),
+            text.len()
+        );
+    }
 }
