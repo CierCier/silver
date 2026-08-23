@@ -7,7 +7,6 @@
 //! 3. Plain identifiers — keywords, locals in scope, and all known symbols.
 
 use agc::lexer::Token;
-use rustc_hash::FxHashSet as HashSet;
 use tower_lsp_server::ls_types::*;
 
 use crate::doc;
@@ -207,21 +206,6 @@ fn member_completion(analysis: &SymbolIndex, offset: usize) -> Option<Vec<Comple
             }),
             ..Default::default()
         });
-    }
-    if items.is_empty() {
-        // Receiver type unknown: offer all methods (name-based).
-        let mut seen: HashSet<&str> = HashSet::default();
-        for sym in &analysis.symbols {
-            if sym.kind != SymbolKind::Method || !seen.insert(&sym.name) {
-                continue;
-            }
-            items.push(CompletionItem {
-                label: sym.name.clone(),
-                kind: Some(CompletionItemKind::METHOD),
-                detail: Some(sym.signature.clone()),
-                ..Default::default()
-            });
-        }
     }
     Some(sort_dedupe(items))
 }
