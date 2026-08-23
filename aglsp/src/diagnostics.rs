@@ -14,10 +14,11 @@ impl Backend {
         // id (mirroring the compiler driver) so `Span.file` distinguishes the
         // buffer from inlined imported files.
         let source_path = uri.to_file_path();
-        let file_id = source_path
-            .as_ref()
-            .map(|p| lexer::register_source(&p.display().to_string(), text))
-            .unwrap_or(0);
+        let file_key = source_path.as_ref().map_or_else(
+            || format!("untitled:{uri:?}"),
+            |path| path.display().to_string(),
+        );
+        let file_id = lexer::register_source(&file_key, text);
         let tokens = match lexer::lex_with_source(text, file_id) {
             Ok(t) => t,
             Err(errors) => {
@@ -167,6 +168,9 @@ impl Backend {
                 }
             }
         }
+
+        let analysis = analyze(&program, text, &tokens, expr_types, file_id);
+        self.cache.lock().insert(uri.clone(), analysis);
 
         let current_uris: HashSet<Uri> = by_uri.keys().cloned().collect();
         let previous_uris = self.diagnostic_uris.lock().clone();
