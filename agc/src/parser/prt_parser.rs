@@ -2945,46 +2945,109 @@ impl PRT_Parser {
         let mut predicates = Vec::new();
         let mut cursor = start + 1;
         while cursor < end {
-            let (bounded_type, next_after_type) = self
-                .parse_type_prefix(tokens, cursor, end)
-                .ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected where-clause type".to_string(),
+            if let Token::Lifetime(name) = &tokens[cursor].kind {
+                let lifetime = ast::Lifetime {
+                    name: name.clone(),
                     span: tokens[cursor].span,
-                })?;
-            cursor = next_after_type;
-            if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
-                break;
-            }
-            cursor += 1;
-
-            let mut bounds = Vec::new();
-            loop {
-                let (trait_ref, next_after_bound) =
-                    self.parse_trait_ref_prefix(tokens, cursor, end)?;
-                bounds.push(ast::TraitBound {
-                    trait_ref,
-                    is_optional: false,
-                });
-                cursor = next_after_bound;
-                if cursor < end && matches!(tokens[cursor].kind, Token::Plus) {
-                    cursor += 1;
-                    continue;
+                };
+                cursor += 1;
+                if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected ':' after lifetime in where-clause predicate"
+                            .to_string(),
+                        span: tokens[cursor.min(end - 1)].span,
+                    });
                 }
-                break;
-            }
+                cursor += 1;
 
-            if bounds.is_empty() {
-                return Err(ParseError::InvalidSyntax {
-                    message: "where-clause predicate must include at least one trait bound"
-                        .to_string(),
-                    span: tokens[cursor.min(end - 1)].span,
+                let mut bounds = Vec::new();
+                loop {
+                    let Some(token) = tokens.get(cursor) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "where-clause lifetime predicate must include at least one lifetime bound"
+                                .to_string(),
+                            span: tokens[end - 1].span,
+                        });
+                    };
+                    let Token::Lifetime(bound_name) = &token.kind else {
+                        let missing_bound = bounds.is_empty()
+                            && matches!(
+                                &token.kind,
+                                Token::Comma
+                                    | Token::Plus
+                                    | Token::RightParen
+                                    | Token::LeftParen
+                                    | Token::RightBrace
+                                    | Token::LeftBrace
+                                    | Token::Semicolon
+                                    | Token::Eof
+                            );
+                        return Err(ParseError::InvalidSyntax {
+                            message: if missing_bound {
+                                "where-clause lifetime predicate must include at least one lifetime bound"
+                                    .to_string()
+                            } else {
+                                "where-clause lifetime predicate bounds must be lifetimes"
+                                    .to_string()
+                            },
+                            span: token.span,
+                        });
+                    };
+                    bounds.push(ast::Lifetime {
+                        name: bound_name.clone(),
+                        span: token.span,
+                    });
+                    cursor += 1;
+                    if cursor < end && matches!(tokens[cursor].kind, Token::Plus) {
+                        cursor += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                predicates.push(ast::WherePredicate::Lifetime { lifetime, bounds });
+            } else {
+                let (bounded_type, next_after_type) = self
+                    .parse_type_prefix(tokens, cursor, end)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected where-clause type".to_string(),
+                        span: tokens[cursor].span,
+                    })?;
+                cursor = next_after_type;
+                if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
+                    break;
+                }
+                cursor += 1;
+
+                let mut bounds = Vec::new();
+                loop {
+                    let (trait_ref, next_after_bound) =
+                        self.parse_trait_ref_prefix(tokens, cursor, end)?;
+                    bounds.push(ast::TraitBound {
+                        trait_ref,
+                        is_optional: false,
+                    });
+                    cursor = next_after_bound;
+                    if cursor < end && matches!(tokens[cursor].kind, Token::Plus) {
+                        cursor += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                if bounds.is_empty() {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "where-clause predicate must include at least one trait bound"
+                            .to_string(),
+                        span: tokens[cursor.min(end - 1)].span,
+                    });
+                }
+
+                predicates.push(ast::WherePredicate::Type {
+                    bounded_type,
+                    bounds,
                 });
             }
-
-            predicates.push(ast::WherePredicate::Type {
-                bounded_type,
-                bounds,
-            });
 
             if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
                 cursor += 1;
@@ -5766,5 +5829,59 @@ mod tests {
         assert_eq!(b_lp.name.name, "b");
         assert_eq!(b_lp.bounds.len(), 1);
         assert_eq!(b_lp.bounds[0].name, "a");
+    }
+    #[test]
+    fn parses_lifetime_where_predicate() {
+        let tokens = lex("where 'a: 'b").expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let (clause, next) = parser
+            .parse_where_clause_prefix(&tokens, 0, tokens.len() - 1)
+            .expect("parse failed");
+        assert_eq!(next, tokens.len() - 1);
+        let clause = clause.expect("expected where clause");
+        let ast::WherePredicate::Lifetime { lifetime, bounds } = &clause.predicates[0] else {
+            panic!("expected lifetime predicate");
+        };
+        assert_eq!(lifetime.name, "a");
+        assert_eq!(
+            bounds.iter().map(|bound| bound.name.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn parses_multiple_lifetime_where_bounds() {
+        let tokens = lex("where 'a: 'b + 'c").expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let (clause, _) = parser
+            .parse_where_clause_prefix(&tokens, 0, tokens.len() - 1)
+            .expect("parse failed");
+        let clause = clause.expect("expected where clause");
+        let ast::WherePredicate::Lifetime { bounds, .. } = &clause.predicates[0] else {
+            panic!("expected lifetime predicate");
+        };
+        assert_eq!(
+            bounds.iter().map(|bound| bound.name.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+    }
+
+    #[test]
+    fn parses_mixed_type_and_lifetime_where_predicates() {
+        let tokens = lex("where T: Trait, 'a: 'b").expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let (clause, _) = parser
+            .parse_where_clause_prefix(&tokens, 0, tokens.len() - 1)
+            .expect("parse failed");
+        let clause = clause.expect("expected where clause");
+        assert_eq!(clause.predicates.len(), 2);
+        assert!(matches!(
+            &clause.predicates[0],
+            ast::WherePredicate::Type { .. }
+        ));
+        assert!(matches!(
+            &clause.predicates[1],
+            ast::WherePredicate::Lifetime { .. }
+        ));
     }
 }
