@@ -345,6 +345,9 @@ pub(crate) fn signature_help(analysis: &SymbolIndex, offset: usize) -> Option<Si
     let target = loop {
         let prev = tokens.get(idx.wrapping_sub(1))?;
         match &prev.kind {
+            Token::DoubleColon => {
+                idx -= 1;
+            }
             Token::Identifier(_) => break prev,
             Token::RightParen => {
                 let mut depth = 0;
