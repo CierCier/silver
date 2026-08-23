@@ -15,7 +15,7 @@ mod util;
 use agc::module_loader::ModuleLoader;
 use agc::parser::ast;
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -31,6 +31,8 @@ pub(crate) struct Backend {
     pub(crate) loader: ModuleLoader,
     /// Path → (mtime_nanos, fully-parsed program) for imported files.
     pub(crate) file_cache: parking_lot::Mutex<HashMap<PathBuf, (u128, ast::Program)>>,
+    /// Diagnostic URIs published by the last diagnostics check.
+    pub(crate) diagnostic_uris: Mutex<HashSet<Uri>>,
 }
 
 impl LanguageServer for Backend {
@@ -297,6 +299,7 @@ async fn main() {
         cache: Mutex::new(HashMap::default()),
         loader: build_lsp_loader(),
         file_cache: Mutex::new(HashMap::default()),
+        diagnostic_uris: Mutex::new(HashSet::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

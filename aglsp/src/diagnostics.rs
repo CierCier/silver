@@ -3,7 +3,7 @@ use agc::parser::{FileImportResolverHook, Parser};
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_index::{SymbolIndex, analyze};
 use agc::symbol_table::CompilerSymbolTable;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tower_lsp_server::ls_types::*;
 
 use crate::Backend;
@@ -43,9 +43,17 @@ impl Backend {
                         foreign_files: Default::default(),
                     },
                 );
+                let current_uris: HashSet<Uri> = [uri.clone()].into_iter().collect();
+                let previous_uris = self.diagnostic_uris.lock().clone();
                 self.client
                     .publish_diagnostics(uri.clone(), diags, None)
                     .await;
+                for stale_uri in previous_uris.difference(&current_uris) {
+                    self.client
+                        .publish_diagnostics(stale_uri.clone(), Vec::new(), None)
+                        .await;
+                }
+                *self.diagnostic_uris.lock() = current_uris;
                 return;
             }
         };
@@ -161,13 +169,19 @@ impl Backend {
             }
         }
 
-        let analysis = analyze(&program, text, &tokens, expr_types, file_id);
-        self.cache.lock().insert(uri.clone(), analysis);
+        let current_uris: HashSet<Uri> = by_uri.keys().cloned().collect();
+        let previous_uris = self.diagnostic_uris.lock().clone();
         for (target_uri, diags) in by_uri {
             self.client
                 .publish_diagnostics(target_uri, diags, None)
                 .await;
         }
+        for stale_uri in previous_uris.difference(&current_uris) {
+            self.client
+                .publish_diagnostics(stale_uri.clone(), Vec::new(), None)
+                .await;
+        }
+        *self.diagnostic_uris.lock() = current_uris;
     }
 }
 
