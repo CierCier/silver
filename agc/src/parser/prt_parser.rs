@@ -5872,6 +5872,24 @@ mod tests {
     }
 
     #[test]
+    fn selective_import_survives_multi_item_program() {
+        // Regression: a selective import followed by other top-level items
+        // must keep its selection through item segmentation.
+        let source = "import std.io.file { println as pln };\ni32 main() { return 0; }";
+        let file_id = crate::lexer::register_source("probe.ag", source);
+        let tokens = crate::lexer::lex_with_source(source, file_id).expect("lex failed");
+        let mut parser = PRT_Parser::new(Some("probe.ag".to_string()));
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 2);
+        let ast::ItemKind::Import(item) = &program.items[0].kind else {
+            panic!("expected import item");
+        };
+        let selection = item.selection.as_ref().expect("selection preserved");
+        assert_eq!(selection.len(), 1);
+        assert_eq!(selection[0].local_name.name, "pln");
+    }
+
+    #[test]
     fn rejects_empty_selective_import_list() {
         let source = "import std.io { };";
         let tokens = crate::lexer::lex(source).expect("lex failed");

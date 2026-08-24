@@ -72,6 +72,16 @@ relevant integration tests).
       print, println as pln };` parses into `ImportItem { path, selection:
       Some(Vec<ImportedName>) }` with 5 new parser tests. (`as` is now a
       reserved keyword; the one std-local use in cookie.ag was renamed)
-- [ ] 15. Import lowering — selective inlining/symbol filtering during
-      import lowering; propagate through `.agm` artifacts
+- [ ] 15. Import lowering — selective inlining/symbol filtering. STATE:
+      alias machinery (clone selected fn under local name after traversal,
+      before-dedup selection capture) was implemented and works at the AST
+      level, but on the default build path the root unit receives std
+      modules via precompiled-artifact metadata (module_imports) rather than
+      source inlining, so there are no function bodies to clone — aliases
+      never materialize. Reverted to avoid shipping dead behavior.
+      NEXT STEP: decide artifact-route semantics first — either (a) filter/
+      rename ModuleArtifact exports (needs alias-aware link symbols), or
+      (b) force source inlining for selectively-imported modules. Then
+      re-land import_hook.rs changes (see session notes; probe method:
+      pending_selections captured pre-dedup, deferred aliasing post-merge).
 - [ ] 16. LSP exposure — completions/references aware of selective imports
