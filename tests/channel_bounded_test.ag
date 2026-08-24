@@ -59,6 +59,36 @@ i32 main() {
         ch.destroy();
     }
 
+    // Test 1b: bounded(0) / negative caps mean UNBOUNDED (no silent clamp to 1)
+    STDOUT.write_str("--- Test 1b: zero/negative capacity = unbounded ---\n");
+    {
+        Channel<i64> zero_ch = Channel<i64>.bounded(0);
+        assert_eq_i64(0, zero_ch.capacity(), "bounded(0) is unbounded, not clamped to 1");
+        i64 i = 0;
+        while (i < 5) {
+            @assert(zero_ch.try_send(i), "unbounded try_send never hits a 1-slot limit");
+            i = i + 1;
+        }
+        assert_eq_i64(5, zero_ch.len(), "all 5 values queued on unbounded channel");
+        zero_ch.destroy();
+
+        Channel<i64> neg_ch = Channel<i64>.bounded(-3);
+        assert_eq_i64(0, neg_ch.capacity(), "negative capacity normalizes to unbounded");
+        neg_ch.destroy();
+    }
+
+    // Test 1c: destroy() leaves coherent state
+    STDOUT.write_str("--- Test 1c: destroy resets stale fields ---\n");
+    {
+        Channel<i64> dch = Channel<i64>.bounded(4);
+        @assert(dch.try_send(1), "send before destroy");
+        dch.destroy();
+        assert_eq_i64(0, dch.len(), "destroyed channel len reset");
+        assert_eq_i64(0, dch.capacity(), "destroyed channel capacity reset");
+        @assert(dch.is_closed(), "destroyed channel is closed");
+        @assert(!dch.try_send(2), "try_send after destroy rejected");
+    }
+
     // Test 2: Multi-threaded bounded producer-consumer with backpressure & close
     STDOUT.write_str("\n--- Test 2: Bounded producer-consumer stream ---\n");
     {

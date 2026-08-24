@@ -49,8 +49,11 @@ relevant integration tests).
 > NOTE: `std/channel.ag` and `std/sync.ag` carry **uncommitted user work** —
 > items 10–11 are BLOCKED until that work is committed by its author.
 
-- [ ] 10. [BLOCKED: uncommitted user work] Channel bounded semantics &
-      reset (`std/channel.ag`)
+- [x] 10. Channel bounded semantics & reset — blocking `send` was already in
+      the WIP (correct expected-value futex pattern); `bounded(<=0)` now
+      means unbounded instead of silent clamp to 1; `destroy()` resets all
+      bookkeeping (len/capacity/closed/futex words) so reuse/double-destroy
+      can't observe stale state; regression tests added
 - [ ] 11. [BLOCKED: uncommitted user work] Condvar/RwLock naming aliases
       (`std/sync.ag`)
 - [x] 12. Futex-based thread joining — adaptive wait (64 spins, then

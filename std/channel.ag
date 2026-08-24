@@ -47,12 +47,18 @@ impl<T> Channel<T> {
     }
 
     /// A bounded channel with backpressure when full.
+    /// `cap <= 0` creates an UNBOUNDED channel (matching `capacity()`'s
+    /// "0 = unbounded" convention) instead of silently clamping to 1.
     Channel<T> bounded(i64 cap) {
         Channel<T> c;
         c.mu = RawMutex.new();
         c.queue = Vec<T>.new();
         c.head = 0;
-        c.capacity = (cap < 1) ? (i64)1 : cap;
+        if (cap < 0) {
+            c.capacity = 0;
+        } else {
+            c.capacity = cap;
+        }
         c.closed = false;
         c.send_sigs = 0;
         c.recv_sigs = 0;
@@ -183,11 +189,19 @@ impl<T> Channel<T> {
         futex_wake(&self.send_sigs, 2147483647);
     }
 
-    /// Free the backing queue (no sends/recvs after this).
+    /// Free the backing queue (no sends/recvs after this).  Resets all
+    /// bookkeeping so a destroyed channel is left in a coherent state:
+    /// closed (rejecting further sends), empty, unbounded, and with cleared
+    /// futex words — a reuse or double-destroy cannot observe stale values.
     void destroy(&mut Channel<T> self) {
         self.mu.lock();
         self.queue.drop();
+        self.head = 0;
+        self.capacity = 0;
+        self.closed = true;
         self.mu.unlock();
+        __atomic_store_i32(&self.send_sigs, 0, ATOMIC_SEQ_CST);
+        __atomic_store_i32(&self.recv_sigs, 0, ATOMIC_SEQ_CST);
     }
 
     /// Shift the live suffix to the front once the consumed prefix grows
