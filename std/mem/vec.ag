@@ -12,6 +12,11 @@
 // `get_ptr` for read-only access and `take` to extract values before
 // the Vec goes out of scope.  POD types (i32, structs of i32, etc.)
 // are always safe.
+//
+// POD-ONLY: `push` copies `value` into the backing buffer (the by-value
+// param is dropped at callee exit), so an owned element type (String,
+// Vec, ...) leaves every slot a dangling copy — pushing owned types
+// double-frees on drop, same contract as Box/Rc.
 import std.mem.alloc;
 import std.mem.drop;
 import std.ops;

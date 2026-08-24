@@ -44,8 +44,10 @@ relevant integration tests).
 - [x] 8. Fallible collection accessors — `try_pop_front/try_pop_back/
       try_front/try_back` (Deque), `try_pop/try_front` (Queue),
       `try_pop/try_peek` (BinaryHeap), `get_opt` (HashMap)
-- [ ] 9. POD safety disclaimers — document owned-non-POD limitations of
-      Box/Rc/Vec headers (`std/mem/*.ag`)
+- [x] 9. POD safety disclaimers — Box/Rc already documented; aligned Vec's
+      LIMITATIONS with the same owned-`T` double-free wording. Compiler lint
+      rejecting non-POD container instantiations remains future work (track
+      alongside todo 17's type-resolution work)
 
 ## Phase 3 — Concurrency & Synchronization
 
