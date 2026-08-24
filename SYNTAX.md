@@ -67,7 +67,8 @@ These are hard keywords — they cannot be used as identifiers:
 | `void` | Empty/unit return type | `match` | Match expression |
 | `type` | Type alias / associated type | `Self` | Implementing type keyword |
 
-**Not keywords**: `pub` (items are public by default; `private` restricts visibility), `let`, `fn`.
+**Not keywords**: `pub` (items are public by default; `private` restricts visibility), `fn`.
+`let` is a keyword introducing inferred local bindings (`let x = expr;`).
 
 ### Literals
 
@@ -371,11 +372,19 @@ macro swap(a, b) {
 
 ### Variable Declarations
 
-Silver uses **C-style syntax**: type before name. Only C-style declarations work
-(e.g., `i32 x = 42;`).
+Silver uses **C-style syntax**: type before name. An initializer-less binding
+declares the variable with its annotated type.
 ```silver
 i32 x = 42;           // C-style declaration (idiomatic)
 f64 y;                // uninitialized (allowed; drop-flag caveats apply)
+```
+
+**Inferred bindings**: `let name = expr;` declares a local whose type is
+inferred from the initializer expression (including generic call results).
+An initializer is required — `let x;` is an error; annotate instead.
+```silver
+let n = compute();    // type inferred from compute()'s return type
+let b = move owned;   // move transfers ownership, as with annotated lets
 ```
 
 Pattern destructuring (`let (a, b) = ...`) is **not** supported.

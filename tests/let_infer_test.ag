@@ -1,0 +1,76 @@
+// tests/let_infer_test.ag — inferred `let name = expr;` bindings.
+//
+// Covers: inference from plain calls, generic instantiation results,
+// arithmetic on inferred values, inference inside generic function bodies,
+// nested scopes, and move semantics with drop flags.
+
+import std.sys.entry;
+import std.test;
+
+i32 drops = 0;
+
+struct Tracker {
+    i64 v;
+}
+
+impl Drop for Tracker {
+    void drop(Tracker* self) {
+        drops = drops + 1;
+    }
+}
+
+T pick_second<T>(T a, T b) {
+    // Inference inside a generic body: the binding's type mentions T and
+    // must substitute correctly at each instantiation.
+    let first = a;
+    let second = b;
+    if (false) { return first; }
+    let local = second;
+    return local;
+}
+
+i64 answer() {
+    return 42;
+}
+
+Tracker make_tracker(i64 val) {
+    Tracker t;
+    t.v = val;
+    return t;
+}
+
+i32 main() {
+    test_start("infer from call");
+    let n = answer();
+    assert_eq_i64(42, n, "inferred i64 from call result");
+
+    test_start("arithmetic on inferred bindings");
+    let doubled = n + n;
+    assert_eq_i64(84, doubled, "inferred binding composes with operators");
+
+    test_start("generic instantiation inference");
+    let s = pick_second((i64)1, (i64)2);
+    assert_eq_i64(2, s, "inferred through monomorphized body");
+    let w = pick_second((i64)10, (i64)20);
+    assert_eq_i64(20, w, "second instantiation stays independent");
+
+    test_start("nested scopes");
+    let outer = (i64)5;
+    {
+        let inner = outer + outer;
+        assert_eq_i64(10, inner, "inner scope sees outer inferred value");
+        let deeper = inner * 2;
+        assert_eq_i64(20, deeper, "chained inference across scopes");
+    }
+
+    test_start("move semantics with drop flags");
+    let a = make_tracker(7);
+    {
+        let b = move a;   // ownership transfers out of 'a'
+        let c = b;        // copy: both b and c own live values
+    }
+    // Scope exit dropped exactly b and c; the moved-from 'a' is skipped.
+    assert_eq_i32(2, drops, "moved-from binding not dropped, copies are");
+
+    return done();
+}

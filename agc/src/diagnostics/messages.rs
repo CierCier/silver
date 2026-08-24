@@ -162,6 +162,10 @@ pub fn local_bindings_need_type_annotation() -> &'static str {
     "local bindings must include a type annotation"
 }
 
+pub fn inferred_let_needs_initializer() -> &'static str {
+    "inferred 'let' binding needs an initializer; annotate the type ('T x;') or add '= expr'"
+}
+
 pub fn struct_literals_not_supported() -> &'static str {
     "struct literal expressions are not supported here; use a variable initializer ('Type id = { .field = value }') instead"
 }

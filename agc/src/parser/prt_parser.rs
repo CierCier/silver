@@ -1873,6 +1873,10 @@ impl PRT_Parser {
             });
         }
 
+        if matches!(tokens[start].kind, Token::Let) {
+            return self.parse_inferred_let_statement(tokens, start, end);
+        }
+
         let Some((qual_cursor, qualifiers)) =
             Self::consume_declaration_qualifiers(tokens, start, end - 1)
         else {
@@ -1904,6 +1908,89 @@ impl PRT_Parser {
         Ok(ast::Statement {
             kind: ast::StatementKind::Expression(expr),
             span: tokens[start].span.extend_to(&tokens[end - 1].span),
+        })
+    }
+
+    /// Inferred binding: `let name = expr;` (no type annotation). The type
+    /// checker derives the declared type from the initializer expression.
+    fn parse_inferred_let_statement(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<ast::Statement, ParseError> {
+        let statement_span = tokens[start].span.extend_to(&tokens[end - 1].span);
+        let Some(name_token) = tokens.get(start + 1) else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected a binding name after 'let'".to_string(),
+                span: statement_span,
+            });
+        };
+        let Token::Identifier(name) = &name_token.kind else {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected a binding name after 'let'".to_string(),
+                span: name_token.span,
+            });
+        };
+
+        let mut cursor = start + 2;
+        // Grouped bindings (`let a = 1, b = 2;`) are not supported for
+        // inferred lets — each needs its own statement to carry one type.
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
+            return Err(ParseError::InvalidSyntax {
+                message:
+                    "grouped declarations are not supported with 'let'; use separate statements"
+                        .to_string(),
+                span: tokens[cursor].span,
+            });
+        }
+
+        let initializer = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
+            cursor += 1;
+            let expr_end = end - 1; // trailing semicolon
+            if cursor >= expr_end {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected an initializer expression after '='".to_string(),
+                    span: tokens[cursor - 1].span,
+                });
+            }
+            // A second top-level comma would be a grouped declarator.
+            if let Some(comma) = self.find_top_level_comma(tokens, cursor, expr_end) {
+                return Err(ParseError::InvalidSyntax {
+                    message:
+                        "grouped declarations are not supported with 'let'; use separate statements"
+                            .to_string(),
+                    span: tokens[comma].span,
+                });
+            }
+            Some(self.parse_expression_reduction(tokens, cursor, expr_end)?)
+        } else {
+            None
+        };
+
+        if !matches!(tokens[end - 1].kind, Token::Semicolon) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ';' after let binding".to_string(),
+                span: tokens[end - 1].span,
+            });
+        }
+
+        Ok(ast::Statement {
+            kind: ast::StatementKind::Let(ast::LetStatement {
+                pattern: ast::Pattern {
+                    kind: ast::PatternKind::Identifier(ast::Identifier {
+                        name: name.clone(),
+                        span: name_token.span,
+                    }),
+                    span: name_token.span,
+                },
+                type_annotation: None,
+                initializer,
+                is_mutable: true,
+                is_static: false,
+                is_volatile: false,
+            }),
+            span: statement_span,
         })
     }
 

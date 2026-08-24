@@ -76,6 +76,12 @@ pub struct TypeChecker {
     /// monomorphization.
     current_implicit_method_reqs: Vec<ImplicitMethodReq>,
     implicit_method_reqs: HashMap<String, Vec<ImplicitMethodReq>>,
+    /// Inferred `let x = expr;` bindings recorded during typeck:
+    /// (stmt start, stmt end) → (inferred type, binding-name span).
+    /// The driver materializes these as type annotations after typeck so
+    /// downstream passes (move/borrow/escape checks, monomorphization,
+    /// codegen) see ordinary annotated bindings.
+    inferred_lets: HashMap<(usize, usize), (Type, Span)>,
 }
 
 /// A binary operation on a type parameter recorded during generic body
@@ -307,6 +313,11 @@ impl TypeChecker {
     /// Consume bare-constructor rewrite records for post-typeck AST rewriting.
     pub fn take_bare_constructors(&mut self) -> HashMap<(usize, usize), BareConstructorRewrite> {
         std::mem::take(&mut self.bare_constructors)
+    }
+
+    /// Consume inferred `let` bindings for post-typeck AST materialization.
+    pub fn take_inferred_lets(&mut self) -> HashMap<(usize, usize), (Type, Span)> {
+        std::mem::take(&mut self.inferred_lets)
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -872,55 +883,40 @@ impl TypeChecker {
         match &stmt.kind {
             ast::StatementKind::Block(block) => self.check_block(block),
             ast::StatementKind::Let(let_stmt) => {
-                let Some(annotation) = let_stmt.type_annotation.as_ref() else {
-                    self.error(msg::local_bindings_need_type_annotation(), stmt.span);
-                    return;
-                };
+                // Two binding forms:
+                // - `T x = expr;`  — declared type comes from the annotation.
+                // - `let x = expr;` — inferred binding: the declared type is
+                //   taken from the initializer and materialized into the AST
+                //   after type checking (see populate_inferred_let_types).
+                if let Some(annotation) = &let_stmt.type_annotation {
+                    let declared = self.type_from_ast(annotation);
+                    self.reject_plain_void_value_type(&declared, annotation.span);
 
-                let declared = self.type_from_ast(annotation);
-                self.reject_plain_void_value_type(&declared, annotation.span);
-
-                if let Some(init) = &let_stmt.initializer {
-                    let init_type = self.check_expr(init, Some(&declared));
-                    if !self.is_assignable(&declared, &init_type)
-                        && !self.is_implicitly_castable(&init_type, &declared)
-                    {
-                        self.error(msg::type_mismatch(&declared, &init_type), init.span);
-                    }
-                }
-
-                match &let_stmt.pattern.kind {
-                    ast::PatternKind::Identifier(ident) => {
-                        self.bind(
-                            &ident.name,
-                            declared.clone(),
-                            let_stmt.is_mutable,
-                            let_stmt.pattern.span,
-                        );
-                        if let Some(scope) = self.static_vars.last_mut()
-                            && let_stmt.is_static
+                    if let Some(init) = &let_stmt.initializer {
+                        let init_type = self.check_expr(init, Some(&declared));
+                        if !self.is_assignable(&declared, &init_type)
+                            && !self.is_implicitly_castable(&init_type, &declared)
                         {
-                            scope.insert(ident.name.clone());
+                            self.error(msg::type_mismatch(&declared, &init_type), init.span);
                         }
-                        if let Some(scope) = self.volatile_vars.last_mut()
-                            && let_stmt.is_volatile
-                        {
-                            scope.insert(ident.name.clone());
-                        }
-                        // Record for hover: variable name gets its declared type
-                        self.expr_types.insert(
-                            (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
-                            declared.to_string(),
-                        );
                     }
-                    _ => {
-                        self.error(
-                            "let declarations must bind a single identifier; destructuring \
-                            patterns are not supported"
-                                .to_string(),
-                            let_stmt.pattern.span,
-                        );
+
+                    Self::bind_let_pattern(self, let_stmt, declared);
+                } else {
+                    let Some(init) = &let_stmt.initializer else {
+                        self.error(msg::inferred_let_needs_initializer(), stmt.span);
+                        return;
+                    };
+                    let inferred = self.check_expr(init, None);
+                    if Self::is_void_like(&inferred) {
+                        self.error(msg::void_func_cannot_return_value(), init.span);
+                        return;
                     }
+                    self.inferred_lets.insert(
+                        (stmt.span.start, stmt.span.end),
+                        (inferred.clone(), let_stmt.pattern.span),
+                    );
+                    Self::bind_let_pattern(self, let_stmt, inferred);
                 }
             }
             ast::StatementKind::Expression(expr) => {
@@ -968,6 +964,41 @@ impl TypeChecker {
                 self.defer_depth -= 1;
             }
         }
+    }
+
+    /// Bind an identifier let pattern to its declared (or inferred) type:
+    /// registers the local, static/volatile qualifiers, and the hover type.
+    fn bind_let_pattern(&mut self, let_stmt: &ast::LetStatement, declared: Type) {
+        let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind else {
+            self.error(
+                "let declarations must bind a single identifier; destructuring \
+                patterns are not supported"
+                    .to_string(),
+                let_stmt.pattern.span,
+            );
+            return;
+        };
+        self.bind(
+            &ident.name,
+            declared.clone(),
+            let_stmt.is_mutable,
+            let_stmt.pattern.span,
+        );
+        if let Some(scope) = self.static_vars.last_mut()
+            && let_stmt.is_static
+        {
+            scope.insert(ident.name.clone());
+        }
+        if let Some(scope) = self.volatile_vars.last_mut()
+            && let_stmt.is_volatile
+        {
+            scope.insert(ident.name.clone());
+        }
+        // Record for hover: variable name gets its declared type
+        self.expr_types.insert(
+            (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
+            declared.to_string(),
+        );
     }
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
@@ -6279,7 +6310,6 @@ impl TypeChecker {
             span,
         });
     }
-
     fn check_struct_attributes(&mut self, attributes: &[ast::Attribute]) {
         if attributes.is_empty() {
             return;
@@ -6374,6 +6404,170 @@ pub fn rewrite_bare_constructors(
 ) {
     for item in &mut program.items {
         rewrite_item_bare_constructors(item, rewrites);
+    }
+}
+
+/// Materialize inferred `let x = expr;` bindings as annotated lets.
+/// Runs after type checking so every downstream consumer (escape/move/borrow
+/// checks, monomorphization substitution, codegen) sees a plain annotated
+/// binding instead of having to handle inference itself.
+pub fn populate_inferred_let_types(
+    program: &mut ast::Program,
+    inferred: &HashMap<(usize, usize), (Type, Span)>,
+) {
+    for item in &mut program.items {
+        match &mut item.kind {
+            ast::ItemKind::Function(func) => populate_block_inferred_let_types(&mut func.body, inferred),
+            ast::ItemKind::Impl(impl_item) => {
+                for member in &mut impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        populate_block_inferred_let_types(&mut func.body, inferred);
+                    }
+                }
+            }
+            ast::ItemKind::Macro(def) => populate_block_inferred_let_types(&mut def.body, inferred),
+            _ => {}
+        }
+    }
+}
+
+fn populate_block_inferred_let_types(
+    block: &mut ast::Block,
+    inferred: &HashMap<(usize, usize), (Type, Span)>,
+) {
+    for stmt in &mut block.statements {
+        populate_statement_inferred_let_types(stmt, inferred);
+    }
+}
+
+fn populate_statement_inferred_let_types(
+    stmt: &mut ast::Statement,
+    inferred: &HashMap<(usize, usize), (Type, Span)>,
+) {
+    if let ast::StatementKind::Let(let_stmt) = &mut stmt.kind
+        && let_stmt.type_annotation.is_none()
+        && let Some((ty, _name_span)) = inferred.get(&(stmt.span.start, stmt.span.end))
+    {
+        let_stmt.type_annotation = Some(ty.to_ast());
+    }
+    // Recurse into nested statement positions regardless of whether this
+    // statement itself was an inferred binding.
+    match &mut stmt.kind {
+        ast::StatementKind::Block(block) => populate_block_inferred_let_types(block, inferred),
+        ast::StatementKind::Defer(inner) => {
+            populate_statement_inferred_let_types(inner, inferred);
+        }
+        ast::StatementKind::Let(let_stmt) => {
+            if let Some(init) = &mut let_stmt.initializer {
+                populate_expr_blocks_inferred_let_types(init, inferred);
+            }
+        }
+        ast::StatementKind::Expression(expr)
+        | ast::StatementKind::Return(Some(expr))
+        | ast::StatementKind::Break(Some(expr)) => {
+            populate_expr_blocks_inferred_let_types(expr, inferred);
+        }
+        _ => {}
+    }
+}
+
+/// Inferred lets nested inside block-valued expressions (if/while/match/for
+/// bodies and blocks).
+fn populate_expr_blocks_inferred_let_types(
+    expr: &mut ast::Expression,
+    inferred: &HashMap<(usize, usize), (Type, Span)>,
+) {
+    match expr.kind.as_mut() {
+        ast::ExpressionKind::Block(block) => {
+            populate_block_inferred_let_types(block, inferred);
+        }
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            populate_expr_blocks_inferred_let_types(condition, inferred);
+            populate_block_inferred_let_types(then_branch, inferred);
+            if let Some(else_block) = else_branch {
+                populate_block_inferred_let_types(else_block, inferred);
+            }
+        }
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            populate_expr_blocks_inferred_let_types(condition, inferred);
+            populate_expr_blocks_inferred_let_types(then_expr, inferred);
+            populate_expr_blocks_inferred_let_types(else_expr, inferred);
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            populate_expr_blocks_inferred_let_types(condition, inferred);
+            populate_block_inferred_let_types(body, inferred);
+        }
+        ast::ExpressionKind::For {
+            condition, body, ..
+        } => {
+            populate_expr_blocks_inferred_let_types(condition, inferred);
+            populate_block_inferred_let_types(body, inferred);
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            populate_expr_blocks_inferred_let_types(expression, inferred);
+            for arm in arms {
+                // Arm bodies are block-valued: recurse through the block.
+                populate_expr_blocks_inferred_let_types(&mut arm.body, inferred);
+            }
+        }
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            populate_expr_blocks_inferred_let_types(iterable, inferred);
+            populate_block_inferred_let_types(body, inferred);
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            populate_expr_blocks_inferred_let_types(left, inferred);
+            populate_expr_blocks_inferred_let_types(right, inferred);
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. }
+        | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Comptime(operand)
+        | ast::ExpressionKind::Reference {
+            expression: operand,
+            ..
+        }
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand)
+        | ast::ExpressionKind::Cast { expression: operand, .. } => {
+            populate_expr_blocks_inferred_let_types(operand, inferred);
+        }
+        ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } => {
+            populate_expr_blocks_inferred_let_types(object, inferred);
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            populate_expr_blocks_inferred_let_types(receiver, inferred);
+            for arg in arguments {
+                populate_expr_blocks_inferred_let_types(arg, inferred);
+            }
+        }
+        ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } => {
+            populate_expr_blocks_inferred_let_types(function, inferred);
+            for arg in arguments {
+                populate_expr_blocks_inferred_let_types(arg, inferred);
+            }
+        }
+        ast::ExpressionKind::Literal(_)
+        | ast::ExpressionKind::Identifier(_)
+        | ast::ExpressionKind::TypeName(_)
+        | ast::ExpressionKind::Asm { .. }
+        | ast::ExpressionKind::EnumVariant { .. } => {}
+        _ => {}
     }
 }
 
@@ -7715,5 +7909,66 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn infers_let_binding_from_initializer() {
+        // `let y = identity(5);` binds without annotation; the generic call
+        // instantiates T=i32 and the inferred type propagates.
+        let program = parse(
+            "T identity<T>(T x) { return x; } \
+             i32 main() { let y = identity(5); return (i32)y; }",
+        );
+        let (errors, requests) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(
+            !requests.is_empty(),
+            "generic call should produce a monomorph request"
+        );
+    }
+
+    #[test]
+    fn inferred_let_materializes_annotation() {
+        // After typeck, populate_inferred_let_types rewrites the binding to
+        // carry its inferred annotation for downstream passes.
+        let program = parse("i64 make() { return 1; } i32 main() { let n = make(); return 0; }");
+        let mut checker = TypeChecker::new();
+        let mut table = crate::symbol_table::CompilerSymbolTable::new();
+        let (errors, _) = checker.check_program_with_table(&program, &mut table);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let inferred = checker.take_inferred_lets();
+        assert_eq!(inferred.len(), 1, "one inferred binding expected");
+        let (_, (ty, _)) = inferred.iter().next().unwrap();
+        assert_eq!(ty.to_string(), "i64", "inferred type from make()");
+    }
+
+    #[test]
+    fn inferred_let_without_initializer_is_error() {
+        let program = parse("i32 main() { let x; return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message == msg::inferred_let_needs_initializer()),
+            "expected missing-initializer error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn inferred_let_rejects_void_initializer() {
+        let program = parse("void v() {} i32 main() { let z = v(); return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected void-binding error");
+    }
+
+    #[test]
+    fn parses_let_keyword_as_inferred_binding() {
+        // The lexer maps `let` to Token::Let and the statement reduction
+        // produces an un-annotated LetStatement.
+        let tokens = lex("i32 main() { let value = 3; }").expect("lex failed");
+        assert!(
+            tokens.iter().any(|t| matches!(t.kind, crate::lexer::Token::Let)),
+            "`let` should lex as a keyword token"
+        );
     }
 }

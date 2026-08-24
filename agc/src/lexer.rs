@@ -49,6 +49,7 @@ pub enum Token {
     Continue,
     Return,
     Type,
+    Let,
     SelfType,
     Defer,
     Import,
@@ -901,6 +902,7 @@ impl Lexer {
             "break" => Token::Break,
             "continue" => Token::Continue,
             "return" => Token::Return,
+            "let" => Token::Let,
             "defer" => Token::Defer,
             "import" => Token::Import,
             "comptime" => Token::Comptime,
@@ -1542,18 +1544,13 @@ mod tests {
         assert_eq!(tokens, expected);
     }
     #[test]
-    fn test_let_and_ref_are_identifiers() {
-        let mut lexer = Lexer::new("i32 let = 1; i32 ref = 2;".to_string());
+    fn test_let_is_keyword_ref_is_identifier() {
+        let mut lexer = Lexer::new("let ref = 2;".to_string());
         let tokens = lexer.tokenize().unwrap();
         assert_eq!(
             tokens,
             vec![
-                Token::I32,
-                Token::Identifier("let".to_string()),
-                Token::Assign,
-                Token::IntLiteral(1),
-                Token::Semicolon,
-                Token::I32,
+                Token::Let,
                 Token::Identifier("ref".to_string()),
                 Token::Assign,
                 Token::IntLiteral(2),

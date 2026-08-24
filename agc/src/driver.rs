@@ -1034,8 +1034,29 @@ pub fn run(cli: Cli) {
                         &mut ast,
                         &resolved_iter_types,
                     );
-                    // so their ForIn nodes have iterator_type: None. Replace
-                    // the sources with the now-populated bodies from the AST.
+                }
+                // Rewrite bare enum constructors (Some(x)/None/Ok(x)/Err(x))
+                // into typed Enum.Variant(...) constructions using the
+                // expected-type inference recorded during typeck.
+                let bare_constructors = checker.take_bare_constructors();
+                if !bare_constructors.is_empty() {
+                    crate::semantic::typeck::rewrite_bare_constructors(
+                        &mut ast,
+                        &bare_constructors);
+                }
+                // Materialize inferred `let x = expr;` bindings as annotated
+                // lets so downstream passes see plain declarations.
+                let inferred_lets = checker.take_inferred_lets();
+                if !inferred_lets.is_empty() {
+                    crate::semantic::typeck::populate_inferred_let_types(
+                        &mut ast,
+                        &inferred_lets,
+                    );
+                }
+                // Monomorph request bodies were cloned before these rewrites;
+                // refresh them from the populated AST so generic instances
+                // carry iterator types and materialized let annotations.
+                if !resolved_iter_types.is_empty() || !inferred_lets.is_empty() {
                     for request in &mut monomorphs {
                         use crate::semantic::monomorph::MonomorphRequest;
                         match request {
@@ -1081,16 +1102,6 @@ pub fn run(cli: Cli) {
                             }
                         }
                     }
-                }
-                // Rewrite bare enum constructors (Some(x)/None/Ok(x)/Err(x))
-                // into typed Enum.Variant(...) constructions using the
-                // expected-type inference recorded during typeck.
-                let bare_constructors = checker.take_bare_constructors();
-                if !bare_constructors.is_empty() {
-                    crate::semantic::typeck::rewrite_bare_constructors(
-                        &mut ast,
-                        &bare_constructors,
-                    );
                 }
                 if !type_errors.is_empty() {
                     for error in &type_errors {
