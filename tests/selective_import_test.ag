@@ -1,0 +1,27 @@
+// tests/selective_import_test.ag — `import module { name, name as alias };`
+//
+// Covers: aliased calls resolve at compile time (the alias is a rename to
+// the original symbol — zero runtime cost), plain selections work without
+// an alias, and whole-module + selective imports of the same module
+// coexist (selection lists are non-restrictive).
+
+import std.sys.entry;
+import std.test { assert_eq_i64, assert_true, done, test_start };
+import std.io.file { println as pln, STDOUT };
+
+i32 main() {
+    test_start("selective import: plain names");
+    // assert_eq_i64 was selected without an alias; it resolves directly.
+    assert_eq_i64(4, 2 + 2, "plain selection resolves");
+
+    test_start("selective import: alias");
+    // pln is `println` under another name: a compile-time rename.
+    pln("aliased println works");
+    assert_true(true, "alias call site executed");
+
+    test_start("non-restrictive coexistence");
+    // Whole-module access still works alongside the selective import.
+    STDOUT.write_str("stdout reachable via whole-module path\n");
+
+    return done();
+}

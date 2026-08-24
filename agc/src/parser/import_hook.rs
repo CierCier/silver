@@ -31,6 +31,11 @@ pub struct FileImportResolverHook<'a> {
     /// is injected. Libraries emitted as modules have no entry point of
     /// their own and must not define the runtime; disable for --emit=module.
     include_entry_import: bool,
+    /// Selective imports awaiting alias materialization after the traversal
+    /// (module path string + the selected names). Captured BEFORE module
+    /// dedup: a module already inlined transitively still needs its selected
+    /// aliases bound for this import statement.
+    pending_selections: Vec<(String, Vec<ast::ImportedName>)>,
 }
 
 // (ImportAliasPlan removed — import guards and aliases not supported)
@@ -43,6 +48,7 @@ impl<'a> FileImportResolverHook<'a> {
             module_imports: Vec::new(),
             file_cache: None,
             include_entry_import: true,
+            pending_selections: Vec::new(),
         }
     }
 
@@ -54,6 +60,7 @@ impl<'a> FileImportResolverHook<'a> {
             module_imports: Vec::new(),
             file_cache: Some(file_cache),
             include_entry_import: true,
+            pending_selections: Vec::new(),
         }
     }
 
@@ -144,6 +151,11 @@ impl<'a> FileImportResolverHook<'a> {
         }
 
         self.lower_program_recursive(program, base_dir)?;
+        apply_all_pending_selections(
+            std::mem::take(&mut self.pending_selections),
+            self.module_imports.as_mut_slice(),
+            program,
+        );
         validate_import_conflicts(
             self.module_imports
                 .iter()
@@ -195,6 +207,13 @@ impl<'a> FileImportResolverHook<'a> {
             };
 
             let module_path = import_path_to_string(&import_item.path);
+            // Selective imports are recorded before the dedup check: a
+            // module already inlined transitively still needs its selected
+            // names aliased for THIS import statement.
+            if let Some(selection) = &import_item.selection {
+                self.pending_selections
+                    .push((module_path.clone(), selection.clone()));
+            }
             // Every module path is resolved at most once. A re-import — even
             // while the module is still being lowered further up the stack —
             // is a no-op: the merged program is a single symbol space, so the
@@ -359,6 +378,116 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
 /// Convert an imported file path to its Silver module form, e.g.
 /// `/…/std/io/scanner.ag` -> `std.io.scanner`. Falls back to the last two
 /// path components for non-std files.
+/// Apply a selective import's aliases to a module ARTIFACT: for each
+/// `name as alias` selection, duplicate the matching export under the local
+/// name with `link_name` pinned to the real symbol — a pure compile-time
+/// rename (calls through the alias jump straight to the original symbol).
+/// Selections never REMOVE exports (non-restrictive semantics); an alias
+/// naming an unknown export warns and is skipped.
+fn apply_selection_to_artifact(
+    artifact: &mut ModuleArtifact,
+    selection: &mut [ast::ImportedName],
+) {
+    for selected in selection.iter_mut() {
+        if selected.local_name.name == selected.name.name {
+            continue;
+        }
+        // Already materialized on a previous pass — don't duplicate.
+        if artifact
+            .exports
+            .iter()
+            .any(|e| e.name == selected.local_name.name)
+        {
+            continue;
+        }
+        match artifact.exports.iter().find(|e| e.name == selected.name.name) {
+            Some(source_export) => {
+                let mut clone = source_export.clone();
+                clone.name = selected.local_name.name.clone();
+                clone.link_name = Some(
+                    source_export
+                        .link_name
+                        .clone()
+                        .unwrap_or_else(|| source_export.name.clone()),
+                );
+                artifact.exports.push(clone);
+                // Done via the artifact; no body clone needed.
+                selected.local_name = selected.name.clone();
+            }
+            None => {
+                eprintln!(
+                    "agc: warning: selective import alias '{}' names no export '{}'; ignored",
+                    selected.local_name.name, selected.name.name
+                );
+            }
+        }
+    }
+}
+
+/// Materialize `name as alias` selections for SOURCE-inlined modules: the
+/// merged program is a single symbol space, so an aliased function is
+/// cloned under its local name (a distinct symbol; unused clones cost only
+/// dead code). Selections without an alias need no clone; non-restrictive
+/// semantics keep everything else reachable.
+fn build_function_aliases(
+    selection: &[ast::ImportedName],
+    program_items: &[ast::Item],
+) -> Vec<ast::Item> {
+    let mut aliases = Vec::new();
+    for selected in selection {
+        if selected.local_name.name == selected.name.name {
+            continue;
+        }
+        for item in program_items {
+            if let ast::ItemKind::Function(func) = &item.kind {
+                if func.name.name == selected.name.name {
+                    let mut alias_func = func.clone();
+                    alias_func.name = ast::Identifier {
+                        name: selected.local_name.name.clone(),
+                        span: selected.local_name.span,
+                    };
+                    aliases.push(ast::Item {
+                        kind: ast::ItemKind::Function(alias_func),
+                        span: item.span,
+                        visibility: item.visibility.clone(),
+                        attributes: item.attributes.clone(),
+                    });
+                }
+            }
+        }
+    }
+    aliases
+}
+
+/// Run every captured selective import through both alias routes once the
+/// full traversal has finished: artifacts get aliased export duplicates,
+/// source-inlined modules get renamed function clones. Must run at the
+/// OUTERMOST lowering level only, when all transitive inlines and artifact
+/// pushes have landed.
+fn apply_all_pending_selections(
+    pending: Vec<(String, Vec<ast::ImportedName>)>,
+    module_imports: &mut [(String, ModuleArtifact)],
+    program: &mut ast::Program,
+) {
+    let mut pending = pending;
+    for (module_path, selection) in pending.iter_mut() {
+        if let Some((_, artifact)) = module_imports
+            .iter_mut()
+            .find(|(p, _)| p == module_path)
+        {
+            apply_selection_to_artifact(artifact, selection);
+            // Selections materialized through the artifact are done; the
+            // rest fall through to the source route.
+            selection.retain(|sel| sel.local_name.name == sel.name.name);
+        }
+    }
+    pending.retain(|(_module_path, selection)| !selection.is_empty());
+    for (_module_path, selection) in pending {
+        let aliases = build_function_aliases(&selection, &program.items);
+        program.items.extend(aliases);
+    }
+}
+
 fn import_label(path: &Path) -> String {
     let s = path.display().to_string();
     let comps: Vec<&str> = s.split('/').collect();
@@ -588,7 +717,8 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
+    use crate::lexer::{lex, Span};
+    use crate::module_artifact::{ExportKind, ModuleExport};
     use crate::parser::Parser;
 
     fn parse(source: &str) -> ast::Program {
@@ -597,6 +727,89 @@ mod tests {
         let (program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         program
+    }
+
+    #[test]
+    fn artifact_alias_export_uses_original_link_name() {
+        // `println as pln` on an artifact: the alias export must carry the
+        // ORIGINAL link symbol so calls through `pln` are a compile-time
+        // rename, and the original export must remain (non-restrictive).
+        let mut artifact = ModuleArtifact {
+            module_name: "std.io.file".to_string(),
+            module_path: String::new(),
+            source_path: String::new(),
+            source_hash_fnv1a64: 0,
+            compiler_version: String::new(),
+            target_triple: String::new(),
+            code_artifacts: Default::default(),
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: Vec::new(),
+            native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
+            generic_templates: Vec::new(),
+            artifact_path: None,
+        };
+        artifact.exports.push(ModuleExport {
+            kind: ExportKind::Function,
+            name: "println".to_string(),
+            signature: "fn(str)->i32".to_string(),
+            type_params: Vec::new(),
+            link_name: Some("println__str__i32".to_string()),
+            abi: None,
+            is_variadic: false,
+            type_key: None,
+            fields: Vec::new(),
+            layout: None,
+            enum_backing_type: None,
+            enum_variants: Vec::new(),
+            trait_items: Vec::new(),
+            const_value: None,
+            is_mutable: false,
+        });
+        let selection = vec![ast::ImportedName {
+            name: ast::Identifier {
+                name: "println".to_string(),
+                span: Span::default(),
+            },
+            local_name: ast::Identifier {
+                name: "pln".to_string(),
+                span: Span::default(),
+            },
+        }];
+        apply_selection_to_artifact(&mut artifact, &mut selection.clone());
+        assert_eq!(artifact.exports.len(), 2, "alias added, original kept");
+        let alias = artifact.exports.last().unwrap();
+        assert_eq!(alias.name, "pln");
+        assert_eq!(
+            alias.link_name.as_deref(),
+            Some("println__str__i32"),
+            "alias links to the original symbol"
+        );
+    }
+
+    #[test]
+    fn build_function_aliases_clones_selected_fn() {
+        let program = parse("i64 make() { return 1; } i32 main() { return 0; }");
+        let selection = vec![ast::ImportedName {
+            name: ast::Identifier {
+                name: "make".to_string(),
+                span: Span::default(),
+            },
+            local_name: ast::Identifier {
+                name: "create".to_string(),
+                span: Span::default(),
+            },
+        }];
+        let aliases = build_function_aliases(&selection, &program.items);
+        assert_eq!(aliases.len(), 1);
+        match &aliases[0].kind {
+            ast::ItemKind::Function(f) => {
+                assert_eq!(f.name.name, "create");
+                assert_eq!(f.parameters.len(), 0);
+            }
+            _ => panic!("expected function alias"),
+        }
     }
 
     #[test]
