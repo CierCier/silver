@@ -237,6 +237,7 @@ impl Condvar {
     /// Block the current thread until notified. Atomically releases the
     /// mutex `mu`, sleeps on the futex word, and re-acquires
     /// the mutex before returning.
+    /// Named `wait_on` because `wait` is the task-join keyword.
     void wait_on(Condvar* self, RawMutex* mu) {
         i32 expected = __atomic_load_i32(&(*self).seq, ATOMIC_SEQ_CST);
         (*mu).unlock();
@@ -248,6 +249,11 @@ impl Condvar {
     void notify_one(Condvar* self) {
         __atomic_fetch_add_i32(&(*self).seq, 1, ATOMIC_SEQ_CST);
         futex_wake(&(*self).seq, 1);
+    }
+
+    /// Alias for `notify_one` (short form).
+    void notify(Condvar* self) {
+        (*self).notify_one();
     }
 
     /// Wake all threads waiting on this condition variable.

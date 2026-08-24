@@ -54,8 +54,11 @@ relevant integration tests).
       means unbounded instead of silent clamp to 1; `destroy()` resets all
       bookkeeping (len/capacity/closed/futex words) so reuse/double-destroy
       can't observe stale state; regression tests added
-- [ ] 11. [BLOCKED: uncommitted user work] Condvar/RwLock naming aliases
-      (`std/sync.ag`)
+- [x] 11. Condvar/RwLock naming — `Condvar.notify()` alias added;
+      `wait_on` is the correct spelling (a bare `wait` collides with the
+      task-join keyword — lexer Token::Wait). RawRwLock method names were
+      already conventional (read/write/try_read_lock/try_write_lock +
+      unlocks); Mutex/Guard surface complete in the WIP baseline
 - [x] 12. Futex-based thread joining — adaptive wait (64 spins, then
       FUTEX_WAIT on the done flag); child wakes one joiner after its
       release-store (`std/rt/thread_registry.ag`, `std/thread.ag`)
