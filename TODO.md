@@ -61,8 +61,10 @@ relevant integration tests).
 - [x] 12. Futex-based thread joining — adaptive wait (64 spins, then
       FUTEX_WAIT on the done flag); child wakes one joiner after its
       release-store (`std/rt/thread_registry.ag`, `std/thread.ag`)
-- [ ] 13. Static Send enforcement — reject moving locked sync structures
-      across task boundaries (`agc/src/semantic/send_check.rs`)
+- [x] 13. Static Send enforcement — `Guard<T>` is now explicitly non-Send
+      with an actionable diagnostic (holds the mutex locked); unit tests pin
+      `Mutex<T>: Send iff T: Send`. Fully static locked-mutex detection at
+      launch sites requires guard↔mutex alias tracking — future work
 
 ## Phase 4 — Selective Imports (Major Feature)
 

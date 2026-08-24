@@ -38,6 +38,11 @@ const NOT_SEND: &[(&str, &str)] = &[
         "Handle",
         "GC heap handles are not Send (the heap is single-threaded)",
     ),
+    (
+        "Guard",
+        "a live Guard holds its Mutex locked; drop it (or move the unlocked \
+         Mutex itself), never the guard",
+    ),
 ];
 
 /// Resolved definition of a named type, as provided by the type checker.
@@ -254,8 +259,60 @@ mod tests {
     }
 
     #[test]
-    fn user_struct_fields_are_walked() {
-        let pair = |t: Type| DefView::Struct {
+    fn guard_is_never_send() {
+        // A Guard<T> holds its mutex locked: moving one across a thread
+        // boundary is rejected with the guard-specific reason, regardless of
+        // the payload type.
+        let guard = named(
+            "Guard",
+            vec![prim(PrimitiveType::I64)],
+        );
+        let err = structural_send(&guard, &no_defs).unwrap_err();
+        assert!(err.contains("Guard holds its Mutex locked"), "{err}");
+    }
+
+    #[test]
+    fn mutex_is_conditionally_send() {
+        // Mutex<T> is an owning struct (futex word + T): Send iff T is Send.
+        // RawMutex resolves to a plain-field struct via `resolve`.
+        let raw_mutex = DefView::Struct {
+            type_params: vec![],
+            fields: vec![
+                ("word".to_string(), prim(PrimitiveType::I64)),
+                ("waiters".to_string(), prim(PrimitiveType::I64)),
+            ],
+        };
+        let mutex = |t: Type| {
+            DefView::Struct {
+                type_params: vec!["T".to_string()],
+                fields: vec![
+                    ("mu".to_string(), named("RawMutex", vec![])),
+                    ("value".to_string(), t),
+                ],
+            }
+        };
+        let resolve = |n: &str| match n {
+            "RawMutex" => Some(raw_mutex.clone()),
+            "Mutex" => Some(mutex(prim(PrimitiveType::I64))),
+            _ => None,
+        };
+        let ok_mutex = named("Mutex", vec![prim(PrimitiveType::I64)]);
+        assert!(structural_send(&ok_mutex, &resolve).is_ok());
+
+        let bad_mutex =
+            named("Mutex", vec![named("Rc", vec![prim(PrimitiveType::I64)])]);
+        let resolve_bad = |n: &str| match n {
+            "RawMutex" => Some(raw_mutex.clone()),
+            "Mutex" => Some(mutex(named("Rc", vec![prim(PrimitiveType::I64)]))),
+            _ => None,
+        };
+        let err = structural_send(&bad_mutex, &resolve_bad).unwrap_err();
+        assert!(err.contains("Mutex"), "{err}");
+        assert!(err.contains("Rc"), "{err}");
+    }
+
+    #[test]
+    fn user_struct_fields_are_walked() {        let pair = |t: Type| DefView::Struct {
             type_params: vec!["T".to_string()],
             fields: vec![("a".to_string(), t.clone()), ("b".to_string(), t)],
         };
