@@ -68,17 +68,20 @@ relevant integration tests).
       Some(Vec<ImportedName>) }` with 5 new parser tests. (`as` is now a
       reserved keyword; the one std-local use in cookie.ag was renamed)
 - [ ] 15. Import lowering — selective inlining/symbol filtering. STATE:
-      alias machinery (clone selected fn under local name after traversal,
-      before-dedup selection capture) was implemented and works at the AST
-      level, but on the default build path the root unit receives std
-      modules via precompiled-artifact metadata (module_imports) rather than
-      source inlining, so there are no function bodies to clone — aliases
-      never materialize. Reverted to avoid shipping dead behavior.
-      NEXT STEP: decide artifact-route semantics first — either (a) filter/
-      rename ModuleArtifact exports (needs alias-aware link symbols), or
-      (b) force source inlining for selectively-imported modules. Then
-      re-land import_hook.rs changes (see session notes; probe method:
-      pending_selections captured pre-dedup, deferred aliasing post-merge).
+      two full implementations were attempted and reverted (see git reflog
+      around `0587701`). Blocker: on the default build path the root unit's
+      lowering sees neither source bodies nor module_imports artifacts for
+      transitive std dependencies (module_imports contained only
+      `std.atomic` while `assert_eq_i64`/`STDOUT` still resolved — an
+      unlocated cross-unit signature mechanism feeds typeck). Aliasing
+      needs that mechanism identified first.
+      DECIDED SEMANTICS (grill session): filter artifact exports with
+      compile-time rename via `ModuleExport.link_name` duplication;
+      non-restrictive selection lists; source-route clones function items.
+      NEXT STEP: trace how dependency signatures reach root typeck on the
+      build_graph path (start: driver.rs:996 `imported_modules`,
+      build_graph.rs:726 per-node lowering, `resolve_imports`/ModuleCatalog),
+      then re-land import_hook changes against the real injection point.
 - [ ] 16. LSP exposure — completions/references aware of selective imports.
       BLOCKED on todo 15's semantics decision (nothing to expose until
       lowering honors selections)
