@@ -1,9 +1,35 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::diagnostics::{self, Severity};
 use crate::lexer::Span;
 use crate::module_artifact::{ExportKind, ModuleArtifact, ast_type_from_canonical_key};
 use crate::parser::ast;
 use crate::types::Type;
+
+/// Upper bound on fixpoint generations for both the request-driven and the
+/// struct-instantiation loops. Each generation only instantiates previously
+/// unseen keys, so a well-formed program converges in a few rounds; hitting
+/// the cap indicates runaway recursive generic expansion (compiler bug or
+/// pathological input) and is reported instead of hanging the compiler.
+const MAX_FIXPOINT_GENERATIONS: usize = 256;
+
+/// Report a non-converging monomorphization fixpoint at `span` and stop
+/// expanding. We deliberately do not abort the process: the missing
+/// instantiations surface as ordinary downstream errors (and the LSP shares
+/// this code path).
+fn report_nonconvergence(what: &str, generation: usize, span: Span) {
+    eprintln!(
+        "{}",
+        diagnostics::render(
+            span,
+            &format!(
+                "monomorphization for {what} did not converge after {generation} \
+                 generations; recursive generic expansion is too deep"
+            ),
+            Severity::Error,
+        )
+    );
+}
 
 #[derive(Debug, Clone)]
 pub enum MonomorphRequest {
@@ -24,6 +50,16 @@ pub enum MonomorphRequest {
         mapping: HashMap<String, Type>,
         call_span: Span,
     },
+}
+
+impl MonomorphRequest {
+    /// Span of the call site that produced this request.
+    pub fn call_span(&self) -> Span {
+        match self {
+            MonomorphRequest::Function { call_span, .. }
+            | MonomorphRequest::ImplMethod { call_span, .. } => *call_span,
+        }
+    }
 }
 
 pub fn append_monomorphs(
@@ -110,7 +146,13 @@ pub fn append_monomorphs(
     // Process function/method monomorphization requests to fixpoint.
     let mut current_requests: Vec<MonomorphRequest> = requests.to_vec();
     normalize_requests_defaults(&mut current_requests, &defaults);
+    let mut generation = 0usize;
     while !current_requests.is_empty() {
+        generation += 1;
+        if generation > MAX_FIXPOINT_GENERATIONS {
+            report_nonconvergence("function instances", generation, current_requests[0].call_span());
+            break;
+        }
         let new_items = instantiate_requests(program, &current_requests, &mut generated);
         for item in &new_items {
             all_new_items.push(item.clone());
@@ -661,13 +703,19 @@ fn collect_struct_instantiations(
     // source field is HashMap<K, bool>. Walk generated instances to a fixpoint so
     // nested concrete types get their structs and impls monomorphized normally.
     let mut processed = HashSet::default();
+    let mut generation = 0usize;
     loop {
+        generation += 1;
         let pending = instantiations
             .iter()
             .filter(|(key, _)| !processed.contains(*key))
             .map(|(key, inst)| (key.clone(), inst.item.clone()))
             .collect::<Vec<_>>();
         if pending.is_empty() {
+            break;
+        }
+        if generation > MAX_FIXPOINT_GENERATIONS {
+            report_nonconvergence("nested struct instances", generation, Span::default());
             break;
         }
         for (key, item) in pending {
