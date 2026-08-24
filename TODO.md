@@ -13,9 +13,11 @@ relevant integration tests).
       already canonical namespaced mangled names (`type::`/`fn::`/`impl::`);
       an enum-key rewrite is high-churn, zero-behavior-change refactoring of
       a 3000-line module with no known bug to justify it
-- [ ] 5. Harden build cache store — atomic temp-file+rename cache writes,
-      surface cache init errors instead of silently degrading
-      (`agc/src/cache_store.rs`, `agc/src/driver.rs`)
+- [x] 5. Harden build cache store — cache init/clean errors now surface as
+      warnings instead of silent degradation (atomic temp+rename writes
+      already existed). Parallel check-mode execution DESCOPED: `agc check`
+      is contractually frontend-only; running artifact codegen there would
+      break that contract (`driver.rs:1213`)
 
 ## Phase 2 — Standard Library Safety & Consistency
 

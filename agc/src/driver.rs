@@ -473,9 +473,21 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
             Some(dir) => crate::cache_store::CacheStore::with_dir(dir.clone()),
             None => crate::cache_store::CacheStore::new(),
         };
-        if let Ok(store) = cache_store {
-            loader.add_search_dir(store.agm_dir());
-            loader.cache_store = Some(std::sync::Arc::new(store));
+        match cache_store {
+            Ok(store) => {
+                loader.add_search_dir(store.agm_dir());
+                loader.cache_store = Some(std::sync::Arc::new(store));
+            }
+            Err(e) => {
+                let dir = plan
+                    .cache_dir
+                    .clone()
+                    .unwrap_or_else(crate::cache_store::CacheStore::default_cache_dir);
+                eprintln!(
+                    "agc: warning: failed to initialize build cache at {} ({e}); continuing without cache",
+                    dir.display()
+                );
+            }
         }
     }
     // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
@@ -625,12 +637,27 @@ pub fn run(cli: Cli) {
                     Some(dir) => crate::cache_store::CacheStore::with_dir(dir),
                     None => crate::cache_store::CacheStore::new(),
                 };
-                if let Ok(store) = store {
-                    let root = store.root_dir().to_path_buf();
-                    let _ = std::fs::remove_dir_all(&root);
-                    let _ = store.ensure_dirs();
-                    if plan.verbose {
-                        eprintln!("agc: cleaned cache directory {}", root.display());
+                match store {
+                    Ok(store) => {
+                        let root = store.root_dir().to_path_buf();
+                        if let Err(e) = std::fs::remove_dir_all(&root) {
+                            eprintln!(
+                                "agc: warning: failed to clean cache directory {} ({e})",
+                                root.display()
+                            );
+                        }
+                        if let Err(e) = store.ensure_dirs() {
+                            eprintln!(
+                                "agc: warning: failed to recreate cache directory {} ({e})",
+                                store.root_dir().display()
+                            );
+                        }
+                        if plan.verbose {
+                            eprintln!("agc: cleaned cache directory {}", root.display());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("agc: warning: failed to open build cache for cleaning ({e})");
                     }
                 }
                 if plan.inputs.is_empty() {
