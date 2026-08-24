@@ -84,4 +84,6 @@ relevant integration tests).
       (b) force source inlining for selectively-imported modules. Then
       re-land import_hook.rs changes (see session notes; probe method:
       pending_selections captured pre-dedup, deferred aliasing post-merge).
-- [ ] 16. LSP exposure — completions/references aware of selective imports
+- [ ] 16. LSP exposure — completions/references aware of selective imports.
+      BLOCKED on todo 15's semantics decision (nothing to expose until
+      lowering honors selections)
