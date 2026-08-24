@@ -68,17 +68,31 @@ impl Vec<T> {
     /// Read element at `index`.  Returns a COPY — for owned-element types
     /// this creates a shallow copy that shares resources with the backing
     /// buffer.  Prefer `get_ptr` or `take` for owned types.
+    /// Out-of-bounds indices abort deterministically in every build profile.
     T get(&Vec<T> self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
 
+    /// Read element at `index`, returning None when out of bounds.
+    Optional<T> try_get(&Vec<T> self, i64 index) {
+        if (index < 0 || index >= self.len) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.data[index]);
+    }
+
     /// Pointer to element at `index`.
+    /// Out-of-bounds indices abort deterministically in every build profile.
     T* get_ptr(&Vec<T> self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
         return &(self.data[index]);
     }
 
     /// Overwrite element at `index`.
+    /// Out-of-bounds indices abort deterministically in every build profile.
     void set(&mut Vec<T> self, i64 index, T value) {
+        if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = move value;
     }
 
@@ -166,11 +180,13 @@ impl<T> Drop for Vec<T> {
 impl<T> IndexedAccess for Vec<T> {
     type Item = T;
     T __index_get(Vec<T>* self, i64 index) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
+        // Deterministic in all build profiles — release builds must not
+        // index out of bounds silently (UB).
+        if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
     void __index_set(Vec<T>* self, i64 index, T value) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
+        if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = move value;
     }
 }

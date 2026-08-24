@@ -21,9 +21,9 @@ relevant integration tests).
 
 ## Phase 2 — Standard Library Safety & Consistency
 
-- [ ] 6. Deterministic `Vec` bounds — out-of-bounds access aborts in ALL
-      build profiles (not just `@cfg(debug)`); add `try_get`
-      (`std/mem/vec.ag`)
+- [x] 6. Deterministic `Vec` bounds — `get`/`get_ptr`/`set`/`__index_get`/
+      `__index_set` abort on out-of-bounds in ALL profiles (release included,
+      verified exit 134 + backtrace); added `try_get() -> Optional<T>`
 - [ ] 7. Normalize predicate & capacity APIs — `Result.is_ok()/is_err()`,
       `String.is_empty()`, `Bytes.is_empty()`, `.capacity()` normalization
       (`std/result.ag`, `std/string.ag`, `std/bytes.ag`, containers)
