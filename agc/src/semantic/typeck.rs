@@ -395,6 +395,7 @@ impl TypeChecker {
                                     trait_ref: None,
                                     self_type: owner_ty.to_ast(),
                                     items: Vec::new(),
+                                    implicit_type_params: Vec::new(),
                                 },
                                 source_method: ast::ImplFunction {
                                     name: ast::Identifier {
@@ -5495,6 +5496,12 @@ impl TypeChecker {
                         impl_type_params.push(type_param.name.name.clone());
                     }
                 }
+            } else if !impl_item.implicit_type_params.is_empty() {
+                // Parser-recorded file-local parameters: decided when the
+                // impl's own file was parsed, so a global type registered
+                // later (e.g. a user `struct T`) cannot steal the name —
+                // generic parameters shadow global types in their context.
+                impl_type_params.extend(impl_item.implicit_type_params.iter().cloned());
             } else {
                 // Preserve parameter order from the AST (HashSet loses order,
                 // causing non-deterministic generic argument swapping).
@@ -7896,6 +7903,72 @@ mod tests {
                 .iter()
                 .any(|e| e.message == msg::implicit_method_guard_origin("poke")),
             "expected method-origin note, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn user_struct_named_t_does_not_break_generic_impls() {
+        // Cross-file collision at the typeck level: when a generic impl's
+        // parameters were recorded at parse time (file-local knowledge), a
+        // globally registered `struct T` must not turn `T` concrete.
+        // Simulate by parsing the impl from a file WITHOUT `struct T`, then
+        // registering the struct — the merged-program shape after lowering.
+        let impl_source = "enum Opt<T> { None; Some(T); } \
+             impl Opt<T> { bool is_none(Opt<T>* self) { return false; } }";
+        let tokens = lex(impl_source).expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (mut opt_program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+
+        let collision_source = "struct T { i64 v; } i32 main() { T mine; mine.v = 1; return 0; }";
+        let mut full = parse(collision_source);
+        full.items.splice(0..0, opt_program.items.drain(..));
+
+        let (errors, _) = TypeChecker::new().check_program(&full);
+        assert!(
+            errors.is_empty(),
+            "global struct T must not break the generic impl: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn impl_implicit_params_recorded_at_parse() {
+        // The parser records implicit params per impl from FILE-LOCAL type
+        // knowledge: with Result declared locally, T and E are params.
+        let tokens = lex(
+            "enum Result<T, E> { Ok(T); Err(E); } \
+             impl Result<T, E> { i32 f(T x) { return 0; } }",
+        )
+        .expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let ast::ItemKind::Impl(impl_item) = &program.items[1].kind else {
+            panic!("expected impl item");
+        };
+        assert_eq!(impl_item.implicit_type_params, vec!["T", "E"]);
+    }
+
+    #[test]
+    fn file_local_type_wins_over_param_in_same_file_impl() {
+        // A type declared in the SAME file as the impl is concrete, not a
+        // parameter: `impl Wrapper<MyStruct>` records no param.
+        let tokens = lex(
+            "struct MyStruct { i64 v; } struct Wrapper<T> { T inner; } \
+             impl Wrapper<MyStruct> { i32 f(Wrapper<MyStruct>* self) { return 0; } }",
+        )
+        .expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let ast::ItemKind::Impl(impl_item) = &program.items[2].kind else {
+            panic!("expected impl item");
+        };
+        assert!(
+            !impl_item
+                .implicit_type_params
+                .contains(&"MyStruct".to_string()),
+            "file-local concrete type must not become a parameter"
         );
     }
 

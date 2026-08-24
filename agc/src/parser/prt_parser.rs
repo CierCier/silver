@@ -22,6 +22,12 @@ pub struct PRT_Parser {
     grammar: GrammarSpec,
     transition_table: TransitionTable,
     known_type_names: HashSet<String>,
+    /// Type names DECLARED in this file (structs/enums/traits, imported
+    /// aliases) — deliberately excludes generic parameters. Used to decide
+    /// implicit impl generic params: a bare self-type name that is not a
+    /// declared type is a parameter, even if a same-named global type exists
+    /// in another file.
+    declared_type_names: HashSet<String>,
     known_ident_names: HashSet<String>,
 }
 
@@ -47,6 +53,7 @@ impl PRT_Parser {
             grammar: GrammarSpec::new(),
             transition_table: TransitionTable::for_bootstrap(Self::DEFAULT_LOOKAHEAD),
             known_type_names: HashSet::default(),
+            declared_type_names: HashSet::default(),
             known_ident_names: HashSet::default(),
         };
         parser.install_bootstrap_grammar();
@@ -4330,12 +4337,79 @@ impl PRT_Parser {
             }
         }
 
+        // Decide implicit generic parameters NOW, from file-local type
+        // knowledge: a bare identifier in the self type is a parameter unless
+        // it names a type declared in this file (or a primitive/keyword
+        // type). Global registrations from other files must not steal these
+        // names — generic parameters shadow global types inside the impl.
+        let mut implicit_type_params = Vec::new();
+        if generics.is_none() {
+            Self::collect_file_local_type_params(&self_type, &self.declared_type_names, &mut implicit_type_params);
+        }
+
         Ok(ast::ImplItem {
             generics,
             trait_ref,
             self_type,
             items,
+            implicit_type_params,
         })
+    }
+
+    /// Collect bare identifiers in `ty` that are NOT file-local types —
+    /// those are this impl's generic parameters. Order-preserving.
+    fn collect_file_local_type_params(
+        ty: &ast::Type,
+        file_local_types: &HashSet<String>,
+        params: &mut Vec<String>,
+    ) {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => {
+                if named.path.len() == 1 {
+                    let name = &named.path[0].name;
+                    if !file_local_types.contains(name) && !params.contains(name) {
+                        params.push(name.clone());
+                    }
+                }
+                if let Some(generics) = &named.generics {
+                    for arg in generics {
+                        Self::collect_file_local_type_params(arg, file_local_types, params);
+                    }
+                }
+            }
+            ast::TypeKind::Generic(generic) => {
+                if !file_local_types.contains(&generic.name.name)
+                    && !params.contains(&generic.name.name)
+                {
+                    params.push(generic.name.name.clone());
+                }
+                for arg in &generic.args {
+                    Self::collect_file_local_type_params(arg, file_local_types, params);
+                }
+            }
+            ast::TypeKind::Reference(reference) => {
+                Self::collect_file_local_type_params(&reference.inner, file_local_types, params);
+            }
+            ast::TypeKind::Pointer(pointer) => {
+                Self::collect_file_local_type_params(&pointer.inner, file_local_types, params);
+            }
+            ast::TypeKind::Slice(slice) => {
+                Self::collect_file_local_type_params(&slice.element_type, file_local_types, params);
+            }
+            ast::TypeKind::Array(array) => {
+                Self::collect_file_local_type_params(&array.element_type, file_local_types, params);
+            }
+            ast::TypeKind::Optional(inner) => {
+                Self::collect_file_local_type_params(inner, file_local_types, params);
+            }
+            ast::TypeKind::Function(fnty) => {
+                for param in &fnty.parameters {
+                    Self::collect_file_local_type_params(param, file_local_types, params);
+                }
+                Self::collect_file_local_type_params(&fnty.return_type, file_local_types, params);
+            }
+            _ => {}
+        }
     }
 
     fn parse_impl_method(
@@ -5358,6 +5432,7 @@ impl PRT_Parser {
                     }) = tokens.get(idx + 1)
                     {
                         self.known_type_names.insert(name.clone());
+                        self.declared_type_names.insert(name.clone());
                         self.known_ident_names.insert(name.clone());
                     }
                 }
@@ -5459,16 +5534,19 @@ impl PRT_Parser {
         match kind {
             ast::ItemKind::Struct(item) => {
                 self.known_type_names.insert(item.name.name.clone());
+                self.declared_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
                 self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::Enum(item) => {
                 self.known_type_names.insert(item.name.name.clone());
+                self.declared_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
                 self.record_generic_type_params(&item.generics);
             }
             ast::ItemKind::Trait(item) => {
                 self.known_type_names.insert(item.name.name.clone());
+                self.declared_type_names.insert(item.name.name.clone());
                 self.known_ident_names.insert(item.name.name.clone());
                 self.record_generic_type_params(&item.generics);
             }

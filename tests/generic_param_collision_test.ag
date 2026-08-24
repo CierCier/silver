@@ -1,0 +1,34 @@
+// tests/generic_param_collision_test.ag — generic parameters shadow
+// same-named global types from OTHER files.
+//
+// Regression: a user-declared `struct T` used to steal the `T` parameter of
+// std's `impl Result<T, E>` (implicit impl params were re-inferred against
+// the global type registry), breaking every generic method call on std
+// types. Implicit impl parameters are now decided at parse time from
+// file-local knowledge, so this program compiles and runs.
+
+import std.sys.entry;
+import std.test;
+import std.io.file;
+
+struct T {
+    i64 v;
+}
+
+i32 main() {
+    test_start("user struct T coexists with generic std impls");
+
+    // Generic methods on std's Result<T, E> must resolve normally.
+    Result<i64, Error> r = try_open("/dev/null", O_RDONLY, 0);
+    assert_true(!r.is_err(), "try_open /dev/null succeeds");
+    i64 fd = r.value();
+    assert_eq_i64(0, fd % fd, "value() usable");
+
+    // The local struct T is still the concrete global type here.
+    T mine;
+    mine.v = 42;
+    assert_eq_i64(42, mine.v, "local T works as a plain struct");
+
+
+    return done();
+}

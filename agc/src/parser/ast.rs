@@ -156,6 +156,14 @@ pub struct ImplItem {
     pub trait_ref: Option<TraitRef>,
     pub self_type: Type,
     pub items: Vec<ImplItemKind>,
+    /// Bare identifiers in `self_type` that this impl intends as generic
+    /// parameters, decided at PARSE time from file-local type knowledge
+    /// (`impl Result<T, E>` records `[T, E]`; `impl Wrapper<MyStruct>`
+    /// records nothing for `MyStruct`). Typeck must use this list instead
+    /// of re-inferring against the global type registry, where a user
+    /// struct named like a parameter would otherwise win the collision —
+    /// generic parameters shadow global types inside their context.
+    pub implicit_type_params: Vec<String>,
 }
 
 /// Import statement.
