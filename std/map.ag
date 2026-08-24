@@ -1,3 +1,4 @@
+import std.optional;
 import std.mem.alloc;
 import std.hash;
 import std.io.file;
@@ -198,6 +199,15 @@ impl HashMap<K, V> {
         // unreachable - dummy return to satisfy return type
         V dummy;
         return dummy;
+    }
+
+    /// Get value for key, or None when the key is absent.
+    Optional<V> get_opt(&HashMap<K, V> self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0 && self.state[idx] == OCCUPIED && self.keys[idx] == key) {
+            return Optional<V>.some(self.values[idx]);
+        }
+        return Optional<V>.none();
     }
 
     /// Get pointer to value for key. Aborts if key not found.

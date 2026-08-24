@@ -105,6 +105,24 @@ impl Queue<T> {
         return self.data[self.head];
     }
 
+    // -- Fallible accessors (None instead of abort) -----------------------
+
+    /// Remove and return the front element, or None when empty.
+    Optional<T> try_pop(&mut Queue<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.pop());
+    }
+
+    /// Copy of the front element, or None when empty.
+    Optional<T> try_front(&Queue<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.front());
+    }
+
     /// Remove all elements without freeing the backing buffer.
     void clear(&mut Queue<T> self) {
         self.len = 0;

@@ -150,6 +150,40 @@ impl Deque<T> {
         return self.data[tail];
     }
 
+    // -- Fallible accessors (None instead of abort) -----------------------
+
+    /// Remove and return the front element, or None when empty.
+    Optional<T> try_pop_front(&mut Deque<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.pop_front());
+    }
+
+    /// Remove and return the back element, or None when empty.
+    Optional<T> try_pop_back(&mut Deque<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.pop_back());
+    }
+
+    /// Copy of the front element, or None when empty.
+    Optional<T> try_front(&Deque<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.front());
+    }
+
+    /// Copy of the back element, or None when empty.
+    Optional<T> try_back(&Deque<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.back());
+    }
+
     /// Remove all elements without freeing the backing buffer.
     void clear(&mut Deque<T> self) {
         self.len = 0;

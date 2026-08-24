@@ -41,8 +41,9 @@ relevant integration tests).
       normalized). `Result.is_ok()/is_err()` DESCOPED: they already exist on
       the concrete `Result<i64, Error>` (std/sys/result.ag), and generic
       aliases hit the pre-existing type-param collision bug below
-- [ ] 8. Fallible collection accessors — `try_pop`, `try_front`, `try_back`,
-      `get_opt` (`vec`, `deque`, `queue`, `heap`, `map`)
+- [x] 8. Fallible collection accessors — `try_pop_front/try_pop_back/
+      try_front/try_back` (Deque), `try_pop/try_front` (Queue),
+      `try_pop/try_peek` (BinaryHeap), `get_opt` (HashMap)
 - [ ] 9. POD safety disclaimers — document owned-non-POD limitations of
       Box/Rc/Vec headers (`std/mem/*.ag`)
 

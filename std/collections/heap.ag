@@ -128,6 +128,24 @@ impl BinaryHeap<T> {
         return self.data[0];
     }
 
+    // -- Fallible accessors (None instead of abort) -----------------------
+
+    /// Remove and return the greatest element, or None when empty.
+    Optional<T> try_pop(&mut BinaryHeap<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.pop());
+    }
+
+    /// Copy of the greatest element, or None when empty.
+    Optional<T> try_peek(&BinaryHeap<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.peek());
+    }
+
     /// Remove all elements without freeing the backing buffer.
     void clear(&mut BinaryHeap<T> self) {
         self.len = 0;
