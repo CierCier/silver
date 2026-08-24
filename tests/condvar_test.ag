@@ -1,0 +1,94 @@
+// tests/condvar_test.ag — Test suite for Condvar condition variable synchronization.
+
+import std.test;
+import std.thread;
+import std.atomic;
+import std.sync;
+import std.sys.raw.thread;
+import std.sys.entry;
+
+Mutex<i64> g_mu;
+Condvar g_cond;
+i64 g_ready = 0;
+i64 g_work_done = 0;
+WaitGroup g_wg;
+i64 g_workers[4];
+
+void worker_single(i64 _arg) {
+    Guard<i64> g = g_mu.lock();
+    while (g_ready == 0) {
+        g_cond.wait_on(g.raw_mutex());
+    }
+    g_work_done = 42;
+}
+
+void worker_broadcast(i64 _arg) {
+    Guard<i64> g = g_mu.lock();
+    while (g_ready < 2) {
+        g_cond.wait_on(g.raw_mutex());
+    }
+    g_work_done = g_work_done + 1;
+    g_wg.done();
+}
+
+i32 main() {
+    STDOUT.write_str("=== Condvar Tests ===\n\n");
+
+    // Test 1: notify_one single worker wake
+    STDOUT.write_str("--- Test 1: notify_one ---\n");
+    {
+        g_ready = 0;
+        g_work_done = 0;
+        TaskRecord* h = thread_spawn(worker_single, 0);
+        @assert(!(h == (TaskRecord*)0), "failed to spawn worker_single");
+
+        // Give the worker time to block on the condvar
+        for (i64 i = 0; i < 500; i = i + 1) {
+            sys_sched_yield();
+        }
+
+        {
+            Guard<i64> g = g_mu.lock();
+            g_ready = 1;
+            g_cond.notify_one();
+        }
+
+        @assert(!(thread_join(h) < 0), "failed to join worker_single");
+        assert_eq_i64(42, g_work_done, "worker_single received notification and completed work");
+    }
+
+    // Test 2: notify_all broadcast to multiple workers
+    STDOUT.write_str("\n--- Test 2: notify_all broadcast ---\n");
+    {
+        g_ready = 1;
+        g_work_done = 0;
+        g_wg.add(4);
+
+        for (i64 i = 0; i < 4; i = i + 1) {
+            TaskRecord* h = thread_spawn(worker_broadcast, 0);
+            @assert(!(h == (TaskRecord*)0), "failed to spawn worker_broadcast");
+            g_workers[i] = (i64)h;
+        }
+
+        // Give workers time to block on the condvar
+        for (i64 i = 0; i < 1000; i = i + 1) {
+            sys_sched_yield();
+        }
+
+        {
+            Guard<i64> g = g_mu.lock();
+            g_ready = 2;
+            g_cond.notify_all();
+        }
+
+        g_wg.wait_all();
+        for (i64 i = 0; i < 4; i = i + 1) {
+            @assert(!(thread_join((TaskRecord*)g_workers[i]) < 0), "failed to join worker_broadcast");
+        }
+
+        assert_eq_i64(4, g_work_done, "all 4 broadcast workers woke and completed");
+    }
+
+    STDOUT.write_str("\n=== All Condvar Tests Passed ===\n");
+    return 0;
+}

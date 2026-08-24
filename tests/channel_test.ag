@@ -90,7 +90,7 @@ i64 main() {
     @assert(!(h1 == (TaskRecord*)0), "h1 == (TaskRecord*)0");
     @assert(!(thread_join(h1) < 0), "thread_join(h1) < 0");
     for (i64 i = 0; i < 2048; i = i + 1) {
-        i64 v = g_ch.recv();
+        i64 v = g_ch.recv() ? -1;
         @assert(!(v != i), "v != i");
     }
     @assert(!(g_ch.len() != 0), "g_ch.len() != 0");
@@ -101,7 +101,7 @@ i64 main() {
         @assert(!(h == (TaskRecord*)0), "h == (TaskRecord*)0");
     }
     for (i64 k = 0; k < 1000; k = k + 1) {
-        i64 v = g_ch2.recv();
+        i64 v = g_ch2.recv() ? -1;
         @assert(!(v < 0 || v >= 4), "v < 0 || v >= 4");
         g_counts[v] = g_counts[v] + 1;
     }
@@ -110,13 +110,13 @@ i64 main() {
     // Test 3: blocking recv (consumer waits, then producer delivers).
     TaskRecord* h3 = thread_spawn(producer_slow, 0);
     @assert(!(h3 == (TaskRecord*)0), "h3 == (TaskRecord*)0");
-    i64 v3 = g_ch3.recv();   // blocks until producer_slow sends
+    i64 v3 = g_ch3.recv() ? -1;   // blocks until producer_slow sends
     @assert(!(v3 != 777), "v3 != 777");
     @assert(!(thread_join(h3) < 0), "thread_join(h3) < 0");
 
     // Free the channel buffers so leak-check sees a clean exit.
-    g_ch.close();
-    g_ch2.close();
-    g_ch3.close();
+    g_ch.destroy();
+    g_ch2.destroy();
+    g_ch3.destroy();
     return 0;
 }

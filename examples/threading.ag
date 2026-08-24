@@ -36,6 +36,7 @@ void worker_inc(i64 n) {
     for (i64 i = 0; i < n; i = i + 1) {
         Guard<i64> g = g_counter.lock();  // RAII: unlocks when g drops
         g.set(g.get() + 1);
+		@println("{}", g.get());
     }
     g_wg.done();
 }
@@ -94,13 +95,13 @@ i64 main() {
     i64 sum = 0;
     i64 received = 0;
     while (received < 1000) {
-        sum = sum + g_ch.recv();
+        sum = sum + (g_ch.recv() ? 0);
         received = received + 1;
     }
     wait p0;
     wait p1;
     if (sum != 749500) { return 2; }
-    g_ch.close();  // frees the queue buffer for a leak-check-clean exit
+    g_ch.destroy();  // frees the queue buffer for a leak-check-clean exit
 
     // 3. Join a task and read its result.
     Task<i64> t = launch compute(21);

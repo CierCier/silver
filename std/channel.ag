@@ -1,62 +1,113 @@
-// std/channel.ag — Multi-producer, single-consumer FIFO channels.
+// std/channel.ag — Multi-producer, multi-consumer FIFO channels (Bounded & Unbounded).
 //
-// Channel<T> is an unbounded FIFO queue with a blocking recv():
-//   - send(T) pushes a value (ownership moves in) and wakes one blocked
-//     receiver; it never blocks and may be called from any thread.
-//   - recv() blocks until a value is available, then returns it (ownership
-//     moves out).
-//
-// The queue is a Vec<T> guarded by a RawMutex, with a head index for O(1) FIFO
-// pops; the buffer compacts in place once the consumed prefix grows large.
-// A separate seq_cst futex word (`sigs`) counts sends and is the sleep/wake
-// mechanism for blocked receivers.  recv reads the counter under the lock,
-// then futex_waits on it after unlocking: a send racing in between bumps the
-// counter, so the wait returns EAGAIN immediately and recv re-checks the
-// queue — no wake-up can be lost, and a blocked recv is woken by every send
-// until it drains the queue.
-//
-// Channel<T> owns its queue; dropping it frees the buffer.  As with all std
-// containers, elements are not individually destroyed on drop, so owned
-// element types should be fully drained before the channel goes away.
-//
-// The mutex-based queue means this is also correct (though not optimized)
-// for multiple consumers; the single-consumer contract is what v1 promises.
+// Channel<T> is a thread-safe FIFO queue supporting:
+//   - Unbounded mode (Channel<T>.unbounded() / Channel<T>.new()):
+//     send() pushes a value and wakes one blocked receiver; it never blocks.
+//   - Bounded mode (Channel<T>.bounded(cap)):
+//     send() blocks when the buffer reaches capacity until space is freed.
+//   - Optional-based receive:
+//     recv() blocks until a value is available (returning Some(val)) or until
+//     the channel is closed and drained (returning None).
+//     try_recv() is non-blocking, returning Some(val) or None.
+//   - Graceful shutdown:
+//     close() marks the channel closed and wakes all blocked senders & receivers.
 
 import std.atomic;
 import std.mem.vec;
 import std.sync;
+import std.optional;
 
 struct Channel<T> {
     RawMutex mu;
     Vec<T> queue;
-    i64 head;   // index of the front element (consumed prefix before it)
-    i32 sigs;   // send counter; the futex word receivers sleep on
+    i64 head;       // index of the front element
+    i64 capacity;   // 0 = unbounded, > 0 = bounded capacity
+    bool closed;
+    i32 send_sigs;  // futex word for senders waiting on available capacity
+    i32 recv_sigs;  // futex word for receivers waiting on available values
 }
 
-impl Channel<T> {
-    /// A fresh, empty channel.
+impl<T> Channel<T> {
+    /// A fresh, unbounded channel.
     Channel<T> new() {
         Channel<T> c;
         c.mu = RawMutex.new();
         c.queue = Vec<T>.new();
         c.head = 0;
-        c.sigs = 0;
+        c.capacity = 0;
+        c.closed = false;
+        c.send_sigs = 0;
+        c.recv_sigs = 0;
         return c;
     }
 
-    /// Send `value` (ownership moves in).  Never blocks.
-    void send(&mut Channel<T> self, T value) {
-        self.mu.lock();
-        self.queue.push(move value);
-        self.mu.unlock();
-        __atomic_fetch_add_i32(&self.sigs, 1, ATOMIC_SEQ_CST);
-        futex_wake(&self.sigs, 1);
+    /// An unbounded channel (alias for new()).
+    Channel<T> unbounded() {
+        return Channel<T>.new();
     }
 
-    /// Block until a value is available, then return it (ownership moves
-    /// out).  FIFO order: values are received in the order they were sent.
-    T recv(&mut Channel<T> self) {
-        T result;
+    /// A bounded channel with backpressure when full.
+    Channel<T> bounded(i64 cap) {
+        Channel<T> c;
+        c.mu = RawMutex.new();
+        c.queue = Vec<T>.new();
+        c.head = 0;
+        c.capacity = (cap < 1) ? (i64)1 : cap;
+        c.closed = false;
+        c.send_sigs = 0;
+        c.recv_sigs = 0;
+        return c;
+    }
+
+    /// Send `value` (ownership moves in).
+    /// If bounded and full, blocks until capacity is available or channel is closed.
+    /// Returns true on success, false if the channel was closed.
+    bool send(&mut Channel<T> self, T value) {
+        while (true) {
+            self.mu.lock();
+            if (self.closed) {
+                self.mu.unlock();
+                return false;
+            }
+            i64 count = self.queue.len() - self.head;
+            if (self.capacity > 0 && count >= self.capacity) {
+                i32 expected = __atomic_load_i32(&self.send_sigs, ATOMIC_SEQ_CST);
+                self.mu.unlock();
+                futex_wait(&self.send_sigs, expected);
+            } else {
+                self.queue.push(move value);
+                self.mu.unlock();
+                __atomic_fetch_add_i32(&self.recv_sigs, 1, ATOMIC_SEQ_CST);
+                futex_wake(&self.recv_sigs, 1);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Try to send `value` without blocking.
+    /// Returns true if queued, false if channel is full or closed.
+    bool try_send(&mut Channel<T> self, T value) {
+        self.mu.lock();
+        if (self.closed) {
+            self.mu.unlock();
+            return false;
+        }
+        i64 count = self.queue.len() - self.head;
+        if (self.capacity > 0 && count >= self.capacity) {
+            self.mu.unlock();
+            return false;
+        }
+        self.queue.push(move value);
+        self.mu.unlock();
+        __atomic_fetch_add_i32(&self.recv_sigs, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.recv_sigs, 1);
+        return true;
+    }
+
+    /// Block until a value is available or the channel is closed and drained.
+    /// Returns Some(value) if received, None if the channel is closed and empty.
+    Optional<T> recv(&mut Channel<T> self) {
         while (true) {
             self.mu.lock();
             if (self.head < self.queue.len()) {
@@ -64,20 +115,43 @@ impl Channel<T> {
                 self.head = self.head + 1;
                 self.compact();
                 self.mu.unlock();
-                result = move value;
-                break;
+                if (self.capacity > 0) {
+                    __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
+                    futex_wake(&self.send_sigs, 1);
+                }
+                return Optional.Some(move value);
             }
-            // Queue empty: sleep until a send bumps the counter.  If a send
-            // raced in between the load and the syscall, futex_wait returns
-            // EAGAIN immediately and the loop re-checks under the lock.
-            i32 expected = __atomic_load_i32(&self.sigs, ATOMIC_SEQ_CST);
+            if (self.closed) {
+                self.mu.unlock();
+                return Optional.None;
+            }
+            i32 expected = __atomic_load_i32(&self.recv_sigs, ATOMIC_SEQ_CST);
             self.mu.unlock();
-            futex_wait(&self.sigs, expected);
+            futex_wait(&self.recv_sigs, expected);
         }
-        return result;
+        return Optional.None;
     }
 
-    /// Number of values currently buffered (approximate; for diagnostics).
+    /// Try to receive a value without blocking.
+    /// Returns Some(value) if available, None if empty or closed.
+    Optional<T> try_recv(&mut Channel<T> self) {
+        self.mu.lock();
+        if (self.head < self.queue.len()) {
+            T value = self.queue.get(self.head);
+            self.head = self.head + 1;
+            self.compact();
+            self.mu.unlock();
+            if (self.capacity > 0) {
+                __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
+                futex_wake(&self.send_sigs, 1);
+            }
+            return Optional.Some(move value);
+        }
+        self.mu.unlock();
+        return Optional.None;
+    }
+
+    /// Number of values currently buffered.
     i64 len(&Channel<T> self) {
         self.mu.lock();
         i64 n = self.queue.len() - self.head;
@@ -85,18 +159,40 @@ impl Channel<T> {
         return n;
     }
 
-    /// Free the backing queue (no sends/recvs after this).  The queue
-    /// buffer is heap-allocated, so closing is required for leak-check-clean
-    /// exits of long-lived (e.g. global) channels.
+    /// Channel capacity (0 if unbounded).
+    i64 capacity(&Channel<T> self) {
+        return self.capacity;
+    }
+
+    /// Returns true if the channel is closed.
+    bool is_closed(&Channel<T> self) {
+        self.mu.lock();
+        bool c = self.closed;
+        self.mu.unlock();
+        return c;
+    }
+
+    /// Mark the channel as closed and wake all blocked senders & receivers.
     void close(&mut Channel<T> self) {
+        self.mu.lock();
+        self.closed = true;
+        self.mu.unlock();
+        __atomic_fetch_add_i32(&self.recv_sigs, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.recv_sigs, 2147483647);
+        __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.send_sigs, 2147483647);
+    }
+
+    /// Free the backing queue (no sends/recvs after this).
+    void destroy(&mut Channel<T> self) {
         self.mu.lock();
         self.queue.drop();
         self.mu.unlock();
     }
 
-    // Shift the live suffix to the front once the consumed prefix grows
-    // large, so a long-running producer/consumer pair does not grow the
-    // backing buffer without bound.
+    /// Shift the live suffix to the front once the consumed prefix grows
+    /// large, so a long-running producer/consumer pair does not grow the
+    /// backing buffer without bound.
     void compact(&mut Channel<T> self) {
         if (self.head < 1024) {
             return;

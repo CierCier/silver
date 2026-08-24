@@ -1,0 +1,108 @@
+// tests/channel_bounded_test.ag — Test suite for bounded channels, backpressure, closure, and ? fallback.
+
+import std.test;
+import std.thread;
+import std.atomic;
+import std.sync;
+import std.channel;
+import std.optional;
+import std.sys.raw.thread;
+import std.sys.entry;
+
+Channel<i64> g_bounded_ch;
+i64 g_consumed_sum = 0;
+i64 g_consumed_count = 0;
+
+void consumer_worker(i64 _arg) {
+    while (true) {
+        Optional<i64> opt = g_bounded_ch.recv();
+        if (opt.is_none()) {
+            break;
+        }
+        i64 val = opt ? 0;
+        __atomic_fetch_add_i64(&g_consumed_sum, val, ATOMIC_SEQ_CST);
+        __atomic_fetch_add_i64(&g_consumed_count, 1, ATOMIC_SEQ_CST);
+    }
+}
+
+i32 main() {
+    STDOUT.write_str("=== Bounded Channel Tests ===\n\n");
+
+    // Test 1: Bounded try_send backpressure
+    STDOUT.write_str("--- Test 1: try_send capacity limit ---\n");
+    {
+        Channel<i64> ch = Channel<i64>.bounded(2);
+        assert_eq_i64(2, ch.capacity(), "channel capacity is 2");
+        assert_eq_i64(0, ch.len(), "initial channel len is 0");
+
+        @assert(ch.try_send(10), "try_send(10) succeeds");
+        @assert(ch.try_send(20), "try_send(20) succeeds");
+        assert_eq_i64(2, ch.len(), "channel len is 2");
+
+        @assert(!ch.try_send(30), "try_send(30) fails when channel is full");
+
+        i64 v1 = ch.try_recv() ? -1;
+        assert_eq_i64(10, v1, "try_recv popped 10");
+        assert_eq_i64(1, ch.len(), "channel len is now 1");
+
+        @assert(ch.try_send(30), "try_send(30) succeeds after space freed");
+        assert_eq_i64(2, ch.len(), "channel len is 2 again");
+
+        i64 v2 = ch.try_recv() ? -1;
+        i64 v3 = ch.try_recv() ? -1;
+        assert_eq_i64(20, v2, "popped 20");
+        assert_eq_i64(30, v3, "popped 30");
+
+        i64 v_empty = ch.try_recv() ? 999;
+        assert_eq_i64(999, v_empty, "try_recv on empty channel falls back via ? operator");
+
+        ch.destroy();
+    }
+
+    // Test 2: Multi-threaded bounded producer-consumer with backpressure & close
+    STDOUT.write_str("\n--- Test 2: Bounded producer-consumer stream ---\n");
+    {
+        g_bounded_ch = Channel<i64>.bounded(4);
+        g_consumed_sum = 0;
+        g_consumed_count = 0;
+
+        TaskRecord* hc = thread_spawn(consumer_worker, 0);
+        @assert(!(hc == (TaskRecord*)0), "failed to spawn consumer_worker");
+
+        // Send 50 items into capacity-4 channel (forces blocking backpressure)
+        i64 expected_sum = 0;
+        for (i64 i = 1; i <= 50; i = i + 1) {
+            expected_sum = expected_sum + i;
+            @assert(g_bounded_ch.send(i), "send item succeeded");
+        }
+
+        // Close channel to signal EOF to consumer
+        g_bounded_ch.close();
+        @assert(g_bounded_ch.is_closed(), "channel is_closed() is true");
+
+        @assert(!(thread_join(hc) < 0), "failed to join consumer_worker");
+        assert_eq_i64(50, g_consumed_count, "consumer received all 50 items");
+        assert_eq_i64(expected_sum, g_consumed_sum, "consumer received correct total sum");
+
+        g_bounded_ch.destroy();
+    }
+
+    // Test 3: ? fallback operator on closed & empty channel
+    STDOUT.write_str("\n--- Test 3: ? operator on closed channel ---\n");
+    {
+        Channel<i64> ch = Channel<i64>.bounded(2);
+        ch.send(77);
+        ch.close();
+
+        i64 r1 = ch.recv() ? 0;
+        assert_eq_i64(77, r1, "drained last item before close");
+
+        i64 r2 = ch.recv() ? 404;
+        assert_eq_i64(404, r2, "recv on closed empty channel fell back to 404 via ?");
+
+        ch.destroy();
+    }
+
+    STDOUT.write_str("\n=== All Bounded Channel Tests Passed ===\n");
+    return 0;
+}
