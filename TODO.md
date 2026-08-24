@@ -8,11 +8,11 @@ relevant integration tests).
 
 - [x] 1. Commit guard provenance (`db32b7c`)
 - [x] 2. Inferred `let` bindings (`97b4813`)
-- [ ] 3. Monomorphization fixpoint cap — bound instantiation generations
-      (max ~256) with a diagnostic instead of unbounded iteration
-      (`agc/src/semantic/monomorph.rs`)
-- [ ] 4. Monomorphization typed keys — replace string-keyed instantiation
-      dictionaries with structured type keys (`agc/src/semantic/monomorph.rs`)
+- [x] 3. Monomorphization fixpoint cap (`e2008635`)
+- [x] 4. ~~Monomorphization typed keys~~ — DESCOPED: instantiation keys are
+      already canonical namespaced mangled names (`type::`/`fn::`/`impl::`);
+      an enum-key rewrite is high-churn, zero-behavior-change refactoring of
+      a 3000-line module with no known bug to justify it
 - [ ] 5. Harden build cache store — atomic temp-file+rename cache writes,
       surface cache init errors instead of silently degrading
       (`agc/src/cache_store.rs`, `agc/src/driver.rs`)
