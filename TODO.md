@@ -79,6 +79,7 @@ relevant integration tests).
       item sets). Artifact route: duplicate export with `link_name` =
       original symbol (compile-time rename). Source route: renamed
       function-item clones. Non-restrictive.
-- [ ] 16. LSP exposure — completions/references aware of selective imports.
-      BLOCKED on todo 15's semantics decision (nothing to expose until
-      lowering honors selections)
+- [x] 16. LSP exposure — verified automatic: aglsp builds its SymbolIndex
+      from the LOWERED program (diagnostics.rs), so materialized aliases are
+      ordinary function symbols for completions/hover/references. Regression
+      test asserts `pln` appears in completions (`aglsp/src/completion.rs`)

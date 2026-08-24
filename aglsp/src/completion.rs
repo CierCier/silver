@@ -437,3 +437,50 @@ pub(crate) fn signature_help(analysis: &SymbolIndex, offset: usize) -> Option<Si
         active_parameter: Some(active),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agc::lexer;
+    use agc::module_loader::ModuleLoader;
+    use agc::parser::{FileImportResolverHook, Parser};
+    use agc::symbol_index::analyze;
+
+    /// A selectively imported alias (`println as pln`) must appear in
+    /// identifier completions: import lowering materializes the alias as a
+    /// real function symbol before the index is built.
+    #[test]
+    fn aliased_selective_import_appears_in_completions() {
+        let source = "import std.io.file { println as pln };\nfn main() {\n    pl;\n}";
+        let path = std::path::Path::new("/tmp/lsp_sel_import_test.ag");
+        let file_id = lexer::register_source(&path.display().to_string(), source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let mut parser = Parser::new(tokens.clone());
+        let (mut program, parse_errors) = parser.parse_program();
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+
+        // Mirror the LSP diagnostics pipeline: run import lowering so the
+        // alias clone is materialized into the program.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut loader = ModuleLoader::new();
+        loader.add_search_dir(repo_root);
+        let hook = FileImportResolverHook::new(&loader);
+        let lowered = hook.lower_program_imports(&mut program, path.parent(), Some(path));
+        assert!(lowered.is_ok(), "lowering failed: {:?}", lowered.err());
+
+        let expr_types = Default::default();
+        let analysis = analyze(&program, source, &tokens, expr_types, file_id);
+
+        // Complete at the end of "pl" (before the semicolon).
+        let offset = source.rfind("pl").unwrap() + 2;
+        let items = completion(&analysis, offset);
+        assert!(
+            items.iter().any(|item| item.label == "pln"),
+            "alias 'pln' missing from completions: {:?}",
+            items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+    }
+}
