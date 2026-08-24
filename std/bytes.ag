@@ -32,6 +32,11 @@ impl Bytes {
         return self.len;
     }
 
+    /// True when `len` is zero.
+    bool is_empty(&Bytes self) {
+        return self.len == 0;
+    }
+
     i64 capacity(&Bytes self) {
         return self.cap;
     }

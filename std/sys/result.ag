@@ -83,6 +83,12 @@ impl Result<i64, Error> {
         return Result.Ok(raw);
     }
 
+    // `is_ok`/`is_err` predicates are defined here (concrete specialization)
+    // rather than on the generic impl: see the generic-param collision note
+    // in TODO.md — a generic is_err(&Result<T, E>) breaks whenever a user
+    // program declares a type named `T` (typeck.rs collect_implicit_type_
+    // params_ordered drops names that match known types).
+
     bool is_ok(Result<i64, Error> self) {
         return match self { Ok(v) : true, Err(e) : false };
     }

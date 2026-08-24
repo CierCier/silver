@@ -46,6 +46,11 @@ impl BinaryHeap<T> {
         return self.len;
     }
 
+    /// Total allocated capacity.
+    i64 capacity(&BinaryHeap<T> self) {
+        return self.cap;
+    }
+
     /// True when `len` is zero.
     bool is_empty(&BinaryHeap<T> self) {
         return self.len == 0;

@@ -45,6 +45,11 @@ impl Deque<T> {
         return self.len;
     }
 
+    /// Total allocated capacity.
+    i64 capacity(&Deque<T> self) {
+        return self.cap;
+    }
+
     /// True when `len` is zero.
     bool is_empty(&Deque<T> self) {
         return self.len == 0;

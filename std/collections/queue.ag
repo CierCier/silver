@@ -45,6 +45,11 @@ impl Queue<T> {
         return self.len;
     }
 
+    /// Total allocated capacity.
+    i64 capacity(&Queue<T> self) {
+        return self.cap;
+    }
+
     /// True when `len` is zero.
     bool is_empty(&Queue<T> self) {
         return self.len == 0;

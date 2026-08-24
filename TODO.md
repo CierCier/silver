@@ -6,6 +6,18 @@ relevant integration tests).
 
 ## Phase 1 — Compiler Frontend & Diagnostics
 
+- [ ] 17. NEW BUG (discovered while normalizing APIs): a user-declared type
+      named like a generic parameter (`struct T {...}`) breaks generic method
+      resolution for std impls. Root cause:
+      `collect_implicit_type_params_ordered` (typeck.rs:5586) skips bare
+      names that match `known_types`, so `impl Result<T, E>` loses `T` and
+      calls like `r.is_err()` fail with "no matching overload". Repro:
+      declare `struct T` in any program using `std.io`. Fix direction:
+      namespace separation between type params and concrete types, or
+      require explicit generics when names collide, with a clear diagnostic.
+
+## Phase 1 — Compiler Frontend & Diagnostics (original roadmap)
+
 - [x] 1. Commit guard provenance (`db32b7c`)
 - [x] 2. Inferred `let` bindings (`97b4813`)
 - [x] 3. Monomorphization fixpoint cap (`e2008635`)
@@ -24,9 +36,11 @@ relevant integration tests).
 - [x] 6. Deterministic `Vec` bounds — `get`/`get_ptr`/`set`/`__index_get`/
       `__index_set` abort on out-of-bounds in ALL profiles (release included,
       verified exit 134 + backtrace); added `try_get() -> Optional<T>`
-- [ ] 7. Normalize predicate & capacity APIs — `Result.is_ok()/is_err()`,
-      `String.is_empty()`, `Bytes.is_empty()`, `.capacity()` normalization
-      (`std/result.ag`, `std/string.ag`, `std/bytes.ag`, containers)
+- [x] 7. Normalize predicate & capacity APIs — added `String.is_empty()`,
+      `Bytes.is_empty()`, `Deque/Queue/BinaryHeap.capacity()` (Vec already
+      normalized). `Result.is_ok()/is_err()` DESCOPED: they already exist on
+      the concrete `Result<i64, Error>` (std/sys/result.ag), and generic
+      aliases hit the pre-existing type-param collision bug below
 - [ ] 8. Fallible collection accessors — `try_pop`, `try_front`, `try_back`,
       `get_opt` (`vec`, `deque`, `queue`, `heap`, `map`)
 - [ ] 9. POD safety disclaimers — document owned-non-POD limitations of

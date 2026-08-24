@@ -36,6 +36,11 @@ impl String {
         return self.len;
     }
 
+    /// True when `len` is zero.
+    bool is_empty(&String self) {
+        return self.len == 0;
+    }
+
     i64 capacity(&String self) {
         return self.capacity;
     }
