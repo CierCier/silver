@@ -6,15 +6,10 @@ relevant integration tests).
 
 ## Phase 1 — Compiler Frontend & Diagnostics
 
-- [ ] 17. NEW BUG (discovered while normalizing APIs): a user-declared type
-      named like a generic parameter (`struct T {...}`) breaks generic method
-      resolution for std impls. Root cause:
-      `collect_implicit_type_params_ordered` (typeck.rs:5586) skips bare
-      names that match `known_types`, so `impl Result<T, E>` loses `T` and
-      calls like `r.is_err()` fail with "no matching overload". Repro:
-      declare `struct T` in any program using `std.io`. Fix direction:
-      namespace separation between type params and concrete types, or
-      require explicit generics when names collide, with a clear diagnostic.
+- [x] 17. Generic-param/global-type collision (`b237709`) — implicit impl
+      parameters decided at parse time from file-local declared types;
+      params shadow cross-file global types. Same-file `struct T` +
+      `impl X<T>` stays ambiguous-by-syntax (concrete wins locally)
 
 ## Phase 1 — Compiler Frontend & Diagnostics (original roadmap)
 
