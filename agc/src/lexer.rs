@@ -60,6 +60,7 @@ pub enum Token {
     // (Pub removed — items public by default, Private to opt out)
     Private,
     Asm,
+    As,
     In,
     True,
     False,
@@ -914,6 +915,7 @@ impl Lexer {
             // (pub keyword removed — items public by default)
             "private" => Token::Private,
             "asm" => Token::Asm,
+            "as" => Token::As,
             "in" => Token::In,
             "macro" => Token::Macro,
             "true" => Token::True,

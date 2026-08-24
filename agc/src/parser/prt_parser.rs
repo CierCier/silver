@@ -2413,7 +2413,125 @@ impl PRT_Parser {
             });
         }
 
-        Ok(ast::ImportItem { path })
+        // Selective form: `import std.io { print, println as pln };`
+        // (the statement's trailing semicolon is tokens[end - 1]).
+        if cursor < end && matches!(tokens[cursor].kind, Token::LeftBrace) {
+            // Locate the matching '}' — it must be immediately before the
+            // trailing semicolon.
+            let mut depth = 0usize;
+            let mut close = None;
+            for (offset, token) in tokens[cursor..end].iter().enumerate() {
+                match token.kind {
+                    Token::LeftBrace => depth += 1,
+                    Token::RightBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(cursor + offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected '}' to close the selective import list".to_string(),
+                    span: tokens[end - 1].span,
+                });
+            };
+            if close != end - 2 {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unexpected tokens after the selective import list".to_string(),
+                    span: tokens[close + 1].span,
+                });
+            }
+            let selection = self.parse_import_selection(tokens, cursor + 1, close)?;
+            return Ok(ast::ImportItem {
+                path,
+                selection: Some(selection),
+            });
+        }
+
+        Ok(ast::ImportItem {
+            path,
+            selection: None,
+        })
+    }
+
+    /// Parse the comma-separated name list inside `import path { ... }`:
+    /// each entry is `name` or `name as alias`. Empty lists are rejected —
+    /// use a whole-module import instead.
+    fn parse_import_selection(
+        &self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<ast::ImportedName>, ParseError> {
+        let mut items = Vec::new();
+        let mut cursor = start;
+        loop {
+            if cursor >= end {
+                break;
+            }
+            let token = &tokens[cursor];
+            let Token::Identifier(name) = &token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected an item name in the selective import list".to_string(),
+                    span: token.span,
+                });
+            };
+            cursor += 1;
+            let local = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::As)) {
+                cursor += 1;
+                let alias_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
+                    message: "expected a name after 'as'".to_string(),
+                    span: tokens[end - 1].span,
+                })?;
+                let Token::Identifier(alias) = &alias_token.kind else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected a name after 'as'".to_string(),
+                        span: alias_token.span,
+                    });
+                };
+                cursor += 1;
+                ast::Identifier {
+                    name: alias.clone(),
+                    span: alias_token.span,
+                }
+            } else {
+                ast::Identifier {
+                    name: name.clone(),
+                    span: token.span,
+                }
+            };
+            items.push(ast::ImportedName {
+                name: ast::Identifier {
+                    name: name.clone(),
+                    span: token.span,
+                },
+                local_name: local,
+            });
+
+            match tokens.get(cursor).map(|t| &t.kind) {
+                Some(Token::Comma) => cursor += 1,
+                _ => break,
+            }
+        }
+        if items.is_empty() {
+            return Err(ParseError::InvalidSyntax {
+                message:
+                    "selective import list cannot be empty; use `import <module>;` for all items"
+                        .to_string(),
+                span: tokens[start].span,
+            });
+        }
+        if cursor != end {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected ',' or '}' in the selective import list".to_string(),
+                span: tokens[cursor].span,
+            });
+        }
+        Ok(items)
     }
 
     fn parse_global_variable_reduction(
@@ -5712,6 +5830,73 @@ mod tests {
         assert_eq!(item.path.len(), 2);
         assert_eq!(item.path[0].name, "std");
         assert_eq!(item.path[1].name, "io");
+        assert!(item.selection.is_none(), "plain import has no selection");
+    }
+
+    #[test]
+    fn parses_selective_import() {
+        let source = "import std.test { assert_eq_i64, done };";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Import(item) = &program.items[0].kind else {
+            panic!("expected import item");
+        };
+        assert_eq!(item.path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["std", "test"]);
+        let selection = item.selection.as_ref().expect("selective import");
+        assert_eq!(selection.len(), 2);
+        assert_eq!(selection[0].name.name, "assert_eq_i64");
+        // Without `as`, the local name mirrors the exported name.
+        assert_eq!(selection[0].local_name.name, "assert_eq_i64");
+        assert_eq!(selection[1].name.name, "done");
+        assert_eq!(selection[1].local_name.name, "done");
+    }
+
+    #[test]
+    fn parses_selective_import_with_alias() {
+        let source = "import std.io.file { println as pln, STDOUT };";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+
+        let ast::ItemKind::Import(item) = &program.items[0].kind else {
+            panic!("expected import item");
+        };
+        let selection = item.selection.as_ref().expect("selective import");
+        assert_eq!(selection.len(), 2);
+        assert_eq!(selection[0].name.name, "println");
+        assert_eq!(selection[0].local_name.name, "pln");
+        assert_eq!(selection[1].name.name, "STDOUT");
+        assert_eq!(selection[1].local_name.name, "STDOUT");
+    }
+
+    #[test]
+    fn rejects_empty_selective_import_list() {
+        let source = "import std.io { };";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser
+            .parse_program(&tokens)
+            .expect_err("expected parse failure");
+        assert!(
+            err.format_with_help()
+                .contains("selective import list cannot be empty")
+        );
+    }
+
+    #[test]
+    fn rejects_alias_without_name() {
+        let source = "import std.io { print as };";
+        let tokens = crate::lexer::lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let err = parser
+            .parse_program(&tokens)
+            .expect_err("expected parse failure");
+        assert!(
+            err.format_with_help()
+                .contains("expected a name after 'as'")
+        );
     }
 
     #[test]

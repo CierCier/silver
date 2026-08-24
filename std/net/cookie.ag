@@ -306,15 +306,15 @@ void http_parse_one_set_cookie(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
     while (a < e) {
         i64 aend = a;
         while (aend < e && data[aend] != (u8)';') { aend = aend + 1; }
-        i64 as = a;
-        while (as < aend && http_is_space(data[as])) { as = as + 1; }
+        i64 astart = a;
+        while (astart < aend && http_is_space(data[astart])) { astart = astart + 1; }
         i64 ae = aend;
-        while (ae > as && http_is_space(data[ae - 1])) { ae = ae - 1; }
-        if (as < ae) {
-            i64 av_eq = as;
+        while (ae > astart && http_is_space(data[ae - 1])) { ae = ae - 1; }
+        if (astart < ae) {
+            i64 av_eq = astart;
             while (av_eq < ae && data[av_eq] != (u8)'=') { av_eq = av_eq + 1; }
             i64 aname_end = av_eq;
-            while (aname_end > as && http_is_space(data[aname_end - 1])) { aname_end = aname_end - 1; }
+            while (aname_end > astart && http_is_space(data[aname_end - 1])) { aname_end = aname_end - 1; }
             i64 avalue_start = av_eq;
             i64 avalue_end = ae;
             if (av_eq < ae) { avalue_start = av_eq + 1; }
@@ -329,17 +329,17 @@ void http_parse_one_set_cookie(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
                 vk = vk + 1;
             }
             if (attr_ok) {
-                if (http_equal_ci(data, as, aname_end, "secure")) {
+                if (http_equal_ci(data, astart, aname_end, "secure")) {
                     cookie.secure = true;
-                } else if (http_equal_ci(data, as, aname_end, "httponly")) {
+                } else if (http_equal_ci(data, astart, aname_end, "httponly")) {
                     cookie.http_only = true;
-                } else if (http_equal_ci(data, as, aname_end, "domain") && avalue_start < avalue_end) {
+                } else if (http_equal_ci(data, astart, aname_end, "domain") && avalue_start < avalue_end) {
                     cookie.domain.drop();
                     cookie.domain = http_string_from_bytes(data, avalue_start, avalue_end);
-                } else if (http_equal_ci(data, as, aname_end, "path") && avalue_start < avalue_end) {
+                } else if (http_equal_ci(data, astart, aname_end, "path") && avalue_start < avalue_end) {
                     cookie.path.drop();
                     cookie.path = http_string_from_bytes(data, avalue_start, avalue_end);
-                } else if (http_equal_ci(data, as, aname_end, "max-age") && avalue_start < avalue_end) {
+                } else if (http_equal_ci(data, astart, aname_end, "max-age") && avalue_start < avalue_end) {
                     // Go: Atoi; leading-zero values are rejected; <= 0
                     // becomes the -1 delete marker.
                     i64 v = 0;
@@ -348,12 +348,12 @@ void http_parse_one_set_cookie(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
                         if (v <= 0) { v = -1; }
                         cookie.max_age = v;
                     }
-                } else if (http_equal_ci(data, as, aname_end, "expires") && avalue_start < avalue_end) {
+                } else if (http_equal_ci(data, astart, aname_end, "expires") && avalue_start < avalue_end) {
                     i64 v = 0;
                     if (http_parse_rfc1123(data, avalue_start, avalue_end, &v)) {
                         cookie.expires = v;
                     }
-                } else if (http_equal_ci(data, as, aname_end, "samesite") && avalue_start < avalue_end) {
+                } else if (http_equal_ci(data, astart, aname_end, "samesite") && avalue_start < avalue_end) {
                     if (http_equal_ci(data, avalue_start, avalue_end, "lax")) { cookie.same_site = SameSite.Lax; }
                     else if (http_equal_ci(data, avalue_start, avalue_end, "strict")) { cookie.same_site = SameSite.Strict; }
                     else if (http_equal_ci(data, avalue_start, avalue_end, "none")) { cookie.same_site = SameSite.None; }

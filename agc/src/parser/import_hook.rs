@@ -97,6 +97,7 @@ impl<'a> FileImportResolverHook<'a> {
                                 span: lexer::Span::default(),
                             },
                         ],
+                    selection: None,
                     }),
                     span: lexer::Span::default(),
                     visibility: ast::Visibility::Private,
@@ -131,6 +132,7 @@ impl<'a> FileImportResolverHook<'a> {
                                         span: lexer::Span::default(),
                                     })
                                     .collect(),
+                                selection: None,
                             }),
                             span: lexer::Span::default(),
                             visibility: ast::Visibility::Private,

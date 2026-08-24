@@ -597,6 +597,7 @@ mod tests {
             items: vec![ast::Item {
                 kind: ast::ItemKind::Import(ast::ImportItem {
                     path: path.iter().map(|segment| ident(segment)).collect(),
+                    selection: None,
                 }),
                 span: Span::default(),
                 visibility: ast::Visibility::Private,
@@ -730,6 +731,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
+                    selection: None,
                     }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
@@ -738,6 +740,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
+                    selection: None,
                     }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
@@ -780,6 +783,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("a"), ident("mod1")],
+                    selection: None,
                     }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,
@@ -788,6 +792,7 @@ mod tests {
                 ast::Item {
                     kind: ast::ItemKind::Import(ast::ImportItem {
                         path: vec![ident("b"), ident("mod2")],
+                    selection: None,
                     }),
                     span: Span::default(),
                     visibility: ast::Visibility::Private,

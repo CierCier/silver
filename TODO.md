@@ -68,8 +68,10 @@ relevant integration tests).
 
 ## Phase 4 — Selective Imports (Major Feature)
 
-- [ ] 14. Selective import grammar & AST — `Token::As`, parse
-      `import std.io { print, println as pln };` into `ImportItem`
+- [x] 14. Selective import grammar & AST — `Token::As`; `import std.io {
+      print, println as pln };` parses into `ImportItem { path, selection:
+      Some(Vec<ImportedName>) }` with 5 new parser tests. (`as` is now a
+      reserved keyword; the one std-local use in cookie.ag was renamed)
 - [ ] 15. Import lowering — selective inlining/symbol filtering during
       import lowering; propagate through `.agm` artifacts
 - [ ] 16. LSP exposure — completions/references aware of selective imports

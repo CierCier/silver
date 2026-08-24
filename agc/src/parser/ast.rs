@@ -158,11 +158,24 @@ pub struct ImplItem {
     pub items: Vec<ImplItemKind>,
 }
 
-/// Import statement
-/// Import statement — always imports all public items from the module.
+/// Import statement.
+/// `import std.io;` imports every public item from the module. The selective
+/// form `import std.io { print, println as pln };` imports only the listed
+/// items, each optionally renamed (`local_name`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportItem {
     pub path: Vec<Identifier>,
+    /// `None` for whole-module imports; `Some(items)` for selective imports.
+    pub selection: Option<Vec<ImportedName>>,
+}
+
+/// One name inside a selective import: `print` or `println as pln`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedName {
+    /// Name as exported by the module.
+    pub name: Identifier,
+    /// Local alias when written `name as alias`; equals `name` otherwise.
+    pub local_name: Identifier,
 }
 
 /// External function declaration
