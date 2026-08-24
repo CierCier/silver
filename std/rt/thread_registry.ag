@@ -12,9 +12,21 @@
 // Imported transitively by std.sys.entry and directly by std.thread.
 import std.mem.alloc;
 import std.atomic;
+import std.sys.raw.sync;
 
 // Maximum concurrently live threads (slots are reclaimed by thread_join).
 const i64 MAX_THREADS = 64;
+
+// futex(2) operations (Linux x86_64, syscall 202).
+const i64 FUTEX_OP_WAIT = 0;
+const i64 FUTEX_OP_WAKE = 1;
+// Errnos a futex wait can legitimately observe while the flag stays unset:
+// EAGAIN (-11): the value changed before we slept (wake raced ahead of us);
+// EINTR (-4): a signal interrupted the wait.
+const i64 FUTEX_EAGAIN = -11;
+const i64 FUTEX_EINTR = -4;
+// Bounded spin before blocking: short joins never pay a syscall.
+const i64 THREAD_JOIN_MAX_SPINS = 64;
 
 // Per-thread bookkeeping. `tid` doubles as the slot liveness flag:
 //   0  = free slot,   <0 = slot claimed but child not yet running,
@@ -47,20 +59,47 @@ void thread_lock_release() {
     __atomic_store_i32(&g_thread_lock, 0, ATOMIC_RELEASE);
 }
 
+/// Block on the child's done flag via futex wait. Each iteration re-reads
+/// the flag before sleeping, and the kernel atomically re-checks that
+/// `*uaddr == 0` when entering FUTEX_WAIT, so a wake that raced ahead of
+/// the wait returns -EAGAIN instead of stranding us.
+void thread_wait_done_futex(TaskRecord* rec) {
+    while (true) {
+        if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
+            return;
+        }
+        i64 r = sys_futex((i64)&rec.done, FUTEX_OP_WAIT, 0, 0, 0, 0);
+        if (r == FUTEX_EAGAIN || r == FUTEX_EINTR) {
+            continue;
+        }
+    }
+}
+
+/// Wake one thread blocked in thread_wait_done_futex on this record.
+/// Called by the child after its release-store of `done = 1`.
+void thread_wake_done_futex(TaskRecord* rec) {
+    sys_futex((i64)&rec.done, FUTEX_OP_WAKE, 1, 0, 0, 0);
+}
+
 /// Join one task: wait until the child fn returned, then reclaim the slot.
 /// Returns the child's tid. Silently returns -1 for a null record.
 i64 thread_join(TaskRecord* rec) {
     if (rec == (TaskRecord*)0) {
         return -1;
     }
-    // Spin on the child's done flag. (A futex-based wait replaces the spin in
-    // the T1 scheduler pass; the child never exits without setting done.)
+    // Adaptive wait: spin briefly (cheap for near-instant joins), then block
+    // in the kernel on the done flag. The child never exits without setting
+    // done and waking one waiter.
     i64 spins = 0;
     while (true) {
         if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
             break;
         }
         spins = spins + 1;
+        if (spins > THREAD_JOIN_MAX_SPINS) {
+            thread_wait_done_futex(rec);
+            break;
+        }
     }
     i64 tid = rec.tid;
     thread_lock_acquire();
@@ -85,6 +124,10 @@ u8* __silver_wait_done(i64 rec) {
             break;
         }
         spins = spins + 1;
+        if (spins > THREAD_JOIN_MAX_SPINS) {
+            thread_wait_done_futex(r);
+            break;
+        }
     }
     thread_lock_acquire();
     u8* pack = (u8*)r.pack;

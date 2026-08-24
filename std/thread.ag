@@ -4,8 +4,9 @@
 // The whole-allocator spinlock (std/mem/alloc.ag) makes it safe for these
 // threads to allocate/free concurrently. Synchronization is the atomics-based
 // done-flag in each TaskRecord: spawn hands the child a stack + function, the
-// child runs fn(arg), stores its done flag, and exits via sys_exit (which with
-// CLONE_THREAD ends only that thread). Callers join by spinning on the flag.
+// child runs fn(arg), stores its done flag, wakes one joiner via futex, and
+// exits via sys_exit (which with CLONE_THREAD ends only that thread). Callers
+// spin briefly on the flag and then sleep in the kernel (futex wait).
 //
 // Model: `spawn(fn, arg)` — no closures; a function (or fn pointer) plus one
 // machine word of argument. This is the M3 "threads pass addresses" core that
@@ -33,12 +34,14 @@ i64 thread_clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
 }
 
 // Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
-// user function, signals completion, then exits the thread.
+// user function, signals completion (release store + futex wake so a joining
+// thread sleeps instead of spinning), then exits the thread.
 void thread_entry(i64 arg) {
     TaskRecord* rec = (TaskRecord*)arg;
     void(i64) fn = (void(i64))rec.fn;
     fn(rec.arg);
     __atomic_store_i64(&rec.done, 1, ATOMIC_RELEASE);
+    thread_wake_done_futex(rec);
     sys_exit(0);
 }
 

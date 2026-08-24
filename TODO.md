@@ -58,8 +58,9 @@ relevant integration tests).
       reset (`std/channel.ag`)
 - [ ] 11. [BLOCKED: uncommitted user work] Condvar/RwLock naming aliases
       (`std/sync.ag`)
-- [ ] 12. Futex-based thread joining — replace spin-loop in `thread_join`
-      with futex wait/wake (`std/thread.ag`, `std/rt/thread_registry.ag`)
+- [x] 12. Futex-based thread joining — adaptive wait (64 spins, then
+      FUTEX_WAIT on the done flag); child wakes one joiner after its
+      release-store (`std/rt/thread_registry.ag`, `std/thread.ag`)
 - [ ] 13. Static Send enforcement — reject moving locked sync structures
       across task boundaries (`agc/src/semantic/send_check.rs`)
 
