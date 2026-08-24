@@ -87,6 +87,7 @@ struct ImplicitReq {
     left: Type,
     right: Type,
     op: ast::BinaryOperator,
+    origin_span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,7 @@ struct ImplicitMethodReq {
     receiver: Type,
     name: String,
     args: Vec<Type>,
+    origin_span: Span,
 }
 
 /// A bare enum constructor (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
@@ -1227,7 +1229,7 @@ impl TypeChecker {
                         return common;
                     }
 
-                    if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                    if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
                         return left_ty;
                     }
 
@@ -1295,7 +1297,7 @@ impl TypeChecker {
                         && generics.is_empty()
                         && !self.known_types.contains_key(&path[0])
                     {
-                        self.defer_operator_if_generic(&left_ty, &right_ty, operator);
+                        self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span);
                         return Type::Primitive(ast::PrimitiveType::Bool);
                     }
 
@@ -1313,7 +1315,7 @@ impl TypeChecker {
                     }
 
                     if left_ty != right_ty {
-                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
                             return Type::Primitive(ast::PrimitiveType::Bool);
                         }
                         self.error(
@@ -1361,7 +1363,7 @@ impl TypeChecker {
                         if !(self.is_integer_type(&left_ty)
                             && self.is_integer_type(&right_ty)
                             && self.common_numeric_type(&left_ty, &right_ty).is_some())
-                            && !self.defer_operator_if_generic(&left_ty, &right_ty, operator)
+                            && !self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
                         {
                             self.error(
                                 format!(
@@ -1373,7 +1375,7 @@ impl TypeChecker {
                         }
                     }
                     if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
-                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator) {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
                             return left_ty;
                         }
                         self.error(
@@ -3147,6 +3149,7 @@ impl TypeChecker {
                         receiver: receiver_ty.clone(),
                         name: method.name.clone(),
                         args: arg_types,
+                        origin_span: span,
                     });
                     return expected.cloned().unwrap_or(Type::Unknown);
                 }
@@ -5143,7 +5146,7 @@ impl TypeChecker {
             expr.span,
         );
         if result.is_none() {
-            if self.defer_operator_if_generic(left, right, operator) {
+            if self.defer_operator_if_generic(left, right, operator, expr.span) {
                 // Recorded as an implicit guard; enforced at instantiation.
                 return None;
             }
@@ -5178,6 +5181,7 @@ impl TypeChecker {
         left: &Type,
         right: &Type,
         op: &ast::BinaryOperator,
+        origin_span: Span,
     ) -> bool {
         if !self.is_generic_operand(left, right) {
             return false;
@@ -5186,6 +5190,7 @@ impl TypeChecker {
             left: left.clone(),
             right: right.clone(),
             op: op.clone(),
+            origin_span,
         });
         true
     }
@@ -5279,6 +5284,10 @@ impl TypeChecker {
                     ),
                     span,
                 );
+                self.error(
+                    msg::implicit_guard_origin(Self::binary_operator_symbol(&req.op)),
+                    req.origin_span,
+                );
             }
         }
     }
@@ -5320,6 +5329,7 @@ impl TypeChecker {
                     msg::implicit_method_guard_missing(&req.name, &receiver, &arg_strings),
                     span,
                 );
+                self.error(msg::implicit_method_guard_origin(&req.name), req.origin_span);
             }
         }
     }
@@ -7649,5 +7659,61 @@ mod tests {
         // std modules are inlined (injected imports are consumed by lowering).
         let result = hook.lower_program_imports(&mut program, None, None);
         assert!(result.is_ok(), "import lowering failed: {result:?}");
+    }
+
+    #[test]
+    fn operator_guard_origin_note_points_to_definition() {
+        // Instantiating a generic that uses `+` on `T` with a type lacking an
+        // overload must report the call-site error AND a definition-site note.
+        let program = parse(
+            "struct P { i32 x; } T add<T>(T a, T b) { return a + b; } \
+             i32 main() { P p; P q; P r = add(p, q); return 0; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no overload exists")),
+            "expected missing-overload error, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message == msg::implicit_guard_origin("+")),
+            "expected operator-origin note, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn method_guard_origin_note_points_to_definition() {
+        let program = parse(
+            "T poke<T>(T x) { x.poke(); return x; } \
+             i32 main() { return poke(1); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("method requirement for 'poke'")),
+            "expected missing-method-guard error, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message == msg::implicit_method_guard_origin("poke")),
+            "expected method-origin note, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn satisfied_operator_guard_produces_no_errors() {
+        // A concrete instantiation where the operator is builtin-supported
+        // must not trip the guard or emit any diagnostics.
+        let program = parse(
+            "T add<T>(T a, T b) { return a + b; } \
+             i32 main() { return add(1, 2); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 }

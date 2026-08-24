@@ -300,6 +300,13 @@ pub fn implicit_guard_missing(symbol: &str, left: &impl Display, right: &impl Di
         "generic call requires '{left} {symbol} {right}', but no overload exists for that operator"
     )
 }
+pub fn implicit_guard_origin(symbol: &str) -> String {
+    format!("operator requirement for '{symbol}' originates here")
+}
+
+pub fn implicit_method_guard_origin(name: &str) -> String {
+    format!("method requirement for '{name}' originates here")
+}
 pub fn implicit_method_guard_missing(
     name: &str,
     receiver: &impl Display,
