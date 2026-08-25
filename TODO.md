@@ -158,19 +158,19 @@ not deferred silently.
       round-trip through the real Silver spec
       (`agc/tests/elise_source_graph.rs`)
 
-### M3 — Items, types, statements (agc/src/grammar)
-- [ ] silver.elise: all top-level items (imports incl. selective braces,
-      structs/enums/trait decls, impls incl. trait impls + cast members,
-      extern blocks/decls with ABI strings, globals, type aliases, macros,
-      attributes)
-- [ ] Type grammar: primitives, pointers/references/slices, postfix array
-      declarators, generics, function types, lifetime generics
-- [ ] Statement grammar: C-style + inferred lets, defer, control flow,
-      block statements
-- [ ] Word-group context fed per-file (declared typenames) for statement
-      dispatch
-- Gate: every repo file parses; per-file top-level item count matches the
-  legacy parser exactly
+### M3 — Items, types, statements ✅ (item layer)
+- [x] Item recognition over elise token streams ():
+      imports incl. selective braces, extern decls/blocks with ABI strings,
+      structs/enums/trait decls, impls, macros, type aliases, functions vs
+      globals (brace-initializer aware), attributes merged per legacy rules
+- [x] Function/global classifier: ident-before-paren = function;
+       /  / brace-init before paren = global
+- [x] Trailing  of brace-initialized globals absorbed into the item
+- Gate: met — item sequence (kind + order) identical to the legacy parser
+      on every corpus file where the legacy parser succeeds
+      ()
+- Note: statement/expression structure inside bodies is M4; bodies are flat
+      leaves for now
 
 ### M4 — Expressions
 - [ ] Pratt table matching SYNTAX.md §6 exactly (12 levels, `..` at

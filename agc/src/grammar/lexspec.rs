@@ -526,3 +526,98 @@ fn utf8_width(first: u8) -> usize {
         _ => 4,
     }
 }
+
+impl Tok {
+    /// Map a raw row kind back to its variant. Significant kinds are dense
+    /// starting at 0; trivia lives at 0x100+.
+    pub fn from_discriminant(kind: u16) -> Option<Tok> {
+        if kind >= Tok::TriviaLayout as u16 {
+            return None;
+        }
+        use std::sync::OnceLock;
+        static TABLE: OnceLock<Vec<Option<Tok>>> = OnceLock::new();
+        let table = TABLE.get_or_init(|| {
+            let max = Tok::Eof as u16;
+            let mut table: Vec<Option<Tok>> = vec![None; max as usize + 1];
+            // Keep this list adjacent to the enum; the coverage test below
+            // asserts full density so drift cannot hide.
+            let all = [
+                Tok::IntLit, Tok::FloatLit, Tok::ComplexLit, Tok::StrLit,
+                Tok::CharLit, Tok::Lifetime, Tok::Struct, Tok::Enum,
+                Tok::Impl, Tok::Trait, Tok::Mut, Tok::Const, Tok::Static,
+                Tok::Volatile, Tok::If, Tok::Else, Tok::While, Tok::For,
+                Tok::Match, Tok::Break, Tok::Continue, Tok::Return,
+                Tok::Type, Tok::Let, Tok::SelfType, Tok::Defer,
+                Tok::Import, Tok::Comptime, Tok::Cast, Tok::Move,
+                Tok::Extern, Tok::Private, Tok::Asm, Tok::As, Tok::In,
+                Tok::Macro, Tok::Launch, Tok::Wait, Tok::True, Tok::False,
+                Tok::I8, Tok::I16, Tok::I32, Tok::I64, Tok::I128, Tok::U8,
+                Tok::U16, Tok::U32, Tok::U64, Tok::U128, Tok::F32,
+                Tok::F64, Tok::F80, Tok::C32, Tok::C64, Tok::C80,
+                Tok::Bool, Tok::Str, Tok::Char, Tok::Void, Tok::Vec,
+                Tok::Optional, Tok::Plus, Tok::Minus, Tok::Star,
+                Tok::Slash, Tok::Percent, Tok::Equal, Tok::NotEqual,
+                Tok::Less, Tok::Greater, Tok::LessEqual, Tok::GreaterEqual,
+                Tok::AndAnd, Tok::OrOr, Tok::Not, Tok::Assign,
+                Tok::PlusAssign, Tok::MinusAssign, Tok::StarAssign,
+                Tok::SlashAssign, Tok::PercentAssign, Tok::BitAnd,
+                Tok::BitOr, Tok::BitXor, Tok::BitNot, Tok::Increment,
+                Tok::Decrement, Tok::LParen, Tok::RParen, Tok::LBrace,
+                Tok::RBrace, Tok::LBracket, Tok::RBracket, Tok::Semi,
+                Tok::Comma, Tok::Dot, Tok::DotDot, Tok::DotDotDot,
+                Tok::Colon, Tok::ColonColon, Tok::Question, Tok::At,
+                Tok::Hash, Tok::Ident, Tok::Eof,
+            ];
+            for (index, variant) in all.iter().enumerate() {
+                table[index] = Some(*variant);
+            }
+            table
+        });
+        table.get(kind as usize).copied().flatten()
+    }
+}
+
+#[cfg(test)]
+mod discriminant_tests {
+    use super::*;
+
+    /// Guards the from_discriminant table against enum/table drift.
+    #[test]
+    fn discriminant_table_covers_every_variant() {
+        let all = [
+            Tok::IntLit, Tok::FloatLit, Tok::ComplexLit, Tok::StrLit,
+            Tok::CharLit, Tok::Lifetime, Tok::Struct, Tok::Enum,
+            Tok::Impl, Tok::Trait, Tok::Mut, Tok::Const, Tok::Static,
+            Tok::Volatile, Tok::If, Tok::Else, Tok::While, Tok::For,
+            Tok::Match, Tok::Break, Tok::Continue, Tok::Return,
+            Tok::Type, Tok::Let, Tok::SelfType, Tok::Defer,
+            Tok::Import, Tok::Comptime, Tok::Cast, Tok::Move,
+            Tok::Extern, Tok::Private, Tok::Asm, Tok::As, Tok::In,
+            Tok::Macro, Tok::Launch, Tok::Wait, Tok::True, Tok::False,
+            Tok::I8, Tok::I16, Tok::I32, Tok::I64, Tok::I128, Tok::U8,
+            Tok::U16, Tok::U32, Tok::U64, Tok::U128, Tok::F32,
+            Tok::F64, Tok::F80, Tok::C32, Tok::C64, Tok::C80,
+            Tok::Bool, Tok::Str, Tok::Char, Tok::Void, Tok::Vec,
+            Tok::Optional, Tok::Plus, Tok::Minus, Tok::Star,
+            Tok::Slash, Tok::Percent, Tok::Equal, Tok::NotEqual,
+            Tok::Less, Tok::Greater, Tok::LessEqual, Tok::GreaterEqual,
+            Tok::AndAnd, Tok::OrOr, Tok::Not, Tok::Assign,
+            Tok::PlusAssign, Tok::MinusAssign, Tok::StarAssign,
+            Tok::SlashAssign, Tok::PercentAssign, Tok::BitAnd,
+            Tok::BitOr, Tok::BitXor, Tok::BitNot, Tok::Increment,
+            Tok::Decrement, Tok::LParen, Tok::RParen, Tok::LBrace,
+            Tok::RBrace, Tok::LBracket, Tok::RBracket, Tok::Semi,
+            Tok::Comma, Tok::Dot, Tok::DotDot, Tok::DotDotDot,
+            Tok::Colon, Tok::ColonColon, Tok::Question, Tok::At,
+            Tok::Hash, Tok::Ident, Tok::Eof,
+        ];
+        for variant in all {
+            assert_eq!(
+                Tok::from_discriminant(variant as u16),
+                Some(variant),
+                "discriminant collision or gap at {variant:?}"
+            );
+        }
+        assert!(Tok::from_discriminant(Tok::TriviaLayout as u16).is_none());
+    }
+}
