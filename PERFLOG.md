@@ -11,6 +11,26 @@ headline comparison for elise.
 
 ---
 
+## 2026-08-25 — M1 gate (elise-lex Silver spec vs legacy lexer)
+
+- **Commit**: `52935aa`+ (branch `migrate/elise`)
+- **Machine**: same as baseline; `cargo bench -p agc`, optimized profile.
+
+| Scope | Legacy lex | elise lex | Delta |
+|---|---|---|---|
+| std | 7.73 ms | 2.78 ms | **2.8× faster** |
+| tests | 6.76 ms | 1.97 ms | **3.4× faster** |
+| examples | 0.70 ms | 0.22 ms | **3.2× faster** |
+| **all (1.26 MB)** | **17.15 ms** | **4.99 ms** | **3.4× faster (~253 MiB/s)** |
+
+Functional gate: token streams byte-identical across all 269 files
+(`agc/tests/elise_lexer_parity.rs`), including adversarial comment/escape
+snippets.
+
+Verdict: M1 perf review **passed** — no regression; elise-lex is already
+3.4× ahead of the reference lexer before SIMD work.
+
+---
 ## Baseline — legacy hand-written parser
 
 - **Date**: 2026-08-25

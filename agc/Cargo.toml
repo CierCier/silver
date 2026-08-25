@@ -13,6 +13,8 @@ quickcheck_macros = "1.0"
 parking_lot = "0.12"
 rustc-hash = "2.1.3"
 rayon = "1.12.0"
+elise-core = { path = "../elise/core" }
+elise-lex = { path = "../elise/lex" }
 
 [dev-dependencies]
 criterion = "0.7"

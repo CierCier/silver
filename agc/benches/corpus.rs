@@ -122,6 +122,25 @@ fn bench_pipeline_group(c: &mut Criterion, name: &str, sources: &[(&str, &str)])
     group.finish();
 }
 
+fn bench_elise_lex_group(c: &mut Criterion, name: &str, sources: &[(&str, &str)]) {
+    let (bytes, _lines) = bytes_and_lines(sources);
+    if bytes == 0 {
+        return;
+    }
+    let mut group = c.benchmark_group(format!("elise_lex/{name}"));
+    group.throughput(Throughput::Bytes(bytes));
+    group.bench_function(name.to_string(), |b| {
+        b.iter(|| {
+            for (_, src) in sources {
+                let mut spec = agc::grammar::SilverLexSpec::new();
+                let buf = elise_lex::scan(&mut spec, black_box(src)).expect("lex");
+                black_box(buf.len());
+            }
+        })
+    });
+    group.finish();
+}
+
 fn corpus_benches(c: &mut Criterion) {
     let corpus = corpus();
     assert!(!corpus.is_empty(), "corpus discovery found no .ag files");
@@ -140,6 +159,12 @@ fn corpus_benches(c: &mut Criterion) {
     bench_lex_group(c, "all", &all);
     bench_parse_group(c, "all", &all);
     bench_pipeline_group(c, "all", &all);
+    // elise M1 comparison point: same corpus, elise-lex Silver spec.
+    for (prefix, label) in [("std", "std"), ("tests", "tests"), ("examples", "examples")] {
+        let sources = subset(&corpus, prefix);
+        bench_elise_lex_group(c, label, &sources);
+    }
+    bench_elise_lex_group(c, "all", &all);
 
     let (_, lines) = bytes_and_lines(&all);
     eprintln!(

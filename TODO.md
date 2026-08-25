@@ -93,12 +93,12 @@ with two mandatory reviews:
 4. Absolute throughput claims only count in optimized builds once M0 wires
    optimized benching; dev-profile numbers are tracked for relative drift.
 
-> M1 perf review note: elise-lex has no standalone bench yet (the parity gate
-> was functional). Lexer throughput comparison vs the 70 MiB/s baseline lands
-> with the first elise bench in M2's harness work — filed as its own item so
-> it cannot slip silently.
-- [ ] M1 perf follow-up: `elise/benches` lex bench comparing elise-lex
-      Silver spec against the 70 MiB/s legacy lex baseline
+> M1 perf review: **passed** — see the 2026-08-25 PERFLOG entry (3.4× vs
+> legacy). The follow-up item below is therefore closed.
+~~ M1 perf follow-up: `elise/benches` lex bench comparing elise-lex
+      Silver spec against the 70 MiB/s legacy lex baseline ~~
+- [x] M1 perf follow-up: corpus lex bench added to `agc/benches/corpus.rs`
+      (`elise_lex/*` groups) — 4.99 ms vs 17.15 ms legacy, 3.4× faster
 
 ### Code review (at every milestone)
 1. Boundary check: zero Silver references under `elise/`.
