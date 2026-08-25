@@ -18,7 +18,7 @@ headline comparison for elise.
 - **Machine**: Intel Core 5 210H, 8 threads, Linux
 - **Corpus**: 269 files (`std/`, `tests/`, `examples/`), 1,261,570 bytes,
   38,001 lines
-- **Build**: cargo debug-profile bench binary (unoptimized — see note)
+- **Build**: cargo bench profile (inherits release, opt-level 3) — optimized
 
 | Stage | Scope | Mean | Throughput |
 |---|---|---|---|
@@ -39,12 +39,9 @@ headline comparison for elise.
 ~64.9 ms ≈ **585k lines/sec** (~18.5 MiB/s). Lexing is ~26% of pipeline cost,
 parsing ~74%.
 
-> Note: criterion benches run on the dev (unoptimized) profile here because
-> the workspace has no release-bench wiring yet; both elise and this baseline
-> will be re-measured identically at each gate so comparisons stay valid.
-> Switching to `--profile profiling`-style optimized benches is an M0 exit
-> item so the absolute numbers become meaningful against the <50 ms/file
-> ship-gate target.
+> Profile note: Cargo's `bench` profile inherits `release` (opt-level 3), so
+> these are optimized numbers, directly comparable against future elise
+> benches built under the same profile.
 
 ### Per-line reference points
 

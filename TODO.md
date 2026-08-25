@@ -55,6 +55,13 @@ mechanisms (e.g. word-groups for contextual keywords).
 8. **Contextual word-groups**: host-mutable named token sets (e.g.
    "declared typenames") usable in ordered-choice dispatch with committed
    match — solves C-style statement ambiguity without unbounded backtracking.
+9. **Pluggable preprocessing hooks**: elise owns the full lexical stage and
+   exposes a hook pipeline around it — source-level transforms (conditional
+   compilation, include expansion) run before lexing; token/trivia filters
+   run after. Hooks are optional; with none registered the pipeline is a
+   monomorphic pass with zero dispatch overhead. Semantic analysis stays out
+   (phase-isolation rule still applies): hooks transform *text and tokens*,
+   never meaning.
 
 ## Ship gate (first release)
 
@@ -112,15 +119,18 @@ not deferred silently.
 - Gate: `cargo bench -p agc` runs end-to-end; baseline recorded
 
 ### M1 — Silver lexer in elise-lex
-- [ ] Byte-class DFA runtime + flat transition tables
+- [ ] Byte-class DFA-style runtime + flat transition tables
 - [ ] Perfect-hash keyword lookup; contextual keyword groups
+- [ ] **Preprocessing hook pipeline**: `Preprocess` trait (source-level
+      transform + token/trivia filter), default no-op with zero overhead;
+      registered via `LexPipeline::with_hook(...)`
 - [ ] Full Silver lexical spec: identifiers, decimal/hex ints, floats with
       exponents, complex suffix (`3.5i`), strings/chars with escapes, all
       keywords incl. multi-char operators, lifetimes (`'a`), attributes
-      (`#[...]`)
+      (`#[...]`), nested block comments
 - [ ] SIMD skips behind feature flag (whitespace/string/comment runs)
 - Gate: differential test — token streams identical to current `agc`
-  lexer on every repo file, zero diffs
+  lexer on every repo file, zero diffs (boundaries, text, token class)
 
 ### M2 — Source graph core (elise-core)
 - [ ] Green tree: arena-backed, position-independent, structural hashing
