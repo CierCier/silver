@@ -159,16 +159,17 @@ not deferred silently.
       (`agc/tests/elise_source_graph.rs`)
 
 ### M3 — Items, types, statements ✅ (item layer)
-- [x] Item recognition over elise token streams ():
+- [x] Item recognition over elise token streams in
+      agc/src/grammar/parser.rs:
       imports incl. selective braces, extern decls/blocks with ABI strings,
       structs/enums/trait decls, impls, macros, type aliases, functions vs
       globals (brace-initializer aware), attributes merged per legacy rules
-- [x] Function/global classifier: ident-before-paren = function;
-       /  / brace-init before paren = global
-- [x] Trailing  of brace-initialized globals absorbed into the item
+- [x] Function/global classifier: ident-before-paren means function;
+      assign / semicolon / brace-init before paren means global
+- [x] Trailing semicolon of brace-initialized globals absorbed into the item
 - Gate: met — item sequence (kind + order) identical to the legacy parser
       on every corpus file where the legacy parser succeeds
-      ()
+      (agc/tests/elise_item_parity.rs)
 - Note: statement/expression structure inside bodies is M4; bodies are flat
       leaves for now
 
