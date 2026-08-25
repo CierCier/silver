@@ -4,6 +4,9 @@ members = [
     "agc",
     "aglsp",
     "agsm",
+    "elise/core",
+    "elise/lex",
+    "elise/parse",
 ]
 
 

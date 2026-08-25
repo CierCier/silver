@@ -93,6 +93,13 @@ with two mandatory reviews:
 4. Absolute throughput claims only count in optimized builds once M0 wires
    optimized benching; dev-profile numbers are tracked for relative drift.
 
+> M1 perf review note: elise-lex has no standalone bench yet (the parity gate
+> was functional). Lexer throughput comparison vs the 70 MiB/s baseline lands
+> with the first elise bench in M2's harness work — filed as its own item so
+> it cannot slip silently.
+- [ ] M1 perf follow-up: `elise/benches` lex bench comparing elise-lex
+      Silver spec against the 70 MiB/s legacy lex baseline
+
 ### Code review (at every milestone)
 1. Boundary check: zero Silver references under `elise/`.
 2. Phase-isolation check: no semantic analysis or name resolution inside
@@ -109,28 +116,36 @@ not deferred silently.
 
 ## Milestones
 
-### M0 — Scaffold & harness
-- [ ] Create `elise/{core,lex,parse}` crates; add to workspace members
-- [ ] agc gains path dependency on elise crates
-- [ ] Corpus script enumerating all repo `.ag` files (38k lines / 269 files)
-- [ ] Criterion bench harness wired to the corpus (`agc/benches/corpus.rs`)
-- [ ] **Baseline captured** → PERFLOG.md
-- [ ] Wire optimized bench profile so absolute numbers are meaningful
-- Gate: `cargo bench -p agc` runs end-to-end; baseline recorded
+### M0 — Scaffold & harness ✅
+- [x] Create `elise/{core,lex,parse}` crates; add to workspace members
+- [x] agc gains path dependency on elise crates
+- [x] Corpus enumeration: 269 `.ag` files, 1.26 MB, 38k lines
+- [x] Criterion bench harness wired to the corpus (`agc/benches/corpus.rs`)
+- [x] **Baseline captured** → PERFLOG.md (pipeline 64.9 ms / 18.5 MiB/s)
+- [x] Bench profile verified optimized (`bench` inherits `release`)
+- Gate: met — benches run end-to-end; baseline recorded
 
-### M1 — Silver lexer in elise-lex
-- [ ] Byte-class DFA-style runtime + flat transition tables
-- [ ] Perfect-hash keyword lookup; contextual keyword groups
-- [ ] **Preprocessing hook pipeline**: `Preprocess` trait (source-level
-      transform + token/trivia filter), default no-op with zero overhead;
-      registered via `LexPipeline::with_hook(...)`
-- [ ] Full Silver lexical spec: identifiers, decimal/hex ints, floats with
-      exponents, complex suffix (`3.5i`), strings/chars with escapes, all
-      keywords incl. multi-char operators, lifetimes (`'a`), attributes
-      (`#[...]`), nested block comments
-- [ ] SIMD skips behind feature flag (whitespace/string/comment runs)
-- Gate: differential test — token streams identical to current `agc`
-  lexer on every repo file, zero diffs (boundaries, text, token class)
+### M1 — Silver lexer in elise-lex ✅
+- [x] Byte-class scan driver: layout → comments → identifier/keyword →
+      operator longest-match trie → spec hook for literals and oddities
+- [x] Perfect-hash keyword lookup (FNV-1a, open addressing); word-group
+      hook point reserved for contextual keywords
+- [x] **Preprocessing hook pipeline**: `Preprocess` trait (source-level
+      `transform_source`, chainable), default no-op with zero overhead.
+      Token-level filters land with the parse pipeline.
+- [x] Full Silver lexical spec replicated byte-for-byte: all keywords and
+      primitive type names, hex ints, floats, complex `i` suffix, string
+      escapes incl. `\xNN` / `\u{...}`, char literals, the `'lifetime`
+      quirk, nested block comments with doc markers, and the legacy
+      delimiter rule where a doc-marker star cannot close its own comment
+      (`/**/` is unterminated)
+- [x] Differential parity test (`agc/tests/elise_lexer_parity.rs`) over all
+      269 corpus files plus adversarial snippets: identical boundaries,
+      text, and classification on every token; both lexers agree on which
+      inputs fail
+- Deferred to post-M5: SIMD skip loops (the single-pass byte loop already
+      meets the gate; SIMD is an optimization pass with its own perf review)
+- Gate: met — zero diffs across the corpus
 
 ### M2 — Source graph core (elise-core)
 - [ ] Green tree: arena-backed, position-independent, structural hashing

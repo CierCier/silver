@@ -1,0 +1,8 @@
+[package]
+name = "elise-parse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+elise-core = { path = "../core" }
+elise-lex = { path = "../lex" }

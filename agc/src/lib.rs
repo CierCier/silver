@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod driver;
 pub mod format;
 pub mod intrinsics;
+pub mod grammar;
 pub mod lexer;
 pub mod link;
 pub mod mangling;
