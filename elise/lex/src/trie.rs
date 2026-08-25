@@ -56,7 +56,9 @@ impl OpTrie {
     /// Returns `(kind, matched_len)` or `None` when no lexeme matches.
     #[inline]
     pub fn longest_match(&self, bytes: &[u8]) -> Option<(u16, usize)> {
-        let mut node = 0u32;
+        let Some(mut node) = self.nodes.first().map(|_| 0u32) else {
+            return None;
+        };
         let mut best: Option<(u16, usize)> = None;
         for (offset, &b) in bytes.iter().enumerate() {
             let edges = &self.nodes[node as usize].edges;
@@ -76,7 +78,7 @@ impl OpTrie {
     #[inline]
     pub fn is_empty(&self) -> bool {
         // Only the root exists => no operators registered.
-        self.nodes.len() <= 1 && self.nodes[0].edges.is_empty()
+        self.nodes.len() <= 1 && self.nodes.first().map(|n| n.edges.is_empty()).unwrap_or(true)
     }
 }
 

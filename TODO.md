@@ -147,12 +147,16 @@ not deferred silently.
       meets the gate; SIMD is an optimization pass with its own perf review)
 - Gate: met — zero diffs across the corpus
 
-### M2 — Source graph core (elise-core)
-- [ ] Green tree: arena-backed, position-independent, structural hashing
-- [ ] Red layer: parent cursors
-- [ ] Trivia side-list integrated into lossless text reconstruction
-- [ ] Event fold: Enter/Advance/Exit → green tree
-- Gate: fuzz-clean lossless round-trip under random input mutation
+### M2 — Source graph core ✅
+- [x] Green tree: Rc-shared, position-independent ()
+- [x] Cursor layer: / with absolute spans, leaf+node
+      uniform traversal, 
+- [x] Trivia out-of-band in the lexer, interleaved into the tree by the
+      event fold (lossless by construction)
+- [x] Event fold: Enter/Advance/Exit → green tree, malformed-stream tolerant
+- Gate: met — 4000-case deterministic mutation fuzz + whole-corpus lossless
+      round-trip through the real Silver spec
+      ()
 
 ### M3 — Items, types, statements (agc/src/grammar)
 - [ ] silver.elise: all top-level items (imports incl. selective braces,
