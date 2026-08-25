@@ -59,7 +59,7 @@ mechanisms (e.g. word-groups for contextual keywords).
 ## Ship gate (first release)
 
 `parse_ag(source) -> SourceGraph`, where for EVERY `.ag` file in the repo
-(~35k lines / ~80 files across std/, tests/, examples/):
+(~38k lines / 269 files across std/, tests/, examples/):
 
 - [ ] graph.text() round-trips byte-for-byte
 - [ ] zero ERROR nodes on valid code
@@ -72,14 +72,44 @@ Out of scope for first ship (explicitly deferred): typed AST projections,
 incremental reparsing, codegen backend, recovery tuning, multi-language
 support beyond the Silver grammar.
 
+## Process gates — apply to EVERY milestone
+
+A milestone is not done when its functional gate passes. Each of M0–M5 ends
+with two mandatory reviews:
+
+### Perf review (at every milestone)
+1. Run `cargo bench -p agc` (corpus baseline) and any elise benches.
+2. Record results in `PERFLOG.md` as a new dated entry: numbers + delta vs
+   baseline and vs the previous milestone.
+3. Any regression >5% vs the previous entry requires a documented cause or a
+   revert. "We'll optimize later" is not an entry.
+4. Absolute throughput claims only count in optimized builds once M0 wires
+   optimized benching; dev-profile numbers are tracked for relative drift.
+
+### Code review (at every milestone)
+1. Boundary check: zero Silver references under `elise/`.
+2. Phase-isolation check: no semantic analysis or name resolution inside
+   elise; no parsing decisions inside agc semantics.
+3. Hot-path review: no allocations in parse loop, no HashMap lookups in
+   dispatch, indices-not-pointers in tree structures.
+4. Error-path review: every new failure mode produces a spanned diagnostic
+   or ERROR node, never a panic, never silent acceptance.
+5. Tests: each feature lands with a test that would fail without it; all
+   suites green before commit.
+
+Findings from either review get fixed or filed as explicit TODO entries —
+not deferred silently.
+
 ## Milestones
 
 ### M0 — Scaffold & harness
 - [ ] Create `elise/{core,lex,parse}` crates; add to workspace members
 - [ ] agc gains path dependency on elise crates
-- [ ] Corpus script enumerating all repo `.ag` files (35k lines)
-- [ ] Criterion bench harness wired to the corpus
-- Gate: `cargo bench` runs end-to-end
+- [ ] Corpus script enumerating all repo `.ag` files (38k lines / 269 files)
+- [ ] Criterion bench harness wired to the corpus (`agc/benches/corpus.rs`)
+- [ ] **Baseline captured** → PERFLOG.md
+- [ ] Wire optimized bench profile so absolute numbers are meaningful
+- Gate: `cargo bench -p agc` runs end-to-end; baseline recorded
 
 ### M1 — Silver lexer in elise-lex
 - [ ] Byte-class DFA runtime + flat transition tables
