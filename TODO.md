@@ -148,15 +148,15 @@ not deferred silently.
 - Gate: met — zero diffs across the corpus
 
 ### M2 — Source graph core ✅
-- [x] Green tree: Rc-shared, position-independent ()
-- [x] Cursor layer: / with absolute spans, leaf+node
-      uniform traversal, 
+- [x] Green tree: `Rc`-shared, position-independent (`elise-core/src/green.rs`)
+- [x] Cursor layer: `NodeRef` / `Children` with absolute spans, leaf+node
+      uniform traversal, `walk_leaves`
 - [x] Trivia out-of-band in the lexer, interleaved into the tree by the
       event fold (lossless by construction)
 - [x] Event fold: Enter/Advance/Exit → green tree, malformed-stream tolerant
 - Gate: met — 4000-case deterministic mutation fuzz + whole-corpus lossless
       round-trip through the real Silver spec
-      ()
+      (`agc/tests/elise_source_graph.rs`)
 
 ### M3 — Items, types, statements (agc/src/grammar)
 - [ ] silver.elise: all top-level items (imports incl. selective braces,
