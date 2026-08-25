@@ -187,11 +187,15 @@ fn collect_local_generic_defaults(
             generics.as_ref().map(|generics| {
                 (
                     name.clone(),
+                    // Lifetime parameters occupy no slot in the type-argument
+                    // list: they are erased at use sites, so `StringView<'a>`
+                    // is written plain `StringView` and must not trip
+                    // default-filling arity checks.
                     generics
                         .params
                         .iter()
-                        .map(|param| match param {
-                            ast::GenericParam::Type(param) => param.default.clone(),
+                        .filter_map(|param| match param {
+                            ast::GenericParam::Type(param) => Some(param.default.clone()),
                             ast::GenericParam::Lifetime(_) => None,
                         })
                         .collect(),
@@ -1133,8 +1137,8 @@ fn collect_type_instantiations(
                 generics
                     .into_iter()
                     .flat_map(|generics| generics.params.iter())
-                    .map(|param| match param {
-                        ast::GenericParam::Type(param) => param.default.clone(),
+                    .filter_map(|param| match param {
+                        ast::GenericParam::Type(param) => Some(param.default.clone()),
                         ast::GenericParam::Lifetime(_) => None,
                     })
                     .collect(),

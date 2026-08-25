@@ -613,11 +613,13 @@ impl TypeChecker {
                         .generics
                         .as_ref()
                         .map(|generics| {
+                            // Lifetime parameters occupy no type-argument
+                            // slot (erased at use sites).
                             generics
                                 .params
                                 .iter()
-                                .map(|param| match param {
-                                    ast::GenericParam::Type(param) => param.default.clone(),
+                                .filter_map(|param| match param {
+                                    ast::GenericParam::Type(param) => Some(param.default.clone()),
                                     ast::GenericParam::Lifetime(_) => None,
                                 })
                                 .collect::<Vec<_>>()
@@ -643,11 +645,13 @@ impl TypeChecker {
                         .generics
                         .as_ref()
                         .map(|generics| {
+                            // Lifetime parameters occupy no type-argument
+                            // slot (erased at use sites).
                             generics
                                 .params
                                 .iter()
-                                .map(|param| match param {
-                                    ast::GenericParam::Type(param) => param.default.clone(),
+                                .filter_map(|param| match param {
+                                    ast::GenericParam::Type(param) => Some(param.default.clone()),
                                     ast::GenericParam::Lifetime(_) => None,
                                 })
                                 .collect::<Vec<_>>()
@@ -7969,6 +7973,22 @@ mod tests {
                 .implicit_type_params
                 .contains(&"MyStruct".to_string()),
             "file-local concrete type must not become a parameter"
+        );
+    }
+
+    #[test]
+    fn lifetime_only_generic_struct_needs_no_type_args() {
+        // Regression (borrow_conflict_test): lifetime parameters occupy no
+        // slot in the type-argument list, so a `struct SV<'a>` is used plain
+        // — it must not trip "missing required type argument".
+        let program = parse(
+            "struct SV<'a> { &'a i64 data; i64 len; } \
+             i32 main() { SV view; view.len = 1; return view.len; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            !errors.iter().any(|e| e.message.contains("missing required type argument")),
+            "lifetime params must not require type arguments: {errors:?}"
         );
     }
 
