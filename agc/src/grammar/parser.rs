@@ -1,16 +1,15 @@
 //! Item-level parsing over elise token streams.
 //!
-//! Phase-scope note (M3): this pass recognizes top-level item boundaries and
-//! kinds, emitting one child node per item under the root. Attributes and
-//! visibility qualifiers merge into the following item (matching the legacy
-//! parser). Bodies are consumed as flat token leaves; statement/expression
-//! structure arrives in M4. Consumption is delimiter-driven (balanced braces
-//! / semicolons), so a malformed body cannot cascade into the next item.
+//! Phase-scope note (M3/M4): recognizes top-level item boundaries and kinds;
+//! function bodies get structured statement/expression children via
+//! [`body::BodyParser`]. Attributes and visibility qualifiers merge into the
+//! following item, matching the legacy parser. Consumption is
+//! delimiter-driven so a malformed body cannot cascade into the next item.
 
-use elise_lex::{LexError, TokenBuf};
-use elise_parse::{Event, TreeBuilder};
-use elise_core::{SourceGraph, SyntaxError};
+use elise_lex::TokenBuf;
+use elise_parse::{Event, TreeBuilder};use elise_core::{SourceGraph, SyntaxError};
 
+use super::body::BodyParser;
 use super::lexspec::{SilverLexSpec, Tok};
 
 /// Node kinds for the Silver source graph.
@@ -29,8 +28,6 @@ pub enum NodeKind {
     TypeAlias = 9,
     Function = 10,
     GlobalVariable = 11,
-    /// Attribute group attached to a following item; kept distinct so the
-    /// item-count parity check can ignore it while the tree stays lossless.
     Attribute = 12,
 }
 
@@ -62,10 +59,9 @@ pub fn parse_ag(src: &str) -> SourceGraph {
         Ok(buf) => buf,
         Err(err) => {
             let pos = match &err {
-                LexError::UnexpectedByte { pos, .. } | LexError::UnexpectedEof { pos } => {
-                    *pos as usize
-                }
-                LexError::Message { pos, .. } => *pos as usize,
+                elise_lex::LexError::UnexpectedByte { pos, .. }
+                | elise_lex::LexError::UnexpectedEof { pos } => *pos as usize,
+                elise_lex::LexError::Message { pos, .. } => *pos as usize,
             };
             let pos = pos.min(src.len());
             let errors = vec![SyntaxError {
@@ -73,7 +69,6 @@ pub fn parse_ag(src: &str) -> SourceGraph {
                 end: src.len() as u32,
                 message: format!("{err:?}"),
             }];
-            // Degenerate but lossless: whole file is one error leaf.
             let mut children = Vec::new();
             if !src.is_empty() {
                 children.push(elise_core::GreenChild::Token {
@@ -83,10 +78,7 @@ pub fn parse_ag(src: &str) -> SourceGraph {
             }
             return SourceGraph::new(
                 src,
-                std::rc::Rc::new(elise_core::Green::new(
-                    NodeKind::File as u16,
-                    children,
-                )),
+                std::rc::Rc::new(elise_core::Green::new(NodeKind::File as u16, children)),
                 errors,
             );
         }
@@ -112,9 +104,18 @@ struct ItemParser<'a> {
     errors: Vec<SyntaxError>,
 }
 
+/// Classification result for one top-level item.
+struct ItemSpan {
+    kind: NodeKind,
+    start: usize,
+    end: usize,
+    /// `(open_brace_row, close_brace_row)` when the item carries a `{...}`
+    /// body that should be parsed structurally (functions only).
+    braces: Option<(usize, usize)>,
+}
+
 impl<'a> ItemParser<'a> {
     /// Next significant (non-trivia) token at/after `index`.
-    /// Returns `None` at end of input.
     #[inline]
     fn peek_sig(&self, index: usize) -> Option<(usize, Tok)> {
         let mut i = index;
@@ -134,43 +135,56 @@ impl<'a> ItemParser<'a> {
     }
 
     fn parse_file(&mut self) {
-        while let Some((idx, first_tok)) = self.peek_sig(self.pos) {
-            // Attributes and visibility merge into the following item.
-            let mut start = idx;
-            let mut cursor = idx;
-
+        while let Some((first_idx, _)) = self.peek_sig(self.pos) {
+            // Absorb leading attributes (`#[...]`) and visibility
+            // (`private`) into the item span — the legacy parser attaches
+            // them to the following item rather than listing separately.
+            let mut cursor = first_idx;
             loop {
                 match self.peek_sig(cursor) {
-                    Some((hash_idx, Tok::Hash)) => {
-                        let after_group =
-                            self.skip_balanced(hash_idx + 1, Tok::LBracket, Tok::RBracket);
-                        self.emit_item(NodeKind::Attribute, hash_idx, after_group);
-                        cursor = after_group;
+                    Some((h, Tok::Hash)) => {
+                        cursor =
+                            self.skip_balanced(h + 1, Tok::LBracket, Tok::RBracket);
                     }
-                    Some((priv_idx, Tok::Private)) => {
-                        cursor = priv_idx + 1;
+                    Some((p, Tok::Private)) => {
+                        cursor = p + 1;
                     }
-                    Some(_) => break,
-                    None => break,
+                    _ => break,
                 }
             }
 
             let Some((item_idx, tok)) = self.peek_sig(cursor) else {
+                // Trailing attributes with nothing after them: consume flat
+                // so losslessness holds.
+                while self.pos < self.rows.len() && self.rows[self.pos].len > 0 {
+                    self.events.push(Event::Advance(1));
+                    self.pos += 1;
+                }
                 break;
             };
-            let _ = start;
-            let start = idx; // item node spans from its first attribute
 
-            let (kind, end) = match tok {
-                Tok::Import => (NodeKind::Import, self.thru_terminator(item_idx + 1)),
-                Tok::Type => (NodeKind::TypeAlias, self.thru_terminator(item_idx + 1)),
+            let start = first_idx;
+
+            let (kind, end, is_function) = match tok {
+                Tok::Import => (
+                    NodeKind::Import,
+                    self.thru_terminator(item_idx + 1),
+                    false,
+                ),
+                Tok::Type => (
+                    NodeKind::TypeAlias,
+                    self.thru_terminator(item_idx + 1),
+                    false,
+                ),
                 Tok::Extern => {
                     let kind = match self.peek_sig(item_idx + 1) {
                         Some((_, Tok::StrLit)) => match self.peek_sig(item_idx + 2) {
                             Some((_, Tok::LBrace)) => NodeKind::ExternBlock,
                             _ => NodeKind::ExternDecl,
                         },
-                        Some((abi_end, _)) if matches!(self.peek_sig(abi_end), Some((_, Tok::LBrace))) => {
+                        Some((abi_end, _))
+                            if matches!(self.peek_sig(abi_end), Some((_, Tok::LBrace))) =>
+                        {
                             NodeKind::ExternBlock
                         }
                         _ => NodeKind::ExternDecl,
@@ -179,63 +193,140 @@ impl<'a> ItemParser<'a> {
                         NodeKind::ExternBlock => self.thru_braces(item_idx + 1),
                         _ => self.thru_terminator(item_idx + 1),
                     };
-                    (kind, end)
+                    (kind, end, false)
                 }
-                Tok::Struct => (NodeKind::Struct, self.thru_braces(item_idx + 1)),
-                Tok::Enum => (NodeKind::Enum, self.thru_braces(item_idx + 1)),
-                Tok::Trait => (NodeKind::Trait, self.thru_braces(item_idx + 1)),
-                Tok::Impl => (NodeKind::Impl, self.thru_braces(item_idx + 1)),
-                Tok::Macro => (NodeKind::Macro, self.thru_braces(item_idx + 1)),
+                Tok::Struct => (NodeKind::Struct, self.thru_braces(item_idx + 1), false),
+                Tok::Enum => (NodeKind::Enum, self.thru_braces(item_idx + 1), false),
+                Tok::Trait => (NodeKind::Trait, self.thru_braces(item_idx + 1), false),
+                Tok::Impl => (NodeKind::Impl, self.thru_braces(item_idx + 1), false),
+                Tok::Macro => (NodeKind::Macro, self.thru_braces(item_idx + 1), false),
                 Tok::Const | Tok::Static | Tok::Volatile => {
-                    let end = self.classify_tail(item_idx + 1);
-                    (NodeKind::GlobalVariable, self.absorb_trailing_semi(end))
+                    let (end, _braces) = self.classify_tail(item_idx + 1);
+                    let end = self.absorb_trailing_semi(end);
+                    (NodeKind::GlobalVariable, end, false)
                 }
                 _ => {
-                    let end = self.classify_tail(item_idx + 1);
+                    let (end, braces) = self.classify_tail(item_idx + 1);
                     if self.tail_is_function(item_idx + 1, end) {
-                        (NodeKind::Function, end)
+                        (NodeKind::Function, end, true)
                     } else {
-                        (NodeKind::GlobalVariable, self.absorb_trailing_semi(end))
+                        let end = self.absorb_trailing_semi(end);
+                        (NodeKind::GlobalVariable, end, false)
                     }
                 }
             };
 
-            self.emit_item(kind, start, end);
+            if is_function {
+                // Structured body: header leaves, a Body node over the brace
+                // interior, closing brace leaf. `braces` are relative to the
+                // full row list; find their absolute positions by scanning
+                // forward from item_idx with the same depth logic.
+                let mut open_abs: Option<usize> = None;
+                let mut close_abs: Option<usize> = None;
+                let mut depth = 0i64;
+                let mut i = item_idx;
+                while i < end.min(self.rows.len()) {
+                    let row = &self.rows[i];
+                    if row.len == 0 || is_trivia(row.kind) {
+                        i += 1;
+                        continue;
+                    }
+                    match num_to_tok(row.kind) {
+                        Some(Tok::LBrace) => {
+                            if depth == 0 {
+                                open_abs = Some(i);
+                            }
+                            depth += 1;
+                        }
+                        Some(Tok::RBrace) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close_abs = Some(i);
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                self.emit_function(start, item_idx, end, open_abs.zip(close_abs));
+            } else {
+                self.emit_flat_span(kind, start, end);
+            }
             self.pos = end;
         }
 
-        // Any trailing garbage that peek_sig could not classify is skipped by
-        // advancing one row at a time until progress stops.
+        // Any trailing rows that were never classified: consume flat so
+        // losslessness always holds.
         while self.pos < self.rows.len() {
-            let before = self.pos;
-            match self.peek_sig(self.pos) {
-                Some((idx, tok)) => {
-                    let end = self.thru_terminator(idx + 1);
-                    self.emit_item(NodeKind::GlobalVariable, idx, end);
-                    self.pos = end;
-                    if end <= before {
-                        break;
-                    }
-                }
-                None => break,
+            let row = &self.rows[self.pos];
+            if row.len == 0 {
+                break;
             }
+            self.events.push(Event::Advance(1));
+            self.pos += 1;
         }
     }
 
-    fn emit_item(&mut self, kind: NodeKind, start: usize, end: usize) {
+    fn emit_flat_span(&mut self, kind: NodeKind, start: usize, end: usize) {
         self.events.push(Event::Enter(kind as u16));
         self.consume_range(start, end);
         self.events.push(Event::Exit);
     }
 
-    /// Emit `Advance(1)` per significant row in `[start, end)`.
-    fn consume_range(&mut self, start: usize, end: usize) {
-        for i in start..end.min(self.rows.len()) {
-            let row = &self.rows[i];
-            if !is_trivia(row.kind) && row.len > 0 {
-                self.events.push(Event::Advance(1));
+    /// Function items carry a structured Body child: header leaves, then
+    /// statements/expressions parsed by [`BodyParser`], then the braces.
+    fn emit_function(
+        &mut self,
+        start: usize,
+        item_idx: usize,
+        end: usize,
+        braces: Option<(usize, usize)>,
+    ) {
+        self.events.push(Event::Enter(NodeKind::Function as u16));
+        match braces {
+            Some((open_idx, close_idx)) => {
+                // Header up to and including `{`.
+                self.consume_range(start, open_idx + 1);
+                let mut events = std::mem::take(&mut self.events);
+                {
+                    let mut body = crate::grammar::body::BodyParser::new(
+                        self.rows,
+                        open_idx + 1,
+                        close_idx,
+                        &mut events,
+                        &mut self.errors,
+                    );
+                    body.parse_block_inner(close_idx);
+                }
+                // Verify event stream balance: Enters == Exits.
+                let mut enters = 0usize;
+                let mut exits = 0usize;
+                let mut advances = 0usize;
+                for e in &events {
+                    match e {
+                        Event::Enter(_) => enters += 1,
+                        Event::Exit => exits += 1,
+                        Event::Advance(_) => advances += 1,
+                        Event::Nop => {}
+                    }
+                }
+                if enters != exits {
+                    eprintln!(
+                        "DBG UNBALANCED body for rows [{}..{}]: {} enters vs {} exits ({} advances)",
+                        open_idx + 1, close_idx, enters, exits, advances
+                    );
+                }
+                self.events = events;
+                // Closing brace of the body.
+                self.pos = close_idx;
+                self.advance_row();
+            }
+            None => {
+                // No body braces found (malformed): consume to end flat.
+                self.consume_range(item_idx + 1, end);
             }
         }
+        self.events.push(Event::Exit);
     }
 
     /// From `from` (which may be ON the opening delimiter), skip a balanced
@@ -264,6 +355,91 @@ impl<'a> ItemParser<'a> {
             i += 1;
         }
         i
+    }
+
+    fn emit_flat(&mut self, span: &ItemSpan) {
+        self.events.push(Event::Enter(span.kind as u16));
+        self.consume_range(span.start, span.end);
+        self.events.push(Event::Exit);
+    }
+
+    fn emit_span(&mut self, kind: NodeKind, start: usize, end: usize, braces: Option<(usize, usize)>) {
+        if let Some((open_idx, close_idx)) = braces {
+            self.events.push(Event::Enter(kind as u16));
+            self.consume_range(start, open_idx + 1);
+            let mut events = std::mem::take(&mut self.events);
+            let body_start = events.len();
+            {
+                let mut body = BodyParser::new(
+                    self.rows,
+                    open_idx + 1,
+                    close_idx,
+                    &mut events,
+                    &mut self.errors,
+                );
+                body.parse_block_inner(close_idx);
+            }
+            // Safety net: verify event balance (Enters == Exits among
+            // body-emitted events). If unbalanced, strip structured events
+            // and replace with flat leaf advances.
+            let mut enters = 0usize;
+            let mut exits = 0usize;
+            for e in &events[body_start..] {
+                match e {
+                    Event::Enter(_) => enters += 1,
+                    Event::Exit => exits += 1,
+                    _ => {}
+                }
+            }
+            if enters != exits {
+                eprintln!(
+                    "agc: warning: unbalanced body events for rows [{}..{}] \
+                     ({} enters vs {} exits); degrading to flat",
+                    open_idx + 1, close_idx, enters, exits
+                );
+                events.truncate(body_start);
+                for row in &self.rows[open_idx + 1..close_idx] {
+                    if row.len > 0 && !is_trivia(row.kind) {
+                        events.push(Event::Advance(1));
+                    }
+                }
+            }
+            self.events = events;
+            self.pos = close_idx;
+            self.advance_row();
+            self.events.push(Event::Exit);
+        } else {
+            self.events.push(Event::Enter(kind as u16));
+            self.consume_range(start, end);
+            self.events.push(Event::Exit);
+        }
+    }
+
+    /// Emit an item whose body gets structured parsing.
+    fn emit_structured(
+        &mut self,
+        kind: NodeKind,
+        start: usize,
+        end: usize,
+        braces: Option<(usize, usize)>,
+    ) {
+        self.emit_span(kind, start, end, braces);
+    }
+
+    /// Emit `Advance(1)` per significant row in `[start, end)`.
+    fn consume_range(&mut self, start: usize, end: usize) {
+        for i in start..end.min(self.rows.len()) {
+            let row = &self.rows[i];
+            if !is_trivia(row.kind) && row.len > 0 {
+                self.events.push(Event::Advance(1));
+            }
+        }
+    }
+
+    /// Advance past one significant row (e.g. a closing brace).
+    fn advance_row(&mut self) {
+        self.events.push(Event::Advance(1));
+        self.pos += 1;
     }
 
     /// From `start`, consume through the next top-level semicolon.
@@ -311,36 +487,82 @@ impl<'a> ItemParser<'a> {
     }
 
     /// Distinguish function (header + block) from global (semicolon).
-    fn classify_tail(&self, start: usize) -> usize {
+    /// Returns the tail end plus, for functions, the body brace indices.
+    /// Distinguish function (header + block) from global (semicolon).
+    ///
+    /// Tracks paren/bracket/brace nesting. Key rules:
+    /// - Top-level `=` before any braces → global with initializer.
+    /// - Top-level `;` outside all groups → global.
+    /// - `{` at paren-depth 0 AFTER seeing balanced parens → function body;
+    ///   scan to its matching `}`.
+    /// - `{` at paren-depth 0 WITHOUT prior balanced parens → initializer.
+    fn classify_tail(&self, start: usize) -> (usize, Option<(usize, usize)>) {
         let mut i = start;
-        let mut depth = 0i64;
-        let mut seen_brace = false;
+        let mut paren = 0i64;
+        let mut bracket = 0i64;
+        let mut brace = 0i64;
+        let mut saw_balanced_parens = false;
         while i < self.rows.len() {
             let row = &self.rows[i];
             if row.len == 0 {
-                return i;
+                return (i, None);
             }
             if is_trivia(row.kind) {
                 i += 1;
                 continue;
             }
             match num_to_tok(row.kind) {
-                Some(Tok::LBrace) => {
-                    depth += 1;
-                    seen_brace = true;
-                }
-                Some(Tok::RBrace) => {
-                    depth -= 1;
-                    if depth <= 0 && seen_brace {
-                        return i + 1;
+                Some(Tok::LParen) => paren += 1,
+                Some(Tok::RParen) => {
+                    paren -= 1;
+                    if paren == 0 {
+                        saw_balanced_parens = true;
                     }
                 }
-                Some(Tok::Semi) if depth <= 0 && !seen_brace => return i + 1,
+                Some(Tok::LBracket) => bracket += 1,
+                Some(Tok::RBracket) => bracket -= 1,
+                Some(Tok::LBrace) => {
+                    // Function bodies come after balanced param parens.
+                    // Initializers (`= { ... }`) don't.
+                    if saw_balanced_parens && paren <= 0 && bracket <= 0 {
+                        brace += 1;
+                        i += 1;
+                        while i < self.rows.len() {
+                            let row = &self.rows[i];
+                            if row.len == 0 {
+                                return (i, None);
+                            }
+                            if !is_trivia(row.kind) {
+                                match num_to_tok(row.kind) {
+                                    Some(Tok::LBrace) => brace += 1,
+                                    Some(Tok::RBrace) => {
+                                        brace -= 1;
+                                        if brace == 0 {
+                                            return (i + 1, Some((start, i)));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            i += 1;
+                        }
+                        return (i, None);
+                    } else {
+                        brace += 1;
+                    }
+                }
+                Some(Tok::RBrace) => brace -= 1,
+                // Top-level semicolon outside all groups terminates globals.
+                Some(Tok::Semi)
+                    if paren <= 0 && bracket <= 0 && brace <= 0 =>
+                {
+                    return (i + 1, None);
+                }
                 _ => {}
             }
             i += 1;
         }
-        i
+        (i, None)
     }
 
     /// Decide Function vs GlobalVariable for a tail that ends in either a
@@ -362,17 +584,14 @@ impl<'a> ItemParser<'a> {
             }
             match num_to_tok(row.kind) {
                 Some(Tok::LParen) if depth == 0 && prev_ident => return true,
-                Some(Tok::LParen) | Some(Tok::LBracket) | Some(Tok::LBrace) => {
-                    depth += 1;
-                }
+                Some(Tok::LParen)
+                | Some(Tok::LBracket)
+                | Some(Tok::LBrace) => depth += 1,
                 Some(Tok::RParen)
                 | Some(Tok::RBracket)
-                | Some(Tok::RBrace) => {
-                    depth = depth.saturating_sub(1);
-                }
+                | Some(Tok::RBrace) => depth = depth.saturating_sub(1),
+                Some(Tok::Semi) if depth == 0 => return false,
                 Some(Tok::Ident) | Some(Tok::SelfType) => prev_ident = true,
-                // Qualifiers/type keywords keep the previous-ident state so
-                // `Vec<T> name(...)` still resolves as a function header.
                 _ => {}
             }
             i += 1;
@@ -393,18 +612,14 @@ impl<'a> ItemParser<'a> {
             _ => end,
         }
     }
-
-    fn next_is_lbrace(&self, index: usize) -> bool {
-        matches!(self.peek_sig(index), Some((_, Tok::LBrace)))
-    }
-}
-
-#[inline]
-fn is_trivia(kind: u16) -> bool {
-    kind >= Tok::TriviaLayout as u16
 }
 
 #[inline]
 fn num_to_tok(kind: u16) -> Option<Tok> {
     Tok::from_discriminant(kind)
+}
+
+#[inline]
+pub(crate) fn is_trivia(kind: u16) -> bool {
+    kind >= Tok::TriviaLayout as u16
 }

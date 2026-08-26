@@ -4,6 +4,7 @@
 //! item-level parser (see [`parser`]). Nothing Silver-specific may leak
 //! into `elise/`.
 
+pub mod body;
 pub mod lexspec;
 pub mod parser;
 

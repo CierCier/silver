@@ -87,18 +87,19 @@ fn item_parity_over_corpus() {
             .root()
             .children()
             .filter(|c| {
-            // Skip trivia leaves (kinds at/above the trivia base) and
-            // attribute wrappers: legacy attaches attributes to the
-            // following item rather than listing them separately.
-            c.kind() < Tok::TriviaLayout as u16
-                && c.kind() != NodeKind::Attribute as u16
-        })
+                // Skip trivia leaves (kinds at/above the trivia base) and
+                // attribute wrappers: legacy attaches attributes to the
+                // following item rather than listing them separately.
+                c.kind() < Tok::TriviaLayout as u16
+                    && c.kind() != NodeKind::Attribute as u16
+            })
             .map(|c| NodeKind::from_u16(c.kind()).map(|k| kind_name(k)).unwrap_or("UNKNOWN"))
             .collect();
 
         assert_eq!(
             elise_items, expected,
-            "{name}: item sequence differs"
+            "{name}: item sequence differs (raw kinds: {:?})",
+            graph.root().children().map(|c| c.kind()).collect::<Vec<_>>()
         );
         checked += 1;
     }

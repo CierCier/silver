@@ -67,6 +67,7 @@ impl<'a> TreeBuilder<'a> {
         for event in events {
             match *event {
                 Event::Enter(kind) => fold.stack.push((kind, Vec::new())),
+                Event::Nop => {}
                 Event::Advance(count) => {
                     for _ in 0..count {
                         // Trivia preceding this token joins the open node.
@@ -83,6 +84,14 @@ impl<'a> TreeBuilder<'a> {
                             .get(fold.leaf_pos)
                             .filter(|leaf| !leaf.is_trivia)
                         else {
+                            if std::env::var_os("ELISE_DBG_ADVANCE").is_some() {
+                                eprintln!(
+                                    "DBG advance overflow at leaf_pos={}/{} byte={}",
+                                    fold.leaf_pos,
+                                    fold.leaves.len(),
+                                    fold.leaves.iter().map(|l| l.width as usize).sum::<usize>()
+                                );
+                            }
                             break; // out of tokens: malformed events tolerated
                         };
                         let leaf = *leaf;
