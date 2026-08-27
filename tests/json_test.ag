@@ -105,6 +105,46 @@ i32 main() {
     Optional<f64> o4 = ofnone.unwrap();
     @assert(!(o4.is_some()), "o4.is_some()");
 
+    // --- strict number grammar tests (valid vs malformed) ---
+    Result<f64, JsonError> v_zero = @from_json(f64, "0");
+    Result<f64, JsonError> v_neg_zero = @from_json(f64, "-0");
+    Result<f64, JsonError> v_frac = @from_json(f64, "0.5");
+    Result<f64, JsonError> v_exp_plus = @from_json(f64, "1.5E+2");
+    Result<f64, JsonError> v_exp_minus = @from_json(f64, "1.5e-2");
+    @assert(!v_zero.failed() && v_zero.unwrap() == 0.0, "valid 0");
+    @assert(!v_neg_zero.failed() && v_neg_zero.unwrap() == 0.0, "valid -0");
+    @assert(!v_frac.failed() && v_frac.unwrap() == 0.5, "valid 0.5");
+    @assert(!v_exp_plus.failed() && v_exp_plus.unwrap() == 150.0, "valid 1.5E+2");
+    @assert(!v_exp_minus.failed() && v_exp_minus.unwrap() == 0.015, "valid 1.5e-2");
+
+    // Malformed exponents must fail
+    Result<f64, JsonError> bad_exp1 = @from_json(f64, "1e");
+    Result<f64, JsonError> bad_exp2 = @from_json(f64, "1e+");
+    Result<f64, JsonError> bad_exp3 = @from_json(f64, "1e-");
+    Result<f64, JsonError> bad_exp4 = @from_json(f64, "1E");
+    Result<f64, JsonError> bad_exp5 = @from_json(f64, "-2.5e");
+    @assert(bad_exp1.failed(), "malformed '1e' must fail");
+    @assert(bad_exp2.failed(), "malformed '1e+' must fail");
+    @assert(bad_exp3.failed(), "malformed '1e-' must fail");
+    @assert(bad_exp4.failed(), "malformed '1E' must fail");
+    @assert(bad_exp5.failed(), "malformed '-2.5e' must fail");
+
+    // Malformed decimals must fail
+    Result<f64, JsonError> bad_dec1 = @from_json(f64, "1.");
+    Result<f64, JsonError> bad_dec2 = @from_json(f64, "0.");
+    @assert(bad_dec1.failed(), "malformed '1.' must fail");
+    @assert(bad_dec2.failed(), "malformed '0.' must fail");
+
+    // Invalid leading zeros must fail
+    Result<i64, JsonError> bad_lead1 = @from_json(i64, "01");
+    Result<i64, JsonError> bad_lead2 = @from_json(i64, "00");
+    Result<i64, JsonError> bad_lead3 = @from_json(i64, "-05");
+    Result<f64, JsonError> bad_lead4 = @from_json(f64, "01.5");
+    @assert(bad_lead1.failed(), "leading zero '01' must fail");
+    @assert(bad_lead2.failed(), "leading zero '00' must fail");
+    @assert(bad_lead3.failed(), "leading zero '-05' must fail");
+    @assert(bad_lead4.failed(), "leading zero '01.5' must fail");
+
     STDOUT.write_str(encoded);
     STDOUT.write_str("\n");
     return 0;
