@@ -225,6 +225,22 @@ pub(crate) fn build_lsp_loader() -> ModuleLoader {
     }
     loader
 }
+/// Apply a sequence of LSP content changes to a document buffer.
+pub(crate) fn apply_document_changes(
+    doc: &mut String,
+    changes: impl IntoIterator<Item = TextDocumentContentChangeEvent>,
+) {
+    for change in changes {
+        if let Some(range) = change.range {
+            let start = position_to_byte(doc, range.start).min(doc.len());
+            let end = position_to_byte(doc, range.end).min(doc.len());
+            doc.replace_range(start..end, &change.text);
+        } else {
+            *doc = change.text;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +303,38 @@ mod tests {
             ),
             text.len()
         );
+    }
+
+    #[test]
+    fn incremental_change_insertion_and_replacement() {
+        let mut doc = "fn main() {\n    return 0;\n}\n".to_string();
+
+        // Insert `i32 ` before `main`
+        apply_document_changes(
+            &mut doc,
+            vec![TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position { line: 0, character: 3 },
+                    end: Position { line: 0, character: 3 },
+                }),
+                range_length: None,
+                text: "i32 ".to_string(),
+            }],
+        );
+        assert_eq!(doc, "fn i32 main() {\n    return 0;\n}\n");
+
+        // Replace `return 0;` with `return 42;`
+        apply_document_changes(
+            &mut doc,
+            vec![TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position { line: 1, character: 11 },
+                    end: Position { line: 1, character: 12 },
+                }),
+                range_length: None,
+                text: "42".to_string(),
+            }],
+        );
+        assert_eq!(doc, "fn i32 main() {\n    return 42;\n}\n");
     }
 }

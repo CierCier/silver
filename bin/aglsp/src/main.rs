@@ -26,6 +26,7 @@ use util::*;
 
 pub(crate) struct Backend {
     pub(crate) client: Client,
+    pub(crate) documents: Mutex<HashMap<Uri, String>>,
     /// Per‑URI analysis: source text, symbols, occurrences, expression types.
     pub(crate) cache: Mutex<HashMap<Uri, SymbolIndex>>,
     pub(crate) loader: ModuleLoader,
@@ -40,7 +41,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -77,17 +78,24 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+        self.documents.lock().insert(uri.clone(), text.clone());
         self.check_diagnostics(&uri, &text).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        if let Some(change) = params.content_changes.into_iter().last() {
-            self.check_diagnostics(&uri, &change.text).await;
-        }
+        let text = {
+            let mut docs = self.documents.lock();
+            let doc = docs.entry(uri.clone()).or_insert_with(String::new);
+            apply_document_changes(doc, params.content_changes);
+            doc.clone()
+        };
+        self.check_diagnostics(&uri, &text).await;
     }
 
-    async fn did_close(&self, _: DidCloseTextDocumentParams) {}
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.documents.lock().remove(&params.text_document.uri);
+    }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
@@ -311,6 +319,7 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
+        documents: Mutex::new(HashMap::default()),
         cache: Mutex::new(HashMap::default()),
         loader: build_lsp_loader(),
         file_cache: Mutex::new(HashMap::default()),

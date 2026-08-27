@@ -443,7 +443,7 @@ mod tests {
     use super::*;
     use agc::lexer;
     use agc::module_loader::ModuleLoader;
-    use agc::parser::{FileImportResolverHook, Parser};
+    use agc::parser::FileImportResolverHook;
     use agc::symbol_index::analyze;
 
     /// A selectively imported alias (`println as pln`) must appear in
@@ -455,9 +455,9 @@ mod tests {
         let path = std::path::Path::new("/tmp/lsp_sel_import_test.ag");
         let file_id = lexer::register_source(&path.display().to_string(), source);
         let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
-        let mut parser = Parser::new(tokens.clone());
-        let (mut program, parse_errors) = parser.parse_program();
-        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let graph = agc::grammar::parse_ag(source);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        assert!(!graph.has_errors(), "parse errors: {:?}", graph.errors());
 
         // Mirror the LSP diagnostics pipeline: run import lowering so the
         // alias clone is materialized into the program.

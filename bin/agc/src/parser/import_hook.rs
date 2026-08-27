@@ -8,7 +8,6 @@ use crate::module_artifact::ModuleArtifact;
 use crate::module_loader::{
     ModuleLoader, ResolvedSourceImportKind, import_path_to_string, validate_import_conflicts,
 };
-use crate::parser::Parser;
 use crate::parser::ast;
 
 /// Cache keyed by file path: (mtime_nanos, fully-parsed program).

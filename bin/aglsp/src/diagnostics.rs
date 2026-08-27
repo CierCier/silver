@@ -1,5 +1,5 @@
 use agc::lexer;
-use agc::parser::{FileImportResolverHook, Parser};
+use agc::parser::FileImportResolverHook;
 use agc::semantic::typeck::TypeChecker;
 use agc::symbol_index::{SymbolIndex, analyze};
 use agc::symbol_table::CompilerSymbolTable;
@@ -59,21 +59,24 @@ impl Backend {
             }
         };
 
-        let mut parser = Parser::new(tokens.clone());
-        let (mut program, parse_errors) = parser.parse_program();
-
-        let mut diagnostics: Vec<Diagnostic> = parse_errors
-            .iter()
-            .map(|e| Diagnostic {
-                range: span_to_range(text, e.span()),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: match e {
-                    agc::parser::ParseError::InvalidSyntax { message, .. } => message.clone(),
-                    _ => format!("{:?}", e),
-                },
-                ..Default::default()
-            })
-            .collect();
+        let (mut program, mut diagnostics) = {
+            let graph = agc::grammar::parse_ag(text);
+            let errors: Vec<Diagnostic> = graph
+                .errors()
+                .iter()
+                .map(|e| Diagnostic {
+                    range: Range {
+                        start: byte_to_position(text, e.start as usize),
+                        end: byte_to_position(text, e.end as usize),
+                    },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: e.message.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            let prog = agc::grammar::lower_source_graph(&graph, file_id as usize);
+            (prog, errors)
+        };
 
         let base_dir = source_path.as_ref().and_then(|p| p.parent());
         // Keep the user's import span before lowering mutates the item list.
@@ -191,8 +194,6 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agc::parser::Parser;
-    use agc::symbol_index::analyze;
 
     /// The frontend pipeline used by `check_diagnostics` for a buffer with no
     /// imports: lex → parse → cfg gate/fold → type-check. Returns the type
@@ -200,10 +201,9 @@ mod tests {
     /// would.
     fn frontend_type_errors(source: &str) -> Vec<String> {
         let file_id = lexer::register_source("/tmp/lsp_cfg_test.ag", source);
-        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
-        let mut parser = Parser::new(tokens.clone());
-        let (mut program, parse_errors) = parser.parse_program();
-        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let graph = agc::grammar::parse_ag(source);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        assert!(!graph.has_errors(), "parse errors: {:?}", graph.errors());
 
         let mut cfg_set = agc::cfg::CfgSet::parse(&[]);
         agc::cfg::add_derived_cfgs(&mut cfg_set, None, None);

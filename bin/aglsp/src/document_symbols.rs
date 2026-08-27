@@ -97,7 +97,6 @@ fn lsp_kind(kind: SymKind) -> SymbolKind {
 mod tests {
     use super::*;
     use agc::lexer;
-    use agc::parser::Parser;
     use agc::semantic::typeck::TypeChecker;
     use agc::symbol_index::analyze;
     use agc::symbol_table::CompilerSymbolTable;
@@ -105,9 +104,9 @@ mod tests {
     fn analyze_src(source: &str) -> SymbolIndex {
         let file_id = lexer::register_source("/tmp/test_buffer.ag", source);
         let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
-        let mut parser = Parser::new(tokens.clone());
-        let (mut program, parse_errors) = parser.parse_program();
-        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let graph = agc::grammar::parse_ag(source);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        assert!(!graph.has_errors(), "parse errors: {:?}", graph.errors());
         let mut tc = TypeChecker::new();
         let mut table = CompilerSymbolTable::new();
         let (_, _) = tc.check_program_with_table(&mut program, &mut table);
