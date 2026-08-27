@@ -6,7 +6,9 @@
 
 pub mod body;
 pub mod lexspec;
+pub mod lower;
 pub mod parser;
 
 pub use lexspec::{SilverLexSpec, Tok};
+pub use lower::lower_source_graph;
 pub use parser::{parse_ag, NodeKind};
