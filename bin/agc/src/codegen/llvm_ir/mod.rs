@@ -149,7 +149,7 @@ pub struct LlvmIrGenerator<'ctx> {
     /// name. The lazy generic-impl instantiation path emits nested instances
     /// (e.g. `realloc<i64>` inside `Vec<i64>.push`) that the semantic
     /// monomorph pass never requested.
-    pub(crate) generic_function_templates: HashMap<String, ast::FunctionItem>,
+    pub(crate) generic_function_templates: HashMap<String, Vec<ast::FunctionItem>>,
     pub(crate) drop_trait_impl_owners: HashSet<String>,
     pub(crate) loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
     pub(crate) loop_defers_base: Vec<usize>,

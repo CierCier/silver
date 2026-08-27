@@ -5198,11 +5198,15 @@ impl TypeChecker {
     /// known concrete type) — the operands whose operators become implicit
     /// guards on generic functions.
     fn is_bare_type_param(&self, ty: &Type) -> bool {
-        matches!(
-            ty,
-            Type::Named { path, generics }
-                if path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0])
-        )
+        match ty {
+            Type::Named { path, generics } => {
+                path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0])
+            }
+            Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+                self.is_bare_type_param(inner)
+            }
+            _ => false,
+        }
     }
 
     fn is_generic_operand(&self, left: &Type, right: &Type) -> bool {
@@ -5687,6 +5691,7 @@ impl TypeChecker {
         match ty {
             Type::Reference { inner, .. } | Type::Pointer { inner, .. } => self.method_key(inner),
             Type::Named { path, .. } => path.join("::"),
+            Type::Slice { .. } => "Slice".to_string(),
             _ => ty.canonical_key(),
         }
     }
@@ -5695,6 +5700,23 @@ impl TypeChecker {
         let mut current = object_ty;
         while let Type::Reference { inner, .. } | Type::Pointer { inner, .. } = current {
             current = inner.as_ref();
+        }
+
+        // Builtin Slice<T> has pseudo-fields `data: T*` and `len: i64`.
+        if let Type::Slice { element } = current {
+            match field_name {
+                "data" => {
+                    return Some(Type::Pointer {
+                        is_mutable: true,
+                        is_volatile: false,
+                        inner: Box::new((**element).clone()),
+                    });
+                }
+                "len" => {
+                    return Some(Type::Primitive(crate::parser::ast::PrimitiveType::I64));
+                }
+                _ => return None,
+            }
         }
 
         let Type::Named { path, generics } = current else {

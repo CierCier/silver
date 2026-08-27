@@ -518,6 +518,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.loop_stack.pop();
 
                 self.builder.position_at_end(end_bb);
+                self.emit_defers(1)?;
                 self.pop_scope();
                 Ok(())
             }
@@ -530,6 +531,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let next_name = "__forin_next";
 
                 let iterable_val = self.emit_expression_value(iterable)?;
+                if matches!(mode, ast::IterAccessMode::ByValue) {
+                    if let ast::ExpressionKind::Identifier(ident) = iterable.kind.as_ref() {
+                        if let Some(flag_ptr) =
+                            self.lookup_variable(&ident.name).and_then(|v| v.drop_flag)
+                        {
+                            self.builder
+                                .build_store(flag_ptr, self.context.bool_type().const_int(0, false))
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to clear drop flag: {e}"))
+                                })?;
+                        }
+                        self.clear_field_flags(&ident.name)?;
+                    }
+                }
                 let iterable_llvm_ty = iterable_val.get_type();
                 let iterable_ast_ty = self
                     .resolve_receiver_type(iterable)
@@ -655,6 +670,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
 
+                let mut found_ast_ty = _item_type.cloned();
                 let _item_llvm_ty = {
                     let owners = self.receiver_owner_candidates(&iter_expr);
                     let mut found = None;
@@ -682,6 +698,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 _ => None,
                             };
                             if let Some(inner_ty) = inner {
+                                if found_ast_ty.is_none() {
+                                    found_ast_ty = Some(inner_ty.clone());
+                                }
                                 found = Some(self.lower_basic_type(inner_ty)?);
                                 break;
                             }
@@ -694,7 +713,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_extract_value(opt_sv, 1, &binding.name)
                     .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
-                let ast_ty = self.infer_ast_type_from_value(&thing_loaded, span);
+                let ast_ty = found_ast_ty.unwrap_or_else(|| self.infer_ast_type_from_value(&thing_loaded, span));
                 let debug_ty = ast_ty.clone();
                 let var_ptr =
                     self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
@@ -739,6 +758,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.loop_stack.pop();
 
                 self.builder.position_at_end(end_bb);
+                self.emit_defers(1)?;
                 self.pop_scope();
                 Ok(())
             }

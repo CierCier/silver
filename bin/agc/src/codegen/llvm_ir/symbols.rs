@@ -946,12 +946,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         while i < pending.len() {
             let (fn_name, args, arg_count) = pending[i].clone();
             i += 1;
-            let Some(template) = self.generic_function_templates.get(&fn_name).cloned() else {
+            let Some(templates) = self.generic_function_templates.get(&fn_name) else {
                 continue;
             };
-            if template.parameters.len() != arg_count {
+            let Some(template) = templates
+                .iter()
+                .find(|t| t.parameters.len() == arg_count)
+                .cloned()
+            else {
                 continue;
-            }
+            };
             let Some(generics) = &template.generics else {
                 continue;
             };

@@ -720,7 +720,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 }
                 ast::ItemKind::Function(func) if func.generics.is_some() => {
                     self.generic_function_templates
-                        .insert(func.name.name.clone(), func.clone());
+                        .entry(func.name.name.clone())
+                        .or_default()
+                        .push(func.clone());
                 }
                 _ => {}
             }

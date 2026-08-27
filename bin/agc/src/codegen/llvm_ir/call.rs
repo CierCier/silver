@@ -181,11 +181,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let llvm_name = if let Some(generics) = explicit_generics {
             if !generics.is_empty() {
                 let type_args: Vec<Type> = generics.iter().map(Type::from_ast).collect();
-                let mangled = crate::semantic::monomorph::mangle_name(&fn_name, &type_args);
-                self.imported_function_links
-                    .get(&mangled)
-                    .cloned()
-                    .unwrap_or(mangled)
+                let arg_keys = type_args
+                    .iter()
+                    .map(|ty| crate::mangling::sanitize_type_key(&ty.canonical_key()))
+                    .collect::<Vec<_>>();
+                let base_prefix =
+                    format!("{fn_name}__{}_{}__", arg_keys.len(), arg_keys.join("_"));
+                let param_prefix = format!("{base_prefix}{}_", arguments.len());
+                let found = self
+                    .function_name_to_symbol
+                    .keys()
+                    .filter(|name| name.starts_with(&param_prefix))
+                    .min_by_key(|name| name.len())
+                    .cloned();
+                if let Some(mangled) = found {
+                    self.imported_function_links
+                        .get(&mangled)
+                        .cloned()
+                        .unwrap_or(mangled)
+                } else {
+                    let mangled = crate::semantic::monomorph::mangle_name(&fn_name, &type_args);
+                    self.imported_function_links
+                        .get(&mangled)
+                        .cloned()
+                        .unwrap_or(mangled)
+                }
             } else {
                 self.imported_function_links
                     .get(&fn_name)

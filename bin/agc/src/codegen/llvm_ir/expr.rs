@@ -3085,6 +3085,58 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
+                // Fast path for builtin Slice<T> pseudo-fields `data` and `len`.
+                // Handles Slice value, &Slice, and Slice* uniformly.
+                let slice_field = match object_ty.kind.as_ref() {
+                    ast::TypeKind::Slice(slice) => Some((object_ptr, slice.element_type.clone(), false)),
+                    ast::TypeKind::Reference(reference) => {
+                        if let ast::TypeKind::Slice(slice) = reference.inner.kind.as_ref() {
+                            let ref_llvm_ty = self.lower_basic_type(&object_ty)?;
+                            let loaded = self.builder.build_load(ref_llvm_ty, object_ptr, "field.ref.load").map_err(|e| {
+                                CodegenError::with_span(format!("failed to load reference receiver: {e}"), object.span)
+                            })?;
+                            let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
+                                return Err(CodegenError::with_span("reference receiver did not lower to a pointer", object.span));
+                            };
+                            Some((struct_ptr, slice.element_type.clone(), true))
+                        } else { None }
+                    }
+                    ast::TypeKind::Pointer(pointer) => {
+                        if let ast::TypeKind::Slice(slice) = pointer.inner.kind.as_ref() {
+                            let ptr_llvm_ty = self.lower_basic_type(&object_ty)?;
+                            let loaded = self.builder.build_load(ptr_llvm_ty, object_ptr, "field.ptr.load").map_err(|e| {
+                                CodegenError::with_span(format!("failed to load pointer receiver: {e}"), object.span)
+                            })?;
+                            let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
+                                return Err(CodegenError::with_span("pointer receiver did not lower to a pointer", object.span));
+                            };
+                            Some((struct_ptr, slice.element_type.clone(), true))
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some((slice_ptr, elem_ty, _loaded)) = slice_field {
+                    let (field_index, field_ty) = match field.name.as_str() {
+                        "data" => (0u32, ast::Type { kind: Box::new(ast::TypeKind::Pointer(ast::PointerType { is_mutable: true, is_volatile: false, inner: elem_ty.clone() } )), span: field.span }),
+                        "len" => (1u32, ast::Type { kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)), span: field.span }),
+                        _ => {
+                            return Err(CodegenError::with_span(format!("unknown field `{}` on `Slice`", field.name), field.span));
+                        }
+                    };
+                    let slice_llvm_ty = self.lower_basic_type(&object_ty)?;
+                    // For reference/pointer cases object_ty is not Slice itself; lower the inner Slice type for GEP.
+                    let gep_ty = if matches!(object_ty.kind.as_ref(), ast::TypeKind::Slice(_)) {
+                        slice_llvm_ty
+                    } else {
+                        let inner_slice_ty = ast::Type { kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType { element_type: elem_ty.clone() }))), span: object.span };
+                        self.lower_basic_type(&inner_slice_ty)?
+                    };
+                    let struct_ty = gep_ty.into_struct_type();
+                    let field_ptr = self.builder.build_struct_gep(struct_ty, slice_ptr, field_index, &field.name).map_err(|e| {
+                        CodegenError::with_span(format!("failed struct field access: {e}"), field.span)
+                    })?;
+                    return Ok((field_ptr, field_ty));
+                }
                 let (struct_ptr, named) = match object_ty.kind.as_ref() {
                     ast::TypeKind::Named(named) => (object_ptr, named),
                     ast::TypeKind::Reference(reference) => {
