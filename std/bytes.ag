@@ -1,11 +1,10 @@
-// std/bytes.ag — Raw byte buffer (no encoding assumptions).
-// Bytes is an owned growable sequence of u8 values, similar to Rust's Vec<u8>
-// but with a simpler interface focused on byte-oriented I/O and binary data.
 import std.mem.alloc;
 import std.mem.drop;
 import std.mem.memory;
 import std.ops;
-
+import std.iter;
+import std.optional;
+import std.slice;
 struct Bytes {
     u8* data;
     i64 len;
@@ -17,12 +16,22 @@ impl Bytes {
         return Bytes.with_capacity(0);
     }
 
+    Bytes from_str(str text) {
+        i64 n = strlen((const u8*)text);
+        Bytes b = Bytes.with_capacity(n);
+        if (n > 0) {
+            memcpy((void*)b.data, (const void*)text, n);
+            b.len = n;
+        }
+        return b;
+    }
+
     Bytes with_capacity(i64 capacity) {
         Bytes b;
         b.len = 0;
         b.cap = capacity;
         if (capacity > 0) {
-            b.data = alloc<u8>(capacity);
+            b.data = alloc_n<u8>(capacity);
         } else {
             b.data = (u8*)0;
         }
@@ -207,5 +216,85 @@ impl IndexedAccess for Bytes {
     void __index_set(Bytes* self, i64 index, u8 value) {
         if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = value;
+    }
+}
+
+
+struct BytesIter {
+    u8* data;
+    i64 len;
+    i64 idx;
+}
+
+impl Iterator for BytesIter {
+    type Item = u8;
+    Optional<u8> next(BytesIter* self) {
+        if (self.idx < self.len) {
+            u8 v = self.data[self.idx];
+            self.idx = self.idx + 1;
+            return Optional<u8>.some(v);
+        }
+        return Optional<u8>.none();
+    }
+}
+
+struct BytesIntoIter {
+    u8* data;
+    i64 len;
+    i64 idx;
+}
+
+impl Iterator for BytesIntoIter {
+    type Item = u8;
+    Optional<u8> next(BytesIntoIter* self) {
+        if (self.idx < self.len) {
+            u8 v = self.data[self.idx];
+            self.idx = self.idx + 1;
+            return Optional<u8>.some(v);
+        }
+        return Optional<u8>.none();
+    }
+}
+
+impl Drop for BytesIntoIter {
+    void drop(BytesIntoIter* self) {
+        if (self.data != (u8*)0) {
+            free(self.data);
+            self.data = (u8*)0;
+        }
+        self.len = 0;
+        self.idx = 0;
+    }
+}
+
+impl IntoIterator for Bytes {
+    type Item = u8;
+    type IntoIter = BytesIntoIter;
+    BytesIntoIter into_iter(Bytes self) {
+        BytesIntoIter it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = 0;
+        self.data = (u8*)0;
+        self.len = 0;
+        self.cap = 0;
+        return it;
+    }
+}
+
+impl Bytes {
+    BytesIter iter(&Bytes self) {
+        BytesIter it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = 0;
+        return it;
+    }
+
+    Slice<u8> as_slice(&Bytes self) {
+        Slice<u8> s;
+        s.data = self.data;
+        s.len = self.len;
+        return s;
     }
 }

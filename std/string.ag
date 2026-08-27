@@ -24,7 +24,7 @@ impl String {
         s.len = 0;
         s.capacity = capacity;
         if (capacity > 0) {
-            s.data = alloc<u8>(capacity);
+            s.data = alloc_n<u8>(capacity);
             s.data[0] = (u8)0;
         } else {
             s.data = (u8*)0;
@@ -681,5 +681,88 @@ impl Iterator for SplitIter {
         self.data[end] = (u8)0;
         self.has_saved = true;
         return Optional<str>.some((str)&self.data[start]);
+    }
+}
+
+/// Iterator over String byte sequence (borrowed).
+struct StringBytesIter {
+    u8* data;
+    i64 len;
+    i64 idx;
+}
+
+impl Iterator for StringBytesIter {
+    type Item = u8;
+    Optional<u8> next(StringBytesIter* self) {
+        if (self.idx < self.len) {
+            u8 v = self.data[self.idx];
+            self.idx = self.idx + 1;
+            return Optional<u8>.some(v);
+        }
+        return Optional<u8>.none();
+    }
+}
+
+/// Consuming iterator over String bytes (owns backing buffer).
+struct StringIntoIter {
+    u8* data;
+    i64 len;
+    i64 capacity;
+    i64 idx;
+}
+
+impl Iterator for StringIntoIter {
+    type Item = u8;
+    Optional<u8> next(StringIntoIter* self) {
+        if (self.idx < self.len) {
+            u8 v = self.data[self.idx];
+            self.idx = self.idx + 1;
+            return Optional<u8>.some(v);
+        }
+        return Optional<u8>.none();
+    }
+}
+
+impl Drop for StringIntoIter {
+    void drop(StringIntoIter* self) {
+        if (self.data != (u8*)0) {
+            free(self.data);
+            self.data = (u8*)0;
+        }
+        self.len = 0;
+        self.capacity = 0;
+        self.idx = 0;
+    }
+}
+
+impl IntoIterator for String {
+    type Item = u8;
+    type IntoIter = StringIntoIter;
+    StringIntoIter into_iter(String self) {
+        StringIntoIter it;
+        it.data = self.data;
+        it.len = self.len;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        self.data = (u8*)0;
+        self.len = 0;
+        self.capacity = 0;
+        return it;
+    }
+}
+
+impl String {
+    /// Return a borrowed iterator over the bytes of this string.
+    StringBytesIter bytes(&String self) {
+        StringBytesIter it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = 0;
+        return it;
+    }
+
+    /// Return a borrowed iterator over the bytes of this string.
+    StringBytesIter iter(&String self) {
+        return self.bytes();
     }
 }

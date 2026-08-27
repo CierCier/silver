@@ -3,6 +3,7 @@ import std.mem.alloc;
 import std.hash;
 import std.io.file;
 import std.mem.drop;
+import std.iter;
 
 // Internal entry state: Swiss Table 16-byte metadata control groups.
 // Control byte values:
@@ -118,10 +119,10 @@ impl HashMap<K, V> {
             new_cap = new_cap * 2;
         }
 
-        K* new_keys = alloc<K>(new_cap);
-        V* new_vals = alloc<V>(new_cap);
-        // Extra 16 bytes for seamless SIMD group wrapping
-        u8* new_ctrl = alloc<u8>(new_cap + 16);
+        K* new_keys = alloc_n<K>(new_cap);
+        V* new_vals = alloc_n<V>(new_cap);
+        // +16 for SIMD control byte padding
+        u8* new_ctrl = alloc_n<u8>(new_cap + 16);
         for (i64 j = 0; j < new_cap + 16; j = j + 1) {
             new_ctrl[j] = CTRL_EMPTY;
         }
@@ -343,3 +344,114 @@ impl<K, V> Drop for HashMap<K, V> {
         self.len = 0;
     }
 }
+
+struct HashMapEntry<K, V> {
+    K key;
+    V value;
+}
+
+struct HashMapIntoIter<K, V> {
+    K* keys;
+    V* values;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+
+impl<K, V> IntoIterator for HashMap<K, V> {
+    type Item = HashMapEntry<K, V>;
+    type IntoIter = HashMapIntoIter<K, V>;
+    HashMapIntoIter<K, V> into_iter(HashMap<K, V> self) {
+        HashMapIntoIter<K, V> it;
+        it.keys = self.keys;
+        it.values = self.values;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        self.keys = (K*)0;
+        self.values = (V*)0;
+        self.ctrl = (u8*)0;
+        self.capacity = 0;
+        self.len = 0;
+        return it;
+    }
+}
+
+impl<K, V> Drop for HashMapIntoIter<K, V> {
+    void drop(HashMapIntoIter<K, V>* self) {
+        if (self.ctrl != (u8*)0) {
+            free(self.keys);
+            free(self.values);
+            free(self.ctrl);
+            self.keys = (K*)0;
+            self.values = (V*)0;
+            self.ctrl = (u8*)0;
+        }
+        self.capacity = 0;
+        self.idx = 0;
+    }
+}
+
+impl<K, V> Iterator for HashMapIntoIter<K, V> {
+    type Item = HashMapEntry<K, V>;
+    Optional<HashMapEntry<K, V>> next(HashMapIntoIter<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<HashMapEntry<K, V>>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                HashMapEntry<K, V> e;
+                e.key = self.keys[self.idx];
+                e.value = self.values[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<HashMapEntry<K, V>>.some(e);
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<HashMapEntry<K, V>>.none();
+    }
+}
+
+struct HashMapIter<K, V> {
+    K* keys;
+    V* values;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+
+impl<K, V> HashMap<K, V> {
+    HashMapIter<K, V> iter(&HashMap<K, V> self) {
+        HashMapIter<K, V> it;
+        it.keys = self.keys;
+        it.values = self.values;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        return it;
+    }
+}
+
+impl<K, V> Iterator for HashMapIter<K, V> {
+    type Item = HashMapEntry<K, V>;
+    Optional<HashMapEntry<K, V>> next(HashMapIter<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<HashMapEntry<K, V>>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                HashMapEntry<K, V> e;
+                e.key = self.keys[self.idx];
+                e.value = self.values[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<HashMapEntry<K, V>>.some(e);
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<HashMapEntry<K, V>>.none();
+    }
+}
+
+

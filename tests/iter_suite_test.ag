@@ -1,0 +1,267 @@
+// Comprehensive test suite for Silver zero-cost iterators and collection adapters.
+import std.test;
+import std.mem;
+import std.slice;
+import std.string;
+import std.bytes;
+import std.map;
+import std.iter;
+
+i64 double_val(i64 x) {
+    return x * 2;
+}
+
+bool is_even(i64 x) {
+    return x % 2 == 0;
+}
+
+bool is_positive(i64 x) {
+    return x > 0;
+}
+
+bool is_four(i64 x) {
+    return x == 4;
+}
+
+Optional<i64> halve_if_even(i64 x) {
+    if (x % 2 == 0) {
+        return Optional<i64>.some(x / 2);
+    }
+    return Optional<i64>.none();
+}
+
+i64 add_pairs(i64 acc, i64 x) {
+    return acc + x;
+}
+
+i64 multiply_pairs(i64 acc, i64 x) {
+    return acc * x;
+}
+
+i32 main() {
+    STDOUT.write_str("=== Zero-Cost Iterator & Collection Tests ===\n\n");
+
+    // 1. Vec: for-in loop over Vec (IntoIterator) and consumers
+    STDOUT.write_str("--- 1. Vec Iteration & Adapters ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push((i64)1);
+        v.push((i64)2);
+        v.push((i64)3);
+        v.push((i64)4);
+        v.push((i64)5);
+
+        i64 for_sum = 0;
+        for x in v {
+            for_sum = for_sum + x;
+        }
+        assert_eq_i64(15, for_sum, "for-in over Vec yields 15");
+    }
+
+    {
+        Vec<i64> v2 = Vec<i64>.new();
+        v2.push((i64)10);
+        v2.push((i64)20);
+        v2.push((i64)30);
+        v2.push((i64)40);
+
+        SliceIter<i64> it = v2.iter();
+        assert_eq_i64(4, iter_count<SliceIter<i64>, i64>(&it), "iter_count of v2 = 4");
+
+        SliceIter<i64> it_sum = v2.iter();
+        assert_eq_i64(100, iter_sum_i64<SliceIter<i64>>(&it_sum), "iter_sum_i64 of v2 = 100");
+
+        SliceIter<i64> it_prod = v2.iter();
+        assert_eq_i64(240000, iter_product_i64<SliceIter<i64>>(&it_prod), "iter_product_i64 of v2 = 240000");
+
+        v2.drop();
+    }
+
+    // 2. Slice Iteration and Combinators
+    STDOUT.write_str("\n--- 2. Slice Adapters ---\n");
+    {
+        i64* raw_arr = alloc_n<i64>((i64)6);
+        raw_arr[0] = (i64)1;
+        raw_arr[1] = (i64)2;
+        raw_arr[2] = (i64)3;
+        raw_arr[3] = (i64)4;
+        raw_arr[4] = (i64)5;
+        raw_arr[5] = (i64)6;
+
+        Slice<i64> sl = Slice<i64>.from_raw(raw_arr, (i64)6);
+
+        // map
+        SliceIter<i64> map_base = sl.iter();
+        MapIter<SliceIter<i64>, i64, i64> mapped = iter_map<SliceIter<i64>, i64, i64>(&map_base, double_val);
+        assert_eq_i64(42, iter_sum_i64<MapIter<SliceIter<i64>, i64, i64>>(&mapped), "map(double) sum is 42");
+
+        // filter
+        SliceIter<i64> filter_base = sl.iter();
+        FilterIter<SliceIter<i64>, i64> filtered = iter_filter<SliceIter<i64>, i64>(&filter_base, is_even);
+        assert_eq_i64(12, iter_sum_i64<FilterIter<SliceIter<i64>, i64>>(&filtered), "filter(is_even) sum is 12");
+
+        // filter_map
+        SliceIter<i64> fmap_base = sl.iter();
+        FilterMapIter<SliceIter<i64>, i64, i64> fmapped = iter_filter_map<SliceIter<i64>, i64, i64>(&fmap_base, halve_if_even);
+        assert_eq_i64(6, iter_sum_i64<FilterMapIter<SliceIter<i64>, i64, i64>>(&fmapped), "filter_map(halve_if_even) sum is 6");
+
+        // take
+        SliceIter<i64> take_base = sl.iter();
+        TakeIter<SliceIter<i64>, i64> taken = iter_take<SliceIter<i64>, i64>(&take_base, (i64)3);
+        assert_eq_i64(6, iter_sum_i64<TakeIter<SliceIter<i64>, i64>>(&taken), "take(3) sum is 6");
+
+        // skip
+        SliceIter<i64> skip_base = sl.iter();
+        SkipIter<SliceIter<i64>, i64> skipped = iter_skip<SliceIter<i64>, i64>(&skip_base, (i64)3);
+        assert_eq_i64(15, iter_sum_i64<SkipIter<SliceIter<i64>, i64>>(&skipped), "skip(3) sum is 15");
+
+        // enumerate
+        SliceIter<i64> enum_base = sl.iter();
+        EnumerateIter<SliceIter<i64>, i64> enumerated = iter_enumerate<SliceIter<i64>, i64>(&enum_base);
+        Optional<Enumerated<i64>> first_enum = enumerated.next();
+        assert_true(first_enum.is_some(), "first_enum is some");
+        Enumerated<i64> enum_val = first_enum.unwrap();
+        assert_eq_i64(0, enum_val.index, "first enumerated index is 0");
+        assert_eq_i64(1, enum_val.value, "first enumerated value is 1");
+
+        // rev
+        RevIter<i64> revved = iter_rev<i64>(sl.data, sl.len);
+        Optional<i64> first_rev = revved.next();
+        assert_true(first_rev.is_some(), "first_rev is some");
+        assert_eq_i64(6, first_rev.unwrap(), "first reversed element is 6");
+
+        free((void*)raw_arr);
+    }
+
+    // 3. Chain & Zip
+    STDOUT.write_str("\n--- 3. Chain & Zip Adapters ---\n");
+    {
+        Vec<i64> a = Vec<i64>.new();
+        a.push((i64)1);
+        a.push((i64)2);
+
+        Vec<i64> b = Vec<i64>.new();
+        b.push((i64)3);
+        b.push((i64)4);
+
+        SliceIter<i64> it_a = a.iter();
+        SliceIter<i64> it_b = b.iter();
+        ChainIter<SliceIter<i64>, SliceIter<i64>, i64> chained = iter_chain<SliceIter<i64>, SliceIter<i64>, i64>(&it_a, &it_b);
+        assert_eq_i64(10, iter_sum_i64<ChainIter<SliceIter<i64>, SliceIter<i64>, i64>>(&chained), "chain(a, b) sum is 10");
+
+        SliceIter<i64> it_z1 = a.iter();
+        SliceIter<i64> it_z2 = b.iter();
+        ZipIter<SliceIter<i64>, SliceIter<i64>, i64, i64> zipped = iter_zip<SliceIter<i64>, SliceIter<i64>, i64, i64>(&it_z1, &it_z2);
+        Optional<Zipped<i64, i64>> zpair = zipped.next();
+        assert_true(zpair.is_some(), "zipped pair is some");
+        Zipped<i64, i64> pair = zpair.unwrap();
+        assert_eq_i64(1, pair.a, "zipped first is 1");
+        assert_eq_i64(3, pair.b, "zipped second is 3");
+
+        a.drop();
+        b.drop();
+    }
+
+    // 4. Consumers: fold, reduce, any, all, find, position, collect
+    STDOUT.write_str("\n--- 4. Consumers & Predicates ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push((i64)2);
+        v.push((i64)4);
+        v.push((i64)6);
+
+        SliceIter<i64> it_fold = v.iter();
+        i64 folded = iter_fold<SliceIter<i64>, i64, i64>(&it_fold, (i64)100, add_pairs);
+        assert_eq_i64(112, folded, "fold with initial 100 = 112");
+
+        SliceIter<i64> it_red = v.iter();
+        i64 reduced = iter_reduce<SliceIter<i64>, i64>(&it_red, multiply_pairs);
+        assert_eq_i64(48, reduced, "reduce(multiply) = 48");
+
+        SliceIter<i64> it_any = v.iter();
+        assert_true(iter_any<SliceIter<i64>, i64>(&it_any, is_even), "any is_even is true");
+
+        SliceIter<i64> it_all = v.iter();
+        assert_true(iter_all<SliceIter<i64>, i64>(&it_all, is_positive), "all is_positive is true");
+
+        SliceIter<i64> it_find = v.iter();
+        Optional<i64> found = iter_find<SliceIter<i64>, i64>(&it_find, is_even);
+        assert_true(found.is_some(), "find is some");
+        assert_eq_i64(2, found.unwrap(), "find returned 2");
+
+        SliceIter<i64> it_pos = v.iter();
+        assert_eq_i64(1, iter_position<SliceIter<i64>, i64>(&it_pos, is_four), "position of 4 is index 1");
+
+        // collect into new Vec
+        SliceIter<i64> it_coll = v.iter();
+        Vec<i64> collected = iter_collect<SliceIter<i64>, i64>(&it_coll);
+        assert_eq_i64(3, collected.len(), "collected len is 3");
+        assert_eq_i64(2, collected.get((i64)0), "collected[0] = 2");
+        assert_eq_i64(4, collected.get((i64)1), "collected[1] = 4");
+        assert_eq_i64(6, collected.get((i64)2), "collected[2] = 6");
+
+        collected.drop();
+        v.drop();
+    }
+
+    // 5. String Iterators
+    STDOUT.write_str("\n--- 5. String Character & Byte Iterators ---\n");
+    {
+        String s = String.from_str("Hello");
+        StringBytesIter byte_it = s.bytes();
+        assert_eq_i64(5, iter_count<StringBytesIter, u8>(&byte_it), "String bytes count is 5");
+
+        StringBytesIter byte_it2 = s.bytes();
+        Optional<u8> first_b = byte_it2.next();
+        assert_true(first_b.is_some(), "first byte is some");
+        assert_eq_i32((i32)72, (i32)first_b.unwrap(), "first byte is 'H' (72)");
+
+        s.drop();
+    }
+
+    // 6. Bytes Buffer Iterators
+    STDOUT.write_str("\n--- 6. Bytes Buffer Iterators ---\n");
+    {
+        Bytes b = Bytes.with_capacity((i64)4);
+        b.push((u8)10);
+        b.push((u8)20);
+        b.push((u8)30);
+
+        BytesIter b_it = b.iter();
+        assert_eq_i64(3, iter_count<BytesIter, u8>(&b_it), "Bytes iter_count is 3");
+
+        b.drop();
+    }
+
+    // 7. HashMap Iteration
+    STDOUT.write_str("\n--- 7. HashMap Iteration ---\n");
+    {
+        HashMap<i32, i64> map = HashMap<i32, i64>.new();
+        map.insert(1, (i64)100);
+        map.insert(2, (i64)200);
+        map.insert(3, (i64)300);
+
+        i64 map_sum = 0;
+        for entry in map {
+            map_sum = map_sum + entry.value;
+        }
+        assert_eq_i64(600, map_sum, "for-in over HashMap yields 600");
+
+        HashMap<i32, i64> map2 = HashMap<i32, i64>.new();
+        map2.insert(10, (i64)1000);
+        map2.insert(20, (i64)2000);
+
+        HashMapIter<i32, i64> it = map2.iter();
+        i64 count = 0;
+        while (true) {
+            Optional<HashMapEntry<i32, i64>> entry_opt = it.next();
+            if (entry_opt.is_none()) { break; }
+            count = count + 1;
+        }
+        assert_eq_i64(2, count, "HashMap iter count is 2");
+
+        map2.drop();
+    }
+
+    return done();
+}

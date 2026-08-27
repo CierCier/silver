@@ -3,6 +3,7 @@
 // Memory management (malloc/realloc/free) is linked from the C runtime;
 // callers pay only for elements they push.  O(1) amortized push, O(1) index.
 //
+import std.slice;
 // A Vec<T>'s drop method frees the backing buffer automatically.
 //
 // LIMITATIONS
@@ -212,22 +213,10 @@ struct VecIter<T> {
     i64 idx;
 }
 
-impl<T> Drop for VecIter<T> {
-    void drop(VecIter<T>* self) {
-        if (self.data != (T*)0) {
-            free(self.data);
-            self.data = (T*)0;
-        }
-        self.len = 0;
-        self.idx = 0;
-    }
-}
-
-impl<T> Vec<T> {
-    /// Consume the Vec and return an iterator over its elements. The
-    /// backing buffer transfers to the iterator, which frees it on drop
-    /// (the Vec's fields are cleared so its own drop is a no-op).
-    VecIter<T> into_iter(Vec<T>* self) {
+impl<T> IntoIterator for Vec<T> {
+    type Item = T;
+    type IntoIter = VecIter<T>;
+    VecIter<T> into_iter(Vec<T> self) {
         VecIter<T> iter;
         iter.data = self.data;
         iter.len = self.len;
@@ -236,6 +225,49 @@ impl<T> Vec<T> {
         self.len = 0;
         self.cap = 0;
         return iter;
+    }
+}
+
+impl<T> Vec<T> {
+    Slice<T> as_slice(&Vec<T> self) {
+        Slice<T> s;
+        s.data = self.data;
+        s.len = self.len;
+        return s;
+    }
+
+    Slice<T> as_mut_slice(&mut Vec<T> self) {
+        Slice<T> s;
+        s.data = self.data;
+        s.len = self.len;
+        return s;
+    }
+
+    SliceIter<T> iter(&Vec<T> self) {
+        SliceIter<T> it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = 0;
+        return it;
+    }
+
+    RevIter<T> rev_iter(&Vec<T> self) {
+        RevIter<T> r;
+        r.data = self.data;
+        r.len = self.len;
+        r.idx = 0;
+        return r;
+    }
+}
+
+impl<T> Drop for VecIter<T> {
+    void drop(VecIter<T>* self) {
+        if (self.data != (T*)0) {
+            free(self.data);
+            self.data = (T*)0;
+        }
+        self.len = 0;
+        self.idx = 0;
     }
 }
 
@@ -250,4 +282,14 @@ impl<T> Iterator for VecIter<T> {
         }
         return Optional<T>.none();
     }
+}
+
+Vec<T> iter_collect<I, T>(I* iter) {
+    Vec<T> out = Vec<T>.new();
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { break; }
+        out.push(o.unwrap());
+    }
+    return out;
 }

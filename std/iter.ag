@@ -27,3 +27,427 @@ trait IntoIteratorConstPtr {
     type IntoIter;
     IntoIter into_iter_const_ptr(Self self);
 }
+
+struct RevIter<T> {
+    T* data;
+    i64 len;
+    i64 idx;
+}
+
+impl<T> Iterator for RevIter<T> {
+    type Item = T;
+    Optional<T> next(RevIter<T>* self) {
+        if (self.idx < self.len) {
+            T v = self.data[self.len - 1 - self.idx];
+            self.idx = self.idx + 1;
+            return Optional<T>.some(v);
+        }
+        return Optional<T>.none();
+    }
+}
+
+struct MapIter<I, T, U> {
+    I inner;
+    U (T) f;
+}
+
+impl<I, T, U> Iterator for MapIter<I, T, U> {
+    type Item = U;
+    Optional<U> next(MapIter<I, T, U>* self) {
+        Optional<T> o = self.inner.next();
+        if (o.is_none()) { return Optional<U>.none(); }
+        T v = o.unwrap();
+        U (T) ff = self.f;
+        return Optional<U>.some(ff(v));
+    }
+}
+
+struct FilterIter<I, T> {
+    I inner;
+    bool (T) pred;
+}
+
+impl<I, T> Iterator for FilterIter<I, T> {
+    type Item = T;
+    Optional<T> next(FilterIter<I, T>* self) {
+        while (true) {
+            Optional<T> o = self.inner.next();
+            if (o.is_none()) { return Optional<T>.none(); }
+            T v = o.unwrap();
+            bool (T) ff = self.pred;
+            if (ff(v)) { return Optional<T>.some(v); }
+        }
+        return Optional<T>.none();
+    }
+}
+
+struct TakeIter<I, T> {
+    I inner;
+    i64 remaining;
+}
+
+impl<I, T> Iterator for TakeIter<I, T> {
+    type Item = T;
+    Optional<T> next(TakeIter<I, T>* self) {
+        if (self.remaining <= 0) { return Optional<T>.none(); }
+        self.remaining = self.remaining - 1;
+        return self.inner.next();
+    }
+}
+
+struct SkipIter<I, T> {
+    I inner;
+    i64 to_skip;
+    bool done;
+}
+
+impl<I, T> Iterator for SkipIter<I, T> {
+    type Item = T;
+    Optional<T> next(SkipIter<I, T>* self) {
+        if (!self.done) {
+            while (self.to_skip > 0) {
+                Optional<T> o = self.inner.next();
+                if (o.is_none()) { self.done = true; return Optional<T>.none(); }
+                self.to_skip = self.to_skip - 1;
+            }
+            self.done = true;
+        }
+        return self.inner.next();
+    }
+}
+
+struct EnumerateIter<I, T> {
+    I inner;
+    i64 idx;
+}
+
+struct Enumerated<T> {
+    i64 index;
+    T value;
+}
+
+impl<I, T> Iterator for EnumerateIter<I, T> {
+    type Item = Enumerated<T>;
+    Optional<Enumerated<T>> next(EnumerateIter<I, T>* self) {
+        Optional<T> o = self.inner.next();
+        if (o.is_none()) { return Optional<Enumerated<T>>.none(); }
+        Enumerated<T> e;
+        e.index = self.idx;
+        e.value = o.unwrap();
+        self.idx = self.idx + 1;
+        return Optional<Enumerated<T>>.some(e);
+    }
+}
+
+struct ChainIter<A, B, T> {
+    A a;
+    B b;
+    bool in_a;
+}
+
+impl<A, B, T> Iterator for ChainIter<A, B, T> {
+    type Item = T;
+    Optional<T> next(ChainIter<A, B, T>* self) {
+        if (self.in_a) {
+            Optional<T> o = self.a.next();
+            if (o.is_some()) { return o; }
+            self.in_a = false;
+        }
+        return self.b.next();
+    }
+}
+
+struct ZipIter<A, B, TA, TB> {
+    A a;
+    B b;
+}
+
+struct Zipped<A, B> {
+    A a;
+    B b;
+}
+
+impl<A, B, TA, TB> Iterator for ZipIter<A, B, TA, TB> {
+    type Item = Zipped<TA, TB>;
+    Optional<Zipped<TA, TB>> next(ZipIter<A, B, TA, TB>* self) {
+        Optional<TA> oa = self.a.next();
+        Optional<TB> ob = self.b.next();
+        if (oa.is_none() || ob.is_none()) { return Optional<Zipped<TA, TB>>.none(); }
+        Zipped<TA, TB> z;
+        z.a = oa.unwrap();
+        z.b = ob.unwrap();
+        return Optional<Zipped<TA, TB>>.some(z);
+    }
+}
+
+struct FilterMapIter<I, T, U> {
+    I inner;
+    Optional<U> (T) f;
+}
+
+impl<I, T, U> Iterator for FilterMapIter<I, T, U> {
+    type Item = U;
+    Optional<U> next(FilterMapIter<I, T, U>* self) {
+        while (true) {
+            Optional<T> o = self.inner.next();
+            if (o.is_none()) { return Optional<U>.none(); }
+            T v = o.unwrap();
+            Optional<U> (T) ff = self.f;
+            Optional<U> res = ff(v);
+            if (res.is_some()) { return res; }
+        }
+        return Optional<U>.none();
+    }
+}
+
+struct FlatMapIter<I, J, T, U> {
+    I outer;
+    J current;
+    bool has_current;
+    J (T) f;
+}
+
+impl<I, J, T, U> Iterator for FlatMapIter<I, J, T, U> {
+    type Item = U;
+    Optional<U> next(FlatMapIter<I, J, T, U>* self) {
+        while (true) {
+            if (self.has_current) {
+                Optional<U> o = self.current.next();
+                if (o.is_some()) { return o; }
+                self.has_current = false;
+            }
+            Optional<T> outer_next = self.outer.next();
+            if (outer_next.is_none()) { return Optional<U>.none(); }
+            T v = outer_next.unwrap();
+            J (T) ff = self.f;
+            self.current = ff(v);
+            self.has_current = true;
+        }
+        return Optional<U>.none();
+    }
+}
+
+struct FlattenIter<I, J, T> {
+    I outer;
+    J current;
+    bool has_current;
+}
+
+impl<I, J, T> Iterator for FlattenIter<I, J, T> {
+    type Item = T;
+    Optional<T> next(FlattenIter<I, J, T>* self) {
+        while (true) {
+            if (self.has_current) {
+                Optional<T> o = self.current.next();
+                if (o.is_some()) { return o; }
+                self.has_current = false;
+            }
+            Optional<J> outer_next = self.outer.next();
+            if (outer_next.is_none()) { return Optional<T>.none(); }
+            self.current = outer_next.unwrap();
+            self.has_current = true;
+        }
+        return Optional<T>.none();
+    }
+}
+
+i64 iter_count<I, T>(I* iter) {
+    i64 c = 0;
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { break; }
+        c = c + 1;
+    }
+    return c;
+}
+
+A iter_fold<I, T, A>(I* iter, A init, A (A, T) f) {
+    A acc = init;
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { break; }
+        T v = o.unwrap();
+        acc = f(acc, v);
+    }
+    return acc;
+}
+
+Optional<T> iter_find<I, T>(I* iter, bool (T) pred) {
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { return Optional<T>.none(); }
+        T v = o.unwrap();
+        if (pred(v)) { return Optional<T>.some(v); }
+    }
+    return Optional<T>.none();
+}
+
+i64 iter_position<I, T>(I* iter, bool (T) pred) {
+    i64 idx = 0;
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { return -1; }
+        T v = o.unwrap();
+        if (pred(v)) { return idx; }
+        idx = idx + 1;
+    }
+    return -1;
+}
+
+bool iter_any<I, T>(I* iter, bool (T) pred) {
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { return false; }
+        T v = o.unwrap();
+        if (pred(v)) { return true; }
+    }
+    return false;
+}
+
+bool iter_all<I, T>(I* iter, bool (T) pred) {
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { return true; }
+        T v = o.unwrap();
+        if (!pred(v)) { return false; }
+    }
+    return true;
+}
+
+T iter_reduce<I, T>(I* iter, T (T, T) f) {
+    Optional<T> first = iter.next();
+    if (first.is_none()) { abort(); }
+    T acc = first.unwrap();
+    while (true) {
+        Optional<T> o = iter.next();
+        if (o.is_none()) { break; }
+        T v = o.unwrap();
+        acc = f(acc, v);
+    }
+    return acc;
+}
+
+i64 iter_sum_i64<I>(I* iter) {
+    i64 acc = 0;
+    while (true) {
+        Optional<i64> o = iter.next();
+        if (o.is_none()) { break; }
+        acc = acc + o.unwrap();
+    }
+    return acc;
+}
+
+f64 iter_sum_f64<I>(I* iter) {
+    f64 acc = 0.0;
+    while (true) {
+        Optional<f64> o = iter.next();
+        if (o.is_none()) { break; }
+        acc = acc + o.unwrap();
+    }
+    return acc;
+}
+
+i64 iter_product_i64<I>(I* iter) {
+    Optional<i64> first = iter.next();
+    if (first.is_none()) { abort(); }
+    i64 acc = first.unwrap();
+    while (true) {
+        Optional<i64> o = iter.next();
+        if (o.is_none()) { break; }
+        acc = acc * o.unwrap();
+    }
+    return acc;
+}
+
+f64 iter_product_f64<I>(I* iter) {
+    Optional<f64> first = iter.next();
+    if (first.is_none()) { abort(); }
+    f64 acc = first.unwrap();
+    while (true) {
+        Optional<f64> o = iter.next();
+        if (o.is_none()) { break; }
+        acc = acc * o.unwrap();
+    }
+    return acc;
+}
+
+MapIter<I, T, U> iter_map<I, T, U>(I* iter, U (T) f) {
+    MapIter<I, T, U> m;
+    m.inner = *iter;
+    m.f = f;
+    return m;
+}
+
+FilterIter<I, T> iter_filter<I, T>(I* iter, bool (T) pred) {
+    FilterIter<I, T> f;
+    f.inner = *iter;
+    f.pred = pred;
+    return f;
+}
+
+FilterMapIter<I, T, U> iter_filter_map<I, T, U>(I* iter, Optional<U> (T) f) {
+    FilterMapIter<I, T, U> fm;
+    fm.inner = *iter;
+    fm.f = f;
+    return fm;
+}
+
+TakeIter<I, T> iter_take<I, T>(I* iter, i64 n) {
+    TakeIter<I, T> t;
+    t.inner = *iter;
+    t.remaining = n;
+    return t;
+}
+
+SkipIter<I, T> iter_skip<I, T>(I* iter, i64 n) {
+    SkipIter<I, T> s;
+    s.inner = *iter;
+    s.to_skip = n;
+    s.done = false;
+    return s;
+}
+
+EnumerateIter<I, T> iter_enumerate<I, T>(I* iter) {
+    EnumerateIter<I, T> e;
+    e.inner = *iter;
+    e.idx = 0;
+    return e;
+}
+
+ChainIter<A, B, T> iter_chain<A, B, T>(A* a, B* b) {
+    ChainIter<A, B, T> c;
+    c.a = *a;
+    c.b = *b;
+    c.in_a = true;
+    return c;
+}
+
+ZipIter<A, B, TA, TB> iter_zip<A, B, TA, TB>(A* a, B* b) {
+    ZipIter<A, B, TA, TB> z;
+    z.a = *a;
+    z.b = *b;
+    return z;
+}
+
+RevIter<T> iter_rev<T>(T* data, i64 len) {
+    RevIter<T> r;
+    r.data = data;
+    r.len = len;
+    r.idx = 0;
+    return r;
+}
+
+FlatMapIter<Outer, Inner, T, U> iter_flat_map<Outer, Inner, T, U>(Outer* outer, Inner (T) f) {
+    FlatMapIter<Outer, Inner, T, U> fm;
+    fm.outer = *outer;
+    fm.has_current = false;
+    fm.f = f;
+    return fm;
+}
+
+FlattenIter<Outer, Inner, T> iter_flatten<Outer, Inner, T>(Outer* outer) {
+    FlattenIter<Outer, Inner, T> fl;
+    fl.outer = *outer;
+    fl.has_current = false;
+    return fl;
+}
