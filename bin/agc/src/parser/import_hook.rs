@@ -359,8 +359,20 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     if !graph.has_errors() {
         return Ok(program);
     }
-    let err_msg = graph.errors().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
-    Err(err_msg)
+    let rendered_errors: Vec<String> = graph
+        .errors()
+        .iter()
+        .map(|e| {
+            let span = crate::lexer::Span {
+                start: e.start as usize,
+                end: e.end as usize,
+                file: file_id,
+                ..Default::default()
+            };
+            crate::diagnostics::render(span, &e.message, crate::diagnostics::Severity::Error)
+        })
+        .collect();
+    Err(rendered_errors.join("\n"))
 }
 
 /// Convert an imported file path to its Silver module form, e.g.

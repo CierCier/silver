@@ -757,7 +757,28 @@ pub fn run(cli: Cli) {
 
                     let graph = crate::grammar::parse_ag(&src);
                     let ast = crate::grammar::lower_source_graph(&graph, 0);
-                    let errors: Vec<parser::ParseError> = Vec::new();
+
+                    if graph.has_errors() {
+                        for error in graph.errors() {
+                            let span = lexer::Span {
+                                start: error.start as usize,
+                                end: error.end as usize,
+                                ..Default::default()
+                            };
+                            eprintln!(
+                                "{}",
+                                diagnostics::render(
+                                    span,
+                                    &error.message,
+                                    diagnostics::Severity::Error,
+                                )
+                            );
+                        }
+                        if ast.items.is_empty() {
+                            std::process::exit(2);
+                        }
+                        eprintln!("agc: continuing with partial parse...");
+                    }
 
                     let mut symbol_table = CompilerSymbolTable::new();
                     symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
@@ -879,16 +900,21 @@ pub fn run(cli: Cli) {
                 profiler::begin_phase("parse");
                 let graph = crate::grammar::parse_ag(&src);
                 let mut ast = crate::grammar::lower_source_graph(&graph, input_file as usize);
-                let errors: Vec<parser::ParseError> = Vec::new();
                 profiler::end_phase("parse");
 
-                if !errors.is_empty() {
-                    for error in &errors {
+                if graph.has_errors() {
+                    for error in graph.errors() {
+                        let span = lexer::Span {
+                            start: error.start as usize,
+                            end: error.end as usize,
+                            file: input_file,
+                            ..Default::default()
+                        };
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                *error.span(),
-                                &error.format_with_help(),
+                                span,
+                                &error.message,
                                 diagnostics::Severity::Error,
                             )
                         );
