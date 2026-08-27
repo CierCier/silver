@@ -73,6 +73,48 @@ impl Scanner {
             self.buf[self.saved_end] = self.saved_byte;
             self.has_saved = false;
         }
+        while (self.pos + 16 <= self.len) {
+            i64 non_ws = asm("
+                movdqu (%rax), %xmm0
+                movl $$0x20202020, %edx
+                movd %edx, %xmm1
+                pshufd $$0, %xmm1, %xmm1
+                pcmpeqb %xmm0, %xmm1
+
+                movl $$0x09090909, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0a0a0a0a, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0d0d0d0d, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                pmovmskb %xmm1, %ecx
+                cmpl $$65535, %ecx
+                je 1f
+                notl %ecx
+                bsfl %ecx, %eax
+                jmp 2f
+                1:
+                movq $$-1, %rax
+                2:
+            ", [&self.buf[self.pos]], ["rdx", "rcx", "xmm0", "xmm1", "xmm2"]);
+            if (non_ws >= 0) {
+                self.pos = self.pos + non_ws;
+                return true;
+            }
+            self.pos = self.pos + 16;
+        }
         while (self.pos < self.len) {
             u8 ch = self.buf[self.pos];
             if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
@@ -93,6 +135,51 @@ impl Scanner {
             return (str)0;
         }
         i64 start = self.pos;
+        while (self.pos + 16 <= self.len) {
+            i64 ws = asm("
+                movdqu (%rax), %xmm0
+                movl $$0x20202020, %edx
+                movd %edx, %xmm1
+                pshufd $$0, %xmm1, %xmm1
+                pcmpeqb %xmm0, %xmm1
+
+                movl $$0x09090909, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0a0a0a0a, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0d0d0d0d, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                pmovmskb %xmm1, %ecx
+                testl %ecx, %ecx
+                jnz 1f
+                movq $$-1, %rax
+                jmp 2f
+                1:
+                bsfl %ecx, %eax
+                2:
+            ", [&self.buf[self.pos]], ["rdx", "rcx", "xmm0", "xmm1", "xmm2"]);
+            if (ws >= 0) {
+                self.pos = self.pos + ws;
+                self.saved_end = self.pos;
+                self.saved_byte = self.buf[self.pos];
+                self.buf[self.pos] = (u8)0;
+                self.has_saved = true;
+                return (str)&self.buf[start];
+            }
+            self.pos = self.pos + 16;
+        }
         while (self.pos < self.len) {
             u8 ch = self.buf[self.pos];
             if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {

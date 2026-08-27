@@ -1,6 +1,7 @@
 // std/algo/search.ag — Binary search over sorted Vec<T>.
 //
 // Self-contained; bounds are inlined to avoid transitive generic calls.
+import std.cpu;
 import std.mem.vec;
 
 // -- Binary search on sorted slices -- self-contained ---------------------
@@ -53,4 +54,210 @@ bool binary_search<T>(Vec<T>* v, T key) {
         return false;
     }
     return !(v.data[lo] < key) && !(key < v.data[lo]);
+}
+
+// -- Linear Search and Aggregation ----------------------------------------
+
+/// Find the index of the first occurrence of `key` in `[data, data + len)`.
+/// Returns -1 if not found.
+i64 find_first<T>(T* data, i64 len, T key) {
+    if (data == (T*)0 || len <= 0) {
+        return -1;
+    }
+    i64 i = 0;
+    while (i < len) {
+        if (data[i] == key) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Vectorized search for i64 in 4-element (256-bit AVX2) chunks.
+#[target_feature("avx2")]
+i64 find_i64_v256(i64* data, i64 key, i64 blocks) {
+    return asm("
+        movq %rax, %r8
+        movq %rdi, %r9
+        movq %rsi, %rax
+        vmovq %rax, %xmm0
+        vpbroadcastq %xmm0, %ymm0
+        1:
+        vmovdqu (%r9), %ymm1
+        vpcmpeqq %ymm0, %ymm1, %ymm1
+        vmovmskpd %ymm1, %ecx
+        testl %ecx, %ecx
+        jnz 2f
+        addq $$32, %r9
+        decq %r8
+        jnz 1b
+        movq $$-1, %rax
+        vzeroupper
+        jmp 3f
+        2:
+        bsfl %ecx, %ecx
+        movq %r9, %rax
+        subq %rdi, %rax
+        shrq $$3, %rax
+        movslq %ecx, %rdx
+        addq %rdx, %rax
+        vzeroupper
+        3:
+    ", [blocks, (u8*)data, key], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
+}
+
+/// Find index of first occurrence of `key` in `i64` slice with AVX2 acceleration.
+i64 find_i64(i64* data, i64 len, i64 key) {
+    if (data == (i64*)0 || len <= 0) {
+        return -1;
+    }
+    i64 i = 0;
+    if (len >= 4 && @cfg(cpu.avx2)) {
+        i64 blocks = len / 4;
+        i64 r = find_i64_v256(data, key, blocks);
+        if (r >= 0) {
+            return r;
+        }
+        i = blocks * 4;
+    }
+    while (i < len) {
+        if (data[i] == key) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Count total occurrences of `key` in `[data, data + len)`.
+i64 count_occurrences<T>(T* data, i64 len, T key) {
+    if (data == (T*)0 || len <= 0) {
+        return 0;
+    }
+    i64 count = 0;
+    i64 i = 0;
+    while (i < len) {
+        if (data[i] == key) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+/// Return index of minimum element in `[data, data + len)`. Returns -1 if empty.
+i64 min_element<T>(T* data, i64 len) {
+    if (data == (T*)0 || len <= 0) {
+        return -1;
+    }
+    i64 min_idx = 0;
+    i64 i = 1;
+    while (i < len) {
+        if (data[i] < data[min_idx]) {
+            min_idx = i;
+        }
+        i = i + 1;
+    }
+    return min_idx;
+}
+
+/// Return index of maximum element in `[data, data + len)`. Returns -1 if empty.
+i64 max_element<T>(T* data, i64 len) {
+    if (data == (T*)0 || len <= 0) {
+        return -1;
+    }
+    i64 max_idx = 0;
+    i64 i = 1;
+    while (i < len) {
+        if (data[max_idx] < data[i]) {
+            max_idx = i;
+        }
+        i = i + 1;
+    }
+    return max_idx;
+}
+
+/// Vectorized sum of i64 array using AVX2.
+#[target_feature("avx2")]
+i64 sum_i64_v256(i64* data, i64 blocks) {
+    return asm("
+        movq %rax, %r8
+        movq %rdi, %r9
+        vpxor %ymm0, %ymm0, %ymm0
+        1:
+        vmovdqu (%r9), %ymm1
+        vpaddq %ymm1, %ymm0, %ymm0
+        addq $$32, %r9
+        decq %r8
+        jnz 1b
+        vextracti128 $$1, %ymm0, %xmm1
+        vpaddq %xmm1, %xmm0, %xmm0
+        vmovhlps %xmm0, %xmm1, %xmm1
+        vpaddq %xmm1, %xmm0, %xmm0
+        vmovq %xmm0, %rax
+        vzeroupper
+    ", [blocks, (u8*)data], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
+}
+
+/// Compute sum of elements in `i64` slice with AVX2 vectorization.
+i64 sum_i64(i64* data, i64 len) {
+    if (data == (i64*)0 || len <= 0) {
+        return 0;
+    }
+    i64 total = 0;
+    i64 i = 0;
+    if (len >= 4 && @cfg(cpu.avx2)) {
+        i64 blocks = len / 4;
+        total = sum_i64_v256(data, blocks);
+        i = blocks * 4;
+    }
+    while (i < len) {
+        total = total + data[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+/// Vectorized sum of f64 array using AVX.
+#[target_feature("avx")]
+f64 sum_f64_v256(f64* data, i64 blocks) {
+    i64 bits = asm("
+        movq %rax, %r8
+        movq %rdi, %r9
+        vxorpd %ymm0, %ymm0, %ymm0
+        1:
+        vmovupd (%r9), %ymm1
+        vaddpd %ymm1, %ymm0, %ymm0
+        addq $$32, %r9
+        decq %r8
+        jnz 1b
+        vextractf128 $$1, %ymm0, %xmm1
+        vaddpd %xmm1, %xmm0, %xmm0
+        vmovhlps %xmm0, %xmm1, %xmm1
+        vaddsd %xmm1, %xmm0, %xmm0
+        vmovq %xmm0, %rax
+        vzeroupper
+    ", [blocks, (u8*)data], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
+    f64* ptr = (f64*)(&bits);
+    return *ptr;
+}
+
+/// Compute sum of elements in `f64` slice with AVX vectorization.
+f64 sum_f64(f64* data, i64 len) {
+    if (data == (f64*)0 || len <= 0) {
+        return 0.0;
+    }
+    f64 total = 0.0;
+    i64 i = 0;
+    if (len >= 4 && @cfg(cpu.avx)) {
+        i64 blocks = len / 4;
+        total = sum_f64_v256(data, blocks);
+        i = blocks * 4;
+    }
+    while (i < len) {
+        total = total + data[i];
+        i = i + 1;
+    }
+    return total;
 }

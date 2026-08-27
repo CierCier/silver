@@ -143,5 +143,43 @@ i32 main() {
         assert_eq_i64(10, max<i64>(a, b), "max(5, 10) = 10");
     }
 
+    // --- find_first, count_occurrences, is_sorted ---
+    STDOUT.write_str("\n--- find_first, count_occurrences, is_sorted ---\n");
+    {
+        i64 arr[8];
+        arr[0] = 10; arr[1] = 20; arr[2] = 30; arr[3] = 20;
+        arr[4] = 50; arr[5] = 20; arr[6] = 70; arr[7] = 80;
+
+        assert_eq_i64(1, find_first<i64>(arr, 8, 20), "find_first finds index 1");
+        assert_eq_i64(-1, find_first<i64>(arr, 8, 999), "find_first returns -1 on missing");
+        assert_eq_i64(3, count_occurrences<i64>(arr, 8, 20), "count_occurrences finds 3");
+        assert_eq_i64(0, min_element<i64>(arr, 8), "min_element at 0 (10)");
+        assert_eq_i64(7, max_element<i64>(arr, 8), "max_element at 7 (80)");
+
+        assert_false(is_sorted<i64>(arr, 8), "arr is not sorted");
+        sort_slice<i64>(arr, 8);
+        assert_true(is_sorted<i64>(arr, 8), "arr is sorted after sort_slice");
+    }
+
+    // --- Vectorized find_i64, sum_i64, sum_f64 ---
+    STDOUT.write_str("\n--- Vectorized find_i64, sum_i64, sum_f64 ---\n");
+    {
+        i64 nums[12];
+        for (i64 i = 0; i < 12; i = i + 1) {
+            nums[i] = i * 10;
+        }
+
+        assert_eq_i64(7, find_i64(nums, 12, 70), "find_i64 finds 70 at index 7 across AVX2 blocks");
+        assert_eq_i64(-1, find_i64(nums, 12, 75), "find_i64 returns -1 for missing");
+        assert_eq_i64(660, sum_i64(nums, 12), "sum_i64 across AVX2 blocks");
+
+        f64 floats[8];
+        for (i64 i = 0; i < 8; i = i + 1) {
+            floats[i] = (f64)(i + 1);
+        }
+        f64 s = sum_f64(floats, 8);
+        assert_true(s > 35.9 && s < 36.1, "sum_f64 = 36.0");
+    }
+
     return done();
 }
