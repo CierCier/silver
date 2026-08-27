@@ -34,6 +34,7 @@ import std.sys.raw.process;
 import std.mem.memory;
 import std.rt.backtrace;
 import std.atomic;
+import std.cpu;
 // Static free-list head table in .bss — eliminates lazy-init branch on every
 // alloc/free. Zero-initialized by the OS loader at program startup.
 i64 g_mem_heads[9];
@@ -165,6 +166,7 @@ void mem_lock_acquire() {
         if (acquired) {
             return;
         }
+        cpu_relax();
     }
 }
 

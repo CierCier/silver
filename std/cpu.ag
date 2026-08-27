@@ -78,3 +78,8 @@ bool has_fma() { return g_has_fma; }
 bool has_avx() { return g_has_avx; }
 bool has_avx2() { return g_has_avx2; }
 bool has_avx512f() { return g_has_avx512f; }
+
+/// Emit a CPU pause instruction (spin-loop hint for SMT processors).
+void cpu_relax() {
+    asm("pause", [], []);
+}
