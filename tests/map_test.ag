@@ -54,5 +54,152 @@ i32 main() {
     }
     m2.drop();
 
+
+    // --- remove (returns owned Pair) ---
+    STDOUT.write_str("\n--- remove ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(1, (i64)100);
+        m.insert(2, (i64)200);
+        m.insert(3, (i64)300);
+        assert_eq_i64(m.len(), 3, "len=3 before remove");
+
+        Optional<Pair<i32, i64>> removed = m.remove(2);
+        assert_true(removed.is_some(), "remove(2) returns some");
+        Pair<i32, i64> p = removed.unwrap();
+        assert_eq_i64((i64)p.first, (i64)2, "removed key is 2");
+        assert_eq_i64((i64)p.second, (i64)200, "removed value is 200");
+        assert_eq_i64(m.len(), 2, "len=2 after remove");
+        assert_true(!m.contains_key(2), "key 2 gone after remove");
+        assert_true(m.contains_key(1), "key 1 still present");
+        assert_true(m.contains_key(3), "key 3 still present");
+
+        // Re-insert: the slot was a tombstone, must still be hash-findable.
+        m.insert(2, (i64)222);
+        assert_eq_i64(m.get(2), 222, "re-inserted value 222");
+        assert_eq_i64(m.len(), 3, "len=3 after re-insert");
+
+        // Remove a missing key.
+        Optional<Pair<i32, i64>> gone = m.remove(99);
+        assert_true(gone.is_none(), "remove(99) returns none");
+        assert_eq_i64(m.len(), 3, "len unchanged after missing remove");
+
+        m.drop();
+    }
+
+    // --- get_mut (pointer-based mutation) ---
+    STDOUT.write_str("\n--- get_mut ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(10, (i64)100);
+        m.insert(20, (i64)200);
+
+        i64* p = m.get_mut(10);
+        assert_true((i64)p != 0, "get_mut(10) returns non-null");
+        *p = (i64)999;
+        assert_eq_i64(m.get(10), 999, "mutated value via get_mut");
+
+        i64* p2 = m.get_mut(20);
+        assert_true((i64)p2 != 0, "get_mut(20) returns non-null");
+        *p2 = *p2 + (i64)1;
+        assert_eq_i64(m.get(20), 201, "incremented via get_mut");
+
+        i64* p3 = m.get_mut(999);
+        assert_true((i64)p3 == 0, "get_mut(missing) returns null");
+
+        m.drop();
+    }
+
+    // --- reserve / shrink_to_fit ---
+    STDOUT.write_str("\n--- reserve / shrink_to_fit ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.reserve(1000);
+        assert_true(m.len() == 0, "reserved but still empty");
+
+        i32 i = 0;
+        while (i < 100) {
+            m.insert(i, (i64)i * (i64)10);
+            i = i + 1;
+        }
+        assert_eq_i64(m.len(), 100, "len=100 after 100 inserts");
+
+        i = 0;
+        while (i < 100) {
+            assert_eq_i64(m.get(i), (i64)i * (i64)10, "value intact after reserve growth");
+            i = i + 1;
+        }
+
+        m.clear();
+        assert_eq_i64(m.len(), 0, "len=0 after clear");
+
+        m.shrink_to_fit();
+        assert_eq_i64(m.len(), 0, "shrink_to_fit on empty is harmless");
+
+        // Insert one entry, then shrink_to_fit.
+        m.insert(7, (i64)70);
+        m.shrink_to_fit();
+        assert_eq_i64(m.get(7), 70, "value intact after shrink_to_fit");
+        assert_eq_i64(m.len(), 1, "len still 1 after shrink_to_fit");
+
+        m.drop();
+    }
+
+    // --- drain ---
+    STDOUT.write_str("\n--- drain ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(1, (i64)10);
+        m.insert(2, (i64)20);
+        m.insert(3, (i64)30);
+
+        HashMapDrain<i32, i64> dr = m.drain();
+        i64 sum = 0;
+        i64 count = 0;
+        while (true) {
+            Optional<Pair<i32, i64>> opt = dr.next();
+            if (opt.is_none()) { break; }
+            Pair<i32, i64> p = opt.unwrap();
+            sum = sum + p.second;
+            count = count + 1;
+        }
+        assert_eq_i64(count, 3, "drain yields 3 pairs");
+        assert_eq_i64(sum, 60, "drain sums to 60");
+        assert_eq_i64(m.len(), 0, "map empty after drain");
+
+        // Map is reusable.
+        m.insert(99, (i64)999);
+        assert_eq_i64(m.get(99), 999, "map usable after drain");
+        m.drop();
+    }
+
+    // --- keys / values iterators ---
+    STDOUT.write_str("\n--- keys / values ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(1, (i64)10);
+        m.insert(2, (i64)20);
+        m.insert(3, (i64)30);
+
+        HashMapKeysIter<i32, i64> kit = m.keys();
+        i64 kcount = 0;
+        while (true) {
+            Optional<i32> opt = kit.next();
+            if (opt.is_none()) { break; }
+            kcount = kcount + 1;
+        }
+        assert_eq_i64(kcount, 3, "keys() yields 3 keys");
+
+        HashMapValuesIter<i32, i64> vit = m.values();
+        i64 vsum = 0;
+        while (true) {
+            Optional<i64> opt = vit.next();
+            if (opt.is_none()) { break; }
+            vsum = vsum + opt.unwrap();
+        }
+        assert_eq_i64(vsum, 60, "values() sum is 60");
+
+        m.drop();
+    }
     return done();
 }

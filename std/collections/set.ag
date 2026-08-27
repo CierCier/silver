@@ -4,6 +4,8 @@
 // semantics for keys.
 
 import std.map;
+import std.optional;
+import std.iter;
 
 /// A hash set backed by HashMap<K, bool>.
 struct HashSet<K> {
@@ -40,19 +42,79 @@ impl HashSet<K> {
     }
 
     /// Remove a key from the set.  Returns true if the key was present.
+    ///
+    /// NOTE: This does NOT call per-element destructors — owned `K` values
+    /// are leaked.  Use `take` (which returns the owned key) or `drain`
+    /// to release owned elements explicitly.
     bool erase(&mut HashSet<K> self, K key) {
         return self.map.erase(key);
     }
 
+    /// Remove a key and return it, or `none` if absent.  This is the sound
+    /// way to delete an entry whose key is an owned type — ownership
+    /// transfers to the caller.
+    Optional<K> take(&mut HashSet<K> self, K key) {
+        i64 idx = self.map.find_slot(key);
+        if (idx < 0) {
+            return Optional<K>.none();
+        }
+        K k = self.map.keys[idx];
+        self.map.set_ctrl(idx, CTRL_DELETED);
+        self.map.len = self.map.len - 1;
+        return Optional<K>.some(k);
+    }
+
+    /// Ensure the set can hold at least `len + additional` entries without
+    /// rehashing.  No-op if the current capacity already covers the request.
+    void reserve(&mut HashSet<K> self, i64 additional) {
+        self.map.reserve(additional);
+    }
+
+    /// Rehash into the smallest power-of-two capacity that fits the current
+    /// length at the load factor.
+    void shrink_to_fit(&mut HashSet<K> self) {
+        self.map.shrink_to_fit();
+    }
+
     /// Remove all elements without releasing the backing memory.
+    ///
+    /// NOTE: This does NOT call per-element destructors — owned `K` values
+    /// are leaked.  Use `drain` first to release owned elements explicitly.
     void clear(&mut HashSet<K> self) {
         self.map.clear();
+    }
+
+    /// Drain all live keys, yielding owned keys one at a time. The backing
+    /// memory is freed when the iterator is dropped.  The set itself is
+    /// left empty and can be reused afterwards.
+    HashSetDrain<K> drain(&mut HashSet<K> self) {
+        HashSetDrain<K> d;
+        d.inner = self.map.drain();
+        return d;
     }
 }
 
 impl<K> Drop for HashSet<K> {
-    /// Drops the underlying HashMap.
+    /// Drops the underlying HashMap.  Does NOT iterate per-element
+    /// destructors; callers holding owned keys must `drain` first.
     void drop(HashSet<K>* self) {
         self.map.drop();
+    }
+}
+
+/// Owning iterator yielding keys from a HashSet drain.
+struct HashSetDrain<K> {
+    HashMapDrain<K, bool> inner;
+}
+
+impl<K> Iterator for HashSetDrain<K> {
+    type Item = K;
+    Optional<K> next(HashSetDrain<K>* self) {
+        Optional<Pair<K, bool>> opt = self.inner.next();
+        if (opt.is_none()) {
+            return Optional<K>.none();
+        }
+        Pair<K, bool> p = opt.unwrap();
+        return Optional<K>.some(p.first);
     }
 }

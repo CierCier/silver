@@ -1,0 +1,62 @@
+// Pair<K, V> — fixed two-element heterogeneous container.
+//
+// Pairs are the natural return type for `HashMap::remove` and other APIs
+// that need to hand back two owned values together.  They also fit the
+// `(K, V)` shape of `HashMapEntry<K, V>`'s iteration yield.
+//
+// Drop is automatic: the compiler cascades per-field drops for owned
+// element types (see AGENTS.md §6), so a `Pair<String, Vec<i64>>` releases
+// its string and vec on scope exit automatically.  No explicit Drop impl
+// is required (and providing one would be wrong — it would skip the
+// cascade).
+
+/// A 2-tuple `Pair<K, V>` carrying one owned `K` and one owned `V`.
+struct Pair<K, V> {
+    K first;
+    V second;
+}
+
+impl Pair<K, V> {
+    /// Construct a Pair from two owned values.
+    Pair<K, V> new(K first, V second) {
+        Pair<K, V> p;
+        p.first = move first;
+        p.second = move second;
+        return move p;
+    }
+
+    /// Borrow the first component.
+    K* first_ptr(&Pair<K, V> self) {
+        return &self.first;
+    }
+
+    /// Borrow the second component.
+    V* second_ptr(&Pair<K, V> self) {
+        return &self.second;
+    }
+
+    /// Replace the first component in place; the old value is dropped
+    /// (cascaded by the compiler via per-field drop flags).
+    void set_first(&mut Pair<K, V> self, K value) {
+        self.first = move value;
+    }
+
+    /// Replace the second component in place.
+    void set_second(&mut Pair<K, V> self, V value) {
+        self.second = move value;
+    }
+
+    /// Move out the first component, leaving `second` intact. The Pair
+    /// itself remains valid (with `second` still owned) — the caller must
+    /// drop the Pair to release `second`.
+    K unwrap_first(Pair<K, V>* self) {
+        K k = move self.first;
+        return move k;
+    }
+
+    /// Move out the second component, leaving `first` intact.
+    V unwrap_second(Pair<K, V>* self) {
+        V v = move self.second;
+        return move v;
+    }
+}

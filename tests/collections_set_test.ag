@@ -77,5 +77,68 @@ i32 main() {
         s.drop();
     }
 
+
+    // --- take ---
+    STDOUT.write_str("\n--- take ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(11);
+        s.insert(22);
+        Optional<i64> taken = s.take(11);
+        assert_true(taken.is_some(), "take(11) returns some");
+        assert_eq_i64(taken.unwrap(), 11, "taken key is 11");
+        assert_eq_i64(s.len(), 1, "len=1 after take");
+        assert_true(!s.contains(11), "11 gone after take");
+        assert_true(s.contains(22), "22 still present");
+
+        Optional<i64> gone = s.take(999);
+        assert_true(gone.is_none(), "take(missing) returns none");
+        assert_eq_i64(s.len(), 1, "len unchanged after missing take");
+        s.drop();
+    }
+
+    // --- reserve ---
+    STDOUT.write_str("\n--- reserve ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.reserve(500);
+        assert_eq_i64(s.len(), 0, "len=0 after reserve on empty");
+        i64 i = 0;
+        while (i < 200) {
+            s.insert(i);
+            i = i + 1;
+        }
+        assert_eq_i64(s.len(), 200, "len=200 after 200 inserts (reserved)");
+        i = 0;
+        while (i < 200) {
+            assert_true(s.contains(i), "contains after reserve growth");
+            i = i + 1;
+        }
+        s.drop();
+    }
+
+    // --- drain ---
+    STDOUT.write_str("\n--- drain ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(1);
+        s.insert(2);
+        s.insert(3);
+        HashSetDrain<i64> dr = s.drain();
+        i64 sum = 0;
+        i64 count = 0;
+        while (true) {
+            Optional<i64> opt = dr.next();
+            if (opt.is_none()) { break; }
+            sum = sum + opt.unwrap();
+            count = count + 1;
+        }
+        assert_eq_i64(count, 3, "drain yields 3 keys");
+        assert_eq_i64(sum, 6, "drain sums to 6");
+        assert_eq_i64(s.len(), 0, "set empty after drain");
+        s.insert(99);
+        assert_true(s.contains(99), "set reusable after drain");
+        s.drop();
+    }
     return done();
 }

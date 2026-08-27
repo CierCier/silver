@@ -4,6 +4,7 @@ import std.hash;
 import std.io.file;
 import std.mem.drop;
 import std.iter;
+import std.pair;
 
 // Internal entry state: Swiss Table 16-byte metadata control groups.
 // Control byte values:
@@ -175,6 +176,12 @@ impl HashMap<K, V> {
         }
         i64 h = @hash(key);
         if (h < 0) { h = -h; }
+        return self.find_slot_with_hash(key, h);
+    }
+
+    /// Find slot for `key` given a pre-computed non-negative hash.
+    /// Used by the entry API after the lookup key has been moved.
+    i64 find_slot_with_hash(&HashMap<K, V> self, K key, i64 h) {
         u8 h2 = h2_fingerprint(h);
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
@@ -207,19 +214,22 @@ impl HashMap<K, V> {
         i64 cap = self.capacity;
         if (cap == 0) {
             self.grow(INITIAL_CAPACITY);
-            cap = self.capacity;
         } else {
             f64 load = (f64)(self.len + 1) / (f64)cap;
             if (load > LOAD_FACTOR) {
                 self.grow(cap * 2);
-                cap = self.capacity;
             }
         }
 
         i64 h = @hash(key);
         if (h < 0) { h = -h; }
         u8 h2 = h2_fingerprint(h);
-        i64 mask = cap - 1;
+        self._insert_at(h, h2, move key, move value);
+    }
+
+    /// Internal: insert with a pre-computed hash, returns the slot index.
+    i64 _insert_at(&mut HashMap<K, V> self, i64 h, u8 h2, K key, V value) {
+        i64 mask = self.capacity - 1;
         i64 idx = h & mask;
         i64 first_available = -1;
         i64 step = 0;
@@ -232,7 +242,7 @@ impl HashMap<K, V> {
                 if (self.keys[slot] == key) {
                     self.keys[slot] = move key;
                     self.values[slot] = move value;
-                    return;
+                    return slot;
                 }
                 matches = matches & (matches - 1);
             }
@@ -249,11 +259,12 @@ impl HashMap<K, V> {
                 self.values[first_available] = move value;
                 self.set_ctrl(first_available, h2);
                 self.len = self.len + 1;
-                return;
+                return first_available;
             }
             step = step + 16;
             idx = (idx + step) & mask;
         }
+        return -1;
     }
 
     /// Get value for key. Aborts if key not found.
@@ -294,6 +305,10 @@ impl HashMap<K, V> {
     }
 
     /// Remove key. Returns true if key was present.
+    ///
+    /// NOTE: This does NOT call per-element destructors — owned `K` / `V`
+    /// values are leaked.  Use `remove` (which returns the owned pair) or
+    /// `drain` to release owned elements explicitly.
     bool erase(&mut HashMap<K, V> self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0) {
@@ -304,7 +319,69 @@ impl HashMap<K, V> {
         return false;
     }
 
+    /// Remove key and return its owned `(K, V)` pair, or `none`.
+    Optional<Pair<K, V>> remove(&mut HashMap<K, V> self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx < 0) {
+            return Optional<Pair<K, V>>.none();
+        }
+        K k = self.keys[idx];
+        V v = self.values[idx];
+        self.set_ctrl(idx, CTRL_DELETED);
+        self.len = self.len - 1;
+        return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
+    }
+
+    /// Mutable value access. Returns null when the key is absent.
+    V* get_mut(&mut HashMap<K, V> self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx < 0) {
+            return (V*)0;
+        }
+        return &self.values[idx];
+    }
+
+    /// Ensure capacity for at least `additional` more entries.
+    void reserve(&mut HashMap<K, V> self, i64 additional) {
+        if (additional <= 0) { return; }
+        i64 required = self.len + additional;
+        i64 cap = self.capacity;
+        if (cap > 0) {
+            f64 max_f = (f64)cap * LOAD_FACTOR;
+            i64 max_supported = (i64)max_f;
+            if (required <= max_supported) { return; }
+        }
+        i64 target = cap;
+        if (target < INITIAL_CAPACITY) { target = INITIAL_CAPACITY; }
+        while (true) {
+            f64 max_f = (f64)target * LOAD_FACTOR;
+            i64 max_supported = (i64)max_f;
+            if (required <= max_supported) { break; }
+            target = target * 2;
+        }
+        self.grow(target);
+    }
+
+    /// Rehash into the smallest capacity that fits the current length.
+    void shrink_to_fit(&mut HashMap<K, V> self) {
+        i64 cap = self.capacity;
+        if (cap == 0) { return; }
+        i64 target = INITIAL_CAPACITY;
+        while (target < cap) {
+            f64 max_f = (f64)target * LOAD_FACTOR;
+            i64 max_supported = (i64)max_f;
+            if (self.len <= max_supported) { break; }
+            target = target * 2;
+        }
+        if (target < cap) {
+            self.grow(target);
+        }
+    }
+
     /// Remove all entries and release backing memory.
+    ///
+    /// NOTE: This does NOT call per-element destructors — owned `K` / `V`
+    /// values are leaked.  Use `drain` first to release owned elements.
     void clear(&mut HashMap<K, V> self) {
         if (self.ctrl != (u8*)0) {
             free(self.keys);
@@ -316,6 +393,22 @@ impl HashMap<K, V> {
         }
         self.capacity = 0;
         self.len = 0;
+    }
+
+    /// Drain all live entries, yielding owned `(K, V)` pairs.
+    HashMapDrain<K, V> drain(&mut HashMap<K, V> self) {
+        HashMapDrain<K, V> d;
+        d.keys = self.keys;
+        d.values = self.values;
+        d.ctrl = self.ctrl;
+        d.capacity = self.capacity;
+        d.idx = 0;
+        self.keys = (K*)0;
+        self.values = (V*)0;
+        self.ctrl = (u8*)0;
+        self.capacity = 0;
+        self.len = 0;
+        return d;
     }
 
     /// Indexed access: map[key] — returns value for key, aborts if not found.
@@ -422,6 +515,7 @@ struct HashMapIter<K, V> {
 }
 
 impl<K, V> HashMap<K, V> {
+    /// Iterate over all live `(K, V)` entries, yielding owned copies.
     HashMapIter<K, V> iter(&HashMap<K, V> self) {
         HashMapIter<K, V> it;
         it.keys = self.keys;
@@ -430,6 +524,54 @@ impl<K, V> HashMap<K, V> {
         it.capacity = self.capacity;
         it.idx = 0;
         return it;
+    }
+
+    /// Iterate over all live values, yielding owned copies.
+    HashMapValuesIter<K, V> values(&HashMap<K, V> self) {
+        HashMapValuesIter<K, V> it;
+        it.values = self.values;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        return it;
+    }
+
+    /// Iterate over all live keys, yielding owned copies.
+    HashMapKeysIter<K, V> keys(&HashMap<K, V> self) {
+        HashMapKeysIter<K, V> it;
+        it.keys = self.keys;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        return it;
+    }
+
+    /// Iterate over all live values yielding owned copies (non-destructive).
+    HashMapIterMut<K, V> iter_mut(&mut HashMap<K, V> self) {
+        HashMapIterMut<K, V> it;
+        it.values = self.values;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        return it;
+    }
+
+    /// Open an entry-handle for `key`. The handle borrows the map mutably
+    /// for its lifetime; the borrow checker statically prevents any other
+    /// access to the map until the handle is dropped.
+    HashMapEntryRef<K, V> entry(&mut HashMap<K, V> self, K key) {
+        HashMapEntryRef<K, V> e;
+        e.map = self;
+        e.key = key;
+        e.inserted = false;
+        if (self.capacity > 0 && self.len > 0) {
+            i64 h = @hash(e.key);
+            if (h < 0) { h = -h; }
+            e.idx = self.find_slot_with_hash(e.key, h);
+        } else {
+            e.idx = -1;
+        }
+        return e;
     }
 }
 
@@ -454,4 +596,185 @@ impl<K, V> Iterator for HashMapIter<K, V> {
     }
 }
 
+struct HashMapKeysIter<K, V> {
+    K* keys;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+impl<K, V> Iterator for HashMapKeysIter<K, V> {
+    type Item = K;
+    Optional<K> next(HashMapKeysIter<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<K>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                K k = self.keys[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<K>.some(k);
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<K>.none();
+    }
+}
+struct HashMapValuesIter<K, V> {
+    V* values;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+impl<K, V> Iterator for HashMapValuesIter<K, V> {
+    type Item = V;
+    Optional<V> next(HashMapValuesIter<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<V>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                V v = self.values[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<V>.some(v);
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<V>.none();
+    }
+}
+struct HashMapIterMut<K, V> {
+    V* values;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+impl<K, V> Iterator for HashMapIterMut<K, V> {
+    type Item = V;
+    Optional<V> next(HashMapIterMut<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<V>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                V v = self.values[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<V>.some(v);
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<V>.none();
+    }
+}
+struct HashMapDrain<K, V> {
+    K* keys;
+    V* values;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+impl<K, V> Drop for HashMapDrain<K, V> {
+    void drop(HashMapDrain<K, V>* self) {
+        if (self.ctrl != (u8*)0) {
+            free(self.keys);
+            free(self.values);
+            free(self.ctrl);
+            self.keys = (K*)0;
+            self.values = (V*)0;
+            self.ctrl = (u8*)0;
+        }
+        self.capacity = 0;
+        self.idx = 0;
+    }
+}
+impl<K, V> Iterator for HashMapDrain<K, V> {
+    type Item = Pair<K, V>;
+    Optional<Pair<K, V>> next(HashMapDrain<K, V>* self) {
+        if (self.ctrl == (u8*)0) {
+            return Optional<Pair<K, V>>.none();
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                K k = self.keys[self.idx];
+                V v = self.values[self.idx];
+                self.idx = self.idx + 1;
+                return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
+            }
+            self.idx = self.idx + 1;
+        }
+        return Optional<Pair<K, V>>.none();
+    }
+}
+struct HashMapEntryRef<K, V> {
+    HashMap<K, V>* map;
+    K key;
+    i64 idx;
+    bool inserted;
+}
+impl<K, V> HashMapEntryRef<K, V> {
+    bool was_present(&HashMapEntryRef<K, V> self) {
+        return self.idx >= 0 && !self.inserted;
+    }
 
+    bool is_vacant(&HashMapEntryRef<K, V> self) {
+        return self.idx < 0;
+    }
+
+    V* get_ptr(&HashMapEntryRef<K, V> self) {
+        if (self.idx < 0) { return (V*)0; }
+        return &self.map.values[self.idx];
+    }
+
+    V* get_mut_ptr(&HashMapEntryRef<K, V> self) {
+        if (self.idx < 0) { return (V*)0; }
+        return &self.map.values[self.idx];
+    }
+
+    Optional<V> take(&mut HashMapEntryRef<K, V> self) {
+        if (self.idx < 0) {
+            return Optional<V>.none();
+        }
+        V v = self.map.values[self.idx];
+        self.map.set_ctrl(self.idx, CTRL_DELETED);
+        self.map.len = self.map.len - 1;
+        self.idx = -1;
+        return Optional<V>.some(v);
+    }
+
+    V* or_insert(&mut HashMapEntryRef<K, V> self, V default) {
+        if (self.idx >= 0) {
+            return &self.map.values[self.idx];
+        }
+        i64 cap = self.map.capacity;
+        if (cap == 0) {
+            self.map.grow(INITIAL_CAPACITY);
+        } else {
+            f64 load = (f64)(self.map.len + 1) / (f64)cap;
+            if (load > LOAD_FACTOR) {
+                self.map.grow(cap * 2);
+            }
+        }
+        i64 h = @hash(self.key);
+        if (h < 0) { h = -h; }
+        u8 h2 = h2_fingerprint(h);
+        self.idx = self.map._insert_at(h, h2, move self.key, move default);
+        self.inserted = true;
+        return &self.map.values[self.idx];
+    }
+
+    V* or_insert_with(&mut HashMapEntryRef<K, V> self, V () f) {
+        if (self.idx >= 0) {
+            return &self.map.values[self.idx];
+        }
+        V def = f();
+        return self.or_insert(move def);
+    }
+
+    void and_modify(&mut HashMapEntryRef<K, V> self, void (V*) f) {
+        if (self.idx < 0) { return; }
+        f(&self.map.values[self.idx]);
+    }
+}

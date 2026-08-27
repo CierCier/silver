@@ -1,0 +1,96 @@
+// Test suite for HashMap iter_mut / keys / values.
+//
+// These iterators yield owned copies of the values; the map is not modified.
+// For mutation through a pointer, use `get_mut` on individual keys.
+
+import std.test;
+import std.map;
+
+i32 main() {
+    STDOUT.write_str("=== HashMap iter_mut Tests ===\n\n");
+
+    // --- iter_mut yields owned value copies ---
+    STDOUT.write_str("--- iter_mut ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(1, (i64)10);
+        m.insert(2, (i64)20);
+        m.insert(3, (i64)30);
+
+        HashMapIterMut<i32, i64> it = m.iter_mut();
+        i64 sum = 0;
+        while (true) {
+            Optional<i64> opt = it.next();
+            if (opt.is_none()) { break; }
+            sum = sum + opt.unwrap();
+        }
+        assert_eq_i64(sum, 60, "iter_mut sum is 60");
+        // Map still has all values.
+        assert_eq_i64(m.get(1), 10, "value 10 intact after iter_mut");
+        assert_eq_i64(m.get(2), 20, "value 20 intact after iter_mut");
+        assert_eq_i64(m.get(3), 30, "value 30 intact after iter_mut");
+        m.drop();
+    }
+
+    // --- keys() yields K copies ---
+    STDOUT.write_str("\n--- keys ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(7, (i64)0);
+        m.insert(8, (i64)0);
+        m.insert(9, (i64)0);
+
+        HashMapKeysIter<i32, i64> kit = m.keys();
+        i32 sum = 0;
+        while (true) {
+            Optional<i32> opt = kit.next();
+            if (opt.is_none()) { break; }
+            sum = sum + opt.unwrap();
+        }
+        assert_eq_i64((i64)sum, 24, "keys sum is 7+8+9 = 24");
+        m.drop();
+    }
+
+    // --- values() yields V copies ---
+    STDOUT.write_str("\n--- values ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        m.insert(1, (i64)100);
+        m.insert(2, (i64)200);
+        m.insert(3, (i64)300);
+
+        HashMapValuesIter<i32, i64> vit = m.values();
+        i64 sum = 0;
+        while (true) {
+            Optional<i64> opt = vit.next();
+            if (opt.is_none()) { break; }
+            sum = sum + opt.unwrap();
+        }
+        assert_eq_i64(sum, 600, "values sum is 100+200+300 = 600");
+        m.drop();
+    }
+
+    // --- iter_mut after grow ---
+    STDOUT.write_str("\n--- iter_mut after resize ---\n");
+    {
+        HashMap<i32, i64> m = HashMap<i32, i64>.new();
+        i32 i = 0;
+        while (i < 50) {
+            m.insert(i, (i64)i);
+            i = i + 1;
+        }
+        assert_eq_i64(m.len(), 50, "len=50 after 50 inserts");
+        HashMapIterMut<i32, i64> it = m.iter_mut();
+        i64 sum = 0;
+        while (true) {
+            Optional<i64> opt = it.next();
+            if (opt.is_none()) { break; }
+            sum = sum + opt.unwrap();
+        }
+        // 0 + 1 + ... + 49 = 49 * 50 / 2 = 1225
+        assert_eq_i64(sum, 1225, "iter_mut sum after grow is 1225");
+        m.drop();
+    }
+
+    return done();
+}

@@ -1044,7 +1044,7 @@ impl PRT_Parser {
                 self.find_matching_token(tokens, cursor, end, Token::LeftParen, Token::RightParen)
         {
             let mut is_fn = false;
-            if close > cursor + 1 {
+            if close >= cursor + 1 {
                 let type_like = tokens[(cursor + 1)..close]
                     .iter()
                     .all(|t| Self::is_type_like(&t.kind));
@@ -2490,10 +2490,12 @@ impl PRT_Parser {
             cursor += 1;
             let local = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::As)) {
                 cursor += 1;
-                let alias_token = tokens.get(cursor).ok_or_else(|| ParseError::InvalidSyntax {
-                    message: "expected a name after 'as'".to_string(),
-                    span: tokens[end - 1].span,
-                })?;
+                let alias_token = tokens
+                    .get(cursor)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected a name after 'as'".to_string(),
+                        span: tokens[end - 1].span,
+                    })?;
                 let Token::Identifier(alias) = &alias_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "expected a name after 'as'".to_string(),
@@ -3127,7 +3129,6 @@ impl PRT_Parser {
             }
         }
 
-
         Ok((
             Some(ast::Generics {
                 params,
@@ -3222,9 +3223,9 @@ impl PRT_Parser {
                 let (bounded_type, next_after_type) = self
                     .parse_type_prefix(tokens, cursor, end)
                     .ok_or_else(|| ParseError::InvalidSyntax {
-                        message: "expected where-clause type".to_string(),
-                        span: tokens[cursor].span,
-                    })?;
+                    message: "expected where-clause type".to_string(),
+                    span: tokens[cursor].span,
+                })?;
                 cursor = next_after_type;
                 if cursor >= end || !matches!(tokens[cursor].kind, Token::Colon) {
                     break;
@@ -4344,7 +4345,11 @@ impl PRT_Parser {
         // names — generic parameters shadow global types inside the impl.
         let mut implicit_type_params = Vec::new();
         if generics.is_none() {
-            Self::collect_file_local_type_params(&self_type, &self.declared_type_names, &mut implicit_type_params);
+            Self::collect_file_local_type_params(
+                &self_type,
+                &self.declared_type_names,
+                &mut implicit_type_params,
+            );
         }
 
         Ok(ast::ImplItem {
@@ -5416,10 +5421,8 @@ impl PRT_Parser {
         position: usize,
         item_end: usize,
     ) -> Result<ast::Item, ParseError> {
-        let (attributes, item_start) =
-            self.parse_attributes_prefix(tokens, position, item_end)?;
-        let (visibility, item_start) =
-            self.parse_visibility_prefix(tokens, item_start, item_end);
+        let (attributes, item_start) = self.parse_attributes_prefix(tokens, position, item_end)?;
+        let (visibility, item_start) = self.parse_visibility_prefix(tokens, item_start, item_end);
 
         let Some(production) = self.predict_item_production(tokens, item_start) else {
             return Err(ParseError::InvalidSyntax {
@@ -5430,9 +5433,9 @@ impl PRT_Parser {
 
         let item_span = tokens[position].span.extend_to(&tokens[item_end - 1].span);
         let kind = match production {
-            ItemProduction::Import => ast::ItemKind::Import(
-                self.parse_import_reduction(tokens, item_start, item_end)?,
-            ),
+            ItemProduction::Import => {
+                ast::ItemKind::Import(self.parse_import_reduction(tokens, item_start, item_end)?)
+            }
             ItemProduction::ExternDeclaration => {
                 match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
                     ParsedExternDeclaration::Function(function_item) => {
@@ -5446,9 +5449,9 @@ impl PRT_Parser {
             ItemProduction::ExternBlock => ast::ItemKind::ExternBlock(
                 self.parse_extern_block_reduction(tokens, item_start, item_end)?,
             ),
-            ItemProduction::Struct => ast::ItemKind::Struct(
-                self.parse_struct_reduction(tokens, item_start, item_end)?,
-            ),
+            ItemProduction::Struct => {
+                ast::ItemKind::Struct(self.parse_struct_reduction(tokens, item_start, item_end)?)
+            }
             ItemProduction::Enum => {
                 ast::ItemKind::Enum(self.parse_enum_reduction(tokens, item_start, item_end)?)
             }
@@ -6007,7 +6010,13 @@ mod tests {
         let ast::ItemKind::Import(item) = &program.items[0].kind else {
             panic!("expected import item");
         };
-        assert_eq!(item.path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["std", "test"]);
+        assert_eq!(
+            item.path
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["std", "test"]
+        );
         let selection = item.selection.as_ref().expect("selective import");
         assert_eq!(selection.len(), 2);
         assert_eq!(selection[0].name.name, "assert_eq_i64");
@@ -6298,7 +6307,10 @@ mod tests {
         };
         assert_eq!(lifetime.name, "a");
         assert_eq!(
-            bounds.iter().map(|bound| bound.name.as_str()).collect::<Vec<_>>(),
+            bounds
+                .iter()
+                .map(|bound| bound.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["b"]
         );
     }
@@ -6315,7 +6327,10 @@ mod tests {
             panic!("expected lifetime predicate");
         };
         assert_eq!(
-            bounds.iter().map(|bound| bound.name.as_str()).collect::<Vec<_>>(),
+            bounds
+                .iter()
+                .map(|bound| bound.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["b", "c"]
         );
     }
