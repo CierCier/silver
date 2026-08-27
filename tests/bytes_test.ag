@@ -113,5 +113,52 @@ i32 main() {
         b.drop();
     }
 
+    test_start("find, rfind, count, contains");
+    {
+        Bytes b = Bytes.new();
+        u8 sample[10];
+        sample[0] = (u8)'a';
+        sample[1] = (u8)'b';
+        sample[2] = (u8)'c';
+        sample[3] = (u8)'b';
+        sample[4] = (u8)'a';
+        sample[5] = (u8)'d';
+        sample[6] = (u8)'b';
+        sample[7] = (u8)'e';
+        sample[8] = (u8)'f';
+        sample[9] = (u8)'b';
+        b.extend(sample, 10);
+
+        assert_eq_i64(b.find((u8)'b'), 1, "find first 'b'");
+        assert_eq_i64(b.rfind((u8)'b'), 9, "rfind last 'b'");
+        assert_eq_i64(b.count((u8)'b'), 4, "count 'b' = 4");
+        assert_true(b.contains((u8)'d'), "contains 'd'");
+        assert_true(!b.contains((u8)'z'), "!contains 'z'");
+        assert_eq_i64(b.find((u8)'z'), -1, "find 'z' = -1");
+        assert_eq_i64(b.rfind((u8)'z'), -1, "rfind 'z' = -1");
+
+        b.drop();
+    }
+
+    test_start("starts_with, ends_with, equals");
+    {
+        Bytes b1 = Bytes.new();
+        Bytes b2 = Bytes.new();
+        u8 p1[4];
+        p1[0] = (u8)'T'; p1[1] = (u8)'E'; p1[2] = (u8)'S'; p1[3] = (u8)'T';
+        b1.extend(p1, 4);
+        b2.extend(p1, 4);
+
+        assert_true(b1.equals(&b2), "b1 == b2");
+        assert_true(b1.starts_with(p1, 2), "starts_with TE");
+        assert_true(b1.ends_with(&p1[2], 2), "ends_with ST");
+
+        b2.push((u8)'!');
+        assert_true(!b1.equals(&b2), "b1 != b2 after push");
+
+        b1.drop();
+        b2.drop();
+    }
+
     return done();
 }

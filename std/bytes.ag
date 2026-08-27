@@ -3,6 +3,7 @@
 // but with a simpler interface focused on byte-oriented I/O and binary data.
 import std.mem.alloc;
 import std.mem.drop;
+import std.mem.memory;
 import std.ops;
 
 struct Bytes {
@@ -70,7 +71,7 @@ impl Bytes {
     }
 
     void extend(&mut Bytes self, u8* src, i64 src_len) {
-        if (src_len <= 0) {
+        if (src_len <= 0 || src == (u8*)0) {
             return;
         }
         if (self.len + src_len > self.cap) {
@@ -84,12 +85,64 @@ impl Bytes {
             self.data = realloc<u8>(self.data, new_cap);
             self.cap = new_cap;
         }
-        i64 i = 0;
-        while (i < src_len) {
-            self.data[self.len + i] = src[i];
-            i = i + 1;
-        }
+        silver_rt_memcpy(&self.data[self.len], src, src_len);
         self.len = self.len + src_len;
+    }
+
+    /// Find first occurrence of `byte`. Returns index, or -1 if not found.
+    i64 find(&Bytes self, u8 byte) {
+        return mem_find_byte(self.data, byte, self.len);
+    }
+
+    /// Find last occurrence of `byte`. Returns index, or -1 if not found.
+    i64 rfind(&Bytes self, u8 byte) {
+        return mem_find_byte_back(self.data, byte, self.len);
+    }
+
+    /// Count occurrences of `byte`.
+    i64 count(&Bytes self, u8 byte) {
+        return mem_count_byte(self.data, byte, self.len);
+    }
+
+    /// True if `byte` is present in buffer.
+    bool contains(&Bytes self, u8 byte) {
+        return self.find(byte) >= 0;
+    }
+
+    /// True if buffer begins with `prefix`.
+    bool starts_with(&Bytes self, u8* prefix, i64 prefix_len) {
+        if (prefix == (u8*)0 || prefix_len <= 0) {
+            return true;
+        }
+        if (self.len < prefix_len) {
+            return false;
+        }
+        return memcmp((const void*)self.data, (const void*)prefix, prefix_len) == 0;
+    }
+
+    /// True if buffer ends with `suffix`.
+    bool ends_with(&Bytes self, u8* suffix, i64 suffix_len) {
+        if (suffix == (u8*)0 || suffix_len <= 0) {
+            return true;
+        }
+        if (self.len < suffix_len) {
+            return false;
+        }
+        return memcmp((const void*)&self.data[self.len - suffix_len], (const void*)suffix, suffix_len) == 0;
+    }
+
+    /// True if two byte buffers have identical contents.
+    bool equals(&Bytes self, Bytes* other) {
+        if (other == (Bytes*)0) {
+            return false;
+        }
+        if (self.len != other.len) {
+            return false;
+        }
+        if (self.len == 0) {
+            return true;
+        }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
     u8 get(&Bytes self, i64 index) {

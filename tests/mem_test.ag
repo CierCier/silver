@@ -375,5 +375,23 @@ i32 main() {
         check(true, "Freeing page-aligned and large-aligned zero-sized allocations is successful");
     }
 
+    // Test: SIMD search & count primitives
+    STDOUT.write_str("\n--- SIMD Search & Count Primitives ---\n");
+    {
+        u8* buf = alloc<u8>(128);
+        memset(buf, 0, 128);
+        buf[25] = (u8)'X';
+        buf[75] = (u8)'X';
+        buf[110] = (u8)'X';
+
+        assert_eq_i64(mem_find_byte(buf, (u8)'X', 128), 25, "mem_find_byte finds first occurrence across AVX2/SSE blocks");
+        assert_eq_i64(mem_find_byte_back(buf, (u8)'X', 128), 110, "mem_find_byte_back finds last occurrence");
+        assert_eq_i64(mem_count_byte(buf, (u8)'X', 128), 3, "mem_count_byte counts occurrences accurately");
+        assert_eq_i64(mem_find_byte(buf, (u8)'Z', 128), -1, "mem_find_byte returns -1 on missing byte");
+        assert_eq_i64(mem_find_byte_back(buf, (u8)'Z', 128), -1, "mem_find_byte_back returns -1 on missing byte");
+
+        free(buf);
+    }
+
     return done();
 }

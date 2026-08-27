@@ -243,7 +243,7 @@ impl String {
             return -1;
         }
         if (needle_len == 1) {
-            // Single byte: SSE2 memchr scan instead of per-position memcmp.
+            // Single byte: SSE2/AVX2 memchr scan instead of per-position memcmp.
             u8* n = (u8*)needle;
             u8 first = n[0];
             return mem_find_byte(&self.data[0], first, self.len);
@@ -254,6 +254,82 @@ impl String {
             }
         }
         return -1;
+    }
+
+    /// Find last occurrence of `needle`. Returns index, or -1 if not found.
+    i64 rfind(&String self, str needle) {
+        if (needle == (str)0) {
+            return -1;
+        }
+        i64 needle_len = strlen(needle);
+        if (needle_len == 0) {
+            return self.len;
+        }
+        if (self.len < needle_len) {
+            return -1;
+        }
+        if (needle_len == 1) {
+            u8* n = (u8*)needle;
+            return mem_find_byte_back(&self.data[0], n[0], self.len);
+        }
+        i64 i = self.len - needle_len;
+        while (i >= 0) {
+            if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
+                return i;
+            }
+            i = i - 1;
+        }
+        return -1;
+    }
+
+    /// Count occurrences of `needle` in the string.
+    i64 count(&String self, str needle) {
+        if (needle == (str)0 || self.len == 0) {
+            return 0;
+        }
+        i64 needle_len = strlen(needle);
+        if (needle_len == 0) {
+            return 0;
+        }
+        if (needle_len == 1) {
+            u8* n = (u8*)needle;
+            return mem_count_byte(&self.data[0], n[0], self.len);
+        }
+        i64 c = 0;
+        i64 i = 0;
+        while (i <= self.len - needle_len) {
+            if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
+                c = c + 1;
+                i = i + needle_len;
+            } else {
+                i = i + 1;
+            }
+        }
+        return c;
+    }
+
+    /// Return a copy converted to lowercase ASCII.
+    String to_lowercase(&String self) {
+        String result = self.clone();
+        for (i64 i = 0; i < result.len; i = i + 1) {
+            u8 ch = result.data[i];
+            if (ch >= (u8)65 && ch <= (u8)90) {
+                result.data[i] = ch + (u8)32;
+            }
+        }
+        return result;
+    }
+
+    /// Return a copy converted to uppercase ASCII.
+    String to_uppercase(&String self) {
+        String result = self.clone();
+        for (i64 i = 0; i < result.len; i = i + 1) {
+            u8 ch = result.data[i];
+            if (ch >= (u8)97 && ch <= (u8)122) {
+                result.data[i] = ch - (u8)32;
+            }
+        }
+        return result;
     }
 
     String substr(&String self, i64 start, i64 len) {
@@ -380,6 +456,14 @@ impl String {
     bool is_valid_utf8(&String self) {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
+        while (i + 16 <= self.len) {
+            i64 non_ascii = asm("movdqu (%rax), %xmm0\npmovmskb %xmm0, %eax", [&self.data[i]], ["xmm0"]);
+            if (non_ascii == 0) {
+                i = i + 16;
+            } else {
+                break;
+            }
+        }
         while (i < self.len) {
             u8 b = self.data[i];
             if (b < (u8)0x80) {
