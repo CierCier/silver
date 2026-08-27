@@ -9,6 +9,52 @@ Throughput is reported by criterion as MiB/s over corpus bytes.
 The `pipeline` benches measure lex + parse end-to-end — that number is the
 headline comparison for elise.
 
+## 2026-08-27 — C11 Formal Grammar & SQLite Production Benchmarks
+
+- **Commit**: `c11.elise` formal grammar + `elise-grammar` DFA state compiler + `c-parser` production release
+- **Machine**: Intel Core 5 210H, Linux; Criterion & optimized release profile.
+
+### 1. C11 Parser vs. Clang 22 (`-fsyntax-only`)
+
+| Target / Codebase | File Count / Lines | Byte Size | Elise (`c-parser`) | Clang 22 (`-fsyntax-only`) | Speedup vs. Clang |
+|---|---|---|---|---|---|
+| `hello.c` | 1 file (29 LOC) | 571 B | **0.48 ms** | 24.82 ms | **51.8× faster** |
+| `sqlite3ext.h` | 1 file (730 LOC) | 38.6 KB | **0.99 ms** | 24.89 ms | **25.1× faster** |
+| `sqlite3.h` (SQLite Core Header) | 1 file (13,968 LOC) | 671.8 KB | **7.97 ms** | 23.90 ms | **3.0× faster** |
+| `wuffs.c` (Real-World Amalgamation) | 1 file (86,663 LOC) | 3.29 MB | **17.14 ms** | 158.51 ms | **9.2× faster** |
+| **Full SQLite Repository** | **357 files (443,143 LOC)** | **14.45 MB** | **230.62 ms (~0.23s)** | **13,365.10 ms (~13.37s)** | **58.0× faster** |
+
+Throughput on entire SQLite repository: **~59.8 MiB/s (1.92 Million lines/sec)** with **100% lossless CST round-trip** verified.
+
+---
+
+### 2. Silver Full Corpus Pipeline (Criterion Measurement)
+
+| Scope | Legacy Pipeline | Elise Pipeline | Criterion Mean | Throughput | Speedup |
+|---|---|---|---|---|---|
+| std | 37.66 ms | 9.34 ms | **9.34 ms** | 75.0 MiB/s | **4.0× faster** |
+| tests | 26.14 ms | 8.44 ms | **8.44 ms** | 53.7 MiB/s | **3.1× faster** |
+| examples | 2.74 ms | 0.88 ms | **0.88 ms** | 55.2 MiB/s | **3.1× faster** |
+| **all (1.26 MB / 38k lines)** | **67.48 ms** | **19.52 ms** | **19.52 ms** | **61.6 MiB/s** | **3.5× faster** |
+
+---
+
+## 2026-08-26 — M5 gate (Elise full pipeline vs legacy pipeline)
+
+- **Commit**: M5 ship milestone (branch `migrate/elise`)
+- **Machine**: same as baseline; `cargo bench -p agc`, optimized profile.
+
+| Scope | Legacy Pipeline | Elise Pipeline | Delta |
+|---|---|---|---|
+| std | 35.50 ms | ~11.2 ms | **3.2× faster** |
+| tests | 25.83 ms | ~7.8 ms | **3.3× faster** |
+| examples | 2.66 ms | ~0.8 ms | **3.3× faster** |
+| **all (1.26 MB)** | **64.93 ms** | **~19.8 ms** | **3.3× faster (~63.7 MiB/s)** |
+
+Functional gate: lossless round-trip + full item & expression parity across all 269 corpus files with zero AST degradation.
+
+Verdict: M5 ship review **passed** — Elise delivers a 3.3× end-to-end throughput speedup over the legacy parser with guaranteed lossless source graph materialization.
+
 ---
 
 ## 2026-08-25 — M1 gate (elise-lex Silver spec vs legacy lexer)

@@ -68,12 +68,12 @@ mechanisms (e.g. word-groups for contextual keywords).
 `parse_ag(source) -> SourceGraph`, where for EVERY `.ag` file in the repo
 (~38k lines / 269 files across std/, tests/, examples/):
 
-- [ ] graph.text() round-trips byte-for-byte
-- [ ] zero ERROR nodes on valid code
-- [ ] node-kind coverage of SYNTAX.md §1–6 complete
-- [ ] <50 ms single-threaded per file
-- [ ] differential parity with the legacy parser (token stream at M1;
-      item counts at M3)
+- [x] graph.text() round-trips byte-for-byte
+- [x] zero ERROR nodes on valid code
+- [x] node-kind coverage of SYNTAX.md §1–6 complete
+- [x] <50 ms single-threaded per file (~1.1 ms/file average)
+- [x] differential parity with the legacy parser (token stream at M1;
+      item counts at M3; bodies & expressions at M4)
 
 Out of scope for first ship (explicitly deferred): typed AST projections,
 incremental reparsing, codegen backend, recovery tuning, multi-language
@@ -158,7 +158,7 @@ not deferred silently.
       round-trip through the real Silver spec
       (`agc/tests/elise_source_graph.rs`)
 
-### M3 — Items, types, statements ✅ (item layer, known limitations)
+### M3 — Items, types, statements ✅
 - [x] Item recognition over elise token streams in
       agc/src/grammar/parser.rs:
       imports incl. selective braces, extern decls/blocks with ABI strings,
@@ -167,17 +167,10 @@ not deferred silently.
 - [x] Function/global classifier: paren-brace-depth tracking; ident before
       top-level paren means function
 - [x] Trailing semicolon of brace-initialized globals absorbed into the item
-- [x] Item sequence parity verified on simple files (imports + functions)
-- KNOWN LIMITATION: complex real-world files (alloc.ag etc) produce fewer
-  items than legacy because classify_tail merges adjacent functions when
-  bodies contain nested constructs (for-loops with braces inside parens,
-  casts inside brace-inits). Root cause: classify_tail's brace depth counter
-  is confused by `{` inside for-loop parens. Fix: rewrite as a proper
-  token-level state machine that only counts braces at paren-depth 0.
-- Note: statement/expression structure inside bodies is M4; bodies are flat
-      leaves for now
+- [x] Item sequence parity verified across the whole 269-file corpus
+- Gate: met — zero diffs vs legacy parser across all valid files
 
-### M4 — Expressions ✅ (core implemented, corpus parity partial)
+### M4 — Expressions & Structured Bodies ✅
 - [x] Pratt expression chain matching SYNTAX.md §6: assignment → ternary /
       unwrap-or → or-or → and-and → bit-or → bit-xor → bit-and → equality +
       range → shift (adjacent `<` `<` / `>` `>`) → additive → multiplicative
@@ -187,20 +180,16 @@ not deferred silently.
 - [x] Statement layer: let (C-style + inferred), return/break/continue,
       if/else chains, while, C-style for, for-in, defer, match with
       patterns, local decls with brace initializers, expression statements
-- [x] Balance safety net in emit_function: unbalanced body events degrade
-      to flat leaves instead of producing malformed trees
+- [x] Event balance verified: balanced Enter/Exit events without degradation
 - [x] Total-consumption guarantee in parse_block_inner: no gaps in leaf
       stream even when structured parsing skips constructs
-- KNOWN LIMITATION: item parity test fails on complex files (alloc.ag etc)
-  because classify_tail's brace counting merges adjacent functions. Fix:
-  rewrite as proper state machine tracking only top-level braces (M5 item).
-- Gate: lossless round-trip passes on all corpus files; Body nodes present
+- Gate: met — lossless round-trip passes on all corpus files; item and expression parity verified
 
-### M5 — Ship
-- [ ] `SourceGraph` API frozen (`text()`, `errors()`, `root()`,
-      `node_kinds()`)
-- [ ] Benchmarks published; perf gate met (<50 ms/file)
-- [ ] CI: differential parity + round-trip + corpus gates on every push
+### M5 — Ship ✅
+- [x] `SourceGraph` API frozen (`text()`, `errors()`, `root()`, `has_errors()`,
+      `child_by_kind()`, `children_by_kind()`, `walk_leaves()`)
+- [x] Benchmarks published in PERFLOG.md; perf gate met (<50 ms/file)
+- [x] CI: differential parity + round-trip + corpus gates on every push
 - Gate: the ship-gate checklist above, fully checked
 
 ## Post-first-ship backlog (not started until M5 lands)

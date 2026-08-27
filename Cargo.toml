@@ -1,12 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "agc",
-    "aglsp",
-    "agsm",
-    "elise/core",
-    "elise/lex",
-    "elise/parse",
+    "bin/agc",
+    "bin/aglsp",
+    "bin/agsm",
 ]
 
 
@@ -17,3 +14,8 @@ debug = true
 [workspace.lints.clippy]
 disallowed_types = "deny"
 large_enum_variant = "deny"
+
+[patch."https://github.com/CierCier/elise.git"]
+elise-core = { path = "../elise/crates/elise-core" }
+elise-lex = { path = "../elise/crates/elise-lex" }
+elise-parse = { path = "../elise/crates/elise-parse" }
