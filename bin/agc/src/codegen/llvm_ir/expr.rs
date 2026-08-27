@@ -1583,10 +1583,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .collect();
         let fn_type = i64_ty.fn_type(&param_types, false);
 
-        // 4. Create inline asm pointer
+        // 4. Create inline asm pointer with normalized lines
+        let normalized_code: String = if code.contains('\n') {
+            code.lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\t")
+        } else {
+            code.to_string()
+        };
+
         let asm_fn = self.context.create_inline_asm(
             fn_type,
-            code.to_string(),
+            normalized_code,
             constraints,
             true,  // sideeffects: syscall has side effects
             false, // alignstack: false (syscall ABI doesn't require aligned stack)

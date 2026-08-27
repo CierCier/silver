@@ -1030,19 +1030,26 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 });
             }
             cursor.bump();
-            let Some(arg) = cursor.current() else {
-                return Err(ParseError::InvalidSyntax {
-                    message: "expected asm string literal".to_string(),
-                    span: open.span,
-                });
-            };
-            let Token::StringLiteral(ref code) = arg.kind else {
+            let mut code = String::new();
+            let mut has_str = false;
+            while let Some(tok) = cursor.current() {
+                if let Token::StringLiteral(ref s) = tok.kind {
+                    if has_str && !code.ends_with('\n') {
+                        code.push('\n');
+                    }
+                    code.push_str(s);
+                    has_str = true;
+                    cursor.bump();
+                } else {
+                    break;
+                }
+            }
+            if !has_str {
                 return Err(ParseError::InvalidSyntax {
                     message: "asm expects a string literal".to_string(),
-                    span: arg.span,
+                    span: open.span,
                 });
-            };
-            cursor.bump();
+            }
 
             let mut inputs = Vec::new();
             let mut clobbers = Vec::new();
@@ -1143,7 +1150,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let Some(close) = cursor.current() else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected ')' after asm string".to_string(),
-                    span: arg.span,
+                    span: open.span,
                 });
             };
             if !matches!(close.kind, Token::RightParen) {
