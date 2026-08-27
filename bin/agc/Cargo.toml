@@ -13,3 +13,13 @@ quickcheck_macros = "1.0"
 parking_lot = "0.12"
 rustc-hash = "2.1.3"
 rayon = "1.12.0"
+elise-core = { git = "https://github.com/CierCier/elise.git" }
+elise-lex = { git = "https://github.com/CierCier/elise.git" }
+elise-parse = { git = "https://github.com/CierCier/elise.git" }
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "corpus"
+harness = false

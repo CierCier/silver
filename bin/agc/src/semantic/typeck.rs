@@ -7017,6 +7017,8 @@ mod tests {
         let std_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
+            .parent()
+            .unwrap()
             .join("std");
         let mut files: Vec<_> = std::fs::read_dir(&std_dir)
             .expect("std dir not found")
@@ -7855,6 +7857,8 @@ mod tests {
         let (mut program, errors) = parser.parse_program();
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
             .parent()
             .unwrap();
         let mut loader = crate::module_loader::ModuleLoader::new();

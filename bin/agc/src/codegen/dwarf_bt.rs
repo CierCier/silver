@@ -863,11 +863,11 @@ mod tests {
         let _ = std::fs::remove_file(&out);
         let agc = std::env::var("AGC").unwrap_or_else(|_| {
             let target = std::env::var("CARGO_TARGET_DIR")
-                .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../target").to_string());
+                .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
             format!("{target}/debug/agc")
         });
         let status = std::process::Command::new(&agc)
-            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .args([
                 "-c",
                 "-g",

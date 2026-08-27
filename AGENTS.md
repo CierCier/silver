@@ -20,34 +20,31 @@ Silver is a statically typed, LLVM-backed systems programming language exploring
 
 ```
 silver/
-├── agc/                         # The Silver compiler source code (Rust crate)
-│   ├── src/
-│   │   ├── main.rs              # Compiler driver, CLI options parsing, and build orchestrator
-│   │   ├── lib.rs               # Exported frontend modules (for reuse by tooling/LSP)
-│   │   ├── lexer.rs             # Token definition, lexical scanner, and spans
-│   │   ├── parser/              # Syntactic analysis and import resolution
-│   │   │   ├── ast.rs           # Core Abstract Syntax Tree definitions
-│   │   │   ├── error.rs         # Syntax errors mapping source spans
-│   │   │   ├── import_hook.rs   # Lowers import nodes by inlining files or resolving modules
-│   │   │   └── prt_parser.rs    # Predictive Reduction Table parser
-│   │   ├── semantic/            # Semantic analysis, type checking, and monomorphization
-│   │   │   ├── analyzer.rs      # Global symbol registration and duplicate detection
-│   │   │   ├── typeck.rs        # Type-checking rules, layout computing, and trait validation
-│   │   │   └── monomorph.rs     # Generics fixpoint monomorphization engine
-│   │   ├── codegen/             # Target code generation
-│   │   │   ├── abi.rs           # System V AMD64 ABI struct classification handler
-│   │   │   └── llvm_ir.rs       # Inkwell-based LLVM IR builder
-│   │   ├── symbol_table.rs      # Phase-aware compiler symbol registration & scopes
-│   │   ├── diagnostics.rs       # Clang-style caret-underline error visualizer
-│   │   └── profiler.rs          # Simple phase timing instrumenter
+├── bin/                         # Executable CLI binaries
+│   ├── agc/                     # The Silver compiler source code (Rust crate, uses Elise)
+│   │   ├── src/
+│   │   │   ├── main.rs          # Compiler driver, CLI options parsing, and build orchestrator
+│   │   │   ├── lib.rs           # Exported frontend modules (for reuse by tooling/LSP)
+│   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
+│   │   │   ├── parser/          # Syntactic analysis and import resolution
+│   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
+│   │   │   ├── codegen/         # Target code generation (System V AMD64 ABI & LLVM IR)
+│   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
+│   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
+│   │   │   └── profiler.rs      # Phase timing instrumenter
+│   ├── aglsp/                   # Language Server Protocol server
+│   └── agsm/                    # Source maps and module artifact generator
 ├── std/                         # Silver standard library sources (bootstrap-copied)
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
-│   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch, Runtime aggregate
+│   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
+├── examples/                    # Silver example applications (.ag files)
 ├── bootstrap/                   # Generated locally — NOT committed to git
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```
+
+> **External Dependency**: Parsing engine libraries (`elise-core`, `elise-lex`, `elise-parse`, `elise-grammar`) are maintained in the standalone repository [**CierCier/elise**](https://github.com/CierCier/elise).
 
 ---
 

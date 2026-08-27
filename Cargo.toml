@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "agc",
-    "aglsp",
-    "agsm",
+    "bin/agc",
+    "bin/aglsp",
+    "bin/agsm",
 ]
 
 
@@ -14,3 +14,4 @@ debug = true
 [workspace.lints.clippy]
 disallowed_types = "deny"
 large_enum_variant = "deny"
+

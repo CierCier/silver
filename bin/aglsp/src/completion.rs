@@ -464,6 +464,8 @@ mod tests {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
+            .parent()
+            .unwrap()
             .to_path_buf();
         let mut loader = ModuleLoader::new();
         loader.add_search_dir(repo_root);

@@ -72,14 +72,16 @@ i32 main() {
 
 ## Repository Layout
 
-- `agc/` — Reference Silver compiler (written in Rust, powered by LLVM via `inkwell`)
+- `bin/` — Executable binaries and CLI drivers:
+  - `bin/agc/` — Reference Silver compiler (`agc` CLI driver and LLVM backend, powered by [Elise](https://github.com/CierCier/elise))
+  - `bin/aglsp/` — Silver Language Server Protocol implementation (`aglsp`)
+  - `bin/agsm/` — Source maps and module artifact generator (`agsm`)
 - `std/` — Standard library sources (memory management, concurrency, I/O, collections, runtime)
-- `aglsp/` — Silver Language Server Protocol implementation
-- `agsm/` — Source maps and module artifact tools
+- `examples/` — Sample Silver programs
+- `tests/` — Test suites including language unit tests, memory pentests, and integration tests
+- `docs/` — Language specifications and architecture design docs
 - `vendor/` — Third-party library headers and bindings (e.g. `vendor.gfx`)
 - `bootstrap/` — Generated compiler and standard library artifacts
-- `tests/` — Test suites including language unit tests, memory pentests, and integration tests
-- `examples/` — Sample Silver programs
 
 ---
 

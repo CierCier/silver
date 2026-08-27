@@ -755,66 +755,46 @@ pub fn run(cli: Cli) {
                         }
                     };
 
-                    match lexer::lex(&src) {
-                        Ok(tokens) => {
-                            let mut parser = parser::Parser::new_with_source(
-                                tokens,
-                                input.display().to_string(),
-                            );
-                            let (ast, errors) = parser.parse_program();
+                    let graph = crate::grammar::parse_ag(&src);
+                    let ast = crate::grammar::lower_source_graph(&graph, 0);
 
-                            if !errors.is_empty() {
-                                for error in &errors {
-                                    eprintln!(
-                                        "{}",
-                                        diagnostics::render(
-                                            *error.span(),
-                                            &error.format_with_help(),
-                                            diagnostics::Severity::Error,
-                                        )
-                                    );
-                                }
-                                if ast.items.is_empty() {
-                                    std::process::exit(2);
-                                }
-                                eprintln!("agc: continuing with partial parse...");
-                            }
-
-                            let mut symbol_table = CompilerSymbolTable::new();
-                            symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
-                            symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
-
-                            if plan.inputs.len() > 1 {
-                                println!("== {} ==", input.display());
-                            }
-                            if plan.verbose {
-                                eprintln!(
-                                    "agc: symbol table [{}]: {}",
-                                    input.display(),
-                                    symbol_table.summary_line()
-                                );
-                            }
-                            println!("{}", ast_tree::render_program(&ast));
-                        }
-                        Err(errors) => {
+                    if graph.has_errors() {
+                        for error in graph.errors() {
+                            let span = lexer::Span {
+                                start: error.start as usize,
+                                end: error.end as usize,
+                                ..Default::default()
+                            };
                             eprintln!(
-                                "agc: {}: lexer errors in {}",
-                                "error".red().bold(),
-                                input.display()
+                                "{}",
+                                diagnostics::render(
+                                    span,
+                                    &error.message,
+                                    diagnostics::Severity::Error,
+                                )
                             );
-                            for e in errors {
-                                eprintln!(
-                                    "{}",
-                                    diagnostics::render(
-                                        e.span,
-                                        &format!("{:?}", e.kind),
-                                        diagnostics::Severity::Error,
-                                    )
-                                );
-                            }
+                        }
+                        if ast.items.is_empty() {
                             std::process::exit(2);
                         }
+                        eprintln!("agc: continuing with partial parse...");
                     }
+
+                    let mut symbol_table = CompilerSymbolTable::new();
+                    symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
+                    symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
+
+                    if plan.inputs.len() > 1 {
+                        println!("== {} ==", input.display());
+                    }
+                    if plan.verbose {
+                        eprintln!(
+                            "agc: symbol table [{}]: {}",
+                            input.display(),
+                            symbol_table.summary_line()
+                        );
+                    }
+                    println!("{}", ast_tree::render_program(&ast));
                 }
                 return;
             }
@@ -917,43 +897,24 @@ pub fn run(cli: Cli) {
                 let input_path = input.display().to_string();
                 let input_file = lexer::register_source(&input_path, &src);
 
-                profiler::begin_phase("lex");
-                let tokens = match lexer::lex_with_source(&src, input_file) {
-                    Ok(tokens) => tokens,
-                    Err(errors) => {
-                        eprintln!(
-                            "agc: {}: lexer errors in {}",
-                            "error".red().bold(),
-                            input.display()
-                        );
-                        for e in errors {
-                            eprintln!(
-                                "{}",
-                                diagnostics::render(
-                                    e.span,
-                                    &e.kind.to_string(),
-                                    diagnostics::Severity::Error,
-                                )
-                            );
-                        }
-                        std::process::exit(2);
-                    }
-                };
-                profiler::end_phase("lex");
-
                 profiler::begin_phase("parse");
-                let mut parser =
-                    parser::Parser::new_with_source(tokens, input.display().to_string());
-                let (mut ast, errors) = parser.parse_program();
+                let graph = crate::grammar::parse_ag(&src);
+                let mut ast = crate::grammar::lower_source_graph(&graph, input_file as usize);
                 profiler::end_phase("parse");
 
-                if !errors.is_empty() {
-                    for error in &errors {
+                if graph.has_errors() {
+                    for error in graph.errors() {
+                        let span = lexer::Span {
+                            start: error.start as usize,
+                            end: error.end as usize,
+                            file: input_file,
+                            ..Default::default()
+                        };
                         eprintln!(
                             "{}",
                             diagnostics::render(
-                                *error.span(),
-                                &error.format_with_help(),
+                                span,
+                                &error.message,
                                 diagnostics::Severity::Error,
                             )
                         );

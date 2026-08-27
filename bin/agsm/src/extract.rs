@@ -233,6 +233,7 @@ pub fn build_artifact(
             .map(|path| config.resolve_path(base_dir, path).display().to_string())
             .collect(),
         artifact_path: None,
+        generic_templates: Vec::new(),
     })
 }
 
