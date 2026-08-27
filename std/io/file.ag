@@ -74,7 +74,7 @@ impl BufWriter {
                 self.cap = -1;   // sentinel: "initialized, no buffer"
                 return;
             }
-            self.data = (i64)alloc<u8>(4096);
+            self.data = (i64)malloc(4096);
             self.len = 0;
             self.cap = 4096;
         }

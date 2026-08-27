@@ -655,10 +655,6 @@ void* realloc_bytes(void* ptr, i64 new_size) {
     return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
 }
 
-void* realloc(void* ptr, i64 new_size) {
-    return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
-}
-
 void free(void* ptr) {
     mem_free_impl((u8*)ptr);
 }
@@ -673,6 +669,10 @@ T* try_alloc<T>() {
     return (T*)(malloc(@size(T)));
 }
 
+T* try_alloc_n<T>(i64 count) {
+    return (T*)(calloc(count, @size(T)));
+}
+
 T* try_alloc<T>(i64 count) {
     return (T*)(calloc(count, @size(T)));
 }
@@ -685,19 +685,27 @@ T* try_realloc<T>(T* ptr, i64 count) {
 // when allocation fails, providing explicit failure instead of a segfault.
 
 T* alloc<T>() {
-    T* ptr = try_alloc<T>();
+    T* ptr = (T*)(malloc(@size(T)));
     if (ptr == (T*)0) {
         abort();
     }
     return ptr;
 }
 
-T* alloc<T>(i64 count) {
-    T* ptr = try_alloc<T>(count);
+T* alloc_n<T>(i64 count) {
+    T* ptr = (T*)(calloc(count, @size(T)));
     if (ptr == (T*)0) {
         abort();
     }
     return ptr;
+}
+
+T* alloc_array<T>(i64 count) {
+    return alloc_n<T>(count);
+}
+
+T* alloc<T>(i64 count) {
+    return alloc_n<T>(count);
 }
 
 T* realloc<T>(T* ptr, i64 count) {
