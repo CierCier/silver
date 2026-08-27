@@ -1023,11 +1023,9 @@ mod tests {
     use quickcheck::{QuickCheck, TestResult};
 
     fn parse(source: &str) -> ast::Program {
-        let tokens = lex(source).expect("lex failed");
-        let mut parser = Parser::new(tokens);
-        let (program, errors) = parser.parse_program();
-        assert!(errors.is_empty(), "parse errors: {errors:?}");
-        program
+        let graph = crate::grammar::parse_ag(source);
+        assert!(!graph.has_errors(), "parse errors: {:?}", graph.errors());
+        crate::grammar::lower_source_graph(&graph, 0)
     }
 
     #[test]
@@ -1228,6 +1226,9 @@ mod tests {
                 | "else"
                 | "while"
                 | "for"
+                | "match"
+                | "let"
+                | "defer"
                 | "break"
                 | "continue"
                 | "return"
@@ -1241,6 +1242,12 @@ mod tests {
                 | "true"
                 | "false"
                 | "in"
+                | "as"
+                | "launch"
+                | "wait"
+                | "macro"
+                | "type"
+                | "Self"
         )
     }
 

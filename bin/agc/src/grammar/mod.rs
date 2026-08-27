@@ -4,11 +4,13 @@
 //! item-level parser (see [`parser`]). Nothing Silver-specific may leak
 //! into `elise/`.
 
+pub mod ast_view;
 pub mod body;
 pub mod lexspec;
 pub mod lower;
 pub mod parser;
 
+pub use ast_view::*;
 pub use lexspec::{SilverLexSpec, Tok};
 pub use lower::lower_source_graph;
 pub use parser::{parse_ag, NodeKind};

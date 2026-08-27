@@ -84,6 +84,7 @@ pub fn parse_ag(src: &str) -> SourceGraph {
     };
 
     let mut parser = ItemParser {
+        src,
         rows: tokens.rows(),
         pos: 0usize,
         events: Vec::new(),
@@ -97,15 +98,26 @@ pub fn parse_ag(src: &str) -> SourceGraph {
 }
 
 struct ItemParser<'a> {
+    src: &'a str,
     rows: &'a [elise_lex::TokenRow],
     pos: usize,
     events: Vec<Event>,
     errors: Vec<SyntaxError>,
 }
 
-
-
 impl<'a> ItemParser<'a> {
+    #[inline]
+    fn is_ident_text(&self, idx: usize, expected: &str) -> bool {
+        let row = &self.rows[idx];
+        let start = row.start as usize;
+        let end = start + row.len as usize;
+        if end <= self.src.len() {
+            &self.src[start..end] == expected
+        } else {
+            false
+        }
+    }
+
     /// Next significant (non-trivia) token at/after `index`.
     #[inline]
     fn peek_sig(&self, index: usize) -> Option<(usize, Tok)> {
@@ -128,7 +140,7 @@ impl<'a> ItemParser<'a> {
     fn parse_file(&mut self) {
         while let Some((first_idx, _)) = self.peek_sig(self.pos) {
             // Absorb leading attributes (`#[...]`) and visibility
-            // (`private`) into the item span — the legacy parser attaches
+            // (`private`, `pub`) into the item span — the legacy parser attaches
             // them to the following item rather than listing separately.
             let mut cursor = first_idx;
             loop {
@@ -138,6 +150,9 @@ impl<'a> ItemParser<'a> {
                             self.skip_balanced(h + 1, Tok::LBracket, Tok::RBracket);
                     }
                     Some((p, Tok::Private)) => {
+                        cursor = p + 1;
+                    }
+                    Some((p, Tok::Ident)) if self.is_ident_text(p, "pub") => {
                         cursor = p + 1;
                     }
                     _ => break,

@@ -347,12 +347,12 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 [[package]]
 name = "elise-core"
 version = "0.1.0"
-source = "git+https://github.com/CierCier/elise.git#3b7e069a355f9e193c09171f8ddc5006e4a94507"
+source = "git+https://github.com/CierCier/elise.git#e8af64e3b7e1d28152629a6bebdd3fd2e623805a"
 
 [[package]]
 name = "elise-lex"
 version = "0.1.0"
-source = "git+https://github.com/CierCier/elise.git#3b7e069a355f9e193c09171f8ddc5006e4a94507"
+source = "git+https://github.com/CierCier/elise.git#e8af64e3b7e1d28152629a6bebdd3fd2e623805a"
 dependencies = [
  "elise-core",
 ]
@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "elise-parse"
 version = "0.1.0"
-source = "git+https://github.com/CierCier/elise.git#3b7e069a355f9e193c09171f8ddc5006e4a94507"
+source = "git+https://github.com/CierCier/elise.git#e8af64e3b7e1d28152629a6bebdd3fd2e623805a"
 dependencies = [
  "elise-core",
  "elise-lex",
