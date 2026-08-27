@@ -5410,7 +5410,93 @@ impl PRT_Parser {
         })
     }
 
-    fn seed_known_types_from_tokens(&mut self, tokens: &[LexToken]) {
+    pub fn parse_single_item(
+        &mut self,
+        tokens: &[LexToken],
+        position: usize,
+        item_end: usize,
+    ) -> Result<ast::Item, ParseError> {
+        let (attributes, item_start) =
+            self.parse_attributes_prefix(tokens, position, item_end)?;
+        let (visibility, item_start) =
+            self.parse_visibility_prefix(tokens, item_start, item_end);
+
+        let Some(production) = self.predict_item_production(tokens, item_start) else {
+            return Err(ParseError::InvalidSyntax {
+                message: "could not recognize item".to_string(),
+                span: tokens.get(item_start).map(|t| t.span).unwrap_or_default(),
+            });
+        };
+
+        let item_span = tokens[position].span.extend_to(&tokens[item_end - 1].span);
+        let kind = match production {
+            ItemProduction::Import => ast::ItemKind::Import(
+                self.parse_import_reduction(tokens, item_start, item_end)?,
+            ),
+            ItemProduction::ExternDeclaration => {
+                match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
+                    ParsedExternDeclaration::Function(function_item) => {
+                        ast::ItemKind::ExternFunction(function_item)
+                    }
+                    ParsedExternDeclaration::Variable(variable_item) => {
+                        ast::ItemKind::ExternVariable(variable_item)
+                    }
+                }
+            }
+            ItemProduction::ExternBlock => ast::ItemKind::ExternBlock(
+                self.parse_extern_block_reduction(tokens, item_start, item_end)?,
+            ),
+            ItemProduction::Struct => ast::ItemKind::Struct(
+                self.parse_struct_reduction(tokens, item_start, item_end)?,
+            ),
+            ItemProduction::Enum => {
+                ast::ItemKind::Enum(self.parse_enum_reduction(tokens, item_start, item_end)?)
+            }
+            ItemProduction::Trait => {
+                ast::ItemKind::Trait(self.parse_trait_reduction(tokens, item_start, item_end)?)
+            }
+            ItemProduction::Impl => {
+                ast::ItemKind::Impl(self.parse_impl_reduction(tokens, item_start, item_end)?)
+            }
+            ItemProduction::Function => {
+                if matches!(tokens[item_start].kind, Token::Static) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "static functions are not supported".to_string(),
+                        span: tokens[item_start].span,
+                    });
+                }
+                if matches!(tokens[item_start].kind, Token::Volatile) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "volatile functions are not supported".to_string(),
+                        span: tokens[item_start].span,
+                    });
+                }
+                ast::ItemKind::Function(
+                    self.parse_function_reduction(tokens, item_start, item_end)?,
+                )
+            }
+            ItemProduction::GlobalVariable => ast::ItemKind::GlobalVariable(
+                self.parse_global_variable_reduction(tokens, item_start, item_end)?,
+            ),
+            ItemProduction::Macro => {
+                ast::ItemKind::Macro(self.parse_macro_reduction(tokens, item_start, item_end)?)
+            }
+            ItemProduction::TypeAlias => ast::ItemKind::TypeAlias(
+                self.parse_type_alias_reduction(tokens, item_start, item_end)?,
+            ),
+        };
+
+        let (_prog_attrs, retained) = attributes::filter_program_attributes(attributes);
+        self.record_known_item(&kind);
+        Ok(ast::Item {
+            kind,
+            span: item_span,
+            visibility,
+            attributes: retained,
+        })
+    }
+
+    pub fn seed_known_types_from_tokens(&mut self, tokens: &[LexToken]) {
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
         let mut brace_depth = 0usize;

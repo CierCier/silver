@@ -349,30 +349,18 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     // Register the imported file so its diagnostic spans resolve to this file.
     let file_id = crate::lexer::register_source(&path.display().to_string(), &src);
     if verbose {
-        crate::profiler::begin_phase(&format!("lex {label}"));
-    }
-    let tokens = lexer::lex_with_source(&src, file_id)
-        .map_err(|e| format!("lexer errors in {}: {e:?}", path.display()))?;
-    if verbose {
-        crate::profiler::end_phase(&format!("lex {label}"));
-    }
-    if verbose {
         crate::profiler::begin_phase(&format!("parse {label}"));
     }
-    let mut parser = Parser::new_with_source(tokens, path.display().to_string());
-    let (program, errors) = parser.parse_program();
+    let graph = crate::grammar::parse_ag(&src);
+    let program = crate::grammar::lower_source_graph(&graph, file_id as usize);
     if verbose {
         crate::profiler::end_phase(&format!("parse {label}"));
     }
-    if errors.is_empty() {
+    if !graph.has_errors() {
         return Ok(program);
     }
-    Err(crate::diagnostics::render(
-        *errors[0].span(),
-        &errors[0].format_with_help(),
-        crate::diagnostics::Severity::Error,
-    )
-    .to_string())
+    let err_msg = graph.errors().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+    Err(err_msg)
 }
 
 /// Convert an imported file path to its Silver module form, e.g.

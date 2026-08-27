@@ -41,11 +41,13 @@ fn corpus() -> Vec<(String, String)> {
 
 #[test]
 fn ast_lowering_smoketest() {
-    let src = "import std.io;\ni32 main() { return 0; }\n";
-    let graph = parse_ag(src);
+    let src = std::fs::read_to_string("../../examples/regression_demo.ag").unwrap();
+    let graph = parse_ag(&src);
+    for (i, child) in graph.root().children().enumerate() {
+        eprintln!("CHILD {} kind={} span={:?} text_head={:?}", i, child.kind(), child.span(), &child.text()[..child.text().len().min(40)]);
+    }
     let program = lower_source_graph(&graph, 0);
-
-    assert_eq!(program.items.len(), 2);
+    assert_eq!(program.items.len(), 13);
 }
 
 #[test]

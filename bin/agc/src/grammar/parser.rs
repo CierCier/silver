@@ -156,17 +156,17 @@ impl<'a> ItemParser<'a> {
 
             let start = first_idx;
 
-            let (kind, end, is_function) = match tok {
-                Tok::Import => (
-                    NodeKind::Import,
-                    self.thru_terminator(item_idx + 1),
-                    false,
-                ),
-                Tok::Type => (
-                    NodeKind::TypeAlias,
-                    self.thru_terminator(item_idx + 1),
-                    false,
-                ),
+            match tok {
+                Tok::Import => {
+                    let end = self.thru_terminator(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Import, start, end);
+                    self.pos = end;
+                }
+                Tok::Type => {
+                    let end = self.thru_terminator(item_idx + 1);
+                    self.emit_flat_span(NodeKind::TypeAlias, start, end);
+                    self.pos = end;
+                }
                 Tok::Extern => {
                     let kind = match self.peek_sig(item_idx + 1) {
                         Some((_, Tok::StrLit)) => match self.peek_sig(item_idx + 2) {
@@ -184,66 +184,51 @@ impl<'a> ItemParser<'a> {
                         NodeKind::ExternBlock => self.thru_braces(item_idx + 1),
                         _ => self.thru_terminator(item_idx + 1),
                     };
-                    (kind, end, false)
+                    self.emit_flat_span(kind, start, end);
+                    self.pos = end;
                 }
-                Tok::Struct => (NodeKind::Struct, self.thru_braces(item_idx + 1), false),
-                Tok::Enum => (NodeKind::Enum, self.thru_braces(item_idx + 1), false),
-                Tok::Trait => (NodeKind::Trait, self.thru_braces(item_idx + 1), false),
-                Tok::Impl => (NodeKind::Impl, self.thru_braces(item_idx + 1), false),
-                Tok::Macro => (NodeKind::Macro, self.thru_braces(item_idx + 1), false),
+                Tok::Struct => {
+                    let end = self.thru_braces(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Struct, start, end);
+                    self.pos = end;
+                }
+                Tok::Enum => {
+                    let end = self.thru_braces(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Enum, start, end);
+                    self.pos = end;
+                }
+                Tok::Trait => {
+                    let end = self.thru_braces(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Trait, start, end);
+                    self.pos = end;
+                }
+                Tok::Impl => {
+                    let end = self.thru_braces(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Impl, start, end);
+                    self.pos = end;
+                }
+                Tok::Macro => {
+                    let end = self.thru_braces(item_idx + 1);
+                    self.emit_flat_span(NodeKind::Macro, start, end);
+                    self.pos = end;
+                }
                 Tok::Const | Tok::Static | Tok::Volatile => {
                     let (end, _braces) = self.classify_tail(item_idx + 1);
                     let end = self.absorb_trailing_semi(end);
-                    (NodeKind::GlobalVariable, end, false)
+                    self.emit_flat_span(NodeKind::GlobalVariable, start, end);
+                    self.pos = end;
                 }
                 _ => {
-                    let (end, _braces) = self.classify_tail(item_idx + 1);
+                    let (end, braces) = self.classify_tail(item_idx + 1);
                     if self.tail_is_function(item_idx + 1, end) {
-                        (NodeKind::Function, end, true)
+                        self.emit_function(start, item_idx, end, braces);
                     } else {
                         let end = self.absorb_trailing_semi(end);
-                        (NodeKind::GlobalVariable, end, false)
+                        self.emit_flat_span(NodeKind::GlobalVariable, start, end);
                     }
+                    self.pos = end;
                 }
-            };
-
-            if is_function {
-                // Structured body: header leaves, a Body node over the brace
-                // interior, closing brace leaf. `braces` are relative to the
-                // full row list; find their absolute positions by scanning
-                // forward from item_idx with the same depth logic.
-                let mut open_abs: Option<usize> = None;
-                let mut close_abs: Option<usize> = None;
-                let mut depth = 0i64;
-                let mut i = item_idx;
-                while i < end.min(self.rows.len()) {
-                    let row = &self.rows[i];
-                    if row.len == 0 || is_trivia(row.kind) {
-                        i += 1;
-                        continue;
-                    }
-                    match num_to_tok(row.kind) {
-                        Some(Tok::LBrace) => {
-                            if depth == 0 {
-                                open_abs = Some(i);
-                            }
-                            depth += 1;
-                        }
-                        Some(Tok::RBrace) => {
-                            depth -= 1;
-                            if depth == 0 {
-                                close_abs = Some(i);
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                self.emit_function(start, item_idx, end, open_abs.zip(close_abs));
-            } else {
-                self.emit_flat_span(kind, start, end);
             }
-            self.pos = end;
         }
 
         // Any trailing rows that were never classified: consume flat so
