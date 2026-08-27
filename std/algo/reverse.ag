@@ -1,5 +1,6 @@
 // std/algo/reverse.ag — In-place reversal over Vec<T> and slices.
 import std.mem.vec;
+import std.slice;
 
 // -- Reverse ---------------------------------------------------------------
 
@@ -32,4 +33,9 @@ void reverse_slice<T>(T* data, i64 len) {
         i = i + 1;
         j = j - 1;
     }
+}
+
+/// Reverse a Slice<T> in-place.
+void reverse_slice_ref<T>(Slice<T> s) {
+    reverse_slice<T>(s.data, s.len);
 }

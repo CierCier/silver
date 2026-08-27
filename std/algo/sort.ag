@@ -2,7 +2,7 @@
 //
 // The entire heap algorithm is inlined to avoid transitive generic calls.
 import std.mem.vec;
-
+import std.slice;
 // -- Heapsort (max-heap, in-place, O(n log n)) -- self-contained ----------
 
 /// Sort Vec<T> ascending using in-place heapsort.
@@ -227,4 +227,24 @@ bool is_sorted_by<T>(T* data, i64 len, i32 (T*, T*) cmp) {
         i = i + 1;
     }
     return true;
+}
+
+/// Sort a Slice<T> in place.
+void sort_slice_ref<T>(Slice<T> s) {
+    sort_slice<T>(s.data, s.len);
+}
+
+/// Sort a Slice<T> using a custom comparator.
+void sort_slice_by_ref<T>(Slice<T> s, i32 (T*, T*) cmp) {
+    sort_slice_by<T>(s.data, s.len, cmp);
+}
+
+/// Check if a Slice<T> is sorted.
+bool is_sorted_slice<T>(Slice<T> s) {
+    return is_sorted<T>(s.data, s.len);
+}
+
+/// Check if a Slice<T> is sorted according to `cmp`.
+bool is_sorted_by_slice<T>(Slice<T> s, i32 (T*, T*) cmp) {
+    return is_sorted_by<T>(s.data, s.len, cmp);
 }

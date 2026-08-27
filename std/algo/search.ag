@@ -3,7 +3,7 @@
 // Self-contained; bounds are inlined to avoid transitive generic calls.
 import std.cpu;
 import std.mem.vec;
-
+import std.slice;
 // -- Binary search on sorted slices -- self-contained ---------------------
 
 /// Return first index i where v[i] >= key, or v.len if none exists.
@@ -260,4 +260,51 @@ f64 sum_f64(f64* data, i64 len) {
         i = i + 1;
     }
     return total;
+}
+
+/// Slice-based lower_bound.
+i64 lower_bound_slice<T>(Slice<T> s, T key) {
+    i64 lo = 0;
+    i64 hi = s.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (s.data[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/// Slice-based upper_bound.
+i64 upper_bound_slice<T>(Slice<T> s, T key) {
+    i64 lo = 0;
+    i64 hi = s.len;
+    while (lo < hi) {
+        i64 mid = lo + (hi - lo) / 2;
+        if (key < s.data[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+/// Slice-based binary_search.
+bool binary_search_slice<T>(Slice<T> s, T key) {
+    i64 idx = lower_bound_slice<T>(s, key);
+    if (idx >= s.len) { return false; }
+    return !(s.data[idx] < key) && !(key < s.data[idx]);
+}
+
+/// Find first occurrence in a Slice.
+i64 find_first_slice<T>(Slice<T> s, T key) {
+    return find_first<T>(s.data, s.len, key);
+}
+
+/// Count occurrences in a Slice.
+i64 count_occurrences_slice<T>(Slice<T> s, T key) {
+    return count_occurrences<T>(s.data, s.len, key);
 }
