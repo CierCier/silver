@@ -2,6 +2,24 @@
 import std.test;
 import std.mem;
 import std.algo;
+struct Item {
+    i64 id;
+    i64 score;
+}
+
+i32 cmp_desc_i64(i64* a, i64* b) {
+    if (*a > *b) { return -1; }
+    if (*a < *b) { return 1; }
+    return 0;
+}
+
+i32 cmp_item_score_desc(Item* a, Item* b) {
+    if (a.score > b.score) { return -1; }
+    if (a.score < b.score) { return 1; }
+    if (a.id < b.id) { return -1; }
+    if (a.id > b.id) { return 1; }
+    return 0;
+}
 
 i32 main() {
     STDOUT.write_str("=== Algo Sort Tests ===\n\n");
@@ -179,6 +197,34 @@ i32 main() {
         }
         f64 s = sum_f64(floats, 8);
         assert_true(s > 35.9 && s < 36.1, "sum_f64 = 36.0");
+    }
+
+    // --- sort_by and sort_slice_by ---
+    STDOUT.write_str("\n--- sort_by and sort_slice_by ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(10);
+        v.push(40);
+        v.push(20);
+        v.push(50);
+        v.push(30);
+        sort_by(&v, &cmp_desc_i64);
+        assert_eq_i64(50, (i64)v[0], "sort_by desc[0] = 50");
+        assert_eq_i64(40, (i64)v[1], "sort_by desc[1] = 40");
+        assert_eq_i64(30, (i64)v[2], "sort_by desc[2] = 30");
+        assert_eq_i64(20, (i64)v[3], "sort_by desc[3] = 20");
+        assert_eq_i64(10, (i64)v[4], "sort_by desc[4] = 10");
+        v.drop();
+
+        Item items[3];
+        items[0] = { .id = 1, .score = 100 };
+        items[1] = { .id = 2, .score = 500 };
+        items[2] = { .id = 3, .score = 300 };
+        sort_slice_by<Item>(items, 3, &cmp_item_score_desc);
+        assert_eq_i64(2, items[0].id, "highest score first (id 2)");
+        assert_eq_i64(3, items[1].id, "middle score second (id 3)");
+        assert_eq_i64(1, items[2].id, "lowest score third (id 1)");
+        assert_true(is_sorted_by<Item>(items, 3, &cmp_item_score_desc), "items sorted by score desc");
     }
 
     return done();

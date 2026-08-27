@@ -144,3 +144,87 @@ bool is_sorted<T>(T* data, i64 len) {
     }
     return true;
 }
+
+/// Sort Vec<T> using a custom comparator function `cmp(a, b)`.
+/// `cmp(a, b)` returns < 0 when *a < *b, 0 when equal, > 0 when *a > *b.
+void sort_by<T>(Vec<T>* v, i32 (T*, T*) cmp) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    sort_slice_by<T>(v.data, v.len, cmp);
+}
+
+/// Sort a slice [data, data+len) using a custom comparator function `cmp(a, b)`.
+void sort_slice_by<T>(T* data, i64 len, i32 (T*, T*) cmp) {
+    if (len <= 1) {
+        return;
+    }
+
+    // Build max-heap
+    i64 i = (len / 2) - 1;
+    while (i >= 0) {
+        i64 root = i;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= len) {
+                break;
+            }
+            if (child + 1 < len && cmp(&data[child], &data[child + 1]) < 0) {
+                child = child + 1;
+            }
+            if (!(cmp(&data[root], &data[child]) < 0)) {
+                break;
+            }
+            T tmp_root = data[root];
+            T tmp_child = data[child];
+            data[root] = move tmp_child;
+            data[child] = move tmp_root;
+            root = child;
+        }
+        i = i - 1;
+    }
+
+    // Extract
+    i64 end = len;
+    while (end > 1) {
+        end = end - 1;
+        T tmp_root = data[0];
+        T tmp_end = data[end];
+        data[0] = move tmp_end;
+        data[end] = move tmp_root;
+
+        i64 root = 0;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= end) {
+                break;
+            }
+            if (child + 1 < end && cmp(&data[child], &data[child + 1]) < 0) {
+                child = child + 1;
+            }
+            if (!(cmp(&data[root], &data[child]) < 0)) {
+                break;
+            }
+            T tmp_root2 = data[root];
+            T tmp_child2 = data[child];
+            data[root] = move tmp_child2;
+            data[child] = move tmp_root2;
+            root = child;
+        }
+    }
+}
+
+/// Check if slice `[data, data + len)` is sorted according to `cmp(a, b)`.
+bool is_sorted_by<T>(T* data, i64 len, i32 (T*, T*) cmp) {
+    if (data == (T*)0 || len <= 1) {
+        return true;
+    }
+    i64 i = 1;
+    while (i < len) {
+        if (cmp(&data[i], &data[i - 1]) < 0) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
