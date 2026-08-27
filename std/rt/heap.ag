@@ -403,17 +403,18 @@ impl Heap {
     /// has no length accessor, so the slice is passed as pointer + length.
     i64 collect_garbage(Heap* self, RtValue* roots, i64 roots_len) {
         i64 slot_count = self.objects.len();
+        if (slot_count == 0) {
+            return 0;
+        }
 
-        // Clear marks.
-        i64 i = 0;
-        while (i < slot_count) {
-            self.marked.set(i, false);
-            i += 1;
+        // Clear marks in bulk with SIMD memset.
+        if (self.marked.data != (bool*)0) {
+            silver_rt_memset((u8*)self.marked.data, (u8)0, slot_count);
         }
 
         // Mark phase: trace from the roots with an explicit work stack.
         Vec<Handle> stack = Vec<Handle>.new();
-        i = 0;
+        i64 i = 0;
         while (i < roots_len) {
             RtValue* root = &roots[i];
             root.push_handles(&stack);
@@ -441,9 +442,37 @@ impl Heap {
         }
         stack.drop();
 
-        // Sweep phase: release unmarked occupied slots.
+        // Sweep phase: release unmarked occupied slots using 16-slot SIMD chunk scan.
         i64 freed = 0;
         i = 0;
+        bool* occ_ptr = self.occupied.data;
+        bool* mark_ptr = self.marked.data;
+
+        while (i + 16 <= slot_count) {
+            i64 sweep_mask = asm("
+                movq %rax, %r8
+                movq %rdi, %r9
+                movdqu (%r8), %xmm0
+                movdqu (%r9), %xmm1
+                pandn %xmm0, %xmm1
+                pmovmskb %xmm1, %eax
+                movzwq %ax, %rax
+            ", [(u8*)&mark_ptr[i], (u8*)&occ_ptr[i]], ["r8", "r9", "xmm0", "xmm1"]);
+
+            while (sweep_mask != 0) {
+                i64 bit = asm("bsfq %rax, %rax", [sweep_mask], []);
+                i64 slot = i + bit;
+                Object* object = self.objects.get_ptr(slot);
+                object.drop();
+                self.occupied.set(slot, false);
+                self.generations.set(slot, self.generations.get(slot) + (u32)1);
+                self.free_list.push((u32)slot);
+                freed = freed + 1;
+                sweep_mask = sweep_mask & (sweep_mask - 1);
+            }
+            i = i + 16;
+        }
+
         while (i < slot_count) {
             if (self.occupied.get(i) && !self.marked.get(i)) {
                 Object* object = self.objects.get_ptr(i);
@@ -451,9 +480,9 @@ impl Heap {
                 self.occupied.set(i, false);
                 self.generations.set(i, self.generations.get(i) + (u32)1);
                 self.free_list.push((u32)i);
-                freed += 1;
+                freed = freed + 1;
             }
-            i += 1;
+            i = i + 1;
         }
 
         return freed;

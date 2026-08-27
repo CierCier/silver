@@ -206,6 +206,49 @@ impl JsonReader {
 
     void skip_whitespace(JsonReader* self) {
         u8* bytes = (u8*)self.input;
+        while (self.index + 16 <= self.length) {
+            i64 non_ws = asm("
+                movdqu (%rax), %xmm0
+                movl $$0x20202020, %edx
+                movd %edx, %xmm1
+                pshufd $$0, %xmm1, %xmm1
+                pcmpeqb %xmm0, %xmm1
+
+                movl $$0x09090909, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0a0a0a0a, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                movl $$0x0d0d0d0d, %edx
+                movd %edx, %xmm2
+                pshufd $$0, %xmm2, %xmm2
+                pcmpeqb %xmm0, %xmm2
+                por %xmm2, %xmm1
+
+                pmovmskb %xmm1, %ecx
+                cmpl $$65535, %ecx
+                je 1f
+                notl %ecx
+                bsfl %ecx, %eax
+                movzwq %ax, %rax
+                jmp 2f
+                1:
+                movq $$-1, %rax
+                2:
+            ", [&bytes[self.index]], ["rdx", "rcx", "xmm0", "xmm1", "xmm2"]);
+            if (non_ws >= 0) {
+                self.index = self.index + non_ws;
+                return;
+            }
+            self.index = self.index + 16;
+        }
         while (self.index < self.length) {
             u8 ch = bytes[self.index];
             if (ch != (u8)32 && ch != (u8)9 && ch != (u8)10 && ch != (u8)13) {
@@ -395,6 +438,37 @@ impl JsonReader {
         String result = String.new();
         if (!self.expect((u8)34)) { return move result; }
         while (self.index < self.length) {
+            i64 start = self.index;
+            while (self.index + 16 <= self.length) {
+                i64 delim = asm("
+                    movdqu (%rax), %xmm0
+                    movl $$0x22222222, %edx
+                    movd %edx, %xmm1
+                    pshufd $$0, %xmm1, %xmm1
+                    pcmpeqb %xmm0, %xmm1
+
+                    movl $$0x5c5c5c5c, %edx
+                    movd %edx, %xmm2
+                    pshufd $$0, %xmm2, %xmm2
+                    pcmpeqb %xmm0, %xmm2
+                    por %xmm2, %xmm1
+
+                    pmovmskb %xmm1, %eax
+                    movzwq %ax, %rax
+                ", [&bytes[self.index]], ["rdx", "xmm0", "xmm1", "xmm2"]);
+                if (delim != 0) {
+                    i64 bit = asm("bsfq %rax, %rax", [delim], []);
+                    self.index = self.index + bit;
+                    break;
+                }
+                self.index = self.index + 16;
+            }
+            if (self.index > start) {
+                result.push_bytes(&bytes[start], self.index - start);
+            }
+            if (self.index >= self.length) {
+                break;
+            }
             u8 ch = bytes[self.index];
             self.index = self.index + 1;
             if (ch == (u8)34) { return move result; }
