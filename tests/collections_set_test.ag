@@ -140,5 +140,100 @@ i32 main() {
         assert_true(s.contains(99), "set reusable after drain");
         s.drop();
     }
+
+    // --- insert returns bool ---
+    STDOUT.write_str("\n--- insert bool ---\n");
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        assert_true(s.insert(10), "insert 10 returns true");
+        assert_true(!s.insert(10), "insert dup 10 returns false");
+        assert_eq_i64(s.len(), 1, "len 1 after dup insert");
+        s.drop();
+    }
+
+    // --- union ---
+    STDOUT.write_str("\n--- union ---\n");
+    {
+        HashSet<i64> a = HashSet<i64>.new();
+        a.insert(1); a.insert(2); a.insert(3);
+        HashSet<i64> b = HashSet<i64>.new();
+        b.insert(3); b.insert(4); b.insert(5);
+        HashSet<i64> u = a.union(&b);
+        assert_eq_i64(u.len(), 5, "union len 5");
+        assert_true(u.contains(1), "union contains 1");
+        assert_true(u.contains(2), "union contains 2");
+        assert_true(u.contains(3), "union contains 3");
+        assert_true(u.contains(4), "union contains 4");
+        assert_true(u.contains(5), "union contains 5");
+        u.drop(); a.drop(); b.drop();
+    }
+
+    // --- intersection ---
+    STDOUT.write_str("\n--- intersection ---\n");
+    {
+        HashSet<i64> a = HashSet<i64>.new();
+        a.insert(1); a.insert(2); a.insert(3); a.insert(4);
+        HashSet<i64> b = HashSet<i64>.new();
+        b.insert(3); b.insert(4); b.insert(5);
+        HashSet<i64> inter = a.intersection(&b);
+        assert_eq_i64(inter.len(), 2, "intersection len 2");
+        assert_true(inter.contains(3), "intersection contains 3");
+        assert_true(inter.contains(4), "intersection contains 4");
+        assert_true(!inter.contains(1), "intersection not contains 1");
+        inter.drop(); a.drop(); b.drop();
+    }
+
+    // --- difference ---
+    STDOUT.write_str("\n--- difference ---\n");
+    {
+        HashSet<i64> a = HashSet<i64>.new();
+        a.insert(1); a.insert(2); a.insert(3);
+        HashSet<i64> b = HashSet<i64>.new();
+        b.insert(3); b.insert(4);
+        HashSet<i64> d = a.difference(&b);
+        assert_eq_i64(d.len(), 2, "difference len 2");
+        assert_true(d.contains(1), "difference contains 1");
+        assert_true(d.contains(2), "difference contains 2");
+        assert_true(!d.contains(3), "difference not contains 3");
+        d.drop(); a.drop(); b.drop();
+    }
+
+    // --- symmetric_difference ---
+    STDOUT.write_str("\n--- symmetric_difference ---\n");
+    {
+        HashSet<i64> a = HashSet<i64>.new();
+        a.insert(1); a.insert(2); a.insert(3);
+        HashSet<i64> b = HashSet<i64>.new();
+        b.insert(3); b.insert(4); b.insert(5);
+        HashSet<i64> sd = a.symmetric_difference(&b);
+        assert_eq_i64(sd.len(), 4, "symdiff len 4");
+        assert_true(sd.contains(1), "symdiff contains 1");
+        assert_true(sd.contains(2), "symdiff contains 2");
+        assert_true(sd.contains(4), "symdiff contains 4");
+        assert_true(sd.contains(5), "symdiff contains 5");
+        assert_true(!sd.contains(3), "symdiff not contains 3");
+        sd.drop(); a.drop(); b.drop();
+    }
+
+    // --- is_subset / is_superset / is_disjoint ---
+    STDOUT.write_str("\n--- subset / disjoint ---\n");
+    {
+        HashSet<i64> a = HashSet<i64>.new();
+        a.insert(1); a.insert(2);
+        HashSet<i64> b = HashSet<i64>.new();
+        b.insert(1); b.insert(2); b.insert(3);
+        HashSet<i64> c = HashSet<i64>.new();
+        c.insert(4); c.insert(5);
+        assert_true(a.is_subset(&b), "a subset b");
+        assert_true(!b.is_subset(&a), "b not subset a");
+        assert_true(b.is_superset(&a), "b superset a");
+        assert_true(a.is_disjoint(&c), "a disjoint c");
+        assert_true(!a.is_disjoint(&b), "a not disjoint b");
+        // empty set is subset of any
+        HashSet<i64> empty = HashSet<i64>.new();
+        assert_true(empty.is_subset(&a), "empty subset a");
+        assert_true(empty.is_disjoint(&a), "empty disjoint a");
+        empty.drop(); a.drop(); b.drop(); c.drop();
+    }
     return done();
 }
