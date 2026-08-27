@@ -74,6 +74,11 @@ impl Bytes {
         if (src_len <= 0 || src == (u8*)0) {
             return;
         }
+        bool is_internal = false;
+        i64 src_offset = 0;
+        if (self.data != (u8*)0 && (i64)src >= (i64)self.data && (i64)src < (i64)self.data + self.cap) {
+            src_offset = (i64)src - (i64)self.data;
+        }
         if (self.len + src_len > self.cap) {
             i64 new_cap = self.cap * 2;
             if (new_cap < self.len + src_len) {
@@ -84,6 +89,9 @@ impl Bytes {
             }
             self.data = realloc<u8>(self.data, new_cap);
             self.cap = new_cap;
+            if (is_internal) {
+                src = (u8*)((i64)self.data + src_offset);
+            }
         }
         silver_rt_memcpy(&self.data[self.len], src, src_len);
         self.len = self.len + src_len;
@@ -145,20 +153,31 @@ impl Bytes {
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
+    /// Read byte at `index`. Out-of-bounds indices abort deterministically in every build profile.
     u8 get(&Bytes self, i64 index) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) {
+        if (index < 0 || index >= self.len) {
             abort();
         }
         return self.data[index];
     }
 
+    /// Read byte at `index` without bounds checking.
+    u8 get_unchecked(&Bytes self, i64 index) {
+        return self.data[index];
+    }
+
+    /// Write `value` at `index`. Out-of-bounds indices abort deterministically in every build profile.
     void set(&mut Bytes self, i64 index, u8 value) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) {
+        if (index < 0 || index >= self.len) {
             abort();
         }
         self.data[index] = value;
     }
 
+    /// Write `value` at `index` without bounds checking.
+    void set_unchecked(&mut Bytes self, i64 index, u8 value) {
+        self.data[index] = value;
+    }
     u8* as_ptr(&Bytes self) {
         return self.data;
     }
@@ -182,11 +201,11 @@ impl Drop for Bytes {
 impl IndexedAccess for Bytes {
     type Item = u8;
     u8 __index_get(Bytes* self, i64 index) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
+        if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
     void __index_set(Bytes* self, i64 index, u8 value) {
-        if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
+        if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = value;
     }
 }

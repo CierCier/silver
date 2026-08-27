@@ -159,6 +159,37 @@ i32 main() {
         b1.drop();
         b2.drop();
     }
+    test_start("unchecked access");
+    {
+        Bytes b = Bytes.new();
+        b.push((u8)11);
+        b.push((u8)22);
+        assert_eq_i32((i32)b.get_unchecked(0), 11, "get_unchecked(0) = 11");
+        b.set_unchecked(1, (u8)99);
+        assert_eq_i32((i32)b.get_unchecked(1), 99, "set_unchecked(1, 99)");
+        b.drop();
+    }
+
+    test_start("extend self-overlap with reallocation");
+    {
+        Bytes b = Bytes.with_capacity(4);
+        b.push((u8)'H');
+        b.push((u8)'E');
+        b.push((u8)'L');
+        b.push((u8)'P');
+        // Extending with its own buffer triggers reallocation when len + src_len > cap
+        b.extend(b.as_ptr(), b.len());
+        assert_eq_i64(b.len(), 8, "len doubled after self-extend");
+        assert_eq_i32((i32)b.get(0), (i32)'H', "b[0] = 'H'");
+        assert_eq_i32((i32)b.get(1), (i32)'E', "b[1] = 'E'");
+        assert_eq_i32((i32)b.get(2), (i32)'L', "b[2] = 'L'");
+        assert_eq_i32((i32)b.get(3), (i32)'P', "b[3] = 'P'");
+        assert_eq_i32((i32)b.get(4), (i32)'H', "b[4] = 'H'");
+        assert_eq_i32((i32)b.get(5), (i32)'E', "b[5] = 'E'");
+        assert_eq_i32((i32)b.get(6), (i32)'L', "b[6] = 'L'");
+        assert_eq_i32((i32)b.get(7), (i32)'P', "b[7] = 'P'");
+        b.drop();
+    }
 
     return done();
 }
