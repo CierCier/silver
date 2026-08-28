@@ -1,31 +1,6 @@
-//! Active Borrow Conflict Checker (`semantic/borrow_check.rs`).
-//!
-//! Enforces the core memory-safety invariant:
-//! For any memory location `P` at any program point:
-//!   `(Any number of &P) ⊕ (Exactly one &mut P)`
-//!
-//! Invariants:
-//! 1. Cannot take `&mut x` while any active `&x` or `&mut x` exists.
-//! 2. Cannot take `&x` while any active `&mut x` exists.
-//! 3. Cannot assign to `x` or mutate `x` while any borrow of `x` is active.
-//! 4. Cannot move `x` (`move x`) while any borrow of `x` is active.
-//! 5. Cannot read/use `x` while an exclusive borrow `&mut x` is active.
-//! 6. Disjoint field borrows (`&mut p.left` and `&mut p.right`) are permitted simultaneously.
-//! 7. Raw pointers (`T*`) bypass borrow checking.
-//! 8. Reborrowing from `&mut T` creates a temporary reborrow that suspends the original.
-//!
-//! # Phase 1 Migration Note — String Paths → `Place` (read-only scaffolding)
-//! Today every loan is keyed by `(root: String, path: String)` where `path` is a
-//! dotted field string (`"a.b"`) and `ActiveBorrow`/`RefVarInfo` store that string
-//! directly; overlap is tested by `paths_overlap` via `starts_with` on `format!("{p}.")`.
-//! `extract_root_and_path` is the borrow-checker's string `expr_root_and_path` analogue,
-//! adding `Index`/`Deref` passthrough and `RefVarInfo` chaining.
-//! TODO(Place Phase 1): replace the `(String,String)` root+path layer with
-//! `semantic::place::Place { local, projections }` (Silver-natural: `Field`,
-//! `Deref`, `Index`, `TupleField`). `Place`'s pure/comparable helpers
-//! (`overlaps`/`is_prefix`) will supersede `paths_overlap` and the manual
-//! `extract_root_and_path` string joins. No logic deleted in this phase —
-//! scaffolding comments only; string code remains authoritative until cutover.
+//! Borrow checker: enforces `&`/`&mut` exclusivity, disjoint field borrows allowed, raw `T*` unchecked.
+//! Why Place: `Place::overlaps` replaces string `paths_overlap` for field granularity.
+//! TODO(Place Phase 1): replace `(root:String, path:String)` loans with `Place { local, projections }`.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -56,12 +31,7 @@ impl BorrowKind {
     }
 }
 
-/// Metadata about a reference variable in scope.
-/// Current string-based `Place` analogue: `(root, path)` where `path` is a
-/// dotted `String` like `"a.b"`. Reborrows chain through `ref_bindings`.
-/// TODO(Place Phase 1): replace `(String,String)` with `semantic::place::Place`
-/// — `Place { local: LocalId, projections: [Field|Deref|Index|TupleField] }`.
-/// `Place` helpers are pure/comparable and carry `Span`-free structure.
+/// Metadata about a reference variable. TODO(Place Phase 1): replace `(root,path)` with `Place`.
 #[derive(Debug, Clone)]
 pub struct RefVarInfo {
     pub root: String,
@@ -70,12 +40,7 @@ pub struct RefVarInfo {
     pub span: Span,
 }
 
-/// An active loan taken on `root.path`.
-/// String-keyed loan: `root` is the base variable, `path` the dotted field suffix
-/// (empty means the whole place). Overlap is decided by `paths_overlap`.
-/// TODO(Place Phase 1): replace with `semantic::place::Place` as the loan key;
-/// `Place::overlaps` / `Place::is_prefix_of` will replace the string
-/// `starts_with` logic. `Place` mirrors Silver syntax, not a Rust clone.
+/// Active loan on `root.path`. TODO(Place Phase 1): replace with `Place` + `Place::overlaps`.
 #[derive(Debug, Clone)]
 pub struct ActiveBorrow {
     pub root: String,
@@ -83,41 +48,14 @@ pub struct ActiveBorrow {
     pub kind: BorrowKind,
     pub span: Span,
     pub borrower: Option<String>,
-    /// Statement index (within the enclosing block) after which this loan
-    /// expires, if it was last used there (NLL); `None` = live until scope exit
-    /// (reference parameters, or last use not yet observed).
+    /// Statement index after which this loan expires (NLL); `None` = scope exit.
     pub last_use: Option<usize>,
-    /// Reference-parameter loan: stays live for the whole function (the caller
-    /// still holds the borrow), never NLL-expired.
+    /// Reference-parameter loan: live for whole function, never NLL-expired.
     pub param: bool,
 }
 
-/// Phase 8 — Borrow vs Move scaffolding on `Place` (parallel to `ActiveBorrow`).
-///
-/// `ActiveBorrow`/`RefVarInfo` remain the authoritative string-path path until
-/// cutover; this struct is the Place-based replacement that shares the single
-/// overlap impl `Place::overlaps` / `places_overlap` with move/init/drop.
-/// `place` is Silver-natural (`Place { local, projections: [Field|Deref|Index|TupleField] }`),
-/// `kind` is `Shared` (`&T`) or `Exclusive` (`&mut T`, spelled `Mut` in the
-/// Phase 8 spec) — `BorrowKind::Exclusive` is the `Mut` variant.
-///
-/// # Phase 8 rules (from `local://paste-1.md` Phase 8 — Integrate borrow checking on Place)
-///
-/// Borrow vs move overlap is decided by `places_overlap` (prefix of projections
-/// on the same `local`; disjoint locals never overlap):
-///
-/// * `&x` vs `move x` → error — `Place::new("x")` overlaps itself (reflexive).
-/// * `&x.a` vs `move x.a` → error — same field, `x.a` overlaps `x.a`.
-/// * `&mut x.a` vs `move x.a` → error — same as above, kind is `Mut`/`Exclusive` but move conflicts with any borrow.
-/// * `&x.a` vs `move x.b` → allowed — sibling fields `x.a` vs `x.b` are disjoint (`!places_overlap`).
-/// * `&x` vs `move x.a` → error — parent `x` overlaps child `x.a` (prefix).
-/// * `&x.a` vs `move x` → error — child `x.a` overlaps parent `x` (symmetric).
-/// * `&x.a.b` vs `move x.a.c` → allowed — sibling sub-fields disjoint even though they share prefix `x.a`.
-/// * `&x` vs `move y` / `&x.a` vs `move y.a` → allowed — different locals never overlap.
-///
-/// These extend the borrow-vs-borrow table (`Shared`/`Exclusive` in `find_conflict`)
-/// to borrow-vs-move: any active loan overlapping the moved place blocks the move,
-/// disjoint field borrows on the same root remain permitted (`&mut p.left` + `&mut p.right`).
+/// Place-based borrow (Phase 8 scaffolding, parallel to `ActiveBorrow`). Overlap via `places_overlap`.
+/// `&x.a` vs `move x.b` allowed (disjoint); `&x` vs `move x.a` overlaps (prefix).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Borrow {
@@ -125,30 +63,13 @@ pub struct Borrow {
     pub kind: BorrowKind,
 }
 
-/// Place-based overlap test for two loans/places.
-///
-/// Thin wrapper over [`places_overlap`] / [`Place::overlaps`] — the single
-/// Silver-natural impl shared by borrow/move/init/drop. Replaces the string
-/// `paths_overlap` prefix walk once `Borrow { place }` is authoritative.
-/// `true` iff one place is a prefix of the other on the same `local`.
+/// `true` iff places overlap (one is prefix of the other on same local).
 #[allow(dead_code)]
 pub fn borrow_conflicts(a: &Place, b: &Place) -> bool {
     places_overlap(a, b)
 }
 
-/// Returns `true` iff moving `place` conflicts with any active borrow in `borrows`.
-///
-/// Move-while-borrowed is kind-agnostic: any overlapping loan (`Shared` or
-/// `Exclusive`/`Mut`) blocks `move place`. Implemented as “any `places_overlap`”
-/// — the Place analogue of `find_any_borrow`'s `paths_overlap` walk. Keeps the
-/// old string-path logic active; this is parallel scaffolding for Phase 8 cutover.
-///
-/// # Examples (Phase 8 rules)
-///
-/// * `&x` vs `move x` → `true` (error)
-/// * `&x.a` vs `move x.b` → `false` (allowed — disjoint)
-/// * `&x.a` vs `move x.a` → `true` (error)
-/// * `&mut x.a` vs `move x.a` → `true` (error)
+/// `true` iff `place` overlaps any active borrow (any `&x.a` vs `move x.b` disjoint else conflict).
 #[allow(dead_code)]
 pub fn does_move_conflict_with_borrow(place: &Place, borrows: &[Borrow]) -> bool {
     borrows.iter().any(|b| places_overlap(&b.place, place))

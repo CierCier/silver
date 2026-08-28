@@ -721,17 +721,7 @@ impl TypeChecker {
         }
     }
 
-    /// True when `ty` can own resources: its base type implements Drop, or
-    /// it is a generic placeholder (may instantiate to an owned type).
-    ///
-    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-    /// `needs_drop` / `is_copy` will be the single source of truth for Copy vs
-    /// owning-type classification; this heuristic stays authoritative until the
-    /// cutover. Implicit Copy retained per grilling (bool/i64/f64/ptr + all-Copy
-    /// struct = Copy else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
-    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
-    /// — typeck/move_check/codegen must not independently decide Copy/Drop.
-    /// No logic change in this phase; keep existing per-subsystem heuristics working in parallel.
+    /// True if `ty` owns resources (base implements Drop). TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
     fn type_has_drop_impl(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => {

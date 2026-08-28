@@ -1,17 +1,6 @@
-// HashMap<K,V> — SwissTable with ownership-aware moves.
-//
-// Ownership contract for iteration:
-// - `iter(&HashMap<K,V> self)` borrows: takes `&HashMap<K,V> self` and yields
-//   `HashMapEntry<K,V>` copies (`e.key = keys[idx]; e.value = values[idx]`).
-//   The map stays live; iterator holds raw pointers (no ownership, no free).
-//   `Copy` K/V copies bitwise; owned K/V shallow-copies — prefer `get_ptr`.
-// - `into_iter(HashMap<K,V> self)` moves: takes `HashMap<K,V> self` by value
-//   (`Self self`, not `&Self`), transfers buffers (`keys/values/ctrl/capacity`)
-//   to `HashMapIntoIter` and clears `self` (null/0) so map drop is no-op.
-//   Iterator owns buffers (frees on Drop) and each `next()` does
-//   `move keys[idx]` / `move values[idx]` (Place Index) transferring ownership.
-// - `drain(&mut HashMap<K,V> self)` similarly moves buffers out via `&mut self`,
-//   leaving the map empty but live. Each `drain.next()` also `move`s pairs.
+// SwissTable map. Iteration borrows; into_iter/drain move buffers out.
+// Move transfers owned K/V values; Copy is bitwise. `erase` tombstones
+// without moving, so use `remove` or drain when owned values matter.
 import std.optional;
 import std.mem.alloc;
 import std.hash;

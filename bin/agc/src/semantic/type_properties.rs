@@ -1,33 +1,20 @@
-// Central TypeProperties {is_copy, needs_drop} — Phase 5 query (pure, no checker integration yet).
-//
-// Implicit Copy retained per grilling: bool/i64/f64/ptr + all-Copy struct = Copy
-// else non-Copy like String/Vec/HashMap/HashSet/Deque/File.
-// Centralizes the heuristic currently duplicated in typeck.rs:type_has_drop_impl,
-// move_check.rs:is_tracked, and codegen/llvm_ir/scope.rs:get_drop_function_name.
-//
-// Keep functions pure and testable; no TypeChecker wiring yet. A context struct
-// carries the minimal data needed for struct-field recursion and drop-owner lookup
-// so unit tests can inject synthetic structs without a real symbol table.
+//! TypeProperties — single `is_copy`/`needs_drop` source (bool/i64/f64/ptr + all-Copy struct = Copy).
+//! Why: centralize heuristics from typeck/move_check/codegen; pure queries with `TypePropertiesContext` for struct recursion.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::parser::ast;
 
-/// Whether a type is bitwise-copyable and whether it needs a destructor.
+/// Copy vs owning: `is_copy` + `needs_drop`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeProperties {
     pub is_copy: bool,
     pub needs_drop: bool,
 }
 
-/// Minimal context for named-type resolution. Pure data, no checker handle.
-///
-/// * `drop_bases` — base names that have a `Drop` impl (e.g. "String", "Vec").
-///   Bare-name only, matching `typeck.rs:collect_trait_impls` which inserts
-///   `named.path[0].name` for any `impl Drop<X>`.
-/// * `struct_fields` — field types for structs we want recursion into. A missing
-///   entry means "unknown struct"; callers decide via fallback (by default treated
-///   as non-owned unless the name itself is a drop owner).
+/// Context for struct recursion and drop-owner lookup (pure data).
+/// - `drop_bases`: bare names with `Drop` impl (e.g. "String")
+/// - `struct_fields`: field types for recursion; missing = unknown
 #[derive(Debug, Clone, Default)]
 pub struct TypePropertiesContext {
     pub drop_bases: HashSet<String>,
@@ -60,10 +47,7 @@ impl TypePropertiesContext {
 }
 
 fn default_drop_bases() -> HashSet<String> {
-    // Canonical owned bases in std today. Kept deliberately broad so pure
-    // queries without an explicit context still answer "String/Vec/… non-Copy"
-    // correctly. Phase 5 central query will replace the ad-hoc per-subsystem
-    // sets; until then this is the unified list (docs/borrow-checker/copy-semantics.md §2.2).
+    // Unified owned bases (String/Vec/… non-Copy) — central list for Phase 5.
     [
         "String",
         "Vec",
@@ -123,24 +107,15 @@ fn is_copy_primitive(p: &ast::PrimitiveType) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Simple (no-context) queries — keep existing per-subsystem heuristics working
-// in parallel. Use hardcoded drop bases; named structs without field info are
-// treated as Copy iff not a known drop owner.
-// ---------------------------------------------------------------------------
+// Simple (no-context) queries — hardcoded bases; unknown named struct = Copy unless drop owner.
 
-/// Returns true for Copy types: bool, all integer/float primitives, raw pointers,
-/// and (without struct-field knowledge) named types that are not known drop owners.
-/// Tuples/arrays are Copy iff all elements are Copy. References/slices are views
-/// (Copy). This mirrors the implicit-Copy rule per grilling.
+/// Copy per implicit rule: primitives/ptr/ref/slice Copy; tuple/array all-Copy; named non-drop-owner Copy.
 pub fn is_copy(ty: &ast::Type) -> bool {
     let mut visited = HashSet::default();
     is_copy_inner(ty, &default_drop_bases(), &HashMap::default(), &mut visited)
 }
 
-/// Returns true when `ty` needs Drop: direct Drop impl or transitive field Drop.
-/// For the context-free variant, only direct named drop owners and recursive
-/// arrays/tuples are considered (matching typeck.rs:type_has_drop_impl).
+/// Direct or transitive Drop (context-free: only direct owners + tuple/array recursion).
 pub fn needs_drop(ty: &ast::Type) -> bool {
     let mut visited = HashSet::default();
     needs_drop_inner(ty, &default_drop_bases(), &HashMap::default(), &mut visited)
@@ -154,10 +129,7 @@ pub fn properties_for(ty: &ast::Type) -> TypeProperties {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Context-aware queries — for tests and later checker integration. Recursion
-// into struct fields is enabled when the name appears in `ctx.struct_fields`.
-// ---------------------------------------------------------------------------
+// Context-aware queries — recursion enabled when name in `ctx.struct_fields`.
 
 pub fn is_copy_with(ty: &ast::Type, ctx: &TypePropertiesContext) -> bool {
     let mut visited = HashSet::default();

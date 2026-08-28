@@ -1,60 +1,17 @@
-//! MovePath / MovePathTree — Phase 3 structural representation.
-//!
-//! Phase 3 replaces the string-based `VarState::moved_fields` (`FxHashMap<String, _>`)
-//! with a place-rooted tree. This module provides the **structure only**; no
-//! integration with `move_check.rs` yet. Semantics are unchanged — `Live` /
-//! `PartiallyMoved` / `FullyMoved` map to `Initialized` / `PartiallyInitialized` /
-//! `Uninitialized` as underlying init states, but all checkers remain string-based
-//! until the cutover (PR 3).
-//!
-//! # Model
-//!
-//! One `MovePath` node per `Place`. A local `x` is a root; field projections
-//! `x.a`, `x.a.b`, etc. are children. Sibling fields are disjoint children of
-//! the same parent.
-//!
-//! Example tree for `x { a { b, c }, d }`:
-//!
-//! ```text
-//! x
-//! ├── a
-//! │   ├── b
-//! │   └── c
-//! └── d
-//! ```
-//!
-//! That is:
-//! * `Place::new("x")`                        — root `x`
-//! * `Place::new("x").field("a")`              — child `a` of `x`
-//! * `Place::from_slice("x", &["a","b"])`      — child `b` of `x.a`
-//! * `Place::from_slice("x", &["a","c"])`      — child `c` of `x.a`
-//! * `Place::new("x").field("d")`              — child `d` of `x`
-//!
-//! State:
-//! * `Initialized`          — fully live (was `Live`)
-//! * `Uninitialized`        — moved / not yet initialized (was `FullyMoved` for roots)
-//! * `PartiallyInitialized` — some descendant uninitialized but self partially live (was `PartiallyMoved`)
-//!
-//! A move is `Initialized → Uninitialized`. Reinitialization restores a single
-//! place to `Initialized` without affecting siblings.
+//! MovePathTree — field-granular init states (`InitState::{Init,Partial,Uninit}`).
+//! Why: one `MovePath` per `Place`; `x` root with children `x.a`, `x.a.b`; siblings disjoint.
+//! Example: `move x.a` → `x=Partial`, `x.a=Uninit`, `x.b` stays `Init`.
 
 use rustc_hash::FxHashMap;
 
 use crate::semantic::place::{LocalId, Place};
 
-/// Initialization state of a single `MovePath` node.
-///
-/// Phase 3 keeps `Live`/`PartiallyMoved`/`FullyMoved` semantics but exposes them
-/// as init states. `PartiallyInitialized` corresponds to a parent whose child
-/// subtree contains an `Uninitialized` node (e.g. `x` after `move x.a`).
+/// Init state for a `MovePath` node.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub enum InitState {
-    /// Place holds a live, initialized value.
-    Initialized,
-    /// Place has been moved out / is uninitialized.
-    Uninitialized,
-    /// Some descendant is uninitialized while this node still has live siblings.
-    PartiallyInitialized,
+    Initialized,          // live
+    Uninitialized,        // moved / never init
+    PartiallyInitialized, // descendant uninit, sibling live (e.g. `x` after `move x.a`)
 }
 
 impl Default for InitState {
@@ -63,9 +20,7 @@ impl Default for InitState {
     }
 }
 
-/// One node in the move path tree. Each node corresponds to exactly one
-/// [`Place`] (its `place` field). Children are direct field projections of
-/// this place (`x.a` is a child of `x`, `x.a.b` is a child of `x.a`, etc.).
+/// One `MovePath` node — exactly one `Place` + children for direct field projections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePath {
     /// The `Place` this node represents (e.g. `x`, `x.a`, `x.a.b`).
@@ -77,7 +32,7 @@ pub struct MovePath {
 }
 
 impl MovePath {
-    /// Create a new `MovePath` node for `place` in `Initialized` state with no children.
+    /// New node `Initialized`, no children.
     pub fn new(place: Place) -> Self {
         Self {
             place,
@@ -86,15 +41,12 @@ impl MovePath {
         }
     }
 
-    /// Convenience: create a root node for a bare local `x` (`Place::new(local)`).
-    ///
-    /// Satisfies spec helper `fn new(local)` — a `MovePath` rooted at a local
-    /// with no projections.
+    /// New root for bare local `x`.
     pub fn new_local(local: impl Into<LocalId>) -> Self {
         Self::new(Place::new(local))
     }
 
-    /// Create with explicit state.
+    /// New node with explicit state.
     pub fn with_state(place: Place, state: InitState) -> Self {
         Self {
             place,
@@ -103,30 +55,24 @@ impl MovePath {
         }
     }
 
-    /// Current state.
     pub fn state(&self) -> InitState {
         self.state
     }
 
-    /// Set the init state of this node only (does not cascade to children/parent).
+    /// Set state of this node only (no cascade).
     pub fn set_state(&mut self, state: InitState) {
         self.state = state;
     }
 
-    /// Returns `true` iff this place is `Initialized`.
     pub fn is_initialized(&self) -> bool {
         self.state == InitState::Initialized
     }
 
-    /// Returns `true` iff this place is `Uninitialized`.
     pub fn is_uninitialized(&self) -> bool {
         self.state == InitState::Uninitialized
     }
 
-    /// Find a node by exact `Place` equality, searching this subtree depth-first.
-    ///
-    /// Returns `Some(&MovePath)` if `place == self.place` or `place` equals any
-    /// descendant; `None` otherwise.
+    /// Find by exact `Place` in subtree (depth-first).
     pub fn find(&self, place: &Place) -> Option<&MovePath> {
         if &self.place == place {
             return Some(self);
@@ -139,7 +85,7 @@ impl MovePath {
         None
     }
 
-    /// Mutable variant of [`MovePath::find`].
+    /// Mutable variant of `find`.
     pub fn find_mut(&mut self, place: &Place) -> Option<&mut MovePath> {
         if &self.place == place {
             return Some(self);
@@ -152,7 +98,7 @@ impl MovePath {
         None
     }
 
-    /// Find direct child by place (exact match among immediate children).
+    /// Find direct child by exact `Place`.
     pub fn find_child(&self, place: &Place) -> Option<&MovePath> {
         self.children.iter().find(|c| &c.place == place)
     }
@@ -162,8 +108,7 @@ impl MovePath {
         self.children.iter_mut().find(|c| &c.place == place)
     }
 
-    /// Add a child node. If a child with the same `Place` already exists, it is
-    /// replaced and the old node is returned. Otherwise `None`.
+    /// Add child; replace if same `Place` exists, return old.
     pub fn add_child(&mut self, child: MovePath) -> Option<MovePath> {
         if let Some(existing) = self.find_child_mut(&child.place) {
             let old = std::mem::replace(existing, child);
@@ -173,8 +118,7 @@ impl MovePath {
         None
     }
 
-    /// Ensure a direct child for `place` exists; create it `Initialized` if missing.
-    /// Returns `&mut MovePath` to the child.
+    /// Ensure direct child for `place` exists (`Initialized` if missing).
     pub fn get_or_create_child(&mut self, place: Place) -> &mut MovePath {
         let idx = self.children.iter().position(|c| c.place == place);
         if let Some(i) = idx {
@@ -184,16 +128,8 @@ impl MovePath {
         self.children.last_mut().unwrap()
     }
 
-    /// Insert a `Place` into the subtree rooted at `self`, creating all missing
-    /// intermediate prefix nodes. The target node and any newly created ancestors
-    /// are `Initialized` unless they already existed (existing state preserved).
-    ///
-    /// Example: inserting `x.a.b` into a tree rooted at `x` creates `x.a` if
-    /// missing, then `x.a.b`.
-    ///
-    /// Returns `&mut MovePath` to the inserted/found node for `place`.
-    /// If `place` does not have `self.place` as a prefix (different local or
-    /// non-descendant), `None` is returned — the caller should use `MovePathTree`.
+    /// Insert `place` creating missing intermediates (`Initialized` if new, preserve existing).
+    /// Returns node for `place`, or `None` if not descendant of `self.place`.
     pub fn insert(&mut self, place: Place) -> Option<&mut MovePath> {
         if self.place == place {
             return Some(self);
@@ -227,11 +163,7 @@ impl MovePath {
     }
 }
 
-/// Forest of move paths keyed by root local.
-///
-/// `x`, `y`, `z` are distinct roots; each root's subtree mirrors the `Place`
-/// projection hierarchy for that local. This is the Phase-3 replacement for
-/// per-variable `moved_fields` tracking (still unused in this phase).
+/// Forest keyed by root local (`x`, `y` separate roots).
 #[derive(Clone, Debug, Default)]
 pub struct MovePathTree {
     /// Roots indexed by `LocalId` (the `Place::local` of each root `MovePath`).
@@ -273,8 +205,7 @@ impl MovePathTree {
         self.roots.get_mut(local)
     }
 
-    /// Ensure a root `MovePath` for `local` exists; create `Initialized` if missing.
-    /// Returns `&mut MovePath` to the root.
+    /// Ensure root for `local` exists (`Initialized` if missing).
     pub fn get_or_create_root(&mut self, local: impl Into<LocalId>) -> &mut MovePath {
         let local: LocalId = local.into();
         self.roots
@@ -282,10 +213,7 @@ impl MovePathTree {
             .or_insert_with(|| MovePath::new(Place::new(local)))
     }
 
-    /// Insert a `Place` into the tree, creating missing root and intermediate
-    /// prefix nodes. Preserves existing node states.
-    ///
-    /// Returns `&mut MovePath` to the node for `place`.
+    /// Insert `Place`, creating missing root/intermediates (preserve existing states).
     pub fn insert(&mut self, place: Place) -> &mut MovePath {
         let local = place.local.clone();
         let root = self
@@ -319,7 +247,7 @@ impl MovePathTree {
         unsafe { &mut *cur }
     }
 
-    /// Find a node by `Place` anywhere in the forest (exact equality).
+    /// Find by `Place` in forest (exact equality).
     pub fn find(&self, place: &Place) -> Option<&MovePath> {
         let root = self.roots.get(&place.local)?;
         root.find(place)

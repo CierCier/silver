@@ -1,26 +1,10 @@
-//! Definite initialization primitives — Phase 4.
-//!
-//! Pure, place-rooted operations over [`MovePathTree`]. This module provides the
-//! **abstraction only**; no integration with `move_check.rs` yet. The string-path
-//! checkers (`VarState::moved_fields`) remain authoritative in parallel (per
-//! grilling: implicit Copy retained, hybrid verbosity).
-//!
-//! # Operations
-//!
-//! * `is_initialized` / `read` — read-only: is `Place` initialized?
-//! * `move_out` — marks `Uninitialized` + checks already-uninit (error on double-move)
-//! * `initialize` — marks `Initialized`, clearing children (reinit)
-//! * `copy_from` — read-only check for `Copy` types (no state change)
-//!
-//! All ops use [`Place::is_prefix_of`] / [`Place::overlaps`] for child invalidation
-//! and handle the three [`InitState`] variants:
-//! `Initialized` (live), `PartiallyInitialized` (some descendant uninit),
-//! `Uninitialized` (moved / never init).
+//! Definite-init ops over `MovePathTree` (`is_initialized`/`read`/`move_out`/`initialize`/`copy_from`).
+//! Why: field-granular init states with `Place::is_prefix_of`/`overlaps` invalidation (no string walks).
 
 use crate::semantic::move_path::{InitState, MovePath, MovePathTree};
 use crate::semantic::place::Place;
 
-/// Definite-initialization error — attempted use/move of uninitialized place.
+/// Definite-init error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitError {
     /// Place that was illegal to use/move.
@@ -31,7 +15,7 @@ pub struct InitError {
     pub kind: InitErrorKind,
 }
 
-/// Kind of initialization error.
+/// Kind of init error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitErrorKind {
     /// `move_out` on a place already `Uninitialized` (or whose prefix is).
@@ -61,10 +45,7 @@ fn place_to_string(p: &Place) -> String {
     }
 }
 
-/// High-level op for callers that want to dispatch (e.g. `transition_for_assign`).
-///
-/// Kept minimal — the four primitives are the authoritative API. `InitOp` is a
-/// convenience for `move_check::transition_for_assign` to match on.
+/// Dispatch enum for `move_check::transition_for_assign` (four primitives are authoritative).
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum InitOp {
     /// Read / use — must be initialized.
@@ -81,9 +62,7 @@ pub enum InitOp {
 // Helpers — prefix / overlap aware
 // ---------------------------------------------------------------------------
 
-/// Build all strict prefixes of `place` plus `place` itself, from root to leaf.
-///
-/// e.g. `x.a.b` → `[x, x.a, x.a.b]`
+/// All prefixes of `place` including itself (root→leaf). e.g. `x.a.b` → `[x, x.a, x.a.b]`
 fn prefixes(place: &Place) -> Vec<Place> {
     let mut out = Vec::with_capacity(place.projections.len() + 1);
     for len in 0..=place.projections.len() {
@@ -95,11 +74,7 @@ fn prefixes(place: &Place) -> Vec<Place> {
     out
 }
 
-/// Returns true iff `place` or any of its prefixes in `tree` is `Uninitialized`.
-///
-/// This is the overlap-aware "poisoned" check: `move x` makes `x.a` read as
-/// uninitialized because `x.is_prefix_of(x.a)` and `x` is `Uninitialized`.
-/// Uses [`Place::is_prefix_of`] structurally (no string splitting).
+/// True iff `place` or any prefix is `Uninitialized` (why: `move x` poisons `x.a` via `is_prefix_of`).
 fn has_uninit_prefix(tree: &MovePathTree, place: &Place) -> bool {
     for prefix in prefixes(place) {
         // prefix.is_prefix_of(place) is true by construction when locals match;
@@ -117,10 +92,7 @@ fn has_uninit_prefix(tree: &MovePathTree, place: &Place) -> bool {
     false
 }
 
-/// Walk `node` subtree and mark every descendant `Uninitialized`.
-///
-/// Demonstrates child invalidation via `is_prefix_of`: every descendant `d`
-/// satisfies `place.is_prefix_of(&d.place)`.
+/// Mark `node` subtree `Uninitialized` (why: child invalidation — descendant `d` satisfies `place.is_prefix_of(&d.place)`).
 fn mark_subtree_uninit(node: &mut MovePath) {
     node.state = InitState::Uninitialized;
     for child in &mut node.children {
@@ -130,8 +102,7 @@ fn mark_subtree_uninit(node: &mut MovePath) {
     }
 }
 
-/// Walk `node` subtree and mark every descendant `Initialized`.
-/// Used if we choose to keep children rather than clear them.
+/// Mark subtree `Initialized`.
 #[allow(dead_code)]
 fn mark_subtree_init(node: &mut MovePath) {
     node.state = InitState::Initialized;
@@ -141,11 +112,7 @@ fn mark_subtree_init(node: &mut MovePath) {
     }
 }
 
-/// After an `initialize(place)`, recompute ancestor states bottom-up.
-///
-/// An ancestor is `PartiallyInitialized` if any direct child is
-/// `Uninitialized` or `PartiallyInitialized`; otherwise `Initialized`.
-/// This uses structural `Place` equality / prefix checks, not string `starts_with`.
+/// Recompute ancestor states bottom-up after `initialize(place)` (why: `Partial` if any child not `Init`).
 fn recompute_ancestors_after_initialize(tree: &mut MovePathTree, place: &Place) {
     // Ancestors are strict prefixes of `place` (excluding `place` itself).
     let all = prefixes(place);
@@ -208,16 +175,7 @@ fn recompute_ancestors_after_initialize(tree: &mut MovePathTree, place: &Place) 
 // Public ops — spec signatures
 // ---------------------------------------------------------------------------
 
-/// Returns true iff `place` is considered initialized in `tree`.
-///
-/// A place is initialized only when:
-/// * no prefix (including itself) is `Uninitialized` (overlap-poison check), and
-/// * the exact node is `Initialized` (or missing — meaning never moved, treated as init).
-///
-/// Missing nodes are treated as `Initialized` if no prefix is uninitialized,
-/// because the tree only tracks places that have been moved/inserted; absence
-/// means "never moved". This is more ergonomic for unit tests that insert lazily.
-/// Use `check_read` if you want an error on uninit.
+/// True iff `place` initialized (no `Uninit` prefix and exact node `Init` or missing never-moved).
 pub fn is_initialized(tree: &MovePathTree, place: &Place) -> bool {
     // First, overlap-aware prefix check: if any prefix is Uninitialized, whole
     // subtree is poisoned. Uses Place::is_prefix_of via has_uninit_prefix.
@@ -234,17 +192,12 @@ pub fn is_initialized(tree: &MovePathTree, place: &Place) -> bool {
     }
 }
 
-/// Alias for [`is_initialized`] — `read(place) -> bool` per spec.
-///
-/// Spec says `fn read(place: &Place) -> bool (is_initialized)`. The tree is
-/// required to answer, so this form takes `&MovePathTree`.
+/// Alias for `is_initialized`.
 pub fn read(tree: &MovePathTree, place: &Place) -> bool {
     is_initialized(tree, place)
 }
 
-/// Read that returns `Result` — useful for `copy_from`-style callers.
-///
-/// Returns `Ok(())` if initialized, `Err(InitError)` with `UseOfUninitialized`.
+/// `is_initialized` as `Result`.
 pub fn check_read(tree: &MovePathTree, place: &Place) -> Result<(), InitError> {
     if is_initialized(tree, place) {
         Ok(())
@@ -257,13 +210,7 @@ pub fn check_read(tree: &MovePathTree, place: &Place) -> Result<(), InitError> {
     }
 }
 
-/// Move out `place` — marks `Uninitialized` and checks already-uninit.
-///
-/// Errors if `place` (or any prefix via `is_prefix_of`) is already
-/// `Uninitialized` (double-move / use-after-move).
-/// On success, `place` and all its descendants become `Uninitialized` (child
-/// invalidation via `Place::is_prefix_of` / `overlaps`), and ancestors become
-/// `PartiallyInitialized` (unless already `Uninitialized`).
+/// Move out `place` (why: `Uninit` check via prefix, child invalidation via `is_prefix_of`, ancestors `Partial`).
 pub fn move_out(tree: &mut MovePathTree, place: &Place) -> Result<(), InitError> {
     // Check already-uninit via prefix walk (overlap-aware).
     if has_uninit_prefix(tree, place) {
@@ -307,12 +254,7 @@ pub fn move_out(tree: &mut MovePathTree, place: &Place) -> Result<(), InitError>
     Ok(())
 }
 
-/// Initialize (reinit) `place` — marks `Initialized`, clearing children.
-///
-/// After marking, ancestors are recomputed: if all siblings are now
-/// `Initialized`, parent returns to `Initialized`; otherwise stays
-/// `PartiallyInitialized`. Uses `Place::overlaps` / `is_prefix_of` to decide
-/// which deferred invalidations are cleared.
+/// Reinit `place` to `Initialized`, clear children, recompute ancestors via `overlaps`.
 pub fn initialize(tree: &mut MovePathTree, place: &Place) {
     // Ensure chain exists.
     tree.insert(place.clone());
@@ -329,11 +271,7 @@ pub fn initialize(tree: &mut MovePathTree, place: &Place) {
     recompute_ancestors_after_initialize(tree, place);
 }
 
-/// Copy from `place` — read-only check, no state change (for Copy types).
-///
-/// Returns `Ok(())` if `place` is initialized (including prefix checks via
-/// `is_prefix_of`), `Err` otherwise. Does NOT mutate `tree`, demonstrating
-/// implicit Copy (per grilling: `Copy` values are not moved out).
+/// Copy from `place` — read-only `is_initialized` check, no state change (why: implicit Copy).
 pub fn copy_from(tree: &MovePathTree, place: &Place) -> Result<(), InitError> {
     if is_initialized(tree, place) {
         Ok(())

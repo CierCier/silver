@@ -1458,21 +1458,16 @@ impl Walker<'_> {
             .map(String::as_str)
     }
 
+    /// Why: classify implicit move vs copy for inlay hints from the formatted type string.
+    /// Copy if primitive/pointer/reference or no owning base word appears; else Move.
     fn is_copy_type_str(ty: &str) -> bool {
         let s = ty.trim();
         if s.is_empty() {
             return true;
         }
-        // Raw pointers are Copy (T*, mut T*).
-        if s.contains('*') {
+        if s.contains('*') || s.starts_with('&') {
             return true;
         }
-        // References are borrows, but their type string in expr_types is the
-        // pointee behind `&x`; skip hinting references separately. Treat &T as Copy for hint suppression.
-        if s.starts_with('&') {
-            return true;
-        }
-        // Primitive Copy types.
         const PRIMITIVES: &[&str] = &[
             "bool", "char", "str", "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64",
             "u128", "f32", "f64", "f80", "c32", "c64", "c80", "void", "isize", "usize",
@@ -1480,7 +1475,7 @@ impl Walker<'_> {
         if PRIMITIVES.contains(&s) {
             return true;
         }
-        // Known owning bases — if the formatted type contains any as a word, it's non-Copy.
+        // Owning bases — word-boundary search; if present type is non-Copy.
         const DROP_BASES: &[&str] = &[
             "String",
             "Vec",
@@ -1556,7 +1551,6 @@ impl Walker<'_> {
         let Some(ty) = self.type_of(expr) else {
             return;
         };
-        // Reference expressions are borrows, not moves/copies — filtered via type string '&' but also skip if expr is Reference node (not a place, already filtered).
         let kind = if Self::is_copy_type_str(ty) {
             MoveHintKind::Copy
         } else {

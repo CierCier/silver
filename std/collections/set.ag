@@ -1,17 +1,5 @@
-// HashSet<K> — keys-only SwissTable (optimized, no Map<K,bool> backing).
-//
-// Ownership: `insert` moves `K key` into the table (`_insert_at` does
-// `keys[slot]=move key`); `grow` (rehash) moves each live key via
-// `new_keys[slot]=move old_keys[i]` (Place Index) and frees the old buffers
-// without per-element drops — `Copy` K copies bitwise, non-Copy transfers.
-// Earlier POD-only `K k = old[i]; new[slot]=k` duplicated owned pointers;
-// replaced by `move`. `take` moves out (`move keys[idx]`), `erase`/`remove`
-// tombstones without moving (leaks owned K by design — use `take`/`drain`).
-// Layout mirrors std/map.ag but without a values array: 16-byte control
-// groups (0x80 empty, 0xFE tombstone, 0..127 h2), power-of-two capacity,
-// SSE2 group probes, triangular probing (step += 16). `Drop`/`clear` free
-// buffers without iterating; drain owned K via `take`/`drain`/`into_iter`
-// (each moves). See smoke comment at EOF.
+// Keys-only SwissTable. Move transfers owned keys; Copy is bitwise.
+// `iter` borrows; `take`/`drain`/`into_iter` move out. `erase` leaks.
 import std.optional;
 import std.iter;
 import std.mem.alloc;

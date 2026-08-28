@@ -1,116 +1,16 @@
-//! Move-out checker: per-path dataflow over each function body that reports
-//! use-after-move of non-copyable (Drop) values.
+//! Move-out checker: per-path dataflow reporting use-after-move of non-Copy (Drop) values.
 //!
-//! A variable is *moved* (its runtime drop flag is cleared) when it is:
-//! - the operand of `move x` (or the root of `move x.field`),
-//! - a by-value method receiver (`x.consume()` where the method has an
-//!   `InstanceValue` receiver),
-//! - a by-value argument to a function/method whose parameter is a value type,
-//! - the root of a bare `return x;` (implicit move), or
-//! - the receiver of an explicit `v.drop()` call.
+//! A value is moved by `move x`, by-value receivers/args, bare `return x`, or `v.drop()`.
+//! Uses on a moved place are use-after-free errors. Per-path: a move on any
+//! fall-through path taints afterwards; moves in non-fall-through branches don't leak.
 //!
-//! Once moved, any use of the variable — reading it, borrowing it, writing
-//! through it — is a use-after-free and is reported as an error. The analysis
-//! is per-path (Rust-like): a variable moved on *any* fall-through path is
-//! unusable afterwards, but moves inside a branch that never falls through
-//! (return / break / continue) do not propagate past it.
-//!
-//! v1 limitations (safe, no false positives, but incomplete):
-//! - generic-typed bindings (`T x` inside a generic function) are not tracked;
-//! - `break`/`continue` are handled conservatively through the loop merge.
-//!
-//! # Phase 1 Migration Note — String Paths → `Place` (read-only scaffolding)
-//! Current field tracking is string-based: dotted paths like `"a.b.c"` are built
-//! by [`expr_root_and_path`] and stored as `String` keys in
-//! [`VarState::moved_fields`]. Helpers `is_field_moved` / `mark_field_moved` /
-//! `mark_field_reinitialized` and the `paths_overlap`-like prefix walk in
-//! `is_field_moved` operate on that string representation.
-//! TODO(Place Phase 1): replace the `String` field-path layer with
-//! `semantic::place::Place` projections — `Place { local, projections: [Field(..),
-//! Deref, Index, TupleField(..)] }` mirroring Silver syntax (not a Rust clone).
-//! `Place` will be the structured replacement for `(root: String, path: String)`
-//! tuples. No behavior change in this phase: `Place` coexists as parallel
-//! infrastructure; existing string logic stays authoritative until the cutover.
-//! See `semantic::place` for `LocalId`/`Projection` and pure/comparable helpers.
-//!
-//! # Phase 3 Prep — `VarState` → `MovePathTree<Place>` (scaffolding only, no behavior change)
-//! `VarState` currently models moved-ness as a flat `level: u8` lattice
-//! (`0 = Live`, `1 = PartiallyMoved`, `2 = FullyMoved`) plus a
-//! `moved_fields: FxHashMap<String, (Span, &'static str)>` of dotted-path
-//! strings (e.g. `"a"`, `"a.b"`). `is_field_moved` walks ancestors via
-//! `rfind('.')`; `mark_field_reinitialized` strips prefixes via
-//! `starts_with("path.")`. This is the string analogue of a prefix/overlap test.
-//!
-//! Future representation (prep only — not switched in this phase):
-//! `semantic::move_path::MovePathTree<Place>` where each `MovePath` node
-//! corresponds 1:1 to a `Place` (`_MovePath nodes correspond to Place_`).
-//! The tree stores per-path `InitState::{Init, Uninit, Partial}` (with `Partial`
-//! meaning *some* descendant is `Uninit` while the node itself is not uniformly
-//! `Uninit`), preserving the current `Live / PartiallyMoved / FullyMoved`
-//! **semantics** under new `Init / Partial / Uninit` names:
-//! `Live ↔ Init`, `PartiallyMoved ↔ Partial`, `FullyMoved ↔ Uninit` (root `Uninit`).
-//! Helpers `places_overlap` / `Place::is_prefix_of` / `Place::overlaps` and
-//! `MovePathTree` traversal (`find`, `set_state`, subtree fold) will replace the
-//! string `rfind`/`starts_with` walks without semantic change.
-//!
-//! TODO(Phase 3): replace `VarState::moved_fields: FxHashMap<String, _>` with
-//! `MovePathTree<Place>` (see `semantic::move_path::{MovePath, MovePathTree}`).
-//! `MovePathTree` is rooted in `Place`; `VarState::level` will be derived from
-//! the root `InitState` (`Init`/`Partial`/`Uninit`) rather than stored as `u8`.
-//! Keep `Live`/`PartiallyMoved`/`FullyMoved` observable behavior — only the
-//! underlying storage becomes `Init`/`Partial`/`Uninit` in the tree.
-//! Migration candidates: `mark_field_moved`, `mark_field_reinitialized`,
-//! `is_field_moved` → candidates for `places_overlap` vs `InitState` queries
-//! (`Place::is_prefix_of` / `places_overlap` + `MovePathTree::state_at` /
-//! `init_state`). No logic deletion in this phase; comments/scaffolding only.
-//! # Phase 6-8 — Pipeline split: Move analysis vs Drop elaboration
-//!
-//! ```text
-//! AST ──► Typeck ──► Place ──► Borrow / Move ──► DropElaboration ──► LLVM
-//!         (typeck)   (place)   (borrow_check,    (drop_elaborate)   (codegen/llvm_ir/scope)
-//!                              move_check,
-//!                              init / move_path)
-//! ```
-//!
-//! ## Responsibilities — who determines what
-//!
-//! * **Move checker (this file) determines which `Place`s are initialized.**
-//!   Via `MovePathTree<Place>` + `InitState::{Init, Partial, Uninit}` and
-//!   `semantic::init::{move_out, initialize, copy_from, read}` (using
-//!   `Place::is_prefix_of` / `Place::overlaps`), it tracks definite
-//!   initialization per `Place` — `Init` ↔ `Live`, `Partial` ↔ `PartiallyMoved`,
-//!   `Uninit` ↔ `FullyMoved`. Diagnostics (use-after-move, double-move) are
-//!   emitted here, *before* drop elaboration.
-//!
-//! * **Drop elaborator (`semantic::drop_elaborate`) determines which initialized
-//!   values to destroy.** It is a read-only consumer of the `MovePathTree`
-//!   produced above: it queries `is_initialized(tree, place)` /
-//!   `InitState` at each scope exit / unwind / early-return point and collects
-//!   the live `Drop` places (`needs_drop(place_ty)`) that still need a
-//!   destructor. No mutation of init state — collection only.
-//!
-//! * **Drop elaboration interface (sketch, not yet called):**
-//!   ```ignore
-//!   use crate::semantic::move_path::MovePathTree;
-//!   use crate::semantic::drop_elaborate::{PlaceToDrop, drop_elaborate};
-//!
-//!   fn drop_elaborate(tree: &MovePathTree) -> Vec<PlaceToDrop> { /* TODO */ }
-//!   // Future per-scope: DropElaborate::elaborate(&tree) / elaborate_for_scope(tree, scope)
-//!   // Codegen will consume Vec<PlaceToDrop> to emit guarded DropCalls via Place::overlaps.
-//!   ```
-//!   `PlaceToDrop { place: Place }` is the drop-set element; additional fields
-//!   (span, scope) can be added without breaking the `tree -> Vec<PlaceToDrop>`
-//!   shape. See `semantic::drop_elaborate` for the compiling skeleton.
-//!
-//! * **LLVM codegen (`codegen::llvm_ir::scope`) keeps figuring ownership itself
-//!   for now.** `register_drop_flag` / `field_flags` / `DeferredEntry::DropCall`
-//!   + `clear_field_flags_for_path` remain authoritative until the elaborator is
-//!   proven. No flag deletion, no `emit_defers` rewrite in this phase — the new
-//!   `MovePathTree` / `PlaceToDrop` path is parallel scaffolding; old string
-//!   `moved_fields` / `field_flags` logic stays hot. TODO(Phase 6-8): migrate
-//!   `scope.rs` to consume `Vec<PlaceToDrop>` and use `Place::overlaps` for
-//!   field vs whole invalidation, then eliminate hybrid drop flags.
-//!
+//! Why Place + MovePathTree: field-granular init (`x.a` vs `x.b`) via
+//! `Place::overlaps`/`is_prefix_of` and `MovePathTree<InitState>` (Init/Partial/Uninit
+//! ↔ Live/PartiallyMoved/FullyMoved). Drop elaboration consumes the same tree.
+//! TODO(Phase 3): replace `VarState.moved_fields: FxHashMap<String,_>` with
+//! `MovePathTree<Place>`; derive `level` from root `InitState`.
+//! TODO(Phase 5): centralize Copy/Drop via `type_properties::{is_copy,needs_drop}`.
+//! TODO(Phase 6-8): `scope.rs` consumes `Vec<PlaceToDrop>` from `drop_elaborate(&tree)`.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -119,95 +19,22 @@ use crate::semantic::move_path::{InitState, MovePathTree};
 use crate::semantic::place::{Place, Projection};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-// ── Phase 4 — Definite initialization primitives (parallel scaffolding) ──────────
-//
-// Parallel, not yet authoritative. Old string-path logic (`VarState::moved_fields`
-// + `expr_root_and_path`) stays hot; `Place`/`MovePathTree`/`InitOp` are the
-// future path. This block wires the conceptual transitions without changing
-// semantics — helpers are `#[allow(dead_code)]` and guarded from the hot path.
-//
-// ## Correspondence: current string ops → new Place-based `InitOp`s
-//
-// ```text
-// // Current (string)                          // Future (Place / InitOp)
-// String b = move x.field    ──►  move_out(x.field)  + initialize(b)
-//                             //   tree.move_out(&Place::new("x").field("field"))
-//                             // + tree.initialize(&Place::new("b"))
-//
-// i64 b = x.a   (Copy)       ──►  copy_from(x.a)     + initialize(b)
-//                             //   tree.copy_from(&Place::new("x").field("a")) is a
-//                             //   non-destructive read; then
-//                             // + tree.initialize(&Place::new("b"))
-//
-// move x.a                   ──►  move_out(x.a)
-//                             //   tree.move_out(&Place::new("x").field("a"))
-//
-// x.a = new_value            ──►  initialize(x.a)
-//                             //   tree.initialize(&Place::new("x").field("a"))
-// ```
-//
-// `Implicit Copy` is retained (per grilling): `Copy` types use `copy_from`
-// (read without invalidation); non-`Copy` types use `move_out`. Hybrid
-// verbosity keeps both string and `Place` commentary in this phase.
-//
-// Wiring sketch (not yet called in hot path):
-// ```ignore
-// // old:
-// if let Some((root, path)) = expr_root_and_path(&expr) { mark_field_moved(&path, ...) }
-// // future (parallel):
-// if let Some(place) = Place::from_expr(&expr, &locals) {
-//     match transition_for_assign(&place, is_copy) {
-//         InitOp::MoveOut  => init::move_out(&mut tree, &place)?,
-//         InitOp::CopyFrom => init::copy_from(&tree, &place)?,
-//         InitOp::Initialize => init::initialize(&mut tree, &place),
-//         InitOp::Read => init::read(&tree, &place),
-//     }
-// }
-// ```
-// See `semantic::init` (Phase 4) for `move_out`/`initialize`/`copy_from`/`read`
-// and `semantic::move_path::{MovePathTree, InitState}` for the tree.
+// Phase 4 scaffolding (parallel, not yet hot): `Place`/`MovePathTree`/`InitOp`
+// mirror `semantic::init`. String logic stays authoritative; see `semantic::init`
+// and `semantic::move_path` for the tree.
 
-/// Definite-initialization operation on a `Place` (Phase 4 scaffolding).
-///
-/// Parallel to `semantic::init::InitOp`; kept crate-private here so `move_check`
-/// compiles even before `semantic::init` is populated. When `semantic::init`
-/// is available, this mirrors its variants (`MoveOut`/`Copy`/`Initialize`/`Read`).
-/// Not yet used in the hot path — guarded by `#[allow(dead_code)]`.
+/// Definite-init op on a Place (Phase 4 scaffolding, mirrors `semantic::init::InitOp`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum InitOp {
-    /// Destructive move-out: `move x.a` → `Uninitialized` at `x.a`.
-    MoveOut,
-    /// Non-destructive copy: `i64 b = x.a` (Copy) → `copy_from(x.a)` (stays `Initialized`).
-    CopyFrom,
-    /// (Re)initialization: `x.a = v` → `Initialized` at `x.a`.
-    Initialize,
-    /// Pure read without state change (for borrowck/init checks).
-    Read,
+    MoveOut,   // `move x.a` — destructive
+    CopyFrom,  // `i64 b = x.a` — non-destructive Copy
+    Initialize, // `x.a = v`
+    Read,      // pure read
 }
 
-/// Classify the *source* transition for an assignment / let-init of `place`.
-///
-/// Hybrid verbosity — implicit `Copy` retained:
-/// * `is_copy == true`  → `CopyFrom` (non-destructive, `Copy` type like `i64`)
-/// * `is_copy == false` → `MoveOut`  (destructive, non-`Copy`/Drop type like `String`)
-///
-/// Full assignment `let b = <src>` is always `transition_for_assign(src, is_copy)`
-/// **plus** `initialize(b)` on the destination. Examples:
-/// * `String b = move x.field` → `move_out(x.field)` (`MoveOut`) + `initialize(b)`
-/// * `i64 b = x.a`              → `copy_from(x.a)` (`CopyFrom`) + `initialize(b)`
-/// * `move x.a`                 → `move_out(x.a)` (`MoveOut`) alone
-/// * `x.a = new_value`          → `initialize(x.a)` (`Initialize`) — no source transition
-///
-/// Parallel scaffolding: not called in the hot string-path checker yet. Future
-/// wiring will call `crate::semantic::init::{move_out, copy_from, initialize}`
-/// via `MovePathTree` (`Place::is_prefix_of`/`places_overlap` + `InitState`).
-///
-/// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-/// `is_copy` will be `semantic::type_properties::is_copy(ty)` (Implicit Copy retained:
-/// bool/i64/f64/ptr + all-Copy struct = Copy else non-Copy). Future split:
-/// `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`. This helper's
-/// `is_copy: bool` param will be supplied by the central query; keep scaffolding parallel.
+/// Source transition for `let b = <src>` (plus `initialize(b)` on dest).
+/// `is_copy` → `CopyFrom`, else `MoveOut`. TODO(Phase 5): `is_copy` from `type_properties::is_copy`.
 #[allow(dead_code)]
 fn transition_for_assign(place: &Place, is_copy: bool) -> InitOp {
     let _ = place;
@@ -218,14 +45,14 @@ fn transition_for_assign(place: &Place, is_copy: bool) -> InitOp {
     }
 }
 
-/// Convenience: direct mapping for `move <place>` (always `MoveOut`).
+/// `move <place>` → `MoveOut`.
 #[allow(dead_code)]
 fn transition_for_move(place: &Place) -> InitOp {
     let _ = place;
     InitOp::MoveOut
 }
 
-/// Convenience: direct mapping for `initialize(<place>)` (`x.a = v`).
+/// `initialize(<place>)` (`x.a = v`).
 #[allow(dead_code)]
 fn transition_for_initialize(place: &Place) -> InitOp {
     let _ = place;
@@ -242,30 +69,18 @@ pub struct MoveError {
     pub note_message: Option<String>,
 }
 
-/// Per-variable moved-ness lattice — now backed by `MovePathTree<Place>`.
-///
-/// `level` is retained for whole-var fallback (`0 = Live`, `1 = PartiallyMoved`, `2 = FullyMoved`),
-/// but field granularity is now a `MovePathTree` keyed by `Place` plus a
-/// `place_spans` map for diagnostics. All field checks use
-/// `Place::is_prefix_of` / `Place::overlaps` via `semantic::init` primitives,
-/// not string `rfind`/`starts_with`.
+/// Per-variable moved-ness: `level` for whole value + `MovePathTree<Place>` for fields.
 #[derive(Debug, Clone, Default)]
 pub struct VarState {
-    /// Lattice level: `0 = Live (Init)`, `1 = PartiallyMoved (Partial)`, `2 = FullyMoved (Uninit)`.
+    /// `0=Live/Init`, `1=PartiallyMoved/Partial`, `2=FullyMoved/Uninit`.
     pub level: u8,
     pub move_span: Option<Span>,
     pub move_reason: Option<&'static str>,
-    /// Legacy string field paths — retained for hybrid verbosity but not authoritative for field checks.
-    /// New code uses `tree` + `place_spans` with structural `Place` keys.
     pub moved_fields: FxHashMap<String, (Span, &'static str)>,
-    /// Field-level init tree: each `Place` (e.g. `x`, `x.a`, `x.a.b`) maps to `InitState`.
-    /// Uses `Place::is_prefix_of` / `Place::overlaps` via `semantic::init`.
     pub tree: MovePathTree,
-    /// Span/reason per `Place` that was moved — used to report note_span for use-after-move.
     pub place_spans: FxHashMap<Place, (Span, &'static str)>,
 }
 
-/// Build a `Place` from root + dotted path string (e.g. `x`, `a.b` → `x.a.b`).
 fn place_from_root_and_path(root: &str, path: &str) -> Place {
     if path.is_empty() {
         Place::new(root)
@@ -275,7 +90,7 @@ fn place_from_root_and_path(root: &str, path: &str) -> Place {
     }
 }
 
-/// Convert `Place` projections to dotted path string without local (e.g. `x.a.b` → `a.b`).
+/// Dotted path without local (drops Index/Deref) — for legacy display.
 fn place_to_path_str(place: &Place) -> String {
     place
         .projections
@@ -289,13 +104,7 @@ fn place_to_path_str(place: &Place) -> String {
         .join(".")
 }
 
-/// Full `Place` display for diagnostics — includes `local` and all
-/// projections (`Field`, `TupleField`, `Index`, `Deref`) without loss.
-/// `Place::is_prefix_of` / `Place::overlaps` are the overlap authority;
-/// this helper is the human-readable `x.a`, `x.a.b`, `x[index]`, `*p`
-/// counterpart (lossless, not the dotted `place_to_path_str` which drops
-/// `Index`/`Deref`). Used to ensure use-after-move reports the place path
-/// (e.g. `x.a`) via `Place`, not just the root var.
+/// Lossless Place display (`x.a`, `x[index]`, `*p`) for diagnostics.
 fn place_display(place: &Place) -> String {
     let mut s = place.local.clone();
     for p in &place.projections {
@@ -578,20 +387,7 @@ impl VarState {
     }
 }
 
-/// Helper to split an expression into its root variable name and dot-separated field path.
-///
-/// Current (Phase 0) string-based tracking: walks `Identifier` / `FieldAccess` chains
-/// and returns `(root_name, "a.b.c")` where the path is a `"."`-joined `String`.
-/// This is the sole source of `VarState::moved_fields` keys and the basis for all
-/// `is_field_moved` / `mark_field_moved` string comparisons.
-///
-/// TODO(Place Phase 1): replace with `semantic::place::Place` construction —
-/// `Place { local: LocalId(root), projections: Vec<Field(name)> }` mirroring
-/// Silver syntax (`Field`, `Deref`, `Index`, `TupleField`). A `Place::from_expr`
-/// helper (pure, comparable) will supersede this function. Call sites currently doing
-/// `if let Some((root, path)) = expr_root_and_path(expr)` will become
-/// `if let Some(place) = Place::from_expr(expr, locals)` (or similar). Keep this
-/// function until the `Place` cutover is complete — no deletion in this prep phase.
+/// String root+path splitter for legacy `moved_fields` keys. TODO(Place Phase 1): replace with `Place::from_expr`.
 fn expr_root_and_path(expr: &ast::Expression) -> Option<(String, String)> {
     let mut path = Vec::new();
     let mut curr = expr;
@@ -610,15 +406,7 @@ fn expr_root_and_path(expr: &ast::Expression) -> Option<(String, String)> {
     }
 }
 
-/// Phase 11 — Dynamic Index Place construction from an expression.
-///
-/// Builds `Place { local, projections: [Field|Index|Deref|TupleField] }` for
-/// `Identifier`, `FieldAccess`, `Index` (`v[i]` → `Place::new("v").index()` via
-/// `push_projection(Projection::Index)`), and `*p` (`Deref`). Index values are
-/// opaque — any `v[i]`/`v[j]` maps to the same `[Index]` projection, yielding
-/// conservative overlap (`v[i]` overlaps `v[j]`). Field accesses chain, and
-/// `Index` composes after fields (`x.a[i]` → `[Field("a"), Index]`).
-/// Returns `None` for non-place expressions.
+/// Builds `Place` from expr (`Identifier`/`FieldAccess`/`Index`/`*p`). Index is opaque (`v[i]` overlaps `v[j]`).
 fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
     match expr.kind.as_ref() {
         ast::ExpressionKind::Identifier(ident) => Some(Place::new(ident.name.clone())),
@@ -644,22 +432,12 @@ fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
     }
 }
 
-
 /// Moved-ness lattice per live variable: tracks status, move site and reason.
 type State = FxHashMap<String, VarState>;
 
 /// Scope entry: (name, previous state, previous type) so shadowing restores.
 type ScopeEntry = (String, Option<VarState>, Option<ast::Type>);
-/// Program-wide facts used to classify moves (computed once per program).
-///
-/// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-/// `needs_drop` / `is_copy` will be the single source of truth for Copy vs
-/// owning-type classification; `is_tracked`/`Facts` stays authoritative until
-/// the cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
-/// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
-/// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
-/// — typeck/move_check/codegen must not independently decide Copy/Drop.
-/// No logic change in this phase; keep existing per-subsystem heuristics working in parallel.
+/// Facts for move classification. TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
 #[derive(Default)]
 struct Facts {
     /// Base type names that implement `Drop`.
@@ -832,17 +610,7 @@ impl MoveChecker {
         self.check_block(body, &mut state, &mut scopes, &mut var_types);
     }
 
-    /// True if `ty` can own resources (has a Drop impl, possibly nested).
-    /// `Task<T>` handles are tracked too: `wait` consumes the handle, so a
-    /// second `wait` on the same identifier is a use-after-move.
-    ///
-    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-    /// `needs_drop(T)` ⇔ `!is_copy(T)` for non-Copy owning types; `is_tracked`
-    /// is the current move-check analogue of `needs_drop`. Keep authoritative
-    /// until cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct
-    /// = Copy else non-Copy like String/Vec/...).
-    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`.
-    /// No logic change in this phase.
+    /// Tracked if Drop-owned (or `Task` handle). TODO(Phase 5): `type_properties::{is_copy,needs_drop}`.
     fn is_tracked(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),

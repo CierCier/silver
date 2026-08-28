@@ -1,12 +1,5 @@
-//! Call-site parameter-name inlay hints.
-//!
-//! For every recorded call site with a resolved callee, a hint is placed
-//! before each argument showing the callee's parameter name:
-//!
-//!   String s = @format("{}: {}", name, age);
-//!                          ^^^^^ ^^^
-//!                          name:  age:
-
+//! Inlay hints: param names at call sites + implicit move/copy at let/assign/return/call args.
+//! Why: surface implicit Copy vs move for non-obvious ownership without explicit `move`.
 use agc::symbol_index::{SymbolIndex, SymbolKind};
 use tower_lsp_server::ls_types::*;
 
@@ -49,9 +42,7 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
             });
         }
     }
-    // Implicit move/copy hints: show "move" for non-Copy places and "copy" for Copy places
-    // at let initializers, assignments, returns, and call arguments. Explicit `move` is excluded
-    // by the symbol index walker; remaining hints are implicit.
+    // Implicit move/copy at let/assign/return/call args (explicit `move` excluded upstream).
     for hint in &analysis.move_hints {
         let label = match hint.kind {
             agc::symbol_index::MoveHintKind::Move => "move",

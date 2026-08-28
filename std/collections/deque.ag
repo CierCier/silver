@@ -1,27 +1,5 @@
-// Deque<T> — ring-buffer double-ended queue.
-//
-// Ownership: `push_back`/`push_front` move `value` into the buffer
-// (`data[tail] = move value`). Growth (`grow`) linearizes the ring via
-// `new_data[i] = move old[(head+i)%old_cap]` — Place Index/Deref — then
-// frees the old buffer; `Copy` T copies bitwise, non-Copy (String, Vec<u8>)
-// transfers. `pop_front`/`pop_back` move out (`move data[idx]`) and advance
-// head/len, leaving the stale slot moved-from. Earlier POD-only shallow copy
-// in `grow` (`new[i]=old[...]`) duplicated owned pointers; removed and
-// replaced by `move`. `front`/`back` still return shallow copies (POD-safe;
-// owned types should use `try_pop`/`get_ptr` pattern). `clear`/`drop` free
-// backing memory without per-element drops — drain via `pop_*` first for
-// owned T.
-//
-// Iterator ownership contract (Phase 12):
-// - `iter(&Deque<T> self)` borrows: takes `&Deque<T> self`, copies ring
-//   pointer/cap/head/len into a `DequeBorrowIter<T>` and yields copies
-//   (`data[(head+idx)%cap]`) without consuming the deque. Deque stays live.
-// - `into_iter(Deque<T> self)` moves: takes `Deque<T> self` by value
-//   (`Self self`, not `&Self`), transfers buffer via `move self.data` and
-//   clears `self` (`self.data = null; self.len = 0; self.cap = 0; self.head = 0`)
-//   so deque drop is no-op. `DequeIter<T>` owns buffer (frees on Drop) and
-//   each `next()` does `move data[(head+idx)%cap]` (via tmp) transferring
-//   ownership; `Copy` T bitwise-copies via same `move`.
+// Ring-buffer deque. Move transfers owned elements; Copy is bitwise.
+// `iter` borrows; `into_iter`/`drain` own the buffer. Drop frees buffers only.
 import std.mem;
 import std.optional;
 import std.iter;

@@ -1,215 +1,20 @@
-//! Structural `Place` representation — Phase 1 foundation, Phase 2 projection semantics.
-//! Phase 11 — Dynamic Index place (`v[i]`).
+//! Place — structural location for borrow/move/init/drop sharing (replaces string paths).
+//! Why: field-granular overlap via `is_prefix_of`/`overlaps` instead of `rfind('.')`/string prefix walks.
+//! Example: `x` overlaps `x.a` but not `x.b`; `v[i]` is `Place { local:"v", [Index] }` and `v[i]` overlaps `v[j]` conservatively (index value opaque).
 //!
-//! A `Place` names a storage location in Silver's ownership model, mirroring
-//! Silver syntax directly (not a Rust clone). It replaces the ad-hoc
-//! `expr_root_and_path()` string paths with a structurally comparable type
-//! shared by borrow checking, move checking, initialization and drop
-//! elaboration.
+//! Invariants (one-line):
+//! - Overlap = `a.is_prefix_of(b) || b.is_prefix_of(a)` (same local + prefix projections)
+//! - Different locals never overlap; sibling fields/indices disjoint; reflexive + symmetric
+//! - `Index`/`Deref` compare by variant equality; `Index == Index` so all `v[i]` overlap
 //!
-//! # Phase 1 examples
-//!
-//! * `x`          — local `x` with no projections: `Place::new("x")`
-//! * `x.foo.bar`  — field projections: `Place { local: "x", projections: [Field("foo"), Field("bar")] }`
-//! * `x.0`        — tuple field projection: `Place { local: "x", projections: [TupleField(0)] }`
-//! * `x.a.b.c`    — chained fields: `Place { local: "x", projections: [Field("a"), Field("b"), Field("c")] }`
-//!
-//! Additional projections exist for later phases but are already part of the
-//! enum so code can name them uniformly:
-//!
-//! * `*p` / deref — `Projection::Deref`
-//! * `v[i]`       — `Projection::Index`
-//!
-//! ## Phase 11 — Dynamic `Index` place (`v[i]`)
-//!
-//! `v[i]` is represented as `Place { local: "v", projections: [Index] }` for
-//! **any** dynamic index `i`. The index expression value is **opaque** and not
-//! part of `Place` identity — `v[0]`, `v[i]`, `v[j]` all map to the same
-//! `Place` with a single `Index` projection. This yields a **conservative,
-//! index-insensitive** overlap:
-//!
-//! * `v` overlaps `v[i]` — `v` (`[]`) is a prefix of `v[i]` (`[Index]`), so
-//!   moving/borrowing `v` conflicts with `v[i]` and vice-versa (symmetric via
-//!   `overlaps`).
-//! * `v[i]` overlaps `v[j]` — both are `Place { local:"v", [Index] }`, so
-//!   `is_prefix_of` is `true` both ways and `overlaps` is `true`. This is
-//!   conservative: distinct indices *may* be disjoint at runtime, but we treat
-//!   them as overlapping for soundness (Phase 11 limitation).
-//! * `v[i]` vs `v.a` — `Index != Field`, so no overlap (disjoint projections),
-//!   as with any mismatched projection kinds.
-//!
-//! Wire-up: `Place::new("v").index()` or `place.push_projection(Projection::Index)`
-//! builds `v[i]`; `move_check::place_from_expr` and `borrow_check::extract_place`
-//! create this `Place` for `Index` expressions (e.g. `move v[i]`). See `Projection::Index`
-//! docs and `test_v_vs_vi_overlap` / `test_vi_vs_vj_overlap_conservative`.
-//!
-//! `Place` is intentionally pure data: helpers like `is_prefix_of`,
-//! `overlaps`, `parent`, etc. live as associated functions/methods added in
-//! Phase 2 and are not required for Phase 1's "no semantic change" gate.
-//! Existing checkers continue to use string-based `expr_root_and_path` in
-//! parallel; `Place` is parallel infrastructure.
-//!
-//! # Phase 2 — Projection semantics (Phase 2 deliverable)
-//!
-//! Phase 2 delivers the **shared overlap logic** for `Place`. The helpers
-//! `Place::is_prefix_of`, `Place::overlaps`, and `places_overlap` are pure,
-//! structural, and Silver-natural: overlap is defined by **local equality +
-//! prefix of projections** (no string splitting, no `rfind('.')`).
-//!
-//! > **Phase 2 deliverable — no semantic change yet.** The string-based
-//! > checkers in `move_check.rs` (`VarState::is_field_moved`,
-//! > `mark_field_moved`, `expr_root_and_path`) and `borrow_check.rs`
-//! > (`ActiveBorrow`, `paths_overlap`, `extract_root_and_path`) remain the
-//! > authoritative path. `Place` helpers are parallel infrastructure verified
-//! > by unit tests; the cutover to `Place` keys happens in follow-up phases.
-//!
-//! ## Sharing plan — one overlap impl for four consumers
-//!
-//! `places_overlap` / `Place::overlaps` is the single source of truth called
-//! by:
-//!
-//! * **Borrow checker** (`semantic/borrow_check.rs`) — `ActiveBorrow { place: Place }`
-//!   conflict detection replaces `paths_overlap` (`b.root == root &&
-//!   paths_overlap(b.path, path)`). A loan of `x` conflicts with `x.a`, `x.a.b`,
-//!   but not `x.b` or `y.a`.
-//! * **Move checker** (`semantic/move_check.rs`) — `VarState` field-move tracking
-//!   replaces `moved_fields: FxHashMap<String,_>` string prefix walks;
-//!   `is_field_moved` becomes `Place::is_prefix_of`, whole-vs-partial moves use
-//!   `overlaps`.
-//! * **Initialization / definite-assignment** (Phase 4) — `read(place)`,
-//!   `move_out(place)`, `initialize(place)` operate on `Place` keys; `overlaps`
-//!   decides whether `move x.a` poisons `x.a.b` but not `x.b`.
-//! * **Drop elaboration** (`codegen/llvm_ir/scope.rs`) — per-field drop flags and
-//!   cascade emission query `overlaps` to decide which deferred `DropCall`s are
-//!   invalidated by `move x.a` vs `move x`.
-//!
-//! All four subsystems share the same `Projection` equality (structural, not
-//! stringly) so `x.a` vs `x.a.b`, `x.0` vs `x.0`, `*p` vs `*p`, and `v[i]`
-//! are judged uniformly.
-//!
-//! ## Overlap semantics — Silver-natural, not Rust-cloned
-//!
-//! ```text
-//! is_prefix_of(self, other) :=
-//!     self.local == other.local
-//!     && self.projections.len() <= other.projections.len()
-//!     && self.projections == other.projections[0..self.projections.len()]
-//!
-//! overlaps(self, other) :=
-//!     is_prefix_of(self, other) || is_prefix_of(other, self)
-//!
-//! places_overlap(a, b) := a.overlaps(b)   // free-function alias; also used
-//!                                         // as `places_overlap(&[Place], &[Place])`
-//!                                         // → true if any pair overlaps
-//! ```
-//!
-//! Consequences:
-//!
-//! * Reflexive: `p.overlaps(p)` is always `true`.
-//! * Symmetric: `a.overlaps(b) == b.overlaps(a)`.
-//! * Prefix-closed: `x` is a prefix of `x.a`, `x.a.b`, etc., so `x` overlaps every
-//!   place rooted at `x`.
-//! * Local-sensitive: different locals never overlap, even with identical
-//!   projections (`x.a` vs `y.a` → `false`).
-//! * Structural: `Field("a") != Field("b")`, `Field("a") != TupleField(0)`,
-//!   `Deref != Field`, `Index != Field`; projections compare by `==` on the
-//!   `Projection` enum (see `Projection` docs).
-//!
-//! ## Truth table — `is_prefix_of` / `overlaps` / `places_overlap`
-//!
-//! `places_overlap` below is the pair form (`a.overlaps(b)`). The
-//! slice form returns `true` if *any* pair overlaps.
-//!
-//! | Place A | Place B | `A.is_prefix_of(B)` | `B.is_prefix_of(A)` | `A.overlaps(B)` / `places_overlap(A,B)` | Notes |
-//! |---------|---------|---------------------|---------------------|---------------------------------------------|---------------------|
-//! | `x` | `x` | `true` | `true` | `true` | same place — reflexive |
-//! | `x` | `x.a` | `true` | `false` | `true` | whole overlaps field (parent prefix) |
-//! | `x.a` | `x` | `false` | `true` | `true` | symmetric |
-//! | `x.a` | `x.a` | `true` | `true` | `true` | identical field |
-//! | `x.a` | `x.a.b` | `true` | `false` | `true` | field overlaps sub-field |
-//! | `x.a.b` | `x.a` | `false` | `true` | `true` | reverse |
-//! | `x.a` | `x.b` | `false` | `false` | `false` | sibling fields — disjoint |
-//! | `x.a.b` | `x.a.c` | `false` | `false` | `false` | sibling sub-fields — disjoint |
-//! | `x.0` | `x.0` | `true` | `true` | `true` | tuple field equality |
-//! | `x.0` | `x.1` | `false` | `false` | `false` | different tuple indices — disjoint |
-//! | `*p` | `*p` | `true` | `true` | `true` | `Place { local:"p", [Deref] }` overlaps itself |
-//! | `*p` | `p` | `false` | `true` | `true` | `p` is prefix of `*p` (`[]` prefix of `[Deref]`) — whole overlaps deref; direction matters for `is_prefix_of` |
-//! | `v[i]` | `v[i]` | `true` | `true` | `true` | `Index` projection — structural equality (dynamic index is opaque) |
-//! | `x.a` | `y.a` | `false` | `false` | `false` | different locals — never overlap |
-//! | `x` | `y` | `false` | `false` | `false` | different locals, no projections |
-//! | `x.a.b` | `y.a.b` | `false` | `false` | `false` | locals differ — projections ignored |
-//!
-//! ## Examples
-//!
-//! ```ignore
-//! use crate::semantic::place::{Place, Projection, places_overlap};
-//!
-//! let x = Place::new("x");
-//! let xa = Place::new("x").field("a");
-//! let xb = Place::new("x").field("b");
-//! let xab = Place::from_slice("x", &["a", "b"]);
-//! let ya = Place::new("y").field("a");
-//!
-//! // is_prefix_of — prefix direction matters
-//! assert!(x.is_prefix_of(&xa));          // x is prefix of x.a
-//! assert!(!xa.is_prefix_of(&x));         // x.a is not prefix of x
-//! assert!(xa.is_prefix_of(&xab));        // x.a is prefix of x.a.b
-//! assert!(!xab.is_prefix_of(&xa));
-//! assert!(xa.is_prefix_of(&xa));         // reflexive — equal places are prefixes
-//!
-//! // overlaps — symmetric, either direction prefix
-//! assert!(xa.overlaps(&xab));            // x.a overlaps x.a.b
-//! assert!(xab.overlaps(&xa));            // symmetric
-//! assert!(x.overlaps(&xa));              // whole overlaps part
-//! assert!(!xa.overlaps(&xb));            // siblings disjoint
-//! assert!(!xa.overlaps(&ya));            // different locals disjoint
-//!
-//! // places_overlap — free-function alias (pair form)
-//! assert!(places_overlap(&xa, &xab));
-//! assert!(!places_overlap(&xa, &xb));
-//!
-//! // Sibling sub-fields are disjoint even though they share a common prefix `x.a`
-//! let xac = Place::from_slice("x", &["a", "c"]);
-//! assert!(xab.overlaps(&xa));            // x.a.b overlaps x.a
-//! assert!(xac.overlaps(&xa));            // x.a.c overlaps x.a
-//! assert!(!xab.overlaps(&xac));          // but x.a.b does NOT overlap x.a.c
-//!
-//! // Projection-type sensitivity
-//! let x0 = Place { local: "x".into(), projections: vec![Projection::TupleField(0)] };
-//! let x1 = Place { local: "x".into(), projections: vec![Projection::TupleField(1)] };
-//! assert!(!x0.overlaps(&x1));
-//!
-//! let deref_p = Place::new("p").deref();
-//! assert!(Place::new("p").is_prefix_of(&deref_p));
-//! assert!(deref_p.overlaps(&Place::new("p")));
-//! ```
-//!
-/// Local variable identifier — the root of a place.
-///
-/// Phase 1 uses `String` (Silver source name). A future revision may switch
-/// to `SymbolId` (`usize`/`u64` interned id); `Place::new` accepts
-/// `impl Into<LocalId>` so either spelling stays ergonomic.
+/// Local variable identifier — root of a place (String today, may become interned SymbolId).
 pub type LocalId = String;
 
-/// Field identifier — Silver `struct` field name.
-///
-/// Alias kept for readability in `Projection::Field(FieldId)`. Like `LocalId`,
-/// this is `String` today and may become a `SymbolId`/`FieldId` intern id
-/// later without changing the `Place` shape.
+/// Field identifier — `Projection::Field` payload (String today, may become interned).
 pub type FieldId = String;
 
-/// A structural place: a local plus a sequence of projections.
-///
-/// Mirrors Silver syntax directly:
-/// * `x`         → `Place { local: "x", projections: [] }`
-/// * `x.foo.bar` → `Place { local: "x", projections: [Field("foo"), Field("bar")] }`
-/// * `x.0`       → `Place { local: "x", projections: [TupleField(0)] }`
-/// * `x.a.b.c`   → `Place { local: "x", projections: [Field("a"), Field("b"), Field("c")] }`
-/// * `*p`        → `Place { local: "p", projections: [Deref] }` (future)
-/// * `v[i]`      → `Place { local: "v", projections: [Index] }` (future, dynamic index)
-///
-/// Derives structural equality/hashing so `x.a == x.a`, `x.a != x.b`, and
-/// `HashSet<Place>` work out of the box.
+/// Structural place `local + projections` (e.g. `x`, `x.a.b`, `x.0`, `*p`, `v[i]`).
+/// Structural equality/hashing: `x.a == x.a`, `x.a != x.b`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Place {
     /// Root local variable, e.g. `x` in `x.foo.bar`.
@@ -217,47 +22,24 @@ pub struct Place {
     /// Projections applied left-to-right, e.g. `[Field("foo"), Field("bar")]`.
     pub projections: Vec<Projection>,
 }
-
-/// Place projection — Silver-natural, not Rust-cloned.
-///
-/// Variants are ordered to match Silver surface syntax:
-/// * `Field("foo")`   — `x.foo` / `x.foo.bar` (struct field)
-/// * `TupleField(0)`  — `x.0` (tuple index, statically known)
-/// * `Index`          — `v[i]` (dynamic container index, Phase 11B)
-/// * `Deref`          — `*p` (dereference)
+/// Place projection — structural, not string-based.
+/// `Field`/`TupleField` exact equality; `Index` opaque (all `v[i]` equal, conservative).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Projection {
-    /// Struct field access: `x.foo` or `x.foo.bar` (second `Field`).
     Field(FieldId),
-    /// Tuple field access: `x.0`, `x.1`, etc.
     TupleField(usize),
-    /// Dynamic index: `v[i]` — value of `i` is not part of the place identity
-    /// in Phase 1 (future may carry `Option<usize>` or symbolic index).
-    Index,
-    /// Dereference: `*p`.
+    Index, // `v[i]` — value opaque, `v[i]` overlaps `v[j]`
     Deref,
 }
 
 impl Place {
-    /// Empty place — no local, no projections.
-    ///
-    /// Useful as a sentinel / const default. Real program places are built
-    /// with [`Place::new`] and projections.
+    /// Sentinel empty place.
     pub const EMPTY: Place = Place {
         local: String::new(),
         projections: Vec::new(),
     };
 
-    /// Create a place for a bare local `x` (no projections).
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let x = Place::new("x");
-    /// let y = Place::new(String::from("y"));
-    /// assert_eq!(x.local, "x");
-    /// assert!(x.projections.is_empty());
-    /// ```
+    /// Bare local `x` (no projections).
     pub fn new(local: impl Into<LocalId>) -> Self {
         Self {
             local: local.into(),
@@ -266,62 +48,33 @@ impl Place {
     }
 }
 impl Place {
-    /// Root local of this place.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // pseudo: Place::new("x").field("a").root() == "x"
-    /// ```
+    /// Root local.
     pub fn root(&self) -> &LocalId {
         &self.local
     }
 
-    /// Return a new `Place` extended with a field projection.
-    ///
-    /// Pure / non-mutating — clones `self` and pushes `Field(field)`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Place::new("x").field("a").field("b") == Place { local: "x", projections: [Field("a"), Field("b")] }
-    /// ```
+    /// New place with `Field(field)` appended.
     pub fn field(&self, field: &str) -> Place {
         let mut p = self.clone();
         p.projections.push(Projection::Field(field.to_string()));
         p
     }
 
-    /// Return a new `Place` extended with a deref projection (`*p`).
+    /// New place with `Deref` appended.
     pub fn deref(&self) -> Place {
         let mut p = self.clone();
         p.projections.push(Projection::Deref);
         p
     }
 
-    /// Return a new `Place` extended with a dynamic index projection (`v[i]`).
-    ///
-    /// Phase 11 — dynamic, index-insensitive: any `v[i]`, `v[j]`, `v[0]` maps
-    /// to `Place { local: "v", projections: [Index] }`. Overlap is conservative:
-    /// `v` overlaps `v[i]` (prefix), and `v[i]` overlaps `v[j]` (both `[Index]`,
-    /// `Index == Index`, so each is a prefix of the other). Documented as a
-    /// Phase 11 limitation — index values are opaque; distinct indices are
-    /// treated as overlapping for soundness. Build via `Place::new("v").index()`
-    /// or `place.push_projection(Projection::Index)`.
+    /// New place with `Index` appended — conservative: all `v[i]` map to same `Index`.
     pub fn index(&self) -> Place {
         let mut p = self.clone();
         p.projections.push(Projection::Index);
         p
     }
 
-    /// Parent place (one projection removed), or `None` if this is a bare local.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// assert_eq!(Place::new("x").field("a").field("b").parent(), Some(Place::new("x").field("a")));
-    /// assert_eq!(Place::new("x").parent(), None);
-    /// ```
+    /// Parent by popping one projection, or `None` if bare local.
     pub fn parent(&self) -> Option<Place> {
         if self.projections.is_empty() {
             None
@@ -335,14 +88,7 @@ impl Place {
         self.projections.push(p);
     }
 
-    /// Helper for tests: build a place from a local and a slice of field names.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let p = Place::from_slice("x", &["a", "b"]);
-    /// assert_eq!(p, Place::new("x").field("a").field("b"));
-    /// ```
+    /// Build from local + field names (test helper).
     pub fn from_slice(local: impl Into<LocalId>, fields: &[&str]) -> Self {
         let mut place = Self::new(local);
         for f in fields {
@@ -353,30 +99,7 @@ impl Place {
 }
 
 impl Place {
-    /// Returns `true` if `self` is a prefix of `other`.
-    ///
-    /// Silver-natural definition: same `local` and `self.projections` is a
-    /// prefix of `other.projections` (element-wise `==`). The empty prefix
-    /// (bare local) is a prefix of any place with the same local.
-    ///
-    /// Equality of each [`Projection`] is exact:
-    /// * `Field` — string equality
-    /// * `TupleField` — `usize` equality
-    /// * `Index` / `Deref` — unit equality (distinct projections do not match)
-    ///
-    /// Phase 11 note (conservative Index): `v[i]` is `Place { local:"v", [Index] }`
-    /// for any `i`; `Index == Index` always, so `v[i]` is a prefix of `v[j]`
-    /// and vice-versa. Distinct dynamic indices are treated as overlapping for
-    /// soundness — see `test_vi_vs_vj_overlap_conservative`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // pseudo: Place::new("x").is_prefix_of(Place::new("x").field("a")) == true
-    /// // Place::new("x").field("a").is_prefix_of(Place::new("x").field("a").field("b")) == true
-    /// // Place::new("x").field("a").is_prefix_of(Place::new("x").field("b")) == false
-    /// // Place::new("x").field("a").is_prefix_of(Place::new("y").field("a")) == false
-    /// ```
+    /// Why: shared prefix check for borrow/move/init/drop (same local + projection prefix). Conservative `Index`: `v[i]` prefix of `v[j]`.
     pub fn is_prefix_of(&self, other: &Place) -> bool {
         if self.local != other.local {
             return false;
@@ -387,38 +110,13 @@ impl Place {
         self.projections[..] == other.projections[..self.projections.len()]
     }
 
-    /// Returns `true` if `self` and `other` overlap.
-    ///
-    /// Overlap is defined as either place being a prefix of the other
-    /// (including equality). This requires the same `local`; different locals
-    /// never overlap regardless of projections. Projection equality is exact
-    /// per variant.
-    ///
-    /// Phase 11 — `Index` conservative: `v` overlaps `v[i]` (prefix `[]` vs
-    /// `[Index]`), and `v[i]` overlaps `v[j]` (both `[Index]`, `Index == Index`,
-    /// each is a prefix of the other). Distinct indices are intentionally
-    /// treated as overlapping (index-insensitive) for soundness; see module docs.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // x.a overlaps x.a          (equal)
-    /// // x.a overlaps x.a.b        (prefix)
-    /// // x.a does NOT overlap x.b  (sibling field)
-    /// // x overlaps x.a            (bare local prefix)
-    /// // x.a does NOT overlap y.a  (different local)
-    /// // v overlaps v[i]           (Phase 11 Index)
-    /// // v[i] overlaps v[j]        (conservative, Index==Index)
-    /// ```
+    /// Why: symmetric overlap for conflict detection (`a` prefix `b` or vice-versa). `x` overlaps `x.a`; `x.a` disjoint `x.b`; `v` overlaps `v[i]`; `v[i]` overlaps `v[j]` conservatively.
     pub fn overlaps(&self, other: &Place) -> bool {
         self.is_prefix_of(other) || other.is_prefix_of(self)
     }
 }
 
-/// Free-function alias for [`Place::overlaps`].
-///
-/// Exists for call-sites that prefer `places_overlap(&a, &b)` spelling;
-/// borrow/move/init/drop helpers can use either form.
+/// Alias for `Place::overlaps`.
 pub fn places_overlap(a: &Place, b: &Place) -> bool {
     a.overlaps(b)
 }

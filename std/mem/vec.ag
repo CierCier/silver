@@ -1,20 +1,5 @@
-// Generic contiguous-growable array (Vec<T>).
-//
-// Ownership: `push`/`set`/`__index_set` take `T value` by value and `move` it
-// into the backing buffer (`self.data[len] = move value`), so owned element
-// types (String, Vec<u8>, HashMap, etc.) transfer ownership on push and are
-// not double-freed. Growth (`push` reallocation, `reserve`, `shrink_to_fit`)
-// moves existing elements via `move old[i] -> new[i]` (Place Index) and frees
-// the old buffer without dropping — the new buffer now owns the elements.
-// This replaces the earlier POD-only `realloc` byte-copy (which duplicated
-// owned pointers and relied on `Drop` not iterating elements). POD types such
-// as `i32` expand to a trivial bitwise copy under `move` and remain `Copy`.
-//
-// Drop still does NOT call per-element destructors — the backing buffer is
-// freed via `free` on scope exit. Drain owned elements explicitly via
-// `take`, `pop`, `drain`/`into_iter` (each `move`s out) before the Vec drops,
-// or iterate the draining iterator to completion. See the ownership smoke
-// comment at the bottom of this file.
+// Growable contiguous array. Move transfers owned elements; Copy is bitwise.
+// Drop frees the buffer only, so drain owned elements before discarding Vec.
 import std.slice;
 // A Vec<T>'s drop method frees the backing buffer automatically.
 import std.mem.alloc;
