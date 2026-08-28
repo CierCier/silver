@@ -5,6 +5,7 @@ pub mod comptime_cast_hook;
 pub mod escape_check;
 pub mod linter;
 pub mod monomorph;
+pub mod drop_elaborate;
 pub mod init;
 pub mod move_check;
 pub mod move_path;

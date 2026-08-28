@@ -63,6 +63,54 @@
 //! `is_field_moved` → candidates for `places_overlap` vs `InitState` queries
 //! (`Place::is_prefix_of` / `places_overlap` + `MovePathTree::state_at` /
 //! `init_state`). No logic deletion in this phase; comments/scaffolding only.
+//! # Phase 6-8 — Pipeline split: Move analysis vs Drop elaboration
+//!
+//! ```text
+//! AST ──► Typeck ──► Place ──► Borrow / Move ──► DropElaboration ──► LLVM
+//!         (typeck)   (place)   (borrow_check,    (drop_elaborate)   (codegen/llvm_ir/scope)
+//!                              move_check,
+//!                              init / move_path)
+//! ```
+//!
+//! ## Responsibilities — who determines what
+//!
+//! * **Move checker (this file) determines which `Place`s are initialized.**
+//!   Via `MovePathTree<Place>` + `InitState::{Init, Partial, Uninit}` and
+//!   `semantic::init::{move_out, initialize, copy_from, read}` (using
+//!   `Place::is_prefix_of` / `Place::overlaps`), it tracks definite
+//!   initialization per `Place` — `Init` ↔ `Live`, `Partial` ↔ `PartiallyMoved`,
+//!   `Uninit` ↔ `FullyMoved`. Diagnostics (use-after-move, double-move) are
+//!   emitted here, *before* drop elaboration.
+//!
+//! * **Drop elaborator (`semantic::drop_elaborate`) determines which initialized
+//!   values to destroy.** It is a read-only consumer of the `MovePathTree`
+//!   produced above: it queries `is_initialized(tree, place)` /
+//!   `InitState` at each scope exit / unwind / early-return point and collects
+//!   the live `Drop` places (`needs_drop(place_ty)`) that still need a
+//!   destructor. No mutation of init state — collection only.
+//!
+//! * **Drop elaboration interface (sketch, not yet called):**
+//!   ```ignore
+//!   use crate::semantic::move_path::MovePathTree;
+//!   use crate::semantic::drop_elaborate::{PlaceToDrop, drop_elaborate};
+//!
+//!   fn drop_elaborate(tree: &MovePathTree) -> Vec<PlaceToDrop> { /* TODO */ }
+//!   // Future per-scope: DropElaborate::elaborate(&tree) / elaborate_for_scope(tree, scope)
+//!   // Codegen will consume Vec<PlaceToDrop> to emit guarded DropCalls via Place::overlaps.
+//!   ```
+//!   `PlaceToDrop { place: Place }` is the drop-set element; additional fields
+//!   (span, scope) can be added without breaking the `tree -> Vec<PlaceToDrop>`
+//!   shape. See `semantic::drop_elaborate` for the compiling skeleton.
+//!
+//! * **LLVM codegen (`codegen::llvm_ir::scope`) keeps figuring ownership itself
+//!   for now.** `register_drop_flag` / `field_flags` / `DeferredEntry::DropCall`
+//!   + `clear_field_flags_for_path` remain authoritative until the elaborator is
+//!   proven. No flag deletion, no `emit_defers` rewrite in this phase — the new
+//!   `MovePathTree` / `PlaceToDrop` path is parallel scaffolding; old string
+//!   `moved_fields` / `field_flags` logic stays hot. TODO(Phase 6-8): migrate
+//!   `scope.rs` to consume `Vec<PlaceToDrop>` and use `Place::overlaps` for
+//!   field vs whole invalidation, then eliminate hybrid drop flags.
+//!
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
