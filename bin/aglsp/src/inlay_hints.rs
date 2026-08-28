@@ -77,7 +77,7 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
         }
         hints.push(InlayHint {
             position: byte_to_position(&analysis.text, symbol.span.start),
-            label: InlayHintLabel::String(format!(": {ty}")),
+            label: InlayHintLabel::String(ty.to_string()),
             kind: Some(InlayHintKind::TYPE),
             padding_left: Some(false),
             padding_right: Some(true),
