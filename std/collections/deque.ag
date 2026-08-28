@@ -1,9 +1,18 @@
 // Deque<T> — ring-buffer double-ended queue.
 //
-// Memory (malloc/realloc/free) is provided through std.mem.
-// pop_front, pop_back, front, and back abort on an empty deque.
-
+// Ownership: `push_back`/`push_front` move `value` into the buffer
+// (`data[tail] = move value`). Growth (`grow`) linearizes the ring via
+// `new_data[i] = move old[(head+i)%old_cap]` — Place Index/Deref — then
+// frees the old buffer; `Copy` T copies bitwise, non-Copy (String, Vec<u8>)
+// transfers. `pop_front`/`pop_back` move out (`move data[idx]`) and advance
+// head/len, leaving the stale slot moved-from. Earlier POD-only shallow copy
+// in `grow` (`new[i]=old[...]`) duplicated owned pointers; removed and
+// replaced by `move`. `front`/`back` still return shallow copies (POD-safe;
+// owned types should use `try_pop`/`get_ptr` pattern). `clear`/`drop` free
+// backing memory without per-element drops — drain via `pop_*` first for
+// owned T. See smoke comment at EOF.
 import std.mem;
+import std.optional;
 
 /// A double-ended queue backed by a ring buffer.
 struct Deque<T> {
@@ -58,6 +67,8 @@ impl Deque<T> {
     // -- Mutation --------------------------------------------------------
 
     /// Grow capacity to at least `min_cap`, linearizing the ring buffer.
+    /// Moves elements (`new[i] = move old[(head+i)%old_cap]`) not shallow copy;
+    /// POD-only copy removed.
     void grow(&mut Deque<T> self, i64 min_cap) {
         i64 new_cap = self.cap;
         if (new_cap == 0) {
@@ -71,7 +82,7 @@ impl Deque<T> {
         if (old_cap > 0) {
             i64 i = 0;
             while (i < self.len) {
-                new_data[i] = self.data[(self.head + i) % old_cap];
+                new_data[i] = move self.data[(self.head + i) % old_cap];
                 i = i + 1;
             }
         }
@@ -112,25 +123,27 @@ impl Deque<T> {
     }
 
     /// Remove and return the front element.  Aborts if empty.
+    /// Moves ownership (`move data[head]`); stale slot left moved-from.
     T pop_front(&mut Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
-        T result = self.data[self.head];
+        T result = move self.data[self.head];
         self.head = (self.head + 1) % self.cap;
         self.len = self.len - 1;
-        return result;
+        return move result;
     }
 
     /// Remove and return the back element.  Aborts if empty.
+    /// Moves ownership (`move data[tail]`).
     T pop_back(&mut Deque<T> self) {
         if (self.len == 0) {
             abort();
         }
         self.len = self.len - 1;
         i64 tail = (self.head + self.len) % self.cap;
-        T result = self.data[tail];
-        return result;
+        T result = move self.data[tail];
+        return move result;
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.
@@ -185,6 +198,8 @@ impl Deque<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
+    /// NOTE: Does NOT drop elements — for owned T drain via `pop_front`/`pop_back`
+    /// (each `move`s) before `clear`/`drop`; otherwise inner allocations leak.
     void clear(&mut Deque<T> self) {
         self.len = 0;
         self.head = 0;
@@ -192,7 +207,7 @@ impl Deque<T> {
 }
 
 impl<T> Drop for Deque<T> {
-    /// Frees the backing buffer.
+    /// Frees the backing buffer. Does NOT call per-element destructors; see `clear`.
     void drop(Deque<T>* self) {
         if (self.data != (T*)0) {
             free(self.data);
@@ -203,3 +218,11 @@ impl<T> Drop for Deque<T> {
         self.head = 0;
     }
 }
+
+// -- Ownership smoke (manual check) ---------------------------------------
+// Deque<String> growth + pops:
+//   Deque<String> d = Deque<String>.new();
+//   d.push_back(String.from_str("a")); d.push_front(String.from_str("b")); // may grow & linearize via move
+//   String x = d.pop_front(); // move out "b"
+//   String y = d.pop_back();  // move out "a"
+//   // d empty; x.drop() frees "b"; y.drop() frees "a"; d.drop() frees buffer only

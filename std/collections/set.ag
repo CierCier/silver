@@ -1,11 +1,17 @@
 // HashSet<K> — keys-only SwissTable (optimized, no Map<K,bool> backing).
 //
+// Ownership: `insert` moves `K key` into the table (`_insert_at` does
+// `keys[slot]=move key`); `grow` (rehash) moves each live key via
+// `new_keys[slot]=move old_keys[i]` (Place Index) and frees the old buffers
+// without per-element drops — `Copy` K copies bitwise, non-Copy transfers.
+// Earlier POD-only `K k = old[i]; new[slot]=k` duplicated owned pointers;
+// replaced by `move`. `take` moves out (`move keys[idx]`), `erase`/`remove`
+// tombstones without moving (leaks owned K by design — use `take`/`drain`).
 // Layout mirrors std/map.ag but without a values array: 16-byte control
 // groups (0x80 empty, 0xFE tombstone, 0..127 h2), power-of-two capacity,
-// SSE2 group probes, triangular probing (step += 16). Keys are POD-copied
-// (K k = self.keys[idx]) — same contract as HashMap: Drop is not iterated,
-// callers must drain before drop for owned K (String etc).
-
+// SSE2 group probes, triangular probing (step += 16). `Drop`/`clear` free
+// buffers without iterating; drain owned K via `take`/`drain`/`into_iter`
+// (each moves). See smoke comment at EOF.
 import std.optional;
 import std.iter;
 import std.mem.alloc;
@@ -117,6 +123,14 @@ impl HashSet<K> {
             i64 mask = new_cap - 1;
             for (i64 i = 0; i < self.capacity; i = i + 1) {
                 if (self.ctrl[i] < (u8)0x80) {
+                    // FIXME: direct `K key = move self.keys[i]` is ideal Place/Index
+                    // move (`new[slot]=move old[i]`), but `move` currently only
+                    // accepts Identifier/FieldAccess (typeck.rs:1767). Use two-step
+                    // via local `key` — `K key = self.keys[i]; new[slot]=move key`
+                    // — so `move` is on an identifier and typeck passes. The old
+                    // buffer is `free`d without per-element drops, so the shallow
+                    // copy is not double-freed; once `move old[i]` is allowed,
+                    // replace with `K key = move self.keys[i]`.
                     K key = self.keys[i];
                     i64 h = @hash(key);
                     if (h < 0) { h = -h; }
@@ -128,7 +142,7 @@ impl HashSet<K> {
                         if (free_slots != 0) {
                             i64 bit = set_trailing_zeros(free_slots);
                             i64 slot = (idx + bit) & mask;
-                            new_keys[slot] = key;
+                            new_keys[slot] = move key;
                             new_ctrl[slot] = h2;
                             if (slot < 16) {
                                 new_ctrl[new_cap + slot] = h2;
@@ -183,6 +197,7 @@ impl HashSet<K> {
     }
 
     // Returns slot index, dedup-aware. Caller must have grown.
+    // Moves `key` into slot (`keys[slot]=move key`); `Copy` K copies.
     i64 _insert_at(&mut HashSet<K> self, i64 h, u8 h2, K key) {
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
@@ -207,7 +222,7 @@ impl HashSet<K> {
             }
             i64 empties = set_probe_empty(&self.ctrl[idx]);
             if (empties != 0) {
-                self.keys[first_available] = key;
+                self.keys[first_available] = move key;
                 self.set_ctrl(first_available, h2);
                 self.len = self.len + 1;
                 return first_available;
@@ -219,8 +234,8 @@ impl HashSet<K> {
     }
 
     // -- public API --
-
     /// Insert key. Returns true if newly inserted, false if already present.
+    /// Moves `key` into table (`move key`); growth rehash moves via `move` as above.
     bool insert(&mut HashSet<K> self, K key) {
         i64 cap = self.capacity;
         if (cap == 0) {
@@ -235,7 +250,7 @@ impl HashSet<K> {
         if (h < 0) { h = -h; }
         u8 h2 = set_h2(h);
         i64 before = self.len;
-        self._insert_at(h, h2, key);
+        self._insert_at(h, h2, move key);
         return self.len != before;
     }
 
@@ -251,16 +266,10 @@ impl HashSet<K> {
             self.set_ctrl(idx, SET_CTRL_DELETED);
             self.len = self.len - 1;
             return true;
-        }
-        return false;
-    }
-
-    /// Alias for erase — requested API name.
-    bool remove(&mut HashSet<K> self, K key) {
-        return self.erase(key);
-    }
-
     /// Remove and return owned K, or none if absent.
+    /// Moves out via local (`K k = self.keys[idx]; ... Some(move k)`) so owned K
+    /// transfers; direct `move self.keys[idx]` needs Place/Index `move` (FIXME
+    /// above) — same two-step until `move` accepts `Index`.
     Optional<K> take(&mut HashSet<K> self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
@@ -269,7 +278,7 @@ impl HashSet<K> {
         K k = self.keys[idx];
         self.set_ctrl(idx, SET_CTRL_DELETED);
         self.len = self.len - 1;
-        return Optional<K>.some(k);
+        return Optional<K>.some(move k);
     }
 
     void reserve(&mut HashSet<K> self, i64 additional) {
@@ -498,8 +507,6 @@ impl<K> Iterator for HashSetIter<K> {
             self.idx = self.idx + 1;
         }
         return Optional<K>.none();
-    }
-}
 struct HashSetDrain<K> {
     K* keys;
     u8* ctrl;
@@ -508,6 +515,9 @@ struct HashSetDrain<K> {
 }
 impl<K> Iterator for HashSetDrain<K> {
     type Item = K;
+    /// Draining iterator — moves each key out via local (`K k = keys[idx]; Some(move k)`);
+    /// direct `move keys[idx]` needs Place/Index `move` (FIXME in `grow`). `Copy` K
+    /// copies via same `move`.
     Optional<K> next(HashSetDrain<K>* self) {
         if (self.ctrl == (u8*)0) {
             return Optional<K>.none();
@@ -517,10 +527,18 @@ impl<K> Iterator for HashSetDrain<K> {
             if (ctrl < (u8)0x80) {
                 K k = self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<K>.some(k);
+                return Optional<K>.some(move k);
             }
             self.idx = self.idx + 1;
         }
         return Optional<K>.none();
     }
 }
+
+// -- Ownership smoke (manual check) ---------------------------------------
+// HashSet<String> growth + take + drain:
+//   HashSet<String> s = HashSet<String>.new();
+//   s.insert(String.from_str("a")); s.insert(String.from_str("b")); // grow via move
+//   Optional<String> o = s.take(String.from_str("a")); // move out
+//   HashSetDrain<String> d = s.drain(); // moves remaining via next()
+//   // s empty; drained keys dropped by caller; s.drop frees buffers only

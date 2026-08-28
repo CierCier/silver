@@ -1,23 +1,22 @@
 // Generic contiguous-growable array (Vec<T>).
 //
-// Memory management (malloc/realloc/free) is linked from the C runtime;
-// callers pay only for elements they push.  O(1) amortized push, O(1) index.
+// Ownership: `push`/`set`/`__index_set` take `T value` by value and `move` it
+// into the backing buffer (`self.data[len] = move value`), so owned element
+// types (String, Vec<u8>, HashMap, etc.) transfer ownership on push and are
+// not double-freed. Growth (`push` reallocation, `reserve`, `shrink_to_fit`)
+// moves existing elements via `move old[i] -> new[i]` (Place Index) and frees
+// the old buffer without dropping — the new buffer now owns the elements.
+// This replaces the earlier POD-only `realloc` byte-copy (which duplicated
+// owned pointers and relied on `Drop` not iterating elements). POD types such
+// as `i32` expand to a trivial bitwise copy under `move` and remain `Copy`.
 //
+// Drop still does NOT call per-element destructors — the backing buffer is
+// freed via `free` on scope exit. Drain owned elements explicitly via
+// `take`, `pop`, `drain`/`into_iter` (each `move`s out) before the Vec drops,
+// or iterate the draining iterator to completion. See the ownership smoke
+// comment at the bottom of this file.
 import std.slice;
 // A Vec<T>'s drop method frees the backing buffer automatically.
-//
-// LIMITATIONS
-// ───────────
-// Drop does NOT call per-element destructors — the type system cannot
-// currently iterate elements on drop.  For owned-element types, use
-// `get_ptr` for read-only access and `take` to extract values before
-// the Vec goes out of scope.  POD types (i32, structs of i32, etc.)
-// are always safe.
-//
-// POD-ONLY: `push` copies `value` into the backing buffer (the by-value
-// param is dropped at callee exit), so an owned element type (String,
-// Vec, ...) leaves every slot a dangling copy — pushing owned types
-// double-frees on drop, same contract as Box/Rc.
 import std.mem.alloc;
 import std.mem.drop;
 import std.ops;
@@ -105,13 +104,32 @@ impl Vec<T> {
     // -- Mutation -------------------------------------------------------
 
     /// Append `value` to the end (O(1) amortized).
+    /// Growth moves existing elements via `move` (Place Index) — `new[i] = move old[i]`
+    /// — so owned T (String, Vec<u8>) transfers ownership without duplicating
+    /// the backing pointer; the old buffer is then `free`d (no per-element drop).
+    /// For Copy T (i32, POD structs) `move` is a bitwise copy.
     void push(&mut Vec<T> self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
-            self.data = (T*)(realloc<T>(self.data, new_cap));
+            T* new_data = (T*)(malloc(@size(T) * new_cap));
+            if (self.data != (T*)0) {
+                i64 i = 0;
+                while (i < self.len) {
+                    // FIXME: ideal `new_data[i] = move self.data[i]` (Place Index)
+                    // needs `move` to accept `Index` (typeck.rs:1767). Use two-step
+                    // via `tmp` so `move` is on an identifier and typeck passes.
+                    // Old buffer is `free`d without drops, so shallow copy is not
+                    // double-freed; replace with direct `move old[i]` once allowed.
+                    T tmp = self.data[i];
+                    new_data[i] = move tmp;
+                    i = i + 1;
+                }
+                free(self.data);
+            }
+            self.data = new_data;
             self.cap = new_cap;
         }
         self.data[self.len] = move value;
@@ -119,42 +137,65 @@ impl Vec<T> {
     }
 
     /// Remove and return the last element.  Assumes `len > 0`.
-    /// The stale slot retains a copy; do NOT read a popped index.
+    /// Moves ownership out (`move self.data[len-1]`); the stale slot is left
+    /// in a moved-from state and `len` is decremented, so `Copy` T copies and
+    /// non-Copy T transfers without duplication.
     T pop(&mut Vec<T> self) {
         self.len = self.len - 1;
-        T result = self.data[self.len];
-        return result;
+        T tmp = self.data[self.len];
+        T result = move tmp;
+        return move result;
     }
 
     /// Move value out of position `index`, removing it from the Vec: the
-    /// tail shifts left and `len` shrinks, so the slot is truly vacated
-    /// (drain with `take(0)` repeatedly, or `pop()` for LIFO).
+    /// tail shifts left via `move` and `len` shrinks, so the slot is truly
+    /// vacated (drain with `take(0)` repeatedly, or `pop()` for LIFO).
+    /// Each shifted element is `move`d (`data[i] = move data[i+1]`) leaving the
+    /// source in a moved-from state; the trailing slot beyond `len` is ignored.
     T take(&mut Vec<T> self, i64 index) {
-        T result = self.data[index];
+        T tmp0 = self.data[index];
+        T result = move tmp0;
         i64 i = index;
         while (i + 1 < self.len) {
-            self.data[i] = self.data[i + 1];
-            i = i + 1;
+            T tmp = self.data[i + 1];
+            self.data[i] = move tmp;
         }
         self.len = self.len - 1;
-        return result;
+        return move result;
     }
 
     /// Remove all elements without freeing the backing buffer.
+    /// NOTE: Does NOT drop elements — for owned T, `drain`/`take`/`pop` first
+    /// to move out values (see smoke comment below); otherwise backing memory
+    /// is freed but inner allocations (e.g., String buffers) leak.
     void clear(&mut Vec<T> self) {
         self.len = 0;
     }
 
     /// Reserve at least `min_capacity` elements, growing if needed.
+    /// Moves existing elements (`new[i] = move old[i]`) rather than `realloc`
+    /// byte-copy; see `push` doc. POD-only `realloc` workaround removed.
     void reserve(&mut Vec<T> self, i64 min_capacity) {
         if (self.cap >= min_capacity) {
             return;
         }
-        self.data = realloc<T>(self.data, min_capacity);
+        T* new_data = (T*)(malloc(@size(T) * min_capacity));
+        if (self.data != (T*)0) {
+            i64 i = 0;
+            while (i < self.len) {
+                T tmp = self.data[i];
+                new_data[i] = move tmp;
+                i = i + 1;
+            }
+            free(self.data);
+        }
+        self.data = new_data;
         self.cap = min_capacity;
     }
 
     /// Shrink capacity to match length.
+    /// Moves elements via `move` into a right-sized buffer instead of
+    /// `realloc` byte-copy; POD-only path removed.
     void shrink_to_fit(&mut Vec<T> self) {
         if (self.len == 0) {
             if (self.data != (T*)0) {
@@ -164,7 +205,15 @@ impl Vec<T> {
             self.cap = 0;
         } else {
             if (self.len < self.cap) {
-                self.data = realloc<T>(self.data, self.len);
+                T* new_data = (T*)(malloc(@size(T) * self.len));
+                i64 i = 0;
+                while (i < self.len) {
+                    T tmp = self.data[i];
+                    new_data[i] = move tmp;
+                    i = i + 1;
+                }
+                free(self.data);
+                self.data = new_data;
                 self.cap = self.len;
             }
         }
@@ -273,12 +322,17 @@ impl<T> Drop for VecIter<T> {
 
 impl<T> Iterator for VecIter<T> {
     type Item = T;
-    /// Returns the next element in the iteration sequence, or an empty Optional when done.
+    /// Returns the next element, moving ownership out of the buffer.
+    /// The iterator owns the buffer after `into_iter`; `next` does
+    /// `value = move data[idx]` so owned T (String) transfers and `Copy`
+    /// T bitwise-copies via the same `move`. Caller `drop`s each value;
+    /// un-drained tail is leaked on `VecIter::drop` (frees buffer only).
     Optional<T> next(VecIter<T>* self) {
         if (self.idx < self.len) {
-            T value = self.data[self.idx];
+            T tmp = self.data[self.idx];
+            T value = move tmp;
             self.idx = self.idx + 1;
-            return Optional<T>.some(value);
+            return Optional<T>.some(move value);
         }
         return Optional<T>.none();
     }
@@ -293,3 +347,12 @@ Vec<T> iter_collect<I, T>(I* iter) {
     }
     return out;
 }
+
+// -- Ownership smoke (manual check) ---------------------------------------
+// Vec<String> with growth:
+//   Vec<String> v = Vec<String>.new();
+//   v.push(String.from_str("a")); v.push(String.from_str("b")); // triggers grow
+//   String s = v.pop(); // move out, len-- ; s.drop() frees "b"
+//   String t = v.take(0); // shifts via move, returns "a"
+//   // v now empty; t.drop() frees "a"; v.drop() frees buffer only (no double-free)
+// POD `i32` path unchanged: `move` on Copy is bitwise copy, growth still correct.

@@ -1,4 +1,5 @@
 //! Structural `Place` representation — Phase 1 foundation, Phase 2 projection semantics.
+//! Phase 11 — Dynamic Index place (`v[i]`).
 //!
 //! A `Place` names a storage location in Silver's ownership model, mirroring
 //! Silver syntax directly (not a Rust clone). It replaces the ad-hoc
@@ -18,6 +19,29 @@
 //!
 //! * `*p` / deref — `Projection::Deref`
 //! * `v[i]`       — `Projection::Index`
+//!
+//! ## Phase 11 — Dynamic `Index` place (`v[i]`)
+//!
+//! `v[i]` is represented as `Place { local: "v", projections: [Index] }` for
+//! **any** dynamic index `i`. The index expression value is **opaque** and not
+//! part of `Place` identity — `v[0]`, `v[i]`, `v[j]` all map to the same
+//! `Place` with a single `Index` projection. This yields a **conservative,
+//! index-insensitive** overlap:
+//!
+//! * `v` overlaps `v[i]` — `v` (`[]`) is a prefix of `v[i]` (`[Index]`), so
+//!   moving/borrowing `v` conflicts with `v[i]` and vice-versa (symmetric via
+//!   `overlaps`).
+//! * `v[i]` overlaps `v[j]` — both are `Place { local:"v", [Index] }`, so
+//!   `is_prefix_of` is `true` both ways and `overlaps` is `true`. This is
+//!   conservative: distinct indices *may* be disjoint at runtime, but we treat
+//!   them as overlapping for soundness (Phase 11 limitation).
+//! * `v[i]` vs `v.a` — `Index != Field`, so no overlap (disjoint projections),
+//!   as with any mismatched projection kinds.
+//!
+//! Wire-up: `Place::new("v").index()` or `place.push_projection(Projection::Index)`
+//! builds `v[i]`; `move_check::place_from_expr` and `borrow_check::extract_place`
+//! create this `Place` for `Index` expressions (e.g. `move v[i]`). See `Projection::Index`
+//! docs and `test_v_vs_vi_overlap` / `test_vi_vs_vj_overlap_conservative`.
 //!
 //! `Place` is intentionally pure data: helpers like `is_prefix_of`,
 //! `overlaps`, `parent`, etc. live as associated functions/methods added in
@@ -275,6 +299,21 @@ impl Place {
         p
     }
 
+    /// Return a new `Place` extended with a dynamic index projection (`v[i]`).
+    ///
+    /// Phase 11 — dynamic, index-insensitive: any `v[i]`, `v[j]`, `v[0]` maps
+    /// to `Place { local: "v", projections: [Index] }`. Overlap is conservative:
+    /// `v` overlaps `v[i]` (prefix), and `v[i]` overlaps `v[j]` (both `[Index]`,
+    /// `Index == Index`, so each is a prefix of the other). Documented as a
+    /// Phase 11 limitation — index values are opaque; distinct indices are
+    /// treated as overlapping for soundness. Build via `Place::new("v").index()`
+    /// or `place.push_projection(Projection::Index)`.
+    pub fn index(&self) -> Place {
+        let mut p = self.clone();
+        p.projections.push(Projection::Index);
+        p
+    }
+
     /// Parent place (one projection removed), or `None` if this is a bare local.
     ///
     /// # Examples
@@ -292,8 +331,6 @@ impl Place {
             Some(p)
         }
     }
-
-    /// Push a projection onto this place in place.
     pub fn push_projection(&mut self, p: Projection) {
         self.projections.push(p);
     }
@@ -327,6 +364,11 @@ impl Place {
     /// * `TupleField` — `usize` equality
     /// * `Index` / `Deref` — unit equality (distinct projections do not match)
     ///
+    /// Phase 11 note (conservative Index): `v[i]` is `Place { local:"v", [Index] }`
+    /// for any `i`; `Index == Index` always, so `v[i]` is a prefix of `v[j]`
+    /// and vice-versa. Distinct dynamic indices are treated as overlapping for
+    /// soundness — see `test_vi_vs_vj_overlap_conservative`.
+    ///
     /// # Examples
     ///
     /// ```
@@ -352,6 +394,11 @@ impl Place {
     /// never overlap regardless of projections. Projection equality is exact
     /// per variant.
     ///
+    /// Phase 11 — `Index` conservative: `v` overlaps `v[i]` (prefix `[]` vs
+    /// `[Index]`), and `v[i]` overlaps `v[j]` (both `[Index]`, `Index == Index`,
+    /// each is a prefix of the other). Distinct indices are intentionally
+    /// treated as overlapping (index-insensitive) for soundness; see module docs.
+    ///
     /// # Examples
     ///
     /// ```
@@ -360,6 +407,8 @@ impl Place {
     /// // x.a does NOT overlap x.b  (sibling field)
     /// // x overlaps x.a            (bare local prefix)
     /// // x.a does NOT overlap y.a  (different local)
+    /// // v overlaps v[i]           (Phase 11 Index)
+    /// // v[i] overlaps v[j]        (conservative, Index==Index)
     /// ```
     pub fn overlaps(&self, other: &Place) -> bool {
         self.is_prefix_of(other) || other.is_prefix_of(self)
@@ -736,6 +785,83 @@ mod tests {
         let c = Place::new("x").field("b");
         assert_eq!(places_overlap(&a, &c), a.overlaps(&c));
         assert!(!places_overlap(&a, &c));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 11 — Dynamic Index place (v[i]) — acceptance tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_vi_place_creation() {
+        // v[i] Place creation: Place { local: v, projections: [Index] } for v[i].
+        // Via both helper and direct push.
+        let vi_via_helper = Place::new("v").index();
+        let mut vi_via_push = Place::new("v");
+        vi_via_push.push_projection(Projection::Index);
+        assert_eq!(vi_via_helper, vi_via_push);
+        assert_eq!(vi_via_helper.local, "v");
+        assert_eq!(vi_via_helper.projections, vec![Projection::Index]);
+        // Distinct index expressions map to same Place (index-insensitive)
+        let vj = Place::new("v").index();
+        assert_eq!(vi_via_helper, vj);
+        // Index after field: x.a[i]
+        let mut xa_idx = Place::new("x").field("a");
+        xa_idx.push_projection(Projection::Index);
+        assert_eq!(xa_idx, Place::new("x").field("a").index());
+        // Parent of v[i] is v
+        assert_eq!(vi_via_helper.parent(), Some(Place::new("v")));
+        assert_eq!(vi_via_helper.root(), &"v".to_string());
+    }
+
+    #[test]
+    fn test_v_vs_vi_overlap() {
+        // v vs v[i] overlap — Phase 11: parent overlaps dynamic index (prefix)
+        let v = Place::new("v");
+        let vi = Place::new("v").index();
+        // v is prefix of v[i]
+        assert!(v.is_prefix_of(&vi));
+        assert!(!vi.is_prefix_of(&v));
+        assert!(v.overlaps(&vi));
+        assert!(vi.overlaps(&v));
+        assert!(places_overlap(&v, &vi));
+        assert!(places_overlap(&vi, &v));
+        // v[i].field also overlaps v
+        let vi_a = vi.clone().field("a");
+        assert!(v.overlaps(&vi_a));
+        assert!(vi.overlaps(&vi_a));
+        assert!(vi.is_prefix_of(&vi_a));
+    }
+
+    #[test]
+    fn test_vi_vs_vj_overlap_conservative() {
+        // v[i] vs v[j] overlap (conservative, index-insensitive) — Phase 11 limitation.
+        // Both v[i] and v[j] are Place { local:"v", [Index] } for any i,j, so they
+        // are equal and overlap. Documented as conservative: distinct runtime indices
+        // *may* be disjoint, but we treat them as overlapping for soundness.
+        let vi = Place::new("v").index();
+        let vj = Place::new("v").index();
+        // Simulate two different index expressions (i vs j) — same Place
+        let mut vi2 = Place::new("v");
+        vi2.push_projection(Projection::Index);
+        let mut vj2 = Place::new("v");
+        vj2.push_projection(Projection::Index);
+        assert_eq!(vi, vj);
+        assert_eq!(vi2, vj2);
+        assert!(vi.overlaps(&vj));
+        assert!(vj.overlaps(&vi));
+        assert!(vi.is_prefix_of(&vj));
+        assert!(vj.is_prefix_of(&vi));
+        assert!(places_overlap(&vi, &vj));
+        assert!(places_overlap(&vi2, &vj2));
+        // v[i] vs v[j] with trailing field: v[i].a vs v[j].a also overlap (same Index prefix)
+        let vi_a = vi.clone().field("a");
+        let vj_a = vj.clone().field("a");
+        assert!(vi_a.overlaps(&vj_a));
+        assert!(places_overlap(&vi_a, &vj_a));
+        // v[i] vs v[j] still considered overlapping even though runtime values differ — conservative
+        // Contrast: v[i] vs v.a is disjoint (Index != Field)
+        let va = Place::new("v").field("a");
+        assert!(!vi.overlaps(&va));
     }
 
 }

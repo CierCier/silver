@@ -583,6 +583,41 @@ fn expr_root_and_path(expr: &ast::Expression) -> Option<(String, String)> {
     }
 }
 
+/// Phase 11 — Dynamic Index Place construction from an expression.
+///
+/// Builds `Place { local, projections: [Field|Index|Deref|TupleField] }` for
+/// `Identifier`, `FieldAccess`, `Index` (`v[i]` → `Place::new("v").index()` via
+/// `push_projection(Projection::Index)`), and `*p` (`Deref`). Index values are
+/// opaque — any `v[i]`/`v[j]` maps to the same `[Index]` projection, yielding
+/// conservative overlap (`v[i]` overlaps `v[j]`). Field accesses chain, and
+/// `Index` composes after fields (`x.a[i]` → `[Field("a"), Index]`).
+/// Returns `None` for non-place expressions.
+fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(ident) => Some(Place::new(ident.name.clone())),
+        ast::ExpressionKind::FieldAccess { object, field } => {
+            let mut base = place_from_expr(object)?;
+            base.push_projection(Projection::Field(field.name.clone()));
+            Some(base)
+        }
+        ast::ExpressionKind::Index { object, .. } => {
+            let mut base = place_from_expr(object)?;
+            base.push_projection(Projection::Index);
+            Some(base)
+        }
+        ast::ExpressionKind::Unary {
+            operator: ast::UnaryOperator::Dereference,
+            operand,
+        } => {
+            let mut base = place_from_expr(operand)?;
+            base.push_projection(Projection::Deref);
+            Some(base)
+        }
+        _ => None,
+    }
+}
+
+
 /// Moved-ness lattice per live variable: tracks status, move site and reason.
 type State = FxHashMap<String, VarState>;
 
@@ -1016,6 +1051,63 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::Move(inner) => {
+                // Phase 11 — Index place: try structured Place first for v[i] / x.a[i] etc.
+                // Index projections are built via Place::new(local).index() /
+                // push_projection(Projection::Index) and are index-insensitive (conservative).
+                if let Some(place) = place_from_expr(inner) {
+                    // If place contains Index, handle via Place-based move tracking
+                    if place.projections.contains(&Projection::Index) {
+                        let root_name = place.local.clone();
+                        if state.contains_key(&root_name) {
+                            // Check if already moved (whole or Index prefix)
+                            if let Some(var) = state.get(&root_name) {
+                                if var.is_fully_moved() {
+                                    let reason = var
+                                        .move_reason
+                                        .unwrap_or(msg::note_value_explicitly_moved());
+                                    self.error_with_note(
+                                        msg::use_of_moved_value(&root_name),
+                                        inner.span,
+                                        var.move_span,
+                                        reason,
+                                    );
+                                } else if let Some((move_span, reason)) = var.is_place_moved(&place) {
+                                    self.error_with_note(
+                                        format!("use of moved field '{root_name}[index]'"),
+                                        inner.span,
+                                        Some(move_span),
+                                        reason,
+                                    );
+                                } else {
+                                    // Index element move — treat as non-Copy (owning) for soundness
+                                    // unless proven Copy; for now move via Place.
+                                    if let Some(v) = state.get_mut(&root_name) {
+                                        v.mark_place_moved(
+                                            &place,
+                                            inner.span,
+                                            msg::note_value_explicitly_moved(),
+                                        );
+                                    }
+                                    return;
+                                }
+                            }
+                            // If conflict already reported, still mark moved if possible
+                            if let Some(v) = state.get_mut(&root_name) {
+                                // Only mark if not already moved to avoid double-move error pollution
+                                if v.is_place_moved(&place).is_none() && !v.is_fully_moved() {
+                                    v.mark_place_moved(
+                                        &place,
+                                        inner.span,
+                                        msg::note_value_explicitly_moved(),
+                                    );
+                                }
+                            }
+                        } else {
+                            self.check_expr(inner, state, scopes, var_types);
+                        }
+                        return;
+                    }
+                }
                 if let Some((root_name, path)) = expr_root_and_path(inner) {
                     if !self.is_path_tracked(&root_name, &path, var_types) {
                         self.check_expr(inner, state, scopes, var_types);
@@ -1249,7 +1341,34 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::FieldAccess { object, .. } => {
-                if let Some((root_name, path)) = expr_root_and_path(expr) {
+                // Prefer structured Place (handles Field; Index handled below but also chain-aware)
+                if let Some(place) = place_from_expr(expr) {
+                    if let Some(var) = state.get(&place.local.clone()) {
+                        if var.is_fully_moved() {
+                            let reason = var
+                                .move_reason
+                                .unwrap_or(msg::note_value_explicitly_moved());
+                            self.error_with_note(
+                                msg::use_of_moved_value(&place.local),
+                                expr.span,
+                                var.move_span,
+                                reason,
+                            );
+                        } else if let Some((move_span, reason)) = var.is_place_moved(&place) {
+                            let display = if place.projections.contains(&Projection::Index) {
+                                format!("{}[index]", place.local)
+                            } else {
+                                format!("{}.{}", place.local, place_to_path_str(&place))
+                            };
+                            self.error_with_note(
+                                format!("use of moved field '{display}'"),
+                                expr.span,
+                                Some(move_span),
+                                reason,
+                            );
+                        }
+                    }
+                } else if let Some((root_name, path)) = expr_root_and_path(expr) {
                     if let Some(var) = state.get(&root_name) {
                         if var.is_fully_moved() {
                             let reason = var
@@ -1277,8 +1396,36 @@ impl MoveChecker {
                     self.check_expr(object, state, scopes, var_types);
                 }
             }
-            ast::ExpressionKind::Index { object, .. } => {
-                self.check_expr(object, state, scopes, var_types);
+            ast::ExpressionKind::Index { object, index } => {
+                // Phase 11 — dynamic Index place: `v[i]` overlaps `v` and `v[j]` conservatively.
+                // Use Place::new(local).index() / push_projection(Index) via place_from_expr.
+                if let Some(place) = place_from_expr(expr) {
+                    if let Some(var) = state.get(&place.local.clone()) {
+                        if var.is_fully_moved() {
+                            let reason = var
+                                .move_reason
+                                .unwrap_or(msg::note_value_explicitly_moved());
+                            self.error_with_note(
+                                msg::use_of_moved_value(&place.local),
+                                expr.span,
+                                var.move_span,
+                                reason,
+                            );
+                        } else if let Some((move_span, reason)) = var.is_place_moved(&place) {
+                            self.error_with_note(
+                                format!("use of moved field '{}[index]'", place.local),
+                                expr.span,
+                                Some(move_span),
+                                reason,
+                            );
+                        }
+                    }
+                    // Also check index expression itself for moves
+                    self.check_expr(index, state, scopes, var_types);
+                } else {
+                    self.check_expr(object, state, scopes, var_types);
+                    self.check_expr(index, state, scopes, var_types);
+                }
             }
             ast::ExpressionKind::Reference { expression, .. } => {
                 self.check_expr(expression, state, scopes, var_types);
@@ -1293,7 +1440,49 @@ impl MoveChecker {
                     self.check_expr(right, state, scopes, var_types);
 
                     // Re-initialization handling — now via `MovePathTree` + `Place::is_prefix_of`
-                    if let Some((root_name, path)) = expr_root_and_path(left) {
+                    // Phase 11: Index places `v[i]` use Place::new(...).index() / Projection::Index
+                    if let Some(place) = place_from_expr(left) {
+                        if place.projections.contains(&Projection::Index) {
+                            if let Some(var) = state.get_mut(&place.local.clone()) {
+                                if var.is_fully_moved() {
+                                    let reason = var
+                                        .move_reason
+                                        .unwrap_or(msg::note_value_explicitly_moved());
+                                    self.error_with_note(
+                                        msg::use_of_moved_value(&place.local),
+                                        left.span,
+                                        var.move_span,
+                                        reason,
+                                    );
+                                } else {
+                                    var.mark_place_reinitialized(&place);
+                                }
+                            }
+                        } else if let Some((root_name, path)) = expr_root_and_path(left) {
+                            if path.is_empty() {
+                                if state.contains_key(&root_name) {
+                                    state.insert(root_name.clone(), VarState::new_live());
+                                }
+                            } else if let Some(var) = state.get_mut(&root_name) {
+                                if var.is_fully_moved() {
+                                    let reason = var
+                                        .move_reason
+                                        .unwrap_or(msg::note_value_explicitly_moved());
+                                    self.error_with_note(
+                                        msg::use_of_moved_value(&root_name),
+                                        left.span,
+                                        var.move_span,
+                                        reason,
+                                    );
+                                } else {
+                                    let place2 = place_from_root_and_path(&root_name, &path);
+                                    var.mark_place_reinitialized(&place2);
+                                }
+                            }
+                        } else {
+                            self.check_expr(left, state, scopes, var_types);
+                        }
+                    } else if let Some((root_name, path)) = expr_root_and_path(left) {
                         if path.is_empty() {
                             if state.contains_key(&root_name) {
                                 state.insert(root_name.clone(), VarState::new_live());

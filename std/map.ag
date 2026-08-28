@@ -1,3 +1,15 @@
+// HashMap<K,V> — SwissTable with ownership-aware moves.
+//
+// Ownership: `insert`/`_insert_at` move K/V into slots (`keys[slot]=move key`),
+// `grow` rehashes via `new_keys[slot]=move old_keys[i]` (Place Index) and
+// `new_vals[slot]=move old_vals[i]`, freeing old buffers without per-element
+// drops — Copy K/V copies bitwise, non-Copy (String, Vec<u8>) transfers.
+// Earlier POD-only `K k = old[i]; new[slot]=k` duplicated owned pointers;
+// replaced by `move`. `remove`/`HashMapDrain`/`HashMapIntoIter`/`EntryRef::take`
+// each `move` out of the table/buffer; `erase` leaks owned K/V by design
+// (tombstone without move — use `remove`/`drain`). `clear`/`drop` free buffers
+// without iterating; drain via `drain`/`into_iter` (each `move`) before drop
+// for owned types. See smoke comment at EOF.
 import std.optional;
 import std.mem.alloc;
 import std.hash;
@@ -128,13 +140,16 @@ impl HashMap<K, V> {
             new_ctrl[j] = CTRL_EMPTY;
         }
 
-        // Rehash existing entries
+        // Rehash existing entries — move owned K/V via Place Index so non-Copy
+        // (String, Vec) transfers ownership (`new[slot]=move old[i]`) and the
+        // old buffer's slots are left moved-from before `free`. POD-only
+        // shallow copy (`key = old[i]; new[slot]=key`) removed.
         if (self.ctrl != (u8*)0) {
             i64 mask = new_cap - 1;
             for (i64 i = 0; i < self.capacity; i = i + 1) {
                 if (self.ctrl[i] < (u8)0x80) {
-                    K key = self.keys[i];
-                    V val = self.values[i];
+                    K key = move self.keys[i];
+                    V val = move self.values[i];
                     i64 h = @hash(key);
                     if (h < 0) { h = -h; }
                     u8 h2 = h2_fingerprint(h);
@@ -320,13 +335,16 @@ impl HashMap<K, V> {
     }
 
     /// Remove key and return its owned `(K, V)` pair, or `none`.
+    /// Moves ownership out of the table (`move keys[idx]`/`move values[idx]`)
+    /// so non-Copy K/V transfers instead of duplicating pointers; slot then
+    /// tombstoned. `erase` leaks owned K/V by design (no move).
     Optional<Pair<K, V>> remove(&mut HashMap<K, V> self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
             return Optional<Pair<K, V>>.none();
         }
-        K k = self.keys[idx];
-        V v = self.values[idx];
+        K k = move self.keys[idx];
+        V v = move self.values[idx];
         self.set_ctrl(idx, CTRL_DELETED);
         self.len = self.len - 1;
         return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
@@ -487,6 +505,8 @@ impl<K, V> Drop for HashMapIntoIter<K, V> {
 
 impl<K, V> Iterator for HashMapIntoIter<K, V> {
     type Item = HashMapEntry<K, V>;
+    /// Consuming iterator — moves each entry out (`move keys[idx]`/`move values[idx]`)
+    /// so owned K/V transfers; `Copy` K/V bitwise-copy via same `move`.
     Optional<HashMapEntry<K, V>> next(HashMapIntoIter<K, V>* self) {
         if (self.ctrl == (u8*)0) {
             return Optional<HashMapEntry<K, V>>.none();
@@ -495,10 +515,10 @@ impl<K, V> Iterator for HashMapIntoIter<K, V> {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 HashMapEntry<K, V> e;
-                e.key = self.keys[self.idx];
-                e.value = self.values[self.idx];
+                e.key = move self.keys[self.idx];
+                e.value = move self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<HashMapEntry<K, V>>.some(e);
+                return Optional<HashMapEntry<K, V>>.some(move e);
             }
             self.idx = self.idx + 1;
         }
@@ -691,6 +711,8 @@ impl<K, V> Drop for HashMapDrain<K, V> {
 }
 impl<K, V> Iterator for HashMapDrain<K, V> {
     type Item = Pair<K, V>;
+    /// Draining iterator — moves each pair out (`move keys[idx]`/`move values[idx]`)
+    /// so owned T transfers; same `move` is a copy for `Copy` T.
     Optional<Pair<K, V>> next(HashMapDrain<K, V>* self) {
         if (self.ctrl == (u8*)0) {
             return Optional<Pair<K, V>>.none();
@@ -698,8 +720,8 @@ impl<K, V> Iterator for HashMapDrain<K, V> {
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
-                K k = self.keys[self.idx];
-                V v = self.values[self.idx];
+                K k = move self.keys[self.idx];
+                V v = move self.values[self.idx];
                 self.idx = self.idx + 1;
                 return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
             }
@@ -737,11 +759,11 @@ impl<K, V> HashMapEntryRef<K, V> {
         if (self.idx < 0) {
             return Optional<V>.none();
         }
-        V v = self.map.values[self.idx];
+        V v = move self.map.values[self.idx];
         self.map.set_ctrl(self.idx, CTRL_DELETED);
         self.map.len = self.map.len - 1;
         self.idx = -1;
-        return Optional<V>.some(v);
+        return Optional<V>.some(move v);
     }
 
     V* or_insert(&mut HashMapEntryRef<K, V> self, V default) {
@@ -778,3 +800,15 @@ impl<K, V> HashMapEntryRef<K, V> {
         f(&self.map.values[self.idx]);
     }
 }
+
+// -- Ownership smoke (manual check) ---------------------------------------
+// HashMap<String,String> growth + remove + drain + into_iter:
+//   HashMap<String,String> m = HashMap<String,String>.new();
+//   m.insert(String.from_str("k1"), String.from_str("v1")); // move in
+//   m.insert(String.from_str("k2"), String.from_str("v2")); // may grow via move
+//   Optional<Pair<String,String>> o = m.remove(String.from_str("k1")); // move out
+//   HashMapDrain<String,String> d = m.drain(); // each next() moves Pair<String,String>
+//   HashMap<String,String> m2 = HashMap<String,String>.new();
+//   m2.insert(String.from_str("a"), String.from_str("b"));
+//   HashMapIntoIter<String,String> it = m2.into_iter(); // each next() moves entry
+//   // remaining buffers freed via free only; no double-free of owned Strings
