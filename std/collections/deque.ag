@@ -297,7 +297,7 @@ impl<T> Drop for DequeIter<T> {
 
 impl<T> Iterator for DequeIter<T> {
     type Item = T;
-    /// Moves ownership out (`move data[(head+idx)%cap]` via tmp, same as VecIter).
+    /// Move the next element out; Copy is bitwise.
     Optional<T> next(DequeIter<T>* self) {
         if (self.idx < self.len) {
             i64 pos = (self.head + self.idx) % self.cap;
@@ -312,7 +312,7 @@ impl<T> Iterator for DequeIter<T> {
 
 impl<T> Iterator for DequeBorrowIter<T> {
     type Item = T;
-    /// Borrows — yields copy via `data[(head+idx)%cap]`.
+    /// Borrow the next element; the deque remains owned by the caller.
     Optional<T> next(DequeBorrowIter<T>* self) {
         if (self.idx < self.len) {
             i64 pos = (self.head + self.idx) % self.cap;
@@ -323,16 +323,3 @@ impl<T> Iterator for DequeBorrowIter<T> {
         return Optional<T>.none();
     }
 }
-
-// -- Ownership smoke (manual check) ---------------------------------------
-// Deque<String> growth + pops:
-//   Deque<String> d = Deque<String>.new();
-//   d.push_back(String.from_str("a")); d.push_front(String.from_str("b")); // may grow & linearize via move
-//   String x = d.pop_front(); // move out "b"
-//   String y = d.pop_back();  // move out "a"
-//   // d empty; x.drop() frees "b"; y.drop() frees "a"; d.drop() frees buffer only
-// Deque<String> iter vs into_iter:
-//   Deque<String> d2 = Deque<String>.new(); d2.push_back(String.from_str("x"));
-//   DequeBorrowIter<String> it = d2.iter(); // borrows, yields copy
-//   DequeIter<String> oit = d2.into_iter(); // moves buffer, d2 moved-from
-//   Optional<String> o = oit.next(); // move out "x"

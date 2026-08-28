@@ -1,7 +1,6 @@
 // Growable contiguous array. Move transfers owned elements; Copy is bitwise.
 // Drop frees the buffer only, so drain owned elements before discarding Vec.
 import std.slice;
-// A Vec<T>'s drop method frees the backing buffer automatically.
 import std.mem.alloc;
 import std.mem.drop;
 import std.ops;
