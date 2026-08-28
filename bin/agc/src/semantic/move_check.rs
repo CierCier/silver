@@ -18,7 +18,20 @@
 //! v1 limitations (safe, no false positives, but incomplete):
 //! - generic-typed bindings (`T x` inside a generic function) are not tracked;
 //! - `break`/`continue` are handled conservatively through the loop merge.
-
+//!
+//! # Phase 1 Migration Note — String Paths → `Place` (read-only scaffolding)
+//! Current field tracking is string-based: dotted paths like `"a.b.c"` are built
+//! by [`expr_root_and_path`] and stored as `String` keys in
+//! [`VarState::moved_fields`]. Helpers `is_field_moved` / `mark_field_moved` /
+//! `mark_field_reinitialized` and the `paths_overlap`-like prefix walk in
+//! `is_field_moved` operate on that string representation.
+//! TODO(Place Phase 1): replace the `String` field-path layer with
+//! `semantic::place::Place` projections — `Place { local, projections: [Field(..),
+//! Deref, Index, TupleField(..)] }` mirroring Silver syntax (not a Rust clone).
+//! `Place` will be the structured replacement for `(root: String, path: String)`
+//! tuples. No behavior change in this phase: `Place` coexists as parallel
+//! infrastructure; existing string logic stays authoritative until the cutover.
+//! See `semantic::place` for `LocalId`/`Projection` and pure/comparable helpers.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -39,6 +52,15 @@ pub struct VarState {
     pub level: u8, // 0 = live, 1 = partially moved, 2 = fully moved
     pub move_span: Option<Span>,
     pub move_reason: Option<&'static str>,
+    /// Dotted field paths of moved sub-places, e.g. `"left"`, `"a.b"`.
+    /// Current representation is `String`-based (joined by `"."` from
+    /// `expr_root_and_path`). Each entry records where the field was moved and why.
+    /// TODO(Place Phase 1): migrate to `semantic::place::Place` projections —
+    /// `moved_fields` will become keyed by structured `Place`/`Projection`
+    /// (Field/Deref/Index/TupleField) instead of raw strings. Pure helpers on
+    /// `Place` (prefix/overlap/comparison) will replace the manual
+    /// `rfind('.')` / `starts_with` string walks in `is_field_moved` and
+    /// `mark_field_reinitialized`. No deletion in this phase; comments only.
     pub moved_fields: FxHashMap<String, (Span, &'static str)>,
 }
 
@@ -60,6 +82,12 @@ impl VarState {
     }
 
     pub fn mark_field_moved(&mut self, path: &str, span: Span, reason: &'static str) {
+        // String-path field tracking: `path` is a dotted string like `"left"` or
+        // `"a.b"` produced by `expr_root_and_path`. Stored verbatim in
+        // `moved_fields` — prefix semantics are manual (`starts_with`).
+        // TODO(Place Phase 1): replace `path: &str` with `place: &Place` / structured
+        // projections (`Field`/`Deref`/`Index`/`TupleField`). `Place` helpers will
+        // handle prefix/overlap without string splitting.
         if self.level < 2 {
             self.level = 1;
             if self.move_span.is_none() {
@@ -71,6 +99,10 @@ impl VarState {
     }
 
     pub fn mark_field_reinitialized(&mut self, path: &str) {
+        // Current: string prefix removal — `path` and any `"path.*"` subpaths are
+        // removed via `format!("{path}.")` + `starts_with`.
+        // TODO(Place Phase 1): `Place::is_prefix_of` / `Place::strip_prefix` will
+        // replace this `String` prefix walk; projections compare structurally.
         if self.level == 1 {
             self.moved_fields.remove(path);
             let prefix = format!("{path}.");
@@ -92,6 +124,13 @@ impl VarState {
     }
 
     pub fn is_field_moved(&self, path: &str) -> Option<(Span, &'static str)> {
+        // String-path overlap: walks `path` upward via `rfind('.')` checking
+        // ancestors (`"a.b.c"` → `"a.b"` → `"a"`). This is the string analogue of
+        // a `Place` prefix test — e.g. moving `p.left` poisons `p.left.inner`.
+        // TODO(Place Phase 1): replace with `Place` prefix check —
+        // `Place::is_prefix_of` / `Place::overlaps` using `Projection::Field`
+        // vectors instead of dot-split strings. `VarState` will store
+        // `FxHashMap<Place, _>` or `FxHashSet<Place>`.
         if self.is_fully_moved() {
             return self.move_span.zip(self.move_reason);
         }
@@ -128,6 +167,19 @@ impl VarState {
 }
 
 /// Helper to split an expression into its root variable name and dot-separated field path.
+///
+/// Current (Phase 0) string-based tracking: walks `Identifier` / `FieldAccess` chains
+/// and returns `(root_name, "a.b.c")` where the path is a `"."`-joined `String`.
+/// This is the sole source of `VarState::moved_fields` keys and the basis for all
+/// `is_field_moved` / `mark_field_moved` string comparisons.
+///
+/// TODO(Place Phase 1): replace with `semantic::place::Place` construction —
+/// `Place { local: LocalId(root), projections: Vec<Field(name)> }` mirroring
+/// Silver syntax (`Field`, `Deref`, `Index`, `TupleField`). A `Place::from_expr`
+/// helper (pure, comparable) will supersede this function. Call sites currently doing
+/// `if let Some((root, path)) = expr_root_and_path(expr)` will become
+/// `if let Some(place) = Place::from_expr(expr, locals)` (or similar). Keep this
+/// function until the `Place` cutover is complete — no deletion in this prep phase.
 fn expr_root_and_path(expr: &ast::Expression) -> Option<(String, String)> {
     let mut path = Vec::new();
     let mut curr = expr;

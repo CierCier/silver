@@ -13,7 +13,19 @@
 //! 6. Disjoint field borrows (`&mut p.left` and `&mut p.right`) are permitted simultaneously.
 //! 7. Raw pointers (`T*`) bypass borrow checking.
 //! 8. Reborrowing from `&mut T` creates a temporary reborrow that suspends the original.
-
+//!
+//! # Phase 1 Migration Note — String Paths → `Place` (read-only scaffolding)
+//! Today every loan is keyed by `(root: String, path: String)` where `path` is a
+//! dotted field string (`"a.b"`) and `ActiveBorrow`/`RefVarInfo` store that string
+//! directly; overlap is tested by `paths_overlap` via `starts_with` on `format!("{p}.")`.
+//! `extract_root_and_path` is the borrow-checker's string `expr_root_and_path` analogue,
+//! adding `Index`/`Deref` passthrough and `RefVarInfo` chaining.
+//! TODO(Place Phase 1): replace the `(String,String)` root+path layer with
+//! `semantic::place::Place { local, projections }` (Silver-natural: `Field`,
+//! `Deref`, `Index`, `TupleField`). `Place`'s pure/comparable helpers
+//! (`overlaps`/`is_prefix`) will supersede `paths_overlap` and the manual
+//! `extract_root_and_path` string joins. No logic deleted in this phase —
+//! scaffolding comments only; string code remains authoritative until cutover.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -44,6 +56,11 @@ impl BorrowKind {
 }
 
 /// Metadata about a reference variable in scope.
+/// Current string-based `Place` analogue: `(root, path)` where `path` is a
+/// dotted `String` like `"a.b"`. Reborrows chain through `ref_bindings`.
+/// TODO(Place Phase 1): replace `(String,String)` with `semantic::place::Place`
+/// — `Place { local: LocalId, projections: [Field|Deref|Index|TupleField] }`.
+/// `Place` helpers are pure/comparable and carry `Span`-free structure.
 #[derive(Debug, Clone)]
 pub struct RefVarInfo {
     pub root: String,
@@ -53,6 +70,11 @@ pub struct RefVarInfo {
 }
 
 /// An active loan taken on `root.path`.
+/// String-keyed loan: `root` is the base variable, `path` the dotted field suffix
+/// (empty means the whole place). Overlap is decided by `paths_overlap`.
+/// TODO(Place Phase 1): replace with `semantic::place::Place` as the loan key;
+/// `Place::overlaps` / `Place::is_prefix_of` will replace the string
+/// `starts_with` logic. `Place` mirrors Silver syntax, not a Rust clone.
 #[derive(Debug, Clone)]
 pub struct ActiveBorrow {
     pub root: String,
@@ -87,6 +109,10 @@ impl CallAccessKind {
 }
 
 struct CallArgAccess {
+    // String-based place for call-arg overlap checks — mirrors ActiveBorrow's
+    // `(root, path)` model. Overlap in `check_call` uses `paths_overlap`.
+    // TODO(Place Phase 1): `Place` key — `semantic::place::Place` with pure
+    // `overlaps` helper will replace `(String,String)` here as well.
     root: String,
     path: String,
     kind: CallAccessKind,
@@ -167,6 +193,12 @@ impl BorrowChecker {
     }
 
     /// Check if two field paths on the same root variable overlap.
+    /// String-based overlap: `p1` overlaps `p2` when one is a dot-prefix of the
+    /// other (or either is empty = whole place). This is the string analogue of
+    /// `Place` projection prefix testing.
+    /// TODO(Place Phase 1): replace with `semantic::place::Place::overlaps` /
+    /// `is_prefix_of` on structured `Projection::Field` vectors. Pure helper on
+    /// `Place` will handle `Field`/`Deref`/`Index`/`TupleField` structurally.
     fn paths_overlap(p1: &str, p2: &str) -> bool {
         if p1 == p2 || p1.is_empty() || p2.is_empty() {
             return true;
@@ -175,7 +207,6 @@ impl BorrowChecker {
         let prefix2 = format!("{p2}.");
         p2.starts_with(&prefix1) || p1.starts_with(&prefix2)
     }
-
     /// Find an active loan that conflicts with `(root, path, requested_kind)`.
     fn find_conflict(
         &self,
@@ -704,6 +735,17 @@ impl BorrowChecker {
     }
 
     /// Extract root variable name, field path, and whether accessed through a reference variable.
+    /// String-based `Place` builder: walks `Identifier`/`FieldAccess`/`Index`/`Deref` chains
+    /// and produces `(root, "a.b", ref_var)` where the path is `"."`-joined.
+    /// `Index` and `Deref` are transparent passthroughs (path unchanged) in this
+    /// string model — deeper `Place` tracking will need distinct projections.
+    /// Reborrows via `ref_bindings` re-root through an existing `(root,path)`.
+    /// TODO(Place Phase 1): replace with `semantic::place::Place::from_expr` —
+    /// `Place { local, projections: [Field|Index|Deref|TupleField] }` is the
+    /// structured counterpart. Structured projections avoid the lossy
+    /// `Index→transparent` / `TupleField→Field` conflation and let
+    /// `Place::overlaps` handle `Field` vs `Index`/`Deref` soundly. No deletion
+    /// in this phase; comments only.
     fn extract_root_and_path(
         &self,
         expr: &ast::Expression,

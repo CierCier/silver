@@ -415,3 +415,16 @@ Diagnostics are multi-span with a `note: … moved here` pointing to the origina
 ---
 
 *Sources*: `bin/agc/src/semantic/move_check.rs` (VarState `37-128`, `expr_root_and_path` `130-147`, latch `merge_with` `111-127`, `check_program`/`check_function` `274-324`, terminates helpers `238-272`), `bin/agc/src/codegen/llvm_ir/scope.rs` (`defers` stack `307-383`, flag helpers `395-425`, `register_drop_flag` `758-817`, enum cascade `551-752`), `bin/agc/src/codegen/llvm_ir/generate.rs:1582-1630` (defer push + return ordering), `bin/agc/src/codegen/llvm_ir/call.rs:254-256`, `tasks.rs:197` (launch), `AGENTS.md §6.1-6.7` (invariants), `std/mem/vec.ag:9-16,78-81,132-141,174-185` and `std/map.ag:309-333,381-438` (leaked-element contracts).
+
+---
+
+## 11. Phase 1 Migration Note — String Paths → `semantic::place::Place` (scaffolding only)
+
+> **No behavior change in this phase; comments only.** The checker strings described above are the current authoritative representation.
+
+Phase 1 introduces a structured `Place` type in `bin/agc/src/semantic/place.rs` (`semantic::place::Place { local: LocalId, projections: Vec<Projection> }` where `Projection::{Field(FieldId), TupleField(usize), Index, Deref}` mirrors Silver syntax, not a Rust clone) alongside the existing string logic. Helpers are pure and comparable (`Place::overlaps`, prefix checks, etc.).
+
+* `move_check.rs`: `VarState::moved_fields: FxHashMap<String,_>` + `expr_root_and_path` → `Place` keys (`Field` projections); `is_field_moved`/`mark_field_moved`/`mark_field_reinitialized` string walks (`rfind('.')`, `starts_with`) will move to `Place`-based prefix/overlap helpers. See header, `VarState::moved_fields`, `mark_field_moved`, `is_field_moved`, `expr_root_and_path` TODOs.
+* `borrow_check.rs`: `ActiveBorrow { root, path: String }` + `paths_overlap` + `extract_root_and_path` → `Place` keys; `paths_overlap` and `CallArgAccess` `(String,String)` joins will move to `Place::overlaps`/`is_prefix_of`. See module header, `RefVarInfo`/`ActiveBorrow`, `paths_overlap`, `extract_root_and_path`, `CallArgAccess` TODOs.
+
+Until the cutover, `Place` coexists as parallel infrastructure; string paths remain the checked path. Follow-up phases will switch the checkers to `Place` and remove the string helpers.
