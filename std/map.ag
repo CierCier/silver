@@ -1,15 +1,17 @@
 // HashMap<K,V> — SwissTable with ownership-aware moves.
 //
-// Ownership: `insert`/`_insert_at` move K/V into slots (`keys[slot]=move key`),
-// `grow` rehashes via `new_keys[slot]=move old_keys[i]` (Place Index) and
-// `new_vals[slot]=move old_vals[i]`, freeing old buffers without per-element
-// drops — Copy K/V copies bitwise, non-Copy (String, Vec<u8>) transfers.
-// Earlier POD-only `K k = old[i]; new[slot]=k` duplicated owned pointers;
-// replaced by `move`. `remove`/`HashMapDrain`/`HashMapIntoIter`/`EntryRef::take`
-// each `move` out of the table/buffer; `erase` leaks owned K/V by design
-// (tombstone without move — use `remove`/`drain`). `clear`/`drop` free buffers
-// without iterating; drain via `drain`/`into_iter` (each `move`) before drop
-// for owned types. See smoke comment at EOF.
+// Ownership contract for iteration:
+// - `iter(&HashMap<K,V> self)` borrows: takes `&HashMap<K,V> self` and yields
+//   `HashMapEntry<K,V>` copies (`e.key = keys[idx]; e.value = values[idx]`).
+//   The map stays live; iterator holds raw pointers (no ownership, no free).
+//   `Copy` K/V copies bitwise; owned K/V shallow-copies — prefer `get_ptr`.
+// - `into_iter(HashMap<K,V> self)` moves: takes `HashMap<K,V> self` by value
+//   (`Self self`, not `&Self`), transfers buffers (`keys/values/ctrl/capacity`)
+//   to `HashMapIntoIter` and clears `self` (null/0) so map drop is no-op.
+//   Iterator owns buffers (frees on Drop) and each `next()` does
+//   `move keys[idx]` / `move values[idx]` (Place Index) transferring ownership.
+// - `drain(&mut HashMap<K,V> self)` similarly moves buffers out via `&mut self`,
+//   leaving the map empty but live. Each `drain.next()` also `move`s pairs.
 import std.optional;
 import std.mem.alloc;
 import std.hash;
@@ -414,11 +416,14 @@ impl HashMap<K, V> {
     }
 
     /// Drain all live entries, yielding owned `(K, V)` pairs.
+    /// `&mut self` — moves buffers out (`keys/values/ctrl`) and clears map
+    /// so it is empty but still live (re-usable). Iterator owns buffers;
+    /// each `next()` moves `K`/`V` via `move keys[idx]` (Place Index).
     HashMapDrain<K, V> drain(&mut HashMap<K, V> self) {
         HashMapDrain<K, V> d;
-        d.keys = self.keys;
-        d.values = self.values;
-        d.ctrl = self.ctrl;
+        d.keys = move self.keys;
+        d.values = move self.values;
+        d.ctrl = move self.ctrl;
         d.capacity = self.capacity;
         d.idx = 0;
         self.keys = (K*)0;
@@ -472,11 +477,15 @@ struct HashMapIntoIter<K, V> {
 impl<K, V> IntoIterator for HashMap<K, V> {
     type Item = HashMapEntry<K, V>;
     type IntoIter = HashMapIntoIter<K, V>;
+    /// Consumes the map, moving its buffers into the iterator.
+    /// `Self self` (by value) — not `&Self` — so `move self.keys` drains and
+    /// leaves `self` moved-from (null/0). Iterator owns and frees buffers;
+    /// `next()` moves each entry via Place Index.
     HashMapIntoIter<K, V> into_iter(HashMap<K, V> self) {
         HashMapIntoIter<K, V> it;
-        it.keys = self.keys;
-        it.values = self.values;
-        it.ctrl = self.ctrl;
+        it.keys = move self.keys;
+        it.values = move self.values;
+        it.ctrl = move self.ctrl;
         it.capacity = self.capacity;
         it.idx = 0;
         self.keys = (K*)0;
@@ -487,7 +496,6 @@ impl<K, V> IntoIterator for HashMap<K, V> {
         return it;
     }
 }
-
 impl<K, V> Drop for HashMapIntoIter<K, V> {
     void drop(HashMapIntoIter<K, V>* self) {
         if (self.ctrl != (u8*)0) {
@@ -535,7 +543,9 @@ struct HashMapIter<K, V> {
 }
 
 impl<K, V> HashMap<K, V> {
-    /// Iterate over all live `(K, V)` entries, yielding owned copies.
+    /// Borrows the map and yields live `(K, V)` entries as owned copies.
+    /// `&HashMap<K,V> self` — does NOT consume the map; iterator holds raw
+    /// pointers and yields via copy (`keys[idx]`/`values[idx]`). Map stays live.
     HashMapIter<K, V> iter(&HashMap<K, V> self) {
         HashMapIter<K, V> it;
         it.keys = self.keys;

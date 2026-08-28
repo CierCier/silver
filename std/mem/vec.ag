@@ -248,12 +248,16 @@ impl<T> IndexedAccess for Vec<T> {
 
 // -- Iterator support ---------------------------------------------------
 //
-// VecIter<T> is an iterator over Vec<T> elements. into_iter() consumes the
-// Vec: it hands the backing buffer to the iterator and clears the Vec's
-// fields so the Vec's own drop is a no-op. VecIter OWNS the buffer after
-// that transfer and frees it in its Drop (a VecIter left un-drained leaks
-// the buffer otherwise). The iterator itself never frees element values —
-// iterate owned elements with get_ptr/drop like the Vec contract.
+// Ownership contract:
+// - `iter(&Vec<T> self)` borrows: takes `&Vec<T> self`, copies the raw
+//   pointer/len into a `SliceIter<T>` and yields each element via copy
+//   (`data[idx]` / `get_ptr` copy). The Vec remains valid and its buffer is
+//   NOT transferred. Caller must not mutate Vec while the borrow lives.
+// - `into_iter(Vec<T> self)` moves: takes `Vec<T> self` by value (Self self,
+//   not &Self), transfers the buffer via `move self.data` and clears the Vec
+//   (`self.data = null; self.len = 0; self.cap = 0`) so Vec's drop is a no-op.
+//   The returned `VecIter<T>` owns the buffer (frees it on Drop) and each
+//   `next()` does `value = move data[idx]` transferring ownership.
 
 /// Iterator over Vec<T> elements (owns the backing buffer after into_iter).
 struct VecIter<T> {
@@ -265,9 +269,12 @@ struct VecIter<T> {
 impl<T> IntoIterator for Vec<T> {
     type Item = T;
     type IntoIter = VecIter<T>;
+    /// Consumes the Vec, moving its buffer into the iterator.
+    /// `Self self` (by value) — not `&Self` — so `move self.data` drains and
+    /// leaves `self` moved-from (null/0). Iterator owns and frees the buffer.
     VecIter<T> into_iter(Vec<T> self) {
         VecIter<T> iter;
-        iter.data = self.data;
+        iter.data = move self.data;
         iter.len = self.len;
         iter.idx = 0;
         self.data = (T*)0;
@@ -292,6 +299,8 @@ impl<T> Vec<T> {
         return s;
     }
 
+    /// Borrows the Vec and yields element copies without consuming it.
+    /// `&Vec<T> self` so the Vec stays live; iterator holds a raw ptr copy.
     SliceIter<T> iter(&Vec<T> self) {
         SliceIter<T> it;
         it.data = self.data;
@@ -308,6 +317,7 @@ impl<T> Vec<T> {
         return r;
     }
 }
+
 
 impl<T> Drop for VecIter<T> {
     void drop(VecIter<T>* self) {

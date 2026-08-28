@@ -289,6 +289,33 @@ fn place_to_path_str(place: &Place) -> String {
         .join(".")
 }
 
+/// Full `Place` display for diagnostics — includes `local` and all
+/// projections (`Field`, `TupleField`, `Index`, `Deref`) without loss.
+/// `Place::is_prefix_of` / `Place::overlaps` are the overlap authority;
+/// this helper is the human-readable `x.a`, `x.a.b`, `x[index]`, `*p`
+/// counterpart (lossless, not the dotted `place_to_path_str` which drops
+/// `Index`/`Deref`). Used to ensure use-after-move reports the place path
+/// (e.g. `x.a`) via `Place`, not just the root var.
+fn place_display(place: &Place) -> String {
+    let mut s = place.local.clone();
+    for p in &place.projections {
+        match p {
+            Projection::Field(f) => {
+                s.push('.');
+                s.push_str(f);
+            }
+            Projection::TupleField(i) => {
+                s.push('.');
+                s.push_str(&i.to_string());
+            }
+            Projection::Index => s.push_str("[index]"),
+            Projection::Deref => s = format!("*{s}"),
+        }
+    }
+    s
+}
+
+
 /// All prefixes of `place` from root to itself (inclusive).
 fn place_prefixes(place: &Place) -> Vec<Place> {
     let mut out = Vec::with_capacity(place.projections.len() + 1);

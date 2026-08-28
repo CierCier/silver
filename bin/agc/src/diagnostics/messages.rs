@@ -210,6 +210,28 @@ pub fn note_task_handle_consumed() -> &'static str {
     "task handle consumed by wait"
 }
 
+/// Generic "value moved here" note — canonical phrase for move site.
+/// Alias for `note_value_explicitly_moved` without the "explicitly" qualifier,
+/// used by polished diagnostics that show overlapping `Place` paths via
+/// `Place::is_prefix_of` / `Place::overlaps`.
+pub fn note_value_moved_here() -> &'static str {
+    "value moved here"
+}
+
+/// Polished field/index-aware use-after-move message that shows the full
+/// `Place` path (e.g. `x.a`, `x.a.b`, `v[index]`, `*p`) instead of just the
+/// root variable. Keeps the same error kind as `use_of_moved_value` — additive.
+pub fn use_of_moved_field(place: &str) -> String {
+    format!("use of moved value '{place}'")
+}
+
+/// Overlapping-borrow note that shows the previous loan's `Place` path.
+/// Additive refinement of `note_previous_borrow_here` — shows
+/// `previous shared borrow of 'x.a' occurs here` via `Place::overlaps`.
+pub fn note_previous_borrow_of(place: &str, kind: &str) -> String {
+    format!("previous {kind} borrow of '{place}' occurs here")
+}
+
 pub fn cannot_borrow_as_mutable_while_shared(name: &str) -> String {
     format!("cannot borrow '{name}' as mutable because it is already borrowed as shared")
 }
