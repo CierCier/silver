@@ -92,7 +92,7 @@ fn has_uninit_prefix(tree: &MovePathTree, place: &Place) -> bool {
     false
 }
 
-/// Mark `node` subtree `Uninitialized` (why: child invalidation — descendant `d` satisfies `place.is_prefix_of(&d.place)`).
+/// Mark a place and descendants uninitialized.
 fn mark_subtree_uninit(node: &mut MovePath) {
     node.state = InitState::Uninitialized;
     for child in &mut node.children {
@@ -140,7 +140,10 @@ fn recompute_ancestors_after_initialize(tree: &mut MovePathTree, place: &Place) 
             } else {
                 // Was Uninitialized, now has a live child → downgrade to partial.
                 // Only if at least one child is actually Initialized.
-                let any_init = node.children.iter().any(|c| c.state == InitState::Initialized);
+                let any_init = node
+                    .children
+                    .iter()
+                    .any(|c| c.state == InitState::Initialized);
                 if any_init {
                     node.state = InitState::PartiallyInitialized;
                 }
@@ -314,8 +317,14 @@ mod tests {
         move_out(&mut tree, &xa).expect("first move should succeed");
 
         // x.a and its child x.a.b are now uninitialized (child invalidation via is_prefix_of)
-        assert!(!is_initialized(&tree, &xa), "x.a should be uninit after move");
-        assert!(!is_initialized(&tree, &xab), "x.a.b should be poisoned via prefix x.a");
+        assert!(
+            !is_initialized(&tree, &xa),
+            "x.a should be uninit after move"
+        );
+        assert!(
+            !is_initialized(&tree, &xab),
+            "x.a.b should be poisoned via prefix x.a"
+        );
         // sibling x.b untouched — disjoint (overlaps == false)
         assert!(is_initialized(&tree, &xb), "x.b should remain init");
         assert!(!xa.overlaps(&xb), "sibling fields are disjoint");
@@ -344,7 +353,10 @@ mod tests {
         // x.a should be initialized again and children cleared
         assert!(is_initialized(&tree, &xa));
         let node_a = tree.find(&xa).unwrap();
-        assert!(node_a.children.is_empty(), "initialize should clear children");
+        assert!(
+            node_a.children.is_empty(),
+            "initialize should clear children"
+        );
         assert_eq!(node_a.state, InitState::Initialized);
         // sibling still init
         assert!(is_initialized(&tree, &xb));
@@ -408,7 +420,10 @@ mod tests {
 
         move_out(&mut tree, &x).unwrap();
         assert!(!is_initialized(&tree, &x));
-        assert!(!is_initialized(&tree, &xa), "x.a poisoned because x.is_prefix_of(x.a)");
+        assert!(
+            !is_initialized(&tree, &xa),
+            "x.a poisoned because x.is_prefix_of(x.a)"
+        );
         assert!(!is_initialized(&tree, &xb));
         assert!(x.is_prefix_of(&xa));
         assert!(x.overlaps(&xb));
@@ -448,17 +463,23 @@ mod tests {
         // move x.a.b only
         move_out(&mut tree, &xab).unwrap();
         assert!(!is_initialized(&tree, &xab));
-        assert!(is_initialized(&tree, &xac), "sibling x.a.c disjoint from x.a.b");
+        assert!(
+            is_initialized(&tree, &xac),
+            "sibling x.a.c disjoint from x.a.b"
+        );
         // x.a is partial
-        assert_eq!(tree.find(&xa).unwrap().state, InitState::PartiallyInitialized);
+        assert_eq!(
+            tree.find(&xa).unwrap().state,
+            InitState::PartiallyInitialized
+        );
 
-        // reinit x.a should clear both b and c children and make x.a fully init
+        // Reinitializing a parent clears stale child paths.
         initialize(&mut tree, &xa);
         assert!(is_initialized(&tree, &xa));
-        // children cleared → x.a.b not tracked but considered init via parent? Our
-        // has_uninit_prefix will find xa Initialized, and xab missing → init.
-        // We explicitly check: after clearing, xab is missing so is_initialized returns true (no uninit prefix).
-        assert!(is_initialized(&tree, &xab), "after reinit of parent, child considered init");
+        assert!(
+            is_initialized(&tree, &xab),
+            "after reinit of parent, child considered init"
+        );
         assert!(tree.find(&xab).is_none(), "cleared children");
     }
 

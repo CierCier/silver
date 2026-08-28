@@ -1,6 +1,5 @@
-//! Drop elaboration — hybrid flag plan (read-only over `MovePathTree`).
-//! Why: collect live `Place`s needing `Drop` via `is_initialized` + `needs_drop` + `Place::overlaps`; LLVM flag emission stays authoritative until proven.
-//! Sketch: `drop_elaborate(&tree) -> Vec<PlaceToDrop>` drives `scope.rs` flag emission.
+//! Future static drop-set computation over `MovePathTree`.
+//! Why: codegen should emit drops, not rediscover ownership from flags.
 
 use crate::semantic::move_path::MovePathTree;
 use crate::semantic::place::Place;

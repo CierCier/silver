@@ -1,6 +1,5 @@
-//! Place — structural location for borrow/move/init/drop sharing (replaces string paths).
-//! Why: field-granular overlap via `is_prefix_of`/`overlaps` instead of `rfind('.')`/string prefix walks.
-//! Example: `x` overlaps `x.a` but not `x.b`; `v[i]` is `Place { local:"v", [Index] }` and `v[i]` overlaps `v[j]` conservatively (index value opaque).
+//! Structural places shared by borrow, move, init, and drop checks.
+//! Why: projections provide field-aware overlap without string paths.
 //!
 //! Invariants (one-line):
 //! - Overlap = `a.is_prefix_of(b) || b.is_prefix_of(a)` (same local + prefix projections)
@@ -99,7 +98,7 @@ impl Place {
 }
 
 impl Place {
-    /// Why: shared prefix check for borrow/move/init/drop (same local + projection prefix). Conservative `Index`: `v[i]` prefix of `v[j]`.
+    /// Shared prefix check; Index remains conservative.
     pub fn is_prefix_of(&self, other: &Place) -> bool {
         if self.local != other.local {
             return false;
@@ -110,7 +109,7 @@ impl Place {
         self.projections[..] == other.projections[..self.projections.len()]
     }
 
-    /// Why: symmetric overlap for conflict detection (`a` prefix `b` or vice-versa). `x` overlaps `x.a`; `x.a` disjoint `x.b`; `v` overlaps `v[i]`; `v[i]` overlaps `v[j]` conservatively.
+    /// Symmetric overlap used by ownership checks.
     pub fn overlaps(&self, other: &Place) -> bool {
         self.is_prefix_of(other) || other.is_prefix_of(self)
     }
@@ -189,7 +188,10 @@ mod tests {
         assert_ne!(xa.local, ya.local);
         assert_ne!(xa.root(), ya.root());
         // same field name, different local → not equal
-        assert_ne!(Place::from_slice("x", &["a"]), Place::from_slice("y", &["a"]));
+        assert_ne!(
+            Place::from_slice("x", &["a"]),
+            Place::from_slice("y", &["a"])
+        );
         // same local, different field → not equal
         assert_ne!(Place::new("x").field("a"), Place::new("x").field("b"));
         // hash distinction via HashSet
@@ -561,5 +563,4 @@ mod tests {
         let va = Place::new("v").field("a");
         assert!(!vi.overlaps(&va));
     }
-
 }
