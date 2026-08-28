@@ -66,7 +66,115 @@
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
+use crate::semantic::place::Place;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+// ── Phase 4 — Definite initialization primitives (parallel scaffolding) ──────────
+//
+// Parallel, not yet authoritative. Old string-path logic (`VarState::moved_fields`
+// + `expr_root_and_path`) stays hot; `Place`/`MovePathTree`/`InitOp` are the
+// future path. This block wires the conceptual transitions without changing
+// semantics — helpers are `#[allow(dead_code)]` and guarded from the hot path.
+//
+// ## Correspondence: current string ops → new Place-based `InitOp`s
+//
+// ```text
+// // Current (string)                          // Future (Place / InitOp)
+// String b = move x.field    ──►  move_out(x.field)  + initialize(b)
+//                             //   tree.move_out(&Place::new("x").field("field"))
+//                             // + tree.initialize(&Place::new("b"))
+//
+// i64 b = x.a   (Copy)       ──►  copy_from(x.a)     + initialize(b)
+//                             //   tree.copy_from(&Place::new("x").field("a")) is a
+//                             //   non-destructive read; then
+//                             // + tree.initialize(&Place::new("b"))
+//
+// move x.a                   ──►  move_out(x.a)
+//                             //   tree.move_out(&Place::new("x").field("a"))
+//
+// x.a = new_value            ──►  initialize(x.a)
+//                             //   tree.initialize(&Place::new("x").field("a"))
+// ```
+//
+// `Implicit Copy` is retained (per grilling): `Copy` types use `copy_from`
+// (read without invalidation); non-`Copy` types use `move_out`. Hybrid
+// verbosity keeps both string and `Place` commentary in this phase.
+//
+// Wiring sketch (not yet called in hot path):
+// ```ignore
+// // old:
+// if let Some((root, path)) = expr_root_and_path(&expr) { mark_field_moved(&path, ...) }
+// // future (parallel):
+// if let Some(place) = Place::from_expr(&expr, &locals) {
+//     match transition_for_assign(&place, is_copy) {
+//         InitOp::MoveOut  => init::move_out(&mut tree, &place)?,
+//         InitOp::CopyFrom => init::copy_from(&tree, &place)?,
+//         InitOp::Initialize => init::initialize(&mut tree, &place),
+//         InitOp::Read => init::read(&tree, &place),
+//     }
+// }
+// ```
+// See `semantic::init` (Phase 4) for `move_out`/`initialize`/`copy_from`/`read`
+// and `semantic::move_path::{MovePathTree, InitState}` for the tree.
+
+/// Definite-initialization operation on a `Place` (Phase 4 scaffolding).
+///
+/// Parallel to `semantic::init::InitOp`; kept crate-private here so `move_check`
+/// compiles even before `semantic::init` is populated. When `semantic::init`
+/// is available, this mirrors its variants (`MoveOut`/`Copy`/`Initialize`/`Read`).
+/// Not yet used in the hot path — guarded by `#[allow(dead_code)]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum InitOp {
+    /// Destructive move-out: `move x.a` → `Uninitialized` at `x.a`.
+    MoveOut,
+    /// Non-destructive copy: `i64 b = x.a` (Copy) → `copy_from(x.a)` (stays `Initialized`).
+    CopyFrom,
+    /// (Re)initialization: `x.a = v` → `Initialized` at `x.a`.
+    Initialize,
+    /// Pure read without state change (for borrowck/init checks).
+    Read,
+}
+
+/// Classify the *source* transition for an assignment / let-init of `place`.
+///
+/// Hybrid verbosity — implicit `Copy` retained:
+/// * `is_copy == true`  → `CopyFrom` (non-destructive, `Copy` type like `i64`)
+/// * `is_copy == false` → `MoveOut`  (destructive, non-`Copy`/Drop type like `String`)
+///
+/// Full assignment `let b = <src>` is always `transition_for_assign(src, is_copy)`
+/// **plus** `initialize(b)` on the destination. Examples:
+/// * `String b = move x.field` → `move_out(x.field)` (`MoveOut`) + `initialize(b)`
+/// * `i64 b = x.a`              → `copy_from(x.a)` (`CopyFrom`) + `initialize(b)`
+/// * `move x.a`                 → `move_out(x.a)` (`MoveOut`) alone
+/// * `x.a = new_value`          → `initialize(x.a)` (`Initialize`) — no source transition
+///
+/// Parallel scaffolding: not called in the hot string-path checker yet. Future
+/// wiring will call `crate::semantic::init::{move_out, copy_from, initialize}`
+/// via `MovePathTree` (`Place::is_prefix_of`/`places_overlap` + `InitState`).
+#[allow(dead_code)]
+fn transition_for_assign(place: &Place, is_copy: bool) -> InitOp {
+    let _ = place;
+    if is_copy {
+        InitOp::CopyFrom
+    } else {
+        InitOp::MoveOut
+    }
+}
+
+/// Convenience: direct mapping for `move <place>` (always `MoveOut`).
+#[allow(dead_code)]
+fn transition_for_move(place: &Place) -> InitOp {
+    let _ = place;
+    InitOp::MoveOut
+}
+
+/// Convenience: direct mapping for `initialize(<place>)` (`x.a = v`).
+#[allow(dead_code)]
+fn transition_for_initialize(place: &Place) -> InitOp {
+    let _ = place;
+    InitOp::Initialize
+}
 
 /// One move-check diagnostic; same shape as `typeck::TypeError` with optional
 /// secondary note pointing to the earlier move origin.
