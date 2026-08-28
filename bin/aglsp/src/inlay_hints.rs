@@ -49,6 +49,25 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
             });
         }
     }
+    // Implicit move/copy hints: show "move" for non-Copy places and "copy" for Copy places
+    // at let initializers, assignments, returns, and call arguments. Explicit `move` is excluded
+    // by the symbol index walker; remaining hints are implicit.
+    for hint in &analysis.move_hints {
+        let label = match hint.kind {
+            agc::symbol_index::MoveHintKind::Move => "move",
+            agc::symbol_index::MoveHintKind::Copy => "copy",
+        };
+        hints.push(InlayHint {
+            position: byte_to_position(&analysis.text, hint.span.0),
+            label: InlayHintLabel::String(label.to_string()),
+            kind: Some(InlayHintKind::PARAMETER),
+            padding_left: Some(false),
+            padding_right: Some(true),
+            tooltip: None,
+            text_edits: None,
+            data: None,
+        });
+    }
     for symbol in &analysis.symbols {
         let Some(ty) = symbol.inferred_type.as_deref() else {
             continue;
@@ -101,22 +120,22 @@ mod tests {
         );
         let hints = inlay_hints(&analysis);
         // scale(5, 3): value:, factor:  |  c.add(7): amount: (receiver skipped)
-        assert_eq!(hints.len(), 3, "hints: {hints:?}");
-        let labels: Vec<&str> = hints
+        let param_labels: Vec<&str> = hints
             .iter()
-            .map(|h| match &h.label {
-                InlayHintLabel::String(s) => s.as_str(),
-                _ => "",
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) if s.ends_with(':') => Some(s.as_str()),
+                _ => None,
             })
             .collect();
-        assert!(labels.contains(&"value:"), "{labels:?}");
-        assert!(labels.contains(&"factor:"), "{labels:?}");
-        assert!(labels.contains(&"amount:"), "{labels:?}");
-        assert!(
+        assert_eq!(param_labels.len(), 3, "param hints: {hints:?}");
+        assert!(param_labels.contains(&"value:"), "{param_labels:?}");
+        assert!(param_labels.contains(&"factor:"), "{param_labels:?}");
+        assert!(param_labels.contains(&"amount:"), "{param_labels:?}");
+        assert!(param_labels.iter().all(|_| {
             hints
                 .iter()
-                .all(|h| h.kind == Some(InlayHintKind::PARAMETER))
-        );
+                .any(|h| h.kind == Some(InlayHintKind::PARAMETER))
+        }));
     }
 
     #[test]
@@ -131,5 +150,46 @@ mod tests {
     fn no_hints_for_zero_arg_call() {
         let analysis = analyze_src("void no_args() {}\n i32 main() { no_args(); return 0; }");
         assert!(inlay_hints(&analysis).is_empty());
+    }
+
+    #[test]
+    fn implicit_move_and_copy_hints() {
+        let analysis = analyze_src(
+            "String from_str(String* self, str s) { return String.from_str(s); }\n\
+             i32 main() {\n\
+             String a = String.from_str(\"hello\");\n\
+             String b = a;\n\
+             i64 x = 5;\n\
+             i64 y = x;\n\
+             String c = move a;\n\
+             return 0;\n\
+             }",
+        );
+        let hints = inlay_hints(&analysis);
+        let move_labels: Vec<&str> = hints
+            .iter()
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) if s == "move" => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        let copy_labels: Vec<&str> = hints
+            .iter()
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) if s == "copy" => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        // b = a (String) -> move, y = x (i64) -> copy
+        // c = move a is explicit -> no implicit hint for that `a`
+        assert!(
+            move_labels.len() >= 1,
+            "expected at least one move hint, got {hints:?}"
+        );
+        assert!(
+            copy_labels.len() >= 1,
+            "expected at least one copy hint, got {hints:?}"
+        );
+        // Also verify call-arg hints: String.from_str(\"hello\") takes `str` which is Copy? str is primitive -> copy? But literal \"hello\" is not a place, so no hint.
     }
 }

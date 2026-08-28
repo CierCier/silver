@@ -38,6 +38,7 @@ impl Backend {
                         symbols: Vec::new(),
                         occurrences: Vec::new(),
                         call_sites: Vec::new(),
+                        move_hints: Vec::new(),
                         expr_types: Default::default(),
                         import_paths: Vec::new(),
                         tokens: Vec::new(),

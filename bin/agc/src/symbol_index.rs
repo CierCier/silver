@@ -111,8 +111,21 @@ pub struct CallSite {
     pub open_paren: usize,
     /// (start, end) byte spans of each argument expression.
     pub args: Vec<(usize, usize)>,
-    /// Resolved callee symbol (function or method), when known.
+    /// Resolved callee symbol, if the call could be related to a symbol.
     pub callee: Option<SymbolId>,
+}
+
+/// Implicit move/copy site for inlay hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveHintKind {
+    Move,
+    Copy,
+}
+
+#[derive(Debug, Clone)]
+pub struct MoveHint {
+    pub span: (usize, usize),
+    pub kind: MoveHintKind,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +135,8 @@ pub struct SymbolIndex {
     pub occurrences: Vec<Occurrence>,
     /// Call sites in the buffer (parameter-name inlay hints).
     pub call_sites: Vec<CallSite>,
+    /// Implicit move/copy sites (inlay hints).
+    pub move_hints: Vec<MoveHint>,
     /// Expression span (start, end) → formatted type, from the type checker.
     pub expr_types: ExprTypeMap,
     /// Fully qualified module paths seen in `import` statements.
@@ -166,6 +181,7 @@ pub fn analyze(
         symbols: Vec::new(),
         occurrences: Vec::new(),
         call_sites: Vec::new(),
+        move_hints: Vec::new(),
         top_level: HashMap::default(),
         struct_children: HashMap::default(),
         locals: Vec::new(),
@@ -196,6 +212,7 @@ pub fn analyze(
         symbols: walker.symbols,
         occurrences: walker.occurrences,
         call_sites: walker.call_sites,
+        move_hints: walker.move_hints,
         expr_types,
         import_paths: walker.import_paths,
         tokens: current_tokens,
@@ -237,6 +254,7 @@ struct Walker<'a> {
     symbols: Vec<Symbol>,
     occurrences: Vec<Occurrence>,
     call_sites: Vec<CallSite>,
+    move_hints: Vec<MoveHint>,
     top_level: HashMap<String, SymbolId>,
     /// container name (struct/enum name) → field/method/variant symbols.
     struct_children: HashMap<String, Vec<SymbolId>>,
@@ -946,6 +964,7 @@ impl Walker<'_> {
                     self.walk_type(ty);
                 }
                 if let Some(init) = &ls.initializer {
+                    self.maybe_emit_move_hint(init);
                     self.walk_expr(init);
                 }
                 self.walk_pattern(&ls.pattern);
@@ -960,15 +979,20 @@ impl Walker<'_> {
                     symbol.inferred_type = Some(ty);
                 }
             }
-            ast::StatementKind::Return(Some(e)) => self.walk_expr(e),
+            ast::StatementKind::Return(Some(e)) => {
+                self.maybe_emit_move_hint(e);
+                self.walk_expr(e);
+            }
             ast::StatementKind::Return(None)
             | ast::StatementKind::Continue
             | ast::StatementKind::Break(None) => {}
-            ast::StatementKind::Break(Some(e)) => self.walk_expr(e),
+            ast::StatementKind::Break(Some(e)) => {
+                self.maybe_emit_move_hint(e);
+                self.walk_expr(e);
+            }
             ast::StatementKind::Defer(s) => self.walk_stmt(s),
         }
     }
-
     fn walk_pattern(&mut self, pattern: &ast::Pattern) {
         match &pattern.kind {
             ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
@@ -1058,7 +1082,14 @@ impl Walker<'_> {
             ast::ExpressionKind::Literal(_) => {}
             ast::ExpressionKind::Identifier(id) => self.emit_identifier(id),
             ast::ExpressionKind::TypeName(ty) => self.walk_type(ty),
-            ast::ExpressionKind::Binary { left, right, .. } => {
+            ast::ExpressionKind::Binary {
+                left,
+                right,
+                operator,
+            } => {
+                if *operator == ast::BinaryOperator::Assign {
+                    self.maybe_emit_move_hint(right);
+                }
                 self.walk_expr(left);
                 self.walk_expr(right);
             }
@@ -1072,6 +1103,7 @@ impl Walker<'_> {
                 let callee = self.occurrence_symbol_at(function.span.start);
                 self.record_call_site(function.span.end, arguments, callee);
                 for a in arguments {
+                    self.maybe_emit_move_hint(a);
                     self.walk_expr(a);
                 }
             }
@@ -1091,6 +1123,7 @@ impl Walker<'_> {
                 let callee = self.occurrence_symbol_at(method.span.start);
                 self.record_call_site(method.span.end, arguments, callee);
                 for a in arguments {
+                    self.maybe_emit_move_hint(a);
                     self.walk_expr(a);
                 }
             }
@@ -1424,8 +1457,117 @@ impl Walker<'_> {
             .get(&(expr.span.start, expr.span.end))
             .map(String::as_str)
     }
-}
 
+    fn is_copy_type_str(ty: &str) -> bool {
+        let s = ty.trim();
+        if s.is_empty() {
+            return true;
+        }
+        // Raw pointers are Copy (T*, mut T*).
+        if s.contains('*') {
+            return true;
+        }
+        // References are borrows, but their type string in expr_types is the
+        // pointee behind `&x`; skip hinting references separately. Treat &T as Copy for hint suppression.
+        if s.starts_with('&') {
+            return true;
+        }
+        // Primitive Copy types.
+        const PRIMITIVES: &[&str] = &[
+            "bool", "char", "str", "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64",
+            "u128", "f32", "f64", "f80", "c32", "c64", "c80", "void", "isize", "usize",
+        ];
+        if PRIMITIVES.contains(&s) {
+            return true;
+        }
+        // Known owning bases — if the formatted type contains any as a word, it's non-Copy.
+        const DROP_BASES: &[&str] = &[
+            "String",
+            "Vec",
+            "VecIter",
+            "Bytes",
+            "HashMap",
+            "HashSet",
+            "Deque",
+            "BinaryHeap",
+            "Queue",
+            "Box",
+            "Rc",
+            "Arena",
+            "File",
+            "BufWriter",
+            "Scanner",
+            "ByteStream",
+            "Channel",
+            "RawMutex",
+            "Mutex",
+            "Socket",
+            "TcpStream",
+            "TcpListener",
+            "UdpSocket",
+            "HttpConnection",
+            "Set",
+            "Map",
+        ];
+        for base in DROP_BASES {
+            // Word-boundary check: look for `base` not part of longer ident.
+            let mut search = 0usize;
+            while let Some(idx) = s[search..].find(base) {
+                let abs = search + idx;
+                let before_ok = abs == 0
+                    || !s.as_bytes()[abs - 1].is_ascii_alphanumeric()
+                        && s.as_bytes()[abs - 1] != b'_';
+                let after = abs + base.len();
+                let after_ok = after >= s.len()
+                    || !s.as_bytes()[after].is_ascii_alphanumeric() && s.as_bytes()[after] != b'_';
+                if before_ok && after_ok {
+                    return false;
+                }
+                search = abs + base.len();
+            }
+        }
+        // Tuples/arrays containing owning types: the string will contain the base above.
+        true
+    }
+
+    fn is_place_expr(expr: &ast::Expression) -> bool {
+        matches!(
+            &*expr.kind,
+            ast::ExpressionKind::Identifier(_)
+                | ast::ExpressionKind::FieldAccess { .. }
+                | ast::ExpressionKind::Index { .. }
+        )
+    }
+
+    fn is_explicit_move(expr: &ast::Expression) -> bool {
+        matches!(&*expr.kind, ast::ExpressionKind::Move(_))
+    }
+
+    fn maybe_emit_move_hint(&mut self, expr: &ast::Expression) {
+        if Self::is_explicit_move(expr) {
+            return;
+        }
+        if !Self::is_place_expr(expr) {
+            return;
+        }
+        if !self.in_buffer(&expr.span) {
+            return;
+        }
+        let Some(ty) = self.type_of(expr) else {
+            return;
+        };
+        // Reference expressions are borrows, not moves/copies — filtered via type string '&' but also skip if expr is Reference node (not a place, already filtered).
+        let kind = if Self::is_copy_type_str(ty) {
+            MoveHintKind::Copy
+        } else {
+            MoveHintKind::Move
+        };
+        self.move_hints.push(MoveHint {
+            span: (expr.span.start, expr.span.end),
+            kind,
+        });
+    }
+}
 fn occurrence_kind_for(kind: SymbolKind) -> OccurrenceKind {
     match kind {
         SymbolKind::Function | SymbolKind::ExternFunction => OccurrenceKind::Function,
