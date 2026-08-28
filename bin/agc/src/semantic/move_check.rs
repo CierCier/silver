@@ -1,16 +1,6 @@
-//! Move-out checker: per-path dataflow reporting use-after-move of non-Copy (Drop) values.
-//!
-//! A value is moved by `move x`, by-value receivers/args, bare `return x`, or `v.drop()`.
-//! Uses on a moved place are use-after-free errors. Per-path: a move on any
-//! fall-through path taints afterwards; moves in non-fall-through branches don't leak.
-//!
-//! Why Place + MovePathTree: field-granular init (`x.a` vs `x.b`) via
-//! `Place::overlaps`/`is_prefix_of` and `MovePathTree<InitState>` (Init/Partial/Uninit
-//! ↔ Live/PartiallyMoved/FullyMoved). Drop elaboration consumes the same tree.
-//! TODO(Phase 3): replace `VarState.moved_fields: FxHashMap<String,_>` with
-//! `MovePathTree<Place>`; derive `level` from root `InitState`.
-//! TODO(Phase 5): centralize Copy/Drop via `type_properties::{is_copy,needs_drop}`.
-//! TODO(Phase 6-8): `scope.rs` consumes `Vec<PlaceToDrop>` from `drop_elaborate(&tree)`.
+//! Definite-initialization and move checking.
+//! `Place` + `MovePathTree` preserve field-level ownership; `TypeProperties`
+//! distinguishes implicit Copy from ownership-transferring Move.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -27,10 +17,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum InitOp {
-    MoveOut,   // `move x.a` — destructive
-    CopyFrom,  // `i64 b = x.a` — non-destructive Copy
+    MoveOut,    // `move x.a` — destructive
+    CopyFrom,   // `i64 b = x.a` — non-destructive Copy
     Initialize, // `x.a = v`
-    Read,      // pure read
+    Read,       // pure read
 }
 
 /// Source transition for `let b = <src>` (plus `initialize(b)` on dest).
@@ -123,7 +113,6 @@ fn place_display(place: &Place) -> String {
     }
     s
 }
-
 
 /// All prefixes of `place` from root to itself (inclusive).
 fn place_prefixes(place: &Place) -> Vec<Place> {
@@ -307,7 +296,8 @@ impl VarState {
             for (stored_place, (span, reason)) in &self.place_spans {
                 // Compare only projections prefix, ignoring local mismatch for synthetic check.
                 if stored_place.projections.len() <= synth.projections.len()
-                    && stored_place.projections == synth.projections[..stored_place.projections.len()]
+                    && stored_place.projections
+                        == synth.projections[..stored_place.projections.len()]
                 {
                     return Some((*span, *reason));
                 }
@@ -370,13 +360,18 @@ impl VarState {
         }
         // Merge MovePathTree field granularity via structural Place prefixes.
         for (place, (span, reason)) in &other.place_spans {
-            if !init::is_initialized(&other.tree, place) && init::is_initialized(&self.tree, place) {
+            if !init::is_initialized(&other.tree, place) && init::is_initialized(&self.tree, place)
+            {
                 // Use move_out to propagate Partial to ancestors via is_prefix_of.
                 let _ = init::move_out(&mut self.tree, place);
-                self.place_spans.entry(place.clone()).or_insert((*span, *reason));
+                self.place_spans
+                    .entry(place.clone())
+                    .or_insert((*span, *reason));
                 let path_str = place_to_path_str(place);
                 if !path_str.is_empty() {
-                    self.moved_fields.entry(path_str).or_insert((*span, *reason));
+                    self.moved_fields
+                        .entry(path_str)
+                        .or_insert((*span, *reason));
                 }
                 if self.level == 0 {
                     self.level = 1;
@@ -866,7 +861,8 @@ impl MoveChecker {
                                         var.move_span,
                                         reason,
                                     );
-                                } else if let Some((move_span, reason)) = var.is_place_moved(&place) {
+                                } else if let Some((move_span, reason)) = var.is_place_moved(&place)
+                                {
                                     self.error_with_note(
                                         format!("use of moved field '{root_name}[index]'"),
                                         inner.span,
@@ -1083,7 +1079,8 @@ impl MoveChecker {
                                 } else {
                                     let place = place_from_root_and_path(&root_name, &path);
                                     if let Some(var) = state.get(&root_name)
-                                        && let Some((move_span, reason)) = var.is_place_moved(&place)
+                                        && let Some((move_span, reason)) =
+                                            var.is_place_moved(&place)
                                     {
                                         self.error_with_note(
                                             format!("use of moved field '{root_name}.{path}'"),
@@ -1817,7 +1814,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn foo_partial_move_whole_and_reinit_via_place() {
         let errs = errors(
@@ -1851,7 +1847,10 @@ mod tests {
              String make_string() { String s; return s; }\n\
              void g() { Foo x; String y = move x.a; String z = x.b; }",
         );
-        assert!(ok.is_empty(), "x.b should be readable after move x.a (String) via Place::overlaps, got {ok:?}");
+        assert!(
+            ok.is_empty(),
+            "x.b should be readable after move x.a (String) via Place::overlaps, got {ok:?}"
+        );
         let errs = errors(
             "impl Drop<String> for String { void drop(String* self) {} }\n\
              struct Foo { String a; String b; }\n\
@@ -1873,6 +1872,9 @@ mod tests {
              String make_string() { String s; return s; }\n\
              void g() { Foo x; String y = move x.a; x.a = make_string(); String z = move x.a; String w = move x.b; }",
         );
-        assert!(ok2.is_empty(), "after x.a = make_string() reinit, both String fields should be readable via initialize, got {ok2:?}");
+        assert!(
+            ok2.is_empty(),
+            "after x.a = make_string() reinit, both String fields should be readable via initialize, got {ok2:?}"
+        );
     }
 }

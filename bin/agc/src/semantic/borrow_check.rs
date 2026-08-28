@@ -1,10 +1,9 @@
-//! Borrow checker: enforces `&`/`&mut` exclusivity, disjoint field borrows allowed, raw `T*` unchecked.
-//! Why Place: `Place::overlaps` replaces string `paths_overlap` for field granularity.
-//! TODO(Place Phase 1): replace `(root:String, path:String)` loans with `Place { local, projections }`.
+//! Borrow checker: enforces `&`/`&mut` exclusivity; raw pointers are unchecked.
+//! Places make field conflicts structural instead of string-prefix based.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
-use crate::semantic::place::{places_overlap, Place, Projection};
+use crate::semantic::place::{Place, Projection, places_overlap};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// One borrow conflict diagnostic with optional multi-span note.
@@ -897,7 +896,9 @@ impl BorrowChecker {
         // This complements the string `extract_root_and_path` path which collapses Index transparently.
         if let Some((place, ref_var_place)) = self.extract_place(target) {
             if place.projections.contains(&Projection::Index) {
-                if let Some(conflict) = self.find_conflict_for_place(&place, kind, ref_var_place.as_deref()) {
+                if let Some(conflict) =
+                    self.find_conflict_for_place(&place, kind, ref_var_place.as_deref())
+                {
                     let full_target = format!("{}[index]", place.local);
                     let msg = match (kind, conflict.kind) {
                         (BorrowKind::Shared, BorrowKind::Exclusive) => {
@@ -918,9 +919,11 @@ impl BorrowChecker {
                         Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
                     );
                 }
-                let (root, path, _ref_var) = self
-                    .extract_root_and_path(target)
-                    .unwrap_or((place.local.clone(), String::new(), ref_var_place));
+                let (root, path, _ref_var) = self.extract_root_and_path(target).unwrap_or((
+                    place.local.clone(),
+                    String::new(),
+                    ref_var_place,
+                ));
                 let loan = ActiveBorrow {
                     root: root.clone(),
                     path: path.clone(),
@@ -1145,9 +1148,7 @@ impl BorrowChecker {
                         (CallAccessKind::Exclusive, CallAccessKind::Shared)
                         | (CallAccessKind::Shared, CallAccessKind::Exclusive) => {
                             self.error_with_note(
-                                msg::cannot_borrow_as_mutable_and_shared_in_same_call(
-                                    &full_target,
-                                ),
+                                msg::cannot_borrow_as_mutable_and_shared_in_same_call(&full_target),
                                 b.span,
                                 Some(a.span),
                                 Some(msg::note_argument_borrow_here(a.kind.as_str())),
