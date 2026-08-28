@@ -28,8 +28,14 @@ silver/
 │   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
 │   │   │   ├── parser/          # Syntactic analysis and import resolution
 │   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
-│   │   │   ├── codegen/         # Target code generation (System V AMD64 ABI & LLVM IR)
+│   │   │   │   ├── place.rs          # Place {local, projections} — structural location
+│   │   │   │   ├── move_path.rs      # MovePathTree + InitState (Partial/Init/Uninit)
+│   │   │   │   ├── init.rs           # move_out / copy_from / initialize / read
+│   │   │   │   ├── type_properties.rs # TypeProperties {is_copy, needs_drop}
+│   │   │   │   ├── drop_elaborate.rs # Drop elaboration + hybrid flag plan
+│   │   │   │   ├── move_check.rs / borrow_check.rs # Place-based analyses
 │   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
+│   │   │   ├── symbol_index.rs  # LSP symbol index + move/copy inlay hints
 │   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
 │   │   │   └── profiler.rs      # Phase timing instrumenter
 │   ├── aglsp/                   # Language Server Protocol server
@@ -43,7 +49,6 @@ silver/
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```
-
 > **External Dependency**: Parsing engine libraries (`elise-core`, `elise-lex`, `elise-parse`, `elise-grammar`) are maintained in the standalone repository [**CierCier/elise**](https://github.com/CierCier/elise).
 
 ---
@@ -85,7 +90,8 @@ flowchart TD
     Import --> SymInit[Symbol Table: Global Registration]
     SymInit --> Semantic[Semantic Analyzer: Symbol Validation & Comptime Hooks]
     Semantic --> TypeCheck[Type Checker: Resolves Aliases, Overloads, and Computes Layouts]
-    TypeCheck --> Monomorph[Monomorphization: Resolves Generics to Fixpoint]
+    TypeCheck --> Ownership[Ownership: Place / MoveCheck / BorrowCheck / Drop Elaborate]
+    Ownership --> Monomorph[Monomorphization: Resolves Generics to Fixpoint]
     Monomorph --> Codegen[Codegen: System V ABI Struct Passing & LLVM IR Generation]
     Codegen --> Link[Linker: System CC / ld.lld Orchestration]
 ```
@@ -120,21 +126,26 @@ flowchart TD
 - Maps arithmetic/logical expressions to overloaded methods (traits like `Add`, `Eq`, `IndexedAccess` in `std.ops`) by searching for double-underscored matching functions (e.g., `__add`, `__index_get`).
 - Generates type error reports and compiles `MonomorphRequest` generics requests.
 
-#### 7. Monomorphization (`semantic/monomorph.rs`)
+#### 7. Ownership (`place.rs` / `move_path.rs` / `init.rs` / `type_properties.rs` / `move_check.rs` / `borrow_check.rs` / `drop_elaborate.rs`)
+- `Place {local, projections}` with `is_prefix_of` / `overlaps` (Index `v[i]` vs `v[j]` conservative, `v` overlaps `v[i]`).
+- `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move.
+- `MovePathTree` + `InitState` + `move_out`/`copy_from`/`initialize`/`read`; field-granular `x.a` vs `x.b`, reinit `x.a = make()`.
+- `Borrow {place, kind}` via `places_overlap`; drop elaboration hybrid flags (static `Init`→direct drop, `Uninit`→elided, `Partial`→guard).
+
+#### 8. Monomorphization (`semantic/monomorph.rs`)
 - Runs a fixpoint generation loop:
   - Discovers template types (structs, enums, impls, functions) matching type signatures in `MonomorphRequest`.
   - Replaces type variables with concrete types and mangles the new struct/method names.
   - Instantiates nested generic calls inside monomorphized code to fixpoint.
 
-#### 8. Codegen (`codegen/llvm_ir.rs`)
+#### 9. Codegen (`codegen/llvm_ir.rs`)
 - Leverages the `inkwell` LLVM bindings wrapper.
 - Interfaces with target machine layouts via `codegen/abi.rs`, classifying struct layouts <= 8 bytes, <= 16 bytes, and > 16 bytes according to System V AMD64 ABI specifications.
 - Translates syntax constructs (variables, scopes, defer blocks, drop flags, and inline `asm`) into native LLVM IR code.
 
-#### 9. Linker (`main.rs` link driver)
+#### 10. Linker (`main.rs` link driver)
 - Compiles generated LLVM IR into temporary object files.
 - Invokes target toolchains (system `cc` or `ld.lld`) to perform symbol resolution, linking in required library dependencies and producing executables or shared libraries.
-
 ---
 
 ## 5. Coding Style & Conventions
@@ -192,8 +203,8 @@ The Silver compiler implements a lightweight deterministic memory and resource c
    - *Known Design Limitation (Bug C)*: Local variables declared but not initialized have their drop flags set to `true` by default, which can cause spurious drops on zero-initialized fields if the type does not perform pointer-null checks in its `drop` method.
 6. **Per-Field Drop Flags**: each Drop-typed struct field has its own i1 flag (initialized `false` = "no live value yet"), set on field assignment / struct init / by-value params, cleared on move. The scope-exit field cascade checks per-field flags, so uninitialized fields are never destructed; overwriting a field (`x.f = y`) releases the old value (guarded by the field flag).
 7. **Enum Payload Ownership**: constructing a variant with an owned payload requires `move` (`Res.Ok(move i)` — a bare `Res.Ok(i)` is a compile error). Enums WITHOUT a Drop impl of their own get a tag-aware payload cascade: the active variant's Drop-typed payload is dropped at scope exit (so a never-unwrapped `Result<Owned, E>` does not leak). Extract owned payloads with a `move` binding — `match r { Ok(move v) : v, ... }` — which transfers ownership and zeroes the enum's slot (freeing via a plain binding copy now double-frees, since the cascade still runs). Enums WITH a Drop impl manage their payloads in the drop body and get no cascade.
-
----
+8. **Place & Overlap**: `Place {local, projections=[Field/Index/Deref]}` with `is_prefix_of` (x is prefix of x.a) and `overlaps` (x overlaps x.a, x.a vs x.b disjoint, `v` overlaps `v[i]`, `v[i]` vs `v[j]` conservative). Borrow/move/init/drop all share this.
+9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` central; primitives/`T*`/all-Copy struct = Copy (`copy_from` — read without invalidate), `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move (`move_out` — invalidate, `v[i]=move old[i]` via tmp, hybrid flags: `Init`→direct drop, `Uninit`→elided, `Partial`→guard).
 
 ## 7. Diagnostics
 
@@ -205,9 +216,7 @@ Compiler diagnostic messages are rendered using the `diagnostics::render` utilit
 - **Compiler Warning System & Linter**: Configured via `-Wall`, `-Werror` (treat warnings as errors), `-Wunused`, `-Wunreachable-code`, and `-Wno-*` flags. Detects unused variables/parameters (suppressed with `_` prefix) and unreachable statements following unconditional returns/breaks/continues.
 - **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
 - **In-Memory Formatting (`@format`)**: Builtin macro `@format("...", args...)` builds a formatted heap string into an owned `String` instance.
-- **LSP Diagnostic Routing**: `aglsp` filters diagnostics by `file_id`, mapping errors occurring in inlined/imported files against their original source text and publishing to their respective file URIs without corrupting the open buffer's span ranges.
-- **LSP Outline (`textDocument/documentSymbol`)**: `aglsp` builds a hierarchical document-symbol tree (structs, enums, traits, functions, globals with methods/fields/variants as children) from the `SymbolIndex` flat list, keyed by the `qualifier: "Name::"` convention; buffer-local symbols are filtered via the `foreign_files` map. See `aglsp/src/document_symbols.rs`.
-- **LSP Inlay Hints (`textDocument/inlayHint`)**: `agc::symbol_index` records `CallSite { open_paren, args, callee }` for every buffer-local `Call`/`MethodCall` (receiver `self` param skipped for instance methods); `aglsp/src/inlay_hints.rs` renders `name:` hints before each argument.
+- **LSP Inlay Hints (`textDocument/inlayHint`)**: `agc::symbol_index` records `CallSite { open_paren, args, callee }` for every buffer-local `Call`/`MethodCall` (receiver `self` param skipped for instance methods) plus `MoveHint {span, Move|Copy}` for every place `let`/`assign`/`return`/call-arg (`String a = b`→`move` before `b`, `i64 y = x`→`copy` before `x`; explicit `move` excluded, `v[i]` via `tmp`); `aglsp/src/inlay_hints.rs` renders `name:` and `move`/`copy` hints before each argument/place.
 - **LSP Formatting (`textDocument/formatting`)**: `aglsp/src/format.rs` is a conservative whitespace-only formatter (strip trailing whitespace, collapse blank runs, single trailing newline) that cannot corrupt code.
 ## 7.1 Debugging Support (DWARF by default)
 
