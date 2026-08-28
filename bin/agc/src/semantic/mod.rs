@@ -6,6 +6,7 @@ pub mod escape_check;
 pub mod linter;
 pub mod monomorph;
 pub mod move_check;
+pub mod move_path;
 pub mod place;
 pub mod send_check;
 pub mod typeck;

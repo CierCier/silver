@@ -32,6 +32,37 @@
 //! tuples. No behavior change in this phase: `Place` coexists as parallel
 //! infrastructure; existing string logic stays authoritative until the cutover.
 //! See `semantic::place` for `LocalId`/`Projection` and pure/comparable helpers.
+//!
+//! # Phase 3 Prep — `VarState` → `MovePathTree<Place>` (scaffolding only, no behavior change)
+//! `VarState` currently models moved-ness as a flat `level: u8` lattice
+//! (`0 = Live`, `1 = PartiallyMoved`, `2 = FullyMoved`) plus a
+//! `moved_fields: FxHashMap<String, (Span, &'static str)>` of dotted-path
+//! strings (e.g. `"a"`, `"a.b"`). `is_field_moved` walks ancestors via
+//! `rfind('.')`; `mark_field_reinitialized` strips prefixes via
+//! `starts_with("path.")`. This is the string analogue of a prefix/overlap test.
+//!
+//! Future representation (prep only — not switched in this phase):
+//! `semantic::move_path::MovePathTree<Place>` where each `MovePath` node
+//! corresponds 1:1 to a `Place` (`_MovePath nodes correspond to Place_`).
+//! The tree stores per-path `InitState::{Init, Uninit, Partial}` (with `Partial`
+//! meaning *some* descendant is `Uninit` while the node itself is not uniformly
+//! `Uninit`), preserving the current `Live / PartiallyMoved / FullyMoved`
+//! **semantics** under new `Init / Partial / Uninit` names:
+//! `Live ↔ Init`, `PartiallyMoved ↔ Partial`, `FullyMoved ↔ Uninit` (root `Uninit`).
+//! Helpers `places_overlap` / `Place::is_prefix_of` / `Place::overlaps` and
+//! `MovePathTree` traversal (`find`, `set_state`, subtree fold) will replace the
+//! string `rfind`/`starts_with` walks without semantic change.
+//!
+//! TODO(Phase 3): replace `VarState::moved_fields: FxHashMap<String, _>` with
+//! `MovePathTree<Place>` (see `semantic::move_path::{MovePath, MovePathTree}`).
+//! `MovePathTree` is rooted in `Place`; `VarState::level` will be derived from
+//! the root `InitState` (`Init`/`Partial`/`Uninit`) rather than stored as `u8`.
+//! Keep `Live`/`PartiallyMoved`/`FullyMoved` observable behavior — only the
+//! underlying storage becomes `Init`/`Partial`/`Uninit` in the tree.
+//! Migration candidates: `mark_field_moved`, `mark_field_reinitialized`,
+//! `is_field_moved` → candidates for `places_overlap` vs `InitState` queries
+//! (`Place::is_prefix_of` / `places_overlap` + `MovePathTree::state_at` /
+//! `init_state`). No logic deletion in this phase; comments/scaffolding only.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -47,20 +78,50 @@ pub struct MoveError {
     pub note_message: Option<String>,
 }
 
+/// Per-variable moved-ness lattice — current vs future representation.
+///
+/// # Current representation (authoritative in this phase)
+/// `VarState` is a flat struct with `level: u8` encoding the lattice
+/// `0 = Live` / `1 = PartiallyMoved` / `2 = FullyMoved`, plus
+/// `moved_fields: FxHashMap<String, (Span, &'static str)>` of dotted paths
+/// (`"a"`, `"a.b"`) from `expr_root_and_path`. `FullyMoved` (`level == 2`)
+/// means the whole variable is `Uninit`; `PartiallyMoved` means some field
+/// sub-place is `Uninit` but the root is still `Init`-ish. This keeps the
+/// `Live`/`PartiallyMoved`/`FullyMoved` **semantics** that callers observe.
+///
+/// # Future representation (prep only, not switched yet)
+/// `semantic::move_path::MovePathTree<Place>` where every `MovePath` node
+/// corresponds to a `Place` (the tree is *rooted in `Place`*). Each node
+/// carries `InitState::{Init, Uninit, Partial}` — `Partial` is the analogue of
+/// `PartiallyMoved` (some descendant `Uninit`), `Init` ↔ `Live`, `Uninit` ↔
+/// `FullyMoved`. `MovePathTree` helpers fold/lookup via `Place::is_prefix_of` /
+/// `places_overlap` instead of string `rfind('.')` / `starts_with`.
+///
+/// TODO(Phase 3): replace `moved_fields: FxHashMap<String, _>` with
+/// `MovePathTree<Place>` and derive `level`/`Live`/`PartiallyMoved`/`FullyMoved`
+/// from the tree's `InitState` at the root (`Init` → `Live`, `Partial` →
+/// `PartiallyMoved`, `Uninit` → `FullyMoved`). See
+/// `semantic::move_path::{MovePath, MovePathTree, InitState}` and helpers for
+/// tree traversal. No behavior change in this prep phase.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VarState {
+    /// Lattice level: `0 = Live (Init)`, `1 = PartiallyMoved (Partial)`,
+    /// `2 = FullyMoved (Uninit)`. Future: derived from
+    /// `MovePathTree<Place>` root `InitState::{Init, Partial, Uninit}`.
     pub level: u8, // 0 = live, 1 = partially moved, 2 = fully moved
     pub move_span: Option<Span>,
     pub move_reason: Option<&'static str>,
     /// Dotted field paths of moved sub-places, e.g. `"left"`, `"a.b"`.
     /// Current representation is `String`-based (joined by `"."` from
     /// `expr_root_and_path`). Each entry records where the field was moved and why.
-    /// TODO(Place Phase 1): migrate to `semantic::place::Place` projections —
-    /// `moved_fields` will become keyed by structured `Place`/`Projection`
-    /// (Field/Deref/Index/TupleField) instead of raw strings. Pure helpers on
-    /// `Place` (prefix/overlap/comparison) will replace the manual
-    /// `rfind('.')` / `starts_with` string walks in `is_field_moved` and
-    /// `mark_field_reinitialized`. No deletion in this phase; comments only.
+    /// TODO(Phase 3): replace with `MovePathTree<Place>` — each `MovePath` node
+    /// corresponds to a `Place` (`Place { local, projections: [Field(..), Deref,
+    /// Index, TupleField(..)] }`). The tree stores `InitState::{Init, Uninit,
+    /// Partial}` per node; `places_overlap` / `Place::is_prefix_of` and
+    /// `MovePathTree` traversal replace the manual `rfind('.')` / `starts_with`
+    /// string walks in `is_field_moved` and `mark_field_reinitialized`. See
+    /// `semantic::move_path` for `MovePath`/`MovePathTree` helpers. No deletion
+    /// in this phase; comments/scaffolding only.
     pub moved_fields: FxHashMap<String, (Span, &'static str)>,
 }
 
@@ -85,9 +146,15 @@ impl VarState {
         // String-path field tracking: `path` is a dotted string like `"left"` or
         // `"a.b"` produced by `expr_root_and_path`. Stored verbatim in
         // `moved_fields` — prefix semantics are manual (`starts_with`).
-        // TODO(Place Phase 1): replace `path: &str` with `place: &Place` / structured
-        // projections (`Field`/`Deref`/`Index`/`TupleField`). `Place` helpers will
-        // handle prefix/overlap without string splitting.
+        // TODO(Place Phase 1 / MovePath Phase 3): replace `path: &str` with
+        // `place: &Place` / `&MovePath` structured projections
+        // (`Field`/`Deref`/`Index`/`TupleField`). `Place` helpers
+        // (`places_overlap`, `Place::is_prefix_of` / `Place::overlaps`) plus
+        // `MovePathTree::set_state(place, InitState::Uninit)` will handle
+        // prefix/overlap without string splitting. Candidate for
+        // `places_overlap` vs `InitState` migration — this method will become
+        // `tree.insert_or_update(place, Uninit)` with ancestor `Partial`
+        // propagation.
         if self.level < 2 {
             self.level = 1;
             if self.move_span.is_none() {
@@ -101,8 +168,12 @@ impl VarState {
     pub fn mark_field_reinitialized(&mut self, path: &str) {
         // Current: string prefix removal — `path` and any `"path.*"` subpaths are
         // removed via `format!("{path}.")` + `starts_with`.
-        // TODO(Place Phase 1): `Place::is_prefix_of` / `Place::strip_prefix` will
-        // replace this `String` prefix walk; projections compare structurally.
+        // TODO(Place/MovePath Phase 3): `Place::is_prefix_of` /
+        // `places_overlap` and `MovePathTree::set_state(place, InitState::Init)`
+        // will replace this `String` prefix walk; projections compare
+        // structurally (`Field`/`Deref`/`Index`/`TupleField`). Candidate for
+        // `places_overlap` vs `InitState` migration — re-init will fold the
+        // subtree to `Init` and recompute ancestors (`Partial`/`Init`).
         if self.level == 1 {
             self.moved_fields.remove(path);
             let prefix = format!("{path}.");
@@ -114,6 +185,7 @@ impl VarState {
             }
         }
     }
+
 
     pub fn is_moved(&self) -> bool {
         self.level > 0
@@ -127,10 +199,14 @@ impl VarState {
         // String-path overlap: walks `path` upward via `rfind('.')` checking
         // ancestors (`"a.b.c"` → `"a.b"` → `"a"`). This is the string analogue of
         // a `Place` prefix test — e.g. moving `p.left` poisons `p.left.inner`.
-        // TODO(Place Phase 1): replace with `Place` prefix check —
-        // `Place::is_prefix_of` / `Place::overlaps` using `Projection::Field`
-        // vectors instead of dot-split strings. `VarState` will store
-        // `FxHashMap<Place, _>` or `FxHashSet<Place>`.
+        // TODO(Place/MovePath Phase 3): replace with `Place` prefix check —
+        // `Place::is_prefix_of` / `places_overlap` + `MovePathTree::state_at`
+        // using `Projection::Field` vectors instead of dot-split strings.
+        // Candidate for `places_overlap` vs `InitState` migration: query will
+        // become `tree.state_at(place).is_uninit_or_partial_ancestor()` /
+        // `InitState::{Init, Partial, Uninit}` check (return `Some` if `Uninit`
+        // at `place` or any prefix). `VarState` will store
+        // `MovePathTree<Place>` / `FxHashMap<Place, _>` instead of strings.
         if self.is_fully_moved() {
             return self.move_span.zip(self.move_reason);
         }
