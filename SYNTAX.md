@@ -779,8 +779,8 @@ zoo.cage = String.from_str("c"); // reinit — `zoo.cage` is live again
 
 ```silver
 Vec<String> v; v.push(String.from_str("a")); v.push(String.from_str("b"));
-String s = move v[0]; // moves `v[0]`; `v[1]` stays live but `v` is partially moved
-// v[0] = String.from_str("c"); // reinit `v[0]`
+String s = move v[0]; // conservatively moves the Index place; later v[1] access is rejected
+// v[0] = String.from_str("c"); // reinit `v[0]` before indexed access
 ```
 
 Borrow origins interact with places: `&x` vs `move x` conflicts; `&x.a` vs `move x.b` is allowed (disjoint fields); `&mut x.a` vs `move x.a` conflicts.

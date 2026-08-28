@@ -588,6 +588,47 @@ struct MoveChecker {
 }
 
 impl MoveChecker {
+    fn consuming_receiver(
+        &self,
+        receiver: &ast::Expression,
+        method: &str,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        let Some((root, path)) = expr_root_and_path(receiver) else {
+            return false;
+        };
+        let Some(ty) = self.get_field_type(&root, &path, var_types) else {
+            return false;
+        };
+        self.facts
+            .value_receivers
+            .contains(&(Facts::owner_key(&ty), method.to_string()))
+    }
+
+    /// Check expressions evaluated to compute indexed/dereferenced places.
+    fn check_place_operands(
+        &mut self,
+        expr: &ast::Expression,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::FieldAccess { object, .. } => {
+                self.check_place_operands(object, state, scopes, var_types);
+            }
+            ast::ExpressionKind::Index { object, index } => {
+                self.check_place_operands(object, state, scopes, var_types);
+                self.check_expr(index, state, scopes, var_types);
+            }
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => self.check_place_operands(operand, state, scopes, var_types),
+            _ => {}
+        }
+    }
+
     fn check_function(&mut self, parameters: &[ast::Parameter], body: &ast::Block) {
         let mut state = State::default();
         let mut scopes: Vec<Vec<ScopeEntry>> = Vec::new();
@@ -841,6 +882,7 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::Move(inner) => {
+                self.check_place_operands(inner, state, scopes, var_types);
                 // Phase 11 — Index place: try structured Place first for v[i] / x.a[i] etc.
                 // Index projections are built via Place::new(local).index() /
                 // push_projection(Projection::Index) and are index-insensitive (conservative).
@@ -975,16 +1017,8 @@ impl MoveChecker {
                 arguments,
             } => {
                 let is_consuming = method.name == "drop"
-                    || match receiver.kind.as_ref() {
-                        ast::ExpressionKind::Identifier(ident) => {
-                            var_types.get(&ident.name).is_some_and(|ty| {
-                                self.facts
-                                    .value_receivers
-                                    .contains(&(Facts::owner_key(ty), method.name.clone()))
-                            })
-                        }
-                        _ => false,
-                    };
+                    || self.consuming_receiver(receiver, &method.name, var_types);
+                self.check_place_operands(receiver, state, scopes, var_types);
                 if is_consuming {
                     if let Some((root_name, path)) = expr_root_and_path(receiver)
                         && state.contains_key(&root_name)
@@ -1133,7 +1167,7 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::FieldAccess { object, .. } => {
-                // Prefer structured Place (handles Field; Index handled below but also chain-aware)
+                self.check_place_operands(expr, state, scopes, var_types);
                 if let Some(place) = place_from_expr(expr) {
                     if let Some(var) = state.get(&place.local.clone()) {
                         if var.is_fully_moved() {
@@ -1230,6 +1264,7 @@ impl MoveChecker {
                 if *operator == ast::BinaryOperator::Assign {
                     // Evaluate RHS first (in case it uses or moves resources).
                     self.check_expr(right, state, scopes, var_types);
+                    self.check_place_operands(left, state, scopes, var_types);
 
                     // Re-initialization handling — now via `MovePathTree` + `Place::is_prefix_of`
                     // Phase 11: Index places `v[i]` use Place::new(...).index() / Projection::Index
@@ -1590,6 +1625,32 @@ mod tests {
         assert!(
             errs.iter().any(|m| m.contains("use of moved value 't'")),
             "expected use-after-receiver-move error, got {errs:?}"
+        );
+    }
+    #[test]
+    fn use_after_consuming_field_receiver_errors() {
+        let errs = errors(
+            "impl T { i64 consume(T self) { return self.p; } }\n\
+             struct Holder { T item; }\n\
+             i32 g() { Holder h; h.item.consume(); return (i32)h.item.p; }",
+        );
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("use of moved field 'h.item.p'")),
+            "expected use-after-field-receiver error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_index_operand_is_checked() {
+        let errs = errors(
+            "struct Box { T item; }\n\
+                    i32 g() { T items[1]; Box b; move b.item; return (i32)items[b.item.p].p; }",
+        );
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("use of moved field 'b.item.p'")),
+            "expected moved dynamic-index operand error, got {errs:?}"
         );
     }
 
