@@ -523,6 +523,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Resolve `ty` to the Drop destructor function name, if `ty` owns resources.
+    ///
+    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
+    /// `needs_drop` / `is_copy` will be the single source of truth for Copy vs
+    /// owning-type classification; this heuristic stays authoritative until the
+    /// cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
+    /// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
+    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
+    /// — typeck/move_check/codegen must not independently decide Copy/Drop.
+    /// No logic change in this phase; keep existing per-subsystem heuristics working in parallel.
     pub(crate) fn get_drop_function_name(
         &mut self,
         ty: &ast::Type,
@@ -755,6 +765,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// register `var_ptr`'s destructor (plus cascaded field drops) as a
     /// deferred drop on the current scope. Records the flag so `move` and
     /// by-value transfers can clear it. Shared by parameters and locals.
+    ///
+    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
+    /// `needs_drop(ty)` (equivalently `!is_copy(ty)` for owning types) will gate
+    /// whether a flag/defer is emitted. This code stays authoritative until the
+    /// cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
+    /// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
+    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
+    /// — the `get_drop_function_name` / `is_copy` decision will be shared via
+    /// `semantic::type_properties`. No logic change in this phase.
     pub(crate) fn register_drop_flag(
         &mut self,
         name: &str,

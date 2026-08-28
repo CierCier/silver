@@ -152,6 +152,12 @@ pub enum InitOp {
 /// Parallel scaffolding: not called in the hot string-path checker yet. Future
 /// wiring will call `crate::semantic::init::{move_out, copy_from, initialize}`
 /// via `MovePathTree` (`Place::is_prefix_of`/`places_overlap` + `InitState`).
+///
+/// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
+/// `is_copy` will be `semantic::type_properties::is_copy(ty)` (Implicit Copy retained:
+/// bool/i64/f64/ptr + all-Copy struct = Copy else non-Copy). Future split:
+/// `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`. This helper's
+/// `is_copy: bool` param will be supplied by the central query; keep scaffolding parallel.
 #[allow(dead_code)]
 fn transition_for_assign(place: &Place, is_copy: bool) -> InitOp {
     let _ = place;
@@ -388,6 +394,15 @@ type State = FxHashMap<String, VarState>;
 /// Scope entry: (name, previous state, previous type) so shadowing restores.
 type ScopeEntry = (String, Option<VarState>, Option<ast::Type>);
 /// Program-wide facts used to classify moves (computed once per program).
+///
+/// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
+/// `needs_drop` / `is_copy` will be the single source of truth for Copy vs
+/// owning-type classification; `is_tracked`/`Facts` stays authoritative until
+/// the cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
+/// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
+/// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
+/// — typeck/move_check/codegen must not independently decide Copy/Drop.
+/// No logic change in this phase; keep existing per-subsystem heuristics working in parallel.
 #[derive(Default)]
 struct Facts {
     /// Base type names that implement `Drop`.
@@ -563,6 +578,14 @@ impl MoveChecker {
     /// True if `ty` can own resources (has a Drop impl, possibly nested).
     /// `Task<T>` handles are tracked too: `wait` consumes the handle, so a
     /// second `wait` on the same identifier is a use-after-move.
+    ///
+    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
+    /// `needs_drop(T)` ⇔ `!is_copy(T)` for non-Copy owning types; `is_tracked`
+    /// is the current move-check analogue of `needs_drop`. Keep authoritative
+    /// until cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct
+    /// = Copy else non-Copy like String/Vec/...).
+    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`.
+    /// No logic change in this phase.
     fn is_tracked(&self, ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),

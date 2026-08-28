@@ -11,3 +11,4 @@ pub mod move_path;
 pub mod place;
 pub mod send_check;
 pub mod typeck;
+pub mod type_properties;
