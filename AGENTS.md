@@ -99,11 +99,12 @@ flowchart TD
 ### Detailed Compiler Stages
 
 #### 1. Lexer (`lexer.rs`)
+- Depends on the [**Elise**](https://github.com/CierCier/elise) parsing engine (`elise-core`, `elise-lex`) for token extraction, span tracking, and lexical streaming.
 - Scans raw text into a flat vector of `LexToken` containing the enum token type, exact character spans, and lexed text.
 - Supports multi-character tokens, complex numbers (e.g. `3.5i`), escape sequences, and keyword mapping.
 
 #### 2. Parser (`parser/prt_parser.rs`)
-- Operates as a **Predictive Reduction Table (PRT) Parser**.
+- Built on the [**Elise**](https://github.com/CierCier/elise) grammar/reduction framework (`elise-parse`, `elise-grammar`) as a **Predictive Reduction Table (PRT) Parser**.
 - Looks ahead at the start of top-level blocks to map tokens to `TokenClass` (e.g., `Struct`, `Enum`, `Impl`, `TypeStart`) and predicts which `ItemProduction` to instantiate.
 - Finds item boundary segments (`find_item_end`) and executes a specialized reduction parser block on that slice of tokens.
 
