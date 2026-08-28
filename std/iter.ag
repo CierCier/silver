@@ -1,6 +1,26 @@
+// Ownership contract for iteration (Phase 12):
+//
+// - `iter(&self)` borrows the container and yields element copies/borrows
+//   without consuming the container. Implemented as `SliceIter<T> iter(&Vec<T> self)`
+//   or `HashMapIter<K,V> iter(&HashMap<K,V> self)` etc. The iterator holds a
+//   raw pointer + len + idx, yields via copy (`data[idx]` / `keys[idx]`), and
+//   does NOT own or free the buffer. Borrow checker keeps `&self` live while
+//   the iterator exists; calling `iter()` does not invalidate the container.
+// - `into_iter(self)` consumes the container by value (`Self self`, not `&Self`).
+//   It transfers the backing buffer to the iterator (`iter.data = move vec.data;
+//   vec.data = null; vec.len = 0; vec.cap = 0` for Vec; keys/values/ctrl for
+//   HashMap) so the iterator owns the buffer and frees it on `Drop`. Each
+//   `next()` does `value = move data[idx]` transferring ownership of `T` (for
+//   Copy T this is a bitwise copy). The container is left moved-from and its
+//   own `drop` is a no-op.
+// - `drain(&mut self)` similarly moves the buffer out, leaving the container
+//   empty but still live (re-usable after drain).
+// - Hybrid verbosity / implicit Copy retained: iterator structs stay concrete,
+//   `Iterator::next(Self* self)` is object-safe, and `move` on Copy T is copy.
 import std.optional;
 
-// IntoIterator: types that can be iterated over via into_iter(self).
+// IntoIterator: types that can be consumed via `into_iter(self)` — takes
+// ownership of `self` by value (Self self, not &Self) and drains the buffer.
 // Required method: Iterator into_iter(self);
 trait IntoIterator {
     type Item;

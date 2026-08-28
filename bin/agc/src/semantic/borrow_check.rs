@@ -1,22 +1,9 @@
-//! Active Borrow Conflict Checker (`semantic/borrow_check.rs`).
-//!
-//! Enforces the core memory-safety invariant:
-//! For any memory location `P` at any program point:
-//!   `(Any number of &P) ⊕ (Exactly one &mut P)`
-//!
-//! Invariants:
-//! 1. Cannot take `&mut x` while any active `&x` or `&mut x` exists.
-//! 2. Cannot take `&x` while any active `&mut x` exists.
-//! 3. Cannot assign to `x` or mutate `x` while any borrow of `x` is active.
-//! 4. Cannot move `x` (`move x`) while any borrow of `x` is active.
-//! 5. Cannot read/use `x` while an exclusive borrow `&mut x` is active.
-//! 6. Disjoint field borrows (`&mut p.left` and `&mut p.right`) are permitted simultaneously.
-//! 7. Raw pointers (`T*`) bypass borrow checking.
-//! 8. Reborrowing from `&mut T` creates a temporary reborrow that suspends the original.
-
+//! Borrow checker: enforces `&`/`&mut` exclusivity; raw pointers are unchecked.
+//! Places make field conflicts structural instead of string-prefix based.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
+use crate::semantic::place::{Place, Projection, places_overlap};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// One borrow conflict diagnostic with optional multi-span note.
@@ -43,7 +30,7 @@ impl BorrowKind {
     }
 }
 
-/// Metadata about a reference variable in scope.
+/// Metadata about a reference variable. TODO(Place Phase 1): replace `(root,path)` with `Place`.
 #[derive(Debug, Clone)]
 pub struct RefVarInfo {
     pub root: String,
@@ -52,7 +39,7 @@ pub struct RefVarInfo {
     pub span: Span,
 }
 
-/// An active loan taken on `root.path`.
+/// Active loan on `root.path`. TODO(Place Phase 1): replace with `Place` + `Place::overlaps`.
 #[derive(Debug, Clone)]
 pub struct ActiveBorrow {
     pub root: String,
@@ -60,13 +47,31 @@ pub struct ActiveBorrow {
     pub kind: BorrowKind,
     pub span: Span,
     pub borrower: Option<String>,
-    /// Statement index (within the enclosing block) after which this loan
-    /// expires, if it was last used there (NLL); `None` = live until scope exit
-    /// (reference parameters, or last use not yet observed).
+    /// Statement index after which this loan expires (NLL); `None` = scope exit.
     pub last_use: Option<usize>,
-    /// Reference-parameter loan: stays live for the whole function (the caller
-    /// still holds the borrow), never NLL-expired.
+    /// Reference-parameter loan: live for whole function, never NLL-expired.
     pub param: bool,
+}
+
+/// Place-based borrow (Phase 8 scaffolding, parallel to `ActiveBorrow`). Overlap via `places_overlap`.
+/// `&x.a` vs `move x.b` allowed (disjoint); `&x` vs `move x.a` overlaps (prefix).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct Borrow {
+    pub place: Place,
+    pub kind: BorrowKind,
+}
+
+/// `true` iff places overlap (one is prefix of the other on same local).
+#[allow(dead_code)]
+pub fn borrow_conflicts(a: &Place, b: &Place) -> bool {
+    places_overlap(a, b)
+}
+
+/// `true` iff `place` overlaps any active borrow (any `&x.a` vs `move x.b` disjoint else conflict).
+#[allow(dead_code)]
+pub fn does_move_conflict_with_borrow(place: &Place, borrows: &[Borrow]) -> bool {
+    borrows.iter().any(|b| places_overlap(&b.place, place))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +92,10 @@ impl CallAccessKind {
 }
 
 struct CallArgAccess {
+    // String-based place for call-arg overlap checks — mirrors ActiveBorrow's
+    // `(root, path)` model. Overlap in `check_call` uses `paths_overlap`.
+    // TODO(Place Phase 1): `Place` key — `semantic::place::Place` with pure
+    // `overlaps` helper will replace `(String,String)` here as well.
     root: String,
     path: String,
     kind: CallAccessKind,
@@ -167,6 +176,12 @@ impl BorrowChecker {
     }
 
     /// Check if two field paths on the same root variable overlap.
+    /// String-based overlap: `p1` overlaps `p2` when one is a dot-prefix of the
+    /// other (or either is empty = whole place). This is the string analogue of
+    /// `Place` projection prefix testing.
+    /// TODO(Place Phase 1): replace with `semantic::place::Place::overlaps` /
+    /// `is_prefix_of` on structured `Projection::Field` vectors. Pure helper on
+    /// `Place` will handle `Field`/`Deref`/`Index`/`TupleField` structurally.
     fn paths_overlap(p1: &str, p2: &str) -> bool {
         if p1 == p2 || p1.is_empty() || p2.is_empty() {
             return true;
@@ -175,7 +190,6 @@ impl BorrowChecker {
         let prefix2 = format!("{p2}.");
         p2.starts_with(&prefix1) || p1.starts_with(&prefix2)
     }
-
     /// Find an active loan that conflicts with `(root, path, requested_kind)`.
     fn find_conflict(
         &self,
@@ -255,8 +269,62 @@ impl BorrowChecker {
         None
     }
 
+    /// Phase 11 — Place-based conflict finder for `Index` (`v[i]`) overlap.
+    ///
+    /// Uses `places_overlap` / `Place::overlaps` on structured `Place`s.
+    /// `v` overlaps `v[i]` (prefix `[]` vs `[Index]`), and `v[i]` overlaps
+    /// `v[j]` (both `[Index]` → `Index == Index`, conservative, index-insensitive).
+    /// This is the structured counterpart to `paths_overlap` for container indices,
+    /// ensuring `move v[i]` and `&v[i]` conflicts are judged via `Place::Index`.
+    fn find_conflict_for_place(
+        &self,
+        place: &Place,
+        requested_kind: BorrowKind,
+        ignore_borrower: Option<&str>,
+    ) -> Option<&ActiveBorrow> {
+        // Convert active string loans to Places for structural comparison.
+        // For loans that were originally `v[i]`, the string model stored them as `v`
+        // (transparent), so the converted Place will be `Place::new("v")` without Index.
+        // To remain conservative, we also consider that any active loan on `v` overlaps `v[i]`
+        // via Place prefix check: `Place::new("v")` is prefix of `Place::new("v").index()`.
+        // Thus building Places from stored (root,path) and checking `places_overlap`
+        // yields the same conservative result as the string check for existing loans,
+        // but correctly handles new `v[i]` targets via their `[Index]` projection.
+        for scope in self.scopes.iter().rev() {
+            for b in scope.iter().rev() {
+                if let Some(ign) = ignore_borrower
+                    && b.borrower.as_deref() == Some(ign)
+                {
+                    continue;
+                }
+                // Build Place for active borrow: root + dotted fields (Index-transparent stored form)
+                let mut active_place = Place::new(&b.root);
+                if !b.path.is_empty() {
+                    for seg in b.path.split('.') {
+                        active_place.push_projection(Projection::Field(seg.to_string()));
+                    }
+                }
+                if self.places_overlap_for_borrow(&active_place, place) {
+                    match requested_kind {
+                        BorrowKind::Shared => {
+                            if b.kind == BorrowKind::Exclusive {
+                                return Some(b);
+                            }
+                        }
+                        BorrowKind::Exclusive => {
+                            return Some(b);
+                        }
+                    }
+                }
+                // Also consider the stored loan's Place overlapping via string-style prefix
+                // for Index-transparent loans: `v` (active) overlaps `v[i]` (requested) was already
+                // covered by `active_place` being prefix of `place` when `place` has Index.
+            }
+        }
+        None
+    }
+
     fn check_program(&mut self, program: &ast::Program) {
-        self.struct_ref_fields.clear();
         for item in &program.items {
             if let ast::ItemKind::Struct(st) = &item.kind {
                 let mut ref_fields = FxHashSet::default();
@@ -704,6 +772,26 @@ impl BorrowChecker {
     }
 
     /// Extract root variable name, field path, and whether accessed through a reference variable.
+    /// String-based `Place` builder: walks `Identifier`/`FieldAccess`/`Index`/`Deref` chains
+    /// and produces `(root, "a.b", ref_var)` where the path is `"."`-joined.
+    /// `Index` and `Deref` are transparent passthroughs (path unchanged) in this
+    /// string model — deeper `Place` tracking will need distinct projections.
+    /// Reborrows via `ref_bindings` re-root through an existing `(root,path)`.
+    /// TODO(Place Phase 1): replace with `semantic::place::Place::from_expr` —
+    /// `Place { local, projections: [Field|Index|Deref|TupleField] }` is the
+    /// structured counterpart. Structured projections avoid the lossy
+    /// `Index→transparent` / `TupleField→Field` conflation and let
+    /// `Place::overlaps` handle `Field` vs `Index`/`Deref` soundly. No deletion
+    /// in this phase; comments only.
+    ///
+    /// Phase 11 — Index is conservative: `v[i]` extracts as `(v, "", ref_var)` in
+    /// the string model (transparent), which already yields conservative overlap
+    /// (`v` overlaps `v[i]` because empty path overlaps anything, and `v[i]` vs
+    /// `v[j]` both collapse to `v` and thus overlap). Structured `extract_place`
+    /// below preserves `Projection::Index` (`Place::new("v").index()` via
+    /// `push_projection(Projection::Index)`) and `Place::overlaps` gives the same
+    /// conservative result (`v` prefix of `v[i]`, `v[i]` == `v[j]`), documented as
+    /// Phase 11 limitation (index-insensitive, index values opaque).
     fn extract_root_and_path(
         &self,
         expr: &ast::Expression,
@@ -740,6 +828,60 @@ impl BorrowChecker {
         }
     }
 
+    /// Phase 11 — Structured `Place` extraction for `Index` (`v[i]`) handling.
+    ///
+    /// Builds `Place { local, projections: [Field|Index|Deref] }` from
+    /// `Identifier` / `FieldAccess` / `Index` / `*p` chains. `v[i]` → `Place::new("v").index()`
+    /// (`push_projection(Projection::Index)`), `x.a[i]` → `Place::new("x").field("a").index()`.
+    /// Index values are opaque — any `v[i]`/`v[j]` both become `[Index]` and
+    /// `Place::overlaps` treats them as overlapping (conservative, index-insensitive,
+    /// Phase 11 limitation). Reborrows re-root like `extract_root_and_path`.
+    /// Returns `None` for non-place expressions or raw-pointer bases.
+    fn extract_place(&self, expr: &ast::Expression) -> Option<(Place, Option<String>)> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                if self.raw_ptr_vars.contains(&ident.name) {
+                    return None;
+                }
+                if let Some(existing) = self.ref_bindings.get(&ident.name) {
+                    let mut place = Place::new(&existing.root);
+                    if !existing.path.is_empty() {
+                        for seg in existing.path.split('.') {
+                            place.push_projection(Projection::Field(seg.to_string()));
+                        }
+                    }
+                    return Some((place, Some(ident.name.clone())));
+                }
+                Some((Place::new(ident.name.clone()), None))
+            }
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                let (mut base, ref_var) = self.extract_place(object)?;
+                base.push_projection(Projection::Field(field.name.clone()));
+                Some((base, ref_var))
+            }
+            ast::ExpressionKind::Index { object, .. } => {
+                let (mut base, ref_var) = self.extract_place(object)?;
+                base.push_projection(Projection::Index);
+                Some((base, ref_var))
+            }
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => {
+                let (mut base, ref_var) = self.extract_place(operand)?;
+                base.push_projection(Projection::Deref);
+                Some((base, ref_var))
+            }
+            _ => None,
+        }
+    }
+
+    /// Place-based overlap check for `extract_place` results.
+    /// Delegates to `places_overlap` / `Place::overlaps` — conservative for `Index`.
+    fn places_overlap_for_borrow(&self, a: &Place, b: &Place) -> bool {
+        places_overlap(a, b)
+    }
+
     /// Register a borrow bound to a named variable (`let r = &...`).
     fn register_named_borrow(
         &mut self,
@@ -748,6 +890,64 @@ impl BorrowChecker {
         kind: BorrowKind,
         span: Span,
     ) {
+        // Phase 11 — Try structured Place for Index first (conservative Index overlap).
+        // If target is `v[i]` (or `x.a[i]`), `extract_place` yields `Place::new("v").index()`
+        // and we check via `places_overlap` / `Place::overlaps` (v overlaps v[i], v[i] overlaps v[j]).
+        // This complements the string `extract_root_and_path` path which collapses Index transparently.
+        if let Some((place, ref_var_place)) = self.extract_place(target) {
+            if place.projections.contains(&Projection::Index) {
+                if let Some(conflict) =
+                    self.find_conflict_for_place(&place, kind, ref_var_place.as_deref())
+                {
+                    let full_target = format!("{}[index]", place.local);
+                    let msg = match (kind, conflict.kind) {
+                        (BorrowKind::Shared, BorrowKind::Exclusive) => {
+                            msg::cannot_borrow_as_shared_while_mutable(&full_target)
+                        }
+                        (BorrowKind::Exclusive, BorrowKind::Shared) => {
+                            msg::cannot_borrow_as_mutable_while_shared(&full_target)
+                        }
+                        (BorrowKind::Exclusive, BorrowKind::Exclusive) => {
+                            msg::cannot_borrow_as_mutable_more_than_once(&full_target)
+                        }
+                        (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
+                    };
+                    self.error_with_note(
+                        msg,
+                        span,
+                        Some(conflict.span),
+                        Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
+                    );
+                }
+                let (root, path, _ref_var) = self.extract_root_and_path(target).unwrap_or((
+                    place.local.clone(),
+                    String::new(),
+                    ref_var_place,
+                ));
+                let loan = ActiveBorrow {
+                    root: root.clone(),
+                    path: path.clone(),
+                    kind,
+                    span,
+                    borrower: Some(binding_name.to_string()),
+                    last_use: self.get_last_use_for(binding_name),
+                    param: false,
+                };
+                self.ref_bindings.insert(
+                    binding_name.to_string(),
+                    RefVarInfo {
+                        root,
+                        path,
+                        kind,
+                        span,
+                    },
+                );
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.push(loan);
+                }
+                return;
+            }
+        }
         if let Some((root, path, ref_var)) = self.extract_root_and_path(target) {
             let full_target = if path.is_empty() {
                 root.clone()
@@ -948,9 +1148,7 @@ impl BorrowChecker {
                         (CallAccessKind::Exclusive, CallAccessKind::Shared)
                         | (CallAccessKind::Shared, CallAccessKind::Exclusive) => {
                             self.error_with_note(
-                                msg::cannot_borrow_as_mutable_and_shared_in_same_call(
-                                    &full_target,
-                                ),
+                                msg::cannot_borrow_as_mutable_and_shared_in_same_call(&full_target),
                                 b.span,
                                 Some(a.span),
                                 Some(msg::note_argument_borrow_here(a.kind.as_str())),

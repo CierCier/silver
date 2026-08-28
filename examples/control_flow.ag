@@ -43,7 +43,7 @@ i32 main() {
     }
 
     i32 z = 40;
-    i32* p = &z;
+    let p = &z;
     *p = 50;
     @println("z via pointer: {}", z);
 

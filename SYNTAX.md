@@ -748,7 +748,42 @@ semantics and drop flags.
 4. **Defer stack**: `defer` statements execute in **LIFO** order at scope exit,
    including before `return`.
 
----
+### 8.1 Implicit Copy vs Move and Place Granularity
+
+`TypeProperties {is_copy, needs_drop}` is the single source of truth:
+
+- **Copy** (bitwise, `copy_from` — no invalidation): primitives (`bool`, `i8`/`i16`/`i32`/`i64`/`u8`…/`f32`/`f64`/`char`), raw pointers (`T*`), and structs/enums whose every field/variant payload is Copy. `T x = y` copies.
+- **Move** (destructive, `move_out` — invalidates source): `String`, `Vec<T>`, `HashMap<K,V>`, `HashSet<K>`, `Deque<T>`, `Box<T>`, `Rc<T>`, `File`, etc., and any struct containing them. `T x = y` moves; use `T x = move y` to be explicit. LSP shows implicit `move`/`copy` inlay hints before the source place.
+
+```silver
+String a = String.from_str("hello");
+String b = a;          // implicit move — LSP shows `move` before `a`, `a` is uninitialized after
+String c = move b;     // explicit move — no inlay hint (already `move`)
+i64 x = 42;
+i64 y = x;             // copy — LSP shows `copy` before `x`, `x` stays live
+```
+
+Moves are field-granular via `Place {local, projections}` with `is_prefix_of`/`overlaps`:
+
+```silver
+struct Zoo { String cage; String keeper; }
+Zoo zoo;
+zoo.cage = String.from_str("a");
+zoo.keeper = String.from_str("b");
+String cage = move zoo.cage; // moves only `zoo.cage`; `zoo.keeper` stays live
+zoo.cage = String.from_str("c"); // reinit — `zoo.cage` is live again
+// move zoo  would invalidate both fields; `zoo.cage` vs `zoo.keeper` are disjoint
+```
+
+`v[i]` is an `Index` place. Index is conservative: `v` overlaps `v[i]`, and `v[i]` overlaps `v[j]` (different indices) — borrow/move of `v[i]` conflicts with `v[j]` and with `v`.
+
+```silver
+Vec<String> v; v.push(String.from_str("a")); v.push(String.from_str("b"));
+String s = move v[0]; // conservatively moves the Index place; later v[1] access is rejected
+// v[0] = String.from_str("c"); // reinit `v[0]` before indexed access
+```
+
+Borrow origins interact with places: `&x` vs `move x` conflicts; `&x.a` vs `move x.b` is allowed (disjoint fields); `&mut x.a` vs `move x.a` conflicts.
 
 ## 9. Concurrency & Threading
 

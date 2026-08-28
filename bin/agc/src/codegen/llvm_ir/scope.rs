@@ -1,3 +1,7 @@
+//! Scope/drop-flag codegen.
+//! Runtime flags remain the correctness fallback for conditional and partial moves.
+//! The semantic ownership passes provide the future static drop-elision boundary.
+//! Why separate this here: codegen should emit drops, not rediscover ownership.
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::AddressSpace;
@@ -314,6 +318,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let _ = self.defers.pop();
     }
 
+    /// Emit deferred drops/defers for the top `levels` scopes (LIFO).
+    ///
+    /// # Current runtime flags — correctness mechanism
+    ///
+    /// Each `DeferredEntry` carries an optional `i1*` drop flag. When present,
+    /// this method loads the flag and conditionally branches:
+    /// `if flag { drop } else { skip }` (`defer.run` / `defer.after`). This
+    /// runtime check is the current correctness mechanism — it handles
+    /// unconditional moves, conditional moves (branch/join), and partial moves
+    /// (field flags) without any static analysis of `InitState`.
+    ///
+    /// # Future hybrid — static elimination (optimization only)
+    ///
+    /// With `MovePathTree` authoritative, drop elaboration (Phase 7) will
+    /// classify each place at each scope exit as:
+    /// * **Known `Initialized`** → emit a direct `drop(ptr)` with no flag
+    ///   load/branch (static drop).
+    /// * **Known `Uninitialized` / `Moved`** → emit nothing (drop elided).
+    /// * **Dynamic / `PartiallyInitialized` / join-conditional** → keep the
+    ///   current runtime flag guard (`dynamic → drop flag`).
+    ///
+    /// The flag path remains the fallback; static elimination is purely an
+    /// optimization and must preserve the current observable behavior. No
+    /// deletion of the flag logic until the elaborated path is proven.
+    ///
+    /// TODO(Phase 7): formalize drop elaboration (`semantic/drop_elaborate.rs`
+    /// or `semantic::init` extension) that consumes `MovePathTree` states and
+    /// `Place::overlaps` / `Place::is_prefix_of` to build the elaborated drop
+    /// list per scope. `emit_defers` will then iterate the elaborated list
+    /// (already filtered to `Initialized` leaves, with `Uninitialized` elided
+    /// and `dynamic` still flagged) instead of re-deriving ownership. Example:
+    /// `struct Foo { a:String, b:String }` + `move foo.a` → elaborated drops
+    /// `[drop(foo.b)]` only. See `semantic::move_path::{MovePathTree,
+    /// InitState}` and `semantic::init::{is_initialized, move_out}`.
     pub(crate) fn emit_defers(&mut self, levels: usize) -> CodegenResult<()> {
         let total = self.defers.len();
         if levels == 0 || total == 0 {
@@ -392,6 +430,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Clear every per-field drop flag of `name` (ownership of the whole
     /// struct is transferring elsewhere): the fields no longer hold live
     /// values owned by this variable.
+    ///
+    /// Current runtime-flag correctness: field flags are `0 = no live value`,
+    /// `1 = live`. Clearing them prevents the field cascade emitted by
+    /// `register_field_drops` from double-dropping after a whole-struct move.
+    /// Future hybrid (Phase 7): when `MovePathTree` tracks `InitState` per
+    /// field `Place`, a whole-struct `move_out(Place::new(name))` will mark
+    /// the entire subtree `Uninitialized`; drop elaboration will then elide all
+    /// field drops statically, and this runtime clear becomes the `dynamic`
+    /// fallback only. `Place::overlaps` will decide which field flags are
+    /// invalidated (`move x.a` clears `x.a` and `x.a.b` but not `x.b`).
+    ///
+    /// TODO(Phase 7): replace string-keyed `field_flags` clearing with
+    /// `MovePathTree` subtree invalidation via `Place::is_prefix_of`; see
+    /// `semantic::init::move_out` and `semantic/drop_elaborate.rs` (planned).
     pub(crate) fn clear_field_flags(&mut self, name: &str) -> CodegenResult<()> {
         if let Some(var) = self.lookup_variable(name) {
             for (_, flag) in var.field_flags {
@@ -404,6 +456,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// Clear per-field drop flag for a specific field path (or any subfield of it).
+    ///
+    /// Current: string prefix walk (`path` == `p` || `p.starts_with("path.")`)
+    /// mirrors `Place::is_prefix_of` structurally; clears exactly the moved
+    /// subtree so overlapping children (e.g. `x.a.b` under `x.a`) are also
+    /// cleared while disjoint siblings (`x.b`) remain live.
+    /// Future (Phase 7): `Place::is_prefix_of` / `Place::overlaps` over
+    /// `MovePathTree` will replace the string walk; drop elaboration will use
+    /// the same predicate to decide which elaborated field drops to keep.
+    ///
+    /// TODO(Phase 7): migrate to `Place`-based invalidation
+    /// (`semantic::place::Place::is_prefix_of` + `MovePathTree`); see
+    /// `semantic/drop_elaborate.rs` (planned) and `semantic::init::move_out`.
     pub(crate) fn clear_field_flags_for_path(
         &mut self,
         root_name: &str,
@@ -523,6 +587,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Resolve the destructor symbol for `ty`.
+    ///
+    /// Drop liveness is handled separately; runtime flags remain the fallback.
     pub(crate) fn get_drop_function_name(
         &mut self,
         ty: &ast::Type,
@@ -679,6 +746,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Drop impl of its own: the active variant's Drop-typed payload values
     /// are dropped at scope exit (guarded by the variable's drop flag so a
     /// moved enum skips it).
+    ///
+    /// Current: allocates an `i1` flag (`{name}.drop = 1`) and a deferred
+    /// `EnumPayloadDrop`; `emit_defers` guards it with a flag check and
+    /// `emit_enum_payload_drop` tag-switches to the live variant's payload
+    /// drops. Future hybrid (Phase 7): `MovePathTree` per-variant state +
+    /// `Place::overlaps` will allow static knowledge (`Initialized` → direct
+    /// payload drop, `Uninitialized` → no payload drop, dynamic → flag) — same
+    /// hybrid as struct field drops. Keep runtime flag as correctness until
+    /// elaboration is proven.
+    ///
+    /// TODO(Phase 7): formalize drop elaboration for enums using
+    /// `MovePathTree`/`InitState` and `Place::overlaps`; see
+    /// `semantic/drop_elaborate.rs` (planned).
     fn register_enum_payload_cascade(
         &mut self,
         ty: &ast::Type,
@@ -751,10 +831,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
-    /// Allocate a 1-bit drop flag for `name`, initialize it to true, and
-    /// register `var_ptr`'s destructor (plus cascaded field drops) as a
-    /// deferred drop on the current scope. Records the flag so `move` and
-    /// by-value transfers can clear it. Shared by parameters and locals.
+    /// Register a deferred destructor and its runtime flag.
+    ///
+    /// Field flags prevent drops of moved or uninitialized values. A future
+    /// elaboration pass can omit flags when liveness is statically known.
     pub(crate) fn register_drop_flag(
         &mut self,
         name: &str,
@@ -817,6 +897,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    /// Register field-drop cascade for `ty`'s `Drop`-typed fields.
+    ///
+    /// Current: walks struct fields recursively, allocating a per-field `i1`
+    /// flag per `Drop` field (init `0`), pushing a `DropCall` per field onto
+    /// `defers` (LIFO so declaration-order drops fire). `clear_field_flags*`
+    /// and field assignment logic toggle these flags. This string-keyed cascade
+    /// is the field-level correctness mechanism.
+    /// Future hybrid (Phase 7): drop elaboration will walk `MovePathTree`
+    /// children and emit drops only for `Initialized` leaves (`Place::overlaps`
+    /// decides disjointness: `x.a` vs `x.b` disjoint, `x` vs `x.a` overlap).
+    /// The hybrid becomes `Initialized leaf` → direct field drop, `Uninitialized`
+    /// → elided, `PartiallyInitialized`/dynamic → keep per-field flag guard.
+    /// Per-field flags remain the dynamic fallback.
+    ///
+    /// TODO(Phase 7): formalize drop elaboration (`semantic/drop_elaborate.rs`
+    /// or extension) that consumes `MovePathTree` + `Place::overlaps` to
+    /// produce the elaborated field-drop list; this function's field walk will
+    /// then be driven by that list. Keep current cascade until proven. See
+    /// file header hybrid plan and `semantic::init` / `semantic::place`.
     pub(crate) fn register_field_drops(
         &mut self,
         ty: &ast::Type,
