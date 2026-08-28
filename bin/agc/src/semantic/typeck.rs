@@ -321,7 +321,10 @@ impl TypeChecker {
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
-        if !self.imported_source_hashes.insert(module.source_hash_fnv1a64) {
+        if !self
+            .imported_source_hashes
+            .insert(module.source_hash_fnv1a64)
+        {
             return;
         }
         for export in &module.exports {
@@ -379,10 +382,13 @@ impl TypeChecker {
                             .push(sig);
 
                         if let Some((owner_name, method_name)) = export.name.split_once("::") {
-                            let owner_ty = Type::from_canonical_key(owner_name).unwrap_or_else(|_| Type::Named {
-                                path: vec![owner_name.to_string()],
-                                generics: Vec::new(),
-                            });
+                            let owner_ty =
+                                Type::from_canonical_key(owner_name).unwrap_or_else(|_| {
+                                    Type::Named {
+                                        path: vec![owner_name.to_string()],
+                                        generics: Vec::new(),
+                                    }
+                                });
                             let owner_key = self.method_key(&owner_ty);
                             let method_sig = MethodSig {
                                 params: params.clone(),
@@ -404,35 +410,60 @@ impl TypeChecker {
                                     },
                                     generics: None,
                                     is_variadic: export.is_variadic,
-                                    parameters: params.iter().enumerate().map(|(i, p)| ast::Parameter {
-                                        name: ast::Identifier {
-                                            name: format!("p{i}"),
+                                    parameters: params
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, p)| ast::Parameter {
+                                            name: ast::Identifier {
+                                                name: format!("p{i}"),
+                                                span: Span::default(),
+                                            },
+                                            param_type: p.to_ast(),
+                                            is_mutable: false,
                                             span: Span::default(),
-                                        },
-                                        param_type: p.to_ast(),
-                                        is_mutable: false,
-                                        span: Span::default(),
-                                    }).collect(),
+                                        })
+                                        .collect(),
                                     method_kind: if let Some(first) = params.first() {
                                         match first {
-                                            Type::Pointer { .. } => ast::MethodKind::InstancePointer { is_mutable: true },
-                                            Type::Reference { is_mutable, .. } => ast::MethodKind::InstancePointer { is_mutable: *is_mutable },
-                                            _ if *first == owner_ty => ast::MethodKind::InstanceValue,
+                                            Type::Pointer { .. } => {
+                                                ast::MethodKind::InstancePointer {
+                                                    is_mutable: true,
+                                                }
+                                            }
+                                            Type::Reference { is_mutable, .. } => {
+                                                ast::MethodKind::InstancePointer {
+                                                    is_mutable: *is_mutable,
+                                                }
+                                            }
+                                            _ if *first == owner_ty => {
+                                                ast::MethodKind::InstanceValue
+                                            }
                                             _ => ast::MethodKind::Static,
                                         }
                                     } else {
                                         ast::MethodKind::Static
                                     },
                                     visibility: ast::Visibility::Public,
-                                    return_type: if matches!(return_type, Type::Unit) { None } else { Some(return_type.to_ast()) },
-                                    body: ast::Block { statements: Vec::new(), span: Span::default() },
+                                    return_type: if matches!(return_type, Type::Unit) {
+                                        None
+                                    } else {
+                                        Some(return_type.to_ast())
+                                    },
+                                    body: ast::Block {
+                                        statements: Vec::new(),
+                                        span: Span::default(),
+                                    },
                                     attributes: Vec::new(),
                                     span: Span::default(),
                                 },
                             };
-                            let symbol_id = (self.method_symbols.len() + 100_000 + self.methods.len()) as u64;
+                            let symbol_id =
+                                (self.method_symbols.len() + 100_000 + self.methods.len()) as u64;
                             self.method_symbols.insert(symbol_id, method_sig);
-                            self.methods.entry((owner_key, method_name.to_string())).or_default().push(symbol_id);
+                            self.methods
+                                .entry((owner_key, method_name.to_string()))
+                                .or_default()
+                                .push(symbol_id);
                         }
                     }
                 }
@@ -1350,7 +1381,8 @@ impl TypeChecker {
                     }
 
                     if left_ty != right_ty {
-                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
+                        {
                             return Type::Primitive(ast::PrimitiveType::Bool);
                         }
                         self.error(
@@ -1398,7 +1430,8 @@ impl TypeChecker {
                         if !(self.is_integer_type(&left_ty)
                             && self.is_integer_type(&right_ty)
                             && self.common_numeric_type(&left_ty, &right_ty).is_some())
-                            && !self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
+                            && !self
+                                .defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
                         {
                             self.error(
                                 format!(
@@ -1410,7 +1443,8 @@ impl TypeChecker {
                         }
                     }
                     if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
-                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
+                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
+                        {
                             return left_ty;
                         }
                         self.error(
@@ -1553,7 +1587,10 @@ impl TypeChecker {
                     Type::Optional { inner } => Some((**inner).clone()),
                     Type::Named { path, generics } => {
                         let name = path.last().map(|s| s.as_str());
-                        if name == Some("Optional") || name == Some("Result") || name == Some("SysResult") {
+                        if name == Some("Optional")
+                            || name == Some("Result")
+                            || name == Some("SysResult")
+                        {
                             generics.first().cloned()
                         } else {
                             None
@@ -1762,10 +1799,18 @@ impl TypeChecker {
                             expr.span,
                         );
                     }
-                } else if matches!(inner.kind.as_ref(), ast::ExpressionKind::FieldAccess { .. }) {
-                    // Valid field-level move (e.g. `move x.field` or `move n.pair.left`).
+                } else if matches!(
+                    inner.kind.as_ref(),
+                    ast::ExpressionKind::FieldAccess { .. }
+                        | ast::ExpressionKind::Index { .. }
+                        | ast::ExpressionKind::Unary {
+                            operator: ast::UnaryOperator::Dereference,
+                            ..
+                        }
+                ) {
+                    // Any addressable place may transfer ownership.
                 } else {
-                    self.error(msg::move_operand_identifier(), inner.span);
+                    self.error(msg::move_operand_place(), inner.span);
                 }
                 ty
             }
@@ -5368,7 +5413,10 @@ impl TypeChecker {
                     msg::implicit_method_guard_missing(&req.name, &receiver, &arg_strings),
                     span,
                 );
-                self.error(msg::implicit_method_guard_origin(&req.name), req.origin_span);
+                self.error(
+                    msg::implicit_method_guard_origin(&req.name),
+                    req.origin_span,
+                );
             }
         }
     }
@@ -6449,7 +6497,9 @@ pub fn populate_inferred_let_types(
 ) {
     for item in &mut program.items {
         match &mut item.kind {
-            ast::ItemKind::Function(func) => populate_block_inferred_let_types(&mut func.body, inferred),
+            ast::ItemKind::Function(func) => {
+                populate_block_inferred_let_types(&mut func.body, inferred)
+            }
             ast::ItemKind::Impl(impl_item) => {
                 for member in &mut impl_item.items {
                     if let ast::ImplItemKind::Function(func) = member {
@@ -6568,7 +6618,10 @@ fn populate_expr_blocks_inferred_let_types(
         }
         | ast::ExpressionKind::Launch(operand)
         | ast::ExpressionKind::Wait(operand)
-        | ast::ExpressionKind::Cast { expression: operand, .. } => {
+        | ast::ExpressionKind::Cast {
+            expression: operand,
+            ..
+        } => {
             populate_expr_blocks_inferred_let_types(operand, inferred);
         }
         ast::ExpressionKind::FieldAccess { object, .. }
@@ -7814,9 +7867,9 @@ mod tests {
         let program = parse("i32 main() { i32 x = 42; i32 val = x ? 10; return val; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("unwrap-or operator '?' requires Optional, Result, or pointer")),
+            errors.iter().any(|e| e
+                .message
+                .contains("unwrap-or operator '?' requires Optional, Result, or pointer")),
             "expected unwrap-or invalid lhs error, got {errors:?}"
         );
     }
@@ -7964,10 +8017,8 @@ mod tests {
     fn impl_implicit_params_recorded_at_parse() {
         // The parser records implicit params per impl from FILE-LOCAL type
         // knowledge: with Result declared locally, T and E are params.
-        let tokens = lex(
-            "enum Result<T, E> { Ok(T); Err(E); } \
-             impl Result<T, E> { i32 f(T x) { return 0; } }",
-        )
+        let tokens = lex("enum Result<T, E> { Ok(T); Err(E); } \
+             impl Result<T, E> { i32 f(T x) { return 0; } }")
         .expect("lex failed");
         let mut parser = Parser::new(tokens);
         let (program, errors) = parser.parse_program();
@@ -7982,10 +8033,8 @@ mod tests {
     fn file_local_type_wins_over_param_in_same_file_impl() {
         // A type declared in the SAME file as the impl is concrete, not a
         // parameter: `impl Wrapper<MyStruct>` records no param.
-        let tokens = lex(
-            "struct MyStruct { i64 v; } struct Wrapper<T> { T inner; } \
-             impl Wrapper<MyStruct> { i32 f(Wrapper<MyStruct>* self) { return 0; } }",
-        )
+        let tokens = lex("struct MyStruct { i64 v; } struct Wrapper<T> { T inner; } \
+             impl Wrapper<MyStruct> { i32 f(Wrapper<MyStruct>* self) { return 0; } }")
         .expect("lex failed");
         let mut parser = Parser::new(tokens);
         let (program, errors) = parser.parse_program();
@@ -8012,7 +8061,9 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(
-            !errors.iter().any(|e| e.message.contains("missing required type argument")),
+            !errors
+                .iter()
+                .any(|e| e.message.contains("missing required type argument")),
             "lifetime params must not require type arguments: {errors:?}"
         );
     }
@@ -8085,7 +8136,9 @@ mod tests {
         // produces an un-annotated LetStatement.
         let tokens = lex("i32 main() { let value = 3; }").expect("lex failed");
         assert!(
-            tokens.iter().any(|t| matches!(t.kind, crate::lexer::Token::Let)),
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, crate::lexer::Token::Let)),
             "`let` should lex as a keyword token"
         );
     }

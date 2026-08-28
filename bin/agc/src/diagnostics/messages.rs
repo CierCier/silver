@@ -346,8 +346,8 @@ pub fn implicit_method_guard_missing(
 pub fn invalid_cast(from: &impl Display, to: &impl Display) -> String {
     format!("invalid cast: {from} -> {to}")
 }
-pub fn move_operand_identifier() -> &'static str {
-    "move operand must be an identifier"
+pub fn move_operand_place() -> &'static str {
+    "move operand must be a place (identifier, field, index, or dereference)"
 }
 pub fn wait_requires_task(ty: &impl Display) -> String {
     format!("'wait' requires a Task, got {ty}")
