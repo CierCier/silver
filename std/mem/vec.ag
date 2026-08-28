@@ -143,6 +143,7 @@ impl Vec<T> {
         while (i + 1 < self.len) {
             T tmp = self.data[i + 1];
             self.data[i] = move tmp;
+            i = i + 1;
         }
         self.len = self.len - 1;
         return move result;
