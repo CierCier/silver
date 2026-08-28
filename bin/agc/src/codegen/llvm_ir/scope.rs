@@ -587,32 +587,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    /// Resolve `ty` to the Drop destructor function name, if `ty` owns resources.
+    /// Resolve the destructor symbol for `ty`.
     ///
-    /// Current: heuristic `needs_drop` via concrete `Drop` impl owners + generic
-    /// instantiation probe. This is the `needs_drop` predicate that decides
-    /// whether a flag/defer is emitted (see `register_drop_flag`).
-    /// Future hybrid (Phase 7): `semantic::type_properties::needs_drop` /
-    /// `semantic::move_path::InitState` will be the source for "does this
-    /// place need a drop?" Drop elaboration will query `InitState` per `Place`
-    /// and `Place::overlaps` for partial moves; the hybrid at codegen becomes
-    /// `Initialized` → direct drop (no flag), `Uninitialized` → elided,
-    /// `dynamic` → flag guard. Keep this heuristic authoritative until
-    /// `type_properties` cutover; no logic change in this phase.
-    ///
-    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-    /// `needs_drop` / `is_copy` will be the single source of truth for Copy vs
-    /// owning-type classification; this heuristic stays authoritative until the
-    /// cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
-    /// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
-    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
-    /// — typeck/move_check/codegen must not independently decide Copy/Drop.
-    /// No logic change in this phase; keep existing per-subsystem heuristics working in parallel.
-    ///
-    /// TODO(Phase 7): drop elaboration (`semantic/drop_elaborate.rs` or
-    /// `semantic::init` extension) will consume `MovePathTree` states; this
-    /// function's role narrows to "which `Drop` symbol to call" after
-    /// elaboration has chosen *whether* to drop. See hybrid plan in file header.
+    /// Drop liveness is handled separately; runtime flags remain the fallback.
     pub(crate) fn get_drop_function_name(
         &mut self,
         ty: &ast::Type,
@@ -854,48 +831,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
-    /// Allocate a 1-bit drop flag for `name`, initialize it to true, and
-    /// register `var_ptr`'s destructor (plus cascaded field drops) as a
-    /// deferred drop on the current scope. Records the flag so `move` and
-    /// by-value transfers can clear it. Shared by parameters and locals.
+    /// Register a deferred destructor and its runtime flag.
     ///
-    /// # Current runtime flags — correctness mechanism
-    ///
-    /// This is the present authoritative drop setup: if `needs_drop(ty)`
-    /// (currently `get_drop_function_name(ty).is_some()`), an `i1` flag
-    /// `{name}.drop = 1` is stack-allocated and a `DropCall` deferred entry
-    /// is pushed; field drops are cascaded via `register_field_drops`. Flags
-    /// are cleared on `move`, by-value transfer, or explicit `drop()`, and
-    /// checked at scope exit by `emit_defers`. Field flags start `0` and are
-    /// set live on initialization so uninitialized fields are never dropped.
-    ///
-    /// # Future hybrid — static elimination (optimization only)
-    ///
-    /// With `MovePathTree`/`InitState` authoritative, drop elaboration (Phase
-    /// 7) will classify each `Place` at each exit:
-    /// `Initialized` → direct `drop` (no flag), `Uninitialized` → elided,
-    /// `PartiallyInitialized`/conditional → keep runtime flag (`dynamic → drop
-    /// flag`). This function's flag allocation then becomes the dynamic
-    /// fallback; statically known drops bypass it. No logic change in this
-    /// phase; existing flags stay correct and the static path is additive.
-    ///
-    /// TODO(Phase 5): centralize via `semantic::type_properties::{is_copy, needs_drop}`.
-    /// `needs_drop(ty)` (equivalently `!is_copy(ty)` for owning types) will gate
-    /// whether a flag/defer is emitted. This code stays authoritative until the
-    /// cutover. Implicit Copy retained (bool/i64/f64/ptr + all-Copy struct = Copy
-    /// else non-Copy like String/Vec/HashMap/HashSet/Deque/File).
-    /// Future split: `T x = y` => `if is_copy(T) { copy_from(y) } else { move_out(y) }`
-    /// — the `get_drop_function_name` / `is_copy` decision will be shared via
-    /// `semantic::type_properties`. No logic change in this phase.
-    ///
-    /// TODO(Phase 7): formalize drop elaboration (`semantic/drop_elaborate.rs`
-    /// or extension) using `MovePathTree` states and `Place::overlaps` /
-    /// `Place::is_prefix_of`. For `Foo { a:String, b:String }` + `move foo.a`,
-    /// elaboration emits `drop(foo.b)` only; this function will then consult
-    /// the elaborated set instead of unconditionally allocating a flag. Keep
-    /// runtime flags as correctness until proven. See
-    /// `semantic::move_path::{MovePathTree, InitState}` and
-    /// `semantic::init::{is_initialized, move_out, initialize}`.
+    /// Field flags prevent drops of moved or uninitialized values. A future
+    /// elaboration pass can omit flags when liveness is statically known.
     pub(crate) fn register_drop_flag(
         &mut self,
         name: &str,
