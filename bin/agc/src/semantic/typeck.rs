@@ -4065,10 +4065,20 @@ impl TypeChecker {
             // both directions (str is a non-owning view of a NUL-terminated
             // byte buffer, so mutable u8* is accepted as well).
             (Type::Primitive(ast::PrimitiveType::Str), Type::Pointer { inner, .. }) => {
-                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+                matches!(
+                    inner.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
             }
             (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
-                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+                matches!(
+                    inner.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
             }
             _ => false,
         };
@@ -4736,20 +4746,27 @@ impl TypeChecker {
                     inner,
                 },
             ) => {
-                // str is a byte pointer; implicit conversion to const char*
-                // or const u8* (mutable targets require an explicit cast).
+                // str is a byte pointer; implicit conversion to const char*,
+                // const u8*, or const i8* (mutable targets require an explicit cast).
                 if *is_mutable {
                     return false;
                 }
                 matches!(
                     inner.as_ref(),
-                    Type::Primitive(ast::PrimitiveType::Char | ast::PrimitiveType::U8)
+                    Type::Primitive(
+                        ast::PrimitiveType::Char | ast::PrimitiveType::U8 | ast::PrimitiveType::I8
+                    )
                 )
             }
             (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
-                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::U8))
+                matches!(
+                    inner.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
             }
-            // Byte pointers (u8*/char*) convert implicitly; a mutable source
+            // Byte pointers (u8*/i8*/char*) convert implicitly; a mutable source
             // may become a const target, never the reverse.
             (
                 Type::Pointer {
@@ -4764,10 +4781,14 @@ impl TypeChecker {
                 },
             ) if matches!(
                 to_inner.as_ref(),
-                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+                Type::Primitive(
+                    ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                )
             ) && matches!(
                 from_inner.as_ref(),
-                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
+                Type::Primitive(
+                    ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                )
             ) =>
             {
                 !*to_vol && !*from_vol && (!*to_mut || *from_mut)

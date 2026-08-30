@@ -230,8 +230,11 @@ impl ModuleLoader {
             }
             let submodule_config = candidate.with_extension("submodule.toml");
             if submodule_config.is_file() {
-                if let Ok(compiled) = ensure_submodule_built(&submodule_config, &candidate) {
-                    return Some(compiled);
+                match ensure_submodule_built(&submodule_config, &candidate) {
+                    Ok(compiled) => return Some(compiled),
+                    Err(err) => {
+                        eprintln!("agc: {err}");
+                    }
                 }
             }
         }
@@ -435,8 +438,11 @@ fn resolve_source_in_root(
     // On-demand build from submodule configuration (.submodule.toml)
     let submodule_config = joined.with_extension("submodule.toml");
     if submodule_config.is_file() {
-        if let Ok(compiled) = ensure_submodule_built(&submodule_config, &binary_path) {
-            return Some((compiled, ResolvedSourceImportKind::Module));
+        match ensure_submodule_built(&submodule_config, &binary_path) {
+            Ok(compiled) => return Some((compiled, ResolvedSourceImportKind::Module)),
+            Err(err) => {
+                eprintln!("agc: {err}");
+            }
         }
     }
 

@@ -7,7 +7,7 @@ const Color BLUE = {0, 0, 255, 255};
 const Color DARKGRAY = {200, 200, 200, 255};
 
 i32 main() {
-    InitWindow(800, 600, (i8 *) "Spinning 3D Cube - Silver + raylib");
+    InitWindow(800, 600, "Spinning 3D Cube - Silver + raylib");
 
     Vector3 camera_position = { 5.0, 5.0, 5.0 };
     Vector3 camera_target = { 0.0, 0.0, 0.0 };
@@ -81,7 +81,7 @@ i32 main() {
         EndMode3D();
 
         DrawText(
-            (i8 *) "Spinning 3D Cube",
+            "Spinning 3D Cube",
             10,
             10,
             20,
