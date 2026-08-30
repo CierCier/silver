@@ -1,0 +1,5 @@
+name = "curl"
+standard = "c11"
+includes = ["curl/curl.h"]
+pkg_config = "libcurl"
+libs = ["curl"]

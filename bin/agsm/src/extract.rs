@@ -74,6 +74,27 @@ pub fn build_artifact(
     if let Some(target) = target {
         arguments.push(format!("--target={target}"));
     }
+    if let Ok(nix_cflags) = std::env::var("NIX_CFLAGS_COMPILE") {
+        let mut iter = nix_cflags.split_whitespace().peekable();
+        while let Some(flag) = iter.next() {
+            if flag == "-isystem" || flag == "-I" {
+                if let Some(path) = iter.next() {
+                    arguments.push("-I".to_string());
+                    arguments.push(path.to_string());
+                }
+            } else if let Some(path) = flag.strip_prefix("-I") {
+                arguments.push(format!("-I{path}"));
+            }
+        }
+    }
+    for env_var in ["C_INCLUDE_PATH", "CPATH"] {
+        if let Ok(paths) = std::env::var(env_var) {
+            for path in std::env::split_paths(&paths) {
+                arguments.push("-I".to_string());
+                arguments.push(path.display().to_string());
+            }
+        }
+    }
     parser
         .arguments(&arguments)
         .unsaved(&[unsaved])
@@ -779,6 +800,18 @@ fn canonical_type(type_: Type<'_>) -> Result<String, ExtractError> {
                 .get_size()
                 .ok_or_else(|| ExtractError::Unsupported("array without size".to_string()))?;
             format!("Array<{}, {}>", canonical_type(element)?, size)
+        }
+        TypeKind::IncompleteArray => {
+            let element = type_
+                .get_element_type()
+                .ok_or_else(|| ExtractError::Unsupported("incomplete array without element".to_string()))?;
+            let is_const = element.is_const_qualified();
+            let element_key = canonical_type(element)?;
+            if is_const {
+                format!("*const {element_key}")
+            } else {
+                format!("*mut {element_key}")
+            }
         }
         TypeKind::FunctionPrototype => {
             let args = type_

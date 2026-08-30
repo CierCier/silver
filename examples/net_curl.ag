@@ -1,0 +1,32 @@
+// examples/net_curl.ag — HTTP client example using vendored libcurl.
+//
+// Uses the public httpbin.org API (free public testing service) to perform
+// an HTTP GET request and print the response body.
+
+import std.io;
+import vendor.net.curl;
+
+i32 main() {
+    @println("Initializing libcurl handle...");
+    void* curl = curl_easy_init();
+    if (curl == (void*)0) {
+        @eprintln("Error: failed to initialize curl handle");
+        return 1;
+    }
+
+    // Configure HTTP GET request
+    curl_easy_setopt(curl, CURLoption.CURLOPT_URL, "https://httpbin.org/get");
+    curl_easy_setopt(curl, CURLoption.CURLOPT_FOLLOWLOCATION, 1);
+
+    @println("Sending GET request to https://httpbin.org/get ...\n");
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLcode.CURLE_OK) {
+        @eprintln("curl_easy_perform() failed: {}", (str)curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        return 1;
+    }
+
+    @println("\nHTTP request finished successfully!");
+    curl_easy_cleanup(curl);
+    return 0;
+}

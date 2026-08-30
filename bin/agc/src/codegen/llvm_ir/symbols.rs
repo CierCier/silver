@@ -135,9 +135,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(struct_ty);
         }
 
-        let template_fields = self.struct_fields.get(&base_name).cloned().ok_or_else(|| {
-            CodegenError::new(format!("missing field metadata for struct `{base_name}`"))
-        })?;
+        let template_fields = match self.struct_fields.get(&base_name).cloned() {
+            Some(fields) => fields,
+            None => {
+                struct_ty.set_body(&[], false);
+                return Ok(struct_ty);
+            }
+        };
 
         let concrete_fields = if let Some(params) = self.struct_generics.get(&base_name) {
             let args = named.generics.as_ref().ok_or_else(|| {

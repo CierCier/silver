@@ -349,7 +349,7 @@ impl TypeChecker {
                                     span: Span::default(),
                                 },
                                 generics: Self::export_type_params_to_generics(&export.type_params),
-                                is_variadic: false,
+                                is_variadic: export.is_variadic,
                                 parameters: params
                                     .iter()
                                     .enumerate()
@@ -373,7 +373,7 @@ impl TypeChecker {
                                     span: Span::default(),
                                 },
                             },
-                            is_variadic: false,
+                            is_variadic: export.is_variadic,
                             is_imported: true,
                         };
                         self.imported_functions
