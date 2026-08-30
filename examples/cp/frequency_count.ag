@@ -32,7 +32,6 @@ i32 main() {
         }
         i = i + 1;
     }
-
     counts.drop();
     s.drop();
     return 0;
