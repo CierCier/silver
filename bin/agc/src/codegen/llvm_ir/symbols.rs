@@ -137,9 +137,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let template_fields = match self.struct_fields.get(&base_name).cloned() {
             Some(fields) => fields,
-            None => {
+            None if base_name.starts_with("__") => {
                 struct_ty.set_body(&[], false);
                 return Ok(struct_ty);
+            }
+            None => {
+                return Err(CodegenError::new(format!(
+                    "missing field metadata for struct `{base_name}`"
+                )));
             }
         };
 
