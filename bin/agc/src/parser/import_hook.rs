@@ -149,6 +149,31 @@ impl<'a> FileImportResolverHook<'a> {
             }
         }
 
+        if uses_json_or_serialize(&program.items) {
+            let module_path = vec!["std", "json"];
+            let module_key = "std.json";
+            if !self.seen_modules.contains(module_key) {
+                program.items.insert(
+                    0,
+                    ast::Item {
+                        kind: ast::ItemKind::Import(ast::ImportItem {
+                            path: module_path
+                                .into_iter()
+                                .map(|seg| ast::Identifier {
+                                    name: seg.to_string(),
+                                    span: lexer::Span::default(),
+                                })
+                                .collect(),
+                            selection: None,
+                        }),
+                        span: lexer::Span::default(),
+                        visibility: ast::Visibility::Private,
+                        attributes: Vec::new(),
+                    },
+                );
+            }
+        }
+
         self.lower_program_recursive(program, base_dir)?;
         apply_all_pending_selections(
             std::mem::take(&mut self.pending_selections),
@@ -710,6 +735,145 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
         | ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Asm { .. }
         | ast::ExpressionKind::EnumVariant { .. } => {}
+    }
+}
+
+fn uses_json_or_serialize(items: &[ast::Item]) -> bool {
+    items.iter().any(|item| {
+        if item.attributes.iter().any(|attr| attr.name.name == "serialize") {
+            return true;
+        }
+        let mut found = false;
+        match &item.kind {
+            ast::ItemKind::Function(func) => {
+                scan_block_for_json(&func.body, &mut found);
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                for member in &impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        scan_block_for_json(&func.body, &mut found);
+                    }
+                }
+            }
+            ast::ItemKind::Macro(def) => {
+                scan_block_for_json(&def.body, &mut found);
+            }
+            _ => {}
+        }
+        found
+    })
+}
+
+fn scan_block_for_json(block: &ast::Block, found: &mut bool) {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            ast::StatementKind::Let(let_stmt) => {
+                if let Some(init) = &let_stmt.initializer {
+                    scan_expr_for_json(init, found);
+                }
+            }
+            ast::StatementKind::Expression(expr)
+            | ast::StatementKind::Return(Some(expr))
+            | ast::StatementKind::Break(Some(expr)) => {
+                scan_expr_for_json(expr, found);
+            }
+            ast::StatementKind::Block(block) => scan_block_for_json(block, found),
+            ast::StatementKind::Defer(inner) => match &inner.kind {
+                ast::StatementKind::Expression(expr) => {
+                    scan_expr_for_json(expr, found);
+                }
+                ast::StatementKind::Block(block) => {
+                    scan_block_for_json(block, found);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        if *found {
+            return;
+        }
+    }
+}
+
+fn scan_expr_for_json(expr: &ast::Expression, found: &mut bool) {
+    if *found {
+        return;
+    }
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::MacroCall { name, .. } => {
+            if name.name == "json" || name.name == "from_json" {
+                *found = true;
+            }
+        }
+        ast::ExpressionKind::Call {
+            function,
+            arguments,
+        } => {
+            scan_expr_for_json(function, found);
+            for arg in arguments {
+                scan_expr_for_json(arg, found);
+            }
+        }
+        ast::ExpressionKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            scan_expr_for_json(receiver, found);
+            for arg in arguments {
+                scan_expr_for_json(arg, found);
+            }
+        }
+        ast::ExpressionKind::Binary { left, right, .. } => {
+            scan_expr_for_json(left, found);
+            scan_expr_for_json(right, found);
+        }
+        ast::ExpressionKind::Unary { operand, .. }
+        | ast::ExpressionKind::Postfix { operand, .. }
+        | ast::ExpressionKind::Move(operand)
+        | ast::ExpressionKind::Comptime(operand)
+        | ast::ExpressionKind::Reference {
+            expression: operand,
+            ..
+        }
+        | ast::ExpressionKind::Launch(operand)
+        | ast::ExpressionKind::Wait(operand) => {
+            scan_expr_for_json(operand, found);
+        }
+        ast::ExpressionKind::Block(block) => scan_block_for_json(block, found),
+        ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            scan_expr_for_json(condition, found);
+            scan_expr_for_json(then_expr, found);
+            scan_expr_for_json(else_expr, found);
+        }
+        ast::ExpressionKind::UnwrapOr { value, fallback } => {
+            scan_expr_for_json(value, found);
+            scan_expr_for_json(fallback, found);
+        }
+        ast::ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            scan_expr_for_json(condition, found);
+            scan_block_for_json(then_branch, found);
+            if let Some(else_block) = else_branch {
+                scan_block_for_json(else_block, found);
+            }
+        }
+        ast::ExpressionKind::While { condition, body } => {
+            scan_expr_for_json(condition, found);
+            scan_block_for_json(body, found);
+        }
+        ast::ExpressionKind::ForIn { iterable, body, .. } => {
+            scan_expr_for_json(iterable, found);
+            scan_block_for_json(body, found);
+        }
+        _ => {}
     }
 }
 

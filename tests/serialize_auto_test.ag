@@ -1,0 +1,66 @@
+import std.io;
+import std.json;
+
+// 1. Struct explicitly decorated with #[serialize]
+#[serialize]
+struct ServerProfile {
+    i32 id "json:server_id";
+    str host "json:host_name";
+    i32 port;
+    bool active "json:is_active";
+}
+
+// 2. Struct with #[serialize(json)]
+#[serialize(json)]
+struct ClientConfig {
+    str name "json:client_name";
+    i64 timeout_ms "json:timeout";
+}
+
+// 3. Plain struct with NO #[serialize] attribute — auto-synthesized on @json usage
+struct AutoUser {
+    i32 id "json:user_id";
+    str name;
+    f64 score "json:user_score";
+}
+
+// 4. Struct with ignored fields and multiple tags
+#[serialize]
+struct RecordWithIgnored {
+    i32 id "json:rec_id db:id";
+    str secret "json:-";
+    str label "json:title yaml:Title";
+}
+
+i32 main() {
+    // Test 1: #[serialize]
+    ServerProfile server = { .id = 42, .host = "10.0.0.1", .port = 8080, .active = true };
+    str server_json = @json(server);
+    @assert(server_json == "{\"server_id\":42,\"host_name\":\"10.0.0.1\",\"port\":8080,\"is_active\":true}", "server_json match");
+
+    // Test 2: #[serialize(json)]
+    ClientConfig client = { .name = "frontend", .timeout_ms = 5000 };
+    str client_json = @json(client);
+    @assert(client_json == "{\"client_name\":\"frontend\",\"timeout\":5000}", "client_json match");
+
+    // Test 3: Auto-synthesized without #[serialize] attribute
+    AutoUser user = { .id = 100, .name = "Alice", .score = 99.5 };
+    str user_json = @json(user);
+    @assert(user_json == "{\"user_id\":100,\"name\":\"Alice\",\"user_score\":99.5}", "user_json match");
+
+    // Test 4: Deserialization on auto-synthesized struct
+    Result<AutoUser, JsonError> decoded_user = @from_json(AutoUser, "{\"user_id\":200,\"name\":\"Bob\",\"user_score\":75.0}");
+    @assert(!decoded_user.failed(), "decoded_user succeeded");
+    AutoUser bob = decoded_user.unwrap();
+    @assert(bob.id == 200, "bob.id == 200");
+    @assert(bob.name == "Bob", "bob.name == Bob");
+    @assert(bob.score == 75.0, "bob.score == 75.0");
+
+    // Test 5: Ignored fields ('-') and multiple tags
+    RecordWithIgnored rec = { .id = 1, .secret = "hidden_password", .label = "Public Info" };
+    str rec_json = @json(rec);
+    @assert(rec_json == "{\"rec_id\":1,\"title\":\"Public Info\"}", "rec_json match");
+
+    @println("All serialize auto-synthesis tests passed!");
+    return 0;
+}

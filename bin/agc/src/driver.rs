@@ -987,6 +987,7 @@ pub fn run(cli: Cli) {
                 }
 
                 semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
+                crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
 
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");

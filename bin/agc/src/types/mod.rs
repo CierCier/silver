@@ -71,6 +71,7 @@ pub struct StructAttributes {
     pub packed: bool,
     pub repr_c: bool,
     pub align: Option<usize>,
+    pub serialize_formats: Vec<crate::semantic::serialize::SerializationFormat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +156,7 @@ pub fn parse_struct_attributes(
         packed: false,
         repr_c: false,
         align: None,
+        serialize_formats: Vec::new(),
     };
 
     for attr in attributes {
@@ -217,6 +219,14 @@ pub fn parse_struct_attributes(
                     });
                 }
                 out.align = Some(align);
+            }
+            "serialize" => {
+                let formats = crate::semantic::serialize::parse_serialize_attribute(attr)
+                    .map_err(|msg| StructAttrError {
+                        message: msg,
+                        span: attr.span,
+                    })?;
+                out.serialize_formats.extend(formats);
             }
             "link" => {}
             _ => {
@@ -1028,6 +1038,7 @@ mod tests {
             packed: true,
             repr_c: true,
             align: None,
+            serialize_formats: Vec::new(),
         };
         let layout = struct_layout(&ctx, &fields, &attrs);
         assert_eq!(layout.align, Some(1));
@@ -1045,6 +1056,7 @@ mod tests {
             packed: false,
             repr_c: true,
             align: Some(16),
+            serialize_formats: Vec::new(),
         };
         let layout = struct_layout(&ctx, &fields, &attrs);
         assert_eq!(layout.align, Some(16));
@@ -1062,6 +1074,7 @@ mod tests {
             packed: false,
             repr_c: false,
             align: None,
+            serialize_formats: Vec::new(),
         };
         let layout = struct_layout(&ctx, &fields, &attrs);
         assert_eq!(layout.align, Some(4));
