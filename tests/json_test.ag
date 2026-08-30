@@ -1,6 +1,7 @@
 import std.io.file;
 import std.json;
 
+#[serialize]
 struct User {
     i32 id "json:id db:user_id";
     str name "json:name";
@@ -24,6 +25,13 @@ impl User {
     }
 }
 
+#[serialize]
+struct Product {
+    i32 id "json:product_id";
+    str title;
+    f64 price;
+}
+
 
 i32 main() {
     User user = User.new(7, "Ada");
@@ -39,6 +47,18 @@ i32 main() {
     @assert(!(encoded != "{\"id\":7,\"name\":\"Ada\"}"), "check");
     @assert(!(some_json != "7"), "check");
     @assert(!(none_json != "null"), "check");
+
+    // Test synthesized #[serialize] Product
+    Product prod = { .id = 42, .title = "Keyboard", .price = 79.99 };
+    str prod_json = @json(prod);
+    @assert(!(prod_json != "{\"product_id\":42,\"title\":\"Keyboard\",\"price\":79.99}"), "prod_json check");
+
+    Result<Product, JsonError> decoded_prod = @from_json(Product, "{\"product_id\":10,\"title\":\"Mouse\",\"price\":29.5}");
+    @assert(!decoded_prod.failed(), "decoded_prod succeeded");
+    Product p = decoded_prod.unwrap();
+    @assert(p.id == 10, "p.id == 10");
+    @assert(p.title == "Mouse", "p.title == Mouse");
+    @assert(p.price == 29.5, "p.price == 29.5");
 
     // --- full scalar coverage: encode + decode round trips ---
     i8 n8 = -12;

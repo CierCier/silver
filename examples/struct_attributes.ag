@@ -24,7 +24,8 @@ struct DefaultLayout {
     i8 c;
 }
 
-// Struct with field metadata tags (for JSON, DB, and YAML mapping)
+// Struct with #[serialize(json, yaml)] attribute and field metadata tags
+#[serialize(json, yaml)]
 struct TaggedRecord {
     i32 id "json:id db:record_id";
     str title "json:title yaml:Title";
@@ -47,6 +48,7 @@ i32 main() {
     @println("v: ({}, {})", v.x, v.y);
     @println("c: id={} flag={}", c.id, c.flag);
     @println("rec: id={} title={} active={}", rec.id, rec.title, rec.active);
+    @println("rec JSON: {}", @json(rec));
 
     return 0;
 }

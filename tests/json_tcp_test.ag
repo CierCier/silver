@@ -6,6 +6,7 @@ import std.sys.result;
 import std.mem;
 import std.test;
 
+#[serialize]
 struct ApiRequest {
     i32 id "json:id";
     str method "json:method";
