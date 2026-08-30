@@ -2,8 +2,8 @@ import std.io.file;
 import std.json;
 
 struct User {
-    i32 id;
-    str name;
+    i32 id "json:id db:user_id";
+    str name "json:name";
 }
 impl ToJson for User {
     void to_json(User* self, JsonWriter* out) {

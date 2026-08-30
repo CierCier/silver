@@ -7,8 +7,8 @@ import std.mem;
 import std.test;
 
 struct ApiRequest {
-    i32 id;
-    str method;
+    i32 id "json:id";
+    str method "json:method";
 }
 
 impl ToJson for ApiRequest {
