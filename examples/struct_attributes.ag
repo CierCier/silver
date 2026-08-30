@@ -24,19 +24,29 @@ struct DefaultLayout {
     i8 c;
 }
 
+// Struct with field metadata tags (for JSON, DB, and YAML mapping)
+struct TaggedRecord {
+    i32 id "json:id db:record_id";
+    str title "json:title yaml:Title";
+    bool active "json:active";
+}
+
 i32 main() {
     @println("PackedPoint size: {} bytes", @size(PackedPoint));
     @println("AlignedVec size: {} bytes", @size(AlignedVec));
     @println("CLike size: {} bytes", @size(CLike));
     @println("DefaultLayout size: {} bytes", @size(DefaultLayout));
+    @println("TaggedRecord size: {} bytes", @size(TaggedRecord));
 
     PackedPoint p = { .x = 10, .y = 99 };
     AlignedVec v = { .x = 1.0, .y = 2.0 };
     CLike c = { .id = 42, .flag = true };
+    TaggedRecord rec = { .id = 1, .title = "Silver Manual", .active = true };
 
     @println("p: ({}, {})", p.x, p.y);
     @println("v: ({}, {})", v.x, v.y);
     @println("c: id={} flag={}", c.id, c.flag);
+    @println("rec: id={} title={} active={}", rec.id, rec.title, rec.active);
 
     return 0;
 }
