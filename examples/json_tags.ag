@@ -1,0 +1,94 @@
+// examples/json_tags.ag — JSON serialization with field metadata tags.
+//
+// Demonstrates:
+// 1. Struct field metadata tags ("json:key", "db:column", "yaml:key")
+// 2. Serializing tagged structs with @json(...)
+// 3. Deserializing primitive types, strings, and Optionals with @from_json(...)
+
+import std.io;
+import std.json;
+import std.optional;
+
+/// User profile struct with metadata tags for JSON and database mapping.
+struct UserProfile {
+    i32 id "json:id db:user_id";
+    str username "json:username db:handle";
+    str email "json:email";
+    bool is_admin "json:is_admin";
+}
+
+impl ToJson for UserProfile {
+    void to_json(UserProfile* self, JsonWriter* out) {
+        out.begin_object();
+        out.field("id");
+        out.write_i64((i64)self.id);
+        out.field("username");
+        out.write_string(self.username);
+        out.field("email");
+        out.write_string(self.email);
+        out.field("is_admin");
+        out.write_bool(self.is_admin);
+        out.end_object();
+    }
+}
+
+/// Server configuration struct with multi-format metadata tags.
+struct ServerConfig {
+    str host "json:host yaml:Host";
+    i32 port "json:port yaml:Port";
+    bool tls "json:tls yaml:TLS";
+}
+
+impl ToJson for ServerConfig {
+    void to_json(ServerConfig* self, JsonWriter* out) {
+        out.begin_object();
+        out.field("host");
+        out.write_string(self.host);
+        out.field("port");
+        out.write_i64((i64)self.port);
+        out.field("tls");
+        out.write_bool(self.tls);
+        out.end_object();
+    }
+}
+
+i32 main() {
+    // 1. Serialize UserProfile struct with @json
+    UserProfile profile;
+    profile.id = 101;
+    profile.username = "alice";
+    profile.email = "alice@example.com";
+    profile.is_admin = true;
+
+    str profile_json = @json(profile);
+    @println("UserProfile JSON:\n  {}", profile_json);
+
+    // 2. Serialize ServerConfig struct with @json
+    ServerConfig config;
+    config.host = "127.0.0.1";
+    config.port = 8080;
+    config.tls = true;
+
+    str config_json = @json(config);
+    @println("\nServerConfig JSON:\n  {}", config_json);
+
+    // 3. Deserialize JSON string into strongly-typed values using @from_json
+    Result<String, JsonError> decoded_name = @from_json(String, "\"alice\"");
+    if (!decoded_name.failed()) {
+        String name = decoded_name.unwrap();
+        @println("\nDecoded string: {}", (str)name.to_str());
+    }
+
+    Result<i32, JsonError> decoded_port = @from_json(i32, "8080");
+    if (!decoded_port.failed()) {
+        @println("Decoded integer: {}", decoded_port.unwrap());
+    }
+
+    // 4. Optionals and null handling in JSON
+    Optional<i32> maybe_val = Optional<i32>.some(42);
+    Optional<i32> no_val = Optional<i32>.none();
+    @println("\nOptional Some(42) -> {}", @json(maybe_val));
+    @println("Optional None     -> {}", @json(no_val));
+
+    return 0;
+}
