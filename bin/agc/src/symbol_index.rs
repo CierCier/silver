@@ -1099,7 +1099,11 @@ impl Walker<'_> {
                 arguments,
             } => {
                 self.walk_expr(function);
-                let callee = self.occurrence_symbol_at(function.span.start);
+                let callee_span_start = match &*function.kind {
+                    ast::ExpressionKind::FieldAccess { field, .. } => field.span.start,
+                    _ => function.span.start,
+                };
+                let callee = self.occurrence_symbol_at(callee_span_start);
                 self.record_call_site(function.span.end, arguments, callee);
                 for a in arguments {
                     self.maybe_emit_move_hint(a);
@@ -1111,7 +1115,16 @@ impl Walker<'_> {
                 method,
                 arguments,
             } => {
-                let recv_type = self.type_of(receiver).map(str::to_string);
+                let recv_type = self.type_of(receiver).map(str::to_string).or_else(|| {
+                    match &*receiver.kind {
+                        ast::ExpressionKind::Identifier(id) => Some(id.name.clone()),
+                        ast::ExpressionKind::TypeName(ty) => match ty.kind.as_ref() {
+                            ast::TypeKind::Named(n) => n.path.last().map(|id| id.name.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                });
                 self.walk_expr(receiver);
                 self.emit_member_use(
                     method,

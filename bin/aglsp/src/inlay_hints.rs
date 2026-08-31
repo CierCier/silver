@@ -105,12 +105,15 @@ mod tests {
     fn parameter_name_hints_for_free_and_method_calls() {
         let analysis = analyze_src(
             "struct Counter { i64 v; }\n\
-             impl Counter { i64 add(Counter* self, i64 amount) { self.v = self.v + amount; return self.v; } }\n\
+             impl Counter {\n\
+                 Counter create(i64 initial_count) { Counter c = { .v = initial_count }; return c; }\n\
+                 i64 add(Counter* self, i64 amount) { self.v = self.v + amount; return self.v; }\n\
+             }\n\
              i64 scale(i64 value, i64 factor) { return value * factor; }\n\
-             i32 main() { Counter c; i64 a = scale(5, 3); i64 b = c.add(7); return 0; }",
+             i32 main() { Counter c = Counter.create(10); i64 a = scale(5, 3); i64 b = c.add(7); return 0; }",
         );
         let hints = inlay_hints(&analysis);
-        // scale(5, 3): value:, factor:  |  c.add(7): amount: (receiver skipped)
+        // Counter.create(10): initial_count: | scale(5, 3): value:, factor: | c.add(7): amount: (receiver skipped)
         let param_labels: Vec<&str> = hints
             .iter()
             .filter_map(|h| match &h.label {
@@ -118,7 +121,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(param_labels.len(), 3, "param hints: {hints:?}");
+        assert_eq!(param_labels.len(), 4, "param hints: {hints:?}");
+        assert!(param_labels.contains(&"initial_count:"), "{param_labels:?}");
         assert!(param_labels.contains(&"value:"), "{param_labels:?}");
         assert!(param_labels.contains(&"factor:"), "{param_labels:?}");
         assert!(param_labels.contains(&"amount:"), "{param_labels:?}");
