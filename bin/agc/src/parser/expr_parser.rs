@@ -1535,28 +1535,120 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             Token::LeftBracket => {
                 let open_span = token.span;
                 cursor.bump();
-                let index = parse_assignment(cursor)?;
-                let Some(close) = cursor.current() else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "expected ']' in index expression".to_string(),
-                        span: open_span,
-                    });
-                };
-                if !matches!(close.kind, Token::RightBracket) {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "expected ']' in index expression".to_string(),
-                        span: close.span,
-                    });
+
+                // Case 1: starts with Colon e.g. `[:end]`, `[:]`, `[::step]`, `[:end:step]`
+                if matches!(cursor.current().map(|t| &t.kind), Some(Token::Colon)) {
+                    cursor.bump(); // consume first ':'
+                    let mut end = None;
+                    let mut step = None;
+                    if !matches!(
+                        cursor.current().map(|t| &t.kind),
+                        Some(Token::Colon) | Some(Token::RightBracket)
+                    ) {
+                        end = Some(Box::new(parse_assignment(cursor)?));
+                    }
+                    if matches!(cursor.current().map(|t| &t.kind), Some(Token::Colon)) {
+                        cursor.bump(); // consume second ':'
+                        if !matches!(
+                            cursor.current().map(|t| &t.kind),
+                            Some(Token::RightBracket)
+                        ) {
+                            step = Some(Box::new(parse_assignment(cursor)?));
+                        }
+                    }
+                    let Some(close) = cursor.current() else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected ']' in slice expression".to_string(),
+                            span: open_span,
+                        });
+                    };
+                    if !matches!(close.kind, Token::RightBracket) {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected ']' in slice expression".to_string(),
+                            span: close.span,
+                        });
+                    }
+                    let span = expr.span.extend_to(&close.span);
+                    cursor.bump();
+                    expr = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Slice {
+                            object: Box::new(expr),
+                            start: None,
+                            end,
+                            step,
+                        }),
+                        span,
+                    };
+                } else {
+                    // Case 2: starts with an expression `[start...]` or `[index]`
+                    let first_expr = parse_assignment(cursor)?;
+                    if matches!(cursor.current().map(|t| &t.kind), Some(Token::Colon)) {
+                        cursor.bump(); // consume first ':'
+                        let mut end = None;
+                        let mut step = None;
+                        if !matches!(
+                            cursor.current().map(|t| &t.kind),
+                            Some(Token::Colon) | Some(Token::RightBracket)
+                        ) {
+                            end = Some(Box::new(parse_assignment(cursor)?));
+                        }
+                        if matches!(cursor.current().map(|t| &t.kind), Some(Token::Colon)) {
+                            cursor.bump(); // consume second ':'
+                            if !matches!(
+                                cursor.current().map(|t| &t.kind),
+                                Some(Token::RightBracket)
+                            ) {
+                                step = Some(Box::new(parse_assignment(cursor)?));
+                            }
+                        }
+                        let Some(close) = cursor.current() else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected ']' in slice expression".to_string(),
+                                span: open_span,
+                            });
+                        };
+                        if !matches!(close.kind, Token::RightBracket) {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected ']' in slice expression".to_string(),
+                                span: close.span,
+                            });
+                        }
+                        let span = expr.span.extend_to(&close.span);
+                        cursor.bump();
+                        expr = ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Slice {
+                                object: Box::new(expr),
+                                start: Some(Box::new(first_expr)),
+                                end,
+                                step,
+                            }),
+                            span,
+                        };
+                    } else {
+                        // Standard index expression
+                        let Some(close) = cursor.current() else {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected ']' in index expression".to_string(),
+                                span: open_span,
+                            });
+                        };
+                        if !matches!(close.kind, Token::RightBracket) {
+                            return Err(ParseError::InvalidSyntax {
+                                message: "expected ']' in index expression".to_string(),
+                                span: close.span,
+                            });
+                        }
+                        let span = expr.span.extend_to(&close.span);
+                        cursor.bump();
+                        expr = ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Index {
+                                object: Box::new(expr),
+                                index: Box::new(first_expr),
+                            }),
+                            span,
+                        };
+                    }
                 }
-                let span = expr.span.extend_to(&close.span);
-                cursor.bump();
-                expr = ast::Expression {
-                    kind: Box::new(ast::ExpressionKind::Index {
-                        object: Box::new(expr),
-                        index: Box::new(index),
-                    }),
-                    span,
-                };
             }
             Token::Increment => {
                 let end_span = token.span.end;

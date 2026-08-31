@@ -750,6 +750,12 @@ pub enum ExpressionKind {
         object: Box<Expression>,
         index: Box<Expression>,
     },
+    Slice {
+        object: Box<Expression>,
+        start: Option<Box<Expression>>,
+        end: Option<Box<Expression>>,
+        step: Option<Box<Expression>>,
+    },
     If {
         condition: Box<Expression>,
         then_branch: Block,

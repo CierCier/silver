@@ -672,6 +672,24 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
             scan_expr_for_bare_ctor(object, ctor, found);
             scan_expr_for_bare_ctor(index, ctor, found);
         }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            scan_expr_for_bare_ctor(object, ctor, found);
+            if let Some(s) = start {
+                scan_expr_for_bare_ctor(s, ctor, found);
+            }
+            if let Some(e) = end {
+                scan_expr_for_bare_ctor(e, ctor, found);
+            }
+            if let Some(st) = step {
+                scan_expr_for_bare_ctor(st, ctor, found);
+            }
+        }
         ast::ExpressionKind::MethodCall {
             receiver,
             arguments,

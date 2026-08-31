@@ -611,6 +611,31 @@ fn expression_node(expression: &ast::Expression) -> Node {
             n.children.push(expression_node(index));
             n
         }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+        } => {
+            let mut n = Node::new("Expr::Slice");
+            n.children.push(expression_node(object));
+            if let Some(s) = start {
+                let mut start_node = Node::new("Slice::Start");
+                start_node.children.push(expression_node(s));
+                n.children.push(start_node);
+            }
+            if let Some(e) = end {
+                let mut end_node = Node::new("Slice::End");
+                end_node.children.push(expression_node(e));
+                n.children.push(end_node);
+            }
+            if let Some(st) = step {
+                let mut step_node = Node::new("Slice::Step");
+                step_node.children.push(expression_node(st));
+                n.children.push(step_node);
+            }
+            n
+        }
         ast::ExpressionKind::Ternary {
             condition,
             then_expr,
