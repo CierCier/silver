@@ -96,6 +96,26 @@ i32 main() {
         assert_eq_i64(99, h.pop(), "can push and pop after clear");
         h.drop();
     }
+    // --- from_vec and into_iter ---
+    STDOUT.write_str("\n--- from_vec and into_iter ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(10);
+        v.push(50);
+        v.push(30);
+        v.push(20);
+        v.push(40);
+        BinaryHeap<i64> h = BinaryHeap<i64>.from_vec(v);
+        assert_eq_i64(5, h.len(), "heap has 5 elements from vec");
+        i64 prev = 999;
+        i64 count = 0;
+        for val in h {
+            assert_true(val <= prev, "into_iter yields in descending order");
+            prev = val;
+            count = count + 1;
+        }
+        assert_eq_i64(5, count, "iterated all 5 elements");
+    }
 
     return done();
 }

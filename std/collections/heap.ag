@@ -8,6 +8,9 @@
 // pop and peek abort on an empty heap.
 
 import std.mem;
+import std.iter;
+import std.optional;
+import std.mem.vec;
 
 /// A max-heap priority queue backed by a contiguous growable array.
 struct BinaryHeap<T> {
@@ -38,6 +41,27 @@ impl BinaryHeap<T> {
         h.cap = capacity;
         return h;
     }
+    /// Build a binary heap from a vector by pushing each element.
+    BinaryHeap<T> from_vec(Vec<T> v) {
+        BinaryHeap<T> h = BinaryHeap<T>.with_capacity(v.len());
+        for val in v {
+            h.push(move val);
+        }
+        return h;
+    }
+
+    /// Convert the heap into a vector in unspecified (internal buffer) order.
+    Vec<T> into_vec(BinaryHeap<T> self) {
+        Vec<T> v;
+        v.data = self.data;
+        v.len = self.len;
+        v.cap = self.cap;
+        self.data = (T*)0;
+        self.len = 0;
+        self.cap = 0;
+        return v;
+    }
+
 
     // -- Size ------------------------------------------------------------
 
@@ -161,5 +185,31 @@ impl<T> Drop for BinaryHeap<T> {
         }
         self.len = 0;
         self.cap = 0;
+    }
+}
+struct BinaryHeapIntoIter<T> {
+    BinaryHeap<T> heap;
+}
+
+impl<T> Iterator for BinaryHeapIntoIter<T> {
+    type Item = T;
+    Optional<T> next(BinaryHeapIntoIter<T>* self) {
+        return self.heap.try_pop();
+    }
+}
+
+impl<T> Drop for BinaryHeapIntoIter<T> {
+    void drop(BinaryHeapIntoIter<T>* self) {
+        self.heap.drop();
+    }
+}
+
+impl<T> IntoIterator for BinaryHeap<T> {
+    type Item = T;
+    type IntoIter = BinaryHeapIntoIter<T>;
+    BinaryHeapIntoIter<T> into_iter(BinaryHeap<T> self) {
+        BinaryHeapIntoIter<T> it;
+        it.heap = move self;
+        return it;
     }
 }
