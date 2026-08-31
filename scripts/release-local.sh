@@ -45,12 +45,12 @@ fi
 release_notes_file="$(mktemp)"
 trap 'rm -f "$release_notes_file"' EXIT
 
-previous_tag="$(git -C "$root_dir" describe --tags --abbrev=0 "${tag_name}^" 2>/dev/null || true)"
+previous_tag="$(git -C "$root_dir" tag --sort=-creatordate | grep -v "^${tag_name}$" | head -n 1 || true)"
 
 if [ -z "$previous_tag" ]; then
-  git -C "$root_dir" log --pretty=format:"- %s (%h)" > "$release_notes_file"
+  git -C "$root_dir" log --pretty=format:"- %s (%h)" | sed -E 's/(^|[^`@A-Za-z0-9_])@([A-Za-z0-9_]+)/\1`@\2`/g' > "$release_notes_file"
 else
-  git -C "$root_dir" log "${previous_tag}..${tag_name}" --pretty=format:"- %s (%h)" > "$release_notes_file"
+  git -C "$root_dir" log "${previous_tag}..${tag_name}" --pretty=format:"- %s (%h)" | sed -E 's/(^|[^`@A-Za-z0-9_])@([A-Za-z0-9_]+)/\1`@\2`/g' > "$release_notes_file"
 fi
 
 gh release create "$tag_name" "$archive_path" \
