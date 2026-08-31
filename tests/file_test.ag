@@ -1,7 +1,22 @@
 // Test suite for std.file - File I/O
 import std.test;
+import std.string;
+import std.mem.vec;
+
 str test_file = "/tmp/silver_file_test.txt";
 str test_file2 = "/tmp/silver_file_test2.txt";
+
+void drop_vec_strings(Vec<String>* v) {
+    i64 i = 0;
+    while (i < v.len()) {
+        String* p = v.get_ptr(i);
+        String elem = *p;
+        elem.drop();
+        i = i + 1;
+    }
+    v.drop();
+}
+
 i32 main() {
     STDOUT.write_str("=== File I/O Tests ===\n\n");
     
@@ -203,10 +218,31 @@ i32 main() {
     bool bad_flush = bad.flush() == -1;
     assert_true(bad_flush, "flush() on invalid file returns false");
     
-    // Summary
+    // Test: File.read_to_string and File.read_lines
+    STDOUT.write_str("\n--- read_to_string and read_lines ---\n");
+    File fw = File.open_write(test_file);
+    fw.write_line("first row");
+    fw.write_line("second row");
+    fw.close();
+
+    Result<String, Error> res_str = read_to_string(test_file);
+    assert_true(res_str.success(), "read_to_string succeeded");
+    String whole = res_str.unwrap();
+    assert_true(whole == "first row\nsecond row\n", "read_to_string matches written text");
+    whole.drop();
+
+    Result<Vec<String>, Error> res_lines = read_lines(test_file);
+    assert_true(res_lines.success(), "read_lines succeeded");
+    Vec<String> file_lns = res_lines.unwrap();
+    assert_eq_i64(2, file_lns.len(), "read_lines returned 2 rows");
+    String* r0 = file_lns.get_ptr(0);
+    String* r1 = file_lns.get_ptr(1);
+    assert_true(r0.equals("first row"), "row 0 match");
+    assert_true(r1.equals("second row"), "row 1 match");
+    drop_vec_strings(&mut file_lns);
+
     // Final cleanup
     file_delete(test_file);
     file_delete(test_file2);
-    
     return done();
 }
