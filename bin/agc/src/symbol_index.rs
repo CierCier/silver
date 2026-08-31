@@ -149,6 +149,8 @@ pub struct SymbolIndex {
     /// thread-local, so handlers must not query it; they use this map for
     /// cross-file locations.
     pub foreign_files: HashMap<u32, (String, String)>,
+    /// Buffer file ID this index was built for.
+    pub buffer_file: u32,
 }
 
 /// Run the AST walk over `program` (already import-lowered) and produce the
@@ -217,6 +219,7 @@ pub fn analyze(
         import_paths: walker.import_paths,
         tokens: current_tokens,
         foreign_files,
+        buffer_file,
     }
 }
 
@@ -265,13 +268,9 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    /// True when the span belongs to the current buffer (exact file id, or a
-    /// synthetic span within the buffer's byte range).
+    /// True when the span belongs to the current buffer.
     fn in_buffer(&self, span: &Span) -> bool {
-        if span.file == self.buffer_file {
-            return true;
-        }
-        span.file == 0 && span.start < self.text_len && span.end <= self.text_len
+        span.file == self.buffer_file && span.start <= self.text_len && span.end <= self.text_len
     }
     #[expect(
         clippy::too_many_arguments,

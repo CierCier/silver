@@ -620,7 +620,8 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
 }
 
 pub fn parse_impl_snippet(source: &str) -> Option<ast::Item> {
-    let tokens = lexer::lex(source).ok()?;
+    let file_id = lexer::register_source("<synthetic:serialize>", source);
+    let tokens = lexer::lex_with_source(source, file_id).ok()?;
     let code_tokens: Vec<_> = tokens
         .into_iter()
         .filter(|t| !matches!(t.kind, lexer::Token::Comment { .. } | lexer::Token::Eof))

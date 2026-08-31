@@ -63,7 +63,7 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
         let Some(ty) = symbol.inferred_type.as_deref() else {
             continue;
         };
-        if symbol.kind != SymbolKind::Local {
+        if symbol.kind != SymbolKind::Local || symbol.span.file != analysis.buffer_file {
             continue;
         }
         hints.push(InlayHint {
@@ -181,6 +181,47 @@ mod tests {
             copy_labels.len() >= 1,
             "expected at least one copy hint, got {hints:?}"
         );
-        // Also verify call-arg hints: String.from_str(\"hello\") takes `str` which is Copy? str is primitive -> copy? But literal \"hello\" is not a place, so no hint.
+    }
+
+    #[test]
+    fn no_spurious_hints_for_serialized_structs() {
+        let src = r#"
+        #[serialize(json, yaml)]
+        struct TaggedRecord {
+            i32 id "json:id db:record_id";
+            str title "json:title yaml:Title";
+            bool active "json:active";
+        }
+
+        i32 main() {
+            TaggedRecord rec = { .id = 1, .title = "Silver Manual", .active = true };
+            @json(rec);
+            return 0;
+        }
+        "#;
+        let file_id = lexer::register_source("/tmp/test_struct_attrs.ag", src);
+        let tokens = lexer::lex_with_source(src, file_id).expect("lex failed");
+        let graph = agc::grammar::parse_ag(src);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        agc::semantic::serialize::synthesize_serialization_for_program(&mut program);
+
+        let mut tc = TypeChecker::new();
+        let mut table = CompilerSymbolTable::new();
+        let (_, _) = tc.check_program_with_table(&mut program, &mut table);
+        let expr_types = std::mem::take(&mut tc.expr_types);
+        let analysis = analyze(&program, src, &tokens, expr_types, file_id);
+        let hints = inlay_hints(&analysis);
+
+        // There should be NO parameter hints matching "name:", "value:", "expected:", "out:"
+        // in struct declarations or comments.
+        for hint in &hints {
+            if let InlayHintLabel::String(label) = &hint.label {
+                assert!(
+                    !["name:", "value:", "expected:", "out:", "other:"].contains(&label.as_str()),
+                    "found bogus synthesized hint: {label} at {:?}",
+                    hint.position
+                );
+            }
+        }
     }
 }

@@ -43,6 +43,7 @@ impl Backend {
                         import_paths: Vec::new(),
                         tokens: Vec::new(),
                         foreign_files: Default::default(),
+                        buffer_file: file_id,
                     },
                 );
                 let current_uris: HashSet<Uri> = [uri.clone()].into_iter().collect();
