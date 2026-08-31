@@ -3,6 +3,7 @@
 // Kept separate from `std.math` (which binds libm): Silver never links
 // libc/libm, so only code that needs no external runtime may be imported
 // without pulling a link-time library dependency.
+import std.optional;
 
 /// Absolute value of i64. i64::MIN may overflow (not special-cased).
 i64 abs_i64(i64 x) {
@@ -85,4 +86,95 @@ i64 mod_pow_i64(i64 base, i64 exp, i64 modu) {
         exp = exp / 2;
     }
     return result;
+}
+
+/// Sign of an integer: -1 for negative, 0 for zero, 1 for positive.
+i64 signum_i64(i64 x) {
+    if (x < 0) { return -1; }
+    if (x > 0) { return 1; }
+    return 0;
+}
+
+/// Clamp a value within [min_val, max_val].
+i64 clamp_i64(i64 val, i64 min_val, i64 max_val) {
+    if (val < min_val) { return min_val; }
+    if (val > max_val) { return max_val; }
+    return val;
+}
+
+/// Integer square root: largest integer r such that r*r <= n.
+/// Returns 0 for negative inputs.
+i64 isqrt_i64(i64 n) {
+    if (n <= 0) {
+        return 0;
+    }
+    if (n < 4) {
+        return 1;
+    }
+    i64 x0 = n / 2;
+    i64 x1 = (x0 + n / x0) / 2;
+    while (x1 < x0) {
+        x0 = x1;
+        x1 = (x0 + n / x0) / 2;
+    }
+    return x0;
+}
+
+/// Extended Euclidean algorithm: solves a*x + b*y = gcd(a, b).
+/// Returns g = gcd(a, b), and sets *out_x and *out_y (Bézout coefficients).
+i64 ext_gcd_i64(i64 a, i64 b, i64* out_x, i64* out_y) {
+    if (b == 0) {
+        *out_x = 1;
+        *out_y = 0;
+        return a;
+    }
+    i64 x1 = 0;
+    i64 y1 = 0;
+    i64 g = ext_gcd_i64(b, a % b, &x1, &y1);
+    *out_x = y1;
+    *out_y = x1 - (a / b) * y1;
+    return g;
+}
+
+/// Modular inverse of a modulo m: returns x in [0, m) such that (a * x) % m == 1,
+/// or None if gcd(a, m) != 1.
+Optional<i64> mod_inv_i64(i64 a, i64 m) {
+    if (m <= 1) {
+        return Optional<i64>.none();
+    }
+    i64 x = 0;
+    i64 y = 0;
+    i64 g = ext_gcd_i64(a, m, &x, &y);
+    if (g != 1 && g != -1) {
+        return Optional<i64>.none();
+    }
+    i64 res = (x % m + m) % m;
+    return Optional<i64>.some(res);
+}
+
+/// Chinese Remainder Theorem: solves system of congruences:
+/// x = rems[i] (mod mods[i]) for i in 0..count.
+/// Moduli must be pairwise coprime. Returns x in [0, prod(mods)).
+Optional<i64> chinese_remainder_i64(i64* rems, i64* mods, i64 count) {
+    if (count <= 0 || rems == (i64*)0 || mods == (i64*)0) {
+        return Optional<i64>.none();
+    }
+    i64 prod = 1;
+    for (i64 i = 0; i < count; i = i + 1) {
+        if (mods[i] <= 0) { return Optional<i64>.none(); }
+        prod = prod * mods[i];
+    }
+    i64 result = 0;
+    for (i64 i = 0; i < count; i = i + 1) {
+        i64 m_i = mods[i];
+        i64 p_i = prod / m_i;
+        Optional<i64> inv_opt = mod_inv_i64(p_i, m_i);
+        if (inv_opt.is_none()) {
+            return Optional<i64>.none();
+        }
+        i64 inv = inv_opt.unwrap();
+        i64 term = ((rems[i] % m_i + m_i) % m_i) * p_i % prod * inv % prod;
+        result = (result + term) % prod;
+    }
+    return Optional<i64>.some((result % prod + prod) % prod);
 }
