@@ -35,7 +35,7 @@ git -C "$root_dir" push origin "$tag_name"
 echo "Building release bundle for $tag_name..."
 bash "$root_dir/scripts/create-linux-bundle.sh" "$tag_name"
 
-archive_path="$root_dir/dist/silver-linux-x86_64-unknown-linux-gnu-${tag_name}.tar.gz"
+archive_path="$root_dir/dist/silver-linux-x86_64-${tag_name}.tar.gz"
 
 if [ ! -f "$archive_path" ]; then
   echo "error: expected bundle not found at $archive_path"
