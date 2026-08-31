@@ -22,6 +22,7 @@ use crate::semantic::{
 };
 use crate::symbol_table::{CompilerPhase, CompilerSymbolTable};
 use crate::{ast_tree, cfg, codegen, diagnostics, lexer, parser, profiler};
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ArgAction, Parser, ValueEnum};
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use owo_colors::OwoColorize;
@@ -32,159 +33,213 @@ use crate::link::{link_exe, link_shared_module};
 #[derive(Parser, Debug)]
 #[command(
     name = "agc",
-    version = concat!(
-        env!("CARGO_PKG_VERSION"), "\n",
-        "version: ", env!("GIT_DESCRIBE"), "\n",
-        "commit: ", env!("GIT_SHA")
-    ),
-    about = "Silver compiler (clang-like driver)",
-    long_about = "A clang-like driver for the Silver compiler"
+    version = concat!(env!("CARGO_PKG_VERSION"), "  ", env!("GIT_DESCRIBE"), " (", env!("GIT_SHA"), ")"),
+    about = "Silver compiler — LLVM-backed systems language",
+    override_usage = "agc [OPTIONS] <FILE>... [-o <OUT>]\n       agc [OPTIONS] <COMMAND>",
+    help_template = "\
+{before-help}{about} {version}
+
+{usage-heading} {usage}
+
+Commands:
+  build, b    Compile and link an executable (default)
+  run, r      Compile and immediately execute the output binary
+  check, c    Analyze source files and report errors without codegen or linking
+  clean       Remove cached compiler build artifacts
+
+{all-args}{after-help}",
+    styles = Styles::styled()
+        .header(AnsiColor::Green.on_default().bold())
+        .usage(AnsiColor::Green.on_default().bold())
+        .literal(AnsiColor::Cyan.on_default().bold())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .valid(AnsiColor::Green.on_default())
+        .invalid(AnsiColor::Red.on_default().bold())
+        .error(AnsiColor::Red.on_default().bold()),
+    color = clap::ColorChoice::Always,
+    after_help = "\
+Examples:
+  agc run examples/control_flow.ag          run a file
+  agc check std/string.ag                   typecheck only
+  agc -O2 -o app src/main.ag                 optimized build
+  agc --emit-llvm -o - src/main.ag | opt -S  inspect IR
+
+See 'https://github.com/CierCier/silver' for documentation.",
 )]
 pub struct Cli {
-    /// Input source files (.ag). Optional for --emit=grammar.
-    #[arg(value_name = "FILE")]
+    /// Input source files (.ag). Optional for --emit=grammar or --clean.
+    #[arg(value_name = "FILE", help_heading = "Arguments")]
     inputs: Vec<PathBuf>,
 
     /// Write output to <file>
-    #[arg(short = 'o', value_name = "FILE")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help_heading = "Output & Compilation"
+    )]
     output: Option<PathBuf>,
 
     /// Compile and assemble, but do not link (emit .o)
-    #[arg(short = 'c', action = ArgAction::SetTrue)]
+    #[arg(short = 'c', action = ArgAction::SetTrue, help_heading = "Output & Compilation")]
     compile_only: bool,
 
     /// Compile only and emit assembly (.s)
-    #[arg(short = 'S', action = ArgAction::SetTrue)]
+    #[arg(short = 'S', action = ArgAction::SetTrue, help_heading = "Output & Compilation")]
     emit_asm: bool,
 
     /// Emit LLVM IR instead of native output (.ll)
-    #[arg(long = "emit-llvm", action = ArgAction::SetTrue)]
+    #[arg(long = "emit-llvm", action = ArgAction::SetTrue, help_heading = "Output & Compilation")]
     emit_llvm: bool,
 
     /// Explicitly select the output kind (overrides -c/-S/--emit-llvm)
-    #[arg(long = "emit", value_enum)]
+    #[arg(
+        long = "emit",
+        value_enum,
+        value_name = "KIND",
+        help_heading = "Output & Compilation"
+    )]
     emit: Option<EmitKind>,
 
     /// Optimization level: 0,1,2,3,s,z,fast (accepts clang-style -O2)
-    #[arg(short = 'O', value_name = "LEVEL", default_missing_value = "2", num_args = 0..=1)]
+    #[arg(short = 'O', value_name = "LEVEL", default_missing_value = "2", num_args = 0..=1, help_heading = "Output & Compilation")]
     opt_level: Option<String>,
 
-    /// Generate debug information. DWARF is on by default for non-release
-    /// builds (no -O / -O0) and stripped for release builds (-O1+);
-    /// `-g` forces it on, `-g0` (normalized to `--g0` by the driver shim)
-    /// forces it off.
-    #[arg(short = 'g', action = ArgAction::SetTrue)]
+    /// Generate debug information (DWARF). On by default for unoptimized builds.
+    #[arg(short = 'g', action = ArgAction::SetTrue, help_heading = "Output & Compilation")]
     debug_info: bool,
 
-    /// Disable debug information (clang-style -g0; the shim maps -g0 here).
-    #[arg(long = "g0", action = ArgAction::SetTrue)]
+    /// Disable debug information (clang-style -g0)
+    #[arg(long = "g0", action = ArgAction::SetTrue, help_heading = "Output & Compilation")]
     no_debug_info: bool,
 
     /// Add directory to include search path
-    #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append)]
+    #[arg(short = 'I', value_name = "DIR", action = ArgAction::Append, help_heading = "Search Paths & Linking")]
     include_dirs: Vec<PathBuf>,
 
     /// Add a primary module include root (defaults to current working directory)
-    #[arg(long = "root", value_name = "DIR")]
+    #[arg(
+        long = "root",
+        value_name = "DIR",
+        help_heading = "Search Paths & Linking"
+    )]
     root: Option<PathBuf>,
 
     /// Define a preprocessor symbol (accepted for clang-compat; not yet used)
-    #[arg(short = 'D', value_name = "NAME[=VALUE]", action = ArgAction::Append)]
+    #[arg(short = 'D', value_name = "NAME[=VALUE]", action = ArgAction::Append, help_heading = "Search Paths & Linking")]
     defines: Vec<String>,
 
     /// Add directory to library search path
-    #[arg(short = 'L', value_name = "DIR", action = ArgAction::Append)]
+    #[arg(short = 'L', value_name = "DIR", action = ArgAction::Append, help_heading = "Search Paths & Linking")]
     lib_dirs: Vec<PathBuf>,
 
     /// Link with library
-    #[arg(short = 'l', value_name = "LIB", action = ArgAction::Append)]
+    #[arg(short = 'l', value_name = "LIB", action = ArgAction::Append, help_heading = "Search Paths & Linking")]
     libs: Vec<String>,
 
     /// Warning options (e.g. -Wall, -Werror, -Wunused, -Wno-unused)
-    #[arg(short = 'W', value_name = "WARNING", action = ArgAction::Append)]
+    #[arg(short = 'W', value_name = "WARNING", action = ArgAction::Append, help_heading = "Diagnostics")]
     warnings: Vec<String>,
 
     /// Compile for the given target triple
-    #[arg(long = "target", value_name = "TRIPLE")]
+    #[arg(
+        long = "target",
+        value_name = "TRIPLE",
+        help_heading = "Output & Compilation"
+    )]
     target: Option<String>,
 
     /// Use the given sysroot
-    #[arg(long = "sysroot", value_name = "DIR")]
+    #[arg(
+        long = "sysroot",
+        value_name = "DIR",
+        help_heading = "Output & Compilation"
+    )]
     sysroot: Option<PathBuf>,
 
     /// Do not link the standard library (accepted for clang-compat; not yet used)
-    #[arg(long = "no-std", action = ArgAction::SetTrue)]
+    #[arg(long = "no-std", action = ArgAction::SetTrue, help_heading = "Search Paths & Linking")]
     no_std: bool,
 
     /// Link statically with the no-libc runtime. Always enabled: Silver never
     /// links against libc. This flag only governs the runtime, not the
     /// linker's static/dynamic mode (see `--static`).
-    #[arg(long = "static-runtime", action = ArgAction::SetTrue, default_value_t = true)]
+    #[arg(long = "static-runtime", action = ArgAction::SetTrue, default_value_t = true, hide = true)]
     static_runtime: bool,
 
     /// Link the executable fully statically. By default the executable is
     /// dynamically linked so external shared libraries (e.g. raylib) can be
     /// used; Silver code and std are always linked statically into the
     /// objects either way.
-    #[arg(long = "static", action = ArgAction::SetTrue)]
+    #[arg(long = "static", action = ArgAction::SetTrue, help_heading = "Search Paths & Linking")]
     static_link: bool,
 
     /// Prefer shared module artifacts and emit shared libraries for module packaging
-    #[arg(long = "shared", action = ArgAction::SetTrue)]
+    #[arg(long = "shared", action = ArgAction::SetTrue, help_heading = "Search Paths & Linking")]
     shared: bool,
 
-    /// Verbose output
+    /// Use verbose output
     #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue)]
     verbose: bool,
 
     /// Print commands/plan but do not execute (clang-style: also accepts -###)
-    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    #[arg(long = "dry-run", action = ArgAction::SetTrue, help_heading = "Diagnostics")]
     dry_run: bool,
 
     /// Enable time and memory profiling output
-    #[arg(long = "profile", action = ArgAction::SetTrue)]
+    #[arg(long = "profile", action = ArgAction::SetTrue, help_heading = "Diagnostics")]
     profile: bool,
 
     /// Enable allocator leak-check, double-free, and buffer overflow diagnostics
-    #[arg(long = "leak-check", action = ArgAction::SetTrue)]
+    #[arg(long = "leak-check", action = ArgAction::SetTrue, help_heading = "Diagnostics")]
     leak_check: bool,
 
     /// Enable compile-time cfgs: --cfg "key=value,key2=value2" (repeatable).
     /// Drives #[cfg(key)] item gating and @cfg(key) folding; cpu.* keys also
     /// gate on the runtime CPU probe (see std/cpu.ag).
-    #[arg(long = "cfg", value_name = "KEY=VALUE,...", action = ArgAction::Append)]
+    #[arg(long = "cfg", value_name = "KEY=VALUE,...", action = ArgAction::Append, help_heading = "Diagnostics")]
     cfg_flags: Vec<String>,
 
     /// Check only: run syntax, semantic, type, and borrow/move checks without codegen or linking
-    #[arg(long = "check", action = ArgAction::SetTrue)]
+    #[arg(long = "check", action = ArgAction::SetTrue, hide = true)]
     pub check_only: bool,
 
     /// Override default on-disk cache directory (defaults to XDG $XDG_CACHE_HOME/silver)
-    #[arg(long = "cache-dir", value_name = "DIR")]
+    #[arg(
+        long = "cache-dir",
+        value_name = "DIR",
+        help_heading = "Cache & Performance"
+    )]
     pub cache_dir: Option<PathBuf>,
 
     /// Disable artifact caching
-    #[arg(long = "no-cache", alias = "nc", action = ArgAction::SetTrue)]
+    #[arg(long = "no-cache", alias = "nc", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
     pub no_cache: bool,
 
     /// Clean the on-disk compiler cache before building
-    #[arg(long = "clean", alias = "clean-cache", action = ArgAction::SetTrue)]
+    #[arg(long = "clean", alias = "clean-cache", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
     pub clean: bool,
 
     /// Number of parallel compilation jobs (defaults to CPU count)
-    #[arg(short = 'j', long = "jobs", value_name = "N", default_value_t = 0)]
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Cache & Performance"
+    )]
     pub jobs: usize,
 
     /// Run mode: compile and immediately execute the output binary
-    #[arg(long = "run", action = ArgAction::SetTrue)]
+    #[arg(long = "run", action = ArgAction::SetTrue, hide = true)]
     pub run_mode: bool,
 
     /// Arguments to forward to the target binary in run mode
-    #[arg(long = "run-arg", value_name = "ARG", action = ArgAction::Append)]
+    #[arg(long = "run-arg", value_name = "ARG", action = ArgAction::Append, hide = true)]
     pub run_args: Vec<String>,
 
     /// Show module dependency build graph and codegen elements
-    #[arg(long = "show-graph", action = ArgAction::SetTrue)]
+    #[arg(long = "show-graph", action = ArgAction::SetTrue, help_heading = "Diagnostics")]
     pub show_graph: bool,
 
     /// Show build progress (defaults to on in interactive terminals)
@@ -366,7 +421,10 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     let emit = derive_emit(&cli)?;
 
     if cli.inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean {
-        return Err("at least one input file is required (except for --emit=grammar or --clean)".to_string());
+        return Err(
+            "at least one input file is required (except for --emit=grammar or --clean)"
+                .to_string(),
+        );
     }
 
     // For now keep multi-input support limited to link stage, like most compilers.
@@ -807,7 +865,8 @@ pub fn run(cli: Cli) {
 
             let show_graph = plan.show_graph;
             let progress_enabled = plan.progress;
-            let mut active_progress: Option<std::sync::Arc<crate::build_graph::BuildProgress>> = None;
+            let mut active_progress: Option<std::sync::Arc<crate::build_graph::BuildProgress>> =
+                None;
             let mut total_graph_elements = crate::build_graph::CodegenElements::default();
             let mut total_modules = 0;
             let mut cached_count = 0;
@@ -820,7 +879,12 @@ pub fn run(cli: Cli) {
                     graph.display_graph();
                 }
 
-                let total_steps = graph.nodes.len() + if matches!(plan.emit, EmitKind::Exe) { 1 } else { 0 };
+                let total_steps = graph.nodes.len()
+                    + if matches!(plan.emit, EmitKind::Exe) {
+                        1
+                    } else {
+                        0
+                    };
                 let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
                     total_steps,
                     progress_enabled,
@@ -912,11 +976,7 @@ pub fn run(cli: Cli) {
                         };
                         eprintln!(
                             "{}",
-                            diagnostics::render(
-                                span,
-                                &error.message,
-                                diagnostics::Severity::Error,
-                            )
+                            diagnostics::render(span, &error.message, diagnostics::Severity::Error,)
                         );
                     }
                     if ast.items.is_empty() {
@@ -1031,16 +1091,14 @@ pub fn run(cli: Cli) {
                 if !bare_constructors.is_empty() {
                     crate::semantic::typeck::rewrite_bare_constructors(
                         &mut ast,
-                        &bare_constructors);
+                        &bare_constructors,
+                    );
                 }
                 // Materialize inferred `let x = expr;` bindings as annotated
                 // lets so downstream passes see plain declarations.
                 let inferred_lets = checker.take_inferred_lets();
                 if !inferred_lets.is_empty() {
-                    crate::semantic::typeck::populate_inferred_let_types(
-                        &mut ast,
-                        &inferred_lets,
-                    );
+                    crate::semantic::typeck::populate_inferred_let_types(&mut ast, &inferred_lets);
                 }
                 // Monomorph request bodies were cloned before these rewrites;
                 // refresh them from the populated AST so generic instances
@@ -1585,7 +1643,12 @@ pub fn run(cli: Cli) {
                 }
                 profiler::end_phase("link");
                 if let Some(p) = &active_progress {
-                    p.on_complete(total_modules, &total_graph_elements, cached_count, compiled_count);
+                    p.on_complete(
+                        total_modules,
+                        &total_graph_elements,
+                        cached_count,
+                        compiled_count,
+                    );
                 }
                 // Clean up temp dir
                 if let Some(dir) = &exe_temp_dir {

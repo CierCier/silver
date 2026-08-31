@@ -95,6 +95,7 @@ fn place_to_path_str(place: &Place) -> String {
 }
 
 /// Lossless Place display (`x.a`, `x[index]`, `*p`) for diagnostics.
+#[allow(dead_code)]
 fn place_display(place: &Place) -> String {
     let mut s = place.local.clone();
     for p in &place.projections {

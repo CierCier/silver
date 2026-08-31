@@ -20,14 +20,19 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
     let mut i = 1;
     let mut is_run = false;
 
-    // Check if subcommand is "run" or "check"
+    // Check if subcommand is "run", "check", "clean", or "build"
     if let Some(cmd) = argv[1].to_str() {
-        if cmd == "run" {
+        if cmd == "run" || cmd == "r" {
             is_run = true;
             out.push(OsString::from("--run"));
             i = 2;
-        } else if cmd == "check" {
+        } else if cmd == "check" || cmd == "c" {
             out.push(OsString::from("--check"));
+            i = 2;
+        } else if cmd == "clean" {
+            out.push(OsString::from("--clean"));
+            i = 2;
+        } else if cmd == "build" || cmd == "b" {
             i = 2;
         }
     }
