@@ -5,6 +5,9 @@ import std.mem.drop;
 import std.iter;
 import std.optional;
 import std.mem.vec;
+import std.error;
+import std.result;
+import std.sys.result;
 // memcmp, strcmp, strlen, abort come from std.mem.memory
 // (transitively via std.mem.alloc).
 
@@ -13,6 +16,11 @@ struct String {
     i64 len;
     i64 capacity;
 }
+struct StringPair {
+    String first;
+    String second;
+}
+
 
 impl String {
     String new() {
@@ -552,6 +560,164 @@ impl String {
         }
         return true;
     }
+    Optional<i64> parse_i64(&String self) {
+        if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
+        return parse_i64((str)self.data);
+    }
+
+    Optional<i64> parse_i64_radix(&String self, i64 radix) {
+        if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
+        return parse_i64_radix((str)self.data, radix);
+    }
+
+    Optional<i32> parse_i32(&String self) {
+        Optional<i64> o = self.parse_i64();
+        if (o.is_none()) { return Optional<i32>.none(); }
+        return Optional<i32>.some((i32)o.unwrap());
+    }
+
+    Optional<u64> parse_u64(&String self) {
+        Optional<i64> o = self.parse_i64();
+        if (o.is_none()) { return Optional<u64>.none(); }
+        i64 v = o.unwrap();
+        if (v < 0) { return Optional<u64>.none(); }
+        return Optional<u64>.some((u64)v);
+    }
+
+    Vec<i64> extract_ints(&String self) {
+        if (self.len == 0 || self.data == (u8*)0) {
+            return Vec<i64>.new();
+        }
+        return extract_ints((str)self.data);
+    }
+
+    Vec<String> lines(&String self) {
+        Vec<String> res = Vec<String>.new();
+        if (self.len == 0 || self.data == (u8*)0) {
+            return res;
+        }
+        i64 start = 0;
+        for (i64 i = 0; i < self.len; i = i + 1) {
+            if (self.data[i] == (u8)'\n') {
+                i64 line_len = i - start;
+                if (line_len > 0 && self.data[start + line_len - 1] == (u8)'\r') {
+                    line_len = line_len - 1;
+                }
+                res.push(self.substr(start, line_len));
+                start = i + 1;
+            }
+        }
+        if (start < self.len) {
+            i64 line_len = self.len - start;
+            if (line_len > 0 && self.data[start + line_len - 1] == (u8)'\r') {
+                line_len = line_len - 1;
+            }
+            res.push(self.substr(start, line_len));
+        }
+        return res;
+    }
+
+    Vec<String> words(&String self) {
+        Vec<String> res = Vec<String>.new();
+        if (self.len == 0 || self.data == (u8*)0) {
+            return res;
+        }
+        i64 i = 0;
+        while (i < self.len) {
+            while (i < self.len && (self.data[i] == (u8)' ' || self.data[i] == (u8)'\t' || self.data[i] == (u8)'\n' || self.data[i] == (u8)'\r')) {
+                i = i + 1;
+            }
+            if (i >= self.len) {
+                break;
+            }
+            i64 start = i;
+            while (i < self.len && self.data[i] != (u8)' ' && self.data[i] != (u8)'\t' && self.data[i] != (u8)'\n' && self.data[i] != (u8)'\r') {
+                i = i + 1;
+            }
+            res.push(self.substr(start, i - start));
+        }
+        return res;
+    }
+    Optional<StringPair> split_once(&String self, str delimiter) {
+        i64 idx = self.find(delimiter);
+        if (idx < 0) {
+            return Optional<StringPair>.none();
+        }
+        i64 delim_len = strlen(delimiter);
+        String first = self.substr(0, idx);
+        String second = self.substr(idx + delim_len, self.len - (idx + delim_len));
+        StringPair p;
+        p.first = move first;
+        p.second = move second;
+        return Optional<StringPair>.some(move p);
+    }
+    String strip_prefix(&String self, str prefix) {
+        if (self.starts_with(prefix)) {
+            i64 plen = strlen(prefix);
+            return self.substr(plen, self.len - plen);
+        }
+        return self.clone();
+    }
+
+    String strip_suffix(&String self, str suffix) {
+        if (self.ends_with(suffix)) {
+            i64 slen = strlen(suffix);
+            return self.substr(0, self.len - slen);
+        }
+        return self.clone();
+    }
+
+    String trim_start(&String self) {
+        i64 start = 0;
+        while (start < self.len) {
+            u8 ch = self.data[start];
+            if (ch == (u8)' ' || ch == (u8)'\t' || ch == (u8)'\n' || ch == (u8)'\r') {
+                start = start + 1;
+            } else {
+                break;
+            }
+        }
+        return self.substr(start, self.len - start);
+    }
+
+    String trim_end(&String self) {
+        i64 end = self.len;
+        while (end > 0) {
+            u8 ch = self.data[end - 1];
+            if (ch == (u8)' ' || ch == (u8)'\t' || ch == (u8)'\n' || ch == (u8)'\r') {
+                end = end - 1;
+            } else {
+                break;
+            }
+        }
+        return self.substr(0, end);
+    }
+
+    /// Read the entire file at `path` into a String.
+    Result<String, Error> from_file(str path) {
+        Result<i64, Error> r_open = try_open(path, O_RDONLY, 0);
+        if (r_open.is_err()) {
+            return Result<String, Error>.Err(Error.new(r_open.errno(), r_open.err_name()));
+        }
+        i32 fd = (i32)r_open.value();
+        String out = String.with_capacity(1024);
+        u8 buf[4096];
+        while (true) {
+            Result<i64, Error> r_read = try_read(fd, &buf[0], 4096);
+            if (r_read.is_err()) {
+                try_close(fd);
+                out.drop();
+                return Result<String, Error>.Err(Error.new(r_read.errno(), r_read.err_name()));
+            }
+            i64 n = r_read.value();
+            if (n <= 0) {
+                break;
+            }
+            out.push_bytes(&buf[0], n);
+        }
+        try_close(fd);
+        return Result<String, Error>.Ok(move out);
+    }
 }
 
 impl Drop for String {
@@ -620,6 +786,73 @@ impl String {
         return result;
     }
 }
+impl Eq<String> for String {
+    bool __eq(&String self, &String other) {
+        if (self.len != other.len) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
+    }
+}
+
+impl Ne<String> for String {
+    bool __ne(&String self, &String other) {
+        return !self.__eq(other);
+    }
+}
+
+impl String {
+    bool __eq(&String self, str other) {
+        if (other == (str)0) { return self.len == 0; }
+        i64 other_len = strlen(other);
+        if (self.len != other_len) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)other, self.len) == 0;
+    }
+
+    bool __ne(&String self, str other) {
+        return !self.__eq(other);
+    }
+}
+
+impl Compare for String {
+    i32 compare(String* self, String* other) {
+        if (self == other) { return 0; }
+        if (self.len == 0 && other.len == 0) { return 0; }
+        if (self.len == 0) { return -1; }
+        if (other.len == 0) { return 1; }
+        i64 min_len = self.len;
+        if (other.len < min_len) { min_len = other.len; }
+        i32 cmp = memcmp((const void*)self.data, (const void*)other.data, min_len);
+        if (cmp != 0) { return cmp; }
+        if (self.len < other.len) { return -1; }
+        if (self.len > other.len) { return 1; }
+        return 0;
+    }
+}
+
+impl Lt<String> for String {
+    bool __lt(&String self, &String other) {
+        return self.compare(other) < 0;
+    }
+}
+
+impl Gt<String> for String {
+    bool __gt(&String self, &String other) {
+        return self.compare(other) > 0;
+    }
+}
+
+impl Le<String> for String {
+    bool __le(&String self, &String other) {
+        return self.compare(other) <= 0;
+    }
+}
+
+impl Ge<String> for String {
+    bool __ge(&String self, &String other) {
+        return self.compare(other) >= 0;
+    }
+}
 
 struct SplitIter {
     u8* data;
@@ -681,6 +914,14 @@ impl Iterator for SplitIter {
         self.data[end] = (u8)0;
         self.has_saved = true;
         return Optional<str>.some((str)&self.data[start]);
+    }
+}
+impl Drop for SplitIter {
+    void drop(SplitIter* self) {
+        if (self.has_saved && self.data != (u8*)0) {
+            self.data[self.saved_end] = self.saved_byte;
+            self.has_saved = false;
+        }
     }
 }
 
@@ -765,4 +1006,126 @@ impl String {
     StringBytesIter iter(&String self) {
         return self.bytes();
     }
+}
+
+/// Parse an integer in decimal format with optional leading '-' or '+'.
+Optional<i64> parse_i64(str s) {
+    return parse_i64_radix(s, 10);
+}
+
+/// Parse an integer with given radix (2..36), with optional leading '-' or '+'.
+Optional<i64> parse_i64_radix(str s, i64 radix) {
+    if (s == (str)0 || radix < 2 || radix > 36) {
+        return Optional<i64>.none();
+    }
+    u8* p = (u8*)s;
+    i64 len = strlen(s);
+    i64 i = 0;
+    while (i < len && (p[i] == (u8)' ' || p[i] == (u8)'\t' || p[i] == (u8)'\n' || p[i] == (u8)'\r')) {
+        i = i + 1;
+    }
+    if (i == len) {
+        return Optional<i64>.none();
+    }
+    bool neg = false;
+    if (p[i] == (u8)'-') {
+        neg = true;
+        i = i + 1;
+    } else if (p[i] == (u8)'+') {
+        i = i + 1;
+    }
+    if (i == len) {
+        return Optional<i64>.none();
+    }
+    if (radix == 16 && i + 2 <= len && p[i] == (u8)'0' && (p[i + 1] == (u8)'x' || p[i + 1] == (u8)'X')) {
+        i = i + 2;
+    }
+    if (radix == 2 && i + 2 <= len && p[i] == (u8)'0' && (p[i + 1] == (u8)'b' || p[i + 1] == (u8)'B')) {
+        i = i + 2;
+    }
+    if (i == len) {
+        return Optional<i64>.none();
+    }
+    i64 val = 0;
+    i64 digits = 0;
+    while (i < len) {
+        u8 c = p[i];
+        i64 digit = -1;
+        if (c >= (u8)'0' && c <= (u8)'9') {
+            digit = (i64)(c - (u8)'0');
+        } else if (c >= (u8)'a' && c <= (u8)'z') {
+            digit = (i64)(c - (u8)'a') + 10;
+        } else if (c >= (u8)'A' && c <= (u8)'Z') {
+            digit = (i64)(c - (u8)'A') + 10;
+        } else if (c == (u8)' ' || c == (u8)'\t' || c == (u8)'\n' || c == (u8)'\r') {
+            while (i < len && (p[i] == (u8)' ' || p[i] == (u8)'\t' || p[i] == (u8)'\n' || p[i] == (u8)'\r')) {
+                i = i + 1;
+            }
+            if (i == len && digits > 0) {
+                break;
+            }
+            return Optional<i64>.none();
+        } else {
+            return Optional<i64>.none();
+        }
+        if (digit < 0 || digit >= radix) {
+            return Optional<i64>.none();
+        }
+        val = val * radix + digit;
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if (digits == 0) {
+        return Optional<i64>.none();
+    }
+    if (neg) {
+        val = -val;
+    }
+    return Optional<i64>.some(val);
+}
+
+/// Extract all signed integer values found in string `s` (e.g. "x=10, y=-25" -> [10, -25]).
+Vec<i64> extract_ints(str s) {
+    Vec<i64> result = Vec<i64>.new();
+    if (s == (str)0) { return result; }
+    u8* p = (u8*)s;
+    i64 len = strlen(s);
+    i64 i = 0;
+    while (i < len) {
+        if ((p[i] >= (u8)'0' && p[i] <= (u8)'9') || (p[i] == (u8)'-' && i + 1 < len && p[i + 1] >= (u8)'0' && p[i + 1] <= (u8)'9')) {
+            bool neg = false;
+            if (p[i] == (u8)'-') {
+                neg = true;
+                i = i + 1;
+            }
+            i64 val = 0;
+            while (i < len && p[i] >= (u8)'0' && p[i] <= (u8)'9') {
+                val = val * 10 + (i64)(p[i] - (u8)'0');
+                i = i + 1;
+            }
+            if (neg) {
+                val = -val;
+            }
+            result.push(val);
+        } else {
+            i = i + 1;
+        }
+    }
+    return result;
+}
+/// Read the entire file at `path` into an owned String.
+Result<String, Error> read_to_string(str path) {
+    return String.from_file(path);
+}
+
+/// Read the entire file at `path` into lines.
+Result<Vec<String>, Error> read_lines(str path) {
+    Result<String, Error> r = String.from_file(path);
+    if (r.failed()) {
+        return Result<Vec<String>, Error>.Err(r.get_error());
+    }
+    String content = r.unwrap();
+    Vec<String> res = content.lines();
+    content.drop();
+    return Result<Vec<String>, Error>.Ok(move res);
 }

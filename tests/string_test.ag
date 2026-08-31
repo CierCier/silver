@@ -2,6 +2,7 @@
 import std.test;
 import std.string;
 import std.mem.vec;
+import std.hash;
 
 /// Free the String elements of a Vec before dropping the Vec itself (Vec
 /// owns the backing buffer only, never its elements).
@@ -375,6 +376,165 @@ i32 main(){
         str v2 = (str)sc;
         assert_eq_str("hello!", v2, "String still owns its buffer after cast");
         sc.drop();
+    }
+    test_start("String == and != operators");
+    {
+        String s_a = String.from_str("hello");
+        String s_b = String.from_str("hello");
+        String s_c = String.from_str("world");
+        assert_true(s_a == s_b, "distinct String allocations with same text are ==");
+        assert_false(s_a == s_c, "different Strings are not ==");
+        assert_true(s_a != s_c, "different Strings are !=");
+        assert_false(s_a != s_b, "identical Strings are not !=");
+        assert_true(s_a == "hello", "String == str literal");
+        assert_false(s_a == "world", "String == different str literal is false");
+        assert_true(s_a != "world", "String != different str literal is true");
+        assert_true(s_a < s_c, "String < comparison ('hello' < 'world')");
+        assert_false(s_c < s_a, "String < comparison ('world' < 'hello' is false)");
+        assert_true(s_c > s_a, "String > comparison ('world' > 'hello')");
+        assert_true(s_a <= s_b, "String <= comparison (same)");
+        assert_true(s_a >= s_b, "String >= comparison (same)");
+        s_a.drop();
+        s_b.drop();
+        s_c.drop();
+    }
+
+    test_start("String @hash content equality");
+    {
+        String h1 = String.from_str("advent_of_code");
+        String h2 = String.from_str("advent_of_code");
+        assert_eq_i64(@hash(h1), @hash(h2), "@hash of two String instances with same content match");
+        assert_eq_i64(@hash(h1), @hash("advent_of_code"), "@hash(String) matches @hash(str)");
+        h1.drop();
+        h2.drop();
+    }
+    test_start("SplitIter drop restores mutated byte on early break");
+    {
+        String s_split = String.from_str("apple,banana,cherry,date");
+        SplitIter it = s_split.split(",");
+        Optional<str> first = it.next();
+        assert_true(first.is_some(), "first token present");
+        assert_eq_str("apple", first.unwrap(), "first token is 'apple'");
+        // Drop iterator before consuming the rest
+        it.drop();
+        // Original string must be completely intact (no NUL byte replacing ',')
+        assert_eq_str("apple,banana,cherry,date", (str)s_split.to_str(), "String intact after early iterator drop");
+        s_split.drop();
+    }
+    test_start("parse_i64 and parse_i64_radix");
+    {
+        assert_eq_i64(12345, parse_i64("12345").unwrap(), "parse positive decimal");
+        assert_eq_i64(-6789, parse_i64("-6789").unwrap(), "parse negative decimal");
+        assert_eq_i64(42, parse_i64("  +42  ").unwrap(), "parse with whitespace and +");
+        assert_eq_i64(255, parse_i64_radix("0xFF", 16).unwrap(), "parse hex 0xFF");
+        assert_eq_i64(10, parse_i64_radix("0b1010", 2).unwrap(), "parse binary 0b1010");
+        assert_true(parse_i64("invalid").is_none(), "parse non-number returns none");
+
+        String s_num = String.from_str(" -999 ");
+        assert_eq_i64(-999, s_num.parse_i64().unwrap(), "String.parse_i64");
+        s_num.drop();
+    }
+
+    test_start("extract_ints");
+    {
+        String line = String.from_str("Sensor at x=2, y=-18: closest beacon is at x=-2, y=15");
+        Vec<i64> ints = line.extract_ints();
+        assert_eq_i64(4, ints.len(), "extracted 4 integers");
+        assert_eq_i64(2, ints[0], "first int is 2");
+        assert_eq_i64(-18, ints[1], "second int is -18");
+        assert_eq_i64(-2, ints[2], "third int is -2");
+        assert_eq_i64(15, ints[3], "fourth int is 15");
+        ints.drop();
+        line.drop();
+    }
+
+    test_start("lines and words");
+    {
+        String multiline = String.from_str("first line\r\nsecond line\nthird line");
+        Vec<String> lns = multiline.lines();
+        assert_eq_i64(3, lns.len(), "3 lines extracted");
+        String* l0 = lns.get_ptr(0);
+        String* l1 = lns.get_ptr(1);
+        String* l2 = lns.get_ptr(2);
+        assert_true(l0.equals("first line"), "line 1 match");
+        assert_true(l1.equals("second line"), "line 2 match");
+        assert_true(l2.equals("third line"), "line 3 match");
+        drop_vec_strings(&mut lns);
+        multiline.drop();
+
+        String sentence = String.from_str("  apple   banana \t cherry\n");
+        Vec<String> wds = sentence.words();
+        assert_eq_i64(3, wds.len(), "3 words extracted");
+        String* w0 = wds.get_ptr(0);
+        String* w1 = wds.get_ptr(1);
+        String* w2 = wds.get_ptr(2);
+        assert_true(w0.equals("apple"), "word 1");
+        assert_true(w1.equals("banana"), "word 2");
+        assert_true(w2.equals("cherry"), "word 3");
+        drop_vec_strings(&mut wds);
+        sentence.drop();
+    }
+    test_start("split_once, strip_prefix, strip_suffix, trim_start, trim_end");
+    {
+        String kv = String.from_str("key=value:123");
+        Optional<StringPair> pair_opt = kv.split_once("=");
+        assert_true(pair_opt.is_some(), "split_once found =");
+        StringPair p = pair_opt.unwrap();
+        assert_true(p.first == "key", "first is 'key'");
+        assert_true(p.second == "value:123", "second is 'value:123'");
+        p.first.drop();
+        p.second.drop();
+        kv.drop();
+
+        String url = String.from_str("https://example.com/path");
+        String path_str = url.strip_prefix("https://example.com");
+        assert_true(path_str == "/path", "strip_prefix removed domain");
+        path_str.drop();
+        url.drop();
+
+        String file_name = String.from_str("document.txt");
+        String stem = file_name.strip_suffix(".txt");
+        assert_true(stem == "document", "strip_suffix removed extension");
+        stem.drop();
+        file_name.drop();
+
+        String padded = String.from_str("  \t padded string \n ");
+        String t_start = padded.trim_start();
+        assert_true(t_start == "padded string \n ", "trim_start");
+        String t_end = padded.trim_end();
+        assert_true(t_end == "  \t padded string", "trim_end");
+        t_start.drop();
+        t_end.drop();
+        padded.drop();
+    }
+    test_start("read_to_string and read_lines");
+    {
+        str tmp_path = "/tmp/silver_string_read_test.txt";
+        Result<i64, Error> r_w = try_open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 438);
+        if (r_w.is_ok()) {
+            i32 fd = (i32)r_w.value();
+            str content = "alpha\nbeta\ngamma\n";
+            try_write(fd, (u8*)content, strlen(content));
+            try_close(fd);
+
+            Result<String, Error> res_s = read_to_string(tmp_path);
+            assert_true(res_s.success(), "read_to_string ok");
+            String content_str = res_s.unwrap();
+            assert_true(content_str == "alpha\nbeta\ngamma\n", "read_to_string matches");
+            content_str.drop();
+
+            Result<Vec<String>, Error> res_l = read_lines(tmp_path);
+            assert_true(res_l.success(), "read_lines ok");
+            Vec<String> lns = res_l.unwrap();
+            assert_eq_i64(3, lns.len(), "3 lines from file");
+            String* line0 = lns.get_ptr(0);
+            String* line1 = lns.get_ptr(1);
+            String* line2 = lns.get_ptr(2);
+            assert_true(line0.equals("alpha"), "line 0 is alpha");
+            assert_true(line1.equals("beta"), "line 1 is beta");
+            assert_true(line2.equals("gamma"), "line 2 is gamma");
+            drop_vec_strings(&mut lns);
+        }
     }
 
     return done();

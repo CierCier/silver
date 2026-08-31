@@ -1121,6 +1121,76 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
 
+        let inner_named =
+            self.resolve_receiver_type(inner_expr)
+                .and_then(|ty| match ty.kind.as_ref() {
+                    ast::TypeKind::Named(named) => Some(named.clone()),
+                    ast::TypeKind::Reference(r) => Self::extract_named_type(&r.inner).cloned(),
+                    ast::TypeKind::Pointer(p) => Self::extract_named_type(&p.inner).cloned(),
+                    _ => None,
+                });
+        let is_string_struct = inner_named
+            .as_ref()
+            .map(|named| named.path.last().map(|id| id.name.as_str()) == Some("String"))
+            .unwrap_or(false);
+
+        if is_string_struct {
+            let hash_fn = self.module.get_function("hash_bytes").ok_or_else(|| {
+                CodegenError::with_span("@hash requires `import std.hash;`".to_string(), expr.span)
+            })?;
+            let (data_ptr, len_val) = if val.is_struct_value() {
+                let struct_val = val.into_struct_value();
+                let data = self
+                    .builder
+                    .build_extract_value(struct_val, 0, "str_data")
+                    .map_err(|e| CodegenError::new(format!("extract str data: {e}")))?;
+                let len = self
+                    .builder
+                    .build_extract_value(struct_val, 1, "str_len")
+                    .map_err(|e| CodegenError::new(format!("extract str len: {e}")))?;
+                (data, len)
+            } else if val.is_pointer_value() {
+                let ptr = val.into_pointer_value();
+                let string_struct_ty = self
+                    .context
+                    .struct_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+                let data_gep = self
+                    .builder
+                    .build_struct_gep(string_struct_ty, ptr, 0, "str_data_gep")
+                    .map_err(|e| CodegenError::new(format!("gep str data: {e}")))?;
+                let data = self
+                    .builder
+                    .build_load(ptr_ty, data_gep, "str_data")
+                    .map_err(|e| CodegenError::new(format!("load str data: {e}")))?;
+                let len_gep = self
+                    .builder
+                    .build_struct_gep(string_struct_ty, ptr, 1, "str_len_gep")
+                    .map_err(|e| CodegenError::new(format!("gep str len: {e}")))?;
+                let len = self
+                    .builder
+                    .build_load(i64_ty, len_gep, "str_len")
+                    .map_err(|e| CodegenError::new(format!("load str len: {e}")))?;
+                (data, len)
+            } else {
+                return Err(CodegenError::with_span(
+                    "unsupported String representation for @hash".to_string(),
+                    expr.span,
+                ));
+            };
+            let call = self
+                .builder
+                .build_call(
+                    hash_fn,
+                    &[data_ptr.into(), len_val.into()],
+                    "hash_string_call",
+                )
+                .map_err(|e| CodegenError::with_span(format!("hash_bytes call: {e}"), expr.span))?;
+            return call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::new("hash_bytes returned void"));
+        }
+
         if llvm_ty.is_pointer_type() {
             // str: hash the string CONTENT via std.hash.hash_str.
             let hash_fn = self.module.get_function("hash_str").ok_or_else(|| {

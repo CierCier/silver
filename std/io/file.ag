@@ -341,7 +341,6 @@ impl File {
     File open_append(str path) {
         return File.open(path, "a");
     }
-
     bool valid(File* self) {
         return self.is_open && self.fd >= 0;
     }

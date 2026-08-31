@@ -3431,6 +3431,14 @@ impl TypeChecker {
                         if self.is_assignable(&substituted, arg_ty) {
                             mapping = inferred_mapping;
                             matched = true;
+                        } else if let Type::Reference {
+                            is_mutable: false,
+                            inner,
+                        } = &substituted
+                            && (inner.as_ref() == arg_ty || self.is_assignable(inner, arg_ty))
+                        {
+                            mapping = inferred_mapping;
+                            matched = true;
                         } else if self.is_implicitly_castable(arg_ty, &substituted) {
                             score += 1;
                             mapping = inferred_mapping;
@@ -3443,6 +3451,13 @@ impl TypeChecker {
                     if !matched {
                         let substituted = self.substitute_type(&param_ty, &mapping);
                         if self.is_assignable(&substituted, arg_ty) {
+                            matched = true;
+                        } else if let Type::Reference {
+                            is_mutable: false,
+                            inner,
+                        } = &substituted
+                            && (inner.as_ref() == arg_ty || self.is_assignable(inner, arg_ty))
+                        {
                             matched = true;
                         } else if self.is_implicitly_castable(arg_ty, &substituted) {
                             score += 1;
@@ -4838,6 +4853,18 @@ impl TypeChecker {
             ) => {
                 (!*to_mut || *from_mut)
                     && (from_inner == to_inner || self.is_implicitly_castable(from_inner, to_inner))
+            }
+            (
+                from_val,
+                Type::Reference {
+                    is_mutable: false,
+                    inner: to_inner,
+                },
+            ) if self.is_concrete_type(from_val)
+                && (from_val == to_inner.as_ref()
+                    || self.is_implicitly_castable(from_val, to_inner)) =>
+            {
+                true
             }
             (
                 Type::Pointer { inner, .. },

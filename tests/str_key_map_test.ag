@@ -1,5 +1,6 @@
 import std.test;  // assert_true, assert_eq_i64, assert_eq_str, check, done, STDOUT
 import std.map;
+import std.string;
 
 i32 main() {
     STDOUT.write_str("=== HashMap<str, i64> Tests ===\n\n");
@@ -96,6 +97,19 @@ i32 main() {
     m5["apple"] = 99;
     assert_eq_i64(m5["apple"], 99, "m5['apple'] overwritten to 99 via index");
     m5.drop();
+    // --- Owned String keys in HashMap ---
+    STDOUT.write_str("\n--- Owned String keys ---\n");
+    HashMap<String, i64> sm = HashMap<String, i64>.new();
+    sm.insert(String.from_str("foo"), 42);
+    sm.insert(String.from_str("bar"), 84);
+    assert_eq_i64(sm.len(), 2, "sm.len() == 2");
+    assert_true(sm.contains_key(String.from_str("foo")), "sm contains 'foo'");
+    assert_true(sm.contains_key(String.from_str("bar")), "sm contains 'bar'");
+    assert_true(!sm.contains_key(String.from_str("baz")), "sm does not contain 'baz'");
+    assert_eq_i64(sm.get(String.from_str("foo")), 42, "sm.get('foo') == 42");
+    assert_eq_i64(sm.get(String.from_str("bar")), 84, "sm.get('bar') == 84");
+    sm.drop();
+
 
     return done();
 }

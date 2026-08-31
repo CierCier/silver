@@ -469,17 +469,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(updated)
             }
             _ => {
-                // For str equality (==, !=), use strcmp instead of pointer comparison
-                if matches!(
-                    operator,
-                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
-                ) && (self.expression_is_str_type(left) || self.expression_is_str_type(right))
-                {
-                    let lhs = self.emit_expression_value(left)?;
-                    let rhs = self.emit_expression_value(right)?;
-                    return self.emit_strcmp_comparison(lhs, operator, rhs, &whole_expr.span);
-                }
-
                 // For struct types, use trait method call instead of inline
                 // IR. The struct check must come from the TYPE, not a value:
                 // evaluating the lhs just to inspect it (then again inside
@@ -518,6 +507,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         format!("operator '{method_name}' is not implemented for struct type"),
                         whole_expr.span,
                     ));
+                }
+
+                // For str equality (==, !=), use strcmp instead of pointer comparison
+                if matches!(
+                    operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                ) && (self.expression_is_str_type(left) || self.expression_is_str_type(right))
+                {
+                    let lhs = self.emit_expression_value(left)?;
+                    let rhs = self.emit_expression_value(right)?;
+                    return self.emit_strcmp_comparison(lhs, operator, rhs, &whole_expr.span);
                 }
                 let mut lhs = self.emit_expression_value(left)?;
                 let mut rhs = self.emit_expression_value(right)?;
@@ -574,14 +574,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// (falling back to standard pointer comparison in those cases).
     pub(crate) fn expression_is_str_type(&mut self, expr: &ast::Expression) -> bool {
         let str_ty = ast::TypeKind::Primitive(ast::PrimitiveType::Str);
-        match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(ast::Literal::String(_)) => true,
-            ast::ExpressionKind::Identifier(ident) => self
-                .lookup_value_type(&ident.name)
-                .is_some_and(|ty| *ty.kind == str_ty),
-            ast::ExpressionKind::Cast { target_type, .. } => *target_type.kind == str_ty,
-            _ => false,
+        if let ast::ExpressionKind::Literal(ast::Literal::String(_)) = expr.kind.as_ref() {
+            return true;
         }
+        self.resolve_receiver_type(expr)
+            .is_some_and(|ty| *ty.kind == str_ty)
     }
 
     /// Determine whether an expression evaluates to an unsigned integer type.

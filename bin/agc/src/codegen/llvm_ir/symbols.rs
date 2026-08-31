@@ -473,7 +473,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ast::TypeKind::Reference(reference) => Some((*reference.inner).clone()),
                     ast::TypeKind::Array(array) => Some((*array.element_type).clone()),
                     ast::TypeKind::Slice(slice) => Some((*slice.element_type).clone()),
-                    ast::TypeKind::Named(_) => {
+                    ast::TypeKind::Named(named) => {
+                        if let Some(args) = &named.generics
+                            && let Some(first) = args.first()
+                        {
+                            return Some(first.clone());
+                        }
                         // IndexedAccess impl: the `__index_get` return type is
                         // the element type (e.g. String -> u8).
                         for owner in Self::owner_name_candidates_from_type(&obj_ty) {
@@ -1593,7 +1598,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 ..
-            } => self.resolve_lvalue_ptr(expr).ok().map(|(_, ty)| ty),
+            } => self
+                .resolve_lvalue_ptr(expr)
+                .ok()
+                .map(|(_, ty)| ty)
+                .or_else(|| self.resolve_argument_type(expr)),
             ast::ExpressionKind::Reference {
                 is_mutable,
                 expression,
@@ -1681,7 +1690,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ast::TypeKind::Optional(inner) => Some((**inner).clone()),
                         ast::TypeKind::Named(named) => {
                             let name = named.path.last().map(|s| s.name.as_str());
-                            if name == Some("Optional") || name == Some("Result") || name == Some("SysResult") {
+                            if name == Some("Optional")
+                                || name == Some("Result")
+                                || name == Some("SysResult")
+                            {
                                 if let Some(gens) = &named.generics {
                                     gens.first().cloned()
                                 } else {
@@ -1696,6 +1708,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 } else {
                     self.resolve_receiver_type(fallback)
+                }
+            }
+            ast::ExpressionKind::MacroCall { name, .. } => {
+                if name.name == "json" {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Str)),
+                        span: expr.span,
+                    })
+                } else if name.name == "format" {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                            path: vec![ast::Identifier {
+                                name: "String".to_string(),
+                                span: expr.span,
+                            }],
+                            generics: None,
+                        })),
+                        span: expr.span,
+                    })
+                } else if name.name == "hash" || name.name == "align" {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
+                        span: expr.span,
+                    })
+                } else {
+                    None
                 }
             }
             _ => None,

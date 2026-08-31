@@ -267,7 +267,6 @@ impl HashSet<K> {
         self.len = self.len - 1;
         return Optional<K>.some(k);
     }
-
     void reserve(&mut HashSet<K> self, i64 additional) {
         if (additional <= 0) { return; }
         i64 required = self.len + additional;

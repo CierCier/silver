@@ -185,8 +185,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .iter()
                     .map(|ty| crate::mangling::sanitize_type_key(&ty.canonical_key()))
                     .collect::<Vec<_>>();
-                let base_prefix =
-                    format!("{fn_name}__{}_{}__", arg_keys.len(), arg_keys.join("_"));
+                let base_prefix = format!("{fn_name}__{}_{}__", arg_keys.len(), arg_keys.join("_"));
                 let param_prefix = format!("{base_prefix}{}_", arguments.len());
                 let found = self
                     .function_name_to_symbol
@@ -885,8 +884,48 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         for (index, argument) in arguments.iter().enumerate() {
-            let mut value = self.emit_expression_value(argument)?;
             let param_index = index + usize::from(inject_receiver);
+            let expects_ref = signature
+                .as_ref()
+                .and_then(|sig| sig.params.get(param_index))
+                .map(|p| {
+                    matches!(
+                        p.kind.as_ref(),
+                        ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                    )
+                })
+                .unwrap_or(false);
+            let mut value = if expects_ref
+                && self
+                    .resolve_argument_type(argument)
+                    .map(|t| {
+                        !matches!(
+                            t.kind.as_ref(),
+                            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                        )
+                    })
+                    .unwrap_or(false)
+            {
+                if let Ok((ptr, _)) = self.resolve_lvalue_ptr(argument) {
+                    ptr.as_basic_value_enum()
+                } else {
+                    let val = self.emit_expression_value(argument)?;
+                    let function_ctx = self.current_fn.ok_or_else(|| {
+                        CodegenError::new("no active function for argument spill")
+                    })?;
+                    let temp =
+                        self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
+                    self.builder.build_store(temp, val).map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to spill argument for reference param: {e}"),
+                            argument.span,
+                        )
+                    })?;
+                    temp.as_basic_value_enum()
+                }
+            } else {
+                self.emit_expression_value(argument)?
+            };
             if param_index < declared_param_count {
                 if let Some(signature) = &signature {
                     // By-value argument of a Drop type: the callee's
@@ -894,7 +933,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // ownership. Clear the caller's flag to avoid a
                     // double free; extern functions never drop params.
                     if signature.linkage.is_none() {
-                        let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                        let arg_drops = if expects_ref {
+                            false
+                        } else if let Some(arg_ty) = self.resolve_argument_type(argument) {
                             self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
                         } else if param_index < signature.params.len() {
                             self.param_type_drops_on_exit(&signature.params[param_index])
