@@ -89,7 +89,7 @@ for bin_name in agc aglsp agsm; do
   dest_bin="$bin_dir/$bin_name"
   if [[ -f "$src_bin" ]]; then
     echo "  Installing binary: $dest_bin"
-    cp "$src_bin" "$dest_bin"
+    cp --remove-destination "$src_bin" "$dest_bin"
     chmod +x "$dest_bin"
   else
     echo "  warning: binary not found at $src_bin" >&2
