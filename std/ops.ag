@@ -13,12 +13,12 @@ trait Div<B>        { Self __div(self, B other); }
 trait Mod<B>        { Self __mod(self, B other); }
 trait Neg           { Self __neg(self); }
 
-trait Eq<A>   { bool __eq(self, A other); }
-trait Ne<A>   { bool __ne(self, A other); }
-trait Lt<A>   { bool __lt(self, A other); }
-trait Gt<A>   { bool __gt(self, A other); }
-trait Le<A>   { bool __le(self, A other); }
-trait Ge<A>   { bool __ge(self, A other); }
+trait Eq<A>   { bool __eq(Self* self, A* other); }
+trait Ne<A>   { bool __ne(Self* self, A* other); }
+trait Lt<A>   { bool __lt(Self* self, A* other); }
+trait Gt<A>   { bool __gt(Self* self, A* other); }
+trait Le<A>   { bool __le(Self* self, A* other); }
+trait Ge<A>   { bool __ge(Self* self, A* other); }
 
 trait IndexedAccess {
     type Item;

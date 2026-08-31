@@ -727,6 +727,27 @@ fn unify_type(
         return true;
     }
 
+    if let (Type::Reference { inner: exp_inner, .. }, _) = (&expected, found) {
+        if unify_type(exp_inner, found, subst, impl_generics, impl_subst) {
+            return true;
+        }
+    }
+    if let (_, Type::Reference { inner: found_inner, .. }) = (&expected, found) {
+        if unify_type(&expected, found_inner, subst, impl_generics, impl_subst) {
+            return true;
+        }
+    }
+    if let (Type::Pointer { inner: exp_inner, .. }, _) = (&expected, found) {
+        if unify_type(exp_inner, found, subst, impl_generics, impl_subst) {
+            return true;
+        }
+    }
+    if let (_, Type::Pointer { inner: found_inner, .. }) = (&expected, found) {
+        if unify_type(&expected, found_inner, subst, impl_generics, impl_subst) {
+            return true;
+        }
+    }
+
     match (&expected, found) {
         (Type::Unknown, _) => true,
         (Type::Primitive(_), _) | (Type::Unit, _) => &expected == found,
