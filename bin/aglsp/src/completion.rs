@@ -999,4 +999,44 @@ mod tests {
             "expected struct fields in {labels:?}"
         );
     }
+
+    #[test]
+    fn member_completion_on_self_and_explicit_local() {
+        let source = r#"
+        struct Point {
+            i32 x;
+            i32 y;
+        }
+        impl Point {
+            i32 magnitude(Point* self) {
+                self.x;
+                return 0;
+            }
+        }
+        i32 main() {
+            Point pt;
+            pt.y;
+            return 0;
+        }
+        "#;
+        let file_id = lexer::register_source("/tmp/lsp_self_test.ag", source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let graph = agc::grammar::parse_ag(source);
+        let program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        let analysis = analyze(&program, source, &tokens, Default::default(), file_id);
+
+        // 1. Complete on `self.x`
+        let self_offset = source.rfind("self.x").unwrap() + 5;
+        let self_items = completion(&analysis, self_offset);
+        let self_labels: Vec<String> = self_items.iter().map(|i| i.label.clone()).collect();
+        assert!(self_labels.contains(&"x".to_string()), "got {self_labels:?}");
+        assert!(self_labels.contains(&"y".to_string()), "got {self_labels:?}");
+
+        // 2. Complete on `pt.y`
+        let pt_offset = source.rfind("pt.y").unwrap() + 3;
+        let pt_items = completion(&analysis, pt_offset);
+        let pt_labels: Vec<String> = pt_items.iter().map(|i| i.label.clone()).collect();
+        assert!(pt_labels.contains(&"x".to_string()), "got {pt_labels:?}");
+        assert!(pt_labels.contains(&"y".to_string()), "got {pt_labels:?}");
+    }
 }

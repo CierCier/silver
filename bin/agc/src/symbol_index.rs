@@ -821,7 +821,10 @@ impl Walker<'_> {
         self.locals.push(HashMap::default());
         for p in params {
             self.walk_type(&p.param_type);
-            self.declare_local(&p.name.name, p.name.span, SymbolKind::Parameter);
+            let id = self.declare_local(&p.name.name, p.name.span, SymbolKind::Parameter);
+            let ty_str = format_type(&p.param_type);
+            self.symbols[id].signature = format!("{ty_str} {}", p.name.name);
+            self.symbols[id].inferred_type = Some(ty_str);
         }
         self.walk_block(body);
         self.locals.pop();
@@ -945,7 +948,15 @@ impl Walker<'_> {
             ast::StatementKind::Block(b) => self.walk_block(b),
             ast::StatementKind::Expression(e) => self.walk_expr(e),
             ast::StatementKind::Let(ls) => {
-                let inferred = if ls.type_annotation.is_none() {
+                let explicit_ty = ls.type_annotation.as_ref().map(format_type);
+                let inferred = if let Some(ty_str) = explicit_ty {
+                    match &ls.pattern.kind {
+                        ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
+                            Some((id.span, ty_str))
+                        }
+                        _ => None,
+                    }
+                } else {
                     match (&ls.pattern.kind, ls.initializer.as_ref()) {
                         (
                             ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id),
@@ -956,8 +967,6 @@ impl Walker<'_> {
                             .map(|ty| (id.span, ty)),
                         _ => None,
                     }
-                } else {
-                    None
                 };
                 if let Some(ty) = &ls.type_annotation {
                     self.walk_type(ty);
@@ -968,13 +977,13 @@ impl Walker<'_> {
                 }
                 self.walk_pattern(&ls.pattern);
                 if let Some((span, ty)) = inferred
-                    && self.in_buffer(&span)
                     && let Some(symbol) = self
                         .symbols
                         .iter_mut()
                         .rev()
                         .find(|symbol| symbol.kind == SymbolKind::Local && symbol.span == span)
                 {
+                    symbol.signature = format!("{ty} {}", symbol.name);
                     symbol.inferred_type = Some(ty);
                 }
             }

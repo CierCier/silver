@@ -48,7 +48,12 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".into(), ":".into()]),
+                    trigger_characters: Some(vec![
+                        ".".into(),
+                        ":".into(),
+                        "@".into(),
+                        "{".into(),
+                    ]),
                     ..Default::default()
                 }),
                 signature_help_provider: Some(SignatureHelpOptions {
