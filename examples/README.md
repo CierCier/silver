@@ -19,6 +19,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 | `traits.ag` | `trait` definitions, `impl Trait for Type`, method dispatch |
 | `casting.ag` | Numeric casts `(f64)x`, struct `cast` operators |
 | `array_init.ag` | Positional/designated array init, multi-dimensional arrays |
+| `slicing.ag` | Python-style slice syntax on arrays, slices, vectors, and strings |
 | `struct_attributes.ag` | `#[packed]`, `#[align(n)]`, `#[repr(C)]`, `@size(T)` |
 
 ## Standard Library

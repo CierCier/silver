@@ -1,0 +1,55 @@
+import std.io;
+import std.slice;
+import std.mem.vec;
+import std.string;
+
+i32 main() {
+    @println("=== 1. Array Slicing ===");
+    i32 numbers[6] = { 10, 20, 30, 40, 50, 60 };
+
+    // Range slicing [start:end]
+    Slice<i32> mid = numbers[1:5];
+    @println("numbers[1:5] length: {}", mid.len);
+    for i in (i64)0..mid.len {
+        @println("  mid[{}] = {}", i, mid[i]);
+    }
+
+    // Slicing from start to index [:end] and from index to end [start:]
+    Slice<i32> first_three = numbers[:3];
+    Slice<i32> from_four = numbers[4:];
+    @println("numbers[:3][2] = {}", first_three[2]);
+    @println("numbers[4:][0] = {}", from_four[0]);
+
+    // Full slice [:]
+    Slice<i32> all = numbers[:];
+    @println("numbers[:] length: {}", all.len);
+
+    // Negative indices in Python style
+    Slice<i32> without_last = numbers[:-1];
+    Slice<i32> last_two = numbers[-2:];
+    @println("numbers[:-1] length: {}", without_last.len);
+    @println("numbers[-2:][0] = {}, numbers[-2:][1] = {}", last_two[0], last_two[1]);
+
+    @println("\n=== 2. Vector Slicing ===");
+    Vec<i32> v;
+    v.push(100);
+    v.push(200);
+    v.push(300);
+    v.push(400);
+
+    Slice<i32> v_slice = v[1:3];
+    @println("v[1:3] length: {}, elements: {}, {}", v_slice.len, v_slice[0], v_slice[1]);
+
+    @println("\n=== 3. Subslice Slicing ===");
+    Slice<i32> sub = mid[1:3]; // Slicing an existing Slice<i32>
+    @println("mid[1:3] length: {}, elements: {}, {}", sub.len, sub[0], sub[1]);
+
+    @println("\n=== 4. String Slicing ===");
+    String msg = String.from_str("Hello, Silver!");
+    Slice<u8> hello = msg[0:5];
+    Slice<u8> silver = msg[7:13];
+    @println("msg[0:5] length: {}", hello.len);
+    @println("msg[7:13] length: {}", silver.len);
+
+    return 0;
+}
