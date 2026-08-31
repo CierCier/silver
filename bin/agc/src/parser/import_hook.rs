@@ -758,7 +758,7 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
 
 fn uses_json_or_serialize(items: &[ast::Item]) -> bool {
     items.iter().any(|item| {
-        if item.attributes.iter().any(|attr| attr.name.name == "serialize") {
+        if item.attributes.iter().any(|attr| attr.name.name == "serialize" || attr.name.name == "serialise") {
             return true;
         }
         let mut found = false;

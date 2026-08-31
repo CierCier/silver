@@ -220,7 +220,7 @@ pub fn parse_struct_attributes(
                 }
                 out.align = Some(align);
             }
-            "serialize" => {
+            "serialize" | "serialise" => {
                 let formats = crate::semantic::serialize::parse_serialize_attribute(attr)
                     .map_err(|msg| StructAttrError {
                         message: msg,

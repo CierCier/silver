@@ -105,7 +105,7 @@ impl SerializationFormat {
 pub fn parse_serialize_attribute(
     attr: &ast::Attribute,
 ) -> Result<Vec<SerializationFormat>, String> {
-    if attr.name.name != "serialize" {
+    if attr.name.name != "serialize" && attr.name.name != "serialise" {
         return Ok(Vec::new());
     }
     if attr.args.is_empty() {
@@ -203,7 +203,7 @@ pub fn synthesize_serialization_for_program(program: &mut ast::Program) {
             ast::ItemKind::Struct(s) => {
                 structs.push(s.clone());
                 for attr in &item.attributes {
-                    if attr.name.name == "serialize" {
+                    if attr.name.name == "serialize" || attr.name.name == "serialise" {
                         structs_with_attr.insert(s.name.name.clone());
                     }
                 }

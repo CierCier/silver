@@ -121,6 +121,7 @@ impl Backend {
             });
         }
         agc::semantic::cfg_hook::fold_and_prune(&mut program, &cfg_set);
+        agc::semantic::serialize::synthesize_serialization_for_program(&mut program);
 
         // Type-check (runs the semantic analyzer internally: duplicate
         // symbols, unknown identifiers/types/traits, scoping) and capture
@@ -211,6 +212,7 @@ mod tests {
         let cfg_errors = agc::cfg::gate_items(&mut program, &cfg_set);
         assert!(cfg_errors.is_empty(), "cfg errors: {}", cfg_errors.len());
         agc::semantic::cfg_hook::fold_and_prune(&mut program, &cfg_set);
+        agc::semantic::serialize::synthesize_serialization_for_program(&mut program);
 
         let mut tc = TypeChecker::new();
         let mut table = CompilerSymbolTable::new();
@@ -243,6 +245,38 @@ mod tests {
         assert!(
             !errors.iter().any(|e| e.contains("unknown")),
             "gated item leaked into analysis: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn serialize_and_serialise_synthesize_to_json_impl() {
+        // Structs with #[serialize] or #[serialise] synthesize ToJson without
+        // generating "does not implement ToJson" errors for @json calls.
+        let errors = frontend_type_errors(
+            r#"
+            #[serialize(json)]
+            struct RecordA {
+                i32 id;
+                str name;
+            }
+
+            #[serialise(json)]
+            struct RecordB {
+                i32 count;
+            }
+
+            i32 main() {
+                RecordA a = { .id = 1, .name = "test" };
+                RecordB b = { .count = 42 };
+                @json(a);
+                @json(b);
+                return 0;
+            }
+            "#,
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("does not implement ToJson")),
+            "serialization synthesis failed in LSP diagnostics: {errors:?}"
         );
     }
 }
