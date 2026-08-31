@@ -174,6 +174,23 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
             rewrite_expression(object, cfg);
             rewrite_expression(index, cfg);
         }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+        } => {
+            rewrite_expression(object, cfg);
+            if let Some(s) = start {
+                rewrite_expression(s, cfg);
+            }
+            if let Some(e) = end {
+                rewrite_expression(e, cfg);
+            }
+            if let Some(st) = step {
+                rewrite_expression(st, cfg);
+            }
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,

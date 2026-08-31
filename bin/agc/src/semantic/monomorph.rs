@@ -397,7 +397,8 @@ fn normalize_expression(
             normalize_expression(expression, defaults)
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => normalize_expression(object, defaults),
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => normalize_expression(object, defaults),
         ast::ExpressionKind::If {
             condition,
             then_branch,
@@ -961,7 +962,8 @@ fn collect_expression_instantiations(
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => {
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => {
             collect_expression_instantiations(object, generic_structs, instantiations, scopes);
         }
         ast::ExpressionKind::Ternary {
@@ -1598,7 +1600,8 @@ fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<Str
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => {
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => {
             substitute_expression_types(object, mapping);
         }
         ast::ExpressionKind::Binary { left, right, .. } => {
@@ -1877,7 +1880,8 @@ fn rewrite_expression_function_calls(
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => {
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => {
             rewrite_expression_function_calls(object, name, args, mangled, span, param_count);
         }
         ast::ExpressionKind::Cast { expression, .. } => {
@@ -2192,7 +2196,8 @@ fn rewrite_expression_method_calls(
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => {
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => {
             rewrite_expression_method_calls(object, base, method, args, span);
         }
         ast::ExpressionKind::Cast {
@@ -2683,7 +2688,8 @@ fn collect_expression_remaining_calls(
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
-        | ast::ExpressionKind::Index { object, .. } => {
+        | ast::ExpressionKind::Index { object, .. }
+        | ast::ExpressionKind::Slice { object, .. } => {
             results.extend(collect_expression_remaining_calls(object, generic_fns));
         }
         ast::ExpressionKind::Cast { expression, .. } => {

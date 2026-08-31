@@ -1141,6 +1141,23 @@ impl Walker<'_> {
                 self.walk_expr(object);
                 self.walk_expr(index);
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.walk_expr(object);
+                if let Some(s) = start {
+                    self.walk_expr(s);
+                }
+                if let Some(e) = end {
+                    self.walk_expr(e);
+                }
+                if let Some(st) = step {
+                    self.walk_expr(st);
+                }
+            }
             ast::ExpressionKind::Ternary {
                 condition,
                 then_expr,

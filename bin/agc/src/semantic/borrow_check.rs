@@ -528,6 +528,23 @@ impl BorrowChecker {
                     self.collect_expr_uses(index, uses);
                 }
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.collect_expr_uses(object, uses);
+                if let Some(s) = start {
+                    self.collect_expr_uses(s, uses);
+                }
+                if let Some(e) = end {
+                    self.collect_expr_uses(e, uses);
+                }
+                if let Some(st) = step {
+                    self.collect_expr_uses(st, uses);
+                }
+            }
             ast::ExpressionKind::If {
                 condition,
                 then_branch,
@@ -819,7 +836,8 @@ impl BorrowChecker {
                 };
                 Some((root, path, ref_var))
             }
-            ast::ExpressionKind::Index { object, .. } => self.extract_root_and_path(object),
+            ast::ExpressionKind::Index { object, .. }
+            | ast::ExpressionKind::Slice { object, .. } => self.extract_root_and_path(object),
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 operand,
@@ -1276,6 +1294,23 @@ impl BorrowChecker {
             ast::ExpressionKind::Index { object, index } => {
                 self.check_expr(object);
                 self.check_expr(index);
+            }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.check_expr(object);
+                if let Some(s) = start {
+                    self.check_expr(s);
+                }
+                if let Some(e) = end {
+                    self.check_expr(e);
+                }
+                if let Some(st) = step {
+                    self.check_expr(st);
+                }
             }
             ast::ExpressionKind::Call {
                 function,

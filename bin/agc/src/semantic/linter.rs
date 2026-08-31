@@ -361,6 +361,23 @@ impl<'a> Linter<'a> {
                 self.lint_expr(object);
                 self.lint_expr(index);
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.lint_expr(object);
+                if let Some(s) = start {
+                    self.lint_expr(s);
+                }
+                if let Some(e) = end {
+                    self.lint_expr(e);
+                }
+                if let Some(st) = step {
+                    self.lint_expr(st);
+                }
+            }
             ast::ExpressionKind::Block(block) => {
                 self.lint_block(block);
             }

@@ -109,6 +109,23 @@ fn rewrite_expression(expression: &mut ast::Expression) {
             rewrite_expression(object);
             rewrite_expression(index);
         }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+        } => {
+            rewrite_expression(object);
+            if let Some(s) = start {
+                rewrite_expression(s);
+            }
+            if let Some(e) = end {
+                rewrite_expression(e);
+            }
+            if let Some(st) = step {
+                rewrite_expression(st);
+            }
+        }
         ast::ExpressionKind::If {
             condition,
             then_branch,

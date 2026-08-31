@@ -622,6 +622,23 @@ impl MoveChecker {
                 self.check_place_operands(object, state, scopes, var_types);
                 self.check_expr(index, state, scopes, var_types);
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.check_place_operands(object, state, scopes, var_types);
+                if let Some(s) = start {
+                    self.check_expr(s, state, scopes, var_types);
+                }
+                if let Some(e) = end {
+                    self.check_expr(e, state, scopes, var_types);
+                }
+                if let Some(st) = step {
+                    self.check_expr(st, state, scopes, var_types);
+                }
+            }
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 operand,
@@ -1252,6 +1269,23 @@ impl MoveChecker {
                 } else {
                     self.check_expr(object, state, scopes, var_types);
                     self.check_expr(index, state, scopes, var_types);
+                }
+            }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.check_expr(object, state, scopes, var_types);
+                if let Some(s) = start {
+                    self.check_expr(s, state, scopes, var_types);
+                }
+                if let Some(e) = end {
+                    self.check_expr(e, state, scopes, var_types);
+                }
+                if let Some(st) = step {
+                    self.check_expr(st, state, scopes, var_types);
                 }
             }
             ast::ExpressionKind::Reference { expression, .. } => {

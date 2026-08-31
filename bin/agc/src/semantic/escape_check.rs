@@ -283,7 +283,8 @@ impl Checker {
                 }
             }
             ast::ExpressionKind::FieldAccess { object, .. }
-            | ast::ExpressionKind::Index { object, .. } => {
+            | ast::ExpressionKind::Index { object, .. }
+            | ast::ExpressionKind::Slice { object, .. } => {
                 self.classify_depth(object, true, scopes, ref_sources, ptr_locals, ref_params)
             }
             ast::ExpressionKind::Unary {
@@ -323,7 +324,9 @@ impl Checker {
                     }
                 }
             }
-            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+            ast::ExpressionKind::FieldAccess { .. }
+            | ast::ExpressionKind::Index { .. }
+            | ast::ExpressionKind::Slice { .. } => {
                 self.classify_depth(operand, true, scopes, ref_sources, ptr_locals, ref_params)
             }
             ast::ExpressionKind::Unary {
@@ -558,6 +561,23 @@ impl Checker {
             ast::ExpressionKind::FieldAccess { object, .. }
             | ast::ExpressionKind::Index { object, .. } => {
                 self.check_expr(object, scopes, ref_sources, ptr_locals, ref_params);
+            }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.check_expr(object, scopes, ref_sources, ptr_locals, ref_params);
+                if let Some(s) = start {
+                    self.check_expr(s, scopes, ref_sources, ptr_locals, ref_params);
+                }
+                if let Some(e) = end {
+                    self.check_expr(e, scopes, ref_sources, ptr_locals, ref_params);
+                }
+                if let Some(st) = step {
+                    self.check_expr(st, scopes, ref_sources, ptr_locals, ref_params);
+                }
             }
             ast::ExpressionKind::Ternary {
                 condition,

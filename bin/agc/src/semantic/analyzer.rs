@@ -606,6 +606,23 @@ impl Analyzer {
                 self.check_expression(object);
                 self.check_expression(index);
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                self.check_expression(object);
+                if let Some(s) = start {
+                    self.check_expression(s);
+                }
+                if let Some(e) = end {
+                    self.check_expression(e);
+                }
+                if let Some(st) = step {
+                    self.check_expression(st);
+                }
+            }
             ast::ExpressionKind::Ternary {
                 condition,
                 then_expr,

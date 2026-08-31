@@ -2302,6 +2302,142 @@ impl TypeChecker {
                     }
                 }
             }
+            ast::ExpressionKind::Slice {
+                object,
+                start,
+                end,
+                step,
+            } => {
+                let object_ty = self.check_expr(object, None);
+                let object_ty_display = object_ty.to_string();
+
+                let mut arg_types = Vec::new();
+
+                if let Some(s) = start {
+                    let s_ty = self.check_expr(s, None);
+                    if !is_integer(&s_ty) {
+                        self.error(
+                            format!("slice start index must be integer, found {}", s_ty),
+                            s.span,
+                        );
+                    }
+                    arg_types.push(s_ty);
+                } else {
+                    arg_types.push(Type::Primitive(ast::PrimitiveType::I64));
+                }
+
+                if let Some(e) = end {
+                    let e_ty = self.check_expr(e, None);
+                    if !is_integer(&e_ty) {
+                        self.error(
+                            format!("slice end index must be integer, found {}", e_ty),
+                            e.span,
+                        );
+                    }
+                    arg_types.push(e_ty);
+                } else {
+                    arg_types.push(Type::Primitive(ast::PrimitiveType::I64));
+                }
+
+                if let Some(st) = step {
+                    let st_ty = self.check_expr(st, None);
+                    if !is_integer(&st_ty) {
+                        self.error(
+                            format!("slice step must be integer, found {}", st_ty),
+                            st.span,
+                        );
+                    }
+                    arg_types.push(st_ty);
+                }
+
+                if let Some(declared_ty) = match object.kind.as_ref() {
+                    ast::ExpressionKind::Identifier(ident) => self.lookup_type(&ident.name),
+                    _ => None,
+                } {
+                    if let Type::Array { element, .. } = declared_ty {
+                        return Type::Slice { element };
+                    }
+                }
+
+                match &object_ty {
+                    Type::Array { element, .. } => Type::Slice {
+                        element: element.clone(),
+                    },
+                    Type::Slice { element } => Type::Slice {
+                        element: element.clone(),
+                    },
+                    Type::Pointer { inner, .. } => match &**inner {
+                        Type::Slice { element } => Type::Slice {
+                            element: element.clone(),
+                        },
+                        _ => {
+                            if let Some(result_ty) = self.resolve_method_overload_types(
+                                &object_ty,
+                                "__slice_get",
+                                &arg_types,
+                                None,
+                                MethodCallStyle::Instance,
+                                None,
+                                object.span,
+                            ) {
+                                result_ty
+                            } else {
+                                self.error(
+                                    format!("cannot slice type {}", object_ty_display),
+                                    object.span,
+                                );
+                                Type::Unknown
+                            }
+                        }
+                    },
+                    Type::Reference { inner, .. } => match &**inner {
+                        Type::Array { element, .. } => Type::Slice {
+                            element: element.clone(),
+                        },
+                        Type::Slice { element } => Type::Slice {
+                            element: element.clone(),
+                        },
+                        _ => {
+                            if let Some(result_ty) = self.resolve_method_overload_types(
+                                &object_ty,
+                                "__slice_get",
+                                &arg_types,
+                                None,
+                                MethodCallStyle::Instance,
+                                None,
+                                object.span,
+                            ) {
+                                result_ty
+                            } else {
+                                self.error(
+                                    format!("cannot slice type {}", object_ty_display),
+                                    object.span,
+                                );
+                                Type::Unknown
+                            }
+                        }
+                    },
+                    _ => {
+                        if let Some(result_ty) = self.resolve_method_overload_types(
+                            &object_ty,
+                            "__slice_get",
+                            &arg_types,
+                            None,
+                            MethodCallStyle::Instance,
+                            None,
+                            object.span,
+                        ) {
+                            result_ty
+                        } else {
+                            self.error(
+                                format!("cannot slice type {}", object_ty_display),
+                                object.span,
+                            );
+                            Type::Unknown
+                        }
+                    }
+                }
+            }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let object_ty = self.check_expr(object, None);
                 if let Type::Named { path, .. } = &object_ty
@@ -6861,6 +6997,24 @@ fn rewrite_expression_bare_constructors(
             rewrite_expression_bare_constructors(object, rewrites);
             rewrite_expression_bare_constructors(index, rewrites);
         }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            rewrite_expression_bare_constructors(object, rewrites);
+            if let Some(s) = start {
+                rewrite_expression_bare_constructors(s, rewrites);
+            }
+            if let Some(e) = end {
+                rewrite_expression_bare_constructors(e, rewrites);
+            }
+            if let Some(st) = step {
+                rewrite_expression_bare_constructors(st, rewrites);
+            }
+        }
         ast::ExpressionKind::MethodCall {
             receiver,
             arguments,
@@ -7054,6 +7208,24 @@ fn populate_expression_for_in_types(
         ast::ExpressionKind::Index { object, index, .. } => {
             populate_expression_for_in_types(object, resolved_iter_types);
             populate_expression_for_in_types(index, resolved_iter_types);
+        }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            populate_expression_for_in_types(object, resolved_iter_types);
+            if let Some(s) = start {
+                populate_expression_for_in_types(s, resolved_iter_types);
+            }
+            if let Some(e) = end {
+                populate_expression_for_in_types(e, resolved_iter_types);
+            }
+            if let Some(st) = step {
+                populate_expression_for_in_types(st, resolved_iter_types);
+            }
         }
         ast::ExpressionKind::MethodCall {
             receiver,
