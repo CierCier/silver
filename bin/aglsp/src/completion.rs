@@ -19,14 +19,135 @@ const KEYWORDS: &[&str] = &[
     "extern", "asm", "in", "macro", "true", "false",
 ];
 
+const PRIMITIVE_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "f80",
+    "c32", "c64", "c80", "bool", "str", "char", "void",
+];
+
+const MACRO_BUILTINS: &[(&str, &str, &str, &str)] = &[
+    (
+        "@println",
+        "@println(\"{}\", val);",
+        "println(\"${1:{}\", ${2:val});$0",
+        "Prints formatted text followed by a newline to stdout.",
+    ),
+    (
+        "@print",
+        "@print(\"{}\", val);",
+        "print(\"${1:{}\", ${2:val});$0",
+        "Prints formatted text to stdout without a trailing newline.",
+    ),
+    (
+        "@format",
+        "@format(\"{}\", val)",
+        "format(\"${1:{}\", ${2:val})",
+        "Formats arguments into an owned String on the heap.",
+    ),
+    (
+        "@assert",
+        "@assert(condition, \"message\");",
+        "assert(${1:condition});$0",
+        "Asserts a condition in debug builds; aborted with backtrace on failure.",
+    ),
+    (
+        "@size",
+        "@size(Type)",
+        "size(${1:Type})",
+        "Returns the byte size of a type or struct layout.",
+    ),
+    (
+        "@align",
+        "@align(Type)",
+        "align(${1:Type})",
+        "Returns the memory alignment in bytes of a type or struct.",
+    ),
+    (
+        "@json",
+        "@json(value)",
+        "json(${1:value})",
+        "Serializes a struct to a JSON String using synthesized or explicit ToJson.",
+    ),
+    (
+        "@from_json",
+        "@from_json<Type>(json_str)",
+        "from_json<${1:Type}>(${2:json_str})",
+        "Deserializes a JSON string into Result<Type, JsonError>.",
+    ),
+    (
+        "@cfg",
+        "@cfg(key)",
+        "cfg(${1:debug})",
+        "Checks compile-time cfg flag condition.",
+    ),
+    (
+        "@hash",
+        "@hash(value)",
+        "hash(${1:value})",
+        "Computes the 64-bit hash of a value.",
+    ),
+];
+
 pub(crate) fn completion(analysis: &SymbolIndex, offset: usize) -> Vec<CompletionItem> {
     if let Some(items) = import_completion(analysis, offset) {
+        return items;
+    }
+    if let Some(items) = macro_builtin_completion(&analysis.text, offset) {
         return items;
     }
     if let Some(items) = member_completion(analysis, offset) {
         return items;
     }
     identifier_completion(analysis, offset)
+}
+
+// ----- compiler macro / builtin completion (`@`) -----
+
+fn macro_builtin_completion(text: &str, offset: usize) -> Option<Vec<CompletionItem>> {
+    let mut start = offset;
+    let bytes = text.as_bytes();
+    while start > 0 {
+        let c = bytes[start - 1] as char;
+        if c.is_alphanumeric() || c == '_' || c == '@' {
+            start -= 1;
+            if c == '@' {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if start >= offset {
+        return None;
+    }
+    let prefix = &text[start..offset];
+    if !prefix.starts_with('@') {
+        return None;
+    }
+
+    let mut items = Vec::new();
+    for (name, detail, snippet, doc_str) in MACRO_BUILTINS {
+        if name.starts_with(prefix) {
+            let insert_snippet = if prefix.starts_with('@') {
+                snippet.to_string()
+            } else {
+                format!("@{}", snippet)
+            };
+            items.push(CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(detail.to_string()),
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: doc_str.to_string(),
+                })),
+                insert_text: Some(insert_snippet),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("0_{}", name)),
+                ..Default::default()
+            });
+        }
+    }
+    Some(items)
 }
 
 // ----- import path completion -----
@@ -157,57 +278,320 @@ fn module_item(stem: &str, detail: &str) -> CompletionItem {
     }
 }
 
-// ----- member completion (`expr.` / `Type::`) -----
+// ----- member completion (`expr.` / `Type::` / `Type.`) -----
 
 fn member_completion(analysis: &SymbolIndex, offset: usize) -> Option<Vec<CompletionItem>> {
-    let tokens = &analysis.tokens;
-    let trigger_idx = tokens
-        .iter()
-        .rposition(|t| t.span.end <= offset && matches!(t.kind, Token::Dot | Token::DoubleColon))?;
-    // Nothing between the trigger and the cursor.
-    for t in &tokens[trigger_idx + 1..] {
-        if t.span.start < offset {
-            return None;
-        }
-    }
-    let prev = tokens.get(trigger_idx.wrapping_sub(1))?;
-    if !matches!(&prev.kind, Token::Identifier(_)) {
+    let text = &analysis.text;
+    if offset == 0 || offset > text.len() {
         return None;
     }
-    let recv_span = (prev.span.start, prev.span.end);
-    let container = analysis
+
+    // 1. Find the member prefix currently being typed before cursor (alphanumeric + '_')
+    let mut member_start = offset;
+    let bytes = text.as_bytes();
+    while member_start > 0 {
+        let c = bytes[member_start - 1] as char;
+        if c.is_alphanumeric() || c == '_' {
+            member_start -= 1;
+        } else {
+            break;
+        }
+    }
+    let member_prefix = &text[member_start..offset];
+
+    // 2. Check if immediately preceded by `.` or `::`
+    let (_is_dot, _is_double_colon, trigger_len) = if member_start >= 2 && &text[member_start - 2..member_start] == "::" {
+        (false, true, 2)
+    } else if member_start >= 1 && &text[member_start - 1..member_start] == "." {
+        (true, false, 1)
+    } else {
+        return None;
+    };
+
+    let before_trigger = member_start - trigger_len;
+    // Extract receiver text by walking backwards (skipping whitespace)
+    let mut recv_end = before_trigger;
+    while recv_end > 0 && (bytes[recv_end - 1] as char).is_whitespace() {
+        recv_end -= 1;
+    }
+    if recv_end == 0 {
+        return struct_initializer_completion(analysis, offset, member_prefix);
+    }
+
+    // Find receiver start (identifier or closing bracket/paren)
+    let mut recv_start = recv_end;
+    if bytes[recv_end - 1] == b')' || bytes[recv_end - 1] == b']' {
+        let close = bytes[recv_end - 1];
+        let open = if close == b')' { b'(' } else { b'[' };
+        let mut depth = 1;
+        recv_start -= 1;
+        while recv_start > 0 && depth > 0 {
+            recv_start -= 1;
+            if bytes[recv_start] == close {
+                depth += 1;
+            } else if bytes[recv_start] == open {
+                depth -= 1;
+            }
+        }
+        while recv_start > 0 {
+            let c = bytes[recv_start - 1] as char;
+            if c.is_alphanumeric() || c == '_' {
+                recv_start -= 1;
+            } else {
+                break;
+            }
+        }
+    } else {
+        while recv_start > 0 {
+            let c = bytes[recv_start - 1] as char;
+            if c.is_alphanumeric() || c == '_' {
+                recv_start -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let recv_text = text[recv_start..recv_end].trim();
+    if recv_text.is_empty() {
+        return struct_initializer_completion(analysis, offset, member_prefix);
+    }
+
+    // 3. Resolve container name:
+    // First try expr_types at (recv_start, recv_end) or surrounding spans
+    let mut container: Option<String> = analysis
         .expr_types
-        .get(&recv_span)
+        .get(&(recv_start, recv_end))
         .and_then(|ty| type_root_name_of_str(ty));
-    let qualifier = container.map(|c| format!("{c}::"));
-    let qualifier = qualifier.as_deref().unwrap_or("");
+
+    // If not found in expr_types, check if recv_text is a known struct/enum name directly
+    if container.is_none() {
+        if analysis.symbols.iter().any(|s| {
+            s.name == recv_text
+                && matches!(
+                    s.kind,
+                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::TypeAlias
+                )
+        }) {
+            container = Some(recv_text.to_string());
+        }
+    }
+
+    // If still not found, check if recv_text matches a local variable or parameter in scope
+    if container.is_none() {
+        for s in &analysis.symbols {
+            if s.name == recv_text && matches!(s.kind, SymbolKind::Local | SymbolKind::Parameter) {
+                if let Some(ty) = s.inferred_type.as_deref().or_else(|| {
+                    let parts: Vec<&str> = s.signature.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        Some(parts[0])
+                    } else {
+                        None
+                    }
+                }) {
+                    if let Some(root) = type_root_name_of_str(ty) {
+                        container = Some(root);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let Some(container_name) = container else {
+        return None;
+    };
+
+    let qualifier = format!("{container_name}::");
     let mut items: Vec<CompletionItem> = Vec::new();
     for sym in &analysis.symbols {
-        if sym.qualifier.as_deref() != Some(qualifier) {
+        if sym.qualifier.as_deref() != Some(qualifier.as_str()) {
             continue;
         }
-        let (kind, item_kind) = match sym.kind {
-            SymbolKind::Field => (true, CompletionItemKind::FIELD),
-            SymbolKind::Variant => (true, CompletionItemKind::ENUM_MEMBER),
-            SymbolKind::Method => (true, CompletionItemKind::METHOD),
-            _ => (false, CompletionItemKind::TEXT),
+        if !member_prefix.is_empty() && !sym.name.starts_with(member_prefix) {
+            continue;
+        }
+        let (item_kind, sort_prefix) = match sym.kind {
+            SymbolKind::Field => (CompletionItemKind::FIELD, "0"),
+            SymbolKind::Variant => (CompletionItemKind::ENUM_MEMBER, "0"),
+            SymbolKind::Method if !sym.is_static => (CompletionItemKind::METHOD, "1"),
+            SymbolKind::Method => (CompletionItemKind::METHOD, "2"),
+            _ => continue,
         };
-        if !kind {
-            continue;
-        }
+
+        let is_callable = sym.kind == SymbolKind::Method;
+        let insert_text = if is_callable {
+            let has_params = if sym.is_static {
+                !sym.parameters.is_empty()
+            } else {
+                sym.parameters.len() > 1
+            };
+            if has_params {
+                Some(format!("{}($1)$0", sym.name))
+            } else {
+                Some(format!("{}()$0", sym.name))
+            }
+        } else {
+            Some(sym.name.clone())
+        };
+
         items.push(CompletionItem {
             label: sym.name.clone(),
             kind: Some(item_kind),
             detail: Some(sym.signature.clone()),
-            sort_text: Some(if sym.kind == SymbolKind::Field {
-                "0".to_string()
-            } else {
-                "1".to_string()
+            documentation: sym.doc.as_deref().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: doc::doc_to_markdown(d),
+                })
             }),
+            insert_text,
+            insert_text_format: if is_callable {
+                Some(InsertTextFormat::SNIPPET)
+            } else {
+                Some(InsertTextFormat::PLAIN_TEXT)
+            },
+            sort_text: Some(format!("{sort_prefix}_{}", sym.name)),
             ..Default::default()
         });
     }
+
     Some(sort_dedupe(items))
+}
+
+// ----- struct literal field completion (`{ .` / `.field`) -----
+
+fn struct_initializer_completion(
+    analysis: &SymbolIndex,
+    offset: usize,
+    field_prefix: &str,
+) -> Option<Vec<CompletionItem>> {
+    let text = &analysis.text;
+    let bytes = text.as_bytes();
+    let mut i = offset;
+    let mut found_brace = false;
+    let mut depth = 0;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'}' {
+            depth += 1;
+        } else if bytes[i] == b'{' {
+            if depth == 0 {
+                found_brace = true;
+                break;
+            }
+            depth -= 1;
+        }
+    }
+    if !found_brace {
+        return None;
+    }
+
+    let mut before_brace = i;
+    while before_brace > 0 && (bytes[before_brace - 1] as char).is_whitespace() {
+        before_brace -= 1;
+    }
+    if before_brace > 0 && bytes[before_brace - 1] == b'=' {
+        before_brace -= 1;
+        while before_brace > 0 && (bytes[before_brace - 1] as char).is_whitespace() {
+            before_brace -= 1;
+        }
+    }
+
+    let name_end = before_brace;
+    let mut name_start = name_end;
+    while name_start > 0 {
+        let c = bytes[name_start - 1] as char;
+        if c.is_alphanumeric() || c == '_' {
+            name_start -= 1;
+        } else {
+            break;
+        }
+    }
+    let target_name = text[name_start..name_end].trim();
+    if target_name.is_empty() {
+        return None;
+    }
+
+    let mut struct_name = if analysis
+        .symbols
+        .iter()
+        .any(|s| s.name == target_name && s.kind == SymbolKind::Struct)
+    {
+        Some(target_name.to_string())
+    } else {
+        None
+    };
+
+    if struct_name.is_none() {
+        for s in &analysis.symbols {
+            if s.name == target_name && matches!(s.kind, SymbolKind::Local | SymbolKind::Global) {
+                if let Some(ty) = s.inferred_type.as_deref().or_else(|| {
+                    let parts: Vec<&str> = s.signature.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        Some(parts[0])
+                    } else {
+                        None
+                    }
+                }) {
+                    if let Some(root) = type_root_name_of_str(ty) {
+                        struct_name = Some(root);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if struct_name.is_none() {
+        let mut type_end = name_start;
+        while type_end > 0 && (bytes[type_end - 1] as char).is_whitespace() {
+            type_end -= 1;
+        }
+        let mut type_start = type_end;
+        while type_start > 0 {
+            let c = bytes[type_start - 1] as char;
+            if c.is_alphanumeric() || c == '_' {
+                type_start -= 1;
+            } else {
+                break;
+            }
+        }
+        let declared_type = text[type_start..type_end].trim();
+        if !declared_type.is_empty()
+            && analysis
+                .symbols
+                .iter()
+                .any(|s| s.name == declared_type && s.kind == SymbolKind::Struct)
+        {
+            struct_name = Some(declared_type.to_string());
+        }
+    }
+
+    let struct_name = struct_name?;
+    let qualifier = format!("{struct_name}::");
+    let mut items = Vec::new();
+    for sym in &analysis.symbols {
+        if sym.qualifier.as_deref() == Some(qualifier.as_str()) && sym.kind == SymbolKind::Field {
+            if !field_prefix.is_empty() && !sym.name.starts_with(field_prefix) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: format!(".{}", sym.name),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(sym.signature.clone()),
+                insert_text: Some(format!("{} = $1", sym.name)),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("0_{}", sym.name)),
+                ..Default::default()
+            });
+        }
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(sort_dedupe(items))
+    }
 }
 
 // ----- identifier completion -----
@@ -233,7 +617,6 @@ fn identifier_completion(analysis: &SymbolIndex, offset: usize) -> Vec<Completio
         if !sym.name.starts_with(prefix) {
             continue;
         }
-        // Locals/parameters only before their declaration point.
         match sym.kind {
             SymbolKind::Local | SymbolKind::Parameter | SymbolKind::TypeParam
                 if sym.span.end > offset =>
@@ -252,12 +635,24 @@ fn identifier_completion(analysis: &SymbolIndex, offset: usize) -> Vec<Completio
         items.push(item);
     }
 
+    for pt in PRIMITIVE_TYPES {
+        if pt.starts_with(prefix) {
+            items.push(CompletionItem {
+                label: pt.to_string(),
+                kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                detail: Some("primitive type".to_string()),
+                sort_text: Some(format!("3_{pt}")),
+                ..Default::default()
+            });
+        }
+    }
+
     for keyword in KEYWORDS {
         if keyword.starts_with(prefix) {
             items.push(CompletionItem {
                 label: keyword.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                sort_text: Some("z".to_string()),
+                sort_text: Some(format!("4_{keyword}")),
                 ..Default::default()
             });
         }
@@ -284,10 +679,31 @@ fn symbol_item(sym: &Symbol) -> CompletionItem {
         SymbolKind::Variant => CompletionItemKind::ENUM_MEMBER,
         SymbolKind::TypeParam => CompletionItemKind::TYPE_PARAMETER,
     };
+
+    let is_callable = matches!(
+        sym.kind,
+        SymbolKind::Function | SymbolKind::ExternFunction | SymbolKind::Method
+    );
+    let insert_text = if is_callable {
+        let has_params = if sym.kind == SymbolKind::Method && !sym.is_static {
+            sym.parameters.len() > 1
+        } else {
+            !sym.parameters.is_empty()
+        };
+        if has_params {
+            Some(format!("{}($1)$0", sym.name))
+        } else {
+            Some(format!("{}()$0", sym.name))
+        }
+    } else {
+        Some(sym.name.clone())
+    };
+
     let sort = match sym.kind {
         SymbolKind::Local | SymbolKind::Parameter | SymbolKind::TypeParam => "0",
         SymbolKind::Function | SymbolKind::Method => "1",
-        _ => "2",
+        SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait => "2",
+        _ => "3",
     };
     CompletionItem {
         label: sym.name.clone(),
@@ -299,7 +715,13 @@ fn symbol_item(sym: &Symbol) -> CompletionItem {
                 value: doc::doc_to_markdown(d),
             })
         }),
-        sort_text: Some(sort.to_string()),
+        insert_text,
+        insert_text_format: if is_callable {
+            Some(InsertTextFormat::SNIPPET)
+        } else {
+            Some(InsertTextFormat::PLAIN_TEXT)
+        },
+        sort_text: Some(format!("{sort}_{}", sym.name)),
         ..Default::default()
     }
 }
@@ -483,6 +905,98 @@ mod tests {
             items.iter().any(|item| item.label == "pln"),
             "alias 'pln' missing from completions: {:?}",
             items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn macro_builtins_completion_at_at_sign() {
+        let source = "i32 main() {\n    @pr;\n}";
+        let path = std::path::Path::new("/tmp/lsp_macro_test.ag");
+        let file_id = lexer::register_source(&path.display().to_string(), source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let graph = agc::grammar::parse_ag(source);
+        let program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        let analysis = analyze(&program, source, &tokens, Default::default(), file_id);
+
+        let offset = source.rfind("@pr").unwrap() + 3;
+        let items = completion(&analysis, offset);
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(labels.contains(&"@println".to_string()), "got {labels:?}");
+        assert!(labels.contains(&"@print".to_string()), "got {labels:?}");
+    }
+
+    #[test]
+    fn member_completion_partial_and_static() {
+        let source = r#"
+        struct User {
+            i32 id;
+            str name;
+        }
+        impl User {
+            User make(str name) {
+                User u = { .id = 1, .name = name };
+                return u;
+            }
+            i32 get_id(User* self) {
+                return self.id;
+            }
+        }
+        i32 main() {
+            User u = User.make("Alice");
+            u.na;
+            return 0;
+        }
+        "#;
+        let file_id = lexer::register_source("/tmp/lsp_member_test.ag", source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let graph = agc::grammar::parse_ag(source);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        let mut tc = agc::semantic::typeck::TypeChecker::new();
+        let mut table = agc::symbol_table::CompilerSymbolTable::new();
+        let (_, _) = tc.check_program_with_table(&mut program, &mut table);
+        let expr_types = std::mem::take(&mut tc.expr_types);
+        let analysis = analyze(&program, source, &tokens, expr_types, file_id);
+
+        // 1. Complete on `u.na`
+        let offset = source.rfind("u.na").unwrap() + 4;
+        let items = completion(&analysis, offset);
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(labels.contains(&"name".to_string()), "expected 'name' in {labels:?}");
+
+        // 2. Complete on `User.`
+        let static_offset = source.rfind("User.").unwrap() + 5;
+        let static_items = completion(&analysis, static_offset);
+        let static_labels: Vec<String> = static_items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            static_labels.contains(&"make".to_string()),
+            "expected 'make' in {static_labels:?}"
+        );
+    }
+
+    #[test]
+    fn struct_literal_designated_initializer_completion() {
+        let source = r#"
+        struct User {
+            i32 id;
+            str name;
+        }
+        i32 main() {
+            User u = { .id = 1, .name = "Alice" };
+            return 0;
+        }
+        "#;
+        let file_id = lexer::register_source("/tmp/lsp_struct_init_test.ag", source);
+        let tokens = lexer::lex_with_source(source, file_id).expect("lex failed");
+        let graph = agc::grammar::parse_ag(source);
+        let program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+        let analysis = analyze(&program, source, &tokens, Default::default(), file_id);
+
+        let offset = source.rfind(".name").unwrap() + 1;
+        let items = completion(&analysis, offset);
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.contains(&".id".to_string()) && labels.contains(&".name".to_string()),
+            "expected struct fields in {labels:?}"
         );
     }
 }
