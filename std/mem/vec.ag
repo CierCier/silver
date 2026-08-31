@@ -148,6 +148,49 @@ impl Vec<T> {
         self.len = self.len - 1;
         return move result;
     }
+    /// Remove element at `index` in O(1) by swapping with the last element.
+    T swap_remove(&mut Vec<T> self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        if (index == self.len - 1) {
+            return self.pop();
+        }
+        T tmp_idx = self.data[index];
+        T result = move tmp_idx;
+        T last = self.pop();
+        self.data[index] = move last;
+        return move result;
+    }
+
+    /// Swap two elements by index.
+    void swap(&mut Vec<T> self, i64 a, i64 b) {
+        if (a < 0 || a >= self.len || b < 0 || b >= self.len) { abort(); }
+        if (a == b) { return; }
+        T tmp_a = self.data[a];
+        T tmp_b = self.data[b];
+        self.data[a] = move tmp_b;
+        self.data[b] = move tmp_a;
+    }
+
+    /// Reverse elements in place.
+    void reverse(&mut Vec<T> self) {
+        if (self.len <= 1) { return; }
+        i64 left = 0;
+        i64 right = self.len - 1;
+        while (left < right) {
+            self.swap(left, right);
+            left = left + 1;
+            right = right - 1;
+        }
+    }
+
+    /// Pop the last element, or None when empty.
+    Optional<T> try_pop(&mut Vec<T> self) {
+        if (self.len == 0) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.pop());
+    }
+
 
     /// Remove all elements without freeing the backing buffer.
     /// NOTE: Does NOT drop elements — for owned T, `drain`/`take`/`pop` first

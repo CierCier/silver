@@ -172,6 +172,41 @@ i32 main() {
         free(p2);
         v.drop();
     }
+    // --- swap, swap_remove, reverse, try_pop ---
+    STDOUT.write_str("\n--- swap, swap_remove, reverse, try_pop ---\n");
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(10);
+        v.push(20);
+        v.push(30);
+        v.push(40);
+
+        // swap 0 and 3 -> [40, 20, 30, 10]
+        v.swap(0, 3);
+        assert_eq_i64(40, v[0], "v[0] is 40 after swap");
+        assert_eq_i64(10, v[3], "v[3] is 10 after swap");
+
+        // reverse -> [10, 30, 20, 40]
+        v.reverse();
+        assert_eq_i64(10, v[0], "v[0] is 10 after reverse");
+        assert_eq_i64(30, v[1], "v[1] is 30 after reverse");
+        assert_eq_i64(20, v[2], "v[2] is 20 after reverse");
+        assert_eq_i64(40, v[3], "v[3] is 40 after reverse");
+
+        // swap_remove(1) -> removes 30, swaps in 40 -> [10, 40, 20], len=3
+        i64 rem = v.swap_remove(1);
+        assert_eq_i64(30, rem, "swap_remove returned 30");
+        assert_eq_i64(3, v.len(), "len is 3 after swap_remove");
+        assert_eq_i64(40, v[1], "v[1] is 40 after swap_remove");
+
+        // try_pop -> 20, 40, 10, None
+        assert_eq_i64(20, v.try_pop().unwrap(), "try_pop 20");
+        assert_eq_i64(40, v.try_pop().unwrap(), "try_pop 40");
+        assert_eq_i64(10, v.try_pop().unwrap(), "try_pop 10");
+        assert_true(v.try_pop().is_none(), "try_pop is none when empty");
+
+        v.drop();
+    }
 
     return done();
 }
