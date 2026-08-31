@@ -182,8 +182,11 @@ pub(crate) fn link_exe_with_ld_lld(
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
-    // Try mold first (fastest), then ld.lld, then lld.
-    let lld_name = if command_exists("mold") {
+    // Try ld.lld first; mold is broken in current Nix (produces segfaulting
+    // binaries even for trivial objects — see strace SIGSEGV at 0x8). Keep
+    // mold opt-in via SILVER_USE_MOLD if needed.
+    let use_mold = std::env::var("SILVER_USE_MOLD").is_ok() && command_exists("mold");
+    let lld_name = if use_mold {
         "mold"
     } else if command_exists("ld.lld") {
         "ld.lld"
