@@ -901,7 +901,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map(|t| {
                         !matches!(
                             t.kind.as_ref(),
-                            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                            ast::TypeKind::Pointer(_)
+                                | ast::TypeKind::Reference(_)
+                                | ast::TypeKind::Primitive(ast::PrimitiveType::Str)
                         )
                     })
                     .unwrap_or(false)
