@@ -25,6 +25,27 @@ fn main() {
             println!("cargo:rerun-if-changed={}", refs.display());
         }
     }
+
+    // Build configuration for include/root/sysroot search paths
+    if let Ok(val) = std::env::var("SILVER_EXTRA_INCLUDE_DIRS") {
+        println!("cargo:rustc-env=SILVER_BUILD_INCLUDE_DIRS={}", val);
+    }
+    println!("cargo:rerun-if-env-changed=SILVER_EXTRA_INCLUDE_DIRS");
+
+    if let Ok(val) = std::env::var("SILVER_DEFAULT_INCLUDE_DIRS") {
+        println!("cargo:rustc-env=SILVER_BUILD_INCLUDE_DIRS={}", val);
+    }
+    println!("cargo:rerun-if-env-changed=SILVER_DEFAULT_INCLUDE_DIRS");
+
+    if let Ok(val) = std::env::var("SILVER_EXTRA_ROOT_DIRS") {
+        println!("cargo:rustc-env=SILVER_BUILD_ROOT_DIRS={}", val);
+    }
+    println!("cargo:rerun-if-env-changed=SILVER_EXTRA_ROOT_DIRS");
+
+    if let Ok(val) = std::env::var("SILVER_DEFAULT_SYSROOT") {
+        println!("cargo:rustc-env=SILVER_BUILD_SYSROOT={}", val);
+    }
+    println!("cargo:rerun-if-env-changed=SILVER_DEFAULT_SYSROOT");
 }
 
 fn git_cmd(args: &[&str]) -> Option<String> {

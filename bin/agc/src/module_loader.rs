@@ -461,19 +461,90 @@ pub fn filter_exports(artifact: &ModuleArtifact, _import: &ast::ImportItem) -> V
     artifact.exports.clone()
 }
 
+fn add_dir_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
+    if !dirs.contains(&path) {
+        dirs.push(path);
+    }
+}
+
+fn add_sysroot_candidates(dirs: &mut Vec<PathBuf>, root: &Path) {
+    let inc = root.join("include");
+    let inc_silver = inc.join("silver");
+    if inc_silver.is_dir() {
+        add_dir_unique(dirs, inc_silver);
+    }
+    add_dir_unique(dirs, inc);
+
+    let lib = root.join("lib");
+    let lib_silver = lib.join("silver");
+    if lib_silver.is_dir() {
+        add_dir_unique(dirs, lib_silver);
+    }
+    add_dir_unique(dirs, lib);
+}
+
 pub fn module_loader_default_dirs(sysroot: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
+    // 1. Explicit CLI --sysroot
     if let Some(root) = sysroot {
-        dirs.push(root.join("include").join("silver"));
-        dirs.push(root.join("lib").join("silver"));
+        add_sysroot_candidates(&mut dirs, root);
     }
+
+    // 2. SILVER_SYSROOT environment variable
     if let Ok(home) = std::env::var("SILVER_SYSROOT")
         && !home.is_empty()
     {
-        let root = PathBuf::from(home);
-        dirs.push(root.join("include").join("silver"));
-        dirs.push(root.join("lib").join("silver"));
+        add_sysroot_candidates(&mut dirs, Path::new(&home));
     }
+
+    // 3. Build-time configured sysroot (from build.rs)
+    if let Some(build_sysroot) = option_env!("SILVER_BUILD_SYSROOT") {
+        if !build_sysroot.is_empty() {
+            add_sysroot_candidates(&mut dirs, Path::new(build_sysroot));
+        }
+    }
+
+    // 4. Executable-relative sysroot (e.g. <prefix>/bin/agc -> <prefix>/include, <prefix>/lib)
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(bin_dir) = current_exe.parent() {
+            if let Some(prefix) = bin_dir.parent() {
+                add_sysroot_candidates(&mut dirs, prefix);
+            }
+        }
+    }
+
+    // 5. User installation directory (~/.local/share/silver, $XDG_DATA_HOME/silver, etc.)
+    if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+        if !xdg_data.is_empty() {
+            let user_silver = Path::new(&xdg_data).join("silver");
+            add_sysroot_candidates(&mut dirs, &user_silver);
+        }
+    } else if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let user_silver = Path::new(&home).join(".local").join("share").join("silver");
+            add_sysroot_candidates(&mut dirs, &user_silver);
+        }
+    }
+
+    // Standard system share directories
+    add_sysroot_candidates(&mut dirs, Path::new("/usr/local/share/silver"));
+    add_sysroot_candidates(&mut dirs, Path::new("/usr/share/silver"));
+
+    // 6. Build-time configured include dirs
+    if let Some(build_includes) = option_env!("SILVER_BUILD_INCLUDE_DIRS") {
+        for path in std::env::split_paths(build_includes) {
+            add_dir_unique(&mut dirs, path);
+        }
+    }
+
+    // 7. Build-time configured root dirs
+    if let Some(build_roots) = option_env!("SILVER_BUILD_ROOT_DIRS") {
+        for path in std::env::split_paths(build_roots) {
+            add_sysroot_candidates(&mut dirs, &path);
+        }
+    }
+
     dirs
 }
 
