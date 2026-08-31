@@ -89,6 +89,22 @@ impl Slice<T> {
         return self.sub_slice(0, mid);
     }
 
+    /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
+    Slice<T> __slice_get(&Slice<T> self, i64 start, i64 end) {
+        if (start < 0) {
+            start = self.len + start;
+            if (start < 0) { start = 0; }
+        }
+        if (end < 0) {
+            end = self.len + end;
+            if (end < 0) { end = 0; }
+        }
+        if (start > self.len) { start = self.len; }
+        if (end > self.len) { end = self.len; }
+        if (end < start) { end = start; }
+        return self.sub_slice(start, end - start);
+    }
+
     /// Returns the first element, or None if empty.
     Optional<T> first(&Slice<T> self) {
         if (self.len == 0) { return Optional<T>.none(); }

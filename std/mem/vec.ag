@@ -327,6 +327,12 @@ impl<T> Vec<T> {
         return s;
     }
 
+    /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
+    Slice<T> __slice_get(&Vec<T> self, i64 start, i64 end) {
+        Slice<T> s = self.as_slice();
+        return s.__slice_get(start, end);
+    }
+
     /// Borrows the Vec and yields element copies without consuming it.
     /// `&Vec<T> self` so the Vec stays live; iterator holds a raw ptr copy.
     SliceIter<T> iter(&Vec<T> self) {

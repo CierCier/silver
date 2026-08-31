@@ -26,6 +26,11 @@ trait IndexedAccess {
     void __index_set(Self* self, i64 index, Item value);
 }
 
+trait SliceAccess {
+    type Output;
+    Output __slice_get(Self* self, i64 start, i64 end);
+}
+
 // Compare trait for ordering algorithms (heapsort, binary search, etc.).
 // Returns < 0 when *self sorts before *other, 0 when equal, > 0 when after.
 trait Compare {

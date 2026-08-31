@@ -1,6 +1,7 @@
 import std.mem.alloc;
 import std.mem.memory;
 import std.ops;
+import std.slice;
 import std.mem.drop;
 import std.iter;
 import std.optional;
@@ -51,6 +52,19 @@ impl String {
 
     i64 capacity(&String self) {
         return self.capacity;
+    }
+
+    Slice<u8> as_slice(&String self) {
+        Slice<u8> s;
+        s.data = self.data;
+        s.len = self.len;
+        return s;
+    }
+
+    /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
+    Slice<u8> __slice_get(&String self, i64 start, i64 end) {
+        Slice<u8> s = self.as_slice();
+        return s.__slice_get(start, end);
     }
 
     void clear(&mut String self) {
