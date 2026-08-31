@@ -494,6 +494,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => None,
                 }
             }
+            ast::ExpressionKind::Slice { object, .. } => {
+                let obj_ty = self.resolve_argument_type(object)?;
+                match obj_ty.kind.as_ref() {
+                    ast::TypeKind::Array(array) => Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                            element_type: array.element_type.clone(),
+                        }))),
+                        span: object.span,
+                    }),
+                    ast::TypeKind::Slice(_) => Some(obj_ty),
+                    _ => None,
+                }
+            }
             ast::ExpressionKind::Binary { left, .. } => self.resolve_argument_type(left),
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
@@ -639,7 +652,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ..
             } => Self::substitute_expression_types(operand, mapping),
             ast::ExpressionKind::FieldAccess { object, .. }
-            | ast::ExpressionKind::Index { object, .. } => {
+            | ast::ExpressionKind::Index { object, .. }
+            | ast::ExpressionKind::Slice { object, .. } => {
                 Self::substitute_expression_types(object, mapping)
             }
             ast::ExpressionKind::Ternary {
@@ -935,7 +949,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.rewrite_call_sites_in_expression(expression);
             }
             ast::ExpressionKind::FieldAccess { object, .. }
-            | ast::ExpressionKind::Index { object, .. } => {
+            | ast::ExpressionKind::Index { object, .. }
+            | ast::ExpressionKind::Slice { object, .. } => {
                 self.rewrite_call_sites_in_expression(object);
             }
             _ => {}
@@ -1151,7 +1166,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
                 ast::ExpressionKind::FieldAccess { object, .. }
-                | ast::ExpressionKind::Index { object, .. } => walk_expr(object, out),
+                | ast::ExpressionKind::Index { object, .. }
+                | ast::ExpressionKind::Slice { object, .. } => walk_expr(object, out),
                 ast::ExpressionKind::ForIn { iterable, body, .. } => {
                     walk_expr(iterable, out);
                     walk_block(body, out);
@@ -1595,6 +1611,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
             ast::ExpressionKind::FieldAccess { .. }
             | ast::ExpressionKind::Index { .. }
+            | ast::ExpressionKind::Slice { .. }
             | ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 ..
