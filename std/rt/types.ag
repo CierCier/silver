@@ -79,16 +79,16 @@ impl TypeResult {
         return r;
     }
 
-    bool is_ok(TypeResult* self) {
+    bool is_ok(*self) {
         return self.ok;
     }
 
-    bool is_err(TypeResult* self) {
+    bool is_err(*self) {
         return !self.ok;
     }
 
     /// The TypeId on success; aborts (with the error message) on failure.
-    TypeId unwrap(TypeResult* self) {
+    TypeId unwrap(*self) {
         if (!self.ok) {
             STDOUT.write_str("TypeResult.unwrap on error ");
             STDOUT.write_i64(self.err);
@@ -102,7 +102,7 @@ impl TypeResult {
 }
 
 impl Drop for TypeResult {
-    void drop(TypeResult* self) {
+    void drop(*self) {
         self.msg.drop();
     }
 }
@@ -219,7 +219,7 @@ impl TypeRegistry {
 
     /// Push a fully-built Type, assign its id, and index it by name.
     /// Callers must have verified the name is not taken.
-    u32 intern(TypeRegistry* self, Type ty) {
+    u32 intern(*self, Type ty) {
         u32 raw = (u32)self.types.len();
         ty.id = TypeId.from_raw(raw);
         self.types.push(move ty);
@@ -230,19 +230,19 @@ impl TypeRegistry {
         return raw;
     }
 
-    void add_builtin(TypeRegistry* self, str name, i32 kind) {
+    void add_builtin(*self, str name, i32 kind) {
         Type ty = Type.new(rt_type_str_owned(name), kind);
         self.intern(move ty);
     }
 
-    void add_builtin_int(TypeRegistry* self, str name, u16 bits, bool is_signed) {
+    void add_builtin_int(*self, str name, u16 bits, bool is_signed) {
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.INT);
         ty.bits = bits;
         ty.is_signed = is_signed;
         self.intern(move ty);
     }
 
-    void add_builtin_float(TypeRegistry* self, str name, u16 bits) {
+    void add_builtin_float(*self, str name, u16 bits) {
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.FLOAT);
         ty.bits = bits;
         self.intern(move ty);
@@ -251,7 +251,7 @@ impl TypeRegistry {
     /// Duplicate-name checked intern (Rust: alloc_type).  Consumes `ty`; on a
     /// duplicate name the Type (and everything it owns) is freed via the
     /// parameter's automatic drop.
-    TypeResult alloc_type(TypeRegistry* self, Type ty) {
+    TypeResult alloc_type(*self, Type ty) {
         if (self.by_name.contains_key((str)ty.name.to_str())) {
             String m = rt_type_str_owned("type name already defined: ");
             m.push_str((str)ty.name.to_str());
@@ -261,7 +261,7 @@ impl TypeRegistry {
         return TypeResult.ok_id(TypeId.from_raw(raw));
     }
 
-    TypeResult unknown_type_id_error(TypeRegistry* self, u32 raw) {
+    TypeResult unknown_type_id_error(*self, u32 raw) {
         String m = rt_type_str_owned("unknown type id: ");
         rt_type_append_u32(&m, raw);
         return TypeResult.error((i32)TYPE_ERR.UNKNOWN_TYPE_ID, move m);
@@ -271,7 +271,7 @@ impl TypeRegistry {
 
     /// Pointer to the interned Type, or null when the id is unknown.
     /// The pointer is invalidated by the next type definition (table growth).
-    Type* get(TypeRegistry* self, TypeId id) {
+    Type* get(*self, TypeId id) {
         i64 index = (i64)id.raw;
         if (index < 0 || index >= self.types.len()) {
             return (Type*)0;
@@ -281,7 +281,7 @@ impl TypeRegistry {
 
     /// Display name for `id`, or (str)0 when unknown.  The pointer is owned
     /// by the registry and is stable for the registry's lifetime.
-    str name_of(TypeRegistry* self, TypeId id) {
+    str name_of(*self, TypeId id) {
         Type* ty = self.get(id);
         if (ty == (Type*)0) {
             return (str)0;
@@ -290,7 +290,7 @@ impl TypeRegistry {
     }
 
     /// TypeId registered under `name`, or TypeId.none() when absent.
-    TypeId lookup(TypeRegistry* self, str name) {
+    TypeId lookup(*self, str name) {
         if (self.by_name.contains_key(name)) {
             return TypeId.from_raw(self.by_name.get(name));
         }
@@ -301,7 +301,7 @@ impl TypeRegistry {
 
     /// vec<elem> — interned: repeated calls with the same element id return
     /// the same TypeId.
-    TypeResult vec_of(TypeRegistry* self, TypeId elem) {
+    TypeResult vec_of(*self, TypeId elem) {
         if (self.vec_cache.contains_key(elem.raw)) {
             return TypeResult.ok_id(TypeId.from_raw(self.vec_cache.get(elem.raw)));
         }
@@ -322,7 +322,7 @@ impl TypeRegistry {
     }
 
     /// optional<inner> — interned like vec_of.
-    TypeResult optional_of(TypeRegistry* self, TypeId inner) {
+    TypeResult optional_of(*self, TypeId inner) {
         if (self.optional_cache.contains_key(inner.raw)) {
             return TypeResult.ok_id(TypeId.from_raw(self.optional_cache.get(inner.raw)));
         }
@@ -344,7 +344,7 @@ impl TypeRegistry {
 
     /// ret(params...) — interned by a canonical serialized key of the
     /// raw param ids + ret id ("p0,p1,...->ret").  Consumes `params`.
-    TypeResult function(TypeRegistry* self, Vec<TypeId> params, TypeId ret) {
+    TypeResult function(*self, Vec<TypeId> params, TypeId ret) {
         // Canonical cache key from raw ids.
         String key = String.new();
         i64 i = 0;
@@ -410,7 +410,7 @@ impl TypeRegistry {
 
     /// Define a struct type.  Consumes `fields` (FieldDefs own nothing).
     /// Errors: DUPLICATE_TYPE_NAME, DUPLICATE_FIELD_NAME, UNKNOWN_TYPE_ID.
-    TypeResult define_struct(TypeRegistry* self, str name, Vec<FieldDef> fields) {
+    TypeResult define_struct(*self, str name, Vec<FieldDef> fields) {
         if (self.by_name.contains_key(name)) {
             String m = rt_type_str_owned("type name already defined: ");
             m.push_str(name);
@@ -458,7 +458,7 @@ impl TypeRegistry {
     /// Define an enum whose discriminants are the variant indices 0..n
     /// (any explicit discriminants on the defs are ignored — Rust's
     /// define_enum takes name+payload pairs only).  Consumes `variants`.
-    TypeResult define_enum(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+    TypeResult define_enum(*self, str name, Vec<VariantDef> variants) {
         i64 i = 0;
         while (i < variants.len()) {
             VariantDef* v = variants.get_ptr(i);
@@ -471,7 +471,7 @@ impl TypeRegistry {
 
     /// Define an enum with explicit discriminants on every variant.
     /// Consumes `variants`.
-    TypeResult define_enum_with_discriminants(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+    TypeResult define_enum_with_discriminants(*self, str name, Vec<VariantDef> variants) {
         return self.define_enum_core(name, move variants);
     }
 
@@ -480,7 +480,7 @@ impl TypeRegistry {
     /// discriminant is 0; each one after an explicit X is X + 1.
     /// Errors with DISCRIMINANT_OVERFLOW when the successor of the last
     /// discriminant does not fit in i64.  Consumes `variants`.
-    TypeResult define_enum_autofill_discriminants(TypeRegistry* self, str name, Vec<VariantDef> variants) {
+    TypeResult define_enum_autofill_discriminants(*self, str name, Vec<VariantDef> variants) {
         i64 next = 0;
         i64 i = 0;
         while (i < variants.len()) {
@@ -506,7 +506,7 @@ impl TypeRegistry {
     }
 
     // Shared define_enum tail: validates, then transfers payload ownership.
-    TypeResult define_enum_core(TypeRegistry* self, str name, Vec<VariantDef> defs) {
+    TypeResult define_enum_core(*self, str name, Vec<VariantDef> defs) {
         if (self.by_name.contains_key(name)) {
             rt_free_variant_defs(&defs);
             String m = rt_type_str_owned("type name already defined: ");
@@ -583,7 +583,7 @@ impl TypeRegistry {
 
     /// Index of the variant called `name`, or -1 (unknown id / not an enum /
     /// no such variant).
-    i64 enum_variant_index(TypeRegistry* self, TypeId enum_ty, str name) {
+    i64 enum_variant_index(*self, TypeId enum_ty, str name) {
         Type* ty = self.get(enum_ty);
         if (ty == (Type*)0) {
             return -1;
@@ -604,7 +604,7 @@ impl TypeRegistry {
 
     /// Variant at `index`, or null (unknown id / not an enum / out of range).
     /// The pointer is invalidated by the next type definition.
-    EnumVariant* enum_variant(TypeRegistry* self, TypeId enum_ty, i64 index) {
+    EnumVariant* enum_variant(*self, TypeId enum_ty, i64 index) {
         Type* ty = self.get(enum_ty);
         if (ty == (Type*)0) {
             return (EnumVariant*)0;
@@ -619,7 +619,7 @@ impl TypeRegistry {
     }
 
     /// Index of the variant with `discriminant`, or -1.
-    i64 enum_variant_by_discriminant(TypeRegistry* self, TypeId enum_ty, i64 discriminant) {
+    i64 enum_variant_by_discriminant(*self, TypeId enum_ty, i64 discriminant) {
         Type* ty = self.get(enum_ty);
         if (ty == (Type*)0) {
             return -1;
@@ -642,7 +642,7 @@ impl TypeRegistry {
 impl Drop for TypeRegistry {
     /// Frees every interned Type (names, fields, variants, payloads), the
     /// name/interning maps, and the owned fn-cache key strings.  Idempotent.
-    void drop(TypeRegistry* self) {
+    void drop(*self) {
         i64 i = 0;
         while (i < self.types.len()) {
             Type* ty = self.types.get_ptr(i);
