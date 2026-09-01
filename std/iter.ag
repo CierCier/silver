@@ -28,10 +28,10 @@ trait IntoIterator {
     IntoIter into_iter(Self self);
 }
 
-// Iterator: types that yield values via next(Self* self).
+// Iterator: types that yield values via next(*self).
 trait Iterator {
     type Item;
-    Optional<Item> next(Self* self);
+    Optional<Item> next(*self);
 }
 
 // IntoIteratorPtr: yields mutable pointers to elements.
@@ -56,7 +56,7 @@ struct RevIter<T> {
 
 impl<T> Iterator for RevIter<T> {
     type Item = T;
-    Optional<T> next(RevIter<T>* self) {
+    Optional<T> next(*self) {
         if (self.idx < self.len) {
             T v = self.data[self.len - 1 - self.idx];
             self.idx = self.idx + 1;
@@ -73,7 +73,7 @@ struct MapIter<I, T, U> {
 
 impl<I, T, U> Iterator for MapIter<I, T, U> {
     type Item = U;
-    Optional<U> next(MapIter<I, T, U>* self) {
+    Optional<U> next(*self) {
         Optional<T> o = self.inner.next();
         if (o.is_none()) { return Optional<U>.none(); }
         T v = o.unwrap();
@@ -89,7 +89,7 @@ struct FilterIter<I, T> {
 
 impl<I, T> Iterator for FilterIter<I, T> {
     type Item = T;
-    Optional<T> next(FilterIter<I, T>* self) {
+    Optional<T> next(*self) {
         while (true) {
             Optional<T> o = self.inner.next();
             if (o.is_none()) { return Optional<T>.none(); }
@@ -108,7 +108,7 @@ struct TakeIter<I, T> {
 
 impl<I, T> Iterator for TakeIter<I, T> {
     type Item = T;
-    Optional<T> next(TakeIter<I, T>* self) {
+    Optional<T> next(*self) {
         if (self.remaining <= 0) { return Optional<T>.none(); }
         self.remaining = self.remaining - 1;
         return self.inner.next();
@@ -123,7 +123,7 @@ struct SkipIter<I, T> {
 
 impl<I, T> Iterator for SkipIter<I, T> {
     type Item = T;
-    Optional<T> next(SkipIter<I, T>* self) {
+    Optional<T> next(*self) {
         if (!self.done) {
             while (self.to_skip > 0) {
                 Optional<T> o = self.inner.next();
@@ -148,7 +148,7 @@ struct Enumerated<T> {
 
 impl<I, T> Iterator for EnumerateIter<I, T> {
     type Item = Enumerated<T>;
-    Optional<Enumerated<T>> next(EnumerateIter<I, T>* self) {
+    Optional<Enumerated<T>> next(*self) {
         Optional<T> o = self.inner.next();
         if (o.is_none()) { return Optional<Enumerated<T>>.none(); }
         Enumerated<T> e;
@@ -167,7 +167,7 @@ struct ChainIter<A, B, T> {
 
 impl<A, B, T> Iterator for ChainIter<A, B, T> {
     type Item = T;
-    Optional<T> next(ChainIter<A, B, T>* self) {
+    Optional<T> next(*self) {
         if (self.in_a) {
             Optional<T> o = self.a.next();
             if (o.is_some()) { return o; }
@@ -189,7 +189,7 @@ struct Zipped<A, B> {
 
 impl<A, B, TA, TB> Iterator for ZipIter<A, B, TA, TB> {
     type Item = Zipped<TA, TB>;
-    Optional<Zipped<TA, TB>> next(ZipIter<A, B, TA, TB>* self) {
+    Optional<Zipped<TA, TB>> next(*self) {
         Optional<TA> oa = self.a.next();
         Optional<TB> ob = self.b.next();
         if (oa.is_none() || ob.is_none()) { return Optional<Zipped<TA, TB>>.none(); }
@@ -207,7 +207,7 @@ struct FilterMapIter<I, T, U> {
 
 impl<I, T, U> Iterator for FilterMapIter<I, T, U> {
     type Item = U;
-    Optional<U> next(FilterMapIter<I, T, U>* self) {
+    Optional<U> next(*self) {
         while (true) {
             Optional<T> o = self.inner.next();
             if (o.is_none()) { return Optional<U>.none(); }
@@ -229,7 +229,7 @@ struct FlatMapIter<I, J, T, U> {
 
 impl<I, J, T, U> Iterator for FlatMapIter<I, J, T, U> {
     type Item = U;
-    Optional<U> next(FlatMapIter<I, J, T, U>* self) {
+    Optional<U> next(*self) {
         while (true) {
             if (self.has_current) {
                 Optional<U> o = self.current.next();
@@ -255,7 +255,7 @@ struct FlattenIter<I, J, T> {
 
 impl<I, J, T> Iterator for FlattenIter<I, J, T> {
     type Item = T;
-    Optional<T> next(FlattenIter<I, J, T>* self) {
+    Optional<T> next(*self) {
         while (true) {
             if (self.has_current) {
                 Optional<T> o = self.current.next();
