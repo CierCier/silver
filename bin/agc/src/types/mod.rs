@@ -908,6 +908,7 @@ pub fn is_numeric(ty: &Type) -> bool {
                 | ast::PrimitiveType::C32
                 | ast::PrimitiveType::C64
                 | ast::PrimitiveType::C80
+                | ast::PrimitiveType::Char
         )
     )
 }
@@ -926,6 +927,7 @@ pub fn is_integer(ty: &Type) -> bool {
                 | ast::PrimitiveType::U32
                 | ast::PrimitiveType::U64
                 | ast::PrimitiveType::U128
+                | ast::PrimitiveType::Char
         )
     )
 }

@@ -4317,6 +4317,19 @@ impl TypeChecker {
         if view_compatible {
             return true;
         }
+        if let (Type::Primitive(expected_p), Type::Primitive(found_p)) = (expected, found) {
+            // 8-bit byte and char types are mutually assignable:
+            // char <-> u8, char <-> i8, u8 <-> i8
+            if matches!(
+                (expected_p, found_p),
+                (
+                    ast::PrimitiveType::Char | ast::PrimitiveType::U8 | ast::PrimitiveType::I8,
+                    ast::PrimitiveType::Char | ast::PrimitiveType::U8 | ast::PrimitiveType::I8
+                )
+            ) {
+                return true;
+            }
+        }
         match (
             self.enum_backing_type(expected),
             self.enum_backing_type(found),
@@ -5140,6 +5153,7 @@ impl TypeChecker {
                 | ast::PrimitiveType::C32
                 | ast::PrimitiveType::C64
                 | ast::PrimitiveType::C80
+                | ast::PrimitiveType::Char
                 | ast::PrimitiveType::Bool
         )
     }
@@ -5453,19 +5467,41 @@ impl TypeChecker {
         }
     }
 
+    fn numeric_rank(p: &ast::PrimitiveType) -> u32 {
+        match p {
+            ast::PrimitiveType::Bool => 1,
+            ast::PrimitiveType::I8 => 10,
+            ast::PrimitiveType::U8 => 11,
+            ast::PrimitiveType::I16 => 20,
+            ast::PrimitiveType::U16 => 21,
+            ast::PrimitiveType::Char => 29,
+            ast::PrimitiveType::I32 => 30,
+            ast::PrimitiveType::U32 => 31,
+            ast::PrimitiveType::I64 => 40,
+            ast::PrimitiveType::U64 => 41,
+            ast::PrimitiveType::I128 => 50,
+            ast::PrimitiveType::U128 => 51,
+            ast::PrimitiveType::F32 => 60,
+            ast::PrimitiveType::F64 => 70,
+            ast::PrimitiveType::F80 => 80,
+            ast::PrimitiveType::C32 => 90,
+            ast::PrimitiveType::C64 => 100,
+            ast::PrimitiveType::C80 => 110,
+            _ => 0,
+        }
+    }
+
     fn common_numeric_type(&self, left: &Type, right: &Type) -> Option<Type> {
-        let left = Type::Primitive(self.numeric_type(left)?);
-        let right = Type::Primitive(self.numeric_type(right)?);
-        if left == right {
-            return Some(left);
+        let left_prim = self.numeric_type(left)?;
+        let right_prim = self.numeric_type(right)?;
+        if left_prim == right_prim {
+            return Some(Type::Primitive(left_prim));
         }
-        if self.is_implicitly_castable(&right, &left) {
-            return Some(left);
+        if Self::numeric_rank(&left_prim) >= Self::numeric_rank(&right_prim) {
+            Some(Type::Primitive(left_prim))
+        } else {
+            Some(Type::Primitive(right_prim))
         }
-        if self.is_implicitly_castable(&left, &right) {
-            return Some(right);
-        }
-        None
     }
 
     fn resolve_operator_overload(

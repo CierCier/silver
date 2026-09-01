@@ -39,5 +39,56 @@ i32 main() {
     u8 buf[3] = { 104, 105, 106 };
     str bs = &buf[0];
     if (bs[0] != (u8)104) { return 14; }
+
+    // Implicit char -> u8 and u8 -> char
+    char c_val = 'Z';
+    u8 b_from_c = c_val;
+    if (b_from_c != (u8)90) { return 15; }
+    u8 b_val = 65;
+    char c_from_b = b_val;
+    if (c_from_b != 'A') { return 16; }
+
+    // Implicit char -> i8 and i8 -> char
+    char c_val2 = 'm';
+    i8 x_from_c = c_val2;
+    if (x_from_c != (i8)109) { return 17; }
+    i8 x_val = 100;
+    char c_from_x = x_val;
+    if (c_from_x != 'd') { return 18; }
+
+    // Implicit u8 <-> i8
+    u8 u_val = 42;
+    i8 i_from_u = u_val;
+    if (i_from_u != (i8)42) { return 19; }
+    i8 i_val2 = 77;
+    u8 u_from_i = i_val2;
+    if (u_from_i != (u8)77) { return 20; }
+
+    // Widening implicit casts
+    i32 i32_from_u8 = u_val;
+    if (i32_from_u8 != 42) { return 21; }
+    i64 i64_from_char = c_val;
+    if (i64_from_char != 90) { return 22; }
+    f64 f64_from_i32 = i32_from_u8;
+    if (f64_from_i32 < 41.9 || f64_from_i32 > 42.1) { return 23; }
+
+    // Function parameter and return casts
+    if (identity_u8(c_val) != (u8)90) { return 24; }
+    if (identity_char(b_val) != 'A') { return 25; }
+    if (identity_i8(c_val2) != (i8)109) { return 26; }
+    if (identity_char(x_val) != 'd') { return 27; }
+
     return 0;
+}
+
+u8 identity_u8(u8 x) {
+    return x;
+}
+
+char identity_char(char x) {
+    return x;
+}
+
+i8 identity_i8(i8 x) {
+    return x;
 }
