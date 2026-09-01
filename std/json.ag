@@ -21,7 +21,7 @@ impl JsonError {
 }
 
 trait ToJson {
-    void to_json(Self* self, JsonWriter* out);
+    void to_json(*self, JsonWriter* out);
 }
 
 trait FromJson {
@@ -51,7 +51,7 @@ impl JsonWriter {
         return move writer;
     }
 
-    void before_value(JsonWriter* self) {
+    void before_value(*self) {
         if (self.depth == 0) {
             return;
         }
@@ -68,7 +68,7 @@ impl JsonWriter {
         }
     }
 
-    void write_escaped_body(JsonWriter* self, str value) {
+    void write_escaped_body(*self, str value) {
         u8* bytes = (u8*)value;
         i64 i = 0;
         i64 len = cstr_len(bytes);
@@ -91,44 +91,44 @@ impl JsonWriter {
         }
     }
 
-    void write_string(JsonWriter* self, str value) {
+    void write_string(*self, str value) {
         self.before_value();
         self.output.write_u8((u8)34);
         self.write_escaped_body(value);
         self.output.write_u8((u8)34);
     }
 
-    void write_raw(JsonWriter* self, str value) {
+    void write_raw(*self, str value) {
         self.before_value();
         self.output.write_str(value);
     }
 
-    void write_null(JsonWriter* self) {
+    void write_null(*self) {
         self.before_value();
         self.output.write_str("null");
     }
 
-    void write_i64(JsonWriter* self, i64 value) {
+    void write_i64(*self, i64 value) {
         self.before_value();
         self.output.write_i64(value);
     }
 
-    void write_u64(JsonWriter* self, u64 value) {
+    void write_u64(*self, u64 value) {
         self.before_value();
         self.output.write_u64(value);
     }
 
-    void write_f64(JsonWriter* self, f64 value) {
+    void write_f64(*self, f64 value) {
         self.before_value();
         self.output.write_f64(value);
     }
 
-    void write_bool(JsonWriter* self, bool value) {
+    void write_bool(*self, bool value) {
         self.before_value();
         self.output.write_bool(value);
     }
 
-    void begin_object(JsonWriter* self) {
+    void begin_object(*self) {
         self.before_value();
         self.output.write_u8((u8)123);
         if (self.depth < 32) {
@@ -138,14 +138,14 @@ impl JsonWriter {
         }
     }
 
-    void end_object(JsonWriter* self) {
+    void end_object(*self) {
         if (self.depth > 0) {
             self.depth = self.depth - 1;
         }
         self.output.write_u8((u8)125);
     }
 
-    void begin_array(JsonWriter* self) {
+    void begin_array(*self) {
         self.before_value();
         self.output.write_u8((u8)91);
         if (self.depth < 32) {
@@ -155,14 +155,14 @@ impl JsonWriter {
         }
     }
 
-    void end_array(JsonWriter* self) {
+    void end_array(*self) {
         if (self.depth > 0) {
             self.depth = self.depth - 1;
         }
         self.output.write_u8((u8)93);
     }
 
-    void field(JsonWriter* self, str name) {
+    void field(*self, str name) {
         if (self.depth == 0 || self.contexts[self.depth - 1] != 1) {
             return;
         }
@@ -177,7 +177,7 @@ impl JsonWriter {
         self.expecting_value = true;
     }
 
-    str finish(JsonWriter* self) {
+    str finish(*self) {
         self.output.write_u8((u8)0);
         str result = (str)self.output.data;
         self.output.data = 0;
@@ -204,7 +204,7 @@ impl JsonReader {
         return move reader;
     }
 
-    void skip_whitespace(JsonReader* self) {
+    void skip_whitespace(*self) {
         u8* bytes = (u8*)self.input;
         while (self.index + 16 <= self.length) {
             i64 non_ws = asm("
@@ -258,7 +258,7 @@ impl JsonReader {
         }
     }
 
-    bool expect(JsonReader* self, u8 expected) {
+    bool expect(*self, u8 expected) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
         if (self.index >= self.length || bytes[self.index] != expected) {
@@ -269,13 +269,13 @@ impl JsonReader {
         return true;
     }
 
-    bool begin_object(JsonReader* self) { return self.expect((u8)123); }
-    bool end_object(JsonReader* self) { return self.expect((u8)125); }
-    bool begin_array(JsonReader* self) { return self.expect((u8)91); }
-    bool end_array(JsonReader* self) { return self.expect((u8)93); }
-    bool comma(JsonReader* self) { return self.expect((u8)44); }
+    bool begin_object(*self) { return self.expect((u8)123); }
+    bool end_object(*self) { return self.expect((u8)125); }
+    bool begin_array(*self) { return self.expect((u8)91); }
+    bool end_array(*self) { return self.expect((u8)93); }
+    bool comma(*self) { return self.expect((u8)44); }
 
-    bool literal(JsonReader* self, str value) {
+    bool literal(*self, str value) {
         u8* input = (u8*)self.input;
         u8* expected = (u8*)value;
         self.skip_whitespace();
@@ -296,7 +296,7 @@ impl JsonReader {
         return true;
     }
 
-    bool read_bool(JsonReader* self, bool* out) {
+    bool read_bool(*self, bool* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
         if (self.index + 4 <= self.length
@@ -308,7 +308,7 @@ impl JsonReader {
         return false;
     }
 
-    bool read_i64(JsonReader* self, i64* out) {
+    bool read_i64(*self, i64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
         bool negative = false;
@@ -343,14 +343,14 @@ impl JsonReader {
         return true;
     }
 
-    bool read_i32(JsonReader* self, i32* out) {
+    bool read_i32(*self, i32* out) {
         i64 value = 0;
         if (!self.read_i64(&value)) { return false; }
         *out = (i32)value;
         return true;
     }
 
-    bool read_u64(JsonReader* self, u64* out) {
+    bool read_u64(*self, u64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
         if (self.index < self.length && bytes[self.index] == (u8)45) {
@@ -383,7 +383,7 @@ impl JsonReader {
         return true;
     }
 
-    bool read_f64(JsonReader* self, f64* out) {
+    bool read_f64(*self, f64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
         bool negative = false;
@@ -467,7 +467,7 @@ impl JsonReader {
         return true;
     }
 
-    String read_string(JsonReader* self) {
+    String read_string(*self) {
         u8* bytes = (u8*)self.input;
         String result = String.new();
         if (!self.expect((u8)34)) { return move result; }
@@ -524,7 +524,7 @@ impl JsonReader {
         return move result;
     }
 
-    bool field(JsonReader* self, str name) {
+    bool field(*self, str name) {
         String actual = self.read_string();
         if (self.failed || !actual.equals(name)) {
             self.failed = true;
@@ -533,27 +533,27 @@ impl JsonReader {
         return self.expect((u8)58);
     }
 
-    bool ok(JsonReader* self) {
+    bool ok(*self) {
         self.skip_whitespace();
         return !self.failed && self.index == self.length;
     }
 }
 
-impl ToJson for i8 { void to_json(i8* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson for i16 { void to_json(i16* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson for i32 { void to_json(i32* self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson for i64 { void to_json(i64* self, JsonWriter* out) { out.write_i64(*self); } }
-impl ToJson for u8 { void to_json(u8* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson for u16 { void to_json(u16* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson for u32 { void to_json(u32* self, JsonWriter* out) { out.write_u64((u64)*self); } }
-impl ToJson for u64 { void to_json(u64* self, JsonWriter* out) { out.write_u64(*self); } }
-impl ToJson for f64 { void to_json(f64* self, JsonWriter* out) { out.write_f64(*self); } }
-impl ToJson for f32 { void to_json(f32* self, JsonWriter* out) { out.write_f64((f64)*self); } }
-impl ToJson for bool { void to_json(bool* self, JsonWriter* out) { out.write_bool(*self); } }
-impl ToJson for str { void to_json(str* self, JsonWriter* out) { out.write_string(*self); } }
-impl ToJson for String { void to_json(String* self, JsonWriter* out) { out.write_string((str)self.data); } }
+impl ToJson for i8 { void to_json(*self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i16 { void to_json(*self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i32 { void to_json(*self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for i64 { void to_json(*self, JsonWriter* out) { out.write_i64(*self); } }
+impl ToJson for u8 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u16 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u32 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for u64 { void to_json(*self, JsonWriter* out) { out.write_u64(*self); } }
+impl ToJson for f64 { void to_json(*self, JsonWriter* out) { out.write_f64(*self); } }
+impl ToJson for f32 { void to_json(*self, JsonWriter* out) { out.write_f64((f64)*self); } }
+impl ToJson for bool { void to_json(*self, JsonWriter* out) { out.write_bool(*self); } }
+impl ToJson for str { void to_json(*self, JsonWriter* out) { out.write_string(*self); } }
+impl ToJson for String { void to_json(*self, JsonWriter* out) { out.write_string((str)self.data); } }
 impl ToJson for Optional<i32> {
-    void to_json(Optional<i32>* self, JsonWriter* out) {
+    void to_json(*self, JsonWriter* out) {
         Optional<i32> value = *self;
         if (value.is_some()) {
             i32 inner = value.unwrap();
@@ -564,7 +564,7 @@ impl ToJson for Optional<i32> {
     }
 }
 impl ToJson for Optional<f64> {
-    void to_json(Optional<f64>* self, JsonWriter* out) {
+    void to_json(*self, JsonWriter* out) {
         Optional<f64> value = *self;
         if (value.is_some()) {
             f64 inner = value.unwrap();
