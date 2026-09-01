@@ -733,6 +733,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut parser = crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
         let (mut ast, errors) = parser.parse_program();
         if !errors.is_empty() {
+            eprint!("\r\x1b[2K");
             for error in &errors {
                 eprintln!(
                     "{}",
@@ -768,6 +769,17 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut checker = crate::semantic::typeck::TypeChecker::new().with_imported_modules(&import_lowering.module_artifacts);
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
         if !type_errors.is_empty() {
+            eprint!("\r\x1b[2K");
+            for error in &type_errors {
+                eprintln!(
+                    "{}",
+                    crate::diagnostics::render(
+                        error.span,
+                        &error.message,
+                        crate::diagnostics::Severity::Error,
+                    )
+                );
+            }
             return Err(format!("type errors in {}", node.source_path.display()));
         }
 
@@ -845,7 +857,22 @@ impl<'a> ParallelGraphExecutor<'a> {
             Some(&src),
             self.loader.debug_info,
             self.loader.leak_check,
-        ).map_err(|e| format!("LLVM codegen error in {}: {}", node.source_path.display(), e.message))?;
+        ).map_err(|e| {
+            eprint!("\r\x1b[2K");
+            if let Some(span) = e.span {
+                eprintln!(
+                    "{}",
+                    crate::diagnostics::render(
+                        span,
+                        &e.message,
+                        crate::diagnostics::Severity::Error,
+                    )
+                );
+            } else {
+                eprintln!("error: {}", e.message);
+            }
+            format!("LLVM codegen error in {}: {}", node.source_path.display(), e.message)
+        })?;
 
         let obj_bytes = std::fs::read(&temp_o).map_err(|e| format!("failed to read temp object: {e}"))?;
         let _ = std::fs::remove_file(&temp_o);
