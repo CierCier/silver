@@ -2361,9 +2361,22 @@ impl TypeChecker {
                 }
 
                 match &object_ty {
-                    Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
-                        element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
-                    },
+                    Type::Primitive(ast::PrimitiveType::Str) => {
+                        if matches!(
+                            expected,
+                            Some(
+                                Type::Primitive(ast::PrimitiveType::Str)
+                                    | Type::Pointer { .. }
+                                    | Type::Reference { .. }
+                            )
+                        ) {
+                            Type::Primitive(ast::PrimitiveType::Str)
+                        } else {
+                            Type::Slice {
+                                element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                            }
+                        }
+                    }
                     Type::Array { element, .. } => Type::Slice {
                         element: element.clone(),
                     },
@@ -2371,9 +2384,22 @@ impl TypeChecker {
                         element: element.clone(),
                     },
                     Type::Pointer { inner, .. } => match &**inner {
-                        Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
-                            element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
-                        },
+                        Type::Primitive(ast::PrimitiveType::Str) => {
+                            if matches!(
+                                expected,
+                                Some(
+                                    Type::Primitive(ast::PrimitiveType::Str)
+                                        | Type::Pointer { .. }
+                                        | Type::Reference { .. }
+                                )
+                            ) {
+                                Type::Primitive(ast::PrimitiveType::Str)
+                            } else {
+                                Type::Slice {
+                                    element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                                }
+                            }
+                        }
                         Type::Array { element, .. } => Type::Slice {
                             element: element.clone(),
                         },
@@ -2401,9 +2427,22 @@ impl TypeChecker {
                         }
                     },
                     Type::Reference { inner, .. } => match &**inner {
-                        Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
-                            element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
-                        },
+                        Type::Primitive(ast::PrimitiveType::Str) => {
+                            if matches!(
+                                expected,
+                                Some(
+                                    Type::Primitive(ast::PrimitiveType::Str)
+                                        | Type::Pointer { .. }
+                                        | Type::Reference { .. }
+                                )
+                            ) {
+                                Type::Primitive(ast::PrimitiveType::Str)
+                            } else {
+                                Type::Slice {
+                                    element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                                }
+                            }
+                        }
                         Type::Array { element, .. } => Type::Slice {
                             element: element.clone(),
                         },
@@ -4239,6 +4278,35 @@ impl TypeChecker {
             (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
                 matches!(
                     inner.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
+            }
+            (Type::Primitive(ast::PrimitiveType::Str), Type::Slice { element }) => {
+                matches!(
+                    element.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
+            }
+            (Type::Slice { element }, Type::Primitive(ast::PrimitiveType::Str)) => {
+                matches!(
+                    element.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                )
+            }
+            (Type::Pointer { inner, .. }, Type::Slice { element }) => {
+                matches!(
+                    inner.as_ref(),
+                    Type::Primitive(
+                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+                    )
+                ) && matches!(
+                    element.as_ref(),
                     Type::Primitive(
                         ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
                     )

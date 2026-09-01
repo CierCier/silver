@@ -1291,6 +1291,66 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(format!("int-to-pointer cast failed: {e}"), *span)
                 }),
+            (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::PointerType(ptr_ty)) => {
+                let data_val = self
+                    .builder
+                    .build_extract_value(struct_val, 0, "slice.to_ptr")
+                    .map_err(|e| CodegenError::with_span(format!("failed to extract slice data: {e}"), *span))?;
+                if data_val.is_pointer_value() {
+                    let ptr = data_val.into_pointer_value();
+                    if ptr.get_type() == ptr_ty {
+                        Ok(ptr.as_basic_value_enum())
+                    } else {
+                        self.builder
+                            .build_pointer_cast(ptr, ptr_ty, "cast.slice2p")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| CodegenError::with_span(format!("pointer cast failed: {e}"), *span))
+                    }
+                } else {
+                    Err(CodegenError::with_span(
+                        format!(
+                            "unsupported cast from `{}` to `{}`",
+                            struct_val.get_type().print_to_string(),
+                            target.print_to_string()
+                        ),
+                        *span,
+                    ))
+                }
+            }
+            (BasicValueEnum::PointerValue(ptr_val), BasicTypeEnum::StructType(struct_ty)) => {
+                let fields = struct_ty.get_field_types();
+                if fields.len() == 2 && fields[0].is_pointer_type() && fields[1].is_int_type() {
+                    let i64_ty = self.context.i64_type();
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let strlen_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+                    let strlen_fn = self
+                        .module
+                        .get_function("strlen")
+                        .unwrap_or_else(|| self.module.add_function("strlen", strlen_ty, None));
+                    let len_call = self
+                        .builder
+                        .build_call(strlen_fn, &[ptr_val.into()], "str.len")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                    let len_val = len_call
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| CodegenError::with_span("strlen returned void", *span))?
+                        .into_int_value();
+                    let undef = struct_ty.get_undef();
+                    let s1 = self.builder.build_insert_value(undef, ptr_val, 0, "str2slice.ptr").map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                    let s2 = self.builder.build_insert_value(s1, len_val, 1, "str2slice.len").map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                    Ok(s2.as_basic_value_enum())
+                } else {
+                    Err(CodegenError::with_span(
+                        format!(
+                            "unsupported cast from `{}` to `{}`",
+                            ptr_val.get_type().print_to_string(),
+                            target.print_to_string()
+                        ),
+                        *span,
+                    ))
+                }
+            }
             (source, _) => Err(CodegenError::with_span(
                 format!(
                     "unsupported cast from `{}` to `{}`",
