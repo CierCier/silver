@@ -59,15 +59,15 @@ impl Handle {
         return h;
     }
 
-    u32 index(Handle* self) {
+    u32 index(*self) {
         return self.index;
     }
 
-    u32 generation(Handle* self) {
+    u32 generation(*self) {
         return self.generation;
     }
 
-    bool equals(Handle* self, Handle other) {
+    bool equals(*self, Handle other) {
         return self.index == other.index && self.generation == other.generation;
     }
 }
@@ -155,7 +155,7 @@ impl RtValue {
     }
 
     /// TypeId of this value (RtValue::type_id in the Rust runtime).
-    u32 type_id(RtValue* self) {
+    u32 type_id(*self) {
         if (self.kind == RT_KIND_UNIT) {
             return RT_TYPE_UNIT;
         }
@@ -167,7 +167,7 @@ impl RtValue {
 
     /// Append any object handle referenced by this value to `out`
     /// (RtValue::push_handles in the Rust runtime).
-    void push_handles(RtValue* self, Vec<Handle>* out) {
+    void push_handles(*self, Vec<Handle>* out) {
         if (self.kind == RT_KIND_OBJ) {
             out.push(self.handle);
         }
@@ -251,7 +251,7 @@ impl Object {
 
     /// Append every object handle reachable from this object to `out`
     /// (Object::push_handles in the Rust runtime).
-    void push_handles(Object* self, Vec<Handle>* out) {
+    void push_handles(*self, Vec<Handle>* out) {
         if (self.kind == OBJ_KIND_STRING) {
             return;
         }
@@ -269,7 +269,7 @@ impl Drop for Object {
     /// Release owned payload (string buffer and value vector).
     /// RtValue elements own no resources, so dropping the Vec buffer
     /// is sufficient.
-    void drop(Object* self) {
+    void drop(*self) {
         self.text.drop();
         self.values.drop();
     }
@@ -320,7 +320,7 @@ impl Heap {
 
     /// Store `object` in a free slot (reusing the free list when possible)
     /// and return a generational handle to it.
-    Handle alloc(Heap* self, Object object) {
+    Handle alloc(*self, Object object) {
         if (self.free_list.len() > 0) {
             u32 index = self.free_list.pop();
             i64 idx = (i64)index;
@@ -342,7 +342,7 @@ impl Heap {
     }
 
     // Shared validity check: slot exists, generation matches, slot occupied.
-    bool handle_is_valid(Heap* self, Handle handle) {
+    bool handle_is_valid(*self, Handle handle) {
         i64 idx = (i64)handle.index;
         if (idx >= self.generations.len()) {
             return false;
@@ -354,7 +354,7 @@ impl Heap {
     }
 
     /// Borrow the object for `handle`. ok is false for stale/invalid handles.
-    ObjectRef get(Heap* self, Handle handle) {
+    ObjectRef get(*self, Handle handle) {
         ObjectRef r;
         r.ok = false;
         r.object = (Object*)0;
@@ -368,13 +368,13 @@ impl Heap {
 
     /// Mutable borrow of the object for `handle`. Pointers are freely
     /// mutable in Silver; this mirrors Heap::get_mut in the Rust runtime.
-    ObjectRef get_mut(Heap* self, Handle handle) {
+    ObjectRef get_mut(*self, Handle handle) {
         return self.get(handle);
     }
 
     /// Remove the object for `handle` from the heap and return it.
     /// Bumps the slot generation so stale handles are detected.
-    FreeResult free(Heap* self, Handle handle) {
+    FreeResult free(*self, Handle handle) {
         FreeResult r;
         r.ok = false;
         r.object = Object.empty();
@@ -401,7 +401,7 @@ impl Heap {
     ///
     /// Note: the Rust runtime takes `&[RtValue]`; Silver's builtin Slice<T>
     /// has no length accessor, so the slice is passed as pointer + length.
-    i64 collect_garbage(Heap* self, RtValue* roots, i64 roots_len) {
+    i64 collect_garbage(*self, RtValue* roots, i64 roots_len) {
         i64 slot_count = self.objects.len();
         if (slot_count == 0) {
             return 0;
@@ -489,7 +489,7 @@ impl Heap {
     }
 
     /// Number of live (occupied) slots.
-    i64 allocated_count(Heap* self) {
+    i64 allocated_count(*self) {
         i64 count = 0;
         i64 i = 0;
         i64 n = self.occupied.len();
@@ -505,7 +505,7 @@ impl Heap {
 
 impl Drop for Heap {
     /// Release every live object, then the backing vectors.
-    void drop(Heap* self) {
+    void drop(*self) {
         i64 i = 0;
         i64 n = self.objects.len();
         while (i < n) {
