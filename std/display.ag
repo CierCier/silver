@@ -11,22 +11,22 @@ import std.io;  // BufWriter
 
 /// Trait for types that can be formatted for display.
 trait Display {
-    void fmt(Self* self, BufWriter* out);
+    void fmt(*self, BufWriter* out);
 }
 
 // Primitives — redirect to BufWriter.write_T methods
 impl Display for i64 {
-    void fmt(i64* self, BufWriter* out) { out.write_i64(*self); }
+    void fmt(*self, BufWriter* out) { out.write_i64(*self); }
 }
 impl Display for u64 {
-    void fmt(u64* self, BufWriter* out) { out.write_u64(*self); }
+    void fmt(*self, BufWriter* out) { out.write_u64(*self); }
 }
 impl Display for f64 {
-    void fmt(f64* self, BufWriter* out) { out.write_f64(*self); }
+    void fmt(*self, BufWriter* out) { out.write_f64(*self); }
 }
 impl Display for bool {
-    void fmt(bool* self, BufWriter* out) { out.write_bool(*self); }
+    void fmt(*self, BufWriter* out) { out.write_bool(*self); }
 }
 impl Display for str {
-    void fmt(str* self, BufWriter* out) { out.write_str(*self); }
+    void fmt(*self, BufWriter* out) { out.write_str(*self); }
 }
