@@ -45,8 +45,8 @@ impl TcpStream {
         return s;
     }
 
-    bool valid(TcpStream* self) { return self.sock.valid(); }
-    bool invalid(TcpStream* self) { return self.sock.invalid(); }
+    bool valid(*self) { return self.sock.valid(); }
+    bool invalid(*self) { return self.sock.invalid(); }
 
     // Connect to a borrowed address. Err.code is the errno.
     Result<TcpStream, Error> connect(SocketAddr* addr) {
@@ -114,7 +114,7 @@ impl TcpStream {
         return Result<TcpStream, Error>.Ok(move stream);
     }
 
-    Result<i64, Error> read(TcpStream* self, u8* buf, i64 len) {
+    Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (self.invalid()) {
             return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
         }
@@ -125,7 +125,7 @@ impl TcpStream {
         return r;
     }
 
-    Result<i64, Error> write(TcpStream* self, u8* buf, i64 len) {
+    Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (self.invalid()) {
             return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
         }
@@ -144,18 +144,18 @@ impl TcpStream {
         return Result<i64, Error>.Ok(done);
     }
 
-    void close(TcpStream* self) {
+    void close(*self) {
         self.sock.close();
     }
 
-    Result<i64, Error> shutdown(TcpStream* self, ShutdownHow how) {
+    Result<i64, Error> shutdown(*self, ShutdownHow how) {
         if (self.invalid()) { return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid")); }
         return try_shutdown(self.sock.fd, how);
     }
 }
 
 impl Drop for TcpStream {
-    void drop(TcpStream* self) {
+    void drop(*self) {
         self.sock.drop();
     }
 }
@@ -173,9 +173,9 @@ impl TcpListener {
         return listener;
     }
 
-    bool valid(TcpListener* self) { return self.sock.valid(); }
-    bool invalid(TcpListener* self) { return self.sock.invalid(); }
-i32 raw_fd(TcpListener* self) { return self.sock.fd; }
+    bool valid(*self) { return self.sock.valid(); }
+    bool invalid(*self) { return self.sock.invalid(); }
+    i32 raw_fd(*self) { return self.sock.fd; }
 
     // Bind a TCP listener: socket + SO_REUSEADDR + bind + listen.
     TcpListener bind(SocketAddr* addr, i64 backlog) {
@@ -217,7 +217,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
     }
 
     // Returns the accepted client fd; callers can use TcpStream.from_fd.
-    Result<i64, Error> accept(TcpListener* self) {
+    Result<i64, Error> accept(*self) {
         if (self.invalid()) {
             return Result<i64, Error>.Err(Error.new(EINVAL, "listener is invalid"));
         }
@@ -231,7 +231,7 @@ i32 raw_fd(TcpListener* self) { return self.sock.fd; }
 }
 
 impl Drop for TcpListener {
-    void drop(TcpListener* self) {
+    void drop(*self) {
         self.sock.drop();
     }
 }
