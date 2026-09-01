@@ -41,31 +41,31 @@ impl Socket {
         return s;
     }
 
-    bool valid(Socket* self)  { return self.is_open && self.fd >= 0; }
-    bool invalid(Socket* self) { return !self.valid(); }
+    bool valid(*self)  { return self.is_open && self.fd >= 0; }
+    bool invalid(*self) { return !self.valid(); }
 
     /// Set socket option. No-op on invalid sockets.
-    void set_opt(Socket* self, SocketOptionLevel level, SocketOption optname, void* optval, i64 optlen) {
+    void set_opt(*self, SocketOptionLevel level, SocketOption optname, void* optval, i64 optlen) {
         if (self.invalid()) { return; }
         try_setsockopt(self.fd, level, optname, optval, optlen);
     }
 
     /// Set receive timeout in seconds.
-    void set_recv_timeout(Socket* self, i64 sec) {
+    void set_recv_timeout(*self, i64 sec) {
         if (self.invalid()) { return; }
         Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
         try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, (void*)&tv, 16);
     }
 
     /// Set send timeout in seconds (SO_SNDTIMEO).
-    void set_send_timeout(Socket* self, i64 sec) {
+    void set_send_timeout(*self, i64 sec) {
         if (self.invalid()) { return; }
         Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
         try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.SNDTIMEO, (void*)&tv, 16);
     }
 
     /// Close the socket. Idempotent.
-    void close(Socket* self) {
+    void close(*self) {
         if (self.invalid()) { return; }
         try_close(self.fd);
         self.fd = -1;
@@ -74,7 +74,7 @@ impl Socket {
 }
 
 impl Drop for Socket {
-    void drop(Socket* self) {
+    void drop(*self) {
         if (self.is_open && self.fd >= 0) {
             try_close(self.fd);
             self.fd = -1;
@@ -100,7 +100,7 @@ impl UdpSocket {
     }
 
     /// Bind to a borrowed socket address. This socket is IPv4-only.
-    bool bind(UdpSocket* self, SocketAddr* addr) {
+    bool bind(*self, SocketAddr* addr) {
         if (self.sock.invalid()) { return false; }
         Result<i64, Error> r = match *addr {
             V4(sa) : try_bind(self.sock.fd, (void*)&sa, 16),
@@ -111,7 +111,7 @@ impl UdpSocket {
     }
 
     /// Send `len` bytes to a borrowed destination address.
-    i64 send_to(UdpSocket* self, u8* buf, i64 len, SocketAddr* dst) {
+    i64 send_to(*self, u8* buf, i64 len, SocketAddr* dst) {
         if (self.sock.invalid()) { return -EINVAL; }
         Result<i64, Error> r = match *dst {
             V4(sa) : try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)&sa, 16),
@@ -126,7 +126,7 @@ impl UdpSocket {
 
     /// Receive up to `len` bytes. If non-null, fill `src` with the IPv4
     /// sender address.
-    i64 recv_from(UdpSocket* self, u8* buf, i64 len, SocketAddr* src) {
+    i64 recv_from(*self, u8* buf, i64 len, SocketAddr* src) {
         if (self.sock.invalid()) { return -EINVAL; }
         SockAddrIn src_addr;
         u32 addr_len = 16;
@@ -140,20 +140,20 @@ impl UdpSocket {
     }
 
     /// Set receive timeout in seconds.
-    void set_recv_timeout(UdpSocket* self, i64 sec) {
+    void set_recv_timeout(*self, i64 sec) {
         self.sock.set_recv_timeout(sec);
     }
 
-    bool valid(UdpSocket* self)    { return self.sock.valid(); }
-    bool invalid(UdpSocket* self)  { return self.sock.invalid(); }
+    bool valid(*self)    { return self.sock.valid(); }
+    bool invalid(*self)  { return self.sock.invalid(); }
 
     /// Close the underlying socket.
-    void close(UdpSocket* self) {
+    void close(*self) {
         self.sock.close();
     }
 
     /// Get the bound port (via getsockname). Returns 0 on failure.
-    u16 local_port(UdpSocket* self) {
+    u16 local_port(*self) {
         if (self.sock.invalid()) { return (u16)0; }
         SockAddrIn sa;
         u32 len = 16;
@@ -164,7 +164,7 @@ impl UdpSocket {
 }
 
 impl Drop for UdpSocket {
-    void drop(UdpSocket* self) {
+    void drop(*self) {
         self.sock.drop();
     }
 }
