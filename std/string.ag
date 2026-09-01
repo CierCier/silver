@@ -36,20 +36,20 @@ impl String {
         return s;
     }
 
-    i64 len(&String self) {
+    i64 len(&self) {
         return self.len;
     }
 
     /// True when `len` is zero.
-    bool is_empty(&String self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
-    i64 capacity(&String self) {
+    i64 capacity(&self) {
         return self.capacity;
     }
 
-    Slice<u8> as_slice(&String self) {
+    Slice<u8> as_slice(&self) {
         Slice<u8> s;
         s.data = self.data;
         s.len = self.len;
@@ -57,19 +57,19 @@ impl String {
     }
 
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
-    Slice<u8> __slice_get(&String self, i64 start, i64 end) {
+    Slice<u8> __slice_get(&self, i64 start, i64 end) {
         Slice<u8> s = self.as_slice();
         return s.__slice_get(start, end);
     }
 
-    void clear(&mut String self) {
+    void clear(&mut self) {
         self.len = 0;
         if (self.data != (u8*)0) {
             self.data[0] = (u8)0;
         }
     }
 
-    void push(&mut String self, u8 ch) {
+    void push(&mut self, u8 ch) {
         // Need space for the character plus the null terminator
         if (self.len + 2 > self.capacity) {
             i64 new_cap = self.capacity * 2;
@@ -86,7 +86,7 @@ impl String {
 
     /// Append `len` raw bytes from `bytes` with a single bulk copy.
     #[inline(always)]
-    void push_bytes(&mut String self, u8* bytes, i64 len) {
+    void push_bytes(&mut self, u8* bytes, i64 len) {
         if (len <= 0 || bytes == (u8*)0) { return; }
         if (self.len + len + 1 > self.capacity) {
             i64 new_cap = self.capacity * 2;
@@ -100,7 +100,7 @@ impl String {
         self.data[self.len] = (u8)0;
     }
 
-    void push_str(&mut String self, str text) {
+    void push_str(&mut self, str text) {
         if (text == (str)0) {
             return;
         }
@@ -123,7 +123,7 @@ impl String {
 
     // Clone borrows self by shared reference, creates a deep copy, and returns it.
     // The caller retains ownership of the original string.
-    String clone(&String self) {
+    String clone(&self) {
         String s = String.with_capacity(self.capacity);
         s.len = self.len;
         if (self.len > 0) {
@@ -133,7 +133,7 @@ impl String {
         return s;
     }
 
-    bool equals(&String self, str other) {
+    bool equals(&self, str other) {
         if (other == (str)0) {
             return false;
         }
@@ -143,7 +143,7 @@ impl String {
         return strcmp((const char*)self.data, other) == 0;
     }
 
-    const char* to_str(&String self) {
+    const char* to_str(&self) {
         if (self.data == (u8*)0) {
             return "";
         }
@@ -166,7 +166,7 @@ impl String {
         return (str)self.data;
     }
 
-    String trim(&String self) {
+    String trim(&self) {
         i64 start = 0;
         i64 end = self.len;
         while (start < self.len) {
@@ -195,7 +195,7 @@ impl String {
         return result;
     }
 
-    bool starts_with(&String self, str prefix) {
+    bool starts_with(&self, str prefix) {
         if (prefix == (str)0) {
             return false;
         }
@@ -209,7 +209,7 @@ impl String {
         return memcmp((const void*)self.data, (const void*)prefix, prefix_len) == 0;
     }
 
-    bool ends_with(&String self, str suffix) {
+    bool ends_with(&self, str suffix) {
         if (suffix == (str)0) {
             return false;
         }
@@ -223,7 +223,7 @@ impl String {
         return memcmp((const void*)&self.data[self.len - suffix_len], (const void*)suffix, suffix_len) == 0;
     }
 
-    bool contains(&String self, str needle) {
+    bool contains(&self, str needle) {
         if (needle == (str)0) {
             return false;
         }
@@ -248,7 +248,7 @@ impl String {
         return false;
     }
 
-    i64 find(&String self, str needle) {
+    i64 find(&self, str needle) {
         if (needle == (str)0) {
             return -1;
         }
@@ -274,7 +274,7 @@ impl String {
     }
 
     /// Find last occurrence of `needle`. Returns index, or -1 if not found.
-    i64 rfind(&String self, str needle) {
+    i64 rfind(&self, str needle) {
         if (needle == (str)0) {
             return -1;
         }
@@ -300,7 +300,7 @@ impl String {
     }
 
     /// Count occurrences of `needle` in the string.
-    i64 count(&String self, str needle) {
+    i64 count(&self, str needle) {
         if (needle == (str)0 || self.len == 0) {
             return 0;
         }
@@ -326,7 +326,7 @@ impl String {
     }
 
     /// Return a copy converted to lowercase ASCII.
-    String to_lowercase(&String self) {
+    String to_lowercase(&self) {
         String result = self.clone();
         for (i64 i = 0; i < result.len; i = i + 1) {
             u8 ch = result.data[i];
@@ -338,7 +338,7 @@ impl String {
     }
 
     /// Return a copy converted to uppercase ASCII.
-    String to_uppercase(&String self) {
+    String to_uppercase(&self) {
         String result = self.clone();
         for (i64 i = 0; i < result.len; i = i + 1) {
             u8 ch = result.data[i];
@@ -349,7 +349,7 @@ impl String {
         return result;
     }
 
-    String substr(&String self, i64 start, i64 len) {
+    String substr(&self, i64 start, i64 len) {
         if (start < 0) {
             start = 0;
         }
@@ -371,7 +371,7 @@ impl String {
         return result;
     }
 
-    SplitIter split(&String self, str delimiter) {
+    SplitIter split(&self, str delimiter) {
         SplitIter it;
         it.data = self.data;
         it.len = self.len;
@@ -415,7 +415,7 @@ impl String {
         return result;
     }
 
-    String replace(&String self, str needle, str replacement) {
+    String replace(&self, str needle, str replacement) {
         if (needle == (str)0 || self.len == 0) {
             return self.clone();
         }
@@ -466,11 +466,11 @@ impl String {
         }
         return result;
     }
-    i64 byte_len(&String self) {
+    i64 byte_len(&self) {
         return self.len;
     }
 
-    bool is_valid_utf8(&String self) {
+    bool is_valid_utf8(&self) {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
         while (i + 16 <= self.len) {
@@ -528,7 +528,7 @@ impl String {
         return true;
     }
 
-    i64 char_len(&String self) {
+    i64 char_len(&self) {
         if (self.data == (u8*)0) { return 0; }
         i64 count = 0;
         i64 i = 0;
@@ -548,7 +548,7 @@ impl String {
         return count;
     }
 
-    bool push_codepoint(&mut String self, u32 cp) {
+    bool push_codepoint(&mut self, u32 cp) {
         // Reject surrogates and out-of-range values
         if (cp >= (u32)0xD800 && cp <= (u32)0xDFFF) { return false; }
         if (cp > (u32)0x10FFFF) { return false; }
@@ -569,23 +569,23 @@ impl String {
         }
         return true;
     }
-    Optional<i64> parse_i64(&String self) {
+    Optional<i64> parse_i64(&self) {
         if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
         return parse_i64((str)self.data);
     }
 
-    Optional<i64> parse_i64_radix(&String self, i64 radix) {
+    Optional<i64> parse_i64_radix(&self, i64 radix) {
         if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
         return parse_i64_radix((str)self.data, radix);
     }
 
-    Optional<i32> parse_i32(&String self) {
+    Optional<i32> parse_i32(&self) {
         Optional<i64> o = self.parse_i64();
         if (o.is_none()) { return Optional<i32>.none(); }
         return Optional<i32>.some((i32)o.unwrap());
     }
 
-    Optional<u64> parse_u64(&String self) {
+    Optional<u64> parse_u64(&self) {
         Optional<i64> o = self.parse_i64();
         if (o.is_none()) { return Optional<u64>.none(); }
         i64 v = o.unwrap();
@@ -593,14 +593,14 @@ impl String {
         return Optional<u64>.some((u64)v);
     }
 
-    Vec<i64> extract_ints(&String self) {
+    Vec<i64> extract_ints(&self) {
         if (self.len == 0 || self.data == (u8*)0) {
             return Vec<i64>.new();
         }
         return extract_ints((str)self.data);
     }
 
-    Vec<String> lines(&String self) {
+    Vec<String> lines(&self) {
         Vec<String> res = Vec<String>.new();
         if (self.len == 0 || self.data == (u8*)0) {
             return res;
@@ -626,7 +626,7 @@ impl String {
         return res;
     }
 
-    Vec<String> words(&String self) {
+    Vec<String> words(&self) {
         Vec<String> res = Vec<String>.new();
         if (self.len == 0 || self.data == (u8*)0) {
             return res;
@@ -657,7 +657,7 @@ impl String {
         String second = self.substr(idx + delim_len, self.len - (idx + delim_len));
         return Some([move first, move second]);
     }
-    String strip_prefix(&String self, str prefix) {
+    String strip_prefix(&self, str prefix) {
         if (self.starts_with(prefix)) {
             i64 plen = strlen(prefix);
             return self.substr(plen, self.len - plen);
@@ -665,7 +665,7 @@ impl String {
         return self.clone();
     }
 
-    String strip_suffix(&String self, str suffix) {
+    String strip_suffix(&self, str suffix) {
         if (self.ends_with(suffix)) {
             i64 slen = strlen(suffix);
             return self.substr(0, self.len - slen);
@@ -673,7 +673,7 @@ impl String {
         return self.clone();
     }
 
-    String trim_start(&String self) {
+    String trim_start(&self) {
         i64 start = 0;
         while (start < self.len) {
             u8 ch = self.data[start];
@@ -686,7 +686,7 @@ impl String {
         return self.substr(start, self.len - start);
     }
 
-    String trim_end(&String self) {
+    String trim_end(&self) {
         i64 end = self.len;
         while (end > 0) {
             u8 ch = self.data[end - 1];
@@ -727,7 +727,7 @@ impl String {
 }
 
 impl Drop for String {
-    void drop(String* self) {
+    void drop(*self) {
         if (self.data != (u8*)0) {
             free(self.data);
             self.data = (u8*)0;
@@ -738,11 +738,11 @@ impl Drop for String {
 }
 impl IndexedAccess for String {
     type Item = u8;
-    u8 __index_get(String* self, i64 index) {
+    u8 __index_get(*self, i64 index) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         return self.data[index];
     }
-    void __index_set(String* self, i64 index, u8 value) {
+    void __index_set(*self, i64 index, u8 value) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) { abort(); }
         self.data[index] = value;
     }
@@ -752,7 +752,7 @@ impl IndexedAccess for String {
 // compiler resolves them by argument type (see codegen overload handling).
 // Both take the by-value receiver as their first parameter.
 impl Add<String> for String {
-    String __add(String self, String other) {
+    String __add(self, String other) {
         i64 total = self.len + other.len;
         String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;
@@ -773,7 +773,7 @@ impl Add<String> for String {
 
 // __add(String, str) for string-literal concatenation (same ABI note as above).
 impl String {
-    String __add(String self, str other) {
+    String __add(self, str other) {
         i64 other_len = strlen(other);
         i64 total = self.len + other_len;
         String result = String.with_capacity(total + 1); // +1 for NUL
@@ -793,7 +793,7 @@ impl String {
     }
 }
 impl Eq<String> for String {
-    bool __eq(&String self, &String other) {
+    bool __eq(&self, &String other) {
         if (self.len != other.len) { return false; }
         if (self.len == 0) { return true; }
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
@@ -801,13 +801,13 @@ impl Eq<String> for String {
 }
 
 impl Ne<String> for String {
-    bool __ne(&String self, &String other) {
+    bool __ne(&self, &String other) {
         return !self.__eq(other);
     }
 }
 
 impl String {
-    bool __eq(&String self, str other) {
+    bool __eq(&self, str other) {
         if (other == (str)0) { return self.len == 0; }
         i64 other_len = strlen(other);
         if (self.len != other_len) { return false; }
@@ -815,13 +815,13 @@ impl String {
         return memcmp((const void*)self.data, (const void*)other, self.len) == 0;
     }
 
-    bool __ne(&String self, str other) {
+    bool __ne(&self, str other) {
         return !self.__eq(other);
     }
 }
 
 impl Compare for String {
-    i32 compare(String* self, String* other) {
+    i32 compare(*self, String* other) {
         if (self == other) { return 0; }
         if (self.len == 0 && other.len == 0) { return 0; }
         if (self.len == 0) { return -1; }
@@ -837,25 +837,25 @@ impl Compare for String {
 }
 
 impl Lt<String> for String {
-    bool __lt(&String self, &String other) {
+    bool __lt(&self, &String other) {
         return self.compare(other) < 0;
     }
 }
 
 impl Gt<String> for String {
-    bool __gt(&String self, &String other) {
+    bool __gt(&self, &String other) {
         return self.compare(other) > 0;
     }
 }
 
 impl Le<String> for String {
-    bool __le(&String self, &String other) {
+    bool __le(&self, &String other) {
         return self.compare(other) <= 0;
     }
 }
 
 impl Ge<String> for String {
-    bool __ge(&String self, &String other) {
+    bool __ge(&self, &String other) {
         return self.compare(other) >= 0;
     }
 }
@@ -874,13 +874,13 @@ struct SplitIter {
 
 impl Iterator for SplitIter {
     type Item = str;
-    Optional<str> next(SplitIter* self) {
+    Optional<str> next(*self) {
         if (self.data == (u8*)0) {
             if (!self.done && self.pos == 0) {
                 self.done = true;
-                return Optional<str>.some((str)"");
+                return Some((str)"");
             }
-            return Optional<str>.none();
+            return None;
         }
         if (self.has_saved) {
             self.data[self.saved_end] = self.saved_byte;
@@ -888,7 +888,7 @@ impl Iterator for SplitIter {
             self.pos = self.saved_end + self.delim_len;
         }
         if (self.done && self.pos >= self.len) {
-            return Optional<str>.none();
+            return None;
         }
         if (self.delim_len == 0 || self.delim == (str)0) {
             if (self.pos == 0 && !self.done) {
@@ -897,9 +897,9 @@ impl Iterator for SplitIter {
                 self.saved_byte = self.data[self.len];
                 self.data[self.len] = (u8)0;
                 self.has_saved = true;
-                return Optional<str>.some((str)&self.data[0]);
+                return Some((str)&self.data[0]);
             }
-            return Optional<str>.none();
+            return None;
         }
         i64 start = self.pos;
         i64 end = self.len;
@@ -919,11 +919,11 @@ impl Iterator for SplitIter {
         self.saved_byte = self.data[end];
         self.data[end] = (u8)0;
         self.has_saved = true;
-        return Optional<str>.some((str)&self.data[start]);
+        return Some((str)&self.data[start]);
     }
 }
 impl Drop for SplitIter {
-    void drop(SplitIter* self) {
+    void drop(*self) {
         if (self.has_saved && self.data != (u8*)0) {
             self.data[self.saved_end] = self.saved_byte;
             self.has_saved = false;
@@ -940,13 +940,13 @@ struct StringBytesIter {
 
 impl Iterator for StringBytesIter {
     type Item = u8;
-    Optional<u8> next(StringBytesIter* self) {
+    Optional<u8> next(*self) {
         if (self.idx < self.len) {
             u8 v = self.data[self.idx];
             self.idx = self.idx + 1;
-            return Optional<u8>.some(v);
+            return Some(v);
         }
-        return Optional<u8>.none();
+        return None;
     }
 }
 
@@ -960,18 +960,18 @@ struct StringIntoIter {
 
 impl Iterator for StringIntoIter {
     type Item = u8;
-    Optional<u8> next(StringIntoIter* self) {
+    Optional<u8> next(*self) {
         if (self.idx < self.len) {
             u8 v = self.data[self.idx];
             self.idx = self.idx + 1;
-            return Optional<u8>.some(v);
+            return Some(v);
         }
-        return Optional<u8>.none();
+        return None;
     }
 }
 
 impl Drop for StringIntoIter {
-    void drop(StringIntoIter* self) {
+    void drop(*self) {
         if (self.data != (u8*)0) {
             free(self.data);
             self.data = (u8*)0;
@@ -985,7 +985,7 @@ impl Drop for StringIntoIter {
 impl IntoIterator for String {
     type Item = u8;
     type IntoIter = StringIntoIter;
-    StringIntoIter into_iter(String self) {
+    StringIntoIter into_iter(self) {
         StringIntoIter it;
         it.data = self.data;
         it.len = self.len;
@@ -1000,7 +1000,7 @@ impl IntoIterator for String {
 
 impl String {
     /// Return a borrowed iterator over the bytes of this string.
-    StringBytesIter bytes(&String self) {
+    StringBytesIter bytes(&self) {
         StringBytesIter it;
         it.data = self.data;
         it.len = self.len;
@@ -1009,7 +1009,7 @@ impl String {
     }
 
     /// Return a borrowed iterator over the bytes of this string.
-    StringBytesIter iter(&String self) {
+    StringBytesIter iter(&self) {
         return self.bytes();
     }
 }
@@ -1127,8 +1127,8 @@ Result<String, Error> read_to_string(str path) {
 /// Read the entire file at `path` into lines.
 Result<Vec<String>, Error> read_lines(str path) {
     Result<String, Error> r = String.from_file(path);
-    if (r.failed()) {
-        return Result<Vec<String>, Error>.Err(r.get_error());
+    if (r.is_err()) {
+        return Result<Vec<String>, Error>.Err(r.unwrap_err());
     }
     String content = r.unwrap();
     Vec<String> res = content.lines();
