@@ -26,7 +26,7 @@ impl ByteStream {
         return bs;
     }
 
-    i32 read_byte(ByteStream* self) {
+    i32 read_byte(*self) {
         if (self.pos < self.len) {
             i32 result = (i32)self.buf[self.pos];
             self.pos = self.pos + 1;
@@ -52,7 +52,7 @@ impl ByteStream {
         return (i32)self.buf[0];
     }
 
-    i64 read_into(ByteStream* self, u8* dst, i64 dst_len) {
+    i64 read_into(*self, u8* dst, i64 dst_len) {
         if (dst_len <= 0 || self.file.invalid()) {
             return 0;
         }
@@ -105,7 +105,7 @@ impl ByteStream {
         return total;
     }
 
-    bool eof(ByteStream* self) {
+    bool eof(&self) {
         if (self.pos < self.len) {
             return false;
         }
@@ -114,7 +114,7 @@ impl ByteStream {
 }
 
 impl Drop for ByteStream {
-    void drop(ByteStream* self) {
+    void drop(*self) {
         if (self.buf != (u8*)0) {
             free(self.buf);
             self.buf = (u8*)0;
