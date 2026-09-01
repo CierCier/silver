@@ -26,36 +26,36 @@ impl Pair<K, V> {
     }
 
     /// Borrow the first component.
-    K* first_ptr(&Pair<K, V> self) {
+    K* first_ptr(&self) {
         return &self.first;
     }
 
     /// Borrow the second component.
-    V* second_ptr(&Pair<K, V> self) {
+    V* second_ptr(&self) {
         return &self.second;
     }
 
     /// Replace the first component in place; the old value is dropped
     /// (cascaded by the compiler via per-field drop flags).
-    void set_first(&mut Pair<K, V> self, K value) {
+    void set_first(&mut self, K value) {
         self.first = move value;
     }
 
     /// Replace the second component in place.
-    void set_second(&mut Pair<K, V> self, V value) {
+    void set_second(&mut self, V value) {
         self.second = move value;
     }
 
     /// Move out the first component, leaving `second` intact. The Pair
     /// itself remains valid (with `second` still owned) — the caller must
     /// drop the Pair to release `second`.
-    K unwrap_first(Pair<K, V>* self) {
+    K unwrap_first(*self) {
         K k = move self.first;
         return move k;
     }
 
     /// Move out the second component, leaving `first` intact.
-    V unwrap_second(Pair<K, V>* self) {
+    V unwrap_second(*self) {
         V v = move self.second;
         return move v;
     }
