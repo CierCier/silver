@@ -28,7 +28,7 @@ impl SseEvent {
     /// Release the three owned strings. SseEvent has no Drop impl: the
     /// caller frees events explicitly (mirrors WsMessage.payload in
     /// std.net.websocket, since enum payload match bindings are copies).
-    void free(SseEvent* self) {
+    void free(*self) {
         self.event.drop();
         self.id.drop();
         self.data.drop();
@@ -50,7 +50,7 @@ struct SseStream {
 }
 
 impl Drop for SseStream {
-    void drop(SseStream* self) {
+    void drop(*self) {
         self.line.drop();
         self.stream.close();
     }
@@ -76,16 +76,16 @@ impl SseStream {
     }
 
     /// True once the stream has ended (recv returned Done).
-    bool finished(SseStream* self) { return self.finished; }
+    bool finished(*self) { return self.finished; }
 
-    String get_header(SseStream* self, str name) {
+    String get_header(*self, str name) {
         return self.stream.get_header(name);
     }
 
     /// Read the next event, or a done=true SseRecv at end of stream.
     /// `data:` lines join with \n; an empty line dispatches the buffered
     /// event.
-    Result<SseRecv, Error> recv(SseStream* self) {
+    Result<SseRecv, Error> recv(*self) {
         if (self.finished) { return Result<SseRecv, Error>.Ok(done_recv()); }
         String event = String.new();
         String id = String.new();
