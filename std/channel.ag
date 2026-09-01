@@ -68,7 +68,7 @@ impl<T> Channel<T> {
     /// Send `value` (ownership moves in).
     /// If bounded and full, blocks until capacity is available or channel is closed.
     /// Returns true on success, false if the channel was closed.
-    bool send(&mut Channel<T> self, T value) {
+    bool send(&mut self, T value) {
         while (true) {
             self.mu.lock();
             if (self.closed) {
@@ -93,7 +93,7 @@ impl<T> Channel<T> {
 
     /// Try to send `value` without blocking.
     /// Returns true if queued, false if channel is full or closed.
-    bool try_send(&mut Channel<T> self, T value) {
+    bool try_send(&mut self, T value) {
         self.mu.lock();
         if (self.closed) {
             self.mu.unlock();
@@ -113,7 +113,7 @@ impl<T> Channel<T> {
 
     /// Block until a value is available or the channel is closed and drained.
     /// Returns Some(value) if received, None if the channel is closed and empty.
-    Optional<T> recv(&mut Channel<T> self) {
+    Optional<T> recv(&mut self) {
         while (true) {
             self.mu.lock();
             if (self.head < self.queue.len()) {
@@ -125,22 +125,22 @@ impl<T> Channel<T> {
                     __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
                     futex_wake(&self.send_sigs, 1);
                 }
-                return Optional.Some(move value);
+                return Optional<T>.some(move value);
             }
             if (self.closed) {
                 self.mu.unlock();
-                return Optional.None;
+                return Optional<T>.none();
             }
             i32 expected = __atomic_load_i32(&self.recv_sigs, ATOMIC_SEQ_CST);
             self.mu.unlock();
             futex_wait(&self.recv_sigs, expected);
         }
-        return Optional.None;
+        return Optional<T>.none();
     }
 
     /// Try to receive a value without blocking.
     /// Returns Some(value) if available, None if empty or closed.
-    Optional<T> try_recv(&mut Channel<T> self) {
+    Optional<T> try_recv(&mut self) {
         self.mu.lock();
         if (self.head < self.queue.len()) {
             T value = self.queue.get(self.head);
@@ -151,14 +151,14 @@ impl<T> Channel<T> {
                 __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
                 futex_wake(&self.send_sigs, 1);
             }
-            return Optional.Some(move value);
+            return Optional<T>.some(move value);
         }
         self.mu.unlock();
-        return Optional.None;
+        return Optional<T>.none();
     }
 
     /// Number of values currently buffered.
-    i64 len(&Channel<T> self) {
+    i64 len(&self) {
         self.mu.lock();
         i64 n = self.queue.len() - self.head;
         self.mu.unlock();
@@ -166,12 +166,12 @@ impl<T> Channel<T> {
     }
 
     /// Channel capacity (0 if unbounded).
-    i64 capacity(&Channel<T> self) {
+    i64 capacity(&self) {
         return self.capacity;
     }
 
     /// Returns true if the channel is closed.
-    bool is_closed(&Channel<T> self) {
+    bool is_closed(&self) {
         self.mu.lock();
         bool c = self.closed;
         self.mu.unlock();
@@ -179,7 +179,7 @@ impl<T> Channel<T> {
     }
 
     /// Mark the channel as closed and wake all blocked senders & receivers.
-    void close(&mut Channel<T> self) {
+    void close(&mut self) {
         self.mu.lock();
         self.closed = true;
         self.mu.unlock();
@@ -193,7 +193,7 @@ impl<T> Channel<T> {
     /// bookkeeping so a destroyed channel is left in a coherent state:
     /// closed (rejecting further sends), empty, unbounded, and with cleared
     /// futex words — a reuse or double-destroy cannot observe stale values.
-    void destroy(&mut Channel<T> self) {
+    void destroy(&mut self) {
         self.mu.lock();
         self.queue.drop();
         self.head = 0;
@@ -207,7 +207,7 @@ impl<T> Channel<T> {
     /// Shift the live suffix to the front once the consumed prefix grows
     /// large, so a long-running producer/consumer pair does not grow the
     /// backing buffer without bound.
-    void compact(&mut Channel<T> self) {
+    void compact(&mut self) {
         if (self.head < 1024) {
             return;
         }
