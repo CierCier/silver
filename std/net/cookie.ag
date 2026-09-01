@@ -135,7 +135,7 @@ impl Cookie {
         return move cookie;
     }
 
-    bool is_expired(Cookie* self, i64 now) {
+    bool is_expired(*self, i64 now) {
         return self.expires >= 0 && self.expires <= now;
     }
 
@@ -143,7 +143,7 @@ impl Cookie {
     /// is re-quoted when it contains space/comma or was quoted; attributes
     /// follow Go 1.26's order (Path, Domain, Expires, Max-Age, HttpOnly,
     /// Secure, SameSite). Max-Age < 0 serializes as "Max-Age=0" (deletion).
-    void to_string(Cookie* self, String* out) {
+    void to_string(*self, String* out) {
         if (!http_cookie_name_valid((str)self.name.data)) { return; }
         out.push_str((str)self.name.data);
         out.push((u8)'=');
@@ -185,7 +185,7 @@ impl Cookie {
 }
 
 impl Drop for Cookie {
-    void drop(Cookie* self) {
+    void drop(*self) {
         self.name.drop();
         self.value.drop();
         self.path.drop();
@@ -540,7 +540,7 @@ impl CookieJar {
 
     /// Go's Jar.SetCookies for one URL: applies RFC 6265 domain/path
     /// defaults and matching, expiry, and dedup before storing.
-    void set_cookie(CookieJar* self, str host, str path, Cookie incoming) {
+    void set_cookie(*self, str host, str path, Cookie incoming) {
         i64 now = http_unix_now();
         u32 ip4 = 0;
         bool host_is_ip = inet_pton4(host, &ip4);
@@ -607,7 +607,7 @@ impl CookieJar {
 
     /// Store every cookie in `incoming`, consuming the vector's elements
     /// (each is stored or dropped). The caller owns the (emptied) buffer.
-    void set_cookies(CookieJar* self, str host, str path, Vec<Cookie>* incoming) {
+    void set_cookies(*self, str host, str path, Vec<Cookie>* incoming) {
         while (incoming.len > 0) {
             Cookie c = incoming.take(0);
             self.set_cookie(host, path, move c);
@@ -620,7 +620,7 @@ impl CookieJar {
     /// cookies are sent only on https connections and to localhost origins
     /// (browsers treat localhost as secure regardless of scheme — Go's
     /// secureMatch).
-    String cookies_for(CookieJar* self, str host, str path, bool secure) {
+    String cookies_for(*self, str host, str path, bool secure) {
         i64 now = http_unix_now();
         bool localhost = http_is_localhost(host);
         Vec<i64> idx = Vec<i64>.new();
@@ -667,7 +667,7 @@ impl Drop for CookieJar {
     // Idempotent: the compiler may also register a field-drop for the inner
     // Vec after this runs, so len is cleared and Vec.drop nulls the buffer
     // to make a second call a no-op (Cookie.drop is itself guarded).
-    void drop(CookieJar* self) {
+    void drop(*self) {
         while (self.cookies.len > 0) {
             Cookie c = self.cookies.take(0);
             c.drop();
