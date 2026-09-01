@@ -71,7 +71,7 @@ impl RawMutex {
     }
 
     /// Acquire the lock, blocking until it is free.
-    void lock(&mut RawMutex self) {
+    void lock(&mut self) {
         // Fast path: uncontended acquisition.
         bool acquired = __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
         if (acquired) {
@@ -88,7 +88,7 @@ impl RawMutex {
     }
 
     /// Release the lock, waking one waiter if any were parked.
-    void unlock(&mut RawMutex self) {
+    void unlock(&mut self) {
         i32 old = __atomic_exchange_i32(&self.state, 0, ATOMIC_SEQ_CST);
         if (old == 2) {
             futex_wake(&self.state, 1);
@@ -96,7 +96,7 @@ impl RawMutex {
     }
 
     /// Try to acquire the lock without blocking; true on success.
-    bool try_lock(&mut RawMutex self) {
+    bool try_lock(&mut self) {
         return __atomic_cmpxchg_i32(&self.state, 0, 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 }
@@ -129,7 +129,7 @@ impl<T> Mutex<T> {
     /// Acquire the lock (blocking) and return a guard granting access to the
     /// value.  The guard unlocks on drop.  Takes a raw-pointer receiver so
     /// the guard can hold the same address.
-    Guard<T> lock(Mutex<T>* self) {
+    Guard<T> lock(*self) {
         self.mu.lock();
         Guard<T> g;
         g.owner = self;
@@ -146,30 +146,30 @@ struct Guard<T> {
 
 impl<T> Guard<T> {
     /// Mutable pointer to the guarded value (valid while the guard lives).
-    T* get_ptr(&Guard<T> self) {
+    T* get_ptr(&self) {
         return &self.owner.value;
     }
 
     /// Copy of the guarded value.  For owned element types prefer get_ptr —
     /// a copy shares resources with the guarded value (std-wide caveat).
-    T get(&Guard<T> self) {
+    T get(&self) {
         return self.owner.value;
     }
 
     /// Overwrite the guarded value.
-    void set(&mut Guard<T> self, T value) {
+    void set(&mut self, T value) {
         self.owner.value = move value;
     }
 
     /// Pointer to the underlying RawMutex.
-    RawMutex* raw_mutex(&Guard<T> self) {
+    RawMutex* raw_mutex(&self) {
         return &self.owner.mu;
     }
 }
 
 impl<T> Drop for Guard<T> {
     /// Release the lock.  Runs automatically at scope exit / early return.
-    void drop(Guard<T>* self) {
+    void drop(*self) {
         self.owner.mu.unlock();
     }
 }
@@ -193,13 +193,13 @@ impl WaitGroup {
     }
 
     /// Add `delta` units of outstanding work.  Typically 1.
-    void add(&mut WaitGroup self, i64 delta) {
+    void add(&mut self, i64 delta) {
         __atomic_fetch_add_i32(&self.count, (i32)delta, ATOMIC_SEQ_CST);
     }
 
     /// Mark one unit of work complete.  When the count reaches zero, wake
     /// all waiters so a coordinator blocked in `wait_all` can proceed.
-    void done(&mut WaitGroup self) {
+    void done(&mut self) {
         i32 prev = __atomic_fetch_sub_i32(&self.count, 1, ATOMIC_SEQ_CST);
         if (prev == 1) {
             futex_wake(&self.count, 2147483647);
@@ -207,7 +207,7 @@ impl WaitGroup {
     }
 
     /// Block until the count reaches zero.
-    void wait_all(&WaitGroup self) {
+    void wait_all(&self) {
         i32 c = __atomic_load_i32(&self.count, ATOMIC_SEQ_CST);
         while (c != 0) {
             futex_wait(&self.count, c);
@@ -238,7 +238,7 @@ impl Condvar {
     /// mutex `mu`, sleeps on the futex word, and re-acquires
     /// the mutex before returning.
     /// Named `wait_on` because `wait` is the task-join keyword.
-    void wait_on(Condvar* self, RawMutex* mu) {
+    void wait_on(*self, RawMutex* mu) {
         i32 expected = __atomic_load_i32(&(*self).seq, ATOMIC_SEQ_CST);
         (*mu).unlock();
         futex_wait(&(*self).seq, expected);
@@ -246,18 +246,18 @@ impl Condvar {
     }
 
     /// Wake one thread waiting on this condition variable.
-    void notify_one(Condvar* self) {
+    void notify_one(*self) {
         __atomic_fetch_add_i32(&(*self).seq, 1, ATOMIC_SEQ_CST);
         futex_wake(&(*self).seq, 1);
     }
 
     /// Alias for `notify_one` (short form).
-    void notify(Condvar* self) {
-        (*self).notify_one();
+    void notify(*self) {
+        self.notify_one();
     }
 
     /// Wake all threads waiting on this condition variable.
-    void notify_all(Condvar* self) {
+    void notify_all(*self) {
         __atomic_fetch_add_i32(&(*self).seq, 1, ATOMIC_SEQ_CST);
         futex_wake(&(*self).seq, 2147483647);
     }
@@ -293,7 +293,7 @@ impl RawRwLock {
     }
 
     /// Acquire a shared read lock, blocking if a writer is active or waiting.
-    void read_lock(RawRwLock* self) {
+    void read_lock(*self) {
         while (true) {
             i32 ww = __atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST);
             i32 s = __atomic_load_i32(&(*self).state, ATOMIC_SEQ_CST);
@@ -309,7 +309,7 @@ impl RawRwLock {
     }
 
     /// Try to acquire a shared read lock without blocking.
-    bool try_read_lock(RawRwLock* self) {
+    bool try_read_lock(*self) {
         i32 ww = __atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST);
         if (ww > 0) {
             return false;
@@ -322,7 +322,7 @@ impl RawRwLock {
     }
 
     /// Release a shared read lock.
-    void read_unlock(RawRwLock* self) {
+    void read_unlock(*self) {
         i32 prev = __atomic_fetch_sub_i32(&(*self).state, 1, ATOMIC_SEQ_CST);
         if (prev == 1) {
             // Last reader exited: wake one waiting writer if any
@@ -334,7 +334,7 @@ impl RawRwLock {
     }
 
     /// Acquire an exclusive write lock, blocking until all readers and writers exit.
-    void write_lock(RawRwLock* self) {
+    void write_lock(*self) {
         __atomic_fetch_add_i32(&(*self).writers_waiting, 1, ATOMIC_SEQ_CST);
         while (true) {
             if (__atomic_cmpxchg_i32(&(*self).state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
@@ -347,12 +347,12 @@ impl RawRwLock {
     }
 
     /// Try to acquire an exclusive write lock without blocking.
-    bool try_write_lock(RawRwLock* self) {
+    bool try_write_lock(*self) {
         return __atomic_cmpxchg_i32(&(*self).state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Release an exclusive write lock.
-    void write_unlock(RawRwLock* self) {
+    void write_unlock(*self) {
         __atomic_exchange_i32(&(*self).state, 0, ATOMIC_SEQ_CST);
         if (__atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST) > 0) {
             __atomic_fetch_add_i32(&(*self).write_futex, 1, ATOMIC_SEQ_CST);
@@ -382,16 +382,16 @@ impl<T> RwLock<T> {
     }
 
     /// Acquire a shared read lock and return an RAII ReadGuard.
-    ReadGuard<T> read(RwLock<T>* self) {
-        (*self).rw.read_lock();
+    ReadGuard<T> read(*self) {
+        self.rw.read_lock();
         ReadGuard<T> g;
         g.owner = self;
         return g;
     }
 
     /// Acquire an exclusive write lock and return an RAII WriteGuard.
-    WriteGuard<T> write(RwLock<T>* self) {
-        (*self).rw.write_lock();
+    WriteGuard<T> write(*self) {
+        self.rw.write_lock();
         WriteGuard<T> g;
         g.owner = self;
         return g;
@@ -405,19 +405,19 @@ struct ReadGuard<T> {
 
 impl<T> ReadGuard<T> {
     /// Pointer to the guarded value (valid while the guard lives).
-    T* get_ptr(ReadGuard<T>* self) {
-        return &(*self).owner.value;
+    T* get_ptr(*self) {
+        return &self.owner.value;
     }
 
     /// Copy of the guarded value.
-    T get(ReadGuard<T>* self) {
-        return (*self).owner.value;
+    T get(*self) {
+        return self.owner.value;
     }
 }
 
 impl<T> Drop for ReadGuard<T> {
-    void drop(ReadGuard<T>* self) {
-        (*self).owner.rw.read_unlock();
+    void drop(*self) {
+        self.owner.rw.read_unlock();
     }
 }
 
@@ -428,23 +428,23 @@ struct WriteGuard<T> {
 
 impl<T> WriteGuard<T> {
     /// Pointer to the guarded value (valid while the guard lives).
-    T* get_ptr(WriteGuard<T>* self) {
-        return &(*self).owner.value;
+    T* get_ptr(*self) {
+        return &self.owner.value;
     }
 
     /// Copy of the guarded value.
-    T get(WriteGuard<T>* self) {
-        return (*self).owner.value;
+    T get(*self) {
+        return self.owner.value;
     }
 
     /// Overwrite the guarded value.
-    void set(WriteGuard<T>* self, T value) {
-        (*self).owner.value = move value;
+    void set(*self, T value) {
+        self.owner.value = move value;
     }
 }
 
 impl<T> Drop for WriteGuard<T> {
-    void drop(WriteGuard<T>* self) {
-        (*self).owner.rw.write_unlock();
+    void drop(*self) {
+        self.owner.rw.write_unlock();
     }
 }
