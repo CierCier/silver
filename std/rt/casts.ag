@@ -222,7 +222,7 @@ impl CastValue {
     }
 
     /// Raw TypeId of this value (RtValue::type_id in the Rust runtime).
-    u32 type_id(CastValue* self) {
+    u32 type_id(*self) {
         return self.ty;
     }
 }
@@ -267,17 +267,17 @@ impl CastResult {
         return r;
     }
 
-    bool is_ok(CastResult* self) {
+    bool is_ok(*self) {
         return self.ok;
     }
 
-    bool is_err(CastResult* self) {
+    bool is_err(*self) {
         return !self.ok;
     }
 }
 
 impl Drop for CastResult {
-    void drop(CastResult* self) {
+    void drop(*self) {
         self.msg.drop();
     }
 }
@@ -538,22 +538,22 @@ impl CastRegistry {
     }
 
     /// Number of registered pairs.
-    i64 len(CastRegistry* self) {
+    i64 len(*self) {
         return self.by_type.len();
     }
 
     /// register(from, to, func) — the func is an opcode here (see header).
-    void register(CastRegistry* self, u32 from, u32 to, i32 opcode) {
+    void register(*self, u32 from, u32 to, i32 opcode) {
         self.by_type.insert(rt_cast_key(from, to), opcode);
     }
 
     /// TypeId convenience wrapper over register.
-    void register_ids(CastRegistry* self, TypeId from, TypeId to, i32 opcode) {
+    void register_ids(*self, TypeId from, TypeId to, i32 opcode) {
         self.register(from.raw, to.raw, opcode);
     }
 
     /// lookup(from, to) -> opcode, or -1 when absent (Rust: Option<NativeCast>).
-    i32 lookup(CastRegistry* self, u32 from, u32 to) {
+    i32 lookup(*self, u32 from, u32 to) {
         u64 key = rt_cast_key(from, to);
         if (self.by_type.contains_key(key)) {
             return self.by_type.get(key);
@@ -562,13 +562,13 @@ impl CastRegistry {
     }
 
     /// TypeId convenience wrapper over lookup.
-    i32 lookup_ids(CastRegistry* self, TypeId from, TypeId to) {
+    i32 lookup_ids(*self, TypeId from, TypeId to) {
         return self.lookup(from.raw, to.raw);
     }
 
     /// Runtime::install_builtin_casts — register every (from, to) pair over
     /// the 13 numeric builtin types except identity pairs: 13 x 12 = 156.
-    void install_builtin_casts(CastRegistry* self) {
+    void install_builtin_casts(*self) {
         u32 from = 1; // BOOL .. F64 (raw ids 1..13 are exactly the numerics)
         while (from <= 13) {
             u32 to = 1;
@@ -587,7 +587,7 @@ impl CastRegistry {
     /// CAST_NOT_FOUND ("cast not found: {from} -> {to}", the
     /// RuntimeError::CastNotFound Display shape with names resolved to
     /// builtin names where possible).
-    CastResult cast_value(CastRegistry* self, CastValue value, u32 to) {
+    CastResult cast_value(*self, CastValue value, u32 to) {
         u32 from = value.type_id();
         if (from == to) {
             return CastResult.ok_value(value);
@@ -604,12 +604,12 @@ impl CastRegistry {
     }
 
     /// TypeId convenience wrapper over cast.
-    CastResult cast_ids(CastRegistry* self, CastValue value, TypeId to) {
+    CastResult cast_ids(*self, CastValue value, TypeId to) {
         return self.cast_value(value, to.raw);
     }
     /// Like cast, but formats CAST_NOT_FOUND with registry-resolved type
     /// names (exactly the Rust Runtime::cast_value error text).
-    CastResult cast_with_registry(CastRegistry* self, TypeRegistry* reg, CastValue value, TypeId to) {
+    CastResult cast_with_registry(*self, TypeRegistry* reg, CastValue value, TypeId to) {
         u32 from = value.type_id();
         if (from == to.raw) {
             return CastResult.ok_value(value);
@@ -629,7 +629,7 @@ impl CastRegistry {
 }
 
 impl Drop for CastRegistry {
-    void drop(CastRegistry* self) {
+    void drop(*self) {
         self.by_type.drop();
     }
 }
