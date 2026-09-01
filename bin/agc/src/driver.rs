@@ -865,49 +865,53 @@ pub fn run(cli: Cli) {
 
             let show_graph = plan.show_graph;
             let progress_enabled = plan.progress;
-            let mut active_progress: Option<std::sync::Arc<crate::build_graph::BuildProgress>> =
-                None;
-            let mut total_graph_elements = crate::build_graph::CodegenElements::default();
-            let mut total_modules = 0;
+            let graph = match crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
+                Ok(graph) => graph,
+                Err(_) => {
+                    std::process::exit(2);
+                }
+            };
+            let total_graph_elements = graph.total_codegen_elements();
+            let total_modules = graph.nodes.len();
+            if show_graph || plan.verbose {
+                graph.display_graph();
+            }
+
+            let total_steps = graph.nodes.len()
+                + if matches!(plan.emit, EmitKind::Exe) {
+                    1
+                } else {
+                    0
+                };
+            let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
+                total_steps,
+                progress_enabled,
+                plan.verbose,
+            ));
+
             let mut cached_count = 0;
             let mut compiled_count = 0;
-
-            if let Ok(graph) = crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
-                total_graph_elements = graph.total_codegen_elements();
-                total_modules = graph.nodes.len();
-                if show_graph || plan.verbose {
-                    graph.display_graph();
-                }
-
-                let total_steps = graph.nodes.len()
-                    + if matches!(plan.emit, EmitKind::Exe) {
-                        1
-                    } else {
-                        0
-                    };
-                let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
-                    total_steps,
-                    progress_enabled,
-                    plan.verbose,
-                ));
-
-                if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
-                    if let Some(store) = &loader.cache_store {
-                        let executor = crate::build_graph::ParallelGraphExecutor::new(
-                            &graph,
-                            &loader,
-                            store,
-                            plan.jobs,
-                            Some(progress.clone()),
-                        );
-                        if let Ok(report) = executor.execute() {
+            if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
+                if let Some(store) = &loader.cache_store {
+                    let executor = crate::build_graph::ParallelGraphExecutor::new(
+                        &graph,
+                        &loader,
+                        store,
+                        plan.jobs,
+                        Some(progress.clone()),
+                    );
+                    match executor.execute() {
+                        Ok(report) => {
                             cached_count = report.cache_hits;
                             compiled_count = report.compiled_modules;
                         }
+                        Err(_) => {
+                            std::process::exit(2);
+                        }
                     }
                 }
-                active_progress = Some(progress);
             }
+            let active_progress = Some(progress);
 
             let mut llvm_units: Vec<(PathBuf, String)> = Vec::new();
             let mut exe_object_files: Vec<PathBuf> = Vec::new();

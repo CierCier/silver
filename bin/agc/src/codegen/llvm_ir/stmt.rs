@@ -770,112 +770,150 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let_stmt: &ast::LetStatement,
         span: &Span,
     ) -> CodegenResult<()> {
-        let ast::PatternKind::Identifier(identifier) = &let_stmt.pattern.kind else {
-            return Err(CodegenError::with_span(
-                "only identifier let-bindings are supported in LLVM IR codegen",
-                let_stmt.pattern.span,
-            ));
-        };
+        match &let_stmt.pattern.kind {
+            ast::PatternKind::Identifier(identifier) => {
+                let (storage_ty, init_value, inferred_ty) = if let Some(init_expr) = &let_stmt.initializer {
+                    let mut init_value =
+                        if let ast::ExpressionKind::Initializer { items } = init_expr.kind.as_ref() {
+                            let Some(annotation) = &let_stmt.type_annotation else {
+                                return Err(CodegenError::with_span(
+                                    "initializer requires a type annotation in LLVM IR codegen",
+                                    init_expr.span,
+                                ));
+                            };
+                            self.emit_typed_initializer_value(items, annotation, &init_expr.span)?
+                        } else {
+                            self.emit_expression_value(init_expr)?
+                        };
 
-        let (storage_ty, init_value, inferred_ty) = if let Some(init_expr) = &let_stmt.initializer {
-            let mut init_value =
-                if let ast::ExpressionKind::Initializer { items } = init_expr.kind.as_ref() {
+                    let storage_ty = if let Some(annotation) = &let_stmt.type_annotation {
+                        self.lower_basic_type(annotation)?
+                    } else {
+                        init_value.get_type()
+                    };
+                    if let Some(annotation) = &let_stmt.type_annotation {
+                        init_value =
+                            self.cast_value_to_ast_type(init_value, annotation, &init_expr.span)?;
+                    }
+                    let inferred_ty = if let Some(annotation) = &let_stmt.type_annotation {
+                        annotation.clone()
+                    } else {
+                        self.infer_ast_type_from_value(&init_value, span)
+                    };
+                    (storage_ty, init_value, inferred_ty)
+                } else {
                     let Some(annotation) = &let_stmt.type_annotation else {
                         return Err(CodegenError::with_span(
-                            "initializer requires a type annotation in LLVM IR codegen",
-                            init_expr.span,
+                            "let binding without initializer requires a type annotation in LLVM IR codegen",
+                            *span,
                         ));
                     };
-                    self.emit_typed_initializer_value(items, annotation, &init_expr.span)?
-                } else {
-                    self.emit_expression_value(init_expr)?
+                    let storage_ty = self.lower_basic_type(annotation)?;
+                    (storage_ty, storage_ty.const_zero(), annotation.clone())
                 };
+                let function = self
+                    .current_fn
+                    .ok_or_else(|| CodegenError::new("no active function for let statement"))?;
 
-            let storage_ty = if let Some(annotation) = &let_stmt.type_annotation {
-                self.lower_basic_type(annotation)?
-            } else {
-                init_value.get_type()
-            };
-            if let Some(annotation) = &let_stmt.type_annotation {
-                init_value =
-                    self.cast_value_to_ast_type(init_value, annotation, &init_expr.span)?;
-            }
-            let inferred_ty = if let Some(annotation) = &let_stmt.type_annotation {
-                annotation.clone()
-            } else {
-                self.infer_ast_type_from_value(&init_value, span)
-            };
-            (storage_ty, init_value, inferred_ty)
-        } else {
-            let Some(annotation) = &let_stmt.type_annotation else {
-                return Err(CodegenError::with_span(
-                    "let binding without initializer requires a type annotation in LLVM IR codegen",
-                    *span,
-                ));
-            };
-            let storage_ty = self.lower_basic_type(annotation)?;
-            (storage_ty, storage_ty.const_zero(), annotation.clone())
-        };
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for let statement"))?;
+                if let_stmt.is_static {
+                    let fn_name = function.get_name().to_string_lossy().into_owned();
+                    let ordinal = {
+                        let n = self.static_local_counter;
+                        self.static_local_counter += 1;
+                        n
+                    };
+                    let global_name = format!("{fn_name}.{}.{ordinal}", identifier.name);
+                    let global = self.module.add_global(storage_ty, None, &global_name);
+                    global.set_linkage(Linkage::Internal);
+                    if let Some(init) = &let_stmt.initializer {
+                        let const_val =
+                            self.emit_const_value_for_type(init, &inferred_ty)
+                                .map_err(|e| {
+                                    if e.message
+                                        == "global initializer must be a compile-time constant expression"
+                                    {
+                                        CodegenError::with_span(
+                                            "static local initializer must be a compile-time constant",
+                                            init.span,
+                                        )
+                                    } else {
+                                        e
+                                    }
+                                })?;
+                        global.set_initializer(&const_val);
+                    }
+                    if let Some(scope) = self.variables.last_mut() {
+                        scope.insert(
+                            identifier.name.clone(),
+                            VarInfo {
+                                ptr: global.as_pointer_value(),
+                                ty: inferred_ty,
+                                is_mutable: let_stmt.is_mutable,
+                                is_volatile: let_stmt.is_volatile,
+                                drop_flag: None,
+                                field_flags: Vec::new(),
+                            },
+                        );
+                    }
+                    return Ok(());
+                }
 
-        if let_stmt.is_static {
-            // Static local: function-persistent storage, initialized once, never
-            // dropped (C semantics). Backed by an internal-linkage LLVM global.
-            // The name is uniqued per function name and declaration ordinal so
-            // shadowed `static i32 x;` declarations in nested blocks and each
-            // monomorphized generic instantiation get distinct globals. No drop
-            // flag, no field drops, no defer entry: the storage lives for the
-            // whole program, so it is never destroyed (a static of a Drop type
-            // leaks at exit by design).
-            let fn_name = function.get_name().to_string_lossy().into_owned();
-            let ordinal = {
-                let n = self.static_local_counter;
-                self.static_local_counter += 1;
-                n
-            };
-            let global_name = format!("{fn_name}.{}.{ordinal}", identifier.name);
-            let global = self.module.add_global(storage_ty, None, &global_name);
-            global.set_linkage(Linkage::Internal);
-            if let Some(init) = &let_stmt.initializer {
-                let const_val =
-                    self.emit_const_value_for_type(init, &inferred_ty)
-                        .map_err(|e| {
-                            if e.message
-                                == "global initializer must be a compile-time constant expression"
-                            {
-                                CodegenError::with_span(
-                                    "static local initializer must be a compile-time constant",
-                                    init.span,
-                                )
-                            } else {
-                                e
-                            }
-                        })?;
-                global.set_initializer(&const_val);
-            } // no initializer → zero-initialized (LLVM global default)
-            if let Some(scope) = self.variables.last_mut() {
-                scope.insert(
-                    identifier.name.clone(),
-                    VarInfo {
-                        ptr: global.as_pointer_value(),
-                        ty: inferred_ty,
-                        is_mutable: let_stmt.is_mutable,
-                        is_volatile: let_stmt.is_volatile,
-                        drop_flag: None,
-                        field_flags: Vec::new(),
-                    },
-                );
+                self.bind_local_variable(
+                    function,
+                    identifier,
+                    inferred_ty,
+                    storage_ty,
+                    init_value,
+                    let_stmt.is_mutable,
+                    let_stmt.is_volatile,
+                    let_stmt.initializer.is_some(),
+                )?;
+                Ok(())
             }
-            return Ok(());
+            ast::PatternKind::Tuple(sub_patterns) => {
+                let Some(init_expr) = &let_stmt.initializer else {
+                    return Err(CodegenError::with_span(
+                        "destructuring let statement requires an initializer",
+                        *span,
+                    ));
+                };
+                let function = self
+                    .current_fn
+                    .ok_or_else(|| CodegenError::new("no active function for let statement"))?;
+
+                let tuple_val = self.emit_expression_value(init_expr)?;
+                self.emit_tuple_destructuring(
+                    function,
+                    sub_patterns,
+                    tuple_val,
+                    let_stmt.type_annotation.as_ref(),
+                    let_stmt.is_mutable,
+                    let_stmt.is_volatile,
+                    span,
+                )?;
+                Ok(())
+            }
+            _ => Err(CodegenError::with_span(
+                "unsupported pattern in let statement",
+                let_stmt.pattern.span,
+            )),
         }
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn bind_local_variable(
+        &mut self,
+        function: inkwell::values::FunctionValue<'ctx>,
+        identifier: &ast::Identifier,
+        inferred_ty: ast::Type,
+        storage_ty: inkwell::types::BasicTypeEnum<'ctx>,
+        init_value: BasicValueEnum<'ctx>,
+        is_mutable: bool,
+        is_volatile: bool,
+        has_initializer: bool,
+    ) -> CodegenResult<()> {
         let alloca = self.create_entry_alloca(function, &identifier.name, storage_ty)?;
-        // Large zero-initialized arrays: a store of a huge constant aggregate
-        // (e.g. `store [100000 x i8] zeroinitializer`) crashes the LLVM
-        // SelectionDAG combiner, so zero-fill with llvm.memset instead.
-        let zero_fill_bytes = if let_stmt.initializer.is_none()
+        let zero_fill_bytes = if !has_initializer
             && matches!(inferred_ty.kind.as_ref(), ast::TypeKind::Array(_))
         {
             let target_data =
@@ -885,8 +923,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         if let Some(size) = zero_fill_bytes.filter(|&size| size > 64) {
-            self.build_memset(alloca, size, let_stmt.is_volatile)?;
-        } else if let_stmt.is_volatile {
+            self.build_memset(alloca, size, is_volatile)?;
+        } else if is_volatile {
             self.emit_volatile_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, init_value).map_err(|e| {
@@ -897,14 +935,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             })?;
         }
 
-        // A struct local declared with an initializer holds live fields;
-        // register_drop_flag (below) will allocate their per-field flags
-        // (initialized false), so mark them live right after registration.
-        // `let x;` without an initializer leaves them false (Bug C: never
-        // drop uninitialized fields).
-        let has_initializer = let_stmt.initializer.is_some();
         let init_identifier = identifier.name.clone();
-
         let ty = inferred_ty;
         let ty_for_drop = ty.clone();
         if let Some(scope) = self.variables.last_mut() {
@@ -913,8 +944,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 VarInfo {
                     ptr: alloca,
                     ty,
-                    is_mutable: let_stmt.is_mutable,
-                    is_volatile: let_stmt.is_volatile,
+                    is_mutable,
+                    is_volatile,
                     drop_flag: None,
                     field_flags: Vec::new(),
                 },
@@ -929,8 +960,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
         )?;
 
-        // Skip pointer/reference types: the variable is a borrowed view,
-        // not an owner.  Only value-type variables get implicit destructors.
         if matches!(
             ty_for_drop.kind.as_ref(),
             ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
@@ -938,13 +967,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
-        // Check if this variable's type implements Drop; if so, set up a
-        // drop flag and register the cascade (field drops, then own drop).
         self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)?;
-        // Fields of an initialized struct local hold live values; mark them
-        // live so the scope-exit cascade drops them. Uninitialized locals (`let x;`)
-        // have their own drop flag and field flags cleared to 0 so uninitialized
-        // values are never destructed on scope exit / return.
         if let Some(var) = self.lookup_variable(&init_identifier) {
             if has_initializer {
                 for (_, flag) in var.field_flags {
@@ -957,16 +980,121 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             )
                         })?;
                 }
+            } else if let Some(flag) = var.drop_flag {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to clear uninitialized drop flag: {e}"),
+                            identifier.span,
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_tuple_destructuring(
+        &mut self,
+        function: inkwell::values::FunctionValue<'ctx>,
+        sub_patterns: &[ast::Pattern],
+        tuple_val: BasicValueEnum<'ctx>,
+        annotation: Option<&ast::Type>,
+        is_mutable: bool,
+        is_volatile: bool,
+        span: &Span,
+    ) -> CodegenResult<()> {
+        let elem_annotations = match annotation.and_then(|a| match a.kind.as_ref() {
+            ast::TypeKind::Tuple(types) => Some(types),
+            _ => None,
+        }) {
+            Some(types) => types.iter().map(Some).collect::<Vec<_>>(),
+            None => vec![None; sub_patterns.len()],
+        };
+
+        for (i, sub_pat) in sub_patterns.iter().enumerate() {
+            let elem_val = if tuple_val.is_struct_value() {
+                self.builder
+                    .build_extract_value(
+                        tuple_val.into_struct_value(),
+                        i as u32,
+                        &format!("tuple.ext.{i}"),
+                    )
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to extract tuple element {i}: {e}"),
+                            *span,
+                        )
+                    })?
+            } else if tuple_val.is_pointer_value() {
+                let ptr = tuple_val.into_pointer_value();
+                let struct_ty = self.lower_basic_type(annotation.unwrap())?.into_struct_type();
+                let elem_ptr = self
+                    .builder
+                    .build_struct_gep(struct_ty, ptr, i as u32, &format!("tuple.gep.{i}"))
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to GEP tuple element {i}: {e}"),
+                            *span,
+                        )
+                    })?;
+                let elem_ty = struct_ty.get_field_type_at_index(i as u32).unwrap();
+                self.builder
+                    .build_load(elem_ty, elem_ptr, &format!("tuple.load.{i}"))
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to load tuple element {i}: {e}"),
+                            *span,
+                        )
+                    })?
             } else {
-                if let Some(flag) = var.drop_flag {
-                    self.builder
-                        .build_store(flag, self.context.bool_type().const_int(0, false))
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed to clear uninitialized drop flag: {e}"),
-                                identifier.span,
-                            )
-                        })?;
+                return Err(CodegenError::with_span(
+                    "cannot destructure non-aggregate value",
+                    *span,
+                ));
+            };
+
+            let elem_annotation = elem_annotations.get(i).copied().flatten();
+            let mut elem_val = elem_val;
+            if let Some(annot) = elem_annotation {
+                elem_val = self.cast_value_to_ast_type(elem_val, annot, &sub_pat.span)?;
+            }
+            let elem_ast_type = if let Some(annot) = elem_annotation {
+                annot.clone()
+            } else {
+                self.infer_ast_type_from_value(&elem_val, &sub_pat.span)
+            };
+
+            match &sub_pat.kind {
+                ast::PatternKind::Identifier(ident) => {
+                    self.bind_local_variable(
+                        function,
+                        ident,
+                        elem_ast_type,
+                        elem_val.get_type(),
+                        elem_val,
+                        is_mutable,
+                        is_volatile,
+                        true,
+                    )?;
+                }
+                ast::PatternKind::Wildcard => {}
+                ast::PatternKind::Tuple(nested) => {
+                    self.emit_tuple_destructuring(
+                        function,
+                        nested,
+                        elem_val,
+                        elem_annotation,
+                        is_mutable,
+                        is_volatile,
+                        &sub_pat.span,
+                    )?;
+                }
+                _ => {
+                    return Err(CodegenError::with_span(
+                        "unsupported destructuring sub-pattern",
+                        sub_pat.span,
+                    ));
                 }
             }
         }

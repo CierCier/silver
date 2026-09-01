@@ -741,6 +741,34 @@ impl MoveChecker {
         }
     }
 
+    fn declare_pattern(
+        &mut self,
+        pattern: &ast::Pattern,
+        ty: Option<&ast::Type>,
+        state: &mut State,
+        scopes: &mut [Vec<ScopeEntry>],
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(ident) => {
+                self.declare(&ident.name, ty, state, scopes, var_types);
+            }
+            ast::PatternKind::Tuple(items) => {
+                let elem_annotations = match ty.and_then(|a| match a.kind.as_ref() {
+                    ast::TypeKind::Tuple(types) => Some(types),
+                    _ => None,
+                }) {
+                    Some(types) => types.iter().map(Some).collect::<Vec<_>>(),
+                    None => vec![None; items.len()],
+                };
+                for (item, elem_annot) in items.iter().zip(elem_annotations.iter()) {
+                    self.declare_pattern(item, *elem_annot, state, scopes, var_types);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn pop_scope(
         &mut self,
@@ -823,15 +851,13 @@ impl MoveChecker {
                 if let Some(init) = &let_stmt.initializer {
                     self.check_expr(init, state, scopes, var_types);
                 }
-                if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
-                    self.declare(
-                        &ident.name,
-                        let_stmt.type_annotation.as_ref(),
-                        state,
-                        scopes,
-                        var_types,
-                    );
-                }
+                self.declare_pattern(
+                    &let_stmt.pattern,
+                    let_stmt.type_annotation.as_ref(),
+                    state,
+                    scopes,
+                    var_types,
+                );
             }
             ast::StatementKind::Expression(expr) => {
                 self.check_expr(expr, state, scopes, var_types);
@@ -1493,15 +1519,13 @@ impl MoveChecker {
                 if let Some(init_expr) = &init.initializer {
                     self.check_expr(init_expr, state, scopes, var_types);
                 }
-                if let ast::PatternKind::Identifier(ident) = &init.pattern.kind {
-                    self.declare(
-                        &ident.name,
-                        init.type_annotation.as_ref(),
-                        state,
-                        scopes,
-                        var_types,
-                    );
-                }
+                self.declare_pattern(
+                    &init.pattern,
+                    init.type_annotation.as_ref(),
+                    state,
+                    scopes,
+                    var_types,
+                );
                 self.check_expr(condition, state, scopes, var_types);
                 let body_terminates = block_terminates(body);
                 for _ in 0..8 {

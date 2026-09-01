@@ -228,8 +228,20 @@ impl<'a> Linter<'a> {
         if let Some(init) = &let_stmt.initializer {
             self.lint_expr(init);
         }
-        if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
-            self.add_binding(&ident.name, ident.span, false);
+        self.add_pattern_bindings(&let_stmt.pattern);
+    }
+
+    fn add_pattern_bindings(&mut self, pattern: &ast::Pattern) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(ident) => {
+                self.add_binding(&ident.name, ident.span, false);
+            }
+            ast::PatternKind::Tuple(items) => {
+                for item in items {
+                    self.add_pattern_bindings(item);
+                }
+            }
+            _ => {}
         }
     }
 

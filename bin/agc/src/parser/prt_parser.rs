@@ -527,7 +527,7 @@ impl PRT_Parser {
         if matches!(token, Token::Identifier(_)) {
             return self.classify_identifier_as_type_start(tokens, start);
         }
-        if matches!(token, Token::BitwiseAnd) {
+        if matches!(token, Token::BitwiseAnd | Token::LeftBracket) {
             if let Some((_, after_type)) = self.parse_type_prefix(tokens, start, end) {
                 return matches!(
                     tokens.get(after_type).map(|t| &t.kind),
@@ -952,11 +952,11 @@ impl PRT_Parser {
             return Some((reference, next));
         }
 
-        let mut ty = if matches!(tokens[cursor].kind, Token::LeftParen) {
+        let mut ty = if matches!(tokens[cursor].kind, Token::LeftBracket) {
             let open = cursor;
             cursor += 1;
             let mut params = Vec::new();
-            while cursor < end && !matches!(tokens[cursor].kind, Token::RightParen) {
+            while cursor < end && !matches!(tokens[cursor].kind, Token::RightBracket) {
                 let (param, next) = self.parse_type_prefix(tokens, cursor, end)?;
                 params.push(param);
                 cursor = next;
@@ -1927,30 +1927,128 @@ impl PRT_Parser {
         end: usize,
     ) -> Result<ast::Statement, ParseError> {
         let statement_span = tokens[start].span.extend_to(&tokens[end - 1].span);
-        let Some(name_token) = tokens.get(start + 1) else {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected a binding name after 'let'".to_string(),
-                span: statement_span,
-            });
-        };
-        let Token::Identifier(name) = &name_token.kind else {
-            return Err(ParseError::InvalidSyntax {
-                message: "expected a binding name after 'let'".to_string(),
+        let (pattern, mut cursor) = if matches!(tokens.get(start + 1).map(|t| &t.kind), Some(Token::LeftBracket)) {
+            // Tuple destructuring pattern: `let [dir, num_str] = ...;`
+            let bracket_start = start + 1;
+            let mut sub_cursor = bracket_start + 1;
+            let mut patterns = Vec::new();
+            while sub_cursor < end && !matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::RightBracket)) {
+                let Some(token) = tokens.get(sub_cursor) else { break; };
+                if let Token::Identifier(name) = &token.kind {
+                    let pat = if name == "_" {
+                        ast::Pattern {
+                            kind: ast::PatternKind::Wildcard,
+                            span: token.span,
+                        }
+                    } else {
+                        self.known_ident_names.insert(name.clone());
+                        ast::Pattern {
+                            kind: ast::PatternKind::Identifier(ast::Identifier {
+                                name: name.clone(),
+                                span: token.span,
+                            }),
+                            span: token.span,
+                        }
+                    };
+                    patterns.push(pat);
+                    sub_cursor += 1;
+                } else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected identifier in tuple pattern".to_string(),
+                        span: token.span,
+                    });
+                }
+                if matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::Comma)) {
+                    sub_cursor += 1;
+                } else if !matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::RightBracket)) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected ',' or ']' in tuple pattern".to_string(),
+                        span: tokens.get(sub_cursor).map(|t| t.span).unwrap_or(statement_span),
+                    });
+                }
+            }
+            if !matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::RightBracket)) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected ']' after tuple pattern".to_string(),
+                    span: tokens.get(sub_cursor).map(|t| t.span).unwrap_or(statement_span),
+                });
+            }
+            let rbracket_span = tokens[sub_cursor].span;
+            let pattern_span = tokens[bracket_start].span.extend_to(&rbracket_span);
+            sub_cursor += 1; // consume ']'
+            (ast::Pattern {
+                kind: ast::PatternKind::Tuple(patterns),
+                span: pattern_span,
+            }, sub_cursor)
+        } else if let Some(Token::Identifier(_)) = tokens.get(start + 1).map(|t| &t.kind)
+            && matches!(tokens.get(start + 2).map(|t| &t.kind), Some(Token::Comma))
+        {
+            // Bare comma-separated tuple pattern: `let dir, num_str = ...;`
+            let mut sub_cursor = start + 1;
+            let mut patterns = Vec::new();
+            while sub_cursor < end && !matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::Assign | Token::Semicolon)) {
+                let Some(token) = tokens.get(sub_cursor) else { break; };
+                if let Token::Identifier(name) = &token.kind {
+                    let pat = if name == "_" {
+                        ast::Pattern {
+                            kind: ast::PatternKind::Wildcard,
+                            span: token.span,
+                        }
+                    } else {
+                        self.known_ident_names.insert(name.clone());
+                        ast::Pattern {
+                            kind: ast::PatternKind::Identifier(ast::Identifier {
+                                name: name.clone(),
+                                span: token.span,
+                            }),
+                            span: token.span,
+                        }
+                    };
+                    patterns.push(pat);
+                    sub_cursor += 1;
+                } else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected identifier in let pattern".to_string(),
+                        span: token.span,
+                    });
+                }
+                if matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::Comma)) {
+                    sub_cursor += 1;
+                } else if !matches!(tokens.get(sub_cursor).map(|t| &t.kind), Some(Token::Assign | Token::Semicolon)) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected ',' or '=' in let pattern".to_string(),
+                        span: tokens.get(sub_cursor).map(|t| t.span).unwrap_or(statement_span),
+                    });
+                }
+            }
+            let pattern_span = tokens[start + 1].span.extend_to(&tokens[sub_cursor - 1].span);
+            (ast::Pattern {
+                kind: ast::PatternKind::Tuple(patterns),
+                span: pattern_span,
+            }, sub_cursor)
+        } else {
+            let Some(name_token) = tokens.get(start + 1) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected a binding name after 'let'".to_string(),
+                    span: statement_span,
+                });
+            };
+            let Token::Identifier(name) = &name_token.kind else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected a binding name after 'let'".to_string(),
+                    span: name_token.span,
+                });
+            };
+            self.known_ident_names.insert(name.clone());
+            let pattern = ast::Pattern {
+                kind: ast::PatternKind::Identifier(ast::Identifier {
+                    name: name.clone(),
+                    span: name_token.span,
+                }),
                 span: name_token.span,
-            });
+            };
+            (pattern, start + 2)
         };
-
-        let mut cursor = start + 2;
-        // Grouped bindings (`let a = 1, b = 2;`) are not supported for
-        // inferred lets — each needs its own statement to carry one type.
-        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
-            return Err(ParseError::InvalidSyntax {
-                message:
-                    "grouped declarations are not supported with 'let'; use separate statements"
-                        .to_string(),
-                span: tokens[cursor].span,
-            });
-        }
 
         let initializer = if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
             cursor += 1;
@@ -1959,15 +2057,6 @@ impl PRT_Parser {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected an initializer expression after '='".to_string(),
                     span: tokens[cursor - 1].span,
-                });
-            }
-            // A second top-level comma would be a grouped declarator.
-            if let Some(comma) = self.find_top_level_comma(tokens, cursor, expr_end) {
-                return Err(ParseError::InvalidSyntax {
-                    message:
-                        "grouped declarations are not supported with 'let'; use separate statements"
-                            .to_string(),
-                    span: tokens[comma].span,
                 });
             }
             Some(self.parse_expression_reduction(tokens, cursor, expr_end)?)
@@ -1984,13 +2073,7 @@ impl PRT_Parser {
 
         Ok(ast::Statement {
             kind: ast::StatementKind::Let(ast::LetStatement {
-                pattern: ast::Pattern {
-                    kind: ast::PatternKind::Identifier(ast::Identifier {
-                        name: name.clone(),
-                        span: name_token.span,
-                    }),
-                    span: name_token.span,
-                },
+                pattern,
                 type_annotation: None,
                 initializer,
                 is_mutable: true,

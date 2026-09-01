@@ -210,7 +210,20 @@ impl DependencyGraph {
         };
 
         let mut parser = crate::parser::Parser::new_with_source(tokens, source_path.display().to_string());
-        let (ast, _) = parser.parse_program();
+        let (ast, errors) = parser.parse_program();
+        if !errors.is_empty() {
+            for error in &errors {
+                eprintln!(
+                    "{}",
+                    crate::diagnostics::render(
+                        *error.span(),
+                        &error.to_string(),
+                        crate::diagnostics::Severity::Error,
+                    )
+                );
+            }
+            return Err(format!("syntax error in {}", source_path.display()));
+        }
         let codegen_elements = CodegenElements::from_program(&ast);
 
         let current_module_path = module_path.unwrap_or_else(|| {
@@ -720,6 +733,16 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut parser = crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
         let (mut ast, errors) = parser.parse_program();
         if !errors.is_empty() {
+            for error in &errors {
+                eprintln!(
+                    "{}",
+                    crate::diagnostics::render(
+                        *error.span(),
+                        &error.to_string(),
+                        crate::diagnostics::Severity::Error,
+                    )
+                );
+            }
             return Err(format!("syntax error in {}", node.source_path.display()));
         }
 

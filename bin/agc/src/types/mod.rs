@@ -610,7 +610,7 @@ impl fmt::Display for Type {
             Type::Optional { inner } => write!(f, "Optional<{}>", inner),
             Type::Tuple(items) => {
                 let args: Vec<String> = items.iter().map(|t| t.to_string()).collect();
-                write!(f, "({})", args.join(", "))
+                write!(f, "[{}]", args.join(", "))
             }
             Type::Function {
                 params,

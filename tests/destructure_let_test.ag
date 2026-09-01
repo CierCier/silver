@@ -1,0 +1,67 @@
+// tests/destructure_let_test.ag
+// Test suite verifying square bracket tuple syntax: types, literals, return types, and let destructuring
+
+import std.io;
+import std.slice;
+
+[i32, i32] get_coords() {
+    return [100, 250];
+}
+
+[char, Slice<u8>] parse_command(str cmd) {
+    return [cmd[0], cmd[1:]];
+}
+
+[i32, str, i32] get_triplet() {
+    return [7, "lucky", 777];
+}
+
+i32 main() {
+    // 1. Basic tuple variable declaration and destructuring
+    [i32, i32] tup = [1, 2];
+    let [a, b] = tup;
+    if (a != 1 || b != 2) {
+        println("FAIL: basic tuple destructure");
+        return 1;
+    }
+
+    // 2. Destructuring with indexing and slicing
+    str s = "R12345";
+    let [dir, num_str] = [s[0], s[1:]];
+    if (dir != 'R' || num_str.len != 5 || num_str[0] != '1' || num_str[4] != '5') {
+        println("FAIL: slice destructure");
+        return 2;
+    }
+
+    // 3. Destructuring from function return value
+    let [x, y] = get_coords();
+    if (x != 100 || y != 250) {
+        println("FAIL: func coords return destructure");
+        return 3;
+    }
+
+    let [cmd_ch, cmd_arg] = parse_command("G90");
+    if (cmd_ch != 'G' || cmd_arg.len != 2 || cmd_arg[0] != '9' || cmd_arg[1] != '0') {
+        println("FAIL: parse_command destructure");
+        return 4;
+    }
+
+    // 4. Wildcard destructuring
+    let [first, _, last] = get_triplet();
+    if (first != 7 || last != 777) {
+        println("FAIL: triplet wildcard destructure");
+        return 5;
+    }
+
+    // 5. Mutability and mutation of destructured variables
+    let [val1, val2] = [10, 20];
+    val1 = val1 + 1;
+    val2 = val2 + 2;
+    if (val1 != 11 || val2 != 22) {
+        println("FAIL: mutation of destructured variables");
+        return 6;
+    }
+
+    println("PASS: square bracket tuple tests");
+    return 0;
+}

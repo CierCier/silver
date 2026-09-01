@@ -1291,6 +1291,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(format!("int-to-pointer cast failed: {e}"), *span)
                 }),
+            (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::StructType(target_struct_ty)) => {
+                if struct_val.get_type() == target_struct_ty {
+                    Ok(struct_val.as_basic_value_enum())
+                } else {
+                    let src_fields = struct_val.get_type().get_field_types();
+                    let dst_fields = target_struct_ty.get_field_types();
+                    if src_fields.len() == dst_fields.len() {
+                        let mut result = target_struct_ty.get_undef();
+                        for (i, dst_ty) in dst_fields.iter().enumerate() {
+                            let elem = self
+                                .builder
+                                .build_extract_value(struct_val, i as u32, &format!("struct.cast.ext.{i}"))
+                                .map_err(|e| CodegenError::with_span(format!("struct cast extract failed: {e}"), *span))?;
+                            let casted = self.cast_value_to_basic_type(elem, *dst_ty, span)?;
+                            result = self
+                                .builder
+                                .build_insert_value(result, casted, i as u32, &format!("struct.cast.ins.{i}"))
+                                .map_err(|e| CodegenError::with_span(format!("struct cast insert failed: {e}"), *span))?
+                                .into_struct_value();
+                        }
+                        Ok(result.as_basic_value_enum())
+                    } else {
+                        Err(CodegenError::with_span(
+                            format!(
+                                "unsupported cast from `{}` to `{}`",
+                                struct_val.get_type().print_to_string(),
+                                target.print_to_string()
+                            ),
+                            *span,
+                        ))
+                    }
+                }
+            }
             (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::PointerType(ptr_ty)) => {
                 let data_val = self
                     .builder

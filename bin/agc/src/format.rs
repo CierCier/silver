@@ -57,7 +57,7 @@ pub fn format_type(ty: &ast::Type) -> String {
         }
         ast::TypeKind::Tuple(t) => {
             let items: Vec<String> = t.iter().map(format_type).collect();
-            format!("({})", items.join(", "))
+            format!("[{}]", items.join(", "))
         }
     }
 }

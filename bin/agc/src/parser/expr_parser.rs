@@ -1316,7 +1316,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let span = token.span.with_end(close.span.end);
             cursor.bump();
             return Ok(ast::Expression {
-                kind: Box::new(ast::ExpressionKind::Array(elements)),
+                kind: Box::new(ast::ExpressionKind::Tuple(elements)),
                 span,
             });
         }

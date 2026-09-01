@@ -416,21 +416,7 @@ impl Checker {
                     // later assignment to &x is caught on escape.
                     declared_source = Some(Source::Local);
                 }
-                if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
-                    let old = ref_sources.get(&ident.name).cloned();
-                    if let Some(source) = declared_source {
-                        ref_sources.insert(ident.name.clone(), source);
-                        scopes
-                            .last_mut()
-                            .expect("scope stack non-empty")
-                            .push((ident.name.clone(), old));
-                    } else {
-                        scopes
-                            .last_mut()
-                            .expect("scope stack non-empty")
-                            .push((ident.name.clone(), old));
-                    }
-                }
+                Self::record_pattern_refs(&let_stmt.pattern, declared_source, scopes, ref_sources);
             }
             ast::StatementKind::Expression(expr) => {
                 self.check_expr(expr, scopes, ref_sources, ptr_locals, ref_params);
@@ -475,6 +461,37 @@ impl Checker {
             ast::StatementKind::Defer(inner) => {
                 self.check_statement(inner, scopes, ref_sources, ptr_locals, ref_params);
             }
+        }
+    }
+
+    fn record_pattern_refs(
+        pattern: &ast::Pattern,
+        declared_source: Option<Source>,
+        scopes: &mut [Vec<ScopeEntry>],
+        ref_sources: &mut FxHashMap<String, Source>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(ident) => {
+                let old = ref_sources.get(&ident.name).cloned();
+                if let Some(source) = declared_source {
+                    ref_sources.insert(ident.name.clone(), source);
+                    scopes
+                        .last_mut()
+                        .expect("scope stack non-empty")
+                        .push((ident.name.clone(), old));
+                } else {
+                    scopes
+                        .last_mut()
+                        .expect("scope stack non-empty")
+                        .push((ident.name.clone(), old));
+                }
+            }
+            ast::PatternKind::Tuple(items) => {
+                for item in items {
+                    Self::record_pattern_refs(item, declared_source.clone(), scopes, ref_sources);
+                }
+            }
+            _ => {}
         }
     }
 

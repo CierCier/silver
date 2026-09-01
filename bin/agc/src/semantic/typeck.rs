@@ -1001,39 +1001,88 @@ impl TypeChecker {
         }
     }
 
-    /// Bind an identifier let pattern to its declared (or inferred) type:
-    /// registers the local, static/volatile qualifiers, and the hover type.
+    /// Bind an identifier or tuple let pattern to its declared (or inferred) type:
+    /// registers the local(s), static/volatile qualifiers, and the hover type.
     fn bind_let_pattern(&mut self, let_stmt: &ast::LetStatement, declared: Type) {
-        let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind else {
-            self.error(
-                "let declarations must bind a single identifier; destructuring \
-                patterns are not supported"
-                    .to_string(),
-                let_stmt.pattern.span,
-            );
-            return;
-        };
-        self.bind(
-            &ident.name,
-            declared.clone(),
+        self.bind_pattern(
+            &let_stmt.pattern,
+            &declared,
             let_stmt.is_mutable,
-            let_stmt.pattern.span,
+            let_stmt.is_static,
+            let_stmt.is_volatile,
         );
-        if let Some(scope) = self.static_vars.last_mut()
-            && let_stmt.is_static
-        {
-            scope.insert(ident.name.clone());
+    }
+
+    fn bind_pattern(
+        &mut self,
+        pattern: &ast::Pattern,
+        declared: &Type,
+        is_mutable: bool,
+        is_static: bool,
+        is_volatile: bool,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(ident) => {
+                self.bind(
+                    &ident.name,
+                    declared.clone(),
+                    is_mutable,
+                    pattern.span,
+                );
+                if let Some(scope) = self.static_vars.last_mut()
+                    && is_static
+                {
+                    scope.insert(ident.name.clone());
+                }
+                if let Some(scope) = self.volatile_vars.last_mut()
+                    && is_volatile
+                {
+                    scope.insert(ident.name.clone());
+                }
+                // Record for hover: variable name gets its declared type
+                self.expr_types.insert(
+                    (pattern.span.start, pattern.span.end),
+                    declared.to_string(),
+                );
+            }
+            ast::PatternKind::Wildcard => {}
+            ast::PatternKind::Tuple(sub_patterns) => {
+                match declared {
+                    Type::Tuple(elem_types) => {
+                        if sub_patterns.len() != elem_types.len() {
+                            self.error(
+                                format!(
+                                    "cannot unpack tuple of {} elements into {} variables",
+                                    elem_types.len(),
+                                    sub_patterns.len()
+                                ),
+                                pattern.span,
+                            );
+                            return;
+                        }
+                        for (sub_pat, elem_ty) in sub_patterns.iter().zip(elem_types.iter()) {
+                            self.bind_pattern(sub_pat, elem_ty, is_mutable, is_static, is_volatile);
+                        }
+                        self.expr_types.insert(
+                            (pattern.span.start, pattern.span.end),
+                            declared.to_string(),
+                        );
+                    }
+                    _ => {
+                        self.error(
+                            format!("cannot destructure non-tuple type `{}` with tuple pattern", declared),
+                            pattern.span,
+                        );
+                    }
+                }
+            }
+            _ => {
+                self.error(
+                    "destructuring pattern is not supported in let statement".to_string(),
+                    pattern.span,
+                );
+            }
         }
-        if let Some(scope) = self.volatile_vars.last_mut()
-            && let_stmt.is_volatile
-        {
-            scope.insert(ident.name.clone());
-        }
-        // Record for hover: variable name gets its declared type
-        self.expr_types.insert(
-            (let_stmt.pattern.span.start, let_stmt.pattern.span.end),
-            declared.to_string(),
-        );
     }
 
     fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
@@ -1718,9 +1767,14 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Initializer { .. } => Type::Unknown,
             ast::ExpressionKind::Tuple(items) => {
+                let elem_expected = match expected {
+                    Some(Type::Tuple(elem_tys)) => elem_tys.as_slice(),
+                    _ => &[],
+                };
                 let types = items
                     .iter()
-                    .map(|item| self.check_expr(item, None))
+                    .enumerate()
+                    .map(|(i, item)| self.check_expr(item, elem_expected.get(i)))
                     .collect();
                 Type::Tuple(types)
             }
@@ -4327,6 +4381,16 @@ impl TypeChecker {
                     ast::PrimitiveType::Char | ast::PrimitiveType::U8 | ast::PrimitiveType::I8
                 )
             ) {
+                return true;
+            }
+        }
+        if let (Type::Tuple(expected_items), Type::Tuple(found_items)) = (expected, found) {
+            if expected_items.len() == found_items.len()
+                && expected_items
+                    .iter()
+                    .zip(found_items.iter())
+                    .all(|(e, f)| self.is_assignable(e, f) || self.is_implicitly_castable(f, e))
+            {
                 return true;
             }
         }
