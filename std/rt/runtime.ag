@@ -50,7 +50,7 @@ impl Runtime {
 
     /// Allocate a heap string and wrap it in an RtValue object reference.
     /// (Mirrors Rust Runtime::alloc_string.)
-    RtValue alloc_string(Runtime* self, str text) {
+    RtValue alloc_string(*self, str text) {
         String s = String.new();
         s.push_str(text);
         Handle handle = self.heap.alloc(Object.new_string(move s));
@@ -60,7 +60,7 @@ impl Runtime {
     /// Dynamic method dispatch by name.
     /// Returns a MethodResult (ok flag + RtValue + RT_ERR + owned message).
     /// (Mirrors Rust Runtime::call_method.)
-    MethodResult call_method(Runtime* self, RtValue receiver, str name, RtValue* args, i64 args_len) {
+    MethodResult call_method(*self, RtValue receiver, str name, RtValue* args, i64 args_len) {
         return self.methods.call_method(&self.types, &self.heap, receiver, name, args, args_len);
     }
 
@@ -68,13 +68,13 @@ impl Runtime {
     /// Returns a CastResult (ok flag + CastValue + CAST_ERR + owned message).
     /// Uses the type registry for pretty error messages.
     /// (Mirrors Rust Runtime::cast_value.)
-    CastResult cast_value(Runtime* self, CastValue value, TypeId to) {
+    CastResult cast_value(*self, CastValue value, TypeId to) {
         return self.casts.cast_with_registry(&self.types, value, to);
     }
 }
 
 impl Drop for Runtime {
-    void drop(Runtime* self) {
+    void drop(*self) {
         self.methods.drop();
         self.casts.drop();
         self.heap.drop();
