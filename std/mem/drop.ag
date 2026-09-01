@@ -5,5 +5,5 @@
 /// to the instance and is called automatically by the compiler.
 
 trait Drop {
-    void drop(Self* self);
+    void drop(*self);
 }
