@@ -69,6 +69,9 @@ pub fn refresh_monomorph_bodies(monomorphs: &mut [MonomorphRequest], program: &a
                 for item in &program.items {
                     if let ast::ItemKind::Function(f) = &item.kind
                         && f.name.name == source.name.name
+                        && f.generics == source.generics
+                        && f.parameters == source.parameters
+                        && f.return_type == source.return_type
                     {
                         source.body = f.body.clone();
                         break;

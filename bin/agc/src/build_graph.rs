@@ -760,6 +760,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         );
         crate::cfg::gate_items(&mut ast, &cfg_set);
         crate::semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
+        crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
 
         let mut symbol_table = crate::symbol_table::CompilerSymbolTable::new();
         symbol_table.record_program_symbols(&ast, crate::symbol_table::CompilerPhase::Parse);
@@ -783,9 +784,19 @@ impl<'a> ParallelGraphExecutor<'a> {
             return Err(format!("type errors in {}", node.source_path.display()));
         }
 
+        let resolved_iter_types = checker.take_resolved_iter_types();
+        if !resolved_iter_types.is_empty() {
+            crate::semantic::typeck::populate_for_in_iterator_types(&mut ast, &resolved_iter_types);
+        }
+
         let bare_constructors = checker.take_bare_constructors();
         if !bare_constructors.is_empty() {
             crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &bare_constructors);
+        }
+
+        let inferred_lets = checker.take_inferred_lets();
+        if !inferred_lets.is_empty() {
+            crate::semantic::typeck::populate_inferred_let_types(&mut ast, &inferred_lets);
         }
 
         let mut monomorphs = monomorphs;

@@ -2404,6 +2404,53 @@ impl PRT_Parser {
                 }
             }
 
+            // Standalone `match expr { ... }` statement — no trailing `;`
+            // required, analogous to `if` / `while` / `for`.
+            if matches!(tokens[cursor].kind, Token::Match) {
+                // Scan past the scrutinee to find the opening `{` of the
+                // match body, skipping nested parens/brackets/braces that
+                // may appear in the scrutinee expression.
+                let mut scan = cursor + 1;
+                while scan < end && !matches!(tokens[scan].kind, Token::LeftBrace) {
+                    match tokens[scan].kind {
+                        Token::LeftParen => {
+                            if let Some(c) = self.find_matching_token(
+                                tokens, scan, end, Token::LeftParen, Token::RightParen,
+                            ) { scan = c + 1; } else { break; }
+                        }
+                        Token::LeftBracket => {
+                            if let Some(c) = self.find_matching_token(
+                                tokens, scan, end, Token::LeftBracket, Token::RightBracket,
+                            ) { scan = c + 1; } else { break; }
+                        }
+                        _ => scan += 1,
+                    }
+                }
+                if scan < end && matches!(tokens[scan].kind, Token::LeftBrace) {
+                    let Some(close) = self.find_matching_token(
+                        tokens, scan, end, Token::LeftBrace, Token::RightBrace,
+                    ) else {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "unterminated match block".to_string(),
+                            span: tokens[cursor].span,
+                        });
+                    };
+                    let stmt_end = close + 1;
+                    let expr = self.parse_expression_reduction(tokens, cursor, stmt_end)?;
+                    let span = tokens[cursor].span.extend_to(&tokens[close].span);
+                    statements.push(ast::Statement {
+                        kind: ast::StatementKind::Expression(expr),
+                        span,
+                    });
+                    cursor = stmt_end;
+                    // Skip optional trailing `;` (e.g. `match v { ... };`).
+                    if cursor < end && matches!(tokens[cursor].kind, Token::Semicolon) {
+                        cursor += 1;
+                    }
+                    continue;
+                }
+            }
+
             if matches!(tokens[cursor].kind, Token::LeftBrace) {
                 let Some(close) = self.find_matching_token(
                     tokens,
