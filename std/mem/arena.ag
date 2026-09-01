@@ -36,14 +36,14 @@ impl Arena {
     }
 
     /// Reset the arena — all previous allocations become invalid.
-    void reset(Arena* self) {
+    void reset(*self) {
         self.offset = 0;
     }
 }
 
 impl Drop for Arena {
     /// Free the entire arena memory.
-    void drop(Arena* self) {
+    void drop(*self) {
         if (self.base != (u8*)0) {
             free(self.base);
             self.base = (u8*)0;
