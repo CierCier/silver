@@ -6,7 +6,9 @@
 # status. Run from anywhere; the script always operates from the repo root.
 #
 # Usage:
-#   bash tests/run_tests.sh              # run all tests
+#   bash tests/run_tests.sh              # run all tests in parallel (-j nproc)
+#   bash tests/run_tests.sh -j 4         # run with 4 concurrent test workers
+#   bash tests/run_tests.sh --release    # use release build of agc (faster)
 #   bash tests/run_tests.sh vec_test     # run a single test by name
 #   bash tests/run_tests.sh vec_test.ag  # (with or without the .ag suffix)
 #   bash tests/run_tests.sh --compare FILE  # run, then diff run times vs FILE
@@ -15,33 +17,64 @@
 # peak_mem_kb) to bench/metrics.tsv; the summary lists the slowest tests.
 # Compare two runs (e.g. before/after a perf change) with --compare.
 #
-# Dependencies: bash, coreutils, cargo (plus the toolchain agc itself needs).
+# Dependencies: bash (>=4.3), coreutils, cargo (plus the toolchain agc itself needs).
 set -u
 
-# Baseline metrics file for --compare; also the destination of every run.
+# Default configuration
 COMPARE_BASELINE=""
-for arg in "$@"; do
-    if [ "$arg" = "--compare" ]; then
-        COMPARE_BASELINE="${2:-}"
-        if [ -z "$COMPARE_BASELINE" ] || [ ! -f "$COMPARE_BASELINE" ]; then
-            echo "error: --compare requires an existing metrics file" >&2
+JOBS=$(nproc 2>/dev/null || echo 4)
+RELEASE=0
+EXPLICIT_TEST=0
+CLI_TEST_NAME=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --compare)
+            COMPARE_BASELINE="${2:-}"
+            if [ -z "$COMPARE_BASELINE" ] || [ ! -f "$COMPARE_BASELINE" ]; then
+                echo "error: --compare requires an existing metrics file" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        -j|--jobs)
+            JOBS="${2:-4}"
+            shift 2
+            ;;
+        -j*)
+            JOBS="${1#-j}"
+            shift
+            ;;
+        --release)
+            RELEASE=1
+            shift
+            ;;
+        --debug)
+            RELEASE=0
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "unknown option: $1" >&2
             exit 1
-        fi
-        shift 2
-        break
-    fi
-    if [ "$arg" = "--" ]; then
-        shift
-        break
-    fi
-    break
+            ;;
+        *)
+            EXPLICIT_TEST=1
+            CLI_TEST_NAME="$1"
+            shift
+            break
+            ;;
+    esac
 done
 
 # ---------------------------------------------------------------------------
 # Skip list. One test name (without .ag) per line, each with a comment
-# explaining why it is skipped. Currently empty: every test in tests/ is
-# expected to compile and run.
+# explaining why it is skipped.
 SKIP_TESTS="
+mem_growth_watch  # manual 30-sec memory growth benchmark; run explicitly with: bash tests/run_tests.sh mem_growth_watch
 "
 
 # Some tests intentionally exit with a nonzero status. Return the expected
@@ -114,7 +147,6 @@ leak_check_enabled() {
     esac
 }
 
-
 # Some tests are expected to fail at compile time (e.g., type errors).
 # Return 0 (success) if compilation failure is the expected outcome.
 expected_compile_failure() {
@@ -134,6 +166,17 @@ expected_compile_failure() {
         *) return 1 ;;
     esac
 }
+
+# Some tests require stdin input. If this function returns 0 for a test name,
+# its stdout is piped into the test binary as stdin.
+test_stdin() {
+    case "$1" in
+        scanner_test) printf '\357\273\2773\n10 -20 caf\303\251\nlast line\n' ;;
+        scanner_wide_test) printf -- '-5 -300 70000 -9000000000 170141183460469231731687303715884105727 255 65000 4000000000 18446744073709551615 340282366920938463463374607431768211455 300 -40000 256 -1 3.5 -2.25 1e3 true false hello\n' ;;
+        *) return 1 ;;
+    esac
+}
+
 # Kill runaway test binaries after this many seconds.
 RUN_TIMEOUT_SECS=120
 
@@ -160,9 +203,18 @@ test_count=0
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
-AGC="$ROOT/target/debug/agc"
+
+if [ "$RELEASE" -eq 1 ]; then
+    AGC="$ROOT/target/release/agc"
+else
+    AGC="$ROOT/target/debug/agc"
+fi
 
 is_skipped() {
+    # If a specific test is passed explicitly on the CLI, do not skip it
+    if [ "$EXPLICIT_TEST" -eq 1 ]; then
+        return 1
+    fi
     while IFS= read -r line; do
         # Strip inline comments starting with '#'
         local clean="${line%%#*}"
@@ -215,9 +267,6 @@ run_timed() {
     fi
     local tfile
     tfile="$(mktemp)"
-    # Run the timed command in a subshell only when a working directory is
-    # requested; the timing file is parsed below in the caller's scope so
-    # the measured variables survive.
     if [ -n "$rundir" ]; then
         (cd "$rundir" && \time -o "$tfile" -f "$TIME_FMT" "$@" >"$logfile" 2>&1)
     else
@@ -238,7 +287,6 @@ run_timed() {
                 ;;
             cpu=*)
                 local val="${field#cpu=}"
-                # Strip trailing % for arithmetic
                 val="${val%\%}"
                 eval "${step}_cpu_pct=\$val"
                 ;;
@@ -256,10 +304,18 @@ run_timed() {
     return $rc
 }
 
-echo "== Building agc =="
-if ! cargo build -p agc; then
-    echo "error: failed to build agc" >&2
-    exit 1
+if [ "$RELEASE" -eq 1 ]; then
+    echo "== Building agc (release) =="
+    if ! cargo build --release -p agc; then
+        echo "error: failed to build agc" >&2
+        exit 1
+    fi
+else
+    echo "== Building agc =="
+    if ! cargo build -p agc; then
+        echo "error: failed to build agc" >&2
+        exit 1
+    fi
 fi
 if [ ! -x "$AGC" ]; then
     echo "error: agc binary not found at $AGC" >&2
@@ -273,8 +329,8 @@ mkdir -p "$ROOT/bench"
 printf '# run %s\n' "$(date +'%F %T')" > "$CURRENT_FILE"
 
 tests=()
-if [ "$#" -ge 1 ]; then
-    name="${1##*/}"
+if [ "$EXPLICIT_TEST" -eq 1 ]; then
+    name="${CLI_TEST_NAME##*/}"
     name="${name%.ag}"
     if [ ! -f "$ROOT/tests/$name.ag" ]; then
         echo "error: no such test: tests/$name.ag" >&2
@@ -388,12 +444,110 @@ if ! is_skipped module_import_test; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Worker implementation: compiles and runs a single test
+# ---------------------------------------------------------------------------
+run_single_test_worker() {
+    local t="$1"
+    local name="${t##*/}"
+    name="${name%.ag}"
+
+    local bin="$WORKDIR/$name"
+    local compile_log="$WORKDIR/$name.compile.log"
+    local run_log="$WORKDIR/$name.run.log"
+    local res_file="$WORKDIR/$name.result"
+
+    local extra_flags="$(test_specific_flags "$name")"
+    if leak_check_enabled "$name"; then
+        extra_flags="$extra_flags --leak-check"
+    fi
+
+    local compile_real_ms=0 compile_cpu_pct=0 compile_mem_kb=0
+    # shellcheck disable=SC2086
+    if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" \
+        --cfg "cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" $extra_flags; then
+        if expected_compile_failure "$name"; then
+            printf 'PASS_EXPECTED_ERR\t%s\t0\t0\t0\t0\t0\t0\n' "$name" > "$res_file"
+        else
+            printf 'FAIL_COMPILE\t%s\t0\t0\t0\t0\t0\t0\n' "$name" > "$res_file"
+        fi
+        return
+    fi
+
+    if expected_compile_failure "$name"; then
+        printf 'FAIL_UNEXPECTED_COMPILE\t%s\t0\t0\t0\t0\t0\t0\n' "$name" > "$res_file"
+        return
+    fi
+
+    local run_dir="$WORKDIR/$name.rundir"
+    mkdir -p "$run_dir"
+    if [ "$name" = "tls_test" ] || [ "$name" = "http2_tls_test" ]; then
+        run_dir="$ROOT"
+    fi
+
+    local run_real_ms=0 run_cpu_pct=0 run_mem_kb=0
+    if test_stdin "$name" > /dev/null 2>&1; then
+        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name")
+    else
+        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < /dev/null
+    fi
+    local exit_code=$?
+
+    if [ "$name" = "static_link_test" ]; then
+        if ! ldd "$bin" 2>&1 | head -1 | grep -q "not a dynamic executable"; then
+            printf 'FAIL_STATIC\t%s\t%s\t%s\t0\t0\t0\t0\n' "$name" "$compile_real_ms" "$run_real_ms" > "$res_file"
+            return
+        fi
+    fi
+
+    if [ "$name" = "cfg_derived_test" ]; then
+        if readelf -S "$bin" 2>/dev/null | grep -q "\.debug_info"; then
+            printf 'FAIL_DWARF\t%s\t%s\t%s\t0\t0\t0\t0\n' "$name" "$compile_real_ms" "$run_real_ms" > "$res_file"
+            return
+        fi
+    fi
+
+    if [ "$name" = "backtrace_test" ]; then
+        if ! (grep -q "level3 at backtrace_test.ag:" "$run_log" \
+           && grep -q "level2 at backtrace_test.ag:" "$run_log" \
+           && grep -q "level1 at backtrace_test.ag:" "$run_log" \
+           && grep -q "main at backtrace_test.ag:" "$run_log" \
+           && grep -q "__silver_assert_failed at " "$run_log" \
+           && grep -q "args: x=" "$run_log"); then
+            printf 'FAIL_BACKTRACE\t%s\t%s\t%s\t0\t0\t0\t0\n' "$name" "$compile_real_ms" "$run_real_ms" > "$res_file"
+            return
+        fi
+    fi
+
+    local want="$(expected_exit "$name")"
+    if [ "$exit_code" -ne "$want" ]; then
+        if [ "$exit_code" -eq 124 ]; then
+            printf 'FAIL_TIMEOUT\t%s\t%s\t%s\t0\t0\t0\t0\n' "$name" "$compile_real_ms" "$run_real_ms" > "$res_file"
+        else
+            printf 'FAIL_EXIT\t%s\t%s\t%s\t%s\t%s\t0\t0\n' "$name" "$compile_real_ms" "$run_real_ms" "$exit_code" "$want" > "$res_file"
+        fi
+        return
+    fi
+
+    local total_real=$(( compile_real_ms + run_real_ms ))
+    local avg_cpu=0
+    if [ "$total_real" -gt 0 ]; then
+        avg_cpu=$(( (compile_real_ms * compile_cpu_pct + run_real_ms * run_cpu_pct) / total_real ))
+    fi
+    local peak_mem=$(( compile_mem_kb > run_mem_kb ? compile_mem_kb : run_mem_kb ))
+
+    printf 'PASS\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$compile_real_ms" "$run_real_ms" "$compile_cpu_pct" "$run_cpu_pct" "$avg_cpu" "$peak_mem" > "$res_file"
+}
+
 passed=0
 failed=0
 skipped=0
 failed_names=""
+slow_run_ms=()
+slow_name=()
 
-echo "== Running integration tests =="
+echo "== Running integration tests (jobs: $JOBS) =="
 # Print table header.
 printf '%-*s  %*s  %*s  %*s  %*s\n' \
     "$COL_NAME" "TEST" \
@@ -407,6 +561,119 @@ printf '%-*s  %*s  %*s  %*s  %*s\n' \
     "$COL_TIME" "---" \
     "$COL_CPU" "---" \
     "$COL_MEM" "----"
+
+# Process result for a finished test
+process_result() {
+    local name="$1"
+    local res_file="$WORKDIR/$name.result"
+    local compile_log="$WORKDIR/$name.compile.log"
+    local run_log="$WORKDIR/$name.run.log"
+
+    if [ ! -f "$res_file" ]; then
+        printf '  FAIL  %-*s  (aborted / no result)\n' "$COL_NAME" "$name"
+        failed=$((failed + 1))
+        failed_names="$failed_names $name"
+        return
+    fi
+
+    local status name_out c_ms r_ms c_cpu r_cpu avg_cpu p_mem
+    IFS=$'\t' read -r status name_out c_ms r_ms c_cpu r_cpu avg_cpu p_mem < "$res_file"
+
+    case "$status" in
+        PASS_EXPECTED_ERR)
+            printf '  PASS  %-*s  (expected compile error)\n' "$COL_NAME" "$name"
+            passed=$((passed + 1))
+            ;;
+        FAIL_COMPILE)
+            printf '  FAIL  %-*s  (compile error)\n' "$COL_NAME" "$name"
+            sed 's/^/    /' "$compile_log"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_UNEXPECTED_COMPILE)
+            printf '  FAIL  %-*s  (unexpectedly compiled)\n' "$COL_NAME" "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_STATIC)
+            printf '  FAIL  %-*s  (binary is not static)\n' "$COL_NAME" "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_DWARF)
+            printf '  FAIL  %-*s  (release build still contains DWARF)\n' "$COL_NAME" "$name"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_BACKTRACE)
+            printf '  FAIL  %-*s  (backtrace did not resolve names/source/args)\n' "$COL_NAME" "$name"
+            sed 's/^/    /' "$run_log"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_TIMEOUT)
+            printf '  FAIL  %-*s  (timed out after %ss)\n' "$COL_NAME" "$name" "$RUN_TIMEOUT_SECS"
+            sed 's/^/    /' "$run_log"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        FAIL_EXIT)
+            local exit_code="$c_cpu" want="$r_cpu"
+            printf '  FAIL  %-*s  (exit %s, expected %s)\n' "$COL_NAME" "$name" "$exit_code" "$want"
+            sed 's/^/    /' "$run_log"
+            failed=$((failed + 1))
+            failed_names="$failed_names $name"
+            ;;
+        PASS)
+            local ctime="$(fmt_ms "$c_ms")"
+            local rtime="$(fmt_ms "$r_ms")"
+            local mem_str="$(fmt_mem "$p_mem")"
+
+            printf '%s\t%s\t%s\t%s\n' "$name" "$c_ms" "$r_ms" "$p_mem" >> "$METRICS_FILE"
+            printf '%s\t%s\t%s\t%s\n' "$name" "$c_ms" "$r_ms" "$p_mem" >> "$CURRENT_FILE"
+
+            if [ "$r_ms" -gt 0 ]; then
+                local slot=0
+                while [ "$slot" -lt 5 ]; do
+                    if [ -z "${slow_run_ms[$slot]:-}" ] || [ "$r_ms" -gt "${slow_run_ms[$slot]}" ]; then
+                        local tail=4
+                        while [ "$tail" -gt "$slot" ]; do
+                            slow_run_ms[$tail]="${slow_run_ms[$((tail - 1))]:-}"
+                            slow_name[$tail]="${slow_name[$((tail - 1))]:-}"
+                            tail=$((tail - 1))
+                        done
+                        slow_run_ms[$slot]="$r_ms"
+                        slow_name[$slot]="$name"
+                        break
+                    fi
+                    slot=$((slot + 1))
+                done
+            fi
+
+            printf '  PASS  %-*s  %*s  %*s  %3d%%  %*s\n' \
+                "$COL_NAME" "$name" \
+                "$COL_TIME" "$ctime" \
+                "$COL_TIME" "$rtime" \
+                "$avg_cpu" \
+                "$COL_MEM" "$mem_str"
+            passed=$((passed + 1))
+
+            total_compile_real_ms=$(( total_compile_real_ms + c_ms ))
+            total_run_real_ms=$(( total_run_real_ms + r_ms ))
+            total_compile_cpu_pct=$(( total_compile_cpu_pct + c_cpu ))
+            total_run_cpu_pct=$(( total_run_cpu_pct + r_cpu ))
+            if [ "$p_mem" -gt "$peak_mem_kb" ]; then
+                peak_mem_kb=$p_mem
+            fi
+            test_count=$(( test_count + 1 ))
+            ;;
+    esac
+}
+
+# Run tests in parallel
+pids=()
+declare -A pid_to_name
+
 for t in "${tests[@]}"; do
     name="${t##*/}"
     name="${name%.ag}"
@@ -417,177 +684,33 @@ for t in "${tests[@]}"; do
         continue
     fi
 
-    bin="$WORKDIR/$name"
-    compile_log="$WORKDIR/$name.compile.log"
-    run_log="$WORKDIR/$name.run.log"
+    run_single_test_worker "$t" &
+    pid=$!
+    pids+=("$pid")
+    pid_to_name["$pid"]="$name"
 
-    # ------- Compile step -------
-    extra_flags="$(test_specific_flags "$name")"
-    if leak_check_enabled "$name"; then
-        extra_flags="$extra_flags --leak-check"
-    fi
-    compile_real_ms=0; compile_cpu_pct=0; compile_mem_kb=0
-    # shellcheck disable=SC2086
-    if ! run_timed compile "$compile_log" "$AGC" "$t" -o "$bin" \
-        --cfg "cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" $extra_flags; then
-        if expected_compile_failure "$name"; then
-            printf '  PASS  %-*s  (expected compile error)\n' "$COL_NAME" "$name"
-            passed=$((passed + 1))
-        else
-            printf '  FAIL  %-*s  (compile error)\n' "$COL_NAME" "$name"
-            sed 's/^/    /' "$compile_log"
-            failed=$((failed + 1))
-            failed_names="$failed_names $name"
-        fi
-        continue
-    fi
-    # Fail if a test expected to fail at compile-time unexpectedly compiled
-    if expected_compile_failure "$name"; then
-        printf '  FAIL  %-*s  (unexpectedly compiled)\n' "$COL_NAME" "$name"
-        failed=$((failed + 1))
-        failed_names="$failed_names $name"
-        continue
-    fi
-
-# Some tests require stdin input. If this function returns 0 for a test name,
-# its stdout is piped into the test binary as stdin.
-test_stdin() {
-    case "$1" in
-        scanner_test) printf '\357\273\2773\n10 -20 caf\303\251\nlast line\n' ;;
-        scanner_wide_test) printf -- '-5 -300 70000 -9000000000 170141183460469231731687303715884105727 255 65000 4000000000 18446744073709551615 340282366920938463463374607431768211455 300 -40000 256 -1 3.5 -2.25 1e3 true false hello\n' ;;
-        *) return 1 ;;
-    esac
-}
-
-    # ------- Run step -------
-    run_dir="$WORKDIR/$name.rundir"
-    mkdir -p "$run_dir"
-    # tls/http2-tls tests read the committed certs via relative paths.
-    if [ "$name" = "tls_test" ] || [ "$name" = "http2_tls_test" ]; then
-        run_dir="$ROOT"
-    fi
-    run_real_ms=0; run_cpu_pct=0; run_mem_kb=0
-    if test_stdin "$name" > /dev/null 2>&1; then
-        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < <(test_stdin "$name")
-    else
-        # Feed EOF stdin so tests that read stdin (e.g. Scanner.stdin())
-        # cannot block forever on an interactive terminal.
-        run_timed run "$run_log" -C "$run_dir" timeout "$RUN_TIMEOUT_SECS" "$bin" < /dev/null
-    fi
-    exit_code=$?
-
-    # ------- Post-run checks -------
-    status="PASS"
-
-    # For static_link_test, verify the binary is truly static.
-    if [ "$name" = "static_link_test" ]; then
-        if ldd "$bin" 2>&1 | head -1 | grep -q "not a dynamic executable"; then
-            : # good
-        else
-            printf '  FAIL  %-*s  (binary is not static)\n' "$COL_NAME" "$name"
-            failed=$((failed + 1))
-            failed_names="$failed_names $name"
-            continue
-        fi
-    fi
-
-    # Default builds carry DWARF (-g implied); release builds (-O1+) must
-    # not. cfg_derived_test is the one -O2 compile in the suite.
-    if [ "$name" = "cfg_derived_test" ]; then
-        if readelf -S "$bin" 2>/dev/null | grep -q "\.debug_info"; then
-            printf '  FAIL  %-*s  (release build still contains DWARF)\n' "$COL_NAME" "$name"
-            failed=$((failed + 1))
-            failed_names="$failed_names $name"
-            continue
-        fi
-    fi
-
-    # For backtrace_test, verify the runtime printed a NAMED stack trace
-    # with exact source positions and argument values: the frame-pointer
-    # walker must resolve the call chain to <name> at <call-site file:line>
-    # and print the spilled parameters.
-    if [ "$name" = "backtrace_test" ]; then
-        if grep -q "level3 at backtrace_test.ag:" "$run_log" \
-           && grep -q "level2 at backtrace_test.ag:" "$run_log" \
-           && grep -q "level1 at backtrace_test.ag:" "$run_log" \
-           && grep -q "main at backtrace_test.ag:" "$run_log" \
-           && grep -q "__silver_assert_failed at " "$run_log" \
-           && grep -q "args: x=" "$run_log"; then
-            : # good
-        else
-            printf '  FAIL  %-*s  (backtrace did not resolve names/source/args)\n' "$COL_NAME" "$name"
-            sed 's/^/    /' "$run_log"
-            failed=$((failed + 1))
-            failed_names="$failed_names $name"
-            continue
-        fi
-    fi
-
-    want="$(expected_exit "$name")"
-    if [ "$exit_code" -ne "$want" ]; then
-        if [ "$exit_code" -eq 124 ]; then
-            printf '  FAIL  %-*s  (timed out after %ss)\n' "$COL_NAME" "$name" "$RUN_TIMEOUT_SECS"
-        else
-            printf '  FAIL  %-*s  (exit %s, expected %s)\n' "$COL_NAME" "$name" "$exit_code" "$want"
-        fi
-        sed 's/^/    /' "$run_log"
-        failed=$((failed + 1))
-        failed_names="$failed_names $name"
-        continue
-    fi
-
-    # ------- Display metrics -------
-    ctime="$(fmt_ms "$compile_real_ms")"
-    rtime="$(fmt_ms "$run_real_ms")"
-    # Average CPU across both phases (weighted by real time).
-    total_real=$(( compile_real_ms + run_real_ms ))
-    avg_cpu=0
-    if [ "$total_real" -gt 0 ]; then
-        avg_cpu=$(( (compile_real_ms * compile_cpu_pct + run_real_ms * run_cpu_pct) / total_real ))
-    fi
-    peak_mem=$(( compile_mem_kb > run_mem_kb ? compile_mem_kb : run_mem_kb ))
-    mem_str="$(fmt_mem "$peak_mem")"
-
-    # Metrics: append a TSV row (history + current-run file) and track the
-    # slowest run times.
-    printf '%s\t%s\t%s\t%s\n' "$name" "$compile_real_ms" "$run_real_ms" "$peak_mem" >> "$METRICS_FILE"
-    printf '%s\t%s\t%s\t%s\n' "$name" "$compile_real_ms" "$run_real_ms" "$peak_mem" >> "$CURRENT_FILE"
-    if [ "$run_real_ms" -gt 0 ]; then
-        slot=0
-        while [ "$slot" -lt 5 ]; do
-            if [ -z "${slow_run_ms[$slot]:-}" ] || [ "$run_real_ms" -gt "${slow_run_ms[$slot]}" ]; then
-                # Shift the tail down.
-                tail=4
-                while [ "$tail" -gt "$slot" ]; do
-                    slow_run_ms[$tail]="${slow_run_ms[$((tail - 1))]:-}"
-                    slow_name[$tail]="${slow_name[$((tail - 1))]:-}"
-                    tail=$((tail - 1))
-                done
-                slow_run_ms[$slot]="$run_real_ms"
-                slow_name[$slot]="$name"
-                break
+    while [ "${#pids[@]}" -ge "$JOBS" ]; do
+        wait -n
+        new_pids=()
+        for p in "${pids[@]}"; do
+            if kill -0 "$p" 2>/dev/null; then
+                new_pids+=("$p")
+            else
+                pname="${pid_to_name[$p]}"
+                process_result "$pname"
+                unset 'pid_to_name[$p]'
             fi
-            slot=$((slot + 1))
         done
-    fi
+        pids=("${new_pids[@]}")
+    done
+done
 
-    printf '  PASS  %-*s  %*s  %*s  %3d%%  %*s\n' \
-        "$COL_NAME" "$name" \
-        "$COL_TIME" "$ctime" \
-        "$COL_TIME" "$rtime" \
-        "$avg_cpu" \
-        "$COL_MEM" "$mem_str"
-    passed=$((passed + 1))
-
-    # ------- Accumulate -------
-    total_compile_real_ms=$(( total_compile_real_ms + compile_real_ms ))
-    total_run_real_ms=$(( total_run_real_ms + run_real_ms ))
-    total_compile_cpu_pct=$(( total_compile_cpu_pct + compile_cpu_pct ))
-    total_run_cpu_pct=$(( total_run_cpu_pct + run_cpu_pct ))
-    if [ "$peak_mem" -gt "$peak_mem_kb" ]; then
-        peak_mem_kb=$peak_mem
-    fi
-    test_count=$(( test_count + 1 ))
+# Wait for remaining active workers
+for p in "${pids[@]}"; do
+    wait "$p" 2>/dev/null
+    pname="${pid_to_name[$p]}"
+    process_result "$pname"
+    unset 'pid_to_name[$p]'
 done
 
 if [ -n "$TLS_NODE_PID" ]; then
