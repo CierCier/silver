@@ -132,7 +132,7 @@ impl TcpStream {
         i64 done = 0;
         while (done < len) {
             Result<i64, Error> r =
-                try_write(self.sock.fd, (u8*)((i64)buf + done), len - done);
+                try_sendto(self.sock.fd, (void*)((i64)buf + done), len - done, 0x4000, (void*)0, 0);
             if (r.is_err()) {
                 if (r.err_is(EINTR)) { continue; }
                 if (done > 0) { return Result<i64, Error>.Ok(done); }
