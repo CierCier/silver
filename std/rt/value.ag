@@ -159,7 +159,7 @@ impl Value {
 
     // Deep-copy helper used by clone() (Vec<T> elements are shallow, so
     // composite payloads recurse).
-    Value clone(Value* self) {
+    Value clone(*self) {
         Value v = Value.blank();
         v.kind = self.kind;
         v.ty = self.ty;
@@ -267,12 +267,12 @@ impl Value {
     // -- Accessors ----------------------------------------------------------
 
     /// Value::type_id in the Rust runtime.
-    TypeId type_id(Value* self) {
+    TypeId type_id(*self) {
         return self.ty;
     }
 
     /// Value::as_bool — has_value is false for non-bool kinds.
-    bool as_bool(Value* self, bool* has_value) {
+    bool as_bool(*self, bool* has_value) {
         if (self.kind == VALUE_KIND_BOOL) {
             *has_value = true;
             return self.bool_val;
@@ -282,7 +282,7 @@ impl Value {
     }
 
     /// Value::as_i64 — has_value is false unless this is an Int tagged I64.
-    i64 as_i64(Value* self, bool* has_value) {
+    i64 as_i64(*self, bool* has_value) {
         if (self.kind == VALUE_KIND_INT && self.ty.eq(TypeId.I64())) {
             *has_value = true;
             return (i64)self.int_val;
@@ -292,7 +292,7 @@ impl Value {
     }
 
     /// Value::as_f64 — has_value is false unless this is a Float tagged F64.
-    f64 as_f64(Value* self, bool* has_value) {
+    f64 as_f64(*self, bool* has_value) {
         if (self.kind == VALUE_KIND_FLOAT && self.ty.eq(TypeId.F64())) {
             *has_value = true;
             return self.float_val;
@@ -303,7 +303,7 @@ impl Value {
 
     /// Value::as_str — registry-owned pointer semantics do not apply here;
     /// the returned pointer borrows this value's buffer (or is null).
-    str as_str(Value* self) {
+    str as_str(*self) {
         if (self.kind == VALUE_KIND_STRING) {
             return (str)self.text.to_str();
         }
@@ -315,7 +315,7 @@ impl Drop for Value {
     /// Release owned payloads: the string buffer, the boxed optional inner,
     /// and every element of the items vector before its buffer.  Idempotent
     /// (String/Vec drops null-check internally; inner is re-nulled).
-    void drop(Value* self) {
+    void drop(*self) {
         self.text.drop();
         if (self.inner != (Value*)0) {
             self.inner.drop();
@@ -364,17 +364,17 @@ impl ValueResult {
         return r;
     }
 
-    bool is_ok(ValueResult* self) {
+    bool is_ok(*self) {
         return self.ok;
     }
 
-    bool is_err(ValueResult* self) {
+    bool is_err(*self) {
         return !self.ok;
     }
 }
 
 impl Drop for ValueResult {
-    void drop(ValueResult* self) {
+    void drop(*self) {
         self.value.drop();
         self.msg.drop();
     }
