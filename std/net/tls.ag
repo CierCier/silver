@@ -172,12 +172,12 @@ impl TlsStream {
         return tls;
     }
 
-    bool invalid(TlsStream* self) { return self.ssl == 0; }
+    bool invalid(*self) { return self.ssl == 0; }
 
     /// Client handshake on a connected fd. `host` is used for SNI and, when
     /// verification is on, hostname checking. On failure `err` is filled and
     /// the stream stays inactive.
-    bool connect(TlsStream* self, i32 fd, str host, bool verify, str ca_file, Error* err) {
+    bool connect(*self, i32 fd, str host, bool verify, str ca_file, Error* err) {
         bool default_config = verify && (ca_file == (str)0 || strlen(ca_file) == 0);
         i64 ctx = ssl_client_ctx(verify, ca_file);
         if (ctx == 0) {
@@ -215,7 +215,7 @@ impl TlsStream {
     }
 
     /// True when ALPN negotiated the "h2" protocol (HTTP/2 over TLS).
-    bool is_h2(TlsStream* self) {
+    bool is_h2(*self) {
         if (!self.active || self.ssl == 0) { return false; }
         u8* proto = (u8*)0;
         u32 plen = 0;
@@ -226,7 +226,7 @@ impl TlsStream {
 
     /// Server handshake (used by local TLS test servers): loads the PEM
     /// certificate/key bundle and accepts a client connection.
-    bool accept(TlsStream* self, i32 fd, str cert_file, str key_file, Error* err) {
+    bool accept(*self, i32 fd, str cert_file, str key_file, Error* err) {
         i64 ctx = ssl_server_ctx(cert_file, key_file);
         if (ctx == 0) {
             *err = Error.new(TLS_ERR, "TLS server context failed");
@@ -254,7 +254,7 @@ impl TlsStream {
         return true;
     }
 
-    Result<i64, Error> read(TlsStream* self, u8* buf, i64 len) {
+    Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
             return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
         }
@@ -267,7 +267,7 @@ impl TlsStream {
         return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS read error"));
     }
 
-    Result<i64, Error> write(TlsStream* self, u8* buf, i64 len) {
+    Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
             return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
         }
@@ -284,13 +284,13 @@ impl TlsStream {
     }
 
     /// Negotiated protocol version ("TLSv1.3", "TLSv1.2", ...) or "unknown".
-    str version(TlsStream* self) {
+    str version(*self) {
         if (!self.active || self.ssl == 0) { return "unknown"; }
         return (str)ssl_get_version(self.ssl);
     }
 
     /// Tear down the TLS session; the socket fd is owned by the caller.
-    void close(TlsStream* self) {
+    void close(*self) {
         if (self.ssl != 0) {
             ssl_shutdown(self.ssl);
             ssl_free(self.ssl);
@@ -305,7 +305,7 @@ impl TlsStream {
 }
 
 impl Drop for TlsStream {
-    void drop(TlsStream* self) {
+    void drop(*self) {
         self.close();
     }
 }
