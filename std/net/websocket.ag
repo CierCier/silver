@@ -211,7 +211,7 @@ struct WsFrame {
 }
 
 impl Drop for WsFrame {
-    void drop(WsFrame* self) {
+    void drop(*self) {
         self.payload.drop();
     }
 }
@@ -246,7 +246,7 @@ struct WebSocket {
 }
 
 impl Drop for WebSocket {
-    void drop(WebSocket* self) {
+    void drop(*self) {
         self.frag_buf.drop();
         self.conn.close();
     }
@@ -369,31 +369,31 @@ impl WebSocket {
         return Result<WebSocket, Error>.Ok(move ws);
     }
 
-    bool closed(WebSocket* self) { return self.closed; }
+    bool closed(*self) { return self.closed; }
 
     // --- Sending ---------------------------------------------------------
 
     /// Send a text message.
-    Result<i64, Error> send_text(WebSocket* self, str text) {
+    Result<i64, Error> send_text(*self, str text) {
         return self.write_frame(WS_OP_TEXT, true, text, strlen(text));
     }
 
     /// Send a binary message.
-    Result<i64, Error> send_binary(WebSocket* self, u8* data, i64 len) {
+    Result<i64, Error> send_binary(*self, u8* data, i64 len) {
         return self.write_frame(WS_OP_BINARY, true, data, len);
     }
 
-    Result<i64, Error> send_ping(WebSocket* self, u8* data, i64 len) {
+    Result<i64, Error> send_ping(*self, u8* data, i64 len) {
         return self.write_frame(WS_OP_PING, true, data, len);
     }
 
-    Result<i64, Error> send_pong(WebSocket* self, u8* data, i64 len) {
+    Result<i64, Error> send_pong(*self, u8* data, i64 len) {
         return self.write_frame(WS_OP_PONG, true, data, len);
     }
 
     /// Send a Close frame (code + reason). The transport stays open until
     /// the peer's Close echo arrives (recv) or the WebSocket is dropped.
-    Result<i64, Error> close(WebSocket* self, i64 code, str reason) {
+    Result<i64, Error> close(*self, i64 code, str reason) {
         if (self.close_sent) {
             return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "close already sent"));
         }
@@ -414,7 +414,7 @@ impl WebSocket {
 
     /// Write one masked frame. Client frames MUST be masked with a fresh
     /// 4-byte mask; payloads stream out in 4KB masked chunks.
-    Result<i64, Error> write_frame(WebSocket* self, i64 opcode, bool fin, u8* data, i64 len) {
+    Result<i64, Error> write_frame(*self, i64 opcode, bool fin, u8* data, i64 len) {
         if (self.closed || self.close_sent && opcode != WS_OP_CLOSE) {
             return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "websocket is closed"));
         }
@@ -474,7 +474,7 @@ impl WebSocket {
     /// Read one message: data frames (with fragmentation reassembly) and
     /// control frames. Ping frames are answered automatically; Pong and
     /// Close are delivered. The payload is owned — drop it after use.
-    Result<WsMessage, Error> recv(WebSocket* self) {
+    Result<WsMessage, Error> recv(*self) {
         while (true) {
             Result<WsFrame, Error> fr = self.read_frame();
             if (fr.failed()) { return Result<WsMessage, Error>.Err(fr.get_error()); }
@@ -561,7 +561,7 @@ impl WebSocket {
     /// Read one frame. Server frames must not be masked; control frames
     /// must be FIN and <= 125 bytes. Payloads larger than max_message are
     /// rejected (WS_ERR_LIMIT).
-    Result<WsFrame, Error> read_frame(WebSocket* self) {
+    Result<WsFrame, Error> read_frame(*self) {
         StreamIo io = http_transport_io(&self.conn);
         u8 b0;
         u8 b1;
