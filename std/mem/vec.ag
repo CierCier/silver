@@ -38,17 +38,17 @@ impl Vec<T> {
     // -- Size / capacity ------------------------------------------------
 
     /// Number of elements currently in the vector.
-    i64 len(&Vec<T> self) {
+    i64 len(&self) {
         return self.len;
     }
 
     /// Total allocated capacity.
-    i64 capacity(&Vec<T> self) {
+    i64 capacity(&self) {
         return self.cap;
     }
 
     /// True when `len` is zero.
-    bool is_empty(&Vec<T> self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
@@ -58,13 +58,13 @@ impl Vec<T> {
     /// this creates a shallow copy that shares resources with the backing
     /// buffer.  Prefer `get_ptr` or `take` for owned types.
     /// Out-of-bounds indices abort deterministically in every build profile.
-    T get(&Vec<T> self, i64 index) {
+    T get(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
 
     /// Read element at `index`, returning None when out of bounds.
-    Optional<T> try_get(&Vec<T> self, i64 index) {
+    Optional<T> try_get(&self, i64 index) {
         if (index < 0 || index >= self.len) {
             return Optional<T>.none();
         }
@@ -73,14 +73,14 @@ impl Vec<T> {
 
     /// Pointer to element at `index`.
     /// Out-of-bounds indices abort deterministically in every build profile.
-    T* get_ptr(&Vec<T> self, i64 index) {
+    T* get_ptr(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return &(self.data[index]);
     }
 
     /// Overwrite element at `index`.
     /// Out-of-bounds indices abort deterministically in every build profile.
-    void set(&mut Vec<T> self, i64 index, T value) {
+    void set(&mut self, i64 index, T value) {
         if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = move value;
     }
@@ -92,7 +92,7 @@ impl Vec<T> {
     /// — so owned T (String, Vec<u8>) transfers ownership without duplicating
     /// the backing pointer; the old buffer is then `free`d (no per-element drop).
     /// For Copy T (i32, POD structs) `move` is a bitwise copy.
-    void push(&mut Vec<T> self, T value) {
+    void push(&mut self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
@@ -124,7 +124,7 @@ impl Vec<T> {
     /// Moves ownership out (`move self.data[len-1]`); the stale slot is left
     /// in a moved-from state and `len` is decremented, so `Copy` T copies and
     /// non-Copy T transfers without duplication.
-    T pop(&mut Vec<T> self) {
+    T pop(&mut self) {
         self.len = self.len - 1;
         T tmp = self.data[self.len];
         T result = move tmp;
@@ -136,7 +136,7 @@ impl Vec<T> {
     /// vacated (drain with `take(0)` repeatedly, or `pop()` for LIFO).
     /// Each shifted element is `move`d (`data[i] = move data[i+1]`) leaving the
     /// source in a moved-from state; the trailing slot beyond `len` is ignored.
-    T take(&mut Vec<T> self, i64 index) {
+    T take(&mut self, i64 index) {
         T tmp0 = self.data[index];
         T result = move tmp0;
         i64 i = index;
@@ -148,8 +148,9 @@ impl Vec<T> {
         self.len = self.len - 1;
         return move result;
     }
+
     /// Remove element at `index` in O(1) by swapping with the last element.
-    T swap_remove(&mut Vec<T> self, i64 index) {
+    T swap_remove(&mut self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         if (index == self.len - 1) {
             return self.pop();
@@ -162,7 +163,7 @@ impl Vec<T> {
     }
 
     /// Swap two elements by index.
-    void swap(&mut Vec<T> self, i64 a, i64 b) {
+    void swap(&mut self, i64 a, i64 b) {
         if (a < 0 || a >= self.len || b < 0 || b >= self.len) { abort(); }
         if (a == b) { return; }
         T tmp_a = self.data[a];
@@ -172,7 +173,7 @@ impl Vec<T> {
     }
 
     /// Reverse elements in place.
-    void reverse(&mut Vec<T> self) {
+    void reverse(&mut self) {
         if (self.len <= 1) { return; }
         i64 left = 0;
         i64 right = self.len - 1;
@@ -184,7 +185,7 @@ impl Vec<T> {
     }
 
     /// Pop the last element, or None when empty.
-    Optional<T> try_pop(&mut Vec<T> self) {
+    Optional<T> try_pop(&mut self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -196,14 +197,14 @@ impl Vec<T> {
     /// NOTE: Does NOT drop elements — for owned T, `drain`/`take`/`pop` first
     /// to move out values (see smoke comment below); otherwise backing memory
     /// is freed but inner allocations (e.g., String buffers) leak.
-    void clear(&mut Vec<T> self) {
+    void clear(&mut self) {
         self.len = 0;
     }
 
     /// Reserve at least `min_capacity` elements, growing if needed.
     /// Moves existing elements (`new[i] = move old[i]`) rather than `realloc`
     /// byte-copy; see `push` doc. POD-only `realloc` workaround removed.
-    void reserve(&mut Vec<T> self, i64 min_capacity) {
+    void reserve(&mut self, i64 min_capacity) {
         if (self.cap >= min_capacity) {
             return;
         }
@@ -224,7 +225,7 @@ impl Vec<T> {
     /// Shrink capacity to match length.
     /// Moves elements via `move` into a right-sized buffer instead of
     /// `realloc` byte-copy; POD-only path removed.
-    void shrink_to_fit(&mut Vec<T> self) {
+    void shrink_to_fit(&mut self) {
         if (self.len == 0) {
             if (self.data != (T*)0) {
                 free(self.data);
@@ -251,7 +252,7 @@ impl Vec<T> {
 impl<T> Drop for Vec<T> {
     /// Frees the backing buffer.  Does NOT call per-element destructors
     /// (the type system currently does not iterate elements on drop).
-    void drop(Vec<T>* self) {
+    void drop(*self) {
         if (self.data != (T*)0) {
             free(self.data);
             self.data = (T*)0;
@@ -262,13 +263,13 @@ impl<T> Drop for Vec<T> {
 }
 impl<T> IndexedAccess for Vec<T> {
     type Item = T;
-    T __index_get(Vec<T>* self, i64 index) {
+    T __index_get(*self, i64 index) {
         // Deterministic in all build profiles — release builds must not
         // index out of bounds silently (UB).
         if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
-    void __index_set(Vec<T>* self, i64 index, T value) {
+    void __index_set(*self, i64 index, T value) {
         if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = move value;
     }
@@ -277,11 +278,11 @@ impl<T> IndexedAccess for Vec<T> {
 // -- Iterator support ---------------------------------------------------
 //
 // Ownership contract:
-// - `iter(&Vec<T> self)` borrows: takes `&Vec<T> self`, copies the raw
+// - `iter(&self)` borrows: takes `&self`, copies the raw
 //   pointer/len into a `SliceIter<T>` and yields each element via copy
 //   (`data[idx]` / `get_ptr` copy). The Vec remains valid and its buffer is
 //   NOT transferred. Caller must not mutate Vec while the borrow lives.
-// - `into_iter(Vec<T> self)` moves: takes `Vec<T> self` by value (Self self,
+// - `into_iter(self)` moves: takes `self` by value (Self self,
 //   not &Self), transfers the buffer via `move self.data` and clears the Vec
 //   (`self.data = null; self.len = 0; self.cap = 0`) so Vec's drop is a no-op.
 //   The returned `VecIter<T>` owns the buffer (frees it on Drop) and each
@@ -298,9 +299,9 @@ impl<T> IntoIterator for Vec<T> {
     type Item = T;
     type IntoIter = VecIter<T>;
     /// Consumes the Vec, moving its buffer into the iterator.
-    /// `Self self` (by value) — not `&Self` — so `move self.data` drains and
+    /// `self` (by value) — not `&self` — so `move self.data` drains and
     /// leaves `self` moved-from (null/0). Iterator owns and frees the buffer.
-    VecIter<T> into_iter(Vec<T> self) {
+    VecIter<T> into_iter(self) {
         VecIter<T> iter;
         iter.data = move self.data;
         iter.len = self.len;
@@ -313,14 +314,14 @@ impl<T> IntoIterator for Vec<T> {
 }
 
 impl<T> Vec<T> {
-    Slice<T> as_slice(&Vec<T> self) {
+    Slice<T> as_slice(&self) {
         Slice<T> s;
         s.data = self.data;
         s.len = self.len;
         return s;
     }
 
-    Slice<T> as_mut_slice(&mut Vec<T> self) {
+    Slice<T> as_mut_slice(&mut self) {
         Slice<T> s;
         s.data = self.data;
         s.len = self.len;
@@ -328,14 +329,14 @@ impl<T> Vec<T> {
     }
 
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
-    Slice<T> __slice_get(&Vec<T> self, i64 start, i64 end) {
+    Slice<T> __slice_get(&self, i64 start, i64 end) {
         Slice<T> s = self.as_slice();
         return s.__slice_get(start, end);
     }
 
     /// Borrows the Vec and yields element copies without consuming it.
-    /// `&Vec<T> self` so the Vec stays live; iterator holds a raw ptr copy.
-    SliceIter<T> iter(&Vec<T> self) {
+    /// `&self` so the Vec stays live; iterator holds a raw ptr copy.
+    SliceIter<T> iter(&self) {
         SliceIter<T> it;
         it.data = self.data;
         it.len = self.len;
@@ -343,7 +344,7 @@ impl<T> Vec<T> {
         return it;
     }
 
-    RevIter<T> rev_iter(&Vec<T> self) {
+    RevIter<T> rev_iter(&self) {
         RevIter<T> r;
         r.data = self.data;
         r.len = self.len;
@@ -354,7 +355,7 @@ impl<T> Vec<T> {
 
 
 impl<T> Drop for VecIter<T> {
-    void drop(VecIter<T>* self) {
+    void drop(*self) {
         if (self.data != (T*)0) {
             free(self.data);
             self.data = (T*)0;
@@ -371,7 +372,7 @@ impl<T> Iterator for VecIter<T> {
     /// `value = move data[idx]` so owned T (String) transfers and `Copy`
     /// T bitwise-copies via the same `move`. Caller `drop`s each value;
     /// un-drained tail is leaked on `VecIter::drop` (frees buffer only).
-    Optional<T> next(VecIter<T>* self) {
+    Optional<T> next(*self) {
         if (self.idx < self.len) {
             T tmp = self.data[self.idx];
             T value = move tmp;
