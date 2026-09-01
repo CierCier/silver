@@ -51,7 +51,7 @@ impl BinaryHeap<T> {
     }
 
     /// Convert the heap into a vector in unspecified (internal buffer) order.
-    Vec<T> into_vec(BinaryHeap<T> self) {
+    Vec<T> into_vec(self) {
         Vec<T> v;
         v.data = self.data;
         v.len = self.len;
@@ -66,24 +66,24 @@ impl BinaryHeap<T> {
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the heap.
-    i64 len(&BinaryHeap<T> self) {
+    i64 len(&self) {
         return self.len;
     }
 
     /// Total allocated capacity.
-    i64 capacity(&BinaryHeap<T> self) {
+    i64 capacity(&self) {
         return self.cap;
     }
 
     /// True when `len` is zero.
-    bool is_empty(&BinaryHeap<T> self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
     // -- Mutation --------------------------------------------------------
 
     /// Push `value` onto the heap (O(log n)).
-    void push(&mut BinaryHeap<T> self, T value) {
+    void push(&mut self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 1;
             if (self.cap != 0) {
@@ -111,7 +111,7 @@ impl BinaryHeap<T> {
     }
 
     /// Remove and return the greatest element.  Aborts if empty.
-    T pop(&mut BinaryHeap<T> self) {
+    T pop(&mut self) {
         if (self.len == 0) {
             abort();
         }
@@ -145,7 +145,7 @@ impl BinaryHeap<T> {
     }
 
     /// Return a copy of the greatest element without removing it.  Aborts if empty.
-    T peek(&BinaryHeap<T> self) {
+    T peek(&self) {
         if (self.len == 0) {
             abort();
         }
@@ -155,7 +155,7 @@ impl BinaryHeap<T> {
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the greatest element, or None when empty.
-    Optional<T> try_pop(&mut BinaryHeap<T> self) {
+    Optional<T> try_pop(&mut self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -163,7 +163,7 @@ impl BinaryHeap<T> {
     }
 
     /// Copy of the greatest element, or None when empty.
-    Optional<T> try_peek(&BinaryHeap<T> self) {
+    Optional<T> try_peek(&self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -171,14 +171,14 @@ impl BinaryHeap<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
-    void clear(&mut BinaryHeap<T> self) {
+    void clear(&mut self) {
         self.len = 0;
     }
 }
 
 impl<T> Drop for BinaryHeap<T> {
     /// Frees the backing buffer.
-    void drop(BinaryHeap<T>* self) {
+    void drop(*self) {
         if (self.data != (T*)0) {
             free(self.data);
             self.data = (T*)0;
@@ -193,13 +193,13 @@ struct BinaryHeapIntoIter<T> {
 
 impl<T> Iterator for BinaryHeapIntoIter<T> {
     type Item = T;
-    Optional<T> next(BinaryHeapIntoIter<T>* self) {
+    Optional<T> next(*self) {
         return self.heap.try_pop();
     }
 }
 
 impl<T> Drop for BinaryHeapIntoIter<T> {
-    void drop(BinaryHeapIntoIter<T>* self) {
+    void drop(*self) {
         self.heap.drop();
     }
 }
@@ -207,7 +207,7 @@ impl<T> Drop for BinaryHeapIntoIter<T> {
 impl<T> IntoIterator for BinaryHeap<T> {
     type Item = T;
     type IntoIter = BinaryHeapIntoIter<T>;
-    BinaryHeapIntoIter<T> into_iter(BinaryHeap<T> self) {
+    BinaryHeapIntoIter<T> into_iter(self) {
         BinaryHeapIntoIter<T> it;
         it.heap = move self;
         return it;
