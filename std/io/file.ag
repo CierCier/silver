@@ -67,7 +67,7 @@ struct __Buf40 { u8 data[40]; }
 
 impl BufWriter {
     /// Ensure internal buffer is initialized (lazy mmap).
-    void ensure_init(BufWriter* self) {
+    void ensure_init(*self) {
         if (self.cap == 0) {
             // UNBUFFERED mode: no buffer allocation, just set cap sentinel.
             if (self.mode == IOMODE_UNBUFFERED) {
@@ -81,7 +81,7 @@ impl BufWriter {
     }
 
     /// Buffer a write.  Flush behavior depends on self.mode.
-    void write(BufWriter* self, u8* src, i64 n) {
+    void write(*self, u8* src, i64 n) {
         self.ensure_init();
 
         // UNBUFFERED: direct syscall, no buffering.
@@ -134,12 +134,12 @@ impl BufWriter {
     }
 
     /// Write a null-terminated string.
-    void write_str(BufWriter* self, str s) {
+    void write_str(*self, str s) {
         self.write((u8*)s, cstr_len((u8*)s));
     }
 
     /// Format and buffer an i64 value.
-    void write_i64(BufWriter* self, i64 v) {
+    void write_i64(*self, i64 v) {
         __Buf32 tmp;
         u8* p = (u8*)&tmp;
         i64 n = itoa(v, p);
@@ -147,7 +147,7 @@ impl BufWriter {
     }
 
     /// Format and buffer a u64 value.
-    void write_u64(BufWriter* self, u64 v) {
+    void write_u64(*self, u64 v) {
         __Buf32 tmp;
         u8* p = (u8*)&tmp;
         i64 n = utoa(v, p);
@@ -155,7 +155,7 @@ impl BufWriter {
     }
 
     /// Format and buffer a u128 value.
-    void write_u128(BufWriter* self, u128 v) {
+    void write_u128(*self, u128 v) {
         __Buf40 tmp;
         u8* p = (u8*)&tmp;
         i64 n = utoa128(v, p);
@@ -163,7 +163,7 @@ impl BufWriter {
     }
 
     /// Format and buffer an i128 value.
-    void write_i128(BufWriter* self, i128 v) {
+    void write_i128(*self, i128 v) {
         __Buf40 tmp;
         u8* p = (u8*)&tmp;
         i64 n = itoa128(v, p);
@@ -171,7 +171,7 @@ impl BufWriter {
     }
 
     /// Format and buffer an f64 value.
-    void write_f64(BufWriter* self, f64 v) {
+    void write_f64(*self, f64 v) {
         __Buf64 tmp;
         u8* p = (u8*)&tmp;
         i64 n = ftoa(v, p);
@@ -179,17 +179,17 @@ impl BufWriter {
     }
 
     /// Format and buffer a bool value.
-    void write_bool(BufWriter* self, bool v) {
+    void write_bool(*self, bool v) {
         if (v) { self.write_str("true"); }
         else   { self.write_str("false"); }
     }
     /// Write a single byte.
-    void write_u8(BufWriter* self, u8 c) {
+    void write_u8(*self, u8 c) {
         self.write(&c, 1);
     }
 
     /// Flush buffered data to the underlying fd via a single sys_write call.
-    void flush(BufWriter* self) {
+    void flush(*self) {
         self.ensure_init();
         if (self.len > 0) {
             if (self.fd >= 0) {
@@ -216,7 +216,7 @@ impl BufWriter {
 
 impl Drop for BufWriter {
     /// Drop: flush remaining data, then free the buffer.
-    void drop(BufWriter* self) {
+    void drop(*self) {
         self.flush();
         if (self.cap > 0) {
             free((void*)self.data);
@@ -341,15 +341,15 @@ impl File {
     File open_append(str path) {
         return File.open(path, "a");
     }
-    bool valid(File* self) {
+    bool valid(*self) {
         return self.is_open && self.fd >= 0;
     }
 
-    bool invalid(File* self) {
+    bool invalid(*self) {
         return !self.valid();
     }
 
-    i32 close(File* self) {
+    i32 close(*self) {
         if (self.invalid()) {
             self.is_open = false;
             return 0;
@@ -371,14 +371,14 @@ impl File {
     }
 
     /// No userspace buffer to flush: a valid fd is already flushed.
-    i32 flush(File* self) {
+    i32 flush(*self) {
         if (self.invalid()) {
             return EOF;
         }
         return 0;
     }
 
-    i32 read_char(File* self) {
+    i32 read_char(*self) {
         if (self.invalid()) {
             return EOF;
         }
@@ -395,7 +395,7 @@ impl File {
         return (i32)ch;
     }
 
-    i32 write_char(File* self, i32 ch) {
+    i32 write_char(*self, i32 ch) {
         if (self.invalid()) {
             return EOF;
         }
@@ -408,7 +408,7 @@ impl File {
         return ch;
     }
 
-    i32 write_str(File* self, str text) {
+    i32 write_str(*self, str text) {
         if (self.invalid()) {
             return EOF;
         }
@@ -434,7 +434,7 @@ impl File {
         return 0;
     }
 
-    i32 write_line(File* self, str text) {
+    i32 write_line(*self, str text) {
         if (self.invalid()) {
             return EOF;
         }
@@ -447,7 +447,7 @@ impl File {
 
     /// fread-shaped API: reads up to elem_size*elem_count bytes, returns
     /// whole elements read (0 at EOF or on error, like a short fread).
-    i64 read(File* self, void* buffer, i64 elem_size, i64 elem_count) {
+    i64 read(*self, void* buffer, i64 elem_size, i64 elem_count) {
         if (self.invalid()) {
             return 0;
         }
@@ -473,7 +473,7 @@ impl File {
 
     /// fwrite-shaped API: writes elem_size*elem_count bytes, returns whole
     /// elements written (short count on error, like fwrite).
-    i64 write(File* self, const void* buffer, i64 elem_size, i64 elem_count) {
+    i64 write(*self, const void* buffer, i64 elem_size, i64 elem_count) {
         if (self.invalid()) {
             return 0;
         }
@@ -497,19 +497,19 @@ impl File {
         return done / elem_size;
     }
 
-    bool seek(File* self, i64 offset) {
+    bool seek(*self, i64 offset) {
         return self.seek_from(offset, IO_SEEK.SET);
     }
 
-    bool seek_to_start(File* self) {
+    bool seek_to_start(*self) {
         return self.seek_from(0, IO_SEEK.SET);
     }
 
-    bool seek_to_end(File* self) {
+    bool seek_to_end(*self) {
         return self.seek_from(0, IO_SEEK.END);
     }
 
-    bool seek_from(File* self, i64 offset, IO_SEEK origin) {
+    bool seek_from(*self, i64 offset, IO_SEEK origin) {
         if (self.invalid()) {
             return false;
         }
@@ -521,7 +521,7 @@ impl File {
         return true;
     }
 
-    i64 tell(File* self) {
+    i64 tell(*self) {
         if (self.invalid()) {
             return -1;
         }
@@ -533,7 +533,7 @@ impl File {
         return r.value();
     }
 
-    void rewind(File* self) {
+    void rewind(*self) {
         if (self.valid()) {
             self.seek_from(0, IO_SEEK.SET);
             self.at_eof = false;
@@ -541,28 +541,28 @@ impl File {
         }
     }
 
-    bool eof(File* self) {
+    bool eof(&self) {
         if (self.invalid()) {
             return true;
         }
         return self.at_eof;
     }
 
-    bool error(File* self) {
+    bool error(&self) {
         if (self.invalid()) {
             return true;
         }
         return self.had_error;
     }
 
-    void clear_error(File* self) {
+    void clear_error(*self) {
         if (self.valid()) {
             self.at_eof = false;
             self.had_error = false;
         }
     }
 
-    i64 size(File* self) {
+    i64 size(*self) {
         if (self.invalid()) {
             return -1;
         }
@@ -581,7 +581,7 @@ impl File {
 }
 
 impl Drop for File {
-    void drop(File* self) {
+    void drop(*self) {
         self.close();
     }
 }
