@@ -89,6 +89,7 @@ impl Backend {
         });
         let imported_modules =
             match FileImportResolverHook::with_cache(&self.loader, &self.file_cache)
+                .with_entry_import(false)
                 .lower_program_imports(&mut program, base_dir, source_path.as_deref())
             {
                 Ok(result) => result.module_artifacts,
@@ -280,4 +281,26 @@ mod tests {
             "serialization synthesis failed in LSP diagnostics: {errors:?}"
         );
     }
+
+    #[test]
+    fn lsp_import_lowering_does_not_inject_std_sys_entry() {
+        let source = "i32 main() { return 0; }";
+        let file_id = lexer::register_source("/tmp/lsp_entry_test.ag", source);
+        let graph = agc::grammar::parse_ag(source);
+        let mut program = agc::grammar::lower_source_graph(&graph, file_id as usize);
+
+        // An empty ModuleLoader has no search directories and cannot resolve std.sys.entry.
+        let loader = agc::module_loader::ModuleLoader::new();
+        let file_cache = parking_lot::Mutex::new(Default::default());
+        let result = FileImportResolverHook::with_cache(&loader, &file_cache)
+            .with_entry_import(false)
+            .lower_program_imports(&mut program, None, None);
+
+        assert!(
+            result.is_ok(),
+            "LSP import lowering failed with unexpected error: {:?}",
+            result.err()
+        );
+    }
 }
+

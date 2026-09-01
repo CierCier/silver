@@ -297,4 +297,10 @@ impl Bytes {
         s.len = self.len;
         return s;
     }
+
+    /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
+    Slice<u8> __slice_get(&Bytes self, i64 start, i64 end) {
+        Slice<u8> s = self.as_slice();
+        return s.__slice_get(start, end);
+    }
 }

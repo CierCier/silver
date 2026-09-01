@@ -186,28 +186,62 @@ pub(crate) fn is_keyword(name: &str) -> bool {
 
 /// Find the Silver std library search dirs (bootstrap/include/silver/ etc.).
 pub(crate) fn find_std_search_dirs() -> Vec<PathBuf> {
-    if let Ok(home) = std::env::var("SILVER_SYSROOT")
+    let mut dirs = Vec::new();
+
+    let default_dirs = if let Ok(home) = std::env::var("SILVER_SYSROOT")
         && !home.is_empty()
     {
-        let root = PathBuf::from(home);
-        let dirs = module_loader_default_dirs(Some(&root));
-        if !dirs.is_empty() {
-            return dirs;
+        module_loader_default_dirs(Some(std::path::Path::new(&home)))
+    } else {
+        module_loader_default_dirs(None)
+    };
+    for dir in default_dirs {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
         }
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let candidate = parent
-            .join("..")
-            .join("bootstrap")
-            .join("include")
-            .join("silver");
-        if candidate.is_dir() {
-            return vec![candidate];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate_root = parent.join("..").join("..");
+            if candidate_root.join("std").is_dir() {
+                if let Ok(p) = candidate_root.canonicalize() {
+                    if !dirs.contains(&p) {
+                        dirs.push(p);
+                    }
+                } else if !dirs.contains(&candidate_root) {
+                    dirs.push(candidate_root);
+                }
+            }
+            let candidate = parent
+                .join("..")
+                .join("bootstrap")
+                .join("include")
+                .join("silver");
+            if candidate.is_dir() && !dirs.contains(&candidate) {
+                dirs.push(candidate);
+            }
         }
     }
-    Vec::new()
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr: &std::path::Path = cwd.as_path();
+        loop {
+            if curr.join("std").is_dir() {
+                let p = curr.to_path_buf();
+                if !dirs.contains(&p) {
+                    dirs.push(p);
+                }
+                break;
+            }
+            match curr.parent() {
+                Some(parent) => curr = parent,
+                None => break,
+            }
+        }
+    }
+
+    dirs
 }
 
 pub(crate) fn build_lsp_loader() -> ModuleLoader {

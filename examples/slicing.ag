@@ -51,5 +51,12 @@ i32 main() {
     @println("msg[0:5] length: {}", hello.len);
     @println("msg[7:13] length: {}", silver.len);
 
+    @println("\n=== 5. Primitive str and Literal Slicing ===");
+    str raw = "Hello, World!";
+    Slice<u8> raw_sub = raw[0:5];
+    Slice<u8> lit_sub = "Silver Language"[0:6];
+    @println("raw[0:5] length: {}", raw_sub.len);
+    @println("\"Silver Language\"[0:6] length: {}", lit_sub.len);
+
     return 0;
 }

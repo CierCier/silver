@@ -2,6 +2,7 @@ import std.test;
 import std.slice;
 import std.mem.vec;
 import std.string;
+import std.bytes;
 
 i32 main() {
     test_start("Array slicing");
@@ -59,6 +60,14 @@ i32 main() {
         assert_eq_i64(2, sub.len, "sub.len == 2");
         assert_eq_i64(30, sub[0], "sub[0] == 30");
         assert_eq_i64(40, sub[1], "sub[1] == 40");
+
+        Slice<i32> sub_all = s1[:];
+        assert_eq_i64(3, sub_all.len, "s1[:].len == 3");
+        assert_eq_i64(20, sub_all[0], "s1[:][0] == 20");
+
+        Slice<i32> sub_neg = s1[:-1];
+        assert_eq_i64(2, sub_neg.len, "s1[:-1].len == 2");
+        assert_eq_i64(30, sub_neg[1], "s1[:-1][1] == 30");
     }
 
     test_start("Vector slicing");
@@ -74,6 +83,19 @@ i32 main() {
         assert_eq_i64(200, v_slice[0], "v[1:3][0] == 200");
         assert_eq_i64(300, v_slice[1], "v[1:3][1] == 300");
 
+        Slice<i32> v_all = v[:];
+        assert_eq_i64(4, v_all.len, "v[:].len == 4");
+        assert_eq_i64(100, v_all[0], "v[:][0] == 100");
+        assert_eq_i64(400, v_all[3], "v[:][3] == 400");
+
+        Slice<i32> v_start = v[2:];
+        assert_eq_i64(2, v_start.len, "v[2:].len == 2");
+        assert_eq_i64(300, v_start[0], "v[2:][0] == 300");
+
+        Slice<i32> v_end = v[:2];
+        assert_eq_i64(2, v_end.len, "v[:2].len == 2");
+        assert_eq_i64(200, v_end[1], "v[:2][1] == 200");
+
         Slice<i32> v_neg = v[:-1];
         assert_eq_i64(3, v_neg.len, "v[:-1].len == 3");
         assert_eq_i64(300, v_neg[2], "v[:-1][2] == 300");
@@ -86,6 +108,98 @@ i32 main() {
         assert_eq_i64(5, str_slice.len, "str_val[0:5].len == 5");
         assert_eq_i64(104, (i64)str_slice[0], "str_slice[0] == 'h'");
         assert_eq_i64(111, (i64)str_slice[4], "str_slice[4] == 'o'");
+
+        Slice<u8> str_all = str_val[:];
+        assert_eq_i64(11, str_all.len, "str_val[:].len == 11");
+        assert_eq_i64(104, (i64)str_all[0], "str_all[0] == 'h'");
+        assert_eq_i64(100, (i64)str_all[10], "str_all[10] == 'd'");
+
+        Slice<u8> str_rest = str_val[6:];
+        assert_eq_i64(5, str_rest.len, "str_val[6:].len == 5");
+        assert_eq_i64(119, (i64)str_rest[0], "str_rest[0] == 'w'");
+
+        Slice<u8> str_prefix = str_val[:5];
+        assert_eq_i64(5, str_prefix.len, "str_val[:5].len == 5");
+        assert_eq_i64(111, (i64)str_prefix[4], "str_prefix[4] == 'o'");
+
+        Slice<u8> str_neg = str_val[:-6];
+        assert_eq_i64(5, str_neg.len, "str_val[:-6].len == 5");
+        assert_eq_i64(111, (i64)str_neg[4], "str_neg[4] == 'o'");
+    }
+
+    test_start("Primitive str slicing");
+    {
+        str text = "hello world";
+        Slice<u8> s_mid = text[0:5];
+        assert_eq_i64(5, s_mid.len, "text[0:5].len == 5");
+        assert_eq_i64(104, (i64)s_mid[0], "s_mid[0] == 'h'");
+        assert_eq_i64(111, (i64)s_mid[4], "s_mid[4] == 'o'");
+
+        Slice<u8> s_all = text[:];
+        assert_eq_i64(11, s_all.len, "text[:].len == 11");
+        assert_eq_i64(104, (i64)s_all[0], "s_all[0] == 'h'");
+        assert_eq_i64(100, (i64)s_all[10], "s_all[10] == 'd'");
+
+        Slice<u8> s_from = text[6:];
+        assert_eq_i64(5, s_from.len, "text[6:].len == 5");
+        assert_eq_i64(119, (i64)s_from[0], "s_from[0] == 'w'");
+        assert_eq_i64(100, (i64)s_from[4], "s_from[4] == 'd'");
+
+        Slice<u8> s_until = text[:5];
+        assert_eq_i64(5, s_until.len, "text[:5].len == 5");
+        assert_eq_i64(111, (i64)s_until[4], "s_until[4] == 'o'");
+
+        Slice<u8> s_neg = text[:-1];
+        assert_eq_i64(10, s_neg.len, "text[:-1].len == 10");
+        assert_eq_i64(108, (i64)s_neg[9], "s_neg[9] == 'l'");
+
+        Slice<u8> s_neg2 = text[-5:-1];
+        assert_eq_i64(4, s_neg2.len, "text[-5:-1].len == 4");
+        assert_eq_i64(119, (i64)s_neg2[0], "s_neg2[0] == 'w'");
+        assert_eq_i64(108, (i64)s_neg2[3], "s_neg2[3] == 'l'");
+    }
+
+    test_start("String literal slicing");
+    {
+        Slice<u8> lit_slice = "silver lang"[0:6];
+        assert_eq_i64(6, lit_slice.len, "\"silver lang\"[0:6].len == 6");
+        assert_eq_i64(115, (i64)lit_slice[0], "lit_slice[0] == 's'");
+        assert_eq_i64(114, (i64)lit_slice[5], "lit_slice[5] == 'r'");
+
+        Slice<u8> lit_all = "silver"[:];
+        assert_eq_i64(6, lit_all.len, "\"silver\"[:].len == 6");
+
+        Slice<u8> lit_tail = "silver"[2:];
+        assert_eq_i64(4, lit_tail.len, "\"silver\"[2:].len == 4");
+        assert_eq_i64(108, (i64)lit_tail[0], "lit_tail[0] == 'l'");
+
+        Slice<u8> lit_head = "silver"[:4];
+        assert_eq_i64(4, lit_head.len, "\"silver\"[:4].len == 4");
+        assert_eq_i64(118, (i64)lit_head[3], "lit_head[3] == 'v'");
+
+        Slice<u8> lit_neg = "silver"[:-2];
+        assert_eq_i64(4, lit_neg.len, "\"silver\"[:-2].len == 4");
+        assert_eq_i64(118, (i64)lit_neg[3], "lit_neg[3] == 'v'");
+    }
+
+    test_start("Bytes slicing");
+    {
+        Bytes b = Bytes.from_str("hello bytes");
+        Slice<u8> b_slice = b[0:5];
+        assert_eq_i64(5, b_slice.len, "b[0:5].len == 5");
+        assert_eq_i64(104, (i64)b_slice[0], "b_slice[0] == 'h'");
+        assert_eq_i64(111, (i64)b_slice[4], "b_slice[4] == 'o'");
+
+        Slice<u8> b_all = b[:];
+        assert_eq_i64(11, b_all.len, "b[:].len == 11");
+
+        Slice<u8> b_from = b[6:];
+        assert_eq_i64(5, b_from.len, "b[6:].len == 5");
+        assert_eq_i64(98, (i64)b_from[0], "b_from[0] == 'b'");
+
+        Slice<u8> b_neg = b[:-1];
+        assert_eq_i64(10, b_neg.len, "b[:-1].len == 10");
+        assert_eq_i64(101, (i64)b_neg[9], "b_neg[9] == 'e'");
     }
 
     done();

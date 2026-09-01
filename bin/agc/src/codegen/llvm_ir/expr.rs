@@ -1230,69 +1230,89 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } => {
                 let object_ty = self.resolve_receiver_type(object);
                 let i64_ty = self.context.i64_type();
-                let i64_zero = i64_ty.const_zero();
 
-                // Check if the object is a fixed-size Array
+                // Check if the object is a fixed-size Array, str, or Slice
                 if let Some(ty) = &object_ty {
-                    if let ast::TypeKind::Array(array) = ty.kind.as_ref() {
+                    let mut actual_kind = ty.kind.as_ref();
+                    while let ast::TypeKind::Pointer(p) = actual_kind {
+                        actual_kind = p.inner.kind.as_ref();
+                    }
+                    while let ast::TypeKind::Reference(r) = actual_kind {
+                        actual_kind = r.inner.kind.as_ref();
+                    }
+
+                    if let ast::TypeKind::Array(array) = actual_kind {
                         let (base_ptr, _) = self.resolve_lvalue_ptr(object)?;
                         let elem_ty = self.lower_basic_type(&array.element_type)?;
                         let len_val = i64_ty.const_int(array.size as u64, false);
+                        return self.emit_slice_construct(
+                            base_ptr,
+                            elem_ty,
+                            &array.element_type,
+                            len_val,
+                            start.as_deref(),
+                            end.as_deref(),
+                            expr.span,
+                        );
+                    }
 
-                        let start_val = if let Some(s) = start {
-                            let v = self.emit_expression_value(s)?.into_int_value();
-                            self.builder.build_int_cast(v, i64_ty, "slice.start.cast").unwrap_or(v)
-                        } else {
-                            i64_zero
+                    if matches!(actual_kind, ast::TypeKind::Primitive(ast::PrimitiveType::Str)) {
+                        let base_val = self.emit_expression_value(object)?;
+                        let base_ptr = base_val.into_pointer_value();
+                        let elem_ty = self.context.i8_type().as_basic_type_enum();
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let strlen_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+                        let strlen_fn = self
+                            .module
+                            .get_function("strlen")
+                            .unwrap_or_else(|| self.module.add_function("strlen", strlen_ty, None));
+                        let len_call = self
+                            .builder
+                            .build_call(strlen_fn, &[base_ptr.into()], "str.len")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
+                        let len_val = len_call
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| CodegenError::with_span("strlen returned void", expr.span))?
+                            .into_int_value();
+                        let elem_ast_ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::U8)),
+                            span: expr.span,
                         };
+                        return self.emit_slice_construct(
+                            base_ptr,
+                            elem_ty,
+                            &elem_ast_ty,
+                            len_val,
+                            start.as_deref(),
+                            end.as_deref(),
+                            expr.span,
+                        );
+                    }
 
-                        let end_val = if let Some(e) = end {
-                            let v = self.emit_expression_value(e)?.into_int_value();
-                            self.builder.build_int_cast(v, i64_ty, "slice.end.cast").unwrap_or(v)
-                        } else {
-                            len_val
-                        };
-
-                        // Python-style clamping:
-                        let start_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, start_val, i64_zero, "start.is_neg").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let start_adj = self.builder.build_int_add(start_val, len_val, "start.adj").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let start_eff = self.builder.build_select(start_neg, start_adj, start_val, "start.eff").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-                        
-                        let start_lt_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLT, start_eff, i64_zero, "start.lt_zero").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let start_clamp_low = self.builder.build_select(start_lt_zero, i64_zero, start_eff, "start.clamp_low").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-                        let start_gt_len = self.builder.build_int_compare(inkwell::IntPredicate::SGT, start_clamp_low, len_val, "start.gt_len").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let final_start = self.builder.build_select(start_gt_len, len_val, start_clamp_low, "start.final").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-
-                        let end_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, end_val, i64_zero, "end.is_neg").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let end_adj = self.builder.build_int_add(end_val, len_val, "end.adj").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let end_eff = self.builder.build_select(end_neg, end_adj, end_val, "end.eff").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-
-                        let end_lt_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLT, end_eff, i64_zero, "end.lt_zero").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let end_clamp_low = self.builder.build_select(end_lt_zero, i64_zero, end_eff, "end.clamp_low").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-                        let end_gt_len = self.builder.build_int_compare(inkwell::IntPredicate::SGT, end_clamp_low, len_val, "end.gt_len").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let final_end = self.builder.build_select(end_gt_len, len_val, end_clamp_low, "end.final").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-
-                        let raw_len = self.builder.build_int_sub(final_end, final_start, "slice.raw_len").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let len_is_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, raw_len, i64_zero, "slice.len_neg").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let final_len = self.builder.build_select(len_is_neg, i64_zero, raw_len, "slice.len").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?.into_int_value();
-
-                        let elem_ptr = unsafe {
-                            self.builder.build_gep(elem_ty, base_ptr, &[final_start], "slice.ptr")
-                                .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?
-                        };
-
-                        let slice_named = ast::NamedType {
-                            path: vec![ast::Identifier {
-                                name: "Slice".to_string(),
-                                span: expr.span,
-                            }],
-                            generics: Some(vec![*array.element_type.clone()]),
-                        };
-                        let slice_struct_ty = self.ensure_named_struct_type(&slice_named)?;
-                        let undef_struct = slice_struct_ty.get_undef();
-                        let s1 = self.builder.build_insert_value(undef_struct, elem_ptr, 0, "slice.s1").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        let s2 = self.builder.build_insert_value(s1, final_len, 1, "slice.s2").map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
-                        return Ok(s2.as_basic_value_enum());
+                    if let ast::TypeKind::Slice(slice) = actual_kind {
+                        let slice_val = self.emit_expression_value(object)?;
+                        let slice_struct = slice_val.into_struct_value();
+                        let base_ptr = self
+                            .builder
+                            .build_extract_value(slice_struct, 0, "slice.ptr")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?
+                            .into_pointer_value();
+                        let len_val = self
+                            .builder
+                            .build_extract_value(slice_struct, 1, "slice.len")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?
+                            .into_int_value();
+                        let elem_ty = self.lower_basic_type(&slice.element_type)?;
+                        return self.emit_slice_construct(
+                            base_ptr,
+                            elem_ty,
+                            &slice.element_type,
+                            len_val,
+                            start.as_deref(),
+                            end.as_deref(),
+                            expr.span,
+                        );
                     }
                 }
 
@@ -1504,6 +1524,75 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expr.span,
             )),
         }
+    }
+
+    fn emit_slice_construct(
+        &mut self,
+        base_ptr: inkwell::values::PointerValue<'ctx>,
+        elem_ty: inkwell::types::BasicTypeEnum<'ctx>,
+        elem_ast_ty: &ast::Type,
+        len_val: inkwell::values::IntValue<'ctx>,
+        start: Option<&ast::Expression>,
+        end: Option<&ast::Expression>,
+        span: Span,
+    ) -> CodegenResult<inkwell::values::BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i64_zero = i64_ty.const_zero();
+
+        let start_val = if let Some(s) = start {
+            let v = self.emit_expression_value(s)?.into_int_value();
+            self.builder.build_int_cast(v, i64_ty, "slice.start.cast").unwrap_or(v)
+        } else {
+            i64_zero
+        };
+
+        let end_val = if let Some(e) = end {
+            let v = self.emit_expression_value(e)?.into_int_value();
+            self.builder.build_int_cast(v, i64_ty, "slice.end.cast").unwrap_or(v)
+        } else {
+            len_val
+        };
+
+        // Python-style clamping:
+        let start_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, start_val, i64_zero, "start.is_neg").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let start_adj = self.builder.build_int_add(start_val, len_val, "start.adj").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let start_eff = self.builder.build_select(start_neg, start_adj, start_val, "start.eff").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+
+        let start_lt_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLT, start_eff, i64_zero, "start.lt_zero").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let start_clamp_low = self.builder.build_select(start_lt_zero, i64_zero, start_eff, "start.clamp_low").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+        let start_gt_len = self.builder.build_int_compare(inkwell::IntPredicate::SGT, start_clamp_low, len_val, "start.gt_len").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let final_start = self.builder.build_select(start_gt_len, len_val, start_clamp_low, "start.final").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+
+        let end_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, end_val, i64_zero, "end.is_neg").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let end_adj = self.builder.build_int_add(end_val, len_val, "end.adj").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let end_eff = self.builder.build_select(end_neg, end_adj, end_val, "end.eff").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+
+        let end_lt_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLT, end_eff, i64_zero, "end.lt_zero").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let end_clamp_low = self.builder.build_select(end_lt_zero, i64_zero, end_eff, "end.clamp_low").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+        let end_gt_len = self.builder.build_int_compare(inkwell::IntPredicate::SGT, end_clamp_low, len_val, "end.gt_len").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let final_end = self.builder.build_select(end_gt_len, len_val, end_clamp_low, "end.final").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+
+        let raw_len = self.builder.build_int_sub(final_end, final_start, "slice.raw_len").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let len_is_neg = self.builder.build_int_compare(inkwell::IntPredicate::SLT, raw_len, i64_zero, "slice.len_neg").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let final_len = self.builder.build_select(len_is_neg, i64_zero, raw_len, "slice.len").map_err(|e| CodegenError::with_span(e.to_string(), span))?.into_int_value();
+
+        let elem_ptr = unsafe {
+            self.builder.build_gep(elem_ty, base_ptr, &[final_start], "slice.ptr")
+                .map_err(|e| CodegenError::with_span(e.to_string(), span))?
+        };
+
+        let slice_named = ast::NamedType {
+            path: vec![ast::Identifier {
+                name: "Slice".to_string(),
+                span,
+            }],
+            generics: Some(vec![elem_ast_ty.clone()]),
+        };
+        let slice_struct_ty = self.ensure_named_struct_type(&slice_named)?;
+        let undef_struct = slice_struct_ty.get_undef();
+        let s1 = self.builder.build_insert_value(undef_struct, elem_ptr, 0, "slice.s1").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let s2 = self.builder.build_insert_value(s1, final_len, 1, "slice.s2").map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        Ok(s2.as_basic_value_enum())
     }
 
     pub(crate) fn emit_enum_construction_impl(

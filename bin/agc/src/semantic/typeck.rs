@@ -2312,9 +2312,10 @@ impl TypeChecker {
                 let object_ty_display = object_ty.to_string();
 
                 let mut arg_types = Vec::new();
+                let i64_expected = Type::Primitive(ast::PrimitiveType::I64);
 
                 if let Some(s) = start {
-                    let s_ty = self.check_expr(s, None);
+                    let s_ty = self.check_expr(s, Some(&i64_expected));
                     if !is_integer(&s_ty) {
                         self.error(
                             format!("slice start index must be integer, found {}", s_ty),
@@ -2327,7 +2328,7 @@ impl TypeChecker {
                 }
 
                 if let Some(e) = end {
-                    let e_ty = self.check_expr(e, None);
+                    let e_ty = self.check_expr(e, Some(&i64_expected));
                     if !is_integer(&e_ty) {
                         self.error(
                             format!("slice end index must be integer, found {}", e_ty),
@@ -2340,7 +2341,7 @@ impl TypeChecker {
                 }
 
                 if let Some(st) = step {
-                    let st_ty = self.check_expr(st, None);
+                    let st_ty = self.check_expr(st, Some(&i64_expected));
                     if !is_integer(&st_ty) {
                         self.error(
                             format!("slice step must be integer, found {}", st_ty),
@@ -2360,6 +2361,9 @@ impl TypeChecker {
                 }
 
                 match &object_ty {
+                    Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
+                        element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                    },
                     Type::Array { element, .. } => Type::Slice {
                         element: element.clone(),
                     },
@@ -2367,6 +2371,12 @@ impl TypeChecker {
                         element: element.clone(),
                     },
                     Type::Pointer { inner, .. } => match &**inner {
+                        Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
+                            element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                        },
+                        Type::Array { element, .. } => Type::Slice {
+                            element: element.clone(),
+                        },
                         Type::Slice { element } => Type::Slice {
                             element: element.clone(),
                         },
@@ -2391,6 +2401,9 @@ impl TypeChecker {
                         }
                     },
                     Type::Reference { inner, .. } => match &**inner {
+                        Type::Primitive(ast::PrimitiveType::Str) => Type::Slice {
+                            element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                        },
                         Type::Array { element, .. } => Type::Slice {
                             element: element.clone(),
                         },

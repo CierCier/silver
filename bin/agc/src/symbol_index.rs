@@ -71,6 +71,8 @@ pub struct Symbol {
     pub is_static: bool,
     /// Inferred type for an unannotated local binding, when known.
     pub inferred_type: Option<String>,
+    /// True if the type was explicitly specified in the source declaration.
+    pub has_explicit_type: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +305,7 @@ impl Walker<'_> {
             is_mutable,
             is_static,
             inferred_type: None,
+            has_explicit_type: false,
         });
         if let Some(container) = container {
             self.struct_children
@@ -825,6 +828,7 @@ impl Walker<'_> {
             let ty_str = format_type(&p.param_type);
             self.symbols[id].signature = format!("{ty_str} {}", p.name.name);
             self.symbols[id].inferred_type = Some(ty_str);
+            self.symbols[id].has_explicit_type = true;
         }
         self.walk_block(body);
         self.locals.pop();
@@ -949,6 +953,7 @@ impl Walker<'_> {
             ast::StatementKind::Expression(e) => self.walk_expr(e),
             ast::StatementKind::Let(ls) => {
                 let explicit_ty = ls.type_annotation.as_ref().map(format_type);
+                let has_explicit_type = explicit_ty.is_some();
                 let inferred = if let Some(ty_str) = explicit_ty {
                     match &ls.pattern.kind {
                         ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
@@ -985,6 +990,7 @@ impl Walker<'_> {
                 {
                     symbol.signature = format!("{ty} {}", symbol.name);
                     symbol.inferred_type = Some(ty);
+                    symbol.has_explicit_type = has_explicit_type;
                 }
             }
             ast::StatementKind::Return(Some(e)) => {

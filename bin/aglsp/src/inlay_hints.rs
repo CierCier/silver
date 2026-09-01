@@ -42,28 +42,30 @@ pub(crate) fn inlay_hints(analysis: &SymbolIndex) -> Vec<InlayHint> {
             });
         }
     }
-    // Implicit move/copy at let/assign/return/call args (explicit `move` excluded upstream).
+    // Implicit move at let/assign/return/call args (explicit `move` excluded upstream).
     for hint in &analysis.move_hints {
-        let label = match hint.kind {
-            agc::symbol_index::MoveHintKind::Move => "move",
-            agc::symbol_index::MoveHintKind::Copy => "copy",
-        };
-        hints.push(InlayHint {
-            position: byte_to_position(&analysis.text, hint.span.0),
-            label: InlayHintLabel::String(label.to_string()),
-            kind: Some(InlayHintKind::PARAMETER),
-            padding_left: Some(false),
-            padding_right: Some(true),
-            tooltip: None,
-            text_edits: None,
-            data: None,
-        });
+        if hint.kind == agc::symbol_index::MoveHintKind::Move {
+            hints.push(InlayHint {
+                position: byte_to_position(&analysis.text, hint.span.0),
+                label: InlayHintLabel::String("move".to_string()),
+                kind: Some(InlayHintKind::PARAMETER),
+                padding_left: Some(false),
+                padding_right: Some(true),
+                tooltip: None,
+                text_edits: None,
+                data: None,
+            });
+        }
     }
     for symbol in &analysis.symbols {
         let Some(ty) = symbol.inferred_type.as_deref() else {
             continue;
         };
-        if symbol.kind != SymbolKind::Local || symbol.span.file != analysis.buffer_file {
+        // Only show type inlay hint for local variables that do NOT have an explicit type written in the source code.
+        if symbol.kind != SymbolKind::Local
+            || symbol.span.file != analysis.buffer_file
+            || symbol.has_explicit_type
+        {
             continue;
         }
         hints.push(InlayHint {
@@ -148,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_move_and_copy_hints() {
+    fn implicit_move_hints() {
         let analysis = analyze_src(
             "String from_str(String* self, str s) { return String.from_str(s); }\n\
              i32 main() {\n\
@@ -175,15 +177,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // b = a (String) -> move, y = x (i64) -> copy
+        // b = a (String) -> move
+        // y = x (i64) -> copy hint removed
         // c = move a is explicit -> no implicit hint for that `a`
         assert!(
-            move_labels.len() >= 1,
+            !move_labels.is_empty(),
             "expected at least one move hint, got {hints:?}"
         );
         assert!(
-            copy_labels.len() >= 1,
-            "expected at least one copy hint, got {hints:?}"
+            copy_labels.is_empty(),
+            "expected no copy hints, got {copy_labels:?}"
         );
     }
 
@@ -227,5 +230,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn no_redundant_type_hints_on_explicitly_typed_declarations() {
+        let src = r#"
+        i32 main() {
+            i32 explicit_int = 42;
+            str explicit_str = "hello";
+            let inferred_val = 100;
+            return 0;
+        }
+        "#;
+        let analysis = analyze_src(src);
+        let hints = inlay_hints(&analysis);
+
+        let type_hints: Vec<&str> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // Should have a prefix type hint for `inferred_val` ("i128"), but NONE for `explicit_int` or `explicit_str`
+        assert_eq!(
+            type_hints,
+            vec!["i128"],
+            "expected type hint only for inferred variable, got: {type_hints:?}"
+        );
     }
 }

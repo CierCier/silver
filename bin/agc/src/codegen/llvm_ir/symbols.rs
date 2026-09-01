@@ -135,6 +135,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(struct_ty);
         }
 
+        if base_name == "Slice" && !self.struct_fields.contains_key("Slice") {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let i64_ty = self.context.i64_type();
+            struct_ty.set_body(&[ptr_ty.into(), i64_ty.into()], false);
+            return Ok(struct_ty);
+        }
+
         let template_fields = match self.struct_fields.get(&base_name).cloned() {
             Some(fields) => fields,
             None if base_name.starts_with("__") => {
@@ -500,6 +507,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ast::TypeKind::Array(array) => Some(ast::Type {
                         kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
                             element_type: array.element_type.clone(),
+                        }))),
+                        span: object.span,
+                    }),
+                    ast::TypeKind::Primitive(ast::PrimitiveType::Str) => Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                            element_type: Box::new(ast::Type {
+                                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::U8)),
+                                span: object.span,
+                            }),
                         }))),
                         span: object.span,
                     }),
