@@ -20,7 +20,7 @@ Instant now() {
 }
 
 impl Instant {
-    i64 elapsed_ns(Instant* self, Instant earlier) {
+    i64 elapsed_ns(*self, Instant earlier) {
         i64 sec_diff = self.ts.sec - earlier.ts.sec;
         i64 nsec_diff = self.ts.nsec - earlier.ts.nsec;
         return sec_diff * 1000000000 + nsec_diff;
