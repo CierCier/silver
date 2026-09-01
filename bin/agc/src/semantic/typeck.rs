@@ -63,7 +63,7 @@ pub struct TypeChecker {
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
-    pub resolved_iter_types: HashMap<(usize, usize), Box<ast::Type>>,
+    pub resolved_iter_types: HashMap<(u32, usize, usize), Box<ast::Type>>,
     /// Bare enum constructors (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
     /// via expected-type inference during typeck; applied to the AST after typeck.
     pub bare_constructors: HashMap<(u32, usize, usize), BareConstructorRewrite>,
@@ -306,7 +306,7 @@ impl TypeChecker {
     }
 
     /// Consume the resolved iterator types map for post-typeck AST population.
-    pub fn take_resolved_iter_types(&mut self) -> HashMap<(usize, usize), Box<ast::Type>> {
+    pub fn take_resolved_iter_types(&mut self) -> HashMap<(u32, usize, usize), Box<ast::Type>> {
         std::mem::take(&mut self.resolved_iter_types)
     }
 
@@ -2978,7 +2978,7 @@ impl TypeChecker {
 
                         // Store resolved iterator type for codegen
                         self.resolved_iter_types.insert(
-                            (expr.span.start, expr.span.end),
+                            (expr.span.file, expr.span.start, expr.span.end),
                             Box::new(iterator_ty.to_ast()),
                         );
 
@@ -6831,7 +6831,7 @@ pub(crate) fn unary_operator_method_name(operator: &ast::UnaryOperator) -> Optio
 /// using the resolved iterator types collected during type checking.
 pub fn populate_for_in_iterator_types(
     program: &mut ast::Program,
-    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+    resolved_iter_types: &HashMap<(u32, usize, usize), Box<ast::Type>>,
 ) {
     for item in &mut program.items {
         populate_item_for_in_types(item, resolved_iter_types);
@@ -7274,7 +7274,7 @@ fn rewrite_expression_bare_constructors(
 
 fn populate_item_for_in_types(
     item: &mut ast::Item,
-    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+    resolved_iter_types: &HashMap<(u32, usize, usize), Box<ast::Type>>,
 ) {
     match &mut item.kind {
         ast::ItemKind::Function(func) => {
@@ -7296,7 +7296,7 @@ fn populate_item_for_in_types(
 
 fn populate_block_for_in_types(
     block: &mut ast::Block,
-    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+    resolved_iter_types: &HashMap<(u32, usize, usize), Box<ast::Type>>,
 ) {
     for stmt in &mut block.statements {
         populate_statement_for_in_types(stmt, resolved_iter_types);
@@ -7305,7 +7305,7 @@ fn populate_block_for_in_types(
 
 fn populate_statement_for_in_types(
     stmt: &mut ast::Statement,
-    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+    resolved_iter_types: &HashMap<(u32, usize, usize), Box<ast::Type>>,
 ) {
     match &mut stmt.kind {
         ast::StatementKind::Expression(expr) => {
@@ -7338,11 +7338,11 @@ fn populate_statement_for_in_types(
 
 fn populate_expression_for_in_types(
     expr: &mut ast::Expression,
-    resolved_iter_types: &HashMap<(usize, usize), Box<ast::Type>>,
+    resolved_iter_types: &HashMap<(u32, usize, usize), Box<ast::Type>>,
 ) {
     match expr.kind.as_mut() {
         ast::ExpressionKind::ForIn { iterator_type, .. } => {
-            if let Some(iter_ty) = resolved_iter_types.get(&(expr.span.start, expr.span.end)) {
+            if let Some(iter_ty) = resolved_iter_types.get(&(expr.span.file, expr.span.start, expr.span.end)) {
                 *iterator_type = Some(iter_ty.clone());
             }
         }

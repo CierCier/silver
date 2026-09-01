@@ -106,15 +106,15 @@ impl<T> Slice<T> {
     }
 
     /// Returns the first element, or None if empty.
-    Optional<T> first(&self) {
-        if (self.len == 0) { return None; }
-        return Some(self.data[0]);
+    T first(&self) {
+        if (self.len == 0) { abort(); }
+        return self.data[0];
     }
 
     /// Returns the last element, or None if empty.
-    Optional<T> last(&self) {
-        if (self.len == 0) { return None; }
-        return Some(self.data[self.len - 1]);
+    T last(&self) {
+        if (self.len == 0) { abort(); }
+        return self.data[self.len - 1];
     }
 
     /// Returns an iterator over the slice.
@@ -143,9 +143,9 @@ impl<T> Slice<T> {
     }
 
     /// Returns element at index wrapped in Optional, or None if out of bounds.
-    Optional<T> get(&self, i64 index) {
-        if (index < 0 || index >= self.len) { return None; }
-        return Some(self.data[index]);
+    T get(&self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return self.data[index];
     }
 
     /// Reverse slice in-place.

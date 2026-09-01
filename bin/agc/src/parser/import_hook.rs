@@ -145,6 +145,11 @@ impl<'a> FileImportResolverHook<'a> {
             auto_modules.push(vec!["std", "hash"]);
         }
 
+        // @assert -> std.mem.memory (provides __silver_assert_failed)
+        if uses_macro(&program.items, &["assert"]) {
+            auto_modules.push(vec!["std", "mem", "memory"]);
+        }
+
         // @json / @from_json / #[serialize] / #[serialise] -> std.json
         if uses_json_or_serialize(&program.items)
             || uses_macro(&program.items, &["json", "from_json"])

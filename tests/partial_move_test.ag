@@ -1,3 +1,6 @@
+import std.test;
+import std.mem.drop;
+import std.mem.alloc;
 // Integration test for Section 2: Partial Moves and Field-Level Deconstruction.
 
 i64 drop_count = 0;
@@ -22,7 +25,7 @@ Resource make_res(i64 id) {
     alloc_count = alloc_count + 1;
     Resource r;
     r.id = id;
-    r.ptr = (u8*)malloc(32);
+    r.ptr = alloc<u8>(32);
     return r;
 }
 
