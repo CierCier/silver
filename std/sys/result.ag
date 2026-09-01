@@ -83,41 +83,27 @@ impl Result<i64, Error> {
         return Result.Ok(raw);
     }
 
-    // `is_ok`/`is_err` predicates are defined here (concrete specialization)
-    // rather than on the generic impl: see the generic-param collision note
-    // in TODO.md — a generic is_err(&Result<T, E>) breaks whenever a user
-    // program declares a type named `T` (typeck.rs collect_implicit_type_
-    // params_ordered drops names that match known types).
-
-    bool is_ok(Result<i64, Error> self) {
-        return match self { Ok(v) : true, Err(e) : false };
-    }
-
-    bool is_err(Result<i64, Error> self) {
-        return match self { Ok(v) : false, Err(e) : true };
-    }
-
     // True when this result failed with exactly errno `err`.
-    bool err_is(Result<i64, Error> self, i64 err) {
+    bool err_is(&self, i64 err) {
         return self.is_err() && self.errno() == err;
     }
 
     // The successful value, or 0 when the result is an error.
-    i64 value(Result<i64, Error> self) {
-        return match self { Ok(v) : v, Err(e) : (i64)0 };
+    i64 value(&self) {
+        return match *self { Ok(v) : v, Err(e) : (i64)0 };
     }
 
     // The positive errno when the result is an error, or 0 on success.
-    i64 errno(Result<i64, Error> self) {
-        return match self {
+    i64 errno(&self) {
+        return match *self {
             Ok(v) : (i64)0,
             Err(e) : e.code
         };
     }
 
     // Symbolic errno name ("EOK" when the call succeeded).
-    str err_name(Result<i64, Error> self) {
-        return match self {
+    str err_name(&self) {
+        return match *self {
             Ok(v) : "EOK",
             Err(e) : e.message
         };

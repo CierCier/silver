@@ -4882,6 +4882,30 @@ impl PRT_Parser {
                 return Some((param, name_idx + 1));
             }
         }
+        // `*self` — pointer receiver.
+        if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Star)) {
+            let name_idx = cursor + 1;
+            if is_self_ident(name_idx) && ends_param(name_idx + 1) && name_idx < end {
+                let span = tokens[cursor].span.extend_to(&tokens[name_idx].span);
+                let param = ast::Parameter {
+                    name: ast::Identifier {
+                        name: "self".to_string(),
+                        span: tokens[name_idx].span,
+                    },
+                    param_type: ast::Type {
+                        kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                            inner: Box::new(self_type(tokens[name_idx].span)),
+                            is_mutable: true,
+                            is_volatile: false,
+                        })),
+                        span,
+                    },
+                    is_mutable: true,
+                    span,
+                };
+                return Some((param, name_idx + 1));
+            }
+        }
         None
     }
 
