@@ -129,7 +129,7 @@ void h2_free_response(H2Response* r) {
 /// std/net). Multiplexed responses live in c.streams[*].resp and are owned
 /// by the connection — callers read them, never free them by hand.
 impl Drop for H2Connection {
-    void drop(H2Connection* self) {
+    void drop(*self) {
         i64 i = 0;
         while (i < H2_MAX_STREAMS) {
             if (self.streams[i].active || self.streams[i].resp.body != (u8*)0
