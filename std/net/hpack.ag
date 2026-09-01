@@ -266,7 +266,7 @@ void hpack_clear_table(HpackDecoder* d) {
 /// the decoder goes out of scope (embedded in H2Connection, whose own Drop
 /// clears it first; the double clear is a no-op).
 impl Drop for HpackDecoder {
-    void drop(HpackDecoder* self) {
+    void drop(*self) {
         hpack_clear_table(self);
     }
 }
