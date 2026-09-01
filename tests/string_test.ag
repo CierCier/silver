@@ -477,13 +477,13 @@ i32 main(){
     test_start("split_once, strip_prefix, strip_suffix, trim_start, trim_end");
     {
         String kv = String.from_str("key=value:123");
-        Optional<StringPair> pair_opt = kv.split_once("=");
+        Optional<[String, String]> pair_opt = kv.split_once("=");
         assert_true(pair_opt.is_some(), "split_once found =");
-        StringPair p = pair_opt.unwrap();
-        assert_true(p.first == "key", "first is 'key'");
-        assert_true(p.second == "value:123", "second is 'value:123'");
-        p.first.drop();
-        p.second.drop();
+        let [k, v] = pair_opt.unwrap();
+        assert_true(k == "key", "first is 'key'");
+        assert_true(v == "value:123", "second is 'value:123'");
+        k.drop();
+        v.drop();
         kv.drop();
 
         String url = String.from_str("https://example.com/path");

@@ -66,7 +66,7 @@ pub struct TypeChecker {
     pub resolved_iter_types: HashMap<(usize, usize), Box<ast::Type>>,
     /// Bare enum constructors (`Some(x)`, `None`, `Ok(x)`, `Err(x)`) resolved
     /// via expected-type inference during typeck; applied to the AST after typeck.
-    pub bare_constructors: HashMap<(usize, usize), BareConstructorRewrite>,
+    pub bare_constructors: HashMap<(u32, usize, usize), BareConstructorRewrite>,
     /// Implicit guards: binary operators on bare type params recorded while
     /// checking a generic function body, keyed by function/method signature.
     /// Checked at every concrete monomorphization request.
@@ -311,7 +311,7 @@ impl TypeChecker {
     }
 
     /// Consume bare-constructor rewrite records for post-typeck AST rewriting.
-    pub fn take_bare_constructors(&mut self) -> HashMap<(usize, usize), BareConstructorRewrite> {
+    pub fn take_bare_constructors(&mut self) -> HashMap<(u32, usize, usize), BareConstructorRewrite> {
         std::mem::take(&mut self.bare_constructors)
     }
 
@@ -5328,14 +5328,12 @@ impl TypeChecker {
             _ => return None,
         };
         // The expected type must be the matching enum with concrete args.
-        let Type::Named {
-            path: exp_path,
-            generics: exp_generics,
-        } = expected?
-        else {
-            return None;
+        let (exp_enum_name, exp_generics) = match expected? {
+            Type::Named { path, generics } => (path.last()?.as_str(), generics.clone()),
+            Type::Optional { inner } => ("Optional", vec![*inner.clone()]),
+            _ => return None,
         };
-        if exp_path.len() != 1 || exp_path[0] != enum_name {
+        if exp_enum_name != enum_name {
             return None;
         }
         let enum_def = self.enum_defs.get(enum_name)?;
@@ -5378,7 +5376,7 @@ impl TypeChecker {
                     .collect()
             };
         self.bare_constructors.insert(
-            (span.start, span.end),
+            (span.file, span.start, span.end),
             BareConstructorRewrite {
                 enum_name: enum_name.to_string(),
                 variant: variant.to_string(),
@@ -6845,7 +6843,7 @@ pub fn populate_for_in_iterator_types(
 /// expected-type inference recorded during typeck.
 pub fn rewrite_bare_constructors(
     program: &mut ast::Program,
-    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+    rewrites: &HashMap<(u32, usize, usize), BareConstructorRewrite>,
 ) {
     for item in &mut program.items {
         rewrite_item_bare_constructors(item, rewrites);
@@ -7023,7 +7021,7 @@ fn populate_expr_blocks_inferred_let_types(
 
 fn rewrite_item_bare_constructors(
     item: &mut ast::Item,
-    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+    rewrites: &HashMap<(u32, usize, usize), BareConstructorRewrite>,
 ) {
     match &mut item.kind {
         ast::ItemKind::Function(func) => {
@@ -7045,7 +7043,7 @@ fn rewrite_item_bare_constructors(
 
 fn rewrite_block_bare_constructors(
     block: &mut ast::Block,
-    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+    rewrites: &HashMap<(u32, usize, usize), BareConstructorRewrite>,
 ) {
     for stmt in &mut block.statements {
         rewrite_statement_bare_constructors(stmt, rewrites);
@@ -7054,7 +7052,7 @@ fn rewrite_block_bare_constructors(
 
 fn rewrite_statement_bare_constructors(
     stmt: &mut ast::Statement,
-    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+    rewrites: &HashMap<(u32, usize, usize), BareConstructorRewrite>,
 ) {
     match &mut stmt.kind {
         ast::StatementKind::Expression(expr)
@@ -7078,9 +7076,9 @@ fn rewrite_statement_bare_constructors(
 
 fn rewrite_expression_bare_constructors(
     expr: &mut ast::Expression,
-    rewrites: &HashMap<(usize, usize), BareConstructorRewrite>,
+    rewrites: &HashMap<(u32, usize, usize), BareConstructorRewrite>,
 ) {
-    let key = (expr.span.start, expr.span.end);
+    let key = (expr.span.file, expr.span.start, expr.span.end);
     if let Some(rewrite) = rewrites.get(&key).cloned() {
         let receiver_ty = ast::Type {
             kind: Box::new(ast::TypeKind::Named(ast::NamedType {
@@ -7104,14 +7102,24 @@ fn rewrite_expression_bare_constructors(
             ast::ExpressionKind::Call { arguments, .. } => arguments.clone(),
             _ => Vec::new(),
         };
-        *expr.kind = ast::ExpressionKind::MethodCall {
-            receiver: Box::new(receiver),
-            method: ast::Identifier {
-                name: rewrite.variant.clone(),
-                span: expr.span,
-            },
-            arguments: args,
-        };
+        if args.is_empty() && matches!(expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
+            *expr.kind = ast::ExpressionKind::FieldAccess {
+                object: Box::new(receiver),
+                field: ast::Identifier {
+                    name: rewrite.variant.clone(),
+                    span: expr.span,
+                },
+            };
+        } else {
+            *expr.kind = ast::ExpressionKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: ast::Identifier {
+                    name: rewrite.variant.clone(),
+                    span: expr.span,
+                },
+                arguments: args,
+            };
+        }
         return;
     }
     match expr.kind.as_mut() {

@@ -7,7 +7,6 @@ import std.hash;
 import std.io.file;
 import std.mem.drop;
 import std.iter;
-import std.pair;
 
 // Internal entry state: Swiss Table 16-byte metadata control groups.
 // Control byte values:
@@ -325,20 +324,16 @@ impl HashMap<K, V> {
         return false;
     }
 
-    /// Remove key and return its owned `(K, V)` pair, or `none`.
-    /// Moves ownership out of the table (`move keys[idx]`/`move values[idx]`)
-    /// so non-Copy K/V transfers instead of duplicating pointers; slot then
-    /// tombstoned. `erase` leaks owned K/V by design (no move).
-    Optional<Pair<K, V>> remove(&mut HashMap<K, V> self, K key) {
+    Optional<[K, V]> remove(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
-            return Optional<Pair<K, V>>.none();
+            return None;
         }
         K k = move self.keys[idx];
         V v = move self.values[idx];
         self.set_ctrl(idx, CTRL_DELETED);
         self.len = self.len - 1;
-        return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
+        return Some([move k, move v]);
     }
 
     /// Mutable value access. Returns null when the key is absent.
@@ -709,12 +704,12 @@ impl<K, V> Drop for HashMapDrain<K, V> {
     }
 }
 impl<K, V> Iterator for HashMapDrain<K, V> {
-    type Item = Pair<K, V>;
-    /// Draining iterator — moves each pair out (`move keys[idx]`/`move values[idx]`)
+    type Item = [K, V];
+    /// Draining iterator — moves each tuple out (`move keys[idx]`/`move values[idx]`)
     /// so owned T transfers; same `move` is a copy for `Copy` T.
-    Optional<Pair<K, V>> next(HashMapDrain<K, V>* self) {
+    Optional<[K, V]> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<Pair<K, V>>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
@@ -722,11 +717,11 @@ impl<K, V> Iterator for HashMapDrain<K, V> {
                 K k = move self.keys[self.idx];
                 V v = move self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<Pair<K, V>>.some(Pair<K, V>.new(move k, move v));
+                return Some([move k, move v]);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<Pair<K, V>>.none();
+        return None;
     }
 }
 struct HashMapEntryRef<K, V> {

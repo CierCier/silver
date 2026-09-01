@@ -64,11 +64,11 @@ i32 main() {
         m.insert(3, (i64)300);
         assert_eq_i64(m.len(), 3, "len=3 before remove");
 
-        Optional<Pair<i32, i64>> removed = m.remove(2);
+        Optional<[i32, i64]> removed = m.remove(2);
         assert_true(removed.is_some(), "remove(2) returns some");
-        Pair<i32, i64> p = removed.unwrap();
-        assert_eq_i64((i64)p.first, (i64)2, "removed key is 2");
-        assert_eq_i64((i64)p.second, (i64)200, "removed value is 200");
+        let [k, v] = removed.unwrap();
+        assert_eq_i64((i64)k, (i64)2, "removed key is 2");
+        assert_eq_i64((i64)v, (i64)200, "removed value is 200");
         assert_eq_i64(m.len(), 2, "len=2 after remove");
         assert_true(!m.contains_key(2), "key 2 gone after remove");
         assert_true(m.contains_key(1), "key 1 still present");
@@ -80,7 +80,7 @@ i32 main() {
         assert_eq_i64(m.len(), 3, "len=3 after re-insert");
 
         // Remove a missing key.
-        Optional<Pair<i32, i64>> gone = m.remove(99);
+        Optional<[i32, i64]> gone = m.remove(99);
         assert_true(gone.is_none(), "remove(99) returns none");
         assert_eq_i64(m.len(), 3, "len unchanged after missing remove");
 
@@ -157,10 +157,10 @@ i32 main() {
         i64 sum = 0;
         i64 count = 0;
         while (true) {
-            Optional<Pair<i32, i64>> opt = dr.next();
+            Optional<[i32, i64]> opt = dr.next();
             if (opt.is_none()) { break; }
-            Pair<i32, i64> p = opt.unwrap();
-            sum = sum + p.second;
+            let [_k, v] = opt.unwrap();
+            sum = sum + v;
             count = count + 1;
         }
         assert_eq_i64(count, 3, "drain yields 3 pairs");

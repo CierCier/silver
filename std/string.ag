@@ -17,11 +17,6 @@ struct String {
     i64 len;
     i64 capacity;
 }
-struct StringPair {
-    String first;
-    String second;
-}
-
 
 impl String {
     String new() {
@@ -652,18 +647,15 @@ impl String {
         }
         return res;
     }
-    Optional<StringPair> split_once(&String self, str delimiter) {
+    Optional<[String, String]> split_once(&self, str delimiter) {
         i64 idx = self.find(delimiter);
         if (idx < 0) {
-            return Optional<StringPair>.none();
+            return None;
         }
         i64 delim_len = strlen(delimiter);
         String first = self.substr(0, idx);
         String second = self.substr(idx + delim_len, self.len - (idx + delim_len));
-        StringPair p;
-        p.first = move first;
-        p.second = move second;
-        return Optional<StringPair>.some(move p);
+        return Some([move first, move second]);
     }
     String strip_prefix(&String self, str prefix) {
         if (self.starts_with(prefix)) {

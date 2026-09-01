@@ -783,6 +783,13 @@ impl<'a> ParallelGraphExecutor<'a> {
             return Err(format!("type errors in {}", node.source_path.display()));
         }
 
+        let bare_constructors = checker.take_bare_constructors();
+        if !bare_constructors.is_empty() {
+            crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &bare_constructors);
+        }
+
+        let mut monomorphs = monomorphs;
+        crate::semantic::monomorph::refresh_monomorph_bodies(&mut monomorphs, &ast);
         crate::semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &import_lowering.module_artifacts);
 
         // Mark library items public and inlined non-library items private

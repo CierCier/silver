@@ -1118,6 +1118,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             },
             BasicValueEnum::FloatValue(_) => ast::TypeKind::Primitive(ast::PrimitiveType::F64),
             BasicValueEnum::PointerValue(_) => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
+            BasicValueEnum::StructValue(sv) => {
+                if let Some(c_name) = sv.get_type().get_name() {
+                    let name_str = c_name.to_str().unwrap_or("");
+                    let clean = name_str.strip_prefix("struct.").unwrap_or(name_str);
+                    if !clean.is_empty() {
+                        ast::TypeKind::Named(ast::NamedType {
+                            path: vec![ast::Identifier {
+                                name: clean.to_string(),
+                                span: *span,
+                            }],
+                            generics: None,
+                        })
+                    } else {
+                        ast::TypeKind::Primitive(ast::PrimitiveType::I64)
+                    }
+                } else {
+                    ast::TypeKind::Primitive(ast::PrimitiveType::I64)
+                }
+            }
             _ => ast::TypeKind::Primitive(ast::PrimitiveType::I64),
         };
 

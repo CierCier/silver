@@ -1107,53 +1107,7 @@ pub fn run(cli: Cli) {
                 // Monomorph request bodies were cloned before these rewrites;
                 // refresh them from the populated AST so generic instances
                 // carry iterator types and materialized let annotations.
-                if !resolved_iter_types.is_empty() || !inferred_lets.is_empty() {
-                    for request in &mut monomorphs {
-                        use crate::semantic::monomorph::MonomorphRequest;
-                        match request {
-                            MonomorphRequest::Function { source, .. } => {
-                                for item in &ast.items {
-                                    if let ast::ItemKind::Function(f) = &item.kind
-                                        && f.name.name == source.name.name
-                                    {
-                                        source.body = f.body.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                            MonomorphRequest::ImplMethod {
-                                impl_item, method, ..
-                            } => {
-                                // Find matching impl in the populated AST and
-                                // replace the method body.
-                                for item in &ast.items {
-                                    if let ast::ItemKind::Impl(impl_item_ast) = &item.kind
-                                        && impl_item_ast.self_type == impl_item.self_type
-                                    {
-                                        for member in &impl_item_ast.items {
-                                            if let ast::ImplItemKind::Function(func) = member
-                                                && func.name.name == method.name.name
-                                            {
-                                                // Find matching method in our source impl
-                                                for source_member in &mut impl_item.items {
-                                                    if let ast::ImplItemKind::Function(source_func) =
-                                                        source_member
-                                                        && source_func.name.name == method.name.name
-                                                    {
-                                                        source_func.body = func.body.clone();
-                                                        break;
-                                                    }
-                                                }
-                                                break;
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                crate::semantic::monomorph::refresh_monomorph_bodies(&mut monomorphs, &ast);
                 if !type_errors.is_empty() {
                     for error in &type_errors {
                         eprintln!(
