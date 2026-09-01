@@ -79,24 +79,24 @@ impl HashSet<K> {
         return s;
     }
 
-    i64 len(&HashSet<K> self) {
+    i64 len(&self) {
         return self.len;
     }
 
-    bool is_empty(&HashSet<K> self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
     // -- internal helpers --
 
-    void set_ctrl(&mut HashSet<K> self, i64 idx, u8 val) {
+    void set_ctrl(&mut self, i64 idx, u8 val) {
         self.ctrl[idx] = val;
         if (idx < 16) {
             self.ctrl[self.capacity + idx] = val;
         }
     }
 
-    void grow(&mut HashSet<K> self, i64 min_capacity) {
+    void grow(&mut self, i64 min_capacity) {
         i64 new_cap = self.capacity;
         if (new_cap == 0) {
             new_cap = SET_INITIAL_CAPACITY;
@@ -144,7 +144,7 @@ impl HashSet<K> {
         self.capacity = new_cap;
     }
 
-    i64 find_slot(&HashSet<K> self, K key) {
+    i64 find_slot(&self, K key) {
         if (self.capacity == 0 || self.len == 0) {
             return -1;
         }
@@ -153,7 +153,7 @@ impl HashSet<K> {
         return self.find_slot_with_hash(key, h);
     }
 
-    i64 find_slot_with_hash(&HashSet<K> self, K key, i64 h) {
+    i64 find_slot_with_hash(&self, K key, i64 h) {
         u8 h2 = set_h2(h);
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
@@ -179,7 +179,7 @@ impl HashSet<K> {
     }
 
     // Returns slot index, dedup-aware. Caller must have grown.
-    i64 _insert_at(&mut HashSet<K> self, i64 h, u8 h2, K key) {
+    i64 _insert_at(&mut self, i64 h, u8 h2, K key) {
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
         i64 first_available = -1;
@@ -217,7 +217,7 @@ impl HashSet<K> {
     // -- public API --
 
     /// Insert key. Returns true if newly inserted, false if already present.
-    bool insert(&mut HashSet<K> self, K key) {
+    bool insert(&mut self, K key) {
         i64 cap = self.capacity;
         if (cap == 0) {
             self.grow(SET_INITIAL_CAPACITY);
@@ -235,13 +235,13 @@ impl HashSet<K> {
         return self.len != before;
     }
 
-    bool contains(&HashSet<K> self, K key) {
+    bool contains(&self, K key) {
         return self.find_slot(key) >= 0;
     }
 
     /// Remove key. Returns true if present (tombstones slot).
     /// Leaks owned K — use take/drain for Drop types.
-    bool erase(&mut HashSet<K> self, K key) {
+    bool erase(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0) {
             self.set_ctrl(idx, SET_CTRL_DELETED);
@@ -252,12 +252,12 @@ impl HashSet<K> {
     }
 
     /// Alias for erase — requested API name.
-    bool remove(&mut HashSet<K> self, K key) {
+    bool remove(&mut self, K key) {
         return self.erase(key);
     }
 
     /// Remove and return owned K, or none if absent.
-    Optional<K> take(&mut HashSet<K> self, K key) {
+    Optional<K> take(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
             return Optional<K>.none();
@@ -267,7 +267,7 @@ impl HashSet<K> {
         self.len = self.len - 1;
         return Optional<K>.some(k);
     }
-    void reserve(&mut HashSet<K> self, i64 additional) {
+    void reserve(&mut self, i64 additional) {
         if (additional <= 0) { return; }
         i64 required = self.len + additional;
         i64 cap = self.capacity;
@@ -287,7 +287,7 @@ impl HashSet<K> {
         self.grow(target);
     }
 
-    void shrink_to_fit(&mut HashSet<K> self) {
+    void shrink_to_fit(&mut self) {
         i64 cap = self.capacity;
         if (cap == 0) { return; }
         i64 target = SET_INITIAL_CAPACITY;
@@ -304,7 +304,7 @@ impl HashSet<K> {
 
     /// Remove all entries and release backing memory.
     /// Leaks owned K — drain first for Drop types.
-    void clear(&mut HashSet<K> self) {
+    void clear(&mut self) {
         if (self.ctrl != (u8*)0) {
             free(self.keys);
             free(self.ctrl);
@@ -315,7 +315,7 @@ impl HashSet<K> {
         self.len = 0;
     }
 
-    HashSetDrain<K> drain(&mut HashSet<K> self) {
+    HashSetDrain<K> drain(&mut self) {
         HashSetDrain<K> d;
         d.keys = self.keys;
         d.ctrl = self.ctrl;
@@ -328,7 +328,7 @@ impl HashSet<K> {
         return d;
     }
 
-    HashSetIter<K> iter(&HashSet<K> self) {
+    HashSetIter<K> iter(&self) {
         HashSetIter<K> it;
         it.keys = self.keys;
         it.ctrl = self.ctrl;
@@ -340,7 +340,7 @@ impl HashSet<K> {
     // -- set algebra (owned returns) --
 
     /// self ∪ other — all keys from either set.
-    HashSet<K> union(&HashSet<K> self, &HashSet<K> other) {
+    HashSet<K> union(&self, &HashSet<K> other) {
         HashSet<K> out = HashSet<K>.new();
         out.reserve(self.len + other.len);
         for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -357,7 +357,7 @@ impl HashSet<K> {
     }
 
     /// self ∩ other — keys present in both.
-    HashSet<K> intersection(&HashSet<K> self, &HashSet<K> other) {
+    HashSet<K> intersection(&self, &HashSet<K> other) {
         HashSet<K> out = HashSet<K>.new();
         if (self.len <= other.len) {
             out.reserve(self.len);
@@ -384,7 +384,7 @@ impl HashSet<K> {
     }
 
     /// self \ other — keys in self but not in other.
-    HashSet<K> difference(&HashSet<K> self, &HashSet<K> other) {
+    HashSet<K> difference(&self, &HashSet<K> other) {
         HashSet<K> out = HashSet<K>.new();
         out.reserve(self.len);
         for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -399,7 +399,7 @@ impl HashSet<K> {
     }
 
     /// (self \ other) ∪ (other \ self) — keys in exactly one set.
-    HashSet<K> symmetric_difference(&HashSet<K> self, &HashSet<K> other) {
+    HashSet<K> symmetric_difference(&self, &HashSet<K> other) {
         HashSet<K> out = HashSet<K>.new();
         out.reserve(self.len + other.len);
         for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -421,7 +421,7 @@ impl HashSet<K> {
         return out;
     }
 
-    bool is_subset(&HashSet<K> self, &HashSet<K> other) {
+    bool is_subset(&self, &HashSet<K> other) {
         if (self.len > other.len) { return false; }
         for (i64 i = 0; i < self.capacity; i = i + 1) {
             if (self.ctrl[i] < (u8)0x80) {
@@ -433,11 +433,11 @@ impl HashSet<K> {
         return true;
     }
 
-    bool is_superset(&HashSet<K> self, &HashSet<K> other) {
+    bool is_superset(&self, &HashSet<K> other) {
         return other.is_subset(self);
     }
 
-    bool is_disjoint(&HashSet<K> self, &HashSet<K> other) {
+    bool is_disjoint(&self, &HashSet<K> other) {
         if (self.len <= other.len) {
             for (i64 i = 0; i < self.capacity; i = i + 1) {
                 if (self.ctrl[i] < (u8)0x80) {
@@ -460,7 +460,7 @@ impl HashSet<K> {
 }
 impl<K> Drop for HashSet<K> {
     /// Frees backing memory. Does NOT iterate per-element drops.
-    void drop(HashSet<K>* self) {
+    void drop(*self) {
         if (self.ctrl != (u8*)0) {
             free(self.keys);
             free(self.ctrl);
@@ -479,7 +479,7 @@ struct HashSetIter<K> {
 }
 impl<K> Iterator for HashSetIter<K> {
     type Item = K;
-    Optional<K> next(HashSetIter<K>* self) {
+    Optional<K> next(*self) {
         if (self.ctrl == (u8*)0) {
             return Optional<K>.none();
         }
@@ -503,7 +503,7 @@ struct HashSetDrain<K> {
 }
 impl<K> Iterator for HashSetDrain<K> {
     type Item = K;
-    Optional<K> next(HashSetDrain<K>* self) {
+    Optional<K> next(*self) {
         if (self.ctrl == (u8*)0) {
             return Optional<K>.none();
         }
