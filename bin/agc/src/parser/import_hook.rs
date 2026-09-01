@@ -112,12 +112,12 @@ impl<'a> FileImportResolverHook<'a> {
             );
         }
 
+        let mut auto_modules: Vec<Vec<&str>> = Vec::new();
+
         // Auto-import: bare enum constructors (`Some`/`None` for Optional,
         // `Ok`/`Err` for Result) resolve via typeck's expected-type inference
         // but need the enum types registered. Inject the matching std module
         // when the source uses those bare names without an explicit import.
-        // `seen_modules` dedupes against explicit `import std.optional;` /
-        // `import std.result;`.
         for (ctor, module_path) in [
             ("Some", vec!["std", "optional"]),
             ("None", vec!["std", "optional"]),
@@ -125,34 +125,36 @@ impl<'a> FileImportResolverHook<'a> {
             ("Err", vec!["std", "result"]),
         ] {
             if uses_bare_constructor(&program.items, ctor) {
-                let module_key = module_path.join(".");
-                if !self.seen_modules.contains(&module_key) {
-                    program.items.insert(
-                        0,
-                        ast::Item {
-                            kind: ast::ItemKind::Import(ast::ImportItem {
-                                path: module_path
-                                    .into_iter()
-                                    .map(|seg| ast::Identifier {
-                                        name: seg.to_string(),
-                                        span: lexer::Span::default(),
-                                    })
-                                    .collect(),
-                                selection: None,
-                            }),
-                            span: lexer::Span::default(),
-                            visibility: ast::Visibility::Private,
-                            attributes: Vec::new(),
-                        },
-                    );
-                }
+                auto_modules.push(module_path);
             }
         }
 
-        if uses_json_or_serialize(&program.items) {
-            let module_path = vec!["std", "json"];
-            let module_key = "std.json";
-            if !self.seen_modules.contains(module_key) {
+        // Auto-import for builtin macros:
+        // @print / @println / @eprint / @eprintln / @fprint / @sprint / @format -> std.io
+        if uses_macro(
+            &program.items,
+            &[
+                "print", "println", "eprint", "eprintln", "fprint", "sprint", "format",
+            ],
+        ) {
+            auto_modules.push(vec!["std", "io"]);
+        }
+
+        // @hash -> std.hash
+        if uses_macro(&program.items, &["hash"]) {
+            auto_modules.push(vec!["std", "hash"]);
+        }
+
+        // @json / @from_json / #[serialize] / #[serialise] -> std.json
+        if uses_json_or_serialize(&program.items)
+            || uses_macro(&program.items, &["json", "from_json"])
+        {
+            auto_modules.push(vec!["std", "json"]);
+        }
+
+        for module_path in auto_modules {
+            let module_key = module_path.join(".");
+            if !self.seen_modules.contains(&module_key) {
                 program.items.insert(
                     0,
                     ast::Item {
@@ -758,23 +760,28 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
 
 fn uses_json_or_serialize(items: &[ast::Item]) -> bool {
     items.iter().any(|item| {
-        if item.attributes.iter().any(|attr| attr.name.name == "serialize" || attr.name.name == "serialise") {
-            return true;
-        }
+        item.attributes
+            .iter()
+            .any(|attr| attr.name.name == "serialize" || attr.name.name == "serialise")
+    })
+}
+
+fn uses_macro(items: &[ast::Item], macro_names: &[&str]) -> bool {
+    items.iter().any(|item| {
         let mut found = false;
         match &item.kind {
             ast::ItemKind::Function(func) => {
-                scan_block_for_json(&func.body, &mut found);
+                scan_block_for_macro(&func.body, macro_names, &mut found);
             }
             ast::ItemKind::Impl(impl_item) => {
                 for member in &impl_item.items {
                     if let ast::ImplItemKind::Function(func) = member {
-                        scan_block_for_json(&func.body, &mut found);
+                        scan_block_for_macro(&func.body, macro_names, &mut found);
                     }
                 }
             }
             ast::ItemKind::Macro(def) => {
-                scan_block_for_json(&def.body, &mut found);
+                scan_block_for_macro(&def.body, macro_names, &mut found);
             }
             _ => {}
         }
@@ -782,26 +789,26 @@ fn uses_json_or_serialize(items: &[ast::Item]) -> bool {
     })
 }
 
-fn scan_block_for_json(block: &ast::Block, found: &mut bool) {
+fn scan_block_for_macro(block: &ast::Block, macro_names: &[&str], found: &mut bool) {
     for stmt in &block.statements {
         match &stmt.kind {
             ast::StatementKind::Let(let_stmt) => {
                 if let Some(init) = &let_stmt.initializer {
-                    scan_expr_for_json(init, found);
+                    scan_expr_for_macro(init, macro_names, found);
                 }
             }
             ast::StatementKind::Expression(expr)
             | ast::StatementKind::Return(Some(expr))
             | ast::StatementKind::Break(Some(expr)) => {
-                scan_expr_for_json(expr, found);
+                scan_expr_for_macro(expr, macro_names, found);
             }
-            ast::StatementKind::Block(block) => scan_block_for_json(block, found),
+            ast::StatementKind::Block(block) => scan_block_for_macro(block, macro_names, found),
             ast::StatementKind::Defer(inner) => match &inner.kind {
                 ast::StatementKind::Expression(expr) => {
-                    scan_expr_for_json(expr, found);
+                    scan_expr_for_macro(expr, macro_names, found);
                 }
                 ast::StatementKind::Block(block) => {
-                    scan_block_for_json(block, found);
+                    scan_block_for_macro(block, macro_names, found);
                 }
                 _ => {}
             },
@@ -813,23 +820,29 @@ fn scan_block_for_json(block: &ast::Block, found: &mut bool) {
     }
 }
 
-fn scan_expr_for_json(expr: &ast::Expression, found: &mut bool) {
+fn scan_expr_for_macro(expr: &ast::Expression, macro_names: &[&str], found: &mut bool) {
     if *found {
         return;
     }
     match expr.kind.as_ref() {
-        ast::ExpressionKind::MacroCall { name, .. } => {
-            if name.name == "json" || name.name == "from_json" {
+        ast::ExpressionKind::MacroCall { name, args } => {
+            if macro_names.contains(&name.name.as_str()) {
                 *found = true;
+                return;
+            }
+            for arg in args {
+                if let ast::MacroArg::Expression(arg_expr) = arg {
+                    scan_expr_for_macro(arg_expr, macro_names, found);
+                }
             }
         }
         ast::ExpressionKind::Call {
             function,
             arguments,
         } => {
-            scan_expr_for_json(function, found);
+            scan_expr_for_macro(function, macro_names, found);
             for arg in arguments {
-                scan_expr_for_json(arg, found);
+                scan_expr_for_macro(arg, macro_names, found);
             }
         }
         ast::ExpressionKind::MethodCall {
@@ -837,14 +850,14 @@ fn scan_expr_for_json(expr: &ast::Expression, found: &mut bool) {
             arguments,
             ..
         } => {
-            scan_expr_for_json(receiver, found);
+            scan_expr_for_macro(receiver, macro_names, found);
             for arg in arguments {
-                scan_expr_for_json(arg, found);
+                scan_expr_for_macro(arg, macro_names, found);
             }
         }
         ast::ExpressionKind::Binary { left, right, .. } => {
-            scan_expr_for_json(left, found);
-            scan_expr_for_json(right, found);
+            scan_expr_for_macro(left, macro_names, found);
+            scan_expr_for_macro(right, macro_names, found);
         }
         ast::ExpressionKind::Unary { operand, .. }
         | ast::ExpressionKind::Postfix { operand, .. }
@@ -856,40 +869,104 @@ fn scan_expr_for_json(expr: &ast::Expression, found: &mut bool) {
         }
         | ast::ExpressionKind::Launch(operand)
         | ast::ExpressionKind::Wait(operand) => {
-            scan_expr_for_json(operand, found);
+            scan_expr_for_macro(operand, macro_names, found);
         }
-        ast::ExpressionKind::Block(block) => scan_block_for_json(block, found),
+        ast::ExpressionKind::Block(block) => scan_block_for_macro(block, macro_names, found),
         ast::ExpressionKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            scan_expr_for_json(condition, found);
-            scan_expr_for_json(then_expr, found);
-            scan_expr_for_json(else_expr, found);
+            scan_expr_for_macro(condition, macro_names, found);
+            scan_expr_for_macro(then_expr, macro_names, found);
+            scan_expr_for_macro(else_expr, macro_names, found);
         }
         ast::ExpressionKind::UnwrapOr { value, fallback } => {
-            scan_expr_for_json(value, found);
-            scan_expr_for_json(fallback, found);
+            scan_expr_for_macro(value, macro_names, found);
+            scan_expr_for_macro(fallback, macro_names, found);
         }
         ast::ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            scan_expr_for_json(condition, found);
-            scan_block_for_json(then_branch, found);
+            scan_expr_for_macro(condition, macro_names, found);
+            scan_block_for_macro(then_branch, macro_names, found);
             if let Some(else_block) = else_branch {
-                scan_block_for_json(else_block, found);
+                scan_block_for_macro(else_block, macro_names, found);
             }
         }
         ast::ExpressionKind::While { condition, body } => {
-            scan_expr_for_json(condition, found);
-            scan_block_for_json(body, found);
+            scan_expr_for_macro(condition, macro_names, found);
+            scan_block_for_macro(body, macro_names, found);
+        }
+        ast::ExpressionKind::For {
+            condition, body, ..
+        } => {
+            scan_expr_for_macro(condition, macro_names, found);
+            scan_block_for_macro(body, macro_names, found);
         }
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
-            scan_expr_for_json(iterable, found);
-            scan_block_for_json(body, found);
+            scan_expr_for_macro(iterable, macro_names, found);
+            scan_block_for_macro(body, macro_names, found);
+        }
+        ast::ExpressionKind::Index { object, index, .. } => {
+            scan_expr_for_macro(object, macro_names, found);
+            scan_expr_for_macro(index, macro_names, found);
+        }
+        ast::ExpressionKind::Slice {
+            object,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            scan_expr_for_macro(object, macro_names, found);
+            if let Some(s) = start {
+                scan_expr_for_macro(s, macro_names, found);
+            }
+            if let Some(e) = end {
+                scan_expr_for_macro(e, macro_names, found);
+            }
+            if let Some(st) = step {
+                scan_expr_for_macro(st, macro_names, found);
+            }
+        }
+        ast::ExpressionKind::Cast { expression, .. } => {
+            scan_expr_for_macro(expression, macro_names, found);
+        }
+        ast::ExpressionKind::FieldAccess { object, .. } => {
+            scan_expr_for_macro(object, macro_names, found);
+        }
+        ast::ExpressionKind::StructLiteral { fields, .. } => {
+            for field in fields {
+                scan_expr_for_macro(&field.value, macro_names, found);
+            }
+        }
+        ast::ExpressionKind::Array(elements) | ast::ExpressionKind::Tuple(elements) => {
+            for element in elements {
+                scan_expr_for_macro(element, macro_names, found);
+            }
+        }
+        ast::ExpressionKind::Initializer { items, .. } => {
+            for item in items {
+                match item {
+                    ast::InitializerItem::Positional(expr)
+                    | ast::InitializerItem::Field { value: expr, .. } => {
+                        scan_expr_for_macro(expr, macro_names, found);
+                    }
+                    ast::InitializerItem::Index { index, value, .. } => {
+                        scan_expr_for_macro(index, macro_names, found);
+                        scan_expr_for_macro(value, macro_names, found);
+                    }
+                }
+            }
+        }
+        ast::ExpressionKind::Match { expression, arms } => {
+            scan_expr_for_macro(expression, macro_names, found);
+            for arm in arms {
+                scan_expr_for_macro(&arm.body, macro_names, found);
+            }
         }
         _ => {}
     }

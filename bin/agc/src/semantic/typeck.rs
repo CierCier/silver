@@ -8346,6 +8346,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_import_injection_adds_builtin_macro_modules() {
+        // A program using @println or @hash with no explicit imports should get
+        // std.io / std.hash auto-injected.
+        let source =
+            "i32 main() { @println(\"test: {}\", @hash(\"hello\")); return 0; }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = Parser::new(tokens);
+        let (mut program, errors) = parser.parse_program();
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let mut loader = crate::module_loader::ModuleLoader::new();
+        loader.add_search_dir(repo_root.to_path_buf());
+        let hook = crate::parser::import_hook::FileImportResolverHook::new(&loader);
+        let result = hook.lower_program_imports(&mut program, None, None);
+        assert!(result.is_ok(), "import lowering failed: {result:?}");
+    }
+
+    #[test]
     fn operator_guard_origin_note_points_to_definition() {
         // Instantiating a generic that uses `+` on `T` with a type lacking an
         // overload must report the call-site error AND a definition-site note.
