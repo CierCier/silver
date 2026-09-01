@@ -310,6 +310,18 @@ fn basename(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
+/// Returns the set of defined function symbol names with code in the object.
+pub fn parse_defined_function_symbols(obj: &[u8]) -> HashSet<String> {
+    let Some(elf) = elf_parse(obj) else {
+        return HashSet::default();
+    };
+    elf.symbols
+        .iter()
+        .filter(|s| s.is_func && s.defined && s.size > 0)
+        .map(|s| s.name.clone())
+        .collect()
+}
+
 /// Parse all line tables; returns per-function line entries.
 pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
     let Some(elf) = elf_parse(obj) else {

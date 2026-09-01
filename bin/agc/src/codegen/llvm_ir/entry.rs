@@ -657,13 +657,52 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
 
+        if !debug_info {
+            generator.emit_bt_debug_tables(&[]);
+            crate::profiler::begin_phase("codegen IR generation");
+            generator.generate_program(program)?;
+            table.absorb_from(&generator.symbol_table);
+            crate::profiler::end_phase("codegen IR generation");
+
+            crate::profiler::begin_phase("LLVM opt passes");
+            generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;
+            crate::profiler::end_phase("LLVM opt passes");
+
+            crate::profiler::begin_phase("finalize debug info");
+            generator.finalize_debug();
+            crate::profiler::end_phase("finalize debug info");
+
+            crate::profiler::begin_phase("LLVM machine emit");
+            machine
+                .write_to_file(&generator.module, file_type, path)
+                .map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to emit {} via LLVM target machine to {}: {e}",
+                        match file_type {
+                            FileType::Object => "object file",
+                            FileType::Assembly => "assembly file",
+                        },
+                        path.display()
+                    ))
+                })?;
+            crate::profiler::end_phase("LLVM machine emit");
+            return Ok(());
+        }
+
+        crate::profiler::begin_phase("codegen IR generation");
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
+        crate::profiler::end_phase("codegen IR generation");
 
+        crate::profiler::begin_phase("LLVM opt passes");
         generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;
+        crate::profiler::end_phase("LLVM opt passes");
 
+        crate::profiler::begin_phase("finalize debug info");
         generator.finalize_debug();
+        crate::profiler::end_phase("finalize debug info");
 
+        crate::profiler::begin_phase("LLVM machine emit (pass 1)");
         machine
             .write_to_file(&generator.module, file_type, path)
             .map_err(|e| {
@@ -676,16 +715,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     path.display()
                 ))
             })?;
+        crate::profiler::end_phase("LLVM machine emit (pass 1)");
 
         // Post-pass: the runtime backtrace walker needs exact source lines
         // and spilled argument offsets, but DWARF sections are not loaded
         // into the running binary. Parse the object we just emitted and fold
         // the interesting bits into alloc'd, link-time-resolved tables, then
-        // re-emit (the debug sections are unchanged by the new globals, so
-        // the parsed offsets stay valid).
+        // re-emit.
         if file_type == FileType::Object
             && let Ok(obj) = std::fs::read(path)
         {
+            crate::profiler::begin_phase("DWARF backtrace parsing");
             let mut fn_debug = crate::codegen::dwarf_bt::parse_object_debug_lines(&obj);
             let targets: rustc_hash::FxHashSet<String> =
                 fn_debug.iter().map(|f| f.name.clone()).collect();
@@ -700,9 +740,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     fn_debug[i].params = p;
                 }
             }
-            // Always emit the (possibly empty) tables so the runtime's
-            // extern references resolve even without DWARF.
+            crate::profiler::end_phase("DWARF backtrace parsing");
+
+            crate::profiler::begin_phase("emit backtrace tables");
             generator.emit_bt_debug_tables(&fn_debug);
+            crate::profiler::end_phase("emit backtrace tables");
+
+            crate::profiler::begin_phase("LLVM machine emit (pass 2)");
             machine
                 .write_to_file(&generator.module, file_type, path)
                 .map_err(|e| {
@@ -711,6 +755,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         path.display()
                     ))
                 })?;
+            crate::profiler::end_phase("LLVM machine emit (pass 2)");
         }
         Ok(())
     }
