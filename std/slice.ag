@@ -21,7 +21,7 @@ impl<T> IndexedAccess for Slice<T> {
     type Item = T;
 
     /// Returns the element at `index`, aborting if out of bounds.
-    T __index_get(Slice<T>* self, i64 index) {
+    T __index_get(*self, i64 index) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
@@ -34,7 +34,7 @@ impl<T> IndexedAccess for Slice<T> {
     }
 
     /// Sets the element at `index` to `value`, aborting if out of bounds.
-    void __index_set(Slice<T>* self, i64 index, T value) {
+    void __index_set(*self, i64 index, T value) {
         if (@cfg(debug) && (index < 0 || index >= self.len)) {
             STDOUT.write_str("Slice index out of bounds: ");
             STDOUT.write_i64(index);
@@ -47,7 +47,7 @@ impl<T> IndexedAccess for Slice<T> {
     }
 }
 
-impl Slice<T> {
+impl<T> Slice<T> {
     /// Create a slice from raw pointer and length.
     Slice<T> from_raw(T* data, i64 len) {
         Slice<T> s;
@@ -57,19 +57,19 @@ impl Slice<T> {
     }
 
     /// Returns the length of the slice.
-    i64 len(&Slice<T> self) { return self.len; }
+    i64 len(&self) { return self.len; }
 
     /// Returns true if the slice is empty.
-    bool is_empty(&Slice<T> self) { return self.len == 0; }
+    bool is_empty(&self) { return self.len == 0; }
 
     /// Returns a pointer to the slice's underlying data.
-    T* as_ptr(&Slice<T> self) { return self.data; }
+    T* as_ptr(&self) { return self.data; }
 
     /// Returns a mutable pointer to the slice's underlying data.
-    T* as_mut_ptr(&mut Slice<T> self) { return self.data; }
+    T* as_mut_ptr(&mut self) { return self.data; }
 
     /// Returns a sub-slice from `start` with length `n`.
-    Slice<T> sub_slice(&Slice<T> self, i64 start, i64 n) {
+    Slice<T> sub_slice(&self, i64 start, i64 n) {
         if (start < 0 || n < 0 || start + n > self.len) { abort(); }
         Slice<T> s;
         if (n == 0) {
@@ -84,13 +84,13 @@ impl Slice<T> {
     }
 
     /// Splits the slice at `mid`, returning (left, right).
-    Slice<T> split_at(&Slice<T> self, i64 mid) {
+    Slice<T> split_at(&self, i64 mid) {
         if (mid < 0 || mid > self.len) { abort(); }
         return self.sub_slice(0, mid);
     }
 
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
-    Slice<T> __slice_get(&Slice<T> self, i64 start, i64 end) {
+    Slice<T> __slice_get(&self, i64 start, i64 end) {
         if (start < 0) {
             start = self.len + start;
             if (start < 0) { start = 0; }
@@ -106,19 +106,19 @@ impl Slice<T> {
     }
 
     /// Returns the first element, or None if empty.
-    Optional<T> first(&Slice<T> self) {
-        if (self.len == 0) { return Optional<T>.none(); }
-        return Optional<T>.some(self.data[0]);
+    Optional<T> first(&self) {
+        if (self.len == 0) { return None; }
+        return Some(self.data[0]);
     }
 
     /// Returns the last element, or None if empty.
-    Optional<T> last(&Slice<T> self) {
-        if (self.len == 0) { return Optional<T>.none(); }
-        return Optional<T>.some(self.data[self.len - 1]);
+    Optional<T> last(&self) {
+        if (self.len == 0) { return None; }
+        return Some(self.data[self.len - 1]);
     }
 
     /// Returns an iterator over the slice.
-    SliceIter<T> iter(&Slice<T> self) {
+    SliceIter<T> iter(&self) {
         SliceIter<T> it;
         it.data = self.data;
         it.len = self.len;
@@ -127,7 +127,7 @@ impl Slice<T> {
     }
 
     /// Returns an iterator starting from `start`.
-    SliceIter<T> iter_from(&Slice<T> self, i64 start) {
+    SliceIter<T> iter_from(&self, i64 start) {
         if (start < 0 || start > self.len) { abort(); }
         SliceIter<T> it;
         it.data = self.data;
@@ -137,19 +137,19 @@ impl Slice<T> {
     }
 
     /// Returns pointer to element at index, aborting if out of bounds.
-    T* get_ptr(&Slice<T> self, i64 index) {
+    T* get_ptr(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return &self.data[index];
     }
 
     /// Returns element at index wrapped in Optional, or None if out of bounds.
-    Optional<T> get(&Slice<T> self, i64 index) {
-        if (index < 0 || index >= self.len) { return Optional<T>.none(); }
-        return Optional<T>.some(self.data[index]);
+    Optional<T> get(&self, i64 index) {
+        if (index < 0 || index >= self.len) { return None; }
+        return Some(self.data[index]);
     }
 
     /// Reverse slice in-place.
-    void reverse(&mut Slice<T> self) {
+    void reverse(&mut self) {
         if (self.data == (T*)0 || self.len <= 1) { return; }
         i64 i = 0;
         i64 j = self.len - 1;
@@ -164,7 +164,7 @@ impl Slice<T> {
     }
 
     /// Returns a reverse iterator over the slice.
-    RevIter<T> rev_iter(&Slice<T> self) {
+    RevIter<T> rev_iter(&self) {
         RevIter<T> r;
         r.data = self.data;
         r.len = self.len;
@@ -181,20 +181,20 @@ struct SliceIter<T> {
 
 impl<T> Iterator for SliceIter<T> {
     type Item = T;
-    Optional<T> next(SliceIter<T>* self) {
+    Optional<T> next(*self) {
         if (self.idx < self.len) {
             T v = self.data[self.idx];
             self.idx = self.idx + 1;
-            return Optional<T>.some(v);
+            return Some(v);
         }
-        return Optional<T>.none();
+        return None;
     }
 }
 
 impl<T> IntoIterator for Slice<T> {
     type Item = T;
     type IntoIter = SliceIter<T>;
-    SliceIter<T> into_iter(Slice<T> self) {
+    SliceIter<T> into_iter(self) {
         SliceIter<T> it;
         it.data = self.data;
         it.len = self.len;
@@ -203,8 +203,8 @@ impl<T> IntoIterator for Slice<T> {
     }
 }
 
-impl SliceIter<T> {
-    i64 count(SliceIter<T>* self) {
+impl<T> SliceIter<T> {
+    i64 count(*self) {
         i64 c = 0;
         while (true) {
             Optional<T> o = self.next();

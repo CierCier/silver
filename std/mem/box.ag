@@ -15,7 +15,7 @@ struct Box<T> {
     T* ptr;
 }
 
-impl Box<T> {
+impl<T> Box<T> {
     /// Allocates memory on the heap and moves `val` into it, returning a new `Box<T>`.
     /// POD-only today (see the struct note): owned T double-frees on drop.
     Box<T> new(T val) {
@@ -27,14 +27,14 @@ impl Box<T> {
     }
 
     /// Returns a pointer to the inner boxed value.
-    T* get(Box<T>* self) {
+    T* get(*self) {
         return self.ptr;
     }
 }
 
 impl<T> Drop for Box<T> {
     /// Frees the heap-allocated memory associated with this box.
-    void drop(Box<T>* self) {
+    void drop(*self) {
         if (self.ptr != (T*)0) {
             free(self.ptr);
             self.ptr = (T*)0;

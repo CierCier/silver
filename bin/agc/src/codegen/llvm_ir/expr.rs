@@ -765,7 +765,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         Some(owner.name.clone())
                     }
                     ast::ExpressionKind::TypeName(ty) => {
-                        if let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                        let named_opt = match ty.kind.as_ref() {
+                            ast::TypeKind::Named(named) => Some(named.clone()),
+                            ast::TypeKind::Optional(inner) => Some(ast::NamedType {
+                                path: vec![ast::Identifier {
+                                    name: "Optional".to_string(),
+                                    span: ty.span,
+                                }],
+                                generics: Some(vec![*inner.clone()]),
+                            }),
+                            _ => None,
+                        };
+                        if let Some(named) = named_opt
                             && named.path.len() == 1
                             && self
                                 .enum_member_constant(&named.path[0].name, &field.name)
@@ -774,7 +785,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             // Prefer the monomorphized concrete instantiation
                             // (e.g. `Optional__i32` for `Optional<i32>`) so the
                             // payload layout matches the concrete type.
-                            let monomorph = Self::monomorph_owner_name_from_named(named);
+                            let monomorph = Self::monomorph_owner_name_from_named(&named);
                             if self.enum_payload_layouts.contains_key(&monomorph)
                                 || self.enum_variants.contains_key(&monomorph)
                             {
@@ -856,14 +867,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                     ast::ExpressionKind::TypeName(ty) => {
-                        if let ast::TypeKind::Named(named) = ty.kind.as_ref() {
-                            let base = Self::named_type_name(named);
+                        if let Some(named) = Self::extract_named_type_owned(ty) {
+                            let base = Self::named_type_name(&named);
                             // For a generic enum the monomorphized concrete
                             // instantiation (e.g. `Box2__i32`) is the registered
                             // layout; fall back to the bare name for non-generic
                             // enums (`Optional`, `OptInt`). Only route to
                             // construction when the method names a real variant.
-                            let monomorph = Self::monomorph_owner_name_from_named(named);
+                            let monomorph = Self::monomorph_owner_name_from_named(&named);
                             let is_variant = |candidate: &str| {
                                 self.enum_variants
                                     .get(candidate)
@@ -2700,38 +2711,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // Resolve the enum name: either the explicit `Enum.Variant`
                     // path, or (for bare `Variant` patterns) the scrutinee's
                     // enum type, which typeck already validated.
-                    let enum_name = if path.len() == 1 {
-                        path[0].name.clone()
+                    let (enum_name, concrete_name) = if path.len() == 1 {
+                        (path[0].name.clone(), path[0].name.clone())
                     } else if let Some(ty) = self.resolve_receiver_type(expression)
-                        && let ast::TypeKind::Named(named) = ty.kind.as_ref()
+                        && let Some(named) = Self::extract_named_type_owned(&ty)
                         && named.path.len() == 1
                     {
-                        named.path[0].name.clone()
+                        let base_name = named.path[0].name.clone();
+                        let monomorph = Self::monomorph_owner_name_from_named(&named);
+                        let conc = if self.enum_payload_layouts.contains_key(&monomorph)
+                            || self.enum_variant_payload_types.contains_key(&monomorph)
+                        {
+                            monomorph
+                        } else {
+                            base_name.clone()
+                        };
+                        (base_name, conc)
                     } else {
                         return Err(CodegenError::with_span(
                             "enum type path must be a single name in match".to_string(),
                             arm.pattern.span,
                         ));
-                    };
-                    // For a generic enum (`Box2.Full(...)` matching a
-                    // `Box2<i32>` value), the payload layout and payload types
-                    // are registered under the monomorphized name
-                    // (`Box2__i32`); prefer it when present, falling back to
-                    // the bare name for non-generic enums.
-                    let concrete_name = if let Some(ty) = self.resolve_receiver_type(expression)
-                        && let ast::TypeKind::Named(named) = ty.kind.as_ref()
-                        && named.path.len() == 1
-                    {
-                        let monomorph = Self::monomorph_owner_name_from_named(named);
-                        if self.enum_payload_layouts.contains_key(&monomorph)
-                            || self.enum_variant_payload_types.contains_key(&monomorph)
-                        {
-                            monomorph
-                        } else {
-                            enum_name.clone()
-                        }
-                    } else {
-                        enum_name.clone()
                     };
                     if let Some(struct_ty) = self.enum_payload_layouts.get(&concrete_name).cloned()
                     {
@@ -2814,7 +2814,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .unwrap_or_default();
                             let substitutions: HashMap<String, ast::Type> = if let Some(ty) =
                                 self.resolve_receiver_type(expression)
-                                && let Some(named) = Self::extract_named_type(&ty)
+                                && let Some(named) = Self::extract_named_type_owned(&ty)
                                 && let Some(params) = self.struct_generics.get(&enum_name)
                                 && let Some(args) = &named.generics
                                 && params.len() == args.len()

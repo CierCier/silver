@@ -38,16 +38,16 @@ impl Bytes {
         return b;
     }
 
-    i64 len(&Bytes self) {
+    i64 len(&self) {
         return self.len;
     }
 
     /// True when `len` is zero.
-    bool is_empty(&Bytes self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
-    i64 capacity(&Bytes self) {
+    i64 capacity(&self) {
         return self.cap;
     }
 
@@ -55,7 +55,7 @@ impl Bytes {
     /// (allocation-free). Unlike a plain copy-then-replace, the taken
     /// buffer is not dropped: the caller owns it. `dst = src.take(&src)`
     /// is the single-owner transfer primitive.
-    Bytes take(Bytes* self) {
+    Bytes take(*self) {
         Bytes out;
         out.data = self.data;
         out.len = self.len;
@@ -66,7 +66,7 @@ impl Bytes {
         return out;
     }
 
-    void push(&mut Bytes self, u8 byte) {
+    void push(&mut self, u8 byte) {
         if (self.len + 1 > self.cap) {
             i64 new_cap = self.cap * 2;
             if (new_cap < 16) {
@@ -79,7 +79,7 @@ impl Bytes {
         self.len = self.len + 1;
     }
 
-    void extend(&mut Bytes self, u8* src, i64 src_len) {
+    void extend(&mut self, u8* src, i64 src_len) {
         if (src_len <= 0 || src == (u8*)0) {
             return;
         }
@@ -107,27 +107,27 @@ impl Bytes {
     }
 
     /// Find first occurrence of `byte`. Returns index, or -1 if not found.
-    i64 find(&Bytes self, u8 byte) {
+    i64 find(&self, u8 byte) {
         return mem_find_byte(self.data, byte, self.len);
     }
 
     /// Find last occurrence of `byte`. Returns index, or -1 if not found.
-    i64 rfind(&Bytes self, u8 byte) {
+    i64 rfind(&self, u8 byte) {
         return mem_find_byte_back(self.data, byte, self.len);
     }
 
     /// Count occurrences of `byte`.
-    i64 count(&Bytes self, u8 byte) {
+    i64 count(&self, u8 byte) {
         return mem_count_byte(self.data, byte, self.len);
     }
 
     /// True if `byte` is present in buffer.
-    bool contains(&Bytes self, u8 byte) {
+    bool contains(&self, u8 byte) {
         return self.find(byte) >= 0;
     }
 
     /// True if buffer begins with `prefix`.
-    bool starts_with(&Bytes self, u8* prefix, i64 prefix_len) {
+    bool starts_with(&self, u8* prefix, i64 prefix_len) {
         if (prefix == (u8*)0 || prefix_len <= 0) {
             return true;
         }
@@ -138,7 +138,7 @@ impl Bytes {
     }
 
     /// True if buffer ends with `suffix`.
-    bool ends_with(&Bytes self, u8* suffix, i64 suffix_len) {
+    bool ends_with(&self, u8* suffix, i64 suffix_len) {
         if (suffix == (u8*)0 || suffix_len <= 0) {
             return true;
         }
@@ -149,7 +149,7 @@ impl Bytes {
     }
 
     /// True if two byte buffers have identical contents.
-    bool equals(&Bytes self, Bytes* other) {
+    bool equals(&self, Bytes* other) {
         if (other == (Bytes*)0) {
             return false;
         }
@@ -163,7 +163,7 @@ impl Bytes {
     }
 
     /// Read byte at `index`. Out-of-bounds indices abort deterministically in every build profile.
-    u8 get(&Bytes self, i64 index) {
+    u8 get(&self, i64 index) {
         if (index < 0 || index >= self.len) {
             abort();
         }
@@ -171,12 +171,12 @@ impl Bytes {
     }
 
     /// Read byte at `index` without bounds checking.
-    u8 get_unchecked(&Bytes self, i64 index) {
+    u8 get_unchecked(&self, i64 index) {
         return self.data[index];
     }
 
     /// Write `value` at `index`. Out-of-bounds indices abort deterministically in every build profile.
-    void set(&mut Bytes self, i64 index, u8 value) {
+    void set(&mut self, i64 index, u8 value) {
         if (index < 0 || index >= self.len) {
             abort();
         }
@@ -184,20 +184,20 @@ impl Bytes {
     }
 
     /// Write `value` at `index` without bounds checking.
-    void set_unchecked(&mut Bytes self, i64 index, u8 value) {
+    void set_unchecked(&mut self, i64 index, u8 value) {
         self.data[index] = value;
     }
-    u8* as_ptr(&Bytes self) {
+    u8* as_ptr(&self) {
         return self.data;
     }
 
-    void clear(&mut Bytes self) {
+    void clear(&mut self) {
         self.len = 0;
     }
 }
 
 impl Drop for Bytes {
-    void drop(Bytes* self) {
+    void drop(*self) {
         if (self.data != (u8*)0) {
             free(self.data);
             self.data = (u8*)0;
@@ -209,11 +209,11 @@ impl Drop for Bytes {
 
 impl IndexedAccess for Bytes {
     type Item = u8;
-    u8 __index_get(Bytes* self, i64 index) {
+    u8 __index_get(*self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
     }
-    void __index_set(Bytes* self, i64 index, u8 value) {
+    void __index_set(*self, i64 index, u8 value) {
         if (index < 0 || index >= self.len) { abort(); }
         self.data[index] = value;
     }
@@ -228,13 +228,13 @@ struct BytesIter {
 
 impl Iterator for BytesIter {
     type Item = u8;
-    Optional<u8> next(BytesIter* self) {
+    Optional<u8> next(*self) {
         if (self.idx < self.len) {
             u8 v = self.data[self.idx];
             self.idx = self.idx + 1;
-            return Optional<u8>.some(v);
+            return Some(v);
         }
-        return Optional<u8>.none();
+        return None;
     }
 }
 
@@ -246,18 +246,18 @@ struct BytesIntoIter {
 
 impl Iterator for BytesIntoIter {
     type Item = u8;
-    Optional<u8> next(BytesIntoIter* self) {
+    Optional<u8> next(*self) {
         if (self.idx < self.len) {
             u8 v = self.data[self.idx];
             self.idx = self.idx + 1;
-            return Optional<u8>.some(v);
+            return Some(v);
         }
-        return Optional<u8>.none();
+        return None;
     }
 }
 
 impl Drop for BytesIntoIter {
-    void drop(BytesIntoIter* self) {
+    void drop(*self) {
         if (self.data != (u8*)0) {
             free(self.data);
             self.data = (u8*)0;
@@ -270,7 +270,7 @@ impl Drop for BytesIntoIter {
 impl IntoIterator for Bytes {
     type Item = u8;
     type IntoIter = BytesIntoIter;
-    BytesIntoIter into_iter(Bytes self) {
+    BytesIntoIter into_iter(self) {
         BytesIntoIter it;
         it.data = self.data;
         it.len = self.len;
@@ -283,7 +283,7 @@ impl IntoIterator for Bytes {
 }
 
 impl Bytes {
-    BytesIter iter(&Bytes self) {
+    BytesIter iter(&self) {
         BytesIter it;
         it.data = self.data;
         it.len = self.len;
@@ -291,7 +291,7 @@ impl Bytes {
         return it;
     }
 
-    Slice<u8> as_slice(&Bytes self) {
+    Slice<u8> as_slice(&self) {
         Slice<u8> s;
         s.data = self.data;
         s.len = self.len;
@@ -299,7 +299,7 @@ impl Bytes {
     }
 
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
-    Slice<u8> __slice_get(&Bytes self, i64 start, i64 end) {
+    Slice<u8> __slice_get(&self, i64 start, i64 end) {
         Slice<u8> s = self.as_slice();
         return s.__slice_get(start, end);
     }

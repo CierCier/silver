@@ -1009,6 +1009,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    pub(crate) fn extract_named_type_owned(ty: &ast::Type) -> Option<ast::NamedType> {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => Some(named.clone()),
+            ast::TypeKind::Optional(inner) => Some(ast::NamedType {
+                path: vec![ast::Identifier {
+                    name: "Optional".to_string(),
+                    span: ty.span,
+                }],
+                generics: Some(vec![*inner.clone()]),
+            }),
+            ast::TypeKind::Slice(slice) => Some(ast::NamedType {
+                path: vec![ast::Identifier {
+                    name: "Slice".to_string(),
+                    span: ty.span,
+                }],
+                generics: Some(vec![*slice.element_type.clone()]),
+            }),
+            ast::TypeKind::Reference(reference) => Self::extract_named_type_owned(&reference.inner),
+            ast::TypeKind::Pointer(pointer) => Self::extract_named_type_owned(&pointer.inner),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_pointer_or_reference(ty: &ast::Type) -> bool {
         matches!(
             ty.kind.as_ref(),

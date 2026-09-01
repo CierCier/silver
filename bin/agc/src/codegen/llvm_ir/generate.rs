@@ -1177,10 +1177,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         let Some(owner) = Self::owner_name_from_type(&item.self_type) else {
             return Ok(());
         };
-        if let Some(named) = Self::extract_named_type(&item.self_type)
+        if let Some(named) = Self::extract_named_type_owned(&item.self_type)
             && let Some(args) = &named.generics
         {
-            let base_name = Self::named_type_name(named);
+            let base_name = Self::named_type_name(&named);
             if base_name != owner
                 && (self.enum_variants.contains_key(&base_name)
                     || self.enum_variant_payload_types.contains_key(&base_name))
@@ -1201,10 +1201,10 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             match impl_item {
                 ast::ImplItemKind::Function(original_func) => {
                     let mut func = (**original_func).clone();
-                    if let Some(named) = Self::extract_named_type(&item.self_type)
+                    if let Some(named) = Self::extract_named_type_owned(&item.self_type)
                         && named.generics.is_some()
                     {
-                        let base_name = Self::named_type_name(named);
+                        let base_name = Self::named_type_name(&named);
                         if base_name != owner {
                             let concrete_owner = ast::Type {
                                 kind: Box::new(ast::TypeKind::Named(ast::NamedType {

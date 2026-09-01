@@ -368,7 +368,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     fn struct_has_field_drops(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
-        let Some(named) = Self::extract_named_type(ty).cloned() else {
+        let Some(named) = Self::extract_named_type_owned(ty) else {
             return Ok(false);
         };
         let base_name = named.path.last().map(|s| &s.name[..]).unwrap_or_default();
@@ -403,7 +403,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// True when `ty` is an enum with a payload cascade (a payload layout
     /// whose variants carry Drop-typed values) and no Drop impl of its own.
     fn enum_has_payload_cascade(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
-        let Some(named) = Self::extract_named_type(ty).cloned() else {
+        let Some(named) = Self::extract_named_type_owned(ty) else {
             return Ok(false);
         };
         if named.path.len() != 1 {

@@ -1243,6 +1243,12 @@ pub fn run(cli: Cli) {
 
                 profiler::begin_phase("monomorph");
                 semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &imported_modules);
+                let mut post_checker = TypeChecker::new().with_imported_modules(&imported_modules);
+                let _ = post_checker.check_program_with_table(&ast, &mut symbol_table);
+                let post_bare = post_checker.take_bare_constructors();
+                if !post_bare.is_empty() {
+                    crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
+                }
                 // Module emits: monomorphized instances of the library's own
                 // generic functions/impls (e.g. identity__i64_i64) must be
                 // externally linkable — consumers reference the mangled

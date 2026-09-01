@@ -22,7 +22,7 @@ struct Rc<T> {
     i32* count;
 }
 
-impl Rc<T> {
+impl<T> Rc<T> {
     /// Create a new reference-counted handle.
     Rc<T> new(T val) {
         T* p = alloc<T>();
@@ -47,7 +47,7 @@ impl Rc<T> {
     }
 
     /// Clone the handle — increments the reference count.
-    Rc<T> clone(Rc<T>* self) {
+    Rc<T> clone(*self) {
         if (self.count != (i32*)0) {
             *(self.count) = *(self.count) + 1;
         }
@@ -58,7 +58,7 @@ impl Rc<T> {
     }
 
     /// Get a raw pointer to the value.
-    T* get(Rc<T>* self) {
+    T* get(*self) {
         return self.ptr;
     }
 }
@@ -66,7 +66,7 @@ impl Rc<T> {
 impl<T> Drop for Rc<T> {
     /// Drop one handle — decrements the reference count.
     /// Frees the value and count when it reaches zero.
-    void drop(Rc<T>* self) {
+    void drop(*self) {
         if (self.count != (i32*)0) {
             *(self.count) = *(self.count) - 1;
             if (*(self.count) == 0) {

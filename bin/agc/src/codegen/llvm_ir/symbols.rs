@@ -1397,14 +1397,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         method_name: &str,
         required_trait: Option<&str>,
     ) -> CodegenResult<Option<String>> {
-        let Some(receiver_named) = Self::extract_named_type(receiver_type) else {
+        let Some(receiver_named) = Self::extract_named_type_owned(receiver_type) else {
             return Ok(None);
         };
         let Some(receiver_args) = &receiver_named.generics else {
             return Ok(None);
         };
-        let base_name = Self::named_type_name(receiver_named);
-        let owner = Self::monomorph_owner_name_from_named(receiver_named);
+        let base_name = Self::named_type_name(&receiver_named);
+        let owner = Self::monomorph_owner_name_from_named(&receiver_named);
 
         let templates = self.generic_impl_templates.clone();
         for template in templates {
@@ -1421,10 +1421,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
 
-            let Some(template_named) = Self::extract_named_type(&template.self_type) else {
+            let Some(template_named) = Self::extract_named_type_owned(&template.self_type) else {
                 continue;
             };
-            if Self::named_type_name(template_named) != base_name {
+            if Self::named_type_name(&template_named) != base_name {
                 continue;
             }
             let Some(template_args) = &template_named.generics else {

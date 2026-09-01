@@ -206,10 +206,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(elem_ty.array_type(array.size as u32).as_basic_type_enum())
             }
             ast::TypeKind::Optional(inner) => {
-                let inner = self.lower_basic_type(inner)?;
+                let named = ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "Optional".to_string(),
+                        span: ty.span,
+                    }],
+                    generics: Some(vec![*inner.clone()]),
+                };
+                let monomorph = Self::monomorph_owner_name_from_named(&named);
+                if let Some(struct_ty) = self
+                    .enum_payload_layouts
+                    .get(&monomorph)
+                    .or_else(|| self.enum_payload_layouts.get("Optional"))
+                {
+                    return Ok(struct_ty.as_basic_type_enum());
+                }
+                let inner_ty = self.lower_basic_type(inner)?;
                 Ok(self
                     .context
-                    .struct_type(&[self.context.i8_type().as_basic_type_enum(), inner], false)
+                    .struct_type(&[self.context.i8_type().as_basic_type_enum(), inner_ty], false)
                     .as_basic_type_enum())
             }
             ast::TypeKind::Tuple(items) => {
