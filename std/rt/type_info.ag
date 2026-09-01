@@ -116,7 +116,7 @@ struct Field {
 }
 
 impl Drop for Field {
-    void drop(Field* self) {
+    void drop(*self) {
         self.name.drop();
     }
 }
@@ -134,7 +134,7 @@ impl StructType {
 }
 
 impl Drop for StructType {
-    void drop(StructType* self) {
+    void drop(*self) {
         i64 i = 0;
         while (i < self.fields.len()) {
             Field* f = self.fields.get_ptr(i);
@@ -152,7 +152,7 @@ struct EnumVariant {
 }
 
 impl Drop for EnumVariant {
-    void drop(EnumVariant* self) {
+    void drop(*self) {
         self.name.drop();
         self.payload.drop();
     }
@@ -171,7 +171,7 @@ impl EnumType {
 }
 
 impl Drop for EnumType {
-    void drop(EnumType* self) {
+    void drop(*self) {
         i64 i = 0;
         while (i < self.variants.len()) {
             EnumVariant* v = self.variants.get_ptr(i);
@@ -197,7 +197,7 @@ impl FunctionType {
 }
 
 impl Drop for FunctionType {
-    void drop(FunctionType* self) {
+    void drop(*self) {
         self.params.drop();
     }
 }
@@ -237,7 +237,7 @@ impl Type {
 }
 
 impl Drop for Type {
-    void drop(Type* self) {
+    void drop(*self) {
         self.name.drop();
         self.struct_data.drop();
         self.enum_data.drop();
