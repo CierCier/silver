@@ -261,4 +261,34 @@ mod tests {
             "expected type hint only for inferred variable, got: {type_hints:?}"
         );
     }
+
+    #[test]
+    fn tuple_unpack_inlay_hints_show_individual_datatypes() {
+        let src = r#"
+        [i32, str] get_pair() {
+            return [10, "test"];
+        }
+        i32 main() {
+            let [num, text] = get_pair();
+            return 0;
+        }
+        "#;
+        let analysis = analyze_src(src);
+        let hints = inlay_hints(&analysis);
+
+        let type_hints: Vec<&str> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            type_hints,
+            vec!["i32", "str"],
+            "expected individual datatypes for tuple unpack, got: {type_hints:?}"
+        );
+    }
 }

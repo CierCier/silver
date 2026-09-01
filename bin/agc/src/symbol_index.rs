@@ -952,27 +952,8 @@ impl Walker<'_> {
             ast::StatementKind::Block(b) => self.walk_block(b),
             ast::StatementKind::Expression(e) => self.walk_expr(e),
             ast::StatementKind::Let(ls) => {
-                let explicit_ty = ls.type_annotation.as_ref().map(format_type);
-                let has_explicit_type = explicit_ty.is_some();
-                let inferred = if let Some(ty_str) = explicit_ty {
-                    match &ls.pattern.kind {
-                        ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
-                            Some((id.span, ty_str))
-                        }
-                        _ => None,
-                    }
-                } else {
-                    match (&ls.pattern.kind, ls.initializer.as_ref()) {
-                        (
-                            ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id),
-                            Some(init),
-                        ) => self
-                            .type_of(init)
-                            .map(str::to_owned)
-                            .map(|ty| (id.span, ty)),
-                        _ => None,
-                    }
-                };
+                let mut bindings = Vec::new();
+                self.collect_pattern_bindings(&ls.pattern, ls.type_annotation.as_ref(), &mut bindings);
                 if let Some(ty) = &ls.type_annotation {
                     self.walk_type(ty);
                 }
@@ -981,16 +962,29 @@ impl Walker<'_> {
                     self.walk_expr(init);
                 }
                 self.walk_pattern(&ls.pattern);
-                if let Some((span, ty)) = inferred
-                    && let Some(symbol) = self
-                        .symbols
-                        .iter_mut()
-                        .rev()
-                        .find(|symbol| symbol.kind == SymbolKind::Local && symbol.span == span)
-                {
-                    symbol.signature = format!("{ty} {}", symbol.name);
-                    symbol.inferred_type = Some(ty);
-                    symbol.has_explicit_type = has_explicit_type;
+                for (span, explicit_ty) in bindings {
+                    let has_explicit = explicit_ty.is_some();
+                    let inferred_ty = explicit_ty.or_else(|| {
+                        self.expr_types
+                            .get(&(span.start, span.end))
+                            .cloned()
+                            .or_else(|| {
+                                ls.initializer
+                                    .as_ref()
+                                    .and_then(|init| self.type_of(init).map(str::to_owned))
+                            })
+                    });
+                    if let Some(ty) = inferred_ty
+                        && let Some(symbol) = self
+                            .symbols
+                            .iter_mut()
+                            .rev()
+                            .find(|symbol| symbol.kind == SymbolKind::Local && symbol.span == span)
+                    {
+                        symbol.signature = format!("{ty} {}", symbol.name);
+                        symbol.inferred_type = Some(ty);
+                        symbol.has_explicit_type = has_explicit;
+                    }
                 }
             }
             ast::StatementKind::Return(Some(e)) => {
@@ -1005,6 +999,51 @@ impl Walker<'_> {
                 self.walk_expr(e);
             }
             ast::StatementKind::Defer(s) => self.walk_stmt(s),
+        }
+    }
+
+    fn collect_pattern_bindings(
+        &self,
+        pattern: &ast::Pattern,
+        ty: Option<&ast::Type>,
+        bindings: &mut Vec<(Span, Option<String>)>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
+                bindings.push((id.span, ty.map(format_type)));
+            }
+            ast::PatternKind::Tuple(sub_patterns) => {
+                if let Some(ast::Type {
+                    kind: box_kind,
+                    ..
+                }) = ty
+                    && let ast::TypeKind::Tuple(elem_tys) = box_kind.as_ref()
+                {
+                    for (i, sub_pat) in sub_patterns.iter().enumerate() {
+                        self.collect_pattern_bindings(sub_pat, elem_tys.get(i), bindings);
+                    }
+                } else {
+                    for sub_pat in sub_patterns {
+                        self.collect_pattern_bindings(sub_pat, None, bindings);
+                    }
+                }
+            }
+            ast::PatternKind::Wildcard => {}
+            ast::PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    if let Some(pat) = &field.pattern {
+                        self.collect_pattern_bindings(pat, None, bindings);
+                    } else {
+                        bindings.push((field.name.span, None));
+                    }
+                }
+            }
+            ast::PatternKind::Enum { data, .. } => {
+                if let Some(p) = data {
+                    self.collect_pattern_bindings(p, None, bindings);
+                }
+            }
+            ast::PatternKind::Literal(_) | ast::PatternKind::Range { .. } => {}
         }
     }
     fn walk_pattern(&mut self, pattern: &ast::Pattern) {
