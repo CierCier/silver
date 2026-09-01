@@ -39,17 +39,17 @@ impl Deque<T> {
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the deque.
-    i64 len(&Deque<T> self) {
+    i64 len(&self) {
         return self.len;
     }
 
     /// Total allocated capacity.
-    i64 capacity(&Deque<T> self) {
+    i64 capacity(&self) {
         return self.cap;
     }
 
     /// True when `len` is zero.
-    bool is_empty(&Deque<T> self) {
+    bool is_empty(&self) {
         return self.len == 0;
     }
 
@@ -58,7 +58,7 @@ impl Deque<T> {
     /// Grow capacity to at least `min_cap`, linearizing the ring buffer.
     /// Moves elements (`new[i] = move old[(head+i)%old_cap]`) not shallow copy;
     /// POD-only copy removed.
-    void grow(&mut Deque<T> self, i64 min_cap) {
+    void grow(&mut self, i64 min_cap) {
         i64 new_cap = self.cap;
         if (new_cap == 0) {
             new_cap = 1;
@@ -84,7 +84,7 @@ impl Deque<T> {
     }
 
     /// Push `value` to the back (O(1) amortized).
-    void push_back(&mut Deque<T> self, T value) {
+    void push_back(&mut self, T value) {
         if (self.len >= self.cap) {
             i64 min_cap = 1;
             if (self.cap != 0) {
@@ -98,7 +98,7 @@ impl Deque<T> {
     }
 
     /// Push `value` to the front (O(1) amortized).
-    void push_front(&mut Deque<T> self, T value) {
+    void push_front(&mut self, T value) {
         if (self.len >= self.cap) {
             i64 min_cap = 1;
             if (self.cap != 0) {
@@ -113,7 +113,7 @@ impl Deque<T> {
 
     /// Remove and return the front element.  Aborts if empty.
     /// Moves ownership (`move data[head]`); stale slot left moved-from.
-    T pop_front(&mut Deque<T> self) {
+    T pop_front(&mut self) {
         if (self.len == 0) {
             abort();
         }
@@ -125,7 +125,7 @@ impl Deque<T> {
 
     /// Remove and return the back element.  Aborts if empty.
     /// Moves ownership (`move data[tail]`).
-    T pop_back(&mut Deque<T> self) {
+    T pop_back(&mut self) {
         if (self.len == 0) {
             abort();
         }
@@ -136,7 +136,7 @@ impl Deque<T> {
     }
 
     /// Return a copy of the front element without removing it.  Aborts if empty.
-    T front(&Deque<T> self) {
+    T front(&self) {
         if (self.len == 0) {
             abort();
         }
@@ -144,7 +144,7 @@ impl Deque<T> {
     }
 
     /// Return a copy of the back element without removing it.  Aborts if empty.
-    T back(&Deque<T> self) {
+    T back(&self) {
         if (self.len == 0) {
             abort();
         }
@@ -155,7 +155,7 @@ impl Deque<T> {
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the front element, or None when empty.
-    Optional<T> try_pop_front(&mut Deque<T> self) {
+    Optional<T> try_pop_front(&mut self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -163,7 +163,7 @@ impl Deque<T> {
     }
 
     /// Remove and return the back element, or None when empty.
-    Optional<T> try_pop_back(&mut Deque<T> self) {
+    Optional<T> try_pop_back(&mut self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -171,7 +171,7 @@ impl Deque<T> {
     }
 
     /// Copy of the front element, or None when empty.
-    Optional<T> try_front(&Deque<T> self) {
+    Optional<T> try_front(&self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -179,7 +179,7 @@ impl Deque<T> {
     }
 
     /// Copy of the back element, or None when empty.
-    Optional<T> try_back(&Deque<T> self) {
+    Optional<T> try_back(&self) {
         if (self.len == 0) {
             return Optional<T>.none();
         }
@@ -189,7 +189,7 @@ impl Deque<T> {
     /// Remove all elements without freeing the backing buffer.
     /// NOTE: Does NOT drop elements — for owned T drain via `pop_front`/`pop_back`
     /// (each `move`s) before `clear`/`drop`; otherwise inner allocations leak.
-    void clear(&mut Deque<T> self) {
+    void clear(&mut self) {
         self.len = 0;
         self.head = 0;
     }
@@ -197,7 +197,7 @@ impl Deque<T> {
 
 impl<T> Drop for Deque<T> {
     /// Frees the backing buffer. Does NOT call per-element destructors; see `clear`.
-    void drop(Deque<T>* self) {
+    void drop(*self) {
         if (self.data != (T*)0) {
             free(self.data);
             self.data = (T*)0;
@@ -233,9 +233,9 @@ impl<T> IntoIterator for Deque<T> {
     type Item = T;
     type IntoIter = DequeIter<T>;
     /// Consumes the deque, moving its buffer into the iterator.
-    /// `Self self` (by value) — not `&Self` — so `move self.data` drains and
+    /// `self` (by value) — not `&self` — so `move self.data` drains and
     /// leaves `self` moved-from (null/0). Iterator owns and frees the buffer.
-    DequeIter<T> into_iter(Deque<T> self) {
+    DequeIter<T> into_iter(self) {
         DequeIter<T> iter;
         iter.data = move self.data;
         iter.len = self.len;
@@ -252,8 +252,8 @@ impl<T> IntoIterator for Deque<T> {
 
 impl<T> Deque<T> {
     /// Borrows the deque and yields element copies without consuming it.
-    /// `&Deque<T> self` so the deque stays live; iterator holds raw ptr copy.
-    DequeBorrowIter<T> iter(&Deque<T> self) {
+    /// `&self` so the deque stays live; iterator holds raw ptr copy.
+    DequeBorrowIter<T> iter(&self) {
         DequeBorrowIter<T> it;
         it.data = self.data;
         it.len = self.len;
@@ -265,7 +265,7 @@ impl<T> Deque<T> {
 
     /// Drains the deque, moving its buffer into an owning iterator.
     /// `&mut self` — moves buffer out and clears deque so it is empty but live.
-    DequeIter<T> drain(&mut Deque<T> self) {
+    DequeIter<T> drain(&mut self) {
         DequeIter<T> d;
         d.data = move self.data;
         d.len = self.len;
@@ -283,7 +283,7 @@ impl<T> Deque<T> {
 impl<T> Drop for DequeIter<T> {
     /// Frees the backing buffer. Does NOT drop un-drained elements — iterate to
     /// completion or `pop_*` to move out owned values before drop.
-    void drop(DequeIter<T>* self) {
+    void drop(*self) {
         if (self.data != (T*)0) {
             free(self.data);
             self.data = (T*)0;
@@ -298,7 +298,7 @@ impl<T> Drop for DequeIter<T> {
 impl<T> Iterator for DequeIter<T> {
     type Item = T;
     /// Move the next element out; Copy is bitwise.
-    Optional<T> next(DequeIter<T>* self) {
+    Optional<T> next(*self) {
         if (self.idx < self.len) {
             i64 pos = (self.head + self.idx) % self.cap;
             T tmp = self.data[pos];
@@ -313,7 +313,7 @@ impl<T> Iterator for DequeIter<T> {
 impl<T> Iterator for DequeBorrowIter<T> {
     type Item = T;
     /// Borrow the next element; the deque remains owned by the caller.
-    Optional<T> next(DequeBorrowIter<T>* self) {
+    Optional<T> next(*self) {
         if (self.idx < self.len) {
             i64 pos = (self.head + self.idx) % self.cap;
             T v = self.data[pos];
