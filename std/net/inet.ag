@@ -173,7 +173,7 @@ impl SockAddrIn6 {
     }
 
     /// Set address from colon-hex string. Returns true on success.
-    bool set_addr(SockAddrIn6* self, str addr_str) {
+    bool set_addr(*self, str addr_str) {
         u64 hi = 0;
         u64 lo = 0;
         bool ok = inet_pton6(addr_str, &hi, &lo);
