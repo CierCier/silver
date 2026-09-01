@@ -92,17 +92,17 @@ impl MethodResult {
         return r;
     }
 
-    bool is_ok(MethodResult* self) {
+    bool is_ok(*self) {
         return self.ok;
     }
 
-    bool is_err(MethodResult* self) {
+    bool is_err(*self) {
         return !self.ok;
     }
 }
 
 impl Drop for MethodResult {
-    void drop(MethodResult* self) {
+    void drop(*self) {
         self.msg.drop();
     }
 }
@@ -130,7 +130,7 @@ impl MethodRegistry {
     // -- Interning ---------------------------------------------------------
 
     /// Intern `name`, returning its stable u32 id.
-    u32 intern(MethodRegistry* self, str name) {
+    u32 intern(*self, str name) {
         if (self.intern_ids.contains_key(name)) {
             return self.intern_ids.get(name);
         }
@@ -138,7 +138,7 @@ impl MethodRegistry {
         String owned = rt_type_str_owned(name);
         self.interned.push(move owned);
         // Key the id map by the buffer now owned by the interned entry;
-        // the heap buffer address is stable across Vec growth.
+        // String buffer addresses are stable across Vec reallocations.
         String* stored = self.interned.get_ptr((i64)id);
         self.intern_ids.insert((str)stored.to_str(), id);
         return id;
@@ -151,7 +151,7 @@ impl MethodRegistry {
     }
 
     /// Register a method on one type (arity -1 = variadic).
-    void register(MethodRegistry* self, TypeId ty, str name, i32 arity, i32 opcode, u32 ctx) {
+    void register(*self, TypeId ty, str name, i32 arity, i32 opcode, u32 ctx) {
         u32 name_id = self.intern(name);
         MethodSpec spec;
         spec.arity = arity;
@@ -161,7 +161,7 @@ impl MethodRegistry {
     }
 
     /// Register a global fallback method (arity -1 = variadic).
-    void register_global(MethodRegistry* self, str name, i32 arity, i32 opcode, u32 ctx) {
+    void register_global(*self, str name, i32 arity, i32 opcode, u32 ctx) {
         u32 name_id = self.intern(name);
         MethodSpec spec;
         spec.arity = arity;
@@ -173,7 +173,7 @@ impl MethodRegistry {
     // -- Lookup --------------------------------------------------------------
 
     /// Type-specific table first, then the global table (Rust lookup order).
-    bool lookup(MethodRegistry* self, u32 type_raw, u32 name_id, MethodSpec* out) {
+    bool lookup(*self, u32 type_raw, u32 name_id, MethodSpec* out) {
         u64 key = MethodRegistry.by_type_key(type_raw, name_id);
         if (self.by_type.contains_key(key)) {
             *out = self.by_type.get(key);
@@ -190,7 +190,7 @@ impl MethodRegistry {
 
     /// Rust: install_builtin_methods.  Safe to call exactly once per
     /// registry (re-installing simply overwrites the same table entries).
-    void install_builtin_methods(MethodRegistry* self) {
+    void install_builtin_methods(*self) {
         // Global: type_name() -> string
         self.register_global("type_name", 0, RT_METHOD_OP_TYPE_NAME, (u32)0);
         // string.len() -> i64
@@ -226,7 +226,7 @@ impl MethodRegistry {
     /// Rust: Runtime::call_method.  Looks up the spec (per-type table wins
     /// over the global table), checks arity, then dispatches on the opcode.
     /// `args` points at `args_len` values (the receiver is separate).
-    MethodResult call_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, str name, RtValue* args, i64 args_len) {
+    MethodResult call_method(*self, TypeRegistry* types, Heap* heap, RtValue receiver, str name, RtValue* args, i64 args_len) {
         u32 type_raw = receiver.type_id();
         u32 name_id = self.intern(name);
 
@@ -252,7 +252,7 @@ impl MethodRegistry {
 
     // -- Opcode dispatch (replaces the Rust closure table) -------------------
 
-    MethodResult dispatch_method(MethodRegistry* self, TypeRegistry* types, Heap* heap, i32 opcode, RtValue receiver, RtValue* args, i64 args_len) {
+    MethodResult dispatch_method(*self, TypeRegistry* types, Heap* heap, i32 opcode, RtValue receiver, RtValue* args, i64 args_len) {
         if (opcode == RT_METHOD_OP_TYPE_NAME) {
             return self.op_type_name(types, heap, receiver);
         }
@@ -273,7 +273,7 @@ impl MethodRegistry {
     }
 
     /// type_name() -> string — allocates the receiver's type name on the heap.
-    MethodResult op_type_name(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver) {
+    MethodResult op_type_name(*self, TypeRegistry* types, Heap* heap, RtValue receiver) {
         u32 type_raw = receiver.type_id();
         str name = types.name_of(TypeId.from_raw(type_raw));
         String text = String.new();
@@ -287,7 +287,7 @@ impl MethodRegistry {
     }
 
     /// string.len() -> i64 — receiver must be a heap string object.
-    MethodResult op_string_len(MethodRegistry* self, Heap* heap, RtValue receiver) {
+    MethodResult op_string_len(*self, Heap* heap, RtValue receiver) {
         if (receiver.kind != RT_KIND_OBJ) {
             return MethodRegistry.invalid_receiver("string object");
         }
@@ -316,7 +316,7 @@ impl MethodRegistry {
 
     /// vec<T>.len() -> i64 — global fallback; errors unless the receiver's
     /// type is a registered vec type and the object is a vec.
-    MethodResult op_vec_len(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver) {
+    MethodResult op_vec_len(*self, TypeRegistry* types, Heap* heap, RtValue receiver) {
         u32 type_raw = receiver.type_id();
         Type* info = types.get(TypeId.from_raw(type_raw));
         if (info == (Type*)0) {
@@ -344,7 +344,7 @@ impl MethodRegistry {
 
     /// vec<T>.push(value) -> unit — checks the pushed value against the
     /// vec's registered element type before appending in place.
-    MethodResult op_vec_push(MethodRegistry* self, TypeRegistry* types, Heap* heap, RtValue receiver, RtValue* args, i64 args_len) {
+    MethodResult op_vec_push(*self, TypeRegistry* types, Heap* heap, RtValue receiver, RtValue* args, i64 args_len) {
         u32 vec_raw = receiver.type_id();
         Type* info = types.get(TypeId.from_raw(vec_raw));
         if (info == (Type*)0) {
@@ -398,7 +398,7 @@ impl MethodRegistry {
 impl Drop for MethodRegistry {
     /// Release the tables and every interned name.  The borrowed
     /// TypeRegistry/Heap are NOT referenced (the caller owns them).  Idempotent.
-    void drop(MethodRegistry* self) {
+    void drop(*self) {
         self.by_type.drop();
         self.global.drop();
         self.intern_ids.drop();
