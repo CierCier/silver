@@ -140,16 +140,16 @@ i64 ext_gcd_i64(i64 a, i64 b, i64* out_x, i64* out_y) {
 /// or None if gcd(a, m) != 1.
 Optional<i64> mod_inv_i64(i64 a, i64 m) {
     if (m <= 1) {
-        return Optional<i64>.none();
+        return None;
     }
     i64 x = 0;
     i64 y = 0;
     i64 g = ext_gcd_i64(a, m, &x, &y);
     if (g != 1 && g != -1) {
-        return Optional<i64>.none();
+        return None;
     }
     i64 res = (x % m + m) % m;
-    return Optional<i64>.some(res);
+    return Some(res);
 }
 
 /// Chinese Remainder Theorem: solves system of congruences:
@@ -157,11 +157,11 @@ Optional<i64> mod_inv_i64(i64 a, i64 m) {
 /// Moduli must be pairwise coprime. Returns x in [0, prod(mods)).
 Optional<i64> chinese_remainder_i64(i64* rems, i64* mods, i64 count) {
     if (count <= 0 || rems == (i64*)0 || mods == (i64*)0) {
-        return Optional<i64>.none();
+        return None;
     }
     i64 prod = 1;
     for (i64 i = 0; i < count; i = i + 1) {
-        if (mods[i] <= 0) { return Optional<i64>.none(); }
+        if (mods[i] <= 0) { return None; }
         prod = prod * mods[i];
     }
     i64 result = 0;
@@ -170,11 +170,11 @@ Optional<i64> chinese_remainder_i64(i64* rems, i64* mods, i64 count) {
         i64 p_i = prod / m_i;
         Optional<i64> inv_opt = mod_inv_i64(p_i, m_i);
         if (inv_opt.is_none()) {
-            return Optional<i64>.none();
+            return None;
         }
         i64 inv = inv_opt.unwrap();
         i64 term = ((rems[i] % m_i + m_i) % m_i) * p_i % prod * inv % prod;
         result = (result + term) % prod;
     }
-    return Optional<i64>.some((result % prod + prod) % prod);
+    return Some((result % prod + prod) % prod);
 }
