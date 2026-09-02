@@ -7100,6 +7100,7 @@ fn rewrite_expression_bare_constructors(
         };
         let args: Vec<ast::Expression> = match expr.kind.as_ref() {
             ast::ExpressionKind::Call { arguments, .. } => arguments.clone(),
+            ast::ExpressionKind::MethodCall { arguments, .. } => arguments.clone(),
             _ => Vec::new(),
         };
         if args.is_empty() && matches!(expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {

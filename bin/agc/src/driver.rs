@@ -1253,9 +1253,8 @@ pub fn run(cli: Cli) {
                         comments: Vec::new(),
                         span: ast.span,
                     };
-                    let mut post_checker = TypeChecker::new().with_imported_modules(&imported_modules);
-                    let _ = post_checker.check_program_with_table(&temp_prog, &mut symbol_table);
-                    let post_bare = post_checker.take_bare_constructors();
+                    let _ = checker.check_program_with_table(&temp_prog, &mut symbol_table);
+                    let post_bare = checker.take_bare_constructors();
                     if !post_bare.is_empty() {
                         crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
                     }

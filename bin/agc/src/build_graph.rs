@@ -802,9 +802,8 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut monomorphs = monomorphs;
         crate::semantic::monomorph::refresh_monomorph_bodies(&mut monomorphs, &ast);
         crate::semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &import_lowering.module_artifacts);
-        let mut post_checker = crate::semantic::typeck::TypeChecker::new().with_imported_modules(&import_lowering.module_artifacts);
-        let _ = post_checker.check_program_with_table(&ast, &mut symbol_table);
-        let post_bare = post_checker.take_bare_constructors();
+        let _ = checker.check_program_with_table(&ast, &mut symbol_table);
+        let post_bare = checker.take_bare_constructors();
         if !post_bare.is_empty() {
             crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
         }

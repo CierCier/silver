@@ -782,10 +782,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .enum_member_constant(&named.path[0].name, &field.name)
                                 .is_some()
                         {
-                            // Prefer the monomorphized concrete instantiation
-                            // (e.g. `Optional__i32` for `Optional<i32>`) so the
-                            // payload layout matches the concrete type.
                             let monomorph = Self::monomorph_owner_name_from_named(&named);
+                            let base = &named.path[0].name;
+                            if monomorph != *base
+                                && !self.enum_variants.contains_key(&monomorph)
+                                && (self.enum_variants.contains_key(base)
+                                    || self.enum_variant_payload_types.contains_key(base))
+                                && let Some(params) = self.struct_generics.get(base).cloned()
+                                && let Some(args) = &named.generics
+                                && params.len() == args.len()
+                            {
+                                let mapping = params
+                                    .iter()
+                                    .cloned()
+                                    .zip(args.iter().cloned())
+                                    .collect::<HashMap<_, _>>();
+                                let _ = self.register_monomorphized_enum(base, &monomorph, &mapping);
+                            }
                             if self.enum_payload_layouts.contains_key(&monomorph)
                                 || self.enum_variants.contains_key(&monomorph)
                             {
@@ -869,12 +882,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ast::ExpressionKind::TypeName(ty) => {
                         if let Some(named) = Self::extract_named_type_owned(ty) {
                             let base = Self::named_type_name(&named);
-                            // For a generic enum the monomorphized concrete
-                            // instantiation (e.g. `Box2__i32`) is the registered
-                            // layout; fall back to the bare name for non-generic
-                            // enums (`Optional`, `OptInt`). Only route to
-                            // construction when the method names a real variant.
                             let monomorph = Self::monomorph_owner_name_from_named(&named);
+                            if monomorph != base
+                                && !self.enum_variants.contains_key(&monomorph)
+                                && (self.enum_variants.contains_key(&base)
+                                    || self.enum_variant_payload_types.contains_key(&base))
+                                && let Some(params) = self.struct_generics.get(&base).cloned()
+                                && let Some(args) = &named.generics
+                                && params.len() == args.len()
+                            {
+                                let mapping = params
+                                    .iter()
+                                    .cloned()
+                                    .zip(args.iter().cloned())
+                                    .collect::<HashMap<_, _>>();
+                                let _ = self.register_monomorphized_enum(&base, &monomorph, &mapping);
+                            }
                             let is_variant = |candidate: &str| {
                                 self.enum_variants
                                     .get(candidate)
