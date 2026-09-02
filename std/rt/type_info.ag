@@ -59,15 +59,15 @@ impl TypeId {
         return TypeId.from_raw((u32)RT_NO_TYPE_ID);
     }
 
-    bool is_none(TypeId self) {
+    bool is_none(self) {
         return self.raw == (u32)RT_NO_TYPE_ID;
     }
 
-    bool is_some(TypeId self) {
+    bool is_some(self) {
         return self.raw != (u32)RT_NO_TYPE_ID;
     }
 
-    bool eq(TypeId self, TypeId other) {
+    bool eq(self, TypeId other) {
         return self.raw == other.raw;
     }
 
