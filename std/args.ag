@@ -11,13 +11,15 @@ struct Args {
     i8** argv;
 }
 
-Args new() {
-    Args a;
-    a.argc = silver_argc();
-    a.argv = silver_argv();
-    return a;
-}
+impl Args {
+    Args new() {
+        Args a;
+        a.argc = silver_argc();
+        a.argv = silver_argv();
+        return a;
+    }
 
-i32 argc(Args* self) {
-    return self.argc;
+    i32 argc(*self) {
+        return self.argc;
+    }
 }
