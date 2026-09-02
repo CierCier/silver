@@ -25,7 +25,7 @@ import std.optional;
 trait IntoIterator {
     type Item;
     type IntoIter;
-    IntoIter into_iter(Self self);
+    IntoIter into_iter(self);
 }
 
 // Iterator: types that yield values via next(*self).
@@ -38,14 +38,14 @@ trait Iterator {
 trait IntoIteratorPtr {
     type Item;
     type IntoIter;
-    IntoIter into_iter_ptr(Self self);
+    IntoIter into_iter_ptr(self);
 }
 
 // IntoIteratorConstPtr: yields const pointers to elements.
 trait IntoIteratorConstPtr {
     type Item;
     type IntoIter;
-    IntoIter into_iter_const_ptr(Self self);
+    IntoIter into_iter_const_ptr(self);
 }
 
 struct RevIter<T> {
