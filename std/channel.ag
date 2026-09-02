@@ -125,17 +125,17 @@ impl<T> Channel<T> {
                     __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
                     futex_wake(&self.send_sigs, 1);
                 }
-                return Optional<T>.some(move value);
+                return Some(move value);
             }
             if (self.closed) {
                 self.mu.unlock();
-                return Optional<T>.none();
+                return None;
             }
             i32 expected = __atomic_load_i32(&self.recv_sigs, ATOMIC_SEQ_CST);
             self.mu.unlock();
             futex_wait(&self.recv_sigs, expected);
         }
-        return Optional<T>.none();
+        return None;
     }
 
     /// Try to receive a value without blocking.
@@ -151,10 +151,10 @@ impl<T> Channel<T> {
                 __atomic_fetch_add_i32(&self.send_sigs, 1, ATOMIC_SEQ_CST);
                 futex_wake(&self.send_sigs, 1);
             }
-            return Optional<T>.some(move value);
+            return Some(move value);
         }
         self.mu.unlock();
-        return Optional<T>.none();
+        return None;
     }
 
     /// Number of values currently buffered.
