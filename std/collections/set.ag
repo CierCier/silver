@@ -260,12 +260,12 @@ impl HashSet<K> {
     Optional<K> take(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
-            return Optional<K>.none();
+            return None;
         }
         K k = self.keys[idx];
         self.set_ctrl(idx, SET_CTRL_DELETED);
         self.len = self.len - 1;
-        return Optional<K>.some(k);
+        return Some(k);
     }
     void reserve(&mut self, i64 additional) {
         if (additional <= 0) { return; }
@@ -481,18 +481,18 @@ impl<K> Iterator for HashSetIter<K> {
     type Item = K;
     Optional<K> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<K>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 K k = self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<K>.some(k);
+                return Some(k);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<K>.none();
+        return None;
     }
 }
 struct HashSetDrain<K> {
@@ -505,17 +505,17 @@ impl<K> Iterator for HashSetDrain<K> {
     type Item = K;
     Optional<K> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<K>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 K k = self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<K>.some(k);
+                return Some(k);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<K>.none();
+        return None;
     }
 }
