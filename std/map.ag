@@ -800,8 +800,8 @@ impl<K, V> HashMapEntryRef<K, V> {
 //   HashMap<String,String> m = HashMap<String,String>.new();
 //   m.insert(String.from_str("k1"), String.from_str("v1")); // move in
 //   m.insert(String.from_str("k2"), String.from_str("v2")); // may grow via move
-//   Optional<Pair<String,String>> o = m.remove(String.from_str("k1")); // move out
-//   HashMapDrain<String,String> d = m.drain(); // each next() moves Pair<String,String>
+//   Optional<[String, String]> o = m.remove(String.from_str("k1")); // move out
+//   HashMapDrain<String,String> d = m.drain(); // each next() moves [String, String]
 //   HashMap<String,String> m2 = HashMap<String,String>.new();
 //   m2.insert(String.from_str("a"), String.from_str("b"));
 //   HashMapIntoIter<String,String> it = m2.into_iter(); // each next() moves entry
