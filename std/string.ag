@@ -703,7 +703,7 @@ impl String {
     Result<String, Error> from_file(str path) {
         Result<i64, Error> r_open = try_open(path, O_RDONLY, 0);
         if (r_open.is_err()) {
-            return Result<String, Error>.Err(Error.new(r_open.errno(), r_open.err_name()));
+            return Err(Error.new(r_open.errno(), r_open.err_name()));
         }
         i32 fd = (i32)r_open.value();
         String out = String.with_capacity(1024);
@@ -713,7 +713,7 @@ impl String {
             if (r_read.is_err()) {
                 try_close(fd);
                 out.drop();
-                return Result<String, Error>.Err(Error.new(r_read.errno(), r_read.err_name()));
+                return Err(Error.new(r_read.errno(), r_read.err_name()));
             }
             i64 n = r_read.value();
             if (n <= 0) {
@@ -722,7 +722,7 @@ impl String {
             out.push_bytes(&buf[0], n);
         }
         try_close(fd);
-        return Result<String, Error>.Ok(move out);
+        return Ok(move out);
     }
 }
 
@@ -1128,10 +1128,10 @@ Result<String, Error> read_to_string(str path) {
 Result<Vec<String>, Error> read_lines(str path) {
     Result<String, Error> r = String.from_file(path);
     if (r.is_err()) {
-        return Result<Vec<String>, Error>.Err(r.unwrap_err());
+        return Err(r.unwrap_err());
     }
     String content = r.unwrap();
     Vec<String> res = content.lines();
     content.drop();
-    return Result<Vec<String>, Error>.Ok(move res);
+    return Ok(move res);
 }
