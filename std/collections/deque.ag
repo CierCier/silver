@@ -157,33 +157,33 @@ impl Deque<T> {
     /// Remove and return the front element, or None when empty.
     Optional<T> try_pop_front(&mut self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.pop_front());
+        return Some(self.pop_front());
     }
 
     /// Remove and return the back element, or None when empty.
     Optional<T> try_pop_back(&mut self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.pop_back());
+        return Some(self.pop_back());
     }
 
     /// Copy of the front element, or None when empty.
     Optional<T> try_front(&self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.front());
+        return Some(self.front());
     }
 
     /// Copy of the back element, or None when empty.
     Optional<T> try_back(&self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.back());
+        return Some(self.back());
     }
 
     /// Remove all elements without freeing the backing buffer.
@@ -304,9 +304,9 @@ impl<T> Iterator for DequeIter<T> {
             T tmp = self.data[pos];
             T value = move tmp;
             self.idx = self.idx + 1;
-            return Optional<T>.some(move value);
+            return Some(move value);
         }
-        return Optional<T>.none();
+        return None;
     }
 }
 
@@ -318,8 +318,8 @@ impl<T> Iterator for DequeBorrowIter<T> {
             i64 pos = (self.head + self.idx) % self.cap;
             T v = self.data[pos];
             self.idx = self.idx + 1;
-            return Optional<T>.some(v);
+            return Some(v);
         }
-        return Optional<T>.none();
+        return None;
     }
 }
