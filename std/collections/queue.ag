@@ -110,17 +110,17 @@ impl Queue<T> {
     /// Remove and return the front element, or None when empty.
     Optional<T> try_pop(&mut self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.pop());
+        return Some(self.pop());
     }
 
     /// Copy of the front element, or None when empty.
     Optional<T> try_front(&self) {
         if (self.len == 0) {
-            return Optional<T>.none();
+            return None;
         }
-        return Optional<T>.some(self.front());
+        return Some(self.front());
     }
 
     /// Remove all elements without freeing the backing buffer.
