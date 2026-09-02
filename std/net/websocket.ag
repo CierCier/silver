@@ -265,11 +265,10 @@ impl WebSocket {
     Result<WebSocket, Error> connect_ca(str url, i64 timeout_secs, str ca_file) {
         WsUrl parsed;
         if (!ws_parse_url(url, &parsed)) {
-            return Result<WebSocket, Error>.Err(
-                Error.new(WS_ERR_MALFORMED, "malformed websocket URL"));
+            return Err(WS_ERR_MALFORMED, "malformed websocket URL");
         }
         Result<HttpConnection, Error> opened = http_open((str)&parsed.host[0], parsed.port, timeout_secs);
-        if (opened.failed()) { return Result<WebSocket, Error>.Err(opened.get_error()); }
+        if (opened.failed()) { return Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
         if (timeout_secs > 0) { conn.set_timeout(timeout_secs); }
         if (parsed.tls) {
@@ -278,7 +277,7 @@ impl WebSocket {
                 (str)&parsed.host[0], true, ca_file, &err);
             if (!ok) {
                 conn.close();
-                return Result<WebSocket, Error>.Err(move err);
+                return Err(move err);
             }
             conn.use_tls = true;
         }
@@ -287,7 +286,7 @@ impl WebSocket {
         u8 key_bytes[16];
         if (!ws_random_bytes(&key_bytes[0], 16)) {
             conn.close();
-            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_IO, "getrandom failed"));
+            return Err(WS_ERR_IO, "getrandom failed");
         }
         String key_b64 = ws_base64(&key_bytes[0], 16);
 
@@ -310,7 +309,7 @@ impl WebSocket {
             conn.close();
             key_b64.drop();
             host_hdr.drop();
-            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_IO, "handshake write failed"));
+            return Err(WS_ERR_IO, "handshake write failed");
         }
 
         // --- Response head ---
@@ -321,15 +320,14 @@ impl WebSocket {
             key_b64.drop();
             host_hdr.drop();
             head.drop();
-            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_HANDSHAKE, "no response to upgrade"));
+            return Err(WS_ERR_HANDSHAKE, "no response to upgrade");
         }
         if (head.status != 101) {
-            Error e = Error.new(WS_ERR_HANDSHAKE, "upgrade rejected");
             conn.close();
             key_b64.drop();
             host_hdr.drop();
             head.drop();
-            return Result<WebSocket, Error>.Err(move e);
+            return Err(WS_ERR_HANDSHAKE, "upgrade rejected");
         }
         String upgrade = head.get_header("Upgrade");
         String connection = head.get_header("Connection");
@@ -356,7 +354,7 @@ impl WebSocket {
         head.drop();
         if (!ok || !accept_ok) {
             conn.close();
-            return Result<WebSocket, Error>.Err(Error.new(WS_ERR_HANDSHAKE, "invalid upgrade response"));
+            return Err(WS_ERR_HANDSHAKE, "invalid upgrade response");
         }
 
         WebSocket ws;
@@ -366,7 +364,7 @@ impl WebSocket {
         ws.closed = false;
         ws.frag_opcode = -1;
         ws.frag_buf = Bytes.new();
-        return Result<WebSocket, Error>.Ok(move ws);
+        return Ok(move ws);
     }
 
     bool closed(*self) { return self.closed; }
@@ -395,7 +393,7 @@ impl WebSocket {
     /// the peer's Close echo arrives (recv) or the WebSocket is dropped.
     Result<i64, Error> close(*self, i64 code, str reason) {
         if (self.close_sent) {
-            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "close already sent"));
+            return Err(WS_ERR_IO, "close already sent");
         }
         self.close_sent = true;
         i64 rlen = reason == (str)0 ? 0 : strlen(reason);
@@ -416,14 +414,14 @@ impl WebSocket {
     /// 4-byte mask; payloads stream out in 4KB masked chunks.
     Result<i64, Error> write_frame(*self, i64 opcode, bool fin, u8* data, i64 len) {
         if (self.closed || self.close_sent && opcode != WS_OP_CLOSE) {
-            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "websocket is closed"));
+            return Err(WS_ERR_IO, "websocket is closed");
         }
         if (len < 0 || len > 0x7fffffffffffffff) {
-            return Result<i64, Error>.Err(Error.new(WS_ERR_LIMIT, "frame too large"));
+            return Err(WS_ERR_LIMIT, "frame too large");
         }
         u8 mask[4];
         if (!ws_random_bytes(&mask[0], 4)) {
-            return Result<i64, Error>.Err(Error.new(WS_ERR_IO, "getrandom failed"));
+            return Err(WS_ERR_IO, "getrandom failed");
         }
         StreamIo io = http_transport_io(&self.conn);
         u8 hdr[14];
@@ -466,7 +464,7 @@ impl WebSocket {
             if (r.failed()) { return r; }
             off = off + chunk;
         }
-        return Result<i64, Error>.Ok(len);
+        return Ok(len);
     }
 
     // --- Receiving -------------------------------------------------------
@@ -477,7 +475,7 @@ impl WebSocket {
     Result<WsMessage, Error> recv(*self) {
         while (true) {
             Result<WsFrame, Error> fr = self.read_frame();
-            if (fr.failed()) { return Result<WsMessage, Error>.Err(fr.get_error()); }
+            if (fr.failed()) { return Err(fr.get_error()); }
             WsFrame f = fr.unwrap();
             if (f.opcode >= 0x8) {
                 if (f.opcode == WS_OP_PING) {
@@ -485,20 +483,20 @@ impl WebSocket {
                     Result<i64, Error> w = self.write_frame(WS_OP_PONG, true, f.payload.data, f.payload.len);
                     if (w.failed()) {
                         f.payload.drop();
-                        return Result<WsMessage, Error>.Err(w.get_error());
+                        return Err(w.get_error());
                     }
                     WsMessage m;
                     m.kind = WS_MSG_PING;
                     m.code = 0;
                     m.payload = f.payload.take();
-                    return Result<WsMessage, Error>.Ok(move m);
+                    return Ok(move m);
                 }
                 if (f.opcode == WS_OP_PONG) {
                     WsMessage m;
                     m.kind = WS_MSG_PONG;
                     m.code = 0;
                     m.payload = f.payload.take();
-                    return Result<WsMessage, Error>.Ok(move m);
+                    return Ok(move m);
                 }
                 if (f.opcode == WS_OP_CLOSE) {
                     WsMessage m;
@@ -518,16 +516,15 @@ impl WebSocket {
                     }
                     self.close_sent = true;
                     self.closed = true;
-                    return Result<WsMessage, Error>.Ok(move m);
+                    return Ok(move m);
                 }
                 f.payload.drop();
-                return Result<WsMessage, Error>.Err(Error.new(WS_ERR_PROTOCOL, "unknown control opcode"));
+                return Err(WS_ERR_PROTOCOL, "unknown control opcode");
             }
             if (f.opcode == WS_OP_CONT) {
                 if (self.frag_opcode < 0) {
                     f.payload.drop();
-                    return Result<WsMessage, Error>.Err(
-                        Error.new(WS_ERR_PROTOCOL, "unexpected continuation frame"));
+                    return Err(WS_ERR_PROTOCOL, "unexpected continuation frame");
                 }
                 self.frag_buf.extend(f.payload.data, f.payload.len);
                 f.payload.drop();
@@ -536,26 +533,25 @@ impl WebSocket {
                     self.frag_opcode = -1;
                     Bytes done = self.frag_buf.take();
                     WsMessage m = ws_message_from(op, move done);
-                    return Result<WsMessage, Error>.Ok(move m);
+                    return Ok(move m);
                 }
                 continue;
             }
             if (self.frag_opcode >= 0) {
                 f.payload.drop();
-                return Result<WsMessage, Error>.Err(
-                    Error.new(WS_ERR_PROTOCOL, "new data frame during fragmented message"));
+                return Err(WS_ERR_PROTOCOL, "new data frame during fragmented message");
             }
             if (f.fin) {
                 Bytes done = f.payload.take();
                 WsMessage m = ws_message_from(f.opcode, move done);
-                return Result<WsMessage, Error>.Ok(move m);
+                return Ok(move m);
             }
             // Begin a fragmented message.
             self.frag_opcode = f.opcode;
             self.frag_buf = f.payload.take();
         }
         // Unreachable.
-        return Result<WsMessage, Error>.Err(Error.new(WS_ERR_PROTOCOL, "unreachable"));
+        return Err(WS_ERR_PROTOCOL, "unreachable");
     }
 
     /// Read one frame. Server frames must not be masked; control frames
@@ -566,22 +562,20 @@ impl WebSocket {
         u8 b0;
         u8 b1;
         if (!ws_read_byte(&io, &mut b0)) {
-            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+            return Err(WS_ERR_IO, "connection closed");
         }
         if (!ws_read_byte(&io, &mut b1)) {
-            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+            return Err(WS_ERR_IO, "connection closed");
         }
         bool fin = (b0 & 0x80) != 0;
         i64 rsv = (b0 >> 4) & 0x7;
         i64 opcode = b0 & 0x0f;
         bool masked = (b1 & 0x80) != 0;
         if (rsv != 0) {
-            return Result<WsFrame, Error>.Err(
-                Error.new(WS_ERR_PROTOCOL, "RSV bits set (no extensions negotiated)"));
+            return Err(WS_ERR_PROTOCOL, "RSV bits set (no extensions negotiated)");
         }
         if (masked) {
-            return Result<WsFrame, Error>.Err(
-                Error.new(WS_ERR_PROTOCOL, "server frames must not be masked"));
+            return Err(WS_ERR_PROTOCOL, "server frames must not be masked");
         }
         i64 len7 = b1 & 0x7f;
         i64 len;
@@ -590,13 +584,13 @@ impl WebSocket {
         } else if (len7 == 126) {
             u8 e[2];
             if (!ws_read_bytes(&io, &e[0], 2)) {
-                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+                return Err(WS_ERR_IO, "connection closed");
             }
             len = ((i64)e[0] << 8) | (i64)e[1];
         } else {
             u8 e[8];
             if (!ws_read_bytes(&io, &e[0], 8)) {
-                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+                return Err(WS_ERR_IO, "connection closed");
             }
             len = 0;
             i64 k = 0;
@@ -605,15 +599,14 @@ impl WebSocket {
                 k = k + 1;
             }
             if (len < 0) {
-                return Result<WsFrame, Error>.Err(Error.new(WS_ERR_LIMIT, "frame length overflow"));
+                return Err(WS_ERR_LIMIT, "frame length overflow");
             }
         }
         if (len > self.max_message) {
-            return Result<WsFrame, Error>.Err(Error.new(WS_ERR_LIMIT, "frame exceeds max message size"));
+            return Err(WS_ERR_LIMIT, "frame exceeds max message size");
         }
         if (opcode >= 0x8 && (len > 125 || !fin)) {
-            return Result<WsFrame, Error>.Err(
-                Error.new(WS_ERR_PROTOCOL, "invalid control frame"));
+            return Err(WS_ERR_PROTOCOL, "invalid control frame");
         }
         Bytes payload = Bytes.with_capacity(len);
         if (len > 0) {
@@ -624,7 +617,7 @@ impl WebSocket {
                 if (want > 4096) { want = 4096; }
                 if (!ws_read_bytes(&io, &buf[0], want)) {
                     payload.drop();
-                    return Result<WsFrame, Error>.Err(Error.new(WS_ERR_IO, "connection closed"));
+                    return Err(WS_ERR_IO, "connection closed");
                 }
                 payload.extend(&buf[0], want);
                 got = got + want;
@@ -634,7 +627,7 @@ impl WebSocket {
         frame.fin = fin;
         frame.opcode = opcode;
         frame.payload = move payload;
-        return Result<WsFrame, Error>.Ok(move frame);
+        return Ok(move frame);
     }
 }
 
