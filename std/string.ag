@@ -570,27 +570,27 @@ impl String {
         return true;
     }
     Optional<i64> parse_i64(&self) {
-        if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
+        if (self.len == 0 || self.data == (u8*)0) { return None; }
         return parse_i64((str)self.data);
     }
 
     Optional<i64> parse_i64_radix(&self, i64 radix) {
-        if (self.len == 0 || self.data == (u8*)0) { return Optional<i64>.none(); }
+        if (self.len == 0 || self.data == (u8*)0) { return None; }
         return parse_i64_radix((str)self.data, radix);
     }
 
     Optional<i32> parse_i32(&self) {
         Optional<i64> o = self.parse_i64();
-        if (o.is_none()) { return Optional<i32>.none(); }
-        return Optional<i32>.some((i32)o.unwrap());
+        if (o.is_none()) { return None; }
+        return Some((i32)o.unwrap());
     }
 
     Optional<u64> parse_u64(&self) {
         Optional<i64> o = self.parse_i64();
-        if (o.is_none()) { return Optional<u64>.none(); }
+        if (o.is_none()) { return None; }
         i64 v = o.unwrap();
-        if (v < 0) { return Optional<u64>.none(); }
-        return Optional<u64>.some((u64)v);
+        if (v < 0) { return None; }
+        return Some((u64)v);
     }
 
     Vec<i64> extract_ints(&self) {
@@ -1022,7 +1022,7 @@ Optional<i64> parse_i64(str s) {
 /// Parse an integer with given radix (2..36), with optional leading '-' or '+'.
 Optional<i64> parse_i64_radix(str s, i64 radix) {
     if (s == (str)0 || radix < 2 || radix > 36) {
-        return Optional<i64>.none();
+        return None;
     }
     u8* p = (u8*)s;
     i64 len = strlen(s);
@@ -1031,7 +1031,7 @@ Optional<i64> parse_i64_radix(str s, i64 radix) {
         i = i + 1;
     }
     if (i == len) {
-        return Optional<i64>.none();
+        return None;
     }
     bool neg = false;
     if (p[i] == (u8)'-') {
@@ -1041,7 +1041,7 @@ Optional<i64> parse_i64_radix(str s, i64 radix) {
         i = i + 1;
     }
     if (i == len) {
-        return Optional<i64>.none();
+        return None;
     }
     if (radix == 16 && i + 2 <= len && p[i] == (u8)'0' && (p[i + 1] == (u8)'x' || p[i + 1] == (u8)'X')) {
         i = i + 2;
@@ -1050,7 +1050,7 @@ Optional<i64> parse_i64_radix(str s, i64 radix) {
         i = i + 2;
     }
     if (i == len) {
-        return Optional<i64>.none();
+        return None;
     }
     i64 val = 0;
     i64 digits = 0;
@@ -1070,24 +1070,24 @@ Optional<i64> parse_i64_radix(str s, i64 radix) {
             if (i == len && digits > 0) {
                 break;
             }
-            return Optional<i64>.none();
+            return None;
         } else {
-            return Optional<i64>.none();
+            return None;
         }
         if (digit < 0 || digit >= radix) {
-            return Optional<i64>.none();
+            return None;
         }
         val = val * radix + digit;
         digits = digits + 1;
         i = i + 1;
     }
     if (digits == 0) {
-        return Optional<i64>.none();
+        return None;
     }
     if (neg) {
         val = -val;
     }
-    return Optional<i64>.some(val);
+    return Some(val);
 }
 
 /// Extract all signed integer values found in string `s` (e.g. "x=10, y=-25" -> [10, -25]).
