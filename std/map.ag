@@ -288,9 +288,9 @@ impl HashMap<K, V> {
     Optional<V> get_opt(&self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0) {
-            return Optional<V>.some(self.values[idx]);
+            return Some(self.values[idx]);
         }
-        return Optional<V>.none();
+        return None;
     }
 
     /// Get pointer to value for key. Aborts if key not found.
@@ -620,18 +620,18 @@ impl<K, V> Iterator for HashMapKeysIter<K, V> {
     type Item = K;
     Optional<K> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<K>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 K k = self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<K>.some(k);
+                return Some(k);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<K>.none();
+        return None;
     }
 }
 struct HashMapValuesIter<K, V> {
@@ -644,18 +644,18 @@ impl<K, V> Iterator for HashMapValuesIter<K, V> {
     type Item = V;
     Optional<V> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<V>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 V v = self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<V>.some(v);
+                return Some(v);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<V>.none();
+        return None;
     }
 }
 struct HashMapIterMut<K, V> {
@@ -668,18 +668,18 @@ impl<K, V> Iterator for HashMapIterMut<K, V> {
     type Item = V;
     Optional<V> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<V>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
                 V v = self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<V>.some(v);
+                return Some(v);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<V>.none();
+        return None;
     }
 }
 struct HashMapDrain<K, V> {
@@ -751,13 +751,13 @@ impl<K, V> HashMapEntryRef<K, V> {
 
     Optional<V> take(&mut self) {
         if (self.idx < 0) {
-            return Optional<V>.none();
+            return None;
         }
         V v = move self.map.values[self.idx];
         self.map.set_ctrl(self.idx, CTRL_DELETED);
         self.map.len = self.map.len - 1;
         self.idx = -1;
-        return Optional<V>.some(move v);
+        return Some(move v);
     }
 
     V* or_insert(&mut self, V default) {
