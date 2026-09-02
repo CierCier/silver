@@ -66,9 +66,9 @@ impl Vec<T> {
     /// Read element at `index`, returning None when out of bounds.
     Optional<T> try_get(&self, i64 index) {
         if (index < 0 || index >= self.len) {
-            return None;
+            return Optional<T>.none();
         }
-        return Some(self.data[index]);
+        return Optional<T>.some(self.data[index]);
     }
 
     /// Pointer to element at `index`.
@@ -187,9 +187,9 @@ impl Vec<T> {
     /// Pop the last element, or None when empty.
     Optional<T> try_pop(&mut self) {
         if (self.len == 0) {
-            return None;
+            return Optional<T>.none();
         }
-        return Some(self.pop());
+        return Optional<T>.some(self.pop());
     }
 
 
