@@ -501,7 +501,7 @@ impl<K, V> Iterator for HashMapIntoIter<K, V> {
     /// so owned K/V transfers; `Copy` K/V bitwise-copy via same `move`.
     Optional<HashMapEntry<K, V>> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<HashMapEntry<K, V>>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
@@ -510,11 +510,11 @@ impl<K, V> Iterator for HashMapIntoIter<K, V> {
                 e.key = move self.keys[self.idx];
                 e.value = move self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<HashMapEntry<K, V>>.some(move e);
+                return Some(move e);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<HashMapEntry<K, V>>.none();
+        return None;
     }
 }
 
@@ -593,7 +593,7 @@ impl<K, V> Iterator for HashMapIter<K, V> {
     type Item = HashMapEntry<K, V>;
     Optional<HashMapEntry<K, V>> next(*self) {
         if (self.ctrl == (u8*)0) {
-            return Optional<HashMapEntry<K, V>>.none();
+            return None;
         }
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
@@ -602,11 +602,11 @@ impl<K, V> Iterator for HashMapIter<K, V> {
                 e.key = self.keys[self.idx];
                 e.value = self.values[self.idx];
                 self.idx = self.idx + 1;
-                return Optional<HashMapEntry<K, V>>.some(e);
+                return Some(e);
             }
             self.idx = self.idx + 1;
         }
-        return Optional<HashMapEntry<K, V>>.none();
+        return None;
     }
 }
 
