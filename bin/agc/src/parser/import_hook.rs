@@ -128,6 +128,9 @@ impl<'a> FileImportResolverHook<'a> {
                 auto_modules.push(module_path);
             }
         }
+        if uses_bare_constructor(&program.items, "Err") {
+            auto_modules.push(vec!["std", "error"]);
+        }
 
         // Auto-import for builtin macros:
         // @print / @println / @eprint / @eprintln / @fprint / @sprint / @format -> std.io

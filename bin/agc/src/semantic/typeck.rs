@@ -5336,6 +5336,64 @@ impl TypeChecker {
         if exp_enum_name != enum_name {
             return None;
         }
+        // Special case: Err(code, message) constructing Result<T, Error> directly.
+        if name == "Err" && arguments.len() == 2 {
+            let arg0_ty = self.check_expr_with_literal_naturals(arguments[0]);
+            let arg1_ty =
+                self.check_expr(arguments[1], Some(&Type::Primitive(ast::PrimitiveType::Str)));
+            if !crate::types::is_integer(&arg0_ty) {
+                self.error(
+                    format!(
+                        "Err(code, message) expected integer error code, found {arg0_ty}"
+                    ),
+                    arguments[0].span,
+                );
+                return None;
+            }
+            if !crate::types::is_string(&arg1_ty) {
+                self.error(
+                    format!(
+                        "Err(code, message) expected str message, found {arg1_ty}"
+                    ),
+                    arguments[1].span,
+                );
+                return None;
+            }
+            if let Some(e_ty) = exp_generics.get(1) {
+                if let Type::Named { path, .. } = e_ty {
+                    if path.last().map(|s| s.as_str()) != Some("Error") {
+                        self.error(
+                            format!(
+                                "Err(code, message) produces Error, but expected error type is {e_ty}"
+                            ),
+                            *span,
+                        );
+                        return None;
+                    }
+                }
+            }
+            let err_ty = Type::Named {
+                path: vec!["Error".to_string()],
+                generics: Vec::new(),
+            };
+            let generics = if !exp_generics.is_empty() {
+                vec![exp_generics[0].clone(), err_ty]
+            } else {
+                vec![Type::Unit, err_ty]
+            };
+            self.bare_constructors.insert(
+                (span.file, span.start, span.end),
+                BareConstructorRewrite {
+                    enum_name: enum_name.to_string(),
+                    variant: variant.to_string(),
+                    generics: generics.iter().map(|g| g.to_ast()).collect(),
+                },
+            );
+            return Some(Type::Named {
+                path: vec![enum_name.to_string()],
+                generics,
+            });
+        }
         let enum_def = self.enum_defs.get(enum_name)?;
         let variant_info = enum_def.variants.get(variant)?;
         let enum_type_params = enum_def.type_params.clone();
@@ -7103,7 +7161,49 @@ fn rewrite_expression_bare_constructors(
             ast::ExpressionKind::MethodCall { arguments, .. } => arguments.clone(),
             _ => Vec::new(),
         };
-        if args.is_empty() && matches!(expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
+        let final_args = if rewrite.variant == "Err" && args.len() == 2 {
+            let mut it = args.into_iter();
+            let code_arg = it.next().unwrap();
+            let msg_arg = it.next().unwrap();
+            let cast_code = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Cast {
+                    expression: Box::new(code_arg),
+                    target_type: Box::new(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
+                        span: expr.span,
+                    }),
+                }),
+                span: expr.span,
+            };
+            let error_receiver = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::TypeName(ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "Error".to_string(),
+                            span: expr.span,
+                        }],
+                        generics: None,
+                    })),
+                    span: expr.span,
+                })),
+                span: expr.span,
+            };
+            let error_call = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::MethodCall {
+                    receiver: Box::new(error_receiver),
+                    method: ast::Identifier {
+                        name: "new".to_string(),
+                        span: expr.span,
+                    },
+                    arguments: vec![cast_code, msg_arg],
+                }),
+                span: expr.span,
+            };
+            vec![error_call]
+        } else {
+            args
+        };
+        if final_args.is_empty() && matches!(expr.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
             *expr.kind = ast::ExpressionKind::FieldAccess {
                 object: Box::new(receiver),
                 field: ast::Identifier {
@@ -7118,7 +7218,7 @@ fn rewrite_expression_bare_constructors(
                     name: rewrite.variant.clone(),
                     span: expr.span,
                 },
-                arguments: args,
+                arguments: final_args,
             };
         }
         return;
@@ -8258,6 +8358,18 @@ mod tests {
         let program = parse(
             "enum Result<T, E> { Ok(T); Err(E); } \
              i32 main() { Result<i32, str> res = Ok(42); i32 val = res ? 10; return val; }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_err_code_message_bare_constructor() {
+        let program = parse(
+            "struct Error { i64 code; str message; } \
+             impl Error { Error new(i64 code, str message) { Error e; e.code = code; e.message = message; return e; } } \
+             enum Result<T, E> { Ok(T); Err(E); } \
+             Result<i32, Error> fail() { return Err(404, \"not found\"); }",
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "expected no errors, got {errors:?}");
