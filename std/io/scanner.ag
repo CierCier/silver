@@ -193,7 +193,7 @@ impl Scanner {
 
     /// Return the next token as an owned String.
     /// Sets ok = false on failure.
-    String next_string(&mut Scanner self) {
+    String next_string(&mut self) {
         str tok = self.next();
         if (!self.ok) {
             return String.new();
@@ -203,7 +203,7 @@ impl Scanner {
 
     /// Parse the next token as a signed integer, saturating to [lo, hi] on
     /// overflow (ok = false). Non-numeric tokens set ok = false and return 0.
-    i64 _parse_signed(&mut Scanner self, i64 lo, i64 hi) {
+    i64 _parse_signed(&mut self, i64 lo, i64 hi) {
         str tok = self.next();
         if (!self.ok) {
             return 0;
