@@ -515,20 +515,20 @@ impl HttpRequest {
         return move request;
     }
 
-    void header(&mut HttpRequest self, str name, str value) {
+    void header(&mut self, str name, str value) {
         self.headers.push_str(name);
         self.headers.push_str(": ");
         self.headers.push_str(value);
         self.headers.push_str("\r\n");
     }
 
-    void set_body(&mut HttpRequest self, str body) {
+    void set_body(&mut self, str body) {
         self.body = body;
     }
 
     /// Go's Request.AddCookie: merge `name=value` into the existing Cookie
     /// header line, or append a new Cookie header when none is set.
-    void add_cookie(&mut HttpRequest self, str name, str value) {
+    void add_cookie(&mut self, str name, str value) {
         u8* data = self.headers.data;
         i64 len = self.headers.len;
         i64 pos = 0;
