@@ -61,7 +61,7 @@ impl TcpStream {
         Result<i64, Error> fd_r = try_socket(AddressFamily.INET, SocketType.STREAM,
             SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (fd_r.is_err()) {
-            return Result<TcpStream, Error>.Err(tcp_syscall_error(fd_r));
+            return Err(tcp_syscall_error(fd_r));
         }
         Socket sock = Socket.from_fd((i32)fd_r.value());
 
@@ -78,11 +78,11 @@ impl TcpStream {
                 Result<i64, Error> pr = try_poll(&pfd, 1, ms);
                 if (pr.is_err()) {
                     sock.close();
-                    return Result<TcpStream, Error>.Err(tcp_syscall_error(pr));
+                    return Err(tcp_syscall_error(pr));
                 }
                 if (pr.value() == 0) {
                     sock.close();
-                    return Result<TcpStream, Error>.Err(Error.new(ETIMEDOUT, "connect timed out"));
+                    return Err(ETIMEDOUT, "connect timed out");
                 }
                 i32 so_error = 0;
                 i64 so_len = 4;
@@ -90,16 +90,16 @@ impl TcpStream {
                     SocketOption.SO_ERROR, (void*)&so_error, (void*)&so_len);
                 if (g.is_err()) {
                     sock.close();
-                    return Result<TcpStream, Error>.Err(tcp_syscall_error(g));
+                    return Err(tcp_syscall_error(g));
                 }
                 if (so_error != 0) {
                     sock.close();
-                    return Result<TcpStream, Error>.Err(Error.new((i64)so_error, errno_name((i64)so_error)));
+                    return Err((i64)so_error, errno_name((i64)so_error));
                 }
             } else {
                 // Immediate failure (refused, unreachable, ...).
                 sock.close();
-                return Result<TcpStream, Error>.Err(tcp_syscall_error(c));
+                return Err(tcp_syscall_error(c));
             }
         }
 
@@ -107,16 +107,16 @@ impl TcpStream {
         Result<i64, Error> fl = tcp_clear_nonblocking(sock.fd);
         if (fl.is_err()) {
             sock.close();
-            return Result<TcpStream, Error>.Err(tcp_syscall_error(fl));
+            return Err(tcp_syscall_error(fl));
         }
         TcpStream stream;
         stream.sock = move sock;
-        return Result<TcpStream, Error>.Ok(move stream);
+        return Ok(move stream);
     }
 
     Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (self.invalid()) {
-            return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
+            return Err(EINVAL, "stream is invalid");
         }
         Result<i64, Error> r = try_read(self.sock.fd, buf, len);
         if (r.err_is(EINTR)) {
@@ -127,7 +127,7 @@ impl TcpStream {
 
     Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (self.invalid()) {
-            return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid"));
+            return Err(EINVAL, "stream is invalid");
         }
         i64 done = 0;
         while (done < len) {
@@ -135,13 +135,13 @@ impl TcpStream {
                 try_sendto(self.sock.fd, (void*)((i64)buf + done), len - done, 0x4000, (void*)0, 0);
             if (r.is_err()) {
                 if (r.err_is(EINTR)) { continue; }
-                if (done > 0) { return Result<i64, Error>.Ok(done); }
+                if (done > 0) { return Ok(done); }
                 return r;
             }
             done = done + r.value();
             if (r.value() == 0) { break; }
         }
-        return Result<i64, Error>.Ok(done);
+        return Ok(done);
     }
 
     void close(*self) {
@@ -149,7 +149,7 @@ impl TcpStream {
     }
 
     Result<i64, Error> shutdown(*self, ShutdownHow how) {
-        if (self.invalid()) { return Result<i64, Error>.Err(Error.new(EINVAL, "stream is invalid")); }
+        if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
         return try_shutdown(self.sock.fd, how);
     }
 }
@@ -219,7 +219,7 @@ impl TcpListener {
     // Returns the accepted client fd; callers can use TcpStream.from_fd.
     Result<i64, Error> accept(*self) {
         if (self.invalid()) {
-            return Result<i64, Error>.Err(Error.new(EINVAL, "listener is invalid"));
+            return Err(EINVAL, "listener is invalid");
         }
         Result<i64, Error> r =
             try_accept4(self.sock.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);
