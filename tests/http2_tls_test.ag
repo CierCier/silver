@@ -7,6 +7,7 @@ import std.error;
 import std.mem.alloc;
 import std.mem.memory;
 import std.net.hpack;
+import std.net.http;
 import std.net.http2;
 import std.net.inet;
 import std.net.tcp;
@@ -48,6 +49,17 @@ i32 main() {
     assert_true(memcmp((const void*)resp.body, (const void*)"hello h2", 8) == 0, "body is hello h2");
     free(resp.body);
     hpack_free_fields(&resp.headers[0], resp.header_count);
+
+    // Test automatic HttpClient transparent ALPN routing to HTTP/2
+    test_start("HttpClient transparent h2 over TLS");
+    HttpClient client = HttpClient.new();
+    client.set_ca_file("tests/certs/ca.pem");
+    Result<HttpResponse, Error> hr = client.get("https://127.0.0.1:18445/hello");
+    assert_true(hr.success(), "client.get h2 succeeded");
+    HttpResponse hresp = hr.unwrap();
+    assert_eq_i64(200, (i64)hresp.status, "client status 200");
+    assert_eq_i64((i64)(i32)HttpVersion.Http20, (i64)(i32)hresp.version, "version is Http20");
+    assert_true(hresp.body.equals("hello h2"), "body matches hello h2");
 
     return done();
 }

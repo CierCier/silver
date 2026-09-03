@@ -12,6 +12,8 @@ import std.mem.drop;
 import std.mem.vec;
 import std.net.cookie;
 import std.net.dns;
+import std.net.hpack;
+import std.net.http2;
 import std.net.http_status;
 import std.net.inet;
 import std.net.tcp;
@@ -36,6 +38,7 @@ const i32 HTTP_DEFAULT_MAX_REDIRECTS = 10;
 enum HttpVersion {
     Http10 = 10;
     Http11 = 11;
+    Http20 = 20;
 }
 
 struct HttpRequest {
@@ -79,6 +82,7 @@ struct HttpConnection {
     u8 tls_state[64]; // opaque TLS transport state (TRANSPORT_TLS_STATE_SIZE)
     bool use_tls;
     HttpVersion version;
+    bool is_h2;
     // Read buffer: framing reads byte-at-a-time, so the transport serves
     // from this buffer and refills in 4KB chunks instead of one syscall (or
     // SSL_read) per byte. Heap-allocated (4096 bytes) so the connection
@@ -255,6 +259,33 @@ void http_strip_sensitive_headers(str block, String* out) {
     }
 }
 
+/// Parse CRLF-separated "Name: value\r\n" header block into HpackField array views.
+i64 http_parse_headers_to_hpack(str raw_headers, HpackField* extra, i64 max_extra) {
+    if (raw_headers == (str)0) { return 0; }
+    u8* data = (u8*)raw_headers;
+    i64 len = strlen(raw_headers);
+    i64 pos = 0;
+    i64 count = 0;
+    while (pos < len && count < max_extra) {
+        i64 end = http_find_crlf(data, len, pos);
+        if (end < 0) { end = len; }
+        i64 colon = pos;
+        while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+        if (colon > pos && colon < end) {
+            i64 value_start = colon + 1;
+            while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+            extra[count].name = &data[pos];
+            extra[count].name_len = colon - pos;
+            extra[count].value = &data[value_start];
+            extra[count].value_len = end - value_start;
+            count += 1;
+        }
+        if (end >= len) { break; }
+        pos = end + 2;
+    }
+    return count;
+}
+
 /// Index of the first CRLF at or after `start`, or -1 when none exists.
 #[inline(always)]
 i64 http_find_crlf(u8* data, i64 len, i64 start) {
@@ -427,6 +458,7 @@ Result<HttpConnection, Error> http_open(str host, u16 port, i64 timeout_secs) {
     connection.stream = move stream;
     connection.use_tls = false;
     connection.version = HttpVersion.Http11;
+    connection.is_h2 = false;
     connection.read_buf = (u8*)malloc(4096);
     connection.read_buf_len = 0;
     connection.read_buf_pos = 0;
@@ -1178,6 +1210,7 @@ impl HttpClient {
         connection.stream = move stream;
         connection.use_tls = false;
         connection.version = version;
+        connection.is_h2 = false;
         connection.read_buf = (u8*)malloc(4096);
         connection.read_buf_len = 0;
         connection.read_buf_pos = 0;
@@ -1302,6 +1335,59 @@ impl HttpClient {
             if (!self.tls_handshake(&conn, host, &mut err)) {
                 return Err(move err);
             }
+        }
+        if (conn.is_http2()) {
+            StreamIo io = http_transport_io(&conn);
+            H2Connection h2c;
+            h2_init(&h2c, &io);
+            if (h2_send_preface(&h2c) != 0) {
+                conn.close();
+                return Err(HTTP_ERR_IO, "H2 preface failed");
+            }
+            HpackField extra[32];
+            i64 n_extra = http_parse_headers_to_hpack(headers, &extra[0], 32);
+            H2Response h2resp;
+            i64 rc = 0;
+            if (body != (str)0 && strlen(body) > 0) {
+                rc = h2_request_body(&h2c, method, "https", host, parsed.path,
+                                     &extra[0], n_extra, (u8*)body, strlen(body), &h2resp);
+            } else {
+                rc = h2_request(&h2c, method, "https", host, parsed.path,
+                                &extra[0], n_extra, &h2resp);
+            }
+            if (rc != 0) {
+                conn.close();
+                return Err(HTTP_ERR_IO, "H2 request failed");
+            }
+            HttpResponse response = HttpResponse.empty();
+            response.version = HttpVersion.Http20;
+            response.status = (i32)h2resp.status;
+            response.reason.push_str(http_status_reason(response.status));
+            i64 hi = 0;
+            while (hi < h2resp.header_count) {
+                response.headers.push_bytes(h2resp.headers[hi].name, h2resp.headers[hi].name_len);
+                response.headers.push_str(": ");
+                response.headers.push_bytes(h2resp.headers[hi].value, h2resp.headers[hi].value_len);
+                response.headers.push_str("\r\n");
+                hi += 1;
+            }
+            i64 ti = 0;
+            while (ti < h2resp.trailer_count) {
+                response.trailers.push_bytes(h2resp.trailers[ti].name, h2resp.trailers[ti].name_len);
+                response.trailers.push_str(": ");
+                response.trailers.push_bytes(h2resp.trailers[ti].value, h2resp.trailers[ti].value_len);
+                response.trailers.push_str("\r\n");
+                ti += 1;
+            }
+            if (h2resp.body != (u8*)0 && h2resp.body_len > 0) {
+                response.body.push_bytes(h2resp.body, h2resp.body_len);
+                response.content_length = h2resp.body_len;
+            } else {
+                response.content_length = 0;
+            }
+            h2_free_response(&h2resp);
+            conn.close();
+            return Ok(move response);
         }
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
         if (headers != (str)0) { req.headers.push_str(headers); }
@@ -1776,5 +1862,15 @@ impl HttpConnection {
     void clear_timeout(*self) {
         self.stream.sock.set_recv_timeout(0);
         self.stream.sock.set_send_timeout(0);
+    }
+
+    /// True when the connection has negotiated HTTP/2 via ALPN.
+    bool is_http2(*self) {
+        if (self.is_h2) { return true; }
+        if (self.use_tls && transport_tls_is_h2((void*)&self.tls_state[0])) {
+            self.is_h2 = true;
+            return true;
+        }
+        return false;
     }
 }
