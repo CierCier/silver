@@ -2807,18 +2807,20 @@ impl HttpServer {
 
         while (true) {
             Result<i64, Error> a = listener.accept();
-            if (a.failed()) {
-                continue;
-            }
-            TcpStream stream = TcpStream.from_fd((i32)a.value());
-            if (self.read_timeout_secs > 0) {
-                stream.sock.set_recv_timeout(self.read_timeout_secs);
-            }
-            if (self.write_timeout_secs > 0) {
-                stream.sock.set_send_timeout(self.write_timeout_secs);
-            }
+            match a {
+                Ok(fd) : {
+                    TcpStream stream = TcpStream.from_fd((i32)fd);
+                    if (self.read_timeout_secs > 0) {
+                        stream.sock.set_recv_timeout(self.read_timeout_secs);
+                    }
+                    if (self.write_timeout_secs > 0) {
+                        stream.sock.set_send_timeout(self.write_timeout_secs);
+                    }
 
-            self.serve_conn(move stream);
+                    self.serve_conn(move stream);
+                },
+                Err(e) : { continue; },
+            };
         }
         return Ok(0);
     }

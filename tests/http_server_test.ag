@@ -44,10 +44,14 @@ void server_worker(i32 fd) {
     i64 count = 0;
     while (count < 4) {
         Result<i64, Error> a = listener.accept();
-        if (a.failed()) { continue; }
-        TcpStream stream = TcpStream.from_fd((i32)a.value());
-        s.serve_conn(move stream);
-        count = count + 1;
+        match a {
+            Ok(fd) : {
+                TcpStream stream = TcpStream.from_fd((i32)fd);
+                s.serve_conn(move stream);
+                count = count + 1;
+            },
+            Err(e) : { continue; },
+        };
     }
     s.drop();
 }

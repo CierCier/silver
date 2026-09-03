@@ -242,12 +242,13 @@ impl UdpSocket {
 
     /// Get the bound port (via getsockname). Returns 0 on failure.
     u16 local_port(*self) {
-        Result<SocketAddr, Error> a = self.local_addr();
-        if (a.failed()) { return (u16)0; }
-        return match a.unwrap() {
-            V4(sa) : ntoh16(sa.sin_port),
-            V6(sa) : ntoh16(sa.sin6_port),
-            Unix(sa) : (u16)0
+        return match self.local_addr() {
+            Ok(addr) : match addr {
+                V4(sa) : ntoh16(sa.sin_port),
+                V6(sa) : ntoh16(sa.sin6_port),
+                Unix(sa) : (u16)0
+            },
+            Err(e) : (u16)0
         };
     }
 
