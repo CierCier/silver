@@ -22,14 +22,23 @@ enum SocketType {
 
 enum SocketOptionLevel {
     SOCKET = 1;
+    TCP = 6;
 }
 
 enum SocketOption {
     REUSEADDR = 2;
     SO_ERROR = 4;
     BROADCAST = 6;
+    KEEPALIVE = 9;
+    REUSEPORT = 15;
     RCVTIMEO = 20;
     SNDTIMEO = 21;
+}
+
+enum TcpOption {
+    NODELAY = 1;
+    CORK = 3;
+    QUICKACK = 12;
 }
 
 enum ShutdownHow {

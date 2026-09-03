@@ -1,0 +1,41 @@
+// std/sys/io_vec.ag — Vectorized scatter/gather I/O and zero-copy sendfile.
+//
+// Essential primitives for high-performance servers:
+// - writev: send response headers + body chunks in a single syscall.
+// - readv: scatter incoming frames across pre-allocated buffers.
+// - sendfile: transfer file data directly from the kernel page cache to a socket.
+
+import std.error;
+import std.sys.raw.fs;
+import std.sys.result;
+
+/// Linux struct iovec (void* iov_base, size_t iov_len) — 16 bytes on x86_64.
+struct IoVec {
+    void* base;
+    i64   len;
+}
+
+impl IoVec {
+    IoVec new(void* base, i64 len) {
+        IoVec iov;
+        iov.base = base;
+        iov.len = len;
+        return iov;
+    }
+}
+
+/// Write data from multiple buffers in a single system call (writev(2)).
+Result<i64, Error> try_writev(i32 fd, IoVec* iov, i64 count) {
+    return Result<i64, Error>.from_raw(sys_writev((i64)fd, (i64)iov, count));
+}
+
+/// Read data into multiple buffers in a single system call (readv(2)).
+Result<i64, Error> try_readv(i32 fd, IoVec* iov, i64 count) {
+    return Result<i64, Error>.from_raw(sys_readv((i64)fd, (i64)iov, count));
+}
+
+/// Zero-copy transfer from file descriptor `in_fd` to socket `out_fd` (sendfile(2)).
+/// If `offset` is non-null, reading starts at `*offset` and updates it upon completion.
+Result<i64, Error> try_sendfile(i32 out_fd, i32 in_fd, i64* offset, i64 count) {
+    return Result<i64, Error>.from_raw(sys_sendfile((i64)out_fd, (i64)in_fd, (i64)offset, count));
+}

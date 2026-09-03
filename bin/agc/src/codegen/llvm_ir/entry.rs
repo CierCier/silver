@@ -150,6 +150,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
             union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
             enum_variant_payload_types: HashMap::default(),
@@ -262,6 +263,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
             union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
             enum_backing_types: HashMap::default(),
             enum_variant_payload_types: HashMap::default(),
             enum_variants: HashMap::default(),
@@ -598,6 +600,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
             union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
             enum_variant_payload_types: HashMap::default(),
             enum_backing_types: HashMap::default(),
             enum_variants: HashMap::default(),
@@ -802,7 +805,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Struct(struct_item) => {
-                    self.register_struct_fields(struct_item);
+                    self.register_struct_fields(struct_item, &item.attributes);
                 }
                 ast::ItemKind::Enum(enum_item) => {
                     self.enum_backing_types

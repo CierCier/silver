@@ -8,6 +8,7 @@ This directory contains dedicated compliance tables for every networking standar
 |:---|:---|:---|:---|:---:|
 | **UDP** | User Datagram Protocol & POSIX Datagram Sockets | RFC 768, POSIX.1-2017, RFC 8200 | [udp.md](file:///home/cier/Projects/silver/docs/standards/udp.md) | **Full** |
 | **TCP** | Transmission Control Protocol & Stream Sockets | RFC 9293, POSIX.1-2017 | [tcp.md](file:///home/cier/Projects/silver/docs/standards/tcp.md) | **Full** |
+| **epoll & Server I/O** | Event Multiplexing, EventFd, Vectorized I/O & Sendfile | epoll(7), eventfd(2), writev(2), sendfile(2) | [epoll.md](file:///home/cier/Projects/silver/docs/standards/epoll.md) | **Full** |
 | **HTTP/1.1** | HTTP Semantics & Framing | RFC 9110, RFC 9112 | [http.md](file:///home/cier/Projects/silver/docs/standards/http.md) | **Full** |
 | **HTTP/2** | HTTP/2 Framing, Multiplexing & Flow Control | RFC 9113 | [http2.md](file:///home/cier/Projects/silver/docs/standards/http2.md) | **Full** |
 | **HPACK** | Header Compression for HTTP/2 | RFC 7541 | [hpack.md](file:///home/cier/Projects/silver/docs/standards/hpack.md) | **Full** |

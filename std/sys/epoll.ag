@@ -1,0 +1,133 @@
+// std/sys/epoll.ag — Linux epoll(7) high-performance event multiplexing.
+//
+// Provides typed raw syscalls and an RAII Epoll instance for building
+// scalable, non-blocking I/O event loops (C10K/C100K servers).
+
+import std.error;
+import std.mem.drop;
+import std.sys.raw.poll;
+import std.sys.result;
+
+// Epoll control operations (epoll_ctl op)
+const i32 EPOLL_CTL_ADD = 1;
+const i32 EPOLL_CTL_DEL = 2;
+const i32 EPOLL_CTL_MOD = 3;
+
+// Epoll events bitmask
+const u32 EPOLLIN      = 1;
+const u32 EPOLLPRI     = 2;
+const u32 EPOLLOUT     = 4;
+const u32 EPOLLERR     = 8;
+const u32 EPOLLHUP     = 16;
+const u32 EPOLLRDNORM  = 64;
+const u32 EPOLLRDBAND  = 128;
+const u32 EPOLLWRNORM  = 256;
+const u32 EPOLLWRBAND  = 512;
+const u32 EPOLLMSG     = 1024;
+const u32 EPOLLRDHUP   = 8192;
+const u32 EPOLLEXCLUSIVE = 268435456;  // 1 << 28
+const u32 EPOLLWAKEUP    = 536870912;  // 1 << 29
+const u32 EPOLLONESHOT   = 1073741824; // 1 << 30
+const u32 EPOLLET        = 2147483648; // 1 << 31 (Edge-Triggered)
+
+// epoll_create1 flags
+const i64 EPOLL_CLOEXEC = 524288; // 0o2000000
+
+/// Linux x86_64 struct epoll_event (packed 12 bytes).
+#[packed]
+struct EpollEvent {
+    u32 events;
+    u64 data;
+}
+
+impl EpollEvent {
+    EpollEvent new(u32 events, u64 data) {
+        EpollEvent ev;
+        ev.events = events;
+        ev.data = data;
+        return ev;
+    }
+}
+
+/// Create an epoll instance with flags (e.g. EPOLL_CLOEXEC).
+Result<i64, Error> try_epoll_create1(i64 flags) {
+    return Result<i64, Error>.from_raw(sys_epoll_create1(flags));
+}
+
+/// Control an epoll instance (EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD).
+Result<i64, Error> try_epoll_ctl(i32 epfd, i32 op, i32 fd, EpollEvent* event) {
+    return Result<i64, Error>.from_raw(sys_epoll_ctl((i64)epfd, (i64)op, (i64)fd, (i64)event));
+}
+
+/// Wait for events on an epoll instance.
+Result<i64, Error> try_epoll_wait(i32 epfd, EpollEvent* events, i64 maxevents, i64 timeout_ms) {
+    return Result<i64, Error>.from_raw(sys_epoll_wait((i64)epfd, (i64)events, maxevents, timeout_ms));
+}
+
+// ---------------------------------------------------------------------------
+// Epoll — RAII epoll instance wrapper
+// ---------------------------------------------------------------------------
+
+struct Epoll {
+    i32 fd;
+    bool is_open;
+}
+
+impl Epoll {
+    /// Create a new epoll file descriptor with EPOLL_CLOEXEC.
+    Result<Epoll, Error> new() {
+        Result<i64, Error> r = try_epoll_create1(EPOLL_CLOEXEC);
+        if (r.is_err()) {
+            return Err(Error.new(r.errno(), "epoll_create1 failed"));
+        }
+        Epoll ep;
+        ep.fd = (i32)r.value();
+        ep.is_open = true;
+        return Ok(move ep);
+    }
+
+    /// Add a file descriptor to this epoll instance.
+    bool add(*self, i32 target_fd, u32 events, u64 data) {
+        if (!self.is_open || self.fd < 0) { return false; }
+        EpollEvent ev = EpollEvent.new(events, data);
+        Result<i64, Error> r = try_epoll_ctl(self.fd, EPOLL_CTL_ADD, target_fd, &ev);
+        return r.is_ok();
+    }
+
+    /// Modify an existing registered file descriptor.
+    bool modify(*self, i32 target_fd, u32 events, u64 data) {
+        if (!self.is_open || self.fd < 0) { return false; }
+        EpollEvent ev = EpollEvent.new(events, data);
+        Result<i64, Error> r = try_epoll_ctl(self.fd, EPOLL_CTL_MOD, target_fd, &ev);
+        return r.is_ok();
+    }
+
+    /// Remove a file descriptor from this epoll instance.
+    bool delete(*self, i32 target_fd) {
+        if (!self.is_open || self.fd < 0) { return false; }
+        Result<i64, Error> r = try_epoll_ctl(self.fd, EPOLL_CTL_DEL, target_fd, (EpollEvent*)0);
+        return r.is_ok();
+    }
+
+    /// Wait for events on this epoll instance. Returns number of ready events, or -errno on error.
+    i64 poll(*self, EpollEvent* events, i64 maxevents, i64 timeout_ms) {
+        if (!self.is_open || self.fd < 0) { return -1; }
+        Result<i64, Error> r = try_epoll_wait(self.fd, events, maxevents, timeout_ms);
+        if (r.is_err()) { return -r.errno(); }
+        return r.value();
+    }
+
+    void close(*self) {
+        if (self.is_open && self.fd >= 0) {
+            try_close(self.fd);
+            self.fd = -1;
+            self.is_open = false;
+        }
+    }
+}
+
+impl Drop for Epoll {
+    void drop(*self) {
+        self.close();
+    }
+}

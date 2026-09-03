@@ -1,0 +1,75 @@
+// std/sys/eventfd.ag — Linux eventfd(2) inter-thread notification mechanism.
+//
+// Provides an efficient 8-byte counter file descriptor that can be added
+// directly to epoll event loops to wake worker/reactor threads.
+
+import std.error;
+import std.mem.drop;
+import std.sys.raw.fs;
+import std.sys.raw.poll;
+import std.sys.result;
+
+const i64 EFD_SEMAPHORE = 1;
+const i64 EFD_CLOEXEC   = 524288; // 0o2000000
+const i64 EFD_NONBLOCK  = 2048;   // 0o4000
+
+/// Create an eventfd with initial counter value and flags.
+Result<i64, Error> try_eventfd(u32 initval, i64 flags) {
+    return Result<i64, Error>.from_raw(sys_eventfd2((i64)initval, flags));
+}
+
+/// RAII eventfd wrapper.
+struct EventFd {
+    i32 fd;
+    bool is_open;
+}
+
+impl EventFd {
+    /// Create an eventfd with optional non-blocking mode.
+    Result<EventFd, Error> new(u32 initval, bool nonblock) {
+        i64 flags = EFD_CLOEXEC;
+        if (nonblock) { flags = flags | EFD_NONBLOCK; }
+        Result<i64, Error> r = try_eventfd(initval, flags);
+        if (r.is_err()) {
+            return Err(Error.new(r.errno(), "eventfd creation failed"));
+        }
+        EventFd e;
+        e.fd = (i32)r.value();
+        e.is_open = true;
+        return Ok(move e);
+    }
+
+    /// Notify / increment the 64-bit event counter.
+    bool notify(*self, u64 val) {
+        if (!self.is_open || self.fd < 0) { return false; }
+        i64 written = sys_write((i64)self.fd, (i64)&val, 8);
+        return written == 8;
+    }
+
+    /// Read and reset the 64-bit event counter.
+    Result<u64, Error> read_val(*self) {
+        if (!self.is_open || self.fd < 0) {
+            return Err(Error.new(EINVAL, "invalid eventfd"));
+        }
+        u64 val = 0;
+        i64 n = sys_read((i64)self.fd, (i64)&val, 8);
+        if (n != 8) {
+            return Err(Error.new(EAGAIN, "eventfd read failed or would block"));
+        }
+        return Ok(val);
+    }
+
+    void close(*self) {
+        if (self.is_open && self.fd >= 0) {
+            try_close(self.fd);
+            self.fd = -1;
+            self.is_open = false;
+        }
+    }
+}
+
+impl Drop for EventFd {
+    void drop(*self) {
+        self.close();
+    }
+}

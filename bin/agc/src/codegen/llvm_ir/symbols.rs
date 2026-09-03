@@ -190,7 +190,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         for (_, field_ty) in &concrete_fields {
             lowered.push(self.lower_basic_type(field_ty)?);
         }
-        struct_ty.set_body(&lowered, false);
+        let is_packed = self.struct_packed.contains(&base_name);
+        struct_ty.set_body(&lowered, is_packed);
         Ok(struct_ty)
     }
 

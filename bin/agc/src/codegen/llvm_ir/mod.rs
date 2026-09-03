@@ -126,6 +126,7 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) struct_types: HashMap<String, StructType<'ctx>>,
     pub(crate) struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     pub(crate) union_types: HashSet<String>,
+    pub(crate) struct_packed: HashSet<String>,
     pub(crate) enum_backing_types: HashMap<String, ast::PrimitiveType>,
     pub(crate) enum_variants: HashMap<String, HashMap<String, i128>>,
     pub(crate) enum_payload_layouts: HashMap<String, StructType<'ctx>>,

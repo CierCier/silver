@@ -1,7 +1,8 @@
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
-use inkwell::types::BasicTypeEnum;
+use inkwell::targets::TargetData;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -1383,6 +1384,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         *span,
                     ))
                 }
+            }
+            (BasicValueEnum::ArrayValue(arr_val), BasicTypeEnum::ArrayType(target_arr_ty)) => {
+                let function = self.current_fn.ok_or_else(|| {
+                    CodegenError::new("no active function for array cast")
+                })?;
+                let target_alloca = self.create_entry_alloca(
+                    function,
+                    "cast.arr.dst",
+                    target_arr_ty.as_basic_type_enum(),
+                )?;
+                self.builder
+                    .build_store(target_alloca, target_arr_ty.const_zero())
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                let src_alloca = self.create_entry_alloca(
+                    function,
+                    "cast.arr.src",
+                    arr_val.get_type().as_basic_type_enum(),
+                )?;
+                self.builder
+                    .build_store(src_alloca, arr_val)
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+
+                let target_data =
+                    TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+                let src_size = target_data.get_abi_size(&arr_val.get_type());
+                let dst_size = target_data.get_abi_size(&target_arr_ty);
+                let copy_size = src_size.min(dst_size);
+
+                self.build_memcpy(target_alloca, 1, src_alloca, 1, copy_size)?;
+                let loaded = self
+                    .builder
+                    .build_load(target_arr_ty, target_alloca, "cast.arr.loaded")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                Ok(loaded)
             }
             (source, _) => Err(CodegenError::with_span(
                 format!(

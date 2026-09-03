@@ -1,0 +1,205 @@
+// tests/server_raw_test.ag — Verification of raw server primitives:
+// - epoll(7) event loop multiplexer with packed 12-byte EpollEvent
+// - eventfd(2) inter-thread / reactor notifications
+// - iovec scatter/gather vectorized I/O (writev, readv)
+// - sendfile(2) zero-copy kernel page-cache to socket transfer
+// - TCP socket tuning: TCP_NODELAY, TCP_QUICKACK, TCP_CORK, SO_KEEPALIVE, SO_REUSEPORT
+
+import std.error;
+import std.io;
+import std.io.file;
+import std.mem.memory;
+import std.net.inet;
+import std.net.socket;
+import std.net.tcp;
+import std.sys.epoll;
+import std.sys.eventfd;
+import std.sys.io_vec;
+import std.sys.raw.fs;
+import std.sys.result;
+import std.sys.socket;
+
+void test_packed_epoll_event() {
+    @assert(@size(EpollEvent) == 12);
+    @assert(@align(EpollEvent) == 1);
+
+    EpollEvent ev = EpollEvent.new(EPOLLIN | EPOLLOUT, 0x123456789ABCDEF0);
+    @assert(ev.events == (EPOLLIN | EPOLLOUT));
+    @assert(ev.data == 0x123456789ABCDEF0);
+}
+
+void test_epoll_and_eventfd() {
+    Result<Epoll, Error> ep_res = Epoll.new();
+    @assert(ep_res.is_ok());
+    Epoll ep = ep_res.unwrap();
+
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+
+    // Register eventfd with epoll
+    bool ok = ep.add(efd.fd, EPOLLIN, 0x42);
+    @assert(ok);
+
+    // With counter at 0, epoll_wait with 0ms timeout should return 0 events
+    EpollEvent events[4];
+    i64 ready = ep.poll(&events[0], 4, 0);
+    @assert(ready == 0);
+
+    // Notify eventfd
+    ok = efd.notify(1);
+    @assert(ok);
+
+    // Now epoll_wait should return 1 event with data == 0x42
+    ready = ep.poll(&events[0], 4, 100);
+    @assert(ready == 1);
+    @assert(events[0].data == 0x42);
+    @assert((events[0].events & EPOLLIN) != 0);
+
+    // Read counter from eventfd
+    Result<u64, Error> r = efd.read_val();
+    @assert(r.is_ok());
+    @assert(r.unwrap() == 1);
+
+    // After reading, eventfd should not be readable anymore
+    ready = ep.poll(&events[0], 4, 0);
+    @assert(ready == 0);
+
+    // Clean up
+    ok = ep.delete(efd.fd);
+    @assert(ok);
+}
+
+void test_vectorized_io() {
+    // Create a connected TCP socket pair via loopback
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 16);
+    @assert(listener.valid());
+
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &slen);
+    SocketAddr local = SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port)).unwrap();
+
+    Result<TcpStream, Error> client_res = TcpStream.connect(&local);
+    @assert(client_res.is_ok());
+    TcpStream client = client_res.unwrap();
+
+    Result<i64, Error> accept_res = listener.accept();
+    @assert(accept_res.is_ok());
+    TcpStream server_conn = TcpStream.from_fd((i32)accept_res.value());
+    @assert(server_conn.valid());
+
+    // Prepare 2 buffers to write via writev
+    str h1 = "HTTP/1.1 200 OK\r\n";
+    str h2 = "Content-Length: 5\r\n\r\nHELLO";
+    IoVec out_iov[2];
+    out_iov[0] = IoVec.new((void*)h1, 17);
+    out_iov[1] = IoVec.new((void*)h2, 26);
+
+    Result<i64, Error> wv = client.writev(&out_iov[0], 2);
+    @assert(wv.is_ok());
+    @assert(wv.value() == 43);
+
+    // Scatter read via readv into two separate buffers
+    u8 b1[17];
+    u8 b2[26];
+    IoVec in_iov[2];
+    in_iov[0] = IoVec.new((void*)&b1[0], 17);
+    in_iov[1] = IoVec.new((void*)&b2[0], 26);
+
+    Result<i64, Error> rv = server_conn.readv(&in_iov[0], 2);
+    @assert(rv.is_ok());
+    @assert(rv.value() == 43);
+    @assert(memcmp((void*)&b1[0], (void*)h1, 17) == 0);
+    @assert(memcmp((void*)&b2[0], (void*)h2, 26) == 0);
+}
+
+void test_socket_tuning_and_reuseport() {
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+
+    // Bind first listener with reuse_port
+    TcpListener l1 = TcpListener.bind_reuse_port(&addr, 16);
+    @assert(l1.valid());
+
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(l1.raw_fd(), (void*)&sa, &slen);
+    SocketAddr bound_addr = SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port)).unwrap();
+
+    // Bind second listener on exact same port via SO_REUSEPORT
+    TcpListener l2 = TcpListener.bind_reuse_port(&bound_addr, 16);
+    @assert(l2.valid());
+
+    // Test nonblocking mode on listener
+    @assert(l1.set_nonblocking(true));
+
+    // Connect a client and test socket options
+    Result<TcpStream, Error> client_res = TcpStream.connect(&bound_addr);
+    @assert(client_res.is_ok());
+    TcpStream client = client_res.unwrap();
+
+    @assert(client.set_nodelay(true));
+    @assert(client.set_quickack(true));
+    @assert(client.set_cork(false));
+    @assert(client.set_keepalive(true));
+    @assert(client.set_nonblocking(true));
+}
+
+void test_zero_copy_sendfile() {
+    // Write a temporary file
+    str path = "/tmp/__silver_sendfile_test.txt";
+    Result<i64, Error> wr_fd = try_open(path, O_WRONLY | O_CREAT | O_TRUNC, 438);
+    @assert(wr_fd.is_ok());
+    i32 out_fd = (i32)wr_fd.value();
+    str payload = "Zero-copy sendfile test content!";
+    try_write(out_fd, (u8*)payload, 32);
+    try_close(out_fd);
+
+    // Open file read-only
+    Result<i64, Error> rd_fd = try_open(path, O_RDONLY, 0);
+    @assert(rd_fd.is_ok());
+    i32 file_to_send_fd = (i32)rd_fd.value();
+
+    // Create connected TCP socket pair
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 16);
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &slen);
+    SocketAddr local = SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port)).unwrap();
+
+    Result<TcpStream, Error> client_res = TcpStream.connect(&local);
+    @assert(client_res.is_ok());
+    TcpStream client = client_res.unwrap();
+
+    Result<i64, Error> accept_res = listener.accept();
+    @assert(accept_res.is_ok());
+    TcpStream server_conn = TcpStream.from_fd((i32)accept_res.value());
+
+    // Sendfile directly from file descriptor into client TCP stream
+    i64 offset = 0;
+    Result<i64, Error> sf = client.sendfile(file_to_send_fd, &offset, 32);
+    @assert(sf.is_ok());
+    @assert(sf.value() == 32);
+    @assert(offset == 32);
+
+    // Read on server side
+    u8 buf[64];
+    Result<i64, Error> r = server_conn.read(&buf[0], 64);
+    @assert(r.is_ok());
+    @assert(r.value() == 32);
+    @assert(memcmp((void*)&buf[0], (void*)payload, 32) == 0);
+
+    try_close(file_to_send_fd);
+    sys_unlink((i64)path);
+}
+
+i32 main() {
+    test_packed_epoll_event();
+    test_epoll_and_eventfd();
+    test_vectorized_io();
+    test_socket_tuning_and_reuseport();
+    test_zero_copy_sendfile();
+    return 0;
+}

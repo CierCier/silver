@@ -703,7 +703,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         // types here would abort on forward references.
         for item in &program.items {
             if let ast::ItemKind::Struct(struct_item) = &item.kind {
-                self.register_struct_fields(struct_item);
+                self.register_struct_fields(struct_item, &item.attributes);
             }
         }
         // Pass 0b: lay out struct bodies (field types resolve now).
@@ -1001,11 +1001,16 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         self.emit_function_item_body(func, attributes)
     }
 
-    /// Register a struct's field metadata and generic parameters without
+    /// Register a struct's field metadata into `self.struct_fields` without
     /// laying out its LLVM body (all fields must be known before any body is
     /// laid out, so forward references resolve).
-    fn register_struct_fields(&mut self, item: &ast::StructItem) {
+    fn register_struct_fields(&mut self, item: &ast::StructItem, attributes: &[ast::Attribute]) {
         let name = item.name.name.clone();
+        if let Ok(attrs) = crate::types::parse_struct_attributes(attributes) {
+            if attrs.packed {
+                self.struct_packed.insert(name.clone());
+            }
+        }
         self.struct_fields.insert(
             name.clone(),
             item.fields
@@ -1054,11 +1059,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        let is_packed = self.struct_packed.contains(&name);
         let mut field_types = Vec::with_capacity(item.fields.len());
         for field in &item.fields {
             field_types.push(self.lower_basic_type(&field.field_type)?);
         }
-        struct_ty.set_body(&field_types, false);
+        struct_ty.set_body(&field_types, is_packed);
 
         Ok(())
     }

@@ -8,6 +8,7 @@ import std.error;
 import std.mem.drop;
 import std.net.inet;
 import std.net.socket;
+import std.sys.io_vec;
 import std.sys.result;
 import std.sys.socket;
 
@@ -152,6 +153,75 @@ impl TcpStream {
         if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
         return try_shutdown(self.sock.fd, how);
     }
+
+    /// Enable or disable TCP_NODELAY (disables Nagle's algorithm for low-latency responses).
+    bool set_nodelay(*self, bool on) {
+        if (self.invalid()) { return false; }
+        i32 val = on ? 1 : 0;
+        Result<i64, Error> r = try_setsockopt(
+            self.sock.fd, SocketOptionLevel.TCP, TcpOption.NODELAY, (void*)&val, 4);
+        return r.is_ok();
+    }
+
+    /// Enable or disable TCP_QUICKACK (sends immediate ACKs).
+    bool set_quickack(*self, bool on) {
+        if (self.invalid()) { return false; }
+        i32 val = on ? 1 : 0;
+        Result<i64, Error> r = try_setsockopt(
+            self.sock.fd, SocketOptionLevel.TCP, TcpOption.QUICKACK, (void*)&val, 4);
+        return r.is_ok();
+    }
+
+    /// Enable or disable TCP_CORK (coalesces small writes into full packets).
+    bool set_cork(*self, bool on) {
+        if (self.invalid()) { return false; }
+        i32 val = on ? 1 : 0;
+        Result<i64, Error> r = try_setsockopt(
+            self.sock.fd, SocketOptionLevel.TCP, TcpOption.CORK, (void*)&val, 4);
+        return r.is_ok();
+    }
+
+    /// Enable or disable SO_KEEPALIVE.
+    bool set_keepalive(*self, bool on) {
+        if (self.invalid()) { return false; }
+        i32 val = on ? 1 : 0;
+        Result<i64, Error> r = try_setsockopt(
+            self.sock.fd, SocketOptionLevel.SOCKET, SocketOption.KEEPALIVE, (void*)&val, 4);
+        return r.is_ok();
+    }
+
+    /// Set non-blocking mode on the stream socket.
+    bool set_nonblocking(*self, bool nonblocking) {
+        if (self.invalid()) { return false; }
+        Result<i64, Error> flags = try_fcntl(self.sock.fd, F_GETFL, 0);
+        if (flags.is_err()) { return false; }
+        i64 fl = flags.value();
+        if (nonblocking) {
+            fl = fl | O_NONBLOCK;
+        } else {
+            fl = fl & ~O_NONBLOCK;
+        }
+        Result<i64, Error> r = try_fcntl(self.sock.fd, F_SETFL, fl);
+        return r.is_ok();
+    }
+
+    /// Vectorized write from multiple buffers in a single system call (writev(2)).
+    Result<i64, Error> writev(*self, IoVec* iov, i64 count) {
+        if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
+        return try_writev(self.sock.fd, iov, count);
+    }
+
+    /// Vectorized read into multiple buffers in a single system call (readv(2)).
+    Result<i64, Error> readv(*self, IoVec* iov, i64 count) {
+        if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
+        return try_readv(self.sock.fd, iov, count);
+    }
+
+    /// Zero-copy transfer directly from a file descriptor to this TCP stream (sendfile(2)).
+    Result<i64, Error> sendfile(*self, i32 file_fd, i64* offset, i64 count) {
+        if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
+        return try_sendfile(self.sock.fd, file_fd, offset, count);
+    }
 }
 
 impl Drop for TcpStream {
@@ -227,6 +297,52 @@ impl TcpListener {
             r = try_accept4(self.sock.fd, (void*)0, (u32*)0, SOCK_CLOEXEC);
         }
         return r;
+    }
+
+    /// Bind a TCP listener with SO_REUSEPORT (allows multiple worker threads/processes
+    /// to bind to the same port for kernel-level connection load balancing).
+    TcpListener bind_reuse_port(SocketAddr* addr, i64 backlog) {
+        Socket sock = Socket.new(AddressFamily.INET, SocketType.STREAM, SOCK_CLOEXEC, 0);
+        if (sock.invalid()) { return TcpListener.closed(); }
+
+        i32 optval = 1;
+        try_setsockopt(sock.fd, SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, (void*)&optval, 4);
+        try_setsockopt(sock.fd, SocketOptionLevel.SOCKET, SocketOption.REUSEPORT, (void*)&optval, 4);
+
+        Result<i64, Error> b = match *addr {
+            V4(sa) : try_bind(sock.fd, (void*)&sa, 16),
+            V6(sa) : try_bind(sock.fd, (void*)&sa, 28),
+            Unix(sa) : try_bind(sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
+        };
+        if (b.is_err()) {
+            sock.close();
+            return TcpListener.closed();
+        }
+
+        Result<i64, Error> li = try_listen(sock.fd, backlog);
+        if (li.is_err()) {
+            sock.close();
+            return TcpListener.closed();
+        }
+
+        TcpListener listener;
+        listener.sock = move sock;
+        return listener;
+    }
+
+    /// Set non-blocking mode on the listener (for edge-triggered epoll accept loops).
+    bool set_nonblocking(*self, bool nonblocking) {
+        if (self.invalid()) { return false; }
+        Result<i64, Error> flags = try_fcntl(self.sock.fd, F_GETFL, 0);
+        if (flags.is_err()) { return false; }
+        i64 fl = flags.value();
+        if (nonblocking) {
+            fl = fl | O_NONBLOCK;
+        } else {
+            fl = fl & ~O_NONBLOCK;
+        }
+        Result<i64, Error> r = try_fcntl(self.sock.fd, F_SETFL, fl);
+        return r.is_ok();
     }
 }
 

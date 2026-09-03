@@ -38,7 +38,7 @@ pub trait SilverGenerator {
         visibility: &ast::Visibility,
         attributes: &[ast::Attribute],
     ) -> CodegenResult<()>;
-    fn register_struct_fields(&mut self, item: &ast::StructItem);
+    fn register_struct_fields(&mut self, item: &ast::StructItem, attributes: &[ast::Attribute]);
     fn generate_struct_item(
         &mut self,
         item: &ast::StructItem,
