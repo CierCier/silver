@@ -302,7 +302,7 @@ impl SocketAddr {
     Result<SocketAddr, AddrError> v4(str ip, u16 port) {
         u32 addr;
         if (!inet_pton4(ip, &addr)) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+            return Err(AddrError.InvalidAddress);
         }
         SockAddrIn sa;
         sa.sin_family = (u16)AddressFamily.INET;
@@ -310,7 +310,7 @@ impl SocketAddr {
         sa.sin_addr = (u32)ntoh32(addr);
         sa.sin_zero_1 = (u32)0;
         sa.sin_zero_2 = (u32)0;
-        return Result<SocketAddr, AddrError>.ok(SocketAddr.V4(sa));
+        return Ok(SocketAddr.V4(sa));
     }
     // Construct from the network-byte-order representation returned by DNS.
     Result<SocketAddr, AddrError> v4_network(u32 addr, u16 port) {
@@ -320,14 +320,14 @@ impl SocketAddr {
         sa.sin_addr = (u32)ntoh32(addr);
         sa.sin_zero_1 = (u32)0;
         sa.sin_zero_2 = (u32)0;
-        return Result<SocketAddr, AddrError>.ok(SocketAddr.V4(sa));
+        return Ok(SocketAddr.V4(sa));
     }
 
     Result<SocketAddr, AddrError> v6(str ip, u16 port) {
         u64 hi = 0;
         u64 lo = 0;
         if (!inet_pton6(ip, &hi, &lo)) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+            return Err(AddrError.InvalidAddress);
         }
         SockAddrIn6 sa;
         sa.sin6_family = (u16)AddressFamily.INET6;
@@ -336,13 +336,13 @@ impl SocketAddr {
         sa.sin6_addr_hi = hi;
         sa.sin6_addr_lo = lo;
         sa.sin6_scope_id = (u32)0;
-        return Result<SocketAddr, AddrError>.ok(SocketAddr.V6(sa));
+        return Ok(SocketAddr.V6(sa));
     }
 
     Result<SocketAddr, AddrError> unix(str path) {
         u8* p = (u8*)path;
         if (path == (str)0 || p[0] == (u8)0) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+            return Err(AddrError.InvalidFormat);
         }
 
         bool abstract_ns = p[0] == (u8)64; // '@' spelling for Linux abstract names
@@ -353,11 +353,11 @@ impl SocketAddr {
         while (p[start + n] != (u8)0) {
             n += 1;
             if (n > 107) {
-                return Result<SocketAddr, AddrError>.Err(AddrError.PathTooLong);
+                return Err(AddrError.PathTooLong);
             }
         }
         if (n == 0) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+            return Err(AddrError.InvalidFormat);
         }
 
         SockAddrUn sa;
@@ -381,12 +381,12 @@ impl SocketAddr {
                 i += 1;
             }
         }
-        return Result<SocketAddr, AddrError>.ok(SocketAddr.Unix(sa));
+        return Ok(SocketAddr.Unix(sa));
     }
 
     Result<SocketAddr, AddrError> parse(str endpoint) {
         if (endpoint == (str)0) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+            return Err(AddrError.InvalidFormat);
         }
         u8* p = (u8*)endpoint;
 
@@ -401,14 +401,14 @@ impl SocketAddr {
             i64 n = 0;
             while (p[i] != (u8)0 && p[i] != (u8)93) {
                 if (n >= 63) {
-                    return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+                    return Err(AddrError.InvalidAddress);
                 }
                 host[n] = p[i];
                 n += 1;
                 i += 1;
             }
             if (p[i] != (u8)93 || n == 0 || p[i + 1] != (u8)58) {
-                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+                return Err(AddrError.InvalidFormat);
             }
             host[n] = (u8)0;
 
@@ -417,7 +417,7 @@ impl SocketAddr {
             n = 0;
             while (p[i] != (u8)0) {
                 if (n >= 5) {
-                    return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+                    return Err(AddrError.InvalidPort);
                 }
                 port[n] = p[i];
                 n += 1;
@@ -426,7 +426,7 @@ impl SocketAddr {
             port[n] = (u8)0;
             i64 port_value = inet_parse_port(port);
             if (port_value < 0) {
-                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+                return Err(AddrError.InvalidPort);
             }
             return SocketAddr.v6((str)&host, (u16)port_value);
         }
@@ -437,14 +437,14 @@ impl SocketAddr {
         i64 n = 0;
         while (p[i] != (u8)0 && p[i] != (u8)58) {
             if (n >= 15) {
-                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidAddress);
+                return Err(AddrError.InvalidAddress);
             }
             host[n] = p[i];
             n += 1;
             i += 1;
         }
         if (p[i] != (u8)58 || n == 0) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidFormat);
+            return Err(AddrError.InvalidFormat);
         }
         host[n] = (u8)0;
 
@@ -453,7 +453,7 @@ impl SocketAddr {
         n = 0;
         while (p[i] != (u8)0) {
             if (n >= 5) {
-                return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+                return Err(AddrError.InvalidPort);
             }
             port[n] = p[i];
             n += 1;
@@ -462,7 +462,7 @@ impl SocketAddr {
         port[n] = (u8)0;
         i64 port_value = inet_parse_port(port);
         if (port_value < 0) {
-            return Result<SocketAddr, AddrError>.Err(AddrError.InvalidPort);
+            return Err(AddrError.InvalidPort);
         }
         return SocketAddr.v4((str)&host, (u16)port_value);
     }
