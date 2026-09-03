@@ -1,8 +1,8 @@
 # Silver — A Modern Systems Programming Language
 
-Silver is a statically typed, LLVM-backed systems programming language designed to occupy the sweet spot between raw C-level control and modern ergonomic safety.
+Silver is a statically typed, LLVM-backed systems programming language designed to be simple and easy to use without sacrificing performance and control.
 
-It combines **deterministic RAII destruction**, **compile-time escape-checked borrowing**, **first-class structured concurrency (`launch`/`wait`)**, and **zero-cost abstractions** on top of a **pure freestanding static runtime** — with no garbage collector and no libc dependency.
+It combines **deterministic RAII destruction**, **compile-time escape-checked borrowing**, **first-class structured concurrency (`launch`/`wait`)**, and **zero-cost abstractions** on top of a **pure freestanding static runtime**.
 
 ---
 
