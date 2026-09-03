@@ -428,6 +428,28 @@ fn parse_simple_type_prefix(
                 kind: Box::new(ast::TypeKind::Named(ast::NamedType { path, generics })),
                 span: tokens[base_start].span.extend_to(&tokens[cursor - 1].span),
             }
+        } else if matches!(tokens[cursor].kind, Token::LeftBracket) {
+            let bracket_start = cursor;
+            cursor += 1;
+            let mut elements = Vec::new();
+            while cursor < end && !matches!(tokens[cursor].kind, Token::RightBracket) {
+                let (elem, next) = parse_simple_type_prefix(tokens, cursor, end)?;
+                elements.push(elem);
+                cursor = next;
+                if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                    cursor += 1;
+                } else {
+                    break;
+                }
+            }
+            if cursor >= end || !matches!(tokens[cursor].kind, Token::RightBracket) {
+                return None;
+            }
+            cursor += 1;
+            ast::Type {
+                kind: Box::new(ast::TypeKind::Tuple(elements)),
+                span: tokens[bracket_start].span.extend_to(&tokens[cursor - 1].span),
+            }
         } else {
             let base = match tokens.get(cursor)?.kind {
                 Token::I8 => ast::TypeKind::Primitive(ast::PrimitiveType::I8),
