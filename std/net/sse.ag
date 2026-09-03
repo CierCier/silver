@@ -61,18 +61,17 @@ impl SseStream {
     /// 2xx response; the caller may inspect the headers via `headers()`.
     Result<SseStream, Error> open(HttpClient* client, str url) {
         Result<HttpStream, Error> opened = client.request_stream("GET", url, (str)0, (str)0);
-        if (opened.failed()) { return Result<SseStream, Error>.Err(opened.get_error()); }
+        if (opened.failed()) { return Err(opened.get_error()); }
         HttpStream stream = opened.unwrap();
         if (stream.status() < 200 || stream.status() >= 300) {
-            Error e = Error.new(SSE_ERR_MALFORMED, "SSE endpoint returned an error status");
             stream.close();
-            return Result<SseStream, Error>.Err(move e);
+            return Err(SSE_ERR_MALFORMED, "SSE endpoint returned an error status");
         }
         SseStream sse;
         sse.stream = move stream;
         sse.line = String.new();
         sse.finished = false;
-        return Result<SseStream, Error>.Ok(move sse);
+        return Ok(move sse);
     }
 
     /// True once the stream has ended (recv returned Done).
@@ -86,7 +85,7 @@ impl SseStream {
     /// `data:` lines join with \n; an empty line dispatches the buffered
     /// event.
     Result<SseRecv, Error> recv(*self) {
-        if (self.finished) { return Result<SseRecv, Error>.Ok(done_recv()); }
+        if (self.finished) { return Ok(done_recv()); }
         String event = String.new();
         String id = String.new();
         String data = String.new();
@@ -98,13 +97,13 @@ impl SseStream {
                 if (data.len > 0) {
                     SseRecv out = event_recv(move event, move id, move data);
                     self.line.clear();
-                    return Result<SseRecv, Error>.Ok(move out);
+                    return Ok(move out);
                 }
                 event.drop();
                 id.drop();
                 data.drop();
                 self.line.clear();
-                return Result<SseRecv, Error>.Ok(done_recv());
+                return Ok(done_recv());
             }
             u8* ln = self.line.data;
             i64 ln_len = self.line.len;
@@ -114,7 +113,7 @@ impl SseStream {
                     if (event.len == 0) { event.push_str("message"); }
                     SseRecv out = event_recv(move event, move id, move data);
                     self.line.clear();
-                    return Result<SseRecv, Error>.Ok(move out);
+                    return Ok(move out);
                 }
                 event.drop();
                 id.drop();
@@ -134,13 +133,13 @@ impl SseStream {
                     if (event.len == 0) { event.push_str("message"); }
                     SseRecv out = event_recv(move event, move id, move data);
                     self.line.clear();
-                    return Result<SseRecv, Error>.Ok(move out);
+                    return Ok(move out);
                 }
                 event.drop();
                 id.drop();
                 data.drop();
                 self.line.clear();
-                return Result<SseRecv, Error>.Ok(done_recv());
+                return Ok(done_recv());
             }
             // Field lines: "name:" or "name: value" (one space stripped).
             i64 colon = sse_find_colon(ln, ln_len);
@@ -166,7 +165,7 @@ impl SseStream {
             self.line.clear();
         }
         // Unreachable.
-        return Result<SseRecv, Error>.Err(Error.new(SSE_ERR_MALFORMED, "unreachable"));
+        return Err(SSE_ERR_MALFORMED, "unreachable");
     }
 }
 
