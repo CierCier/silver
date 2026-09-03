@@ -254,6 +254,36 @@ i32 run_wire_case(str wire, i32 expected_status, str expected_body,
     return 0;
 }
 
+i32 run_wire_error_case(str wire) {
+    TcpListener listener;
+    u16 port = 0;
+    i32 r = bind_loopback(&listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    @assert(!(connect_result.failed()), "connect_result.failed()");
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    HttpClient client = HttpClient.new();
+    Result<HttpConnection, Error> connection_result =
+        client.connect(&connect_addr, HttpVersion.Http11);
+    @assert(!(connection_result.failed()), "connection_result.failed()");
+    HttpConnection connection = connection_result.unwrap();
+
+    Result<i64, Error> accept_result = listener.accept();
+    @assert(!(accept_result.failed()), "accept_result.failed()");
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+    Result<i64, Error> server_write =
+        server.write((u8*)wire, strlen(wire));
+    @assert(!(server_write.failed()), "server_write.failed()");
+
+    HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/status", "fixture.test");
+    Result<HttpResponse, Error> response_result =
+        connection.send(&request, 65536, 1024);
+    @assert(response_result.failed(), "expected response to fail");
+    return 0;
+}
+
 /// Capture one request head into g_req_head; false on EOF or overflow.
 bool capture_head(TcpStream* stream) {
     i64 hlen = 0;
@@ -457,6 +487,26 @@ i32 run_get_public_case() {
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
         200, "hi", (str)0, "OK"),
         "100 Continue skipped, final 200 parsed");
+
+    test_start("multiple interim 1xx skipped");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+        "HTTP/1.1 100 Continue\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+        200, "hi", (str)0, "OK"),
+        "103 and 100 skipped, final 200 parsed");
+
+    test_start("Transfer-Encoding overrides Content-Length");
+    assert_eq_i64(0, run_wire_case(
+        "HTTP/1.1 200 OK\r\nContent-Length: 9999\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        "5\r\nhello\r\n0\r\n\r\n",
+        200, "hello", (str)0, "OK"),
+        "chunked overrides content-length");
+
+    test_start("conflicting Content-Length rejected");
+    assert_eq_i64(0, run_wire_error_case(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 10\r\nConnection: close\r\n\r\nhello"),
+        "conflicting content-length rejected");
 
     test_start("301 location");
     assert_eq_i64(0, run_wire_case(

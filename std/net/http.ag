@@ -685,6 +685,12 @@ impl HttpResponse {
         }
 
         // Headers: CRLF-terminated lines up to the blank line.
+        self.content_length = -1;
+        self.chunked = false;
+        self.close_delimited = (self.version == HttpVersion.Http10);
+        self.trailers.clear();
+        bool has_content_length = false;
+
         u8* data = raw.data;
         i64 header_start = line_end + 2;
         i64 header_end = raw.len - 2;
@@ -697,15 +703,25 @@ impl HttpResponse {
             i64 value_start = colon + 1;
             while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
             if (http_equal_ci(data, header_start, colon, "content-length")) {
-                if (!http_parse_i64(data, value_start, end, &mut self.content_length)) {
+                i64 cl = 0;
+                if (!http_parse_i64(data, value_start, end, &mut cl)) {
                     return Err(HTTP_ERR_MALFORMED, "malformed response");
                 }
+                if (has_content_length && cl != self.content_length) {
+                    return Err(HTTP_ERR_MALFORMED, "conflicting Content-Length headers");
+                }
+                self.content_length = cl;
+                has_content_length = true;
             } else if (http_equal_ci(data, header_start, colon, "transfer-encoding")) {
                 if (http_equal_ci(data, value_start, end, "chunked")) { self.chunked = true; }
             } else if (http_equal_ci(data, header_start, colon, "connection")) {
                 if (http_equal_ci(data, value_start, end, "close")) { self.close_delimited = true; }
             }
             header_start = end + 2;
+        }
+        // RFC 9112 §6.1: Transfer-Encoding overrides Content-Length to prevent request/response smuggling
+        if (self.chunked) {
+            self.content_length = -1;
         }
         // Reuse the headers buffer in place: assigning a fresh substr over
         // the String.new() empty buffer would leak it (field overwrites have
