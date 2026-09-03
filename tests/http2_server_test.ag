@@ -1,0 +1,148 @@
+// tests/http2_server_test.ag — Verification of native Silver HTTP/2 server:
+// - Client connection preface verification (RFC 9113 §3.4)
+// - Server SETTINGS emission and ACK negotiation (RFC 9113 §6.5)
+// - HEADERS request and HPACK response decoding
+// - DATA frames and stream completion
+// - Unified Go-style handler serving both HTTP/1.1 and HTTP/2 over the same port
+
+import std.error;
+import std.fmt;
+import std.mem.memory;
+import std.net.hpack;
+import std.net.http;
+import std.net.http2;
+import std.net.inet;
+import std.net.tcp;
+import std.net.transport;
+import std.sys.entry;
+import std.test;
+import std.thread;
+
+void handle_h2_hello(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.set_header("X-Proto-Echo", r.proto());
+    w.write_header(200);
+    w.write_str("hello h2 world");
+}
+
+void handle_h2_echo(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.body_str());
+}
+
+void server_h2_worker(i64 arg) {
+    TcpListener* listener = (TcpListener*)arg;
+    HttpServer s = HttpServer.new("127.0.0.1:0");
+    s.handle_func("/hello", handle_h2_hello);
+    s.handle_func("/echo", handle_h2_echo);
+
+    // Serve 3 connections: 2 HTTP/2 connections and 1 HTTP/1.1 connection
+    i64 count = 0;
+    while (count < 3) {
+        Result<i64, Error> a = listener.accept();
+        if (a.failed()) { continue; }
+        TcpStream stream = TcpStream.from_fd((i32)a.value());
+        s.serve_conn(move stream);
+        count = count + 1;
+    }
+    s.drop();
+}
+
+Result<i64, Error> tcp_read_cb(void* ctx, u8* buf, i64 len) {
+    TcpStream* s = (TcpStream*)ctx;
+    return s.read(buf, len);
+}
+
+Result<i64, Error> tcp_write_cb(void* ctx, u8* buf, i64 len) {
+    TcpStream* s = (TcpStream*)ctx;
+    return s.write(buf, len);
+}
+
+i32 main() {
+    test_start("http2 server: native Silver implementation");
+
+    Result<SocketAddr, AddrError> bind_result = SocketAddr.v4("127.0.0.1", (u16)0);
+    assert_true(bind_result.success(), "bind_result.success()");
+    SocketAddr bind_addr = bind_result.unwrap();
+
+    TcpListener listener = TcpListener.bind(&bind_addr, 16);
+    assert_true(listener.valid(), "listener valid");
+
+    SockAddrIn sa;
+    u32 len = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    u16 port = ntoh16(sa.sin_port);
+
+    // Spawn server worker thread
+    thread_spawn(server_h2_worker, (i64)&listener);
+
+    // --- Client 1: HTTP/2 (h2c) GET /hello ---
+    Result<SocketAddr, AddrError> cr_addr = SocketAddr.v4("127.0.0.1", port);
+    SocketAddr target_addr = cr_addr.unwrap();
+
+    Result<TcpStream, Error> cr1 = TcpStream.connect_timeout(&target_addr, 5);
+    assert_true(cr1.success(), "connect_timeout ok (client 1)");
+    TcpStream stream1 = cr1.unwrap();
+
+    StreamIo io1;
+    io1.ctx = (void*)&stream1;
+    io1.read = tcp_read_cb;
+    io1.write = tcp_write_cb;
+
+    H2Connection c1;
+    h2_init(&c1, &io1);
+    assert_eq_i64(0, h2_send_preface(&c1), "h2 preface sent");
+
+    H2Response resp1;
+    i64 rc1 = h2_request(&c1, "GET", "http", "127.0.0.1", "/hello", (HpackField*)0, 0, &resp1);
+    assert_eq_i64(0, rc1, "h2 request succeeded");
+    assert_eq_i64(200, resp1.status, "status is 200");
+    assert_true(resp1.body != (u8*)0, "body non-null");
+    assert_true(memcmp((const void*)resp1.body, (const void*)"hello h2 world", 14) == 0, "body content");
+    h2_free_response(&resp1);
+    c1.drop();
+    stream1.close();
+
+    // --- Client 2: HTTP/2 (h2c) POST /echo with body ---
+    Result<TcpStream, Error> cr2 = TcpStream.connect_timeout(&target_addr, 5);
+    assert_true(cr2.success(), "connect_timeout ok (client 2)");
+    TcpStream stream2 = cr2.unwrap();
+
+    StreamIo io2;
+    io2.ctx = (void*)&stream2;
+    io2.read = tcp_read_cb;
+    io2.write = tcp_write_cb;
+
+    H2Connection c2;
+    h2_init(&c2, &io2);
+    assert_eq_i64(0, h2_send_preface(&c2), "h2 preface sent");
+
+    H2Response resp2;
+    u8 echo_body[11] = { (u8)'f', (u8)'a', (u8)'s', (u8)'t', (u8)' ', (u8)'s', (u8)'i', (u8)'l', (u8)'v', (u8)'e', (u8)'r' };
+    i64 rc2 = h2_request_body(&c2, "POST", "http", "127.0.0.1", "/echo", (HpackField*)0, 0, &echo_body[0], 11, &resp2);
+    assert_eq_i64(0, rc2, "h2 POST request succeeded");
+    assert_eq_i64(200, resp2.status, "status is 200");
+    assert_true(resp2.body != (u8*)0, "echo body non-null");
+    assert_true(memcmp((const void*)resp2.body, (const void*)"fast silver", 11) == 0, "echo body matches");
+    h2_free_response(&resp2);
+    c2.drop();
+    stream2.close();
+
+    // --- Client 3: HTTP/1.1 client connecting to SAME server port ---
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    for (i64 i = 0; i < n; i = i + 1) { url.push(digits[i]); }
+    url.push_str("/hello");
+
+    Result<HttpResponse, Error> r3 = http_get((str)url.data);
+    assert_true(r3.success(), "HTTP/1.1 client to same server succeeded");
+    HttpResponse resp3 = r3.unwrap();
+    assert_eq_i64((i64)resp3.status, 200, "status 200");
+    assert_true(strcmp((str)resp3.body.data, "hello h2 world") == 0, "HTTP/1.1 received same response");
+    resp3.drop();
+    url.drop();
+
+    return 0;
+}

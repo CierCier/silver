@@ -684,3 +684,155 @@ i64 h2_wait_all(H2Connection* c) {
     }
     return 0;
 }
+
+// --- Server Operations (RFC 9113) -----------------------------------------
+
+/// Verify 24-byte client connection preface (RFC 9113 §3.4).
+/// "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+bool h2_check_client_preface(StreamIo* io) {
+    u8 magic[24];
+    if (h2_read_full(io, &magic[0], 24) != 0) { return false; }
+    u8 expected[24] = {
+        0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, // "PRI * HT"
+        0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, // "TP/2.0\r\n"
+        0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a  // "\r\nSM\r\n\r\n"
+    };
+    return memcmp((const void*)&magic[0], (const void*)&expected[0], 24) == 0;
+}
+
+/// Send the server's initial SETTINGS frame (RFC 9113 §6.5).
+i64 h2_send_server_settings(H2Connection* c) {
+    u8 payload[18];
+    // Parameter 1: MAX_CONCURRENT_STREAMS = 128
+    payload[0] = (u8)0; payload[1] = (u8)H2_SET_MAX_CONCURRENT_STREAMS;
+    payload[2] = (u8)0; payload[3] = (u8)0; payload[4] = (u8)0; payload[5] = (u8)128;
+    // Parameter 2: INITIAL_WINDOW_SIZE = 65535
+    payload[6] = (u8)0; payload[7] = (u8)H2_SET_INITIAL_WINDOW_SIZE;
+    payload[8] = (u8)0; payload[9] = (u8)0; payload[10] = (u8)0xFF; payload[11] = (u8)0xFF;
+    // Parameter 3: MAX_FRAME_SIZE = 16384
+    payload[12] = (u8)0; payload[13] = (u8)H2_SET_MAX_FRAME_SIZE;
+    payload[14] = (u8)0; payload[15] = (u8)0; payload[16] = (u8)0x40; payload[17] = (u8)0x00;
+    return h2_send_frame(c, H2_SETTINGS, 0, 0, &payload[0], 18);
+}
+
+/// Send a GOAWAY frame (RFC 9113 §6.8).
+i64 h2_send_goaway(H2Connection* c, i64 last_stream_id, i64 error_code) {
+    u8 payload[8];
+    payload[0] = (u8)((last_stream_id >> 24) & 0x7F);
+    payload[1] = (u8)((last_stream_id >> 16) & 0xFF);
+    payload[2] = (u8)((last_stream_id >> 8) & 0xFF);
+    payload[3] = (u8)(last_stream_id & 0xFF);
+    payload[4] = (u8)((error_code >> 24) & 0xFF);
+    payload[5] = (u8)((error_code >> 16) & 0xFF);
+    payload[6] = (u8)((error_code >> 8) & 0xFF);
+    payload[7] = (u8)(error_code & 0xFF);
+    return h2_send_frame(c, H2_GOAWAY, 0, 0, &payload[0], 8);
+}
+
+/// Send a RST_STREAM frame (RFC 9113 §6.4).
+i64 h2_send_rst_stream(H2Connection* c, i64 stream_id, i64 error_code) {
+    u8 payload[4];
+    payload[0] = (u8)((error_code >> 24) & 0xFF);
+    payload[1] = (u8)((error_code >> 16) & 0xFF);
+    payload[2] = (u8)((error_code >> 8) & 0xFF);
+    payload[3] = (u8)(error_code & 0xFF);
+    return h2_send_frame(c, H2_RST_STREAM, 0, stream_id, &payload[0], 4);
+}
+
+/// Send server response HEADERS frame encoded with HPACK (RFC 9113 §6.2).
+i64 h2_send_response_headers(H2Connection* c, i64 stream_id, i32 status, str headers_wire, bool end_stream) {
+    HpackField fields[36];
+    i64 nfields = 1;
+
+    u8 status_buf[4];
+    status_buf[0] = (u8)('0' + ((status / 100) % 10));
+    status_buf[1] = (u8)('0' + ((status / 10) % 10));
+    status_buf[2] = (u8)('0' + (status % 10));
+    status_buf[3] = (u8)0;
+
+    fields[0].name = (u8*)":status";
+    fields[0].name_len = 7;
+    fields[0].value = &status_buf[0];
+    fields[0].value_len = 3;
+
+    if (headers_wire != (str)0 && strlen(headers_wire) > 0) {
+        u8* hdata = (u8*)headers_wire;
+        i64 hlen = strlen(headers_wire);
+        i64 pos = 0;
+        while (pos < hlen && nfields < 36) {
+            i64 end = pos;
+            while (end + 1 < hlen && !(hdata[end] == (u8)'\r' && hdata[end + 1] == (u8)'\n')) {
+                end += 1;
+            }
+            if (end >= hlen) { break; }
+            i64 colon = pos;
+            while (colon < end && hdata[colon] != (u8)':') { colon += 1; }
+            if (colon > pos && colon < end) {
+                i64 vstart = colon + 1;
+                while (vstart < end && (hdata[vstart] == (u8)' ' || hdata[vstart] == (u8)'\t')) {
+                    vstart += 1;
+                }
+                // Exclude connection-specific headers per RFC 9113 §8.3.1
+                i64 nlen = colon - pos;
+                bool skip = false;
+                if (nlen == 10 && memcmp((const void*)&hdata[pos], (const void*)"connection", 10) == 0) { skip = true; }
+                if (nlen == 10 && memcmp((const void*)&hdata[pos], (const void*)"Connection", 10) == 0) { skip = true; }
+                if (nlen == 17 && memcmp((const void*)&hdata[pos], (const void*)"transfer-encoding", 17) == 0) { skip = true; }
+                if (nlen == 17 && memcmp((const void*)&hdata[pos], (const void*)"Transfer-Encoding", 17) == 0) { skip = true; }
+                if (!skip) {
+                    fields[nfields].name = &hdata[pos];
+                    fields[nfields].name_len = colon - pos;
+                    fields[nfields].value = &hdata[vstart];
+                    fields[nfields].value_len = end - vstart;
+                    nfields += 1;
+                }
+            }
+            pos = end + 2;
+        }
+    }
+
+    u8* hpack_buf = alloc<u8>(H2_MAX_HEADER_BLOCK);
+    i64 hlen = hpack_encode(&fields[0], nfields, hpack_buf, H2_MAX_HEADER_BLOCK);
+    if (hlen < 0) {
+        free((void*)hpack_buf);
+        return -1;
+    }
+
+    i64 flags = H2_FLAG_END_HEADERS;
+    if (end_stream) { flags = flags | H2_FLAG_END_STREAM; }
+    i64 r = h2_send_frame(c, H2_HEADERS, flags, stream_id, hpack_buf, hlen);
+    free((void*)hpack_buf);
+    return r;
+}
+
+/// Send server response DATA frame with flow control window respect (RFC 9113 §6.1).
+i64 h2_send_response_data(H2Connection* c, i64 stream_id, u8* buf, i64 len, bool end_stream) {
+    if (len == 0) {
+        if (end_stream) {
+            return h2_send_frame(c, H2_DATA, H2_FLAG_END_STREAM, stream_id, (u8*)0, 0);
+        }
+        return 0;
+    }
+    i64 sent = 0;
+    i64 max_frame = c.peer_max_frame_size;
+    if (max_frame <= 0) { max_frame = H2_DEFAULT_MAX_FRAME; }
+
+    while (sent < len) {
+        i64 chunk = len - sent;
+        if (chunk > max_frame) { chunk = max_frame; }
+        if (c.peer_conn_window > 0 && chunk > c.peer_conn_window) {
+            chunk = c.peer_conn_window;
+        }
+        i64 dflags = 0;
+        if (sent + chunk >= len && end_stream) {
+            dflags = H2_FLAG_END_STREAM;
+        }
+        if (h2_send_frame(c, H2_DATA, dflags, stream_id, &buf[sent], chunk) != 0) {
+            return -1;
+        }
+        c.peer_conn_window -= chunk;
+        sent += chunk;
+    }
+    return 0;
+}
+
