@@ -115,7 +115,7 @@ Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
             r = conn.stream.read(&conn.read_buf[0], 1024);
         }
         if (r.failed()) { return r; }
-        if (r.value() == 0) { return Result<i64, Error>.Ok(0); }
+        if (r.value() == 0) { return Ok(0); }
         conn.read_buf_len = r.value();
         conn.read_buf_pos = 0;
         avail = conn.read_buf_len;
@@ -128,7 +128,7 @@ Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
         i = i + 1;
     }
     conn.read_buf_pos = conn.read_buf_pos + n;
-    return Result<i64, Error>.Ok(n);
+    return Ok(n);
 }
 
 #[inline(always)]
@@ -401,20 +401,20 @@ Result<HttpConnection, Error> http_open(str host, u16 port, i64 timeout_secs) {
     if (inet_pton4(host, &ip4)) { ip = (i32)ip4; }
     else { ip = dns_resolve(host); }
     if (ip == 0) {
-        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_DNS, "DNS resolution failed"));
+        return Err(HTTP_ERR_DNS, "DNS resolution failed");
     }
     Result<SocketAddr, AddrError> addr_result = SocketAddr.v4_network((u32)ip, port);
     if (addr_result.failed()) {
-        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed address"));
+        return Err(HTTP_ERR_MALFORMED, "malformed address");
     }
     SocketAddr addr = addr_result.unwrap();
     Result<TcpStream, Error> connect_result = TcpStream.connect_timeout(&addr, timeout_secs);
     if (connect_result.failed()) {
         Error e = connect_result.get_error();
         if (e.code == ETIMEDOUT) {
-            return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_TIMEOUT, "connection timed out"));
+            return Err(HTTP_ERR_TIMEOUT, "connection timed out");
         }
-        return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed"));
+        return Err(HTTP_ERR_CONNECT, "connection failed");
     }
     TcpStream stream = connect_result.unwrap();
     HttpConnection connection;
@@ -424,7 +424,7 @@ Result<HttpConnection, Error> http_open(str host, u16 port, i64 timeout_secs) {
     connection.read_buf = (u8*)malloc(4096);
     connection.read_buf_len = 0;
     connection.read_buf_pos = 0;
-    return Result<HttpConnection, Error>.Ok(move connection);
+    return Ok(move connection);
 }
 
 /// Rewind the buffered transport by `n` bytes — bytes already consumed from
@@ -589,7 +589,7 @@ impl HttpRequest {
         if (self.body != (str)0 && strlen(self.body) > 0) {
             return transport_write(io, (u8*)self.body, strlen(self.body));
         }
-        return Result<i64, Error>.Ok(written.value());
+        return Ok(written.value());
     }
 }
 
@@ -628,13 +628,13 @@ impl HttpResponse {
         i64 carry_len = 0;
         while (true) {
             Result<i64, Error> r = transport_read(io, &chunk[0], 512);
-            if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+            if (r.is_err()) { return Err(HTTP_ERR_IO, "I/O error"); }
             i64 n = r.value();
-            if (n == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            if (n == 0) { return Err(HTTP_ERR_MALFORMED, "malformed response"); }
             i64 term = http_find_crlfcrlf(&carry[0], carry_len, &chunk[0], n);
             i64 consume = n;
             if (term >= 0) { consume = term + 4 - carry_len; }
-            if (raw.len + consume > max_header) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            if (raw.len + consume > max_header) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
             raw.push_bytes(&chunk[0], consume);
             if (term >= 0) {
                 http_transport_rewind(io, n - consume);
@@ -655,19 +655,19 @@ impl HttpResponse {
         // Status line: "HTTP/1.x <3-digit status>[ reason]". Parsed in place
         // from the raw head (no intermediate substr allocations).
         i64 line_end = http_find_crlf(raw.data, raw.len, 0);
-        if (line_end < 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+        if (line_end < 0) { return Err(HTTP_ERR_MALFORMED, "malformed response"); }
         if (line_end < 12 || raw[8] != (u8)' ') {
-            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            return Err(HTTP_ERR_MALFORMED, "malformed response");
         }
         if (raw[5] != (u8)'1' || raw[6] != (u8)'.') {
-            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            return Err(HTTP_ERR_MALFORMED, "malformed response");
         }
         if (raw[7] == (u8)'0') { self.version = HttpVersion.Http10; }
         else if (raw[7] == (u8)'1') { self.version = HttpVersion.Http11; }
-        else { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+        else { return Err(HTTP_ERR_MALFORMED, "malformed response"); }
         if (!http_is_digit(raw[9]) || !http_is_digit(raw[10])
             || !http_is_digit(raw[11])) {
-            return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+            return Err(HTTP_ERR_MALFORMED, "malformed response");
         }
         self.status = (i32)((i64)(raw[9] - (u8)'0') * 100
             + (i64)(raw[10] - (u8)'0') * 10
@@ -683,15 +683,15 @@ impl HttpResponse {
         i64 header_end = raw.len - 2;
         while (header_start < header_end) {
             i64 end = http_find_crlf(data, header_end, header_start);
-            if (end < 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            if (end < 0) { return Err(HTTP_ERR_MALFORMED, "malformed response"); }
             i64 colon = header_start;
             while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
-            if (colon == end || colon == header_start) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response")); }
+            if (colon == end || colon == header_start) { return Err(HTTP_ERR_MALFORMED, "malformed response"); }
             i64 value_start = colon + 1;
             while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
             if (http_equal_ci(data, header_start, colon, "content-length")) {
                 if (!http_parse_i64(data, value_start, end, &mut self.content_length)) {
-                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                    return Err(HTTP_ERR_MALFORMED, "malformed response");
                 }
             } else if (http_equal_ci(data, header_start, colon, "transfer-encoding")) {
                 if (http_equal_ci(data, value_start, end, "chunked")) { self.chunked = true; }
@@ -705,22 +705,22 @@ impl HttpResponse {
         // no pre-drop).
         self.headers.clear();
         self.headers.push_bytes(&raw.data[line_end + 2], raw.len - line_end - 2);
-        return Result<i64, Error>.Ok(0);
+        return Ok(0);
     }
 
     Result<i64, Error> read_exact(*self, StreamIo* io, i64 count, i64 max_body) {
-        if (count < 0 || count > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+        if (count < 0 || count > max_body) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
         i64 done = 0;
         u8 buf[1024];
         while (done < count) {
             i64 want = count - done;
             if (want > 1024) { want = 1024; }
             Result<i64, Error> r = transport_read(io, &buf[0], want);
-            if (r.is_err() || r.value() == 0) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+            if (r.is_err() || r.value() == 0) { return Err(HTTP_ERR_IO, "I/O error"); }
             self.body.push_bytes(&buf[0], r.value());
             done = done + r.value();
         }
-        return Result<i64, Error>.Ok(done);
+        return Ok(done);
     }
 
     Result<i64, Error> read_chunked(*self, StreamIo* io, i64 max_body) {
@@ -729,40 +729,40 @@ impl HttpResponse {
         u8 byte[1];
         while (true) {
             if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
-                return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                return Err(HTTP_ERR_IO, "I/O error");
             }
             i64 size = 0;
             if (!http_parse_hex(line.data, 0, line.len, &mut size)) {
-                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                return Err(HTTP_ERR_MALFORMED, "malformed response");
             }
             if (size == 0) {
                 // Zero-size chunk: consume trailers until the blank line.
                 while (true) {
                     if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
-                        return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                        return Err(HTTP_ERR_IO, "I/O error");
                     }
-                    if (line.len == 0) { return Result<i64, Error>.Ok(total); }
+                    if (line.len == 0) { return Ok(total); }
                 }
             }
-            if (total + size > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            if (total + size > max_body) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
             Result<i64, Error> got = self.read_exact(io, size, max_body);
             if (got.is_err()) { return got; }
             Result<i64, Error> crlf = transport_read(io, &byte[0], 1);
             if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\r') {
-                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                return Err(HTTP_ERR_MALFORMED, "malformed response");
             }
             crlf = transport_read(io, &byte[0], 1);
             if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\n') {
-                return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                return Err(HTTP_ERR_MALFORMED, "malformed response");
             }
             total = total + size;
         }
         // Unreachable — the loop above only exits via `return`.
-        return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        return Err(HTTP_ERR_MALFORMED, "malformed response");
     }
 
     Result<i64, Error> read_body(*self, StreamIo* io, bool head, i64 max_body) {
-        if (http_status_has_no_body(self.status, head)) { return Result<i64, Error>.Ok(0); }
+        if (http_status_has_no_body(self.status, head)) { return Ok(0); }
         if (self.chunked) { return self.read_chunked(io, max_body); }
         if (self.content_length >= 0) { return self.read_exact(io, self.content_length, max_body); }
         // No framing headers: the body is close-delimited, read until EOF.
@@ -771,14 +771,14 @@ impl HttpResponse {
         i64 total = 0;
         while (true) {
             Result<i64, Error> r = transport_read(io, &buf[0], 1024);
-            if (r.is_err()) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
-            if (r.value() == 0) { return Result<i64, Error>.Ok(total); }
-            if (total + r.value() > max_body) { return Result<i64, Error>.Err(Error.new(HTTP_ERR_LIMIT, "response exceeds size limit")); }
+            if (r.is_err()) { return Err(HTTP_ERR_IO, "I/O error"); }
+            if (r.value() == 0) { return Ok(total); }
+            if (total + r.value() > max_body) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
             self.body.push_bytes(&buf[0], r.value());
             total = total + r.value();
         }
         // Unreachable — the loop above only exits via `return`.
-        return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+        return Err(HTTP_ERR_IO, "I/O error");
     }
 
     /// The value of `name` (case-insensitive) in the response headers, or
@@ -871,7 +871,7 @@ impl HttpResponse {
             h = self.read_head(io, max_header);
             if (h.is_err()) { return h; }
         }
-        return Result<i64, Error>.Ok(0);
+        return Ok(0);
     }
 
     Result<i64, Error> read(*self, StreamIo* io, bool head, i64 max_header, i64 max_body) {
@@ -954,9 +954,9 @@ impl HttpStream {
     /// value moves).
     Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (!self.stream_active) {
-            return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "stream is closed"));
+            return Err(HTTP_ERR_IO, "stream is closed");
         }
-        if (self.body_finished) { return Result<i64, Error>.Ok(0); }
+        if (self.body_finished) { return Ok(0); }
         StreamIo io = http_transport_io(&self.conn);
         if (self.head.chunked) { return self.read_chunked(&io, buf, len); }
         if (self.head.content_length >= 0) {
@@ -981,21 +981,21 @@ impl HttpStream {
         while (true) {
             if (self.chunk_want_size) {
                 if (!http_read_line(io, &self.chunk_line, HTTP_CHUNK_LINE_MAX)) {
-                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                    return Err(HTTP_ERR_IO, "I/O error");
                 }
                 i64 size = 0;
                 if (!http_parse_hex(self.chunk_line.data, 0, self.chunk_line.len, &mut size)) {
-                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                    return Err(HTTP_ERR_MALFORMED, "malformed response");
                 }
                 if (size == 0) {
                     // Zero-size chunk: consume trailers until the blank line.
                     while (true) {
                         if (!http_read_line(io, &self.chunk_line, HTTP_CHUNK_LINE_MAX)) {
-                            return Result<i64, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error"));
+                            return Err(HTTP_ERR_IO, "I/O error");
                         }
                         if (self.chunk_line.len == 0) {
                             self.body_finished = true;
-                            return Result<i64, Error>.Ok(0);
+                            return Ok(0);
                         }
                     }
                 }
@@ -1012,18 +1012,18 @@ impl HttpStream {
                 u8 byte[2];
                 Result<i64, Error> c1 = transport_read(io, &byte[0], 1);
                 if (c1.failed() || c1.value() != 1 || byte[0] != (u8)'\r') {
-                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                    return Err(HTTP_ERR_MALFORMED, "malformed response");
                 }
                 Result<i64, Error> c2 = transport_read(io, &byte[1], 1);
                 if (c2.failed() || c2.value() != 1 || byte[1] != (u8)'\n') {
-                    return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+                    return Err(HTTP_ERR_MALFORMED, "malformed response");
                 }
                 self.chunk_want_size = true;
             }
             return r;
         }
         // Unreachable — the loop above only exits via `return`.
-        return Result<i64, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed response"));
+        return Err(HTTP_ERR_MALFORMED, "malformed response");
     }
 
     /// Close the stream: return the connection to the pool when the body was
@@ -1109,9 +1109,9 @@ impl HttpClient {
         if (connect_result.failed()) {
             Error e = connect_result.get_error();
             if (e.code == ETIMEDOUT) {
-                return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_TIMEOUT, "connection timed out"));
+                return Err(HTTP_ERR_TIMEOUT, "connection timed out");
             }
-            return Result<HttpConnection, Error>.Err(Error.new(HTTP_ERR_CONNECT, "connection failed"));
+            return Err(HTTP_ERR_CONNECT, "connection failed");
         }
         TcpStream stream = connect_result.unwrap();
         HttpConnection connection;
@@ -1121,7 +1121,7 @@ impl HttpClient {
         connection.read_buf = (u8*)malloc(4096);
         connection.read_buf_len = 0;
         connection.read_buf_pos = 0;
-        return Result<HttpConnection, Error>.Ok(move connection);
+        return Ok(move connection);
     }
 
     /// Limit on idle keep-alive connections kept per host (Go's
@@ -1169,7 +1169,7 @@ impl HttpClient {
                 self.pool.lock.unlock();
                 HttpConnection pooled = move entry.conn;
                 *reused = true;
-                return Result<HttpConnection, Error>.Ok(move pooled);
+                return Ok(move pooled);
             }
             self.pool.lock.unlock();
         }
@@ -1229,18 +1229,18 @@ impl HttpClient {
     Result<HttpResponse, Error> request(*self, str method, str url, str body, str headers) {
         HttpUrl parsed;
         if (!http_parse_url(url, &parsed)) {
-            return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed URL"));
+            return Err(HTTP_ERR_MALFORMED, "malformed URL");
         }
         str host = (str)&parsed.host[0];
         bool reused = false;
         Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
-        if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
+        if (opened.failed()) { return Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
         if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
         if (parsed.https && !reused) {
             Error err;
             if (!self.tls_handshake(&conn, host, &mut err)) {
-                return Result<HttpResponse, Error>.Err(move err);
+                return Err(move err);
             }
         }
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
@@ -1263,7 +1263,7 @@ impl HttpClient {
                     ok = self.tls_handshake(&fresh, host, &mut err);
                     if (!ok) {
                         fresh.close();
-                        return Result<HttpResponse, Error>.Err(move err);
+                        return Err(move err);
                     }
                 }
                 if (ok) {
@@ -1276,7 +1276,7 @@ impl HttpClient {
         if (r.failed()) {
             if (self.timeout_secs > 0) { conn.clear_timeout(); }
             conn.close();
-            return Result<HttpResponse, Error>.Err(r.get_error());
+            return Err(r.get_error());
         }
         HttpResponse response = r.unwrap();
         if (self.timeout_secs > 0) { conn.clear_timeout(); }
@@ -1285,7 +1285,7 @@ impl HttpClient {
         } else {
             conn.close();
         }
-        return Result<HttpResponse, Error>.Ok(move response);
+        return Ok(move response);
     }
 
     /// One streaming round trip: like `request`, but only the response head
@@ -1297,18 +1297,18 @@ impl HttpClient {
     Result<HttpStream, Error> request_stream(*self, str method, str url, str body, str headers) {
         HttpUrl parsed;
         if (!http_parse_url(url, &parsed)) {
-            return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "malformed URL"));
+            return Err(HTTP_ERR_MALFORMED, "malformed URL");
         }
         str host = (str)&parsed.host[0];
         bool reused = false;
         Result<HttpConnection, Error> opened = self.acquire(host, parsed.port, parsed.https, &mut reused);
-        if (opened.failed()) { return Result<HttpStream, Error>.Err(opened.get_error()); }
+        if (opened.failed()) { return Err(opened.get_error()); }
         HttpConnection conn = opened.unwrap();
         if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
         if (parsed.https && !reused) {
             Error err;
             if (!self.tls_handshake(&conn, host, &mut err)) {
-                return Result<HttpStream, Error>.Err(move err);
+                return Err(move err);
             }
         }
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, method, parsed.path, host);
@@ -1329,7 +1329,7 @@ impl HttpClient {
                     ok = self.tls_handshake(&fresh, host, &mut err);
                     if (!ok) {
                         fresh.close();
-                        return Result<HttpStream, Error>.Err(move err);
+                        return Err(move err);
                     }
                 }
                 if (ok) {
@@ -1341,11 +1341,11 @@ impl HttpClient {
         }
         if (h.failed()) {
             conn.close();
-            return Result<HttpStream, Error>.Err(h.get_error());
+            return Err(h.get_error());
         }
         HttpResponse head = h.unwrap();
         HttpStream stream = HttpStream.new(move head, move conn, self, host, parsed.port, parsed.https);
-        return Result<HttpStream, Error>.Ok(move stream);
+        return Ok(move stream);
     }
 
     /// Go's Client.Do: performs `request`, following 301/302/303/307/308
@@ -1360,7 +1360,7 @@ impl HttpClient {
         if (request.url == (str)0) {
             bool reused = false;
             Result<HttpConnection, Error> opened = self.acquire(request.host, 80, false, &mut reused);
-            if (opened.failed()) { return Result<HttpResponse, Error>.Err(opened.get_error()); }
+            if (opened.failed()) { return Err(opened.get_error()); }
             HttpConnection conn = opened.unwrap();
             if (self.timeout_secs > 0) { conn.set_timeout(self.timeout_secs); }
             Result<HttpResponse, Error> r = conn.send(request, self.max_header_bytes, self.max_body_bytes);
@@ -1377,7 +1377,7 @@ impl HttpClient {
             if (r.failed()) {
                 if (self.timeout_secs > 0) { conn.clear_timeout(); }
                 conn.close();
-                return Result<HttpResponse, Error>.Err(r.get_error());
+                return Err(r.get_error());
             }
             HttpResponse response = r.unwrap();
             if (self.timeout_secs > 0) { conn.clear_timeout(); }
@@ -1386,7 +1386,7 @@ impl HttpClient {
             } else {
                 conn.close();
             }
-            return Result<HttpResponse, Error>.Ok(move response);
+            return Ok(move response);
         }
         str url = request.url;
         str method = request.method;
@@ -1449,13 +1449,13 @@ impl HttpClient {
                 String location = response.location();
                 if (location.len > 0) {
                     if (redirects >= self.max_redirects) {
-                        return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+                        return Err(HTTP_ERR_REDIRECT, "too many redirects");
                     }
                     next_url = http_resolve_url(url, (str)location.data);
                     if (next_url.len > 0) { follow = true; }
                 }
             }
-            if (!follow) { return Result<HttpResponse, Error>.Ok(move response); }
+            if (!follow) { return Ok(move response); }
             bool preserve = response.status == (i32)HttpStatus.TemporaryRedirect
                 || response.status == (i32)HttpStatus.PermanentRedirect;
             if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
@@ -1474,7 +1474,7 @@ impl HttpClient {
             // iteration sends the follow-up request.
         }
         // Unreachable — the loop above only exits via `return`.
-        return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+        return Err(HTTP_ERR_REDIRECT, "too many redirects");
     }
 
     /// Go's Client.Do returning a streaming body: follows redirects (each
@@ -1483,7 +1483,7 @@ impl HttpClient {
     /// no URL to resolve redirects against and cannot stream.
     Result<HttpStream, Error> do_stream(*self, HttpRequest* request) {
         if (request.url == (str)0) {
-            return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_MALFORMED, "streaming requires a URL"));
+            return Err(HTTP_ERR_MALFORMED, "streaming requires a URL");
         }
         str url = request.url;
         str method = request.method;
@@ -1544,13 +1544,13 @@ impl HttpClient {
                 String location = stream.head.location();
                 if (location.len > 0) {
                     if (redirects >= self.max_redirects) {
-                        return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+                        return Err(HTTP_ERR_REDIRECT, "too many redirects");
                     }
                     next_url = http_resolve_url(url, (str)location.data);
                     if (next_url.len > 0) { follow = true; }
                 }
             }
-            if (!follow) { return Result<HttpStream, Error>.Ok(move stream); }
+            if (!follow) { return Ok(move stream); }
             bool preserve = stream.head.status == (i32)HttpStatus.TemporaryRedirect
                 || stream.head.status == (i32)HttpStatus.PermanentRedirect;
             if (!preserve && method != "HEAD") { method = "GET"; body = (str)0; }
@@ -1568,7 +1568,7 @@ impl HttpClient {
             stream.close(); // discard the 3xx hop (its body is unread)
         }
         // Unreachable — the loop above only exits via `return`.
-        return Result<HttpStream, Error>.Err(Error.new(HTTP_ERR_REDIRECT, "too many redirects"));
+        return Err(HTTP_ERR_REDIRECT, "too many redirects");
     }
 
     /// Go's Client.Get with a streaming body: fetch the head, then stream
@@ -1677,11 +1677,11 @@ impl HttpConnection {
     Result<HttpResponse, Error> send_head(*self, HttpRequest* request, i64 max_header) {
         StreamIo io = http_transport_io(self);
         Result<i64, Error> written = request.write(&io);
-        if (written.is_err()) { return Result<HttpResponse, Error>.Err(Error.new(HTTP_ERR_IO, "I/O error")); }
+        if (written.is_err()) { return Err(HTTP_ERR_IO, "I/O error"); }
         HttpResponse response = HttpResponse.empty();
         Result<i64, Error> h = response.read_final_head(&io, max_header);
-        if (h.is_err()) { return Result<HttpResponse, Error>.Err(h.get_error()); }
-        return Result<HttpResponse, Error>.Ok(move response);
+        if (h.is_err()) { return Err(h.get_error()); }
+        return Ok(move response);
     }
 
     Result<HttpResponse, Error> send(*self, HttpRequest* request, i64 max_header, i64 max_body) {
@@ -1690,9 +1690,9 @@ impl HttpConnection {
         HttpResponse response = h.unwrap();
         StreamIo io = http_transport_io(self);
         Result<i64, Error> b = response.read_body(&io, request.method == "HEAD", max_body);
-        if (b.is_err()) { return Result<HttpResponse, Error>.Err(b.get_error()); }
+        if (b.is_err()) { return Err(b.get_error()); }
         if (request.close || response.close_delimited) { self.close(); }
-        return Result<HttpResponse, Error>.Ok(move response);
+        return Ok(move response);
     }
 
     void close(*self) {
