@@ -581,9 +581,9 @@ impl FromJson for i64 {
         i64 value = 0;
         if (!input.read_i64(&mut value)) {
             JsonError error = JsonError.invalid();
-            return Result<i64, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<i64, JsonError>.ok(value);
+        return Ok(value);
     }
 }
 
@@ -592,9 +592,9 @@ impl FromJson for i32 {
         i32 value = 0;
         if (!input.read_i32(&mut value)) {
             JsonError error = JsonError.invalid();
-            return Result<i32, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<i32, JsonError>.ok(value);
+        return Ok(value);
     }
 }
 
@@ -603,9 +603,9 @@ impl FromJson for bool {
         bool value = false;
         if (!input.read_bool(&mut value)) {
             JsonError error = JsonError.invalid();
-            return Result<bool, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<bool, JsonError>.ok(value);
+        return Ok(value);
     }
 }
 impl FromJson for String {
@@ -613,9 +613,9 @@ impl FromJson for String {
         String value = input.read_string();
         if (input.failed) {
             JsonError error = JsonError.invalid();
-            return Result<String, JsonError>.Err(move error);
+            return Err(move error);
         }
-        Result<String, JsonError> result = Result<String, JsonError>.ok(move value);
+        Result<String, JsonError> result = Ok(move value);
         return move result;
     }
 }
@@ -625,9 +625,9 @@ impl FromJson for i8 {
         i64 value = 0;
         if (!input.read_i64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<i8, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<i8, JsonError>.ok((i8)value);
+        return Ok((i8)value);
     }
 }
 
@@ -636,9 +636,9 @@ impl FromJson for i16 {
         i64 value = 0;
         if (!input.read_i64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<i16, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<i16, JsonError>.ok((i16)value);
+        return Ok((i16)value);
     }
 }
 
@@ -647,9 +647,9 @@ impl FromJson for u8 {
         u64 value = 0;
         if (!input.read_u64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<u8, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<u8, JsonError>.ok((u8)value);
+        return Ok((u8)value);
     }
 }
 
@@ -658,9 +658,9 @@ impl FromJson for u16 {
         u64 value = 0;
         if (!input.read_u64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<u16, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<u16, JsonError>.ok((u16)value);
+        return Ok((u16)value);
     }
 }
 
@@ -669,9 +669,9 @@ impl FromJson for u32 {
         u64 value = 0;
         if (!input.read_u64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<u32, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<u32, JsonError>.ok((u32)value);
+        return Ok((u32)value);
     }
 }
 
@@ -680,9 +680,9 @@ impl FromJson for u64 {
         u64 value = 0;
         if (!input.read_u64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<u64, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<u64, JsonError>.ok(value);
+        return Ok(value);
     }
 }
 
@@ -691,9 +691,9 @@ impl FromJson for f32 {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<f32, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<f32, JsonError>.ok((f32)value);
+        return Ok((f32)value);
     }
 }
 
@@ -702,9 +702,9 @@ impl FromJson for f64 {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<f64, JsonError>.Err(move error);
+            return Err(move error);
         }
-        return Result<f64, JsonError>.ok(value);
+        return Ok(value);
     }
 }
 
@@ -715,16 +715,16 @@ impl FromJson for Optional<i32> {
         if (input.index < input.length && bytes[input.index] == (u8)110) {
             if (input.literal("null")) {
                 Optional<i32> none = None;
-                return Result<Optional<i32>, JsonError>.ok(move none);
+                return Ok(move none);
             }
         }
         i32 value = 0;
         if (!input.read_i32(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<Optional<i32>, JsonError>.Err(move error);
+            return Err(move error);
         }
         Optional<i32> some = Some(value);
-        return Result<Optional<i32>, JsonError>.ok(move some);
+        return Ok(move some);
     }
 }
 
@@ -735,16 +735,16 @@ impl FromJson for Optional<f64> {
         if (input.index < input.length && bytes[input.index] == (u8)110) {
             if (input.literal("null")) {
                 Optional<f64> none = None;
-                return Result<Optional<f64>, JsonError>.ok(move none);
+                return Ok(move none);
             }
         }
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
             JsonError error = JsonError.invalid();
-            return Result<Optional<f64>, JsonError>.Err(move error);
+            return Err(move error);
         }
         Optional<f64> some = Some(value);
-        return Result<Optional<f64>, JsonError>.ok(move some);
+        return Ok(move some);
     }
 }
 
