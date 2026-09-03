@@ -607,13 +607,9 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
 
     body.push_str("        if (!input.end_object()) {\n");
     body.push_str("            JsonError err = JsonError.invalid();\n");
-    body.push_str(&format!(
-        "            return Result<{struct_name}, JsonError>.Err(move err);\n"
-    ));
+    body.push_str("            return Err(move err);\n");
     body.push_str("        }\n");
-    body.push_str(&format!(
-        "        return Result<{struct_name}, JsonError>.ok(move result);\n"
-    ));
+    body.push_str("        return Ok(move result);\n");
     body.push_str("    }\n");
     body.push_str("}\n");
     body
