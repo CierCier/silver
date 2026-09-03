@@ -1,10 +1,10 @@
 # HTTP/2 Standard Compliance
 
 - **Primary Specifications**: [RFC 9113 (HTTP/2)](https://datatracker.ietf.org/doc/html/rfc9113).
-- **Implementation**: [`std/net/http2.ag`](file:///home/cier/Projects/silver/std/net/http2.ag) (`H2Connection`, `H2Stream`, `H2Response`).
-- **Test Suite**: [`tests/http2_test.ag`](file:///home/cier/Projects/silver/tests/http2_test.ag), [`tests/http2_tls_test.ag`](file:///home/cier/Projects/silver/tests/http2_tls_test.ag).
+- **Implementation**: [`std/net/http2.ag`](file:///home/cier/Projects/silver/std/net/http2.ag) (`H2Connection`, `H2Stream`, `H2Response`), [`std/net/http.ag`](file:///home/cier/Projects/silver/std/net/http.ag) (`HttpServer`, `ResponseWriter`, `h2_serve_conn`).
+- **Test Suite**: [`tests/http2_test.ag`](file:///home/cier/Projects/silver/tests/http2_test.ag), [`tests/http2_server_test.ag`](file:///home/cier/Projects/silver/tests/http2_server_test.ag), [`tests/http2_tls_test.ag`](file:///home/cier/Projects/silver/tests/http2_tls_test.ag).
 
-## Compliance Table
+## Client Compliance Table
 
 | Feature / Capability | RFC 9113 Section | Status | API in Silver | Implementation Notes |
 |:---|:---|:---:|:---|:---|
@@ -23,3 +23,18 @@
 | **PING & Heartbeat Frames** | §6.7 | Supported | `h2_read_response`, `h2_wait_all` | Automatically echoes back received PING frames with the ACK flag set. |
 | **GOAWAY Teardown** | §6.8 | Supported | `h2_read_response`, `h2_wait_all` | Gracefully closes connections on peer GOAWAY notifications. |
 | **HttpClient Transparent H2** | §3.3 | Supported | `HttpClient.get(...)`, `do(...)` | Uses ALPN negotiation to transparently invoke HTTP/2 and convert `H2Response` into `HttpResponse`. |
+
+## Server Compliance Table
+
+| Feature / Capability | RFC 9113 Section | Status | API in Silver | Implementation Notes |
+|:---|:---|:---:|:---|:---|
+| **Client Preface Verification** | §3.4 | Supported | `h2_check_client_preface` | Validates client magic `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` upon connection accept. |
+| **Transparent h2c Sniffing** | §3.4 / Go | Supported | `HttpServer.serve_conn` | Automatically peeks connection preface to dispatch between HTTP/1.1 and HTTP/2 over the same socket. |
+| **Server SETTINGS Negotiation** | §6.5 | Supported | `h2_send_server_settings` | Emits server SETTINGS with concurrency limits, window size, and frame size. |
+| **Client Stream Parity Check** | §5.1.1 | Supported | `h2_serve_conn` | Enforces that client-initiated streams must have odd stream IDs, rejecting even IDs with `PROTOCOL_ERROR`. |
+| **Inbound Flow Control** | §5.2 | Supported | `h2_serve_conn` | Emits `WINDOW_UPDATE` frames on stream and connection levels when credit falls below threshold. |
+| **Server Response HEADERS** | §6.2 | Supported | `h2_send_response_headers` | Encodes `:status` and response headers via HPACK, filtering connection-specific headers (§8.3.1). |
+| **Server Flow-Controlled DATA** | §6.1 | Supported | `h2_send_response_data` | Emits payload chunks respecting client frame size and flow control credits. |
+| **Protocol-Agnostic Handlers** | Go Convention | Supported | `ResponseWriter`, `HttpRequest` | Handlers receive standard `(ResponseWriter* w, HttpRequest* r)` regardless of HTTP/1.1 or HTTP/2 protocol. |
+| **Server RST_STREAM & GOAWAY** | §6.4, §6.8 | Supported | `h2_send_rst_stream`, `h2_send_goaway` | Handles stream resets and emits graceful GOAWAY frames on connection termination. |
+

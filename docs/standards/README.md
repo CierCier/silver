@@ -10,8 +10,8 @@ This directory contains dedicated compliance tables for every networking standar
 | **TCP** | Transmission Control Protocol & Stream Sockets | RFC 9293, POSIX.1-2017 | [tcp.md](file:///home/cier/Projects/silver/docs/standards/tcp.md) | **Full** |
 | **epoll & Server I/O** | Event Multiplexing, EventFd, Vectorized I/O & Sendfile | epoll(7), eventfd(2), writev(2), sendfile(2) | [epoll.md](file:///home/cier/Projects/silver/docs/standards/epoll.md) | **Full** |
 | **io_uring** | Asynchronous I/O Framework, SQ/CQ Ring Buffer Architecture | io_uring(7), io_uring_setup(2), io_uring_enter(2) | [io_uring.md](file:///home/cier/Projects/silver/docs/standards/io_uring.md) | **Full** |
-| **HTTP/1.1** | HTTP Semantics & Framing | RFC 9110, RFC 9112 | [http.md](file:///home/cier/Projects/silver/docs/standards/http.md) | **Full** |
-| **HTTP/2** | HTTP/2 Framing, Multiplexing & Flow Control | RFC 9113 | [http2.md](file:///home/cier/Projects/silver/docs/standards/http2.md) | **Full** |
+| **HTTP/1.1** | HTTP Semantics, Framing & Go-like Server Engine | RFC 9110, RFC 9112 | [http.md](file:///home/cier/Projects/silver/docs/standards/http.md) | **Full (Client & Server)** |
+| **HTTP/2** | HTTP/2 Framing, Flow Control & Native Server Engine | RFC 9113 | [http2.md](file:///home/cier/Projects/silver/docs/standards/http2.md) | **Full (Client & Server)** |
 | **HPACK** | Header Compression for HTTP/2 | RFC 7541 | [hpack.md](file:///home/cier/Projects/silver/docs/standards/hpack.md) | **Full** |
 | **TLS & ALPN** | Transport Layer Security & Protocol Negotiation | RFC 8446, RFC 7301, RFC 6066 | [tls.md](file:///home/cier/Projects/silver/docs/standards/tls.md) | **Full** |
 | **DNS** | Domain Name System Resolution | RFC 1034, RFC 1035 | [dns.md](file:///home/cier/Projects/silver/docs/standards/dns.md) | **Full (A records)** |
