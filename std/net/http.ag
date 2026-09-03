@@ -50,6 +50,14 @@ struct HttpRequest {
     str body;
     bool close;
     str url; // full URL for Go-style requests; null for manual requests
+    String method_str;
+    String target_str;
+    String host_str;
+    String path_str;
+    String query_str;
+    String body_buf;
+    i64 content_length;
+    bool chunked;
 }
 
 struct HttpResponse {
@@ -535,6 +543,14 @@ impl HttpRequest {
         request.headers = String.new();
         request.body = body;
         request.close = true;
+        request.method_str = String.new();
+        request.target_str = String.new();
+        request.host_str = String.new();
+        request.path_str = String.new();
+        request.query_str = String.new();
+        request.body_buf = String.new();
+        request.content_length = -1;
+        request.chunked = false;
         return move request;
     }
 
@@ -550,6 +566,36 @@ impl HttpRequest {
         request.body = (str)0;
         request.close = true;
         request.url = (str)0;
+        request.method_str = String.new();
+        request.target_str = String.new();
+        request.host_str = String.new();
+        request.path_str = String.new();
+        request.query_str = String.new();
+        request.body_buf = String.new();
+        request.content_length = -1;
+        request.chunked = false;
+        return move request;
+    }
+
+    /// Empty request for server incoming request reading.
+    HttpRequest empty() {
+        HttpRequest request;
+        request.version = HttpVersion.Http11;
+        request.method = (str)0;
+        request.target = (str)0;
+        request.host = (str)0;
+        request.headers = String.new();
+        request.body = (str)0;
+        request.close = false;
+        request.url = (str)0;
+        request.method_str = String.new();
+        request.target_str = String.new();
+        request.host_str = String.new();
+        request.path_str = String.new();
+        request.query_str = String.new();
+        request.body_buf = String.new();
+        request.content_length = -1;
+        request.chunked = false;
         return move request;
     }
 
@@ -603,6 +649,290 @@ impl HttpRequest {
         self.close = false;
     }
 
+    /// The value of `name` (case-insensitive) in the request headers, or
+    /// an empty string when absent. Mirrors Go's Request.Header.Get.
+    String get_header(*self, str name) {
+        u8* data = self.headers.data;
+        i64 len = self.headers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end
+                && http_equal_ci(data, pos, colon, name)) {
+                i64 value_start = colon + 1;
+                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+                return self.headers.substr(value_start, end - value_start);
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        return String.new();
+    }
+
+    /// Protocol string e.g. "HTTP/1.1". Mirrors Go's Request.Proto.
+    str proto(*self) {
+        if (self.version == HttpVersion.Http10) { return "HTTP/1.0"; }
+        if (self.version == HttpVersion.Http11) { return "HTTP/1.1"; }
+        if (self.version == HttpVersion.Http20) { return "HTTP/2.0"; }
+        return "HTTP/1.1";
+    }
+
+    /// Request path component without query string. Mirrors Go's req.URL.Path.
+    str path(*self) {
+        if (self.path_str.len > 0) { return (str)self.path_str.data; }
+        if (self.target != (str)0) { return self.target; }
+        return "/";
+    }
+
+    /// Query string component without '?'. Mirrors Go's req.URL.RawQuery.
+    str query(*self) {
+        if (self.query_str.len > 0) { return (str)self.query_str.data; }
+        return "";
+    }
+
+    /// Request body as a null-terminated string.
+    str body_str(*self) {
+        if (self.body_buf.len > 0) { return (str)self.body_buf.data; }
+        if (self.body != (str)0) { return self.body; }
+        return "";
+    }
+
+    /// Read request head from `io`. Returns:
+    /// - Ok(1): request head successfully parsed
+    /// - Ok(0): clean EOF on first byte (idle keep-alive disconnect)
+    /// - Err: malformed or oversized request
+    Result<i64, Error> read_head(*self, StreamIo* io, i64 max_header) {
+        String raw = String.new();
+        u8 chunk[512];
+        u8 carry[3];
+        i64 carry_len = 0;
+        bool first_read = true;
+
+        while (true) {
+            Result<i64, Error> r = transport_read(io, &chunk[0], 512);
+            if (r.is_err()) {
+                raw.drop();
+                return Err(HTTP_ERR_IO, "I/O error");
+            }
+            i64 n = r.value();
+            if (n == 0) {
+                raw.drop();
+                if (first_read) { return Ok(0); }
+                return Err(HTTP_ERR_MALFORMED, "malformed request");
+            }
+            first_read = false;
+            i64 term = http_find_crlfcrlf(&carry[0], carry_len, &chunk[0], n);
+            i64 consume = n;
+            if (term >= 0) { consume = term + 4 - carry_len; }
+            if (raw.len + consume > max_header) {
+                raw.drop();
+                return Err(HTTP_ERR_LIMIT, "request exceeds size limit");
+            }
+            raw.push_bytes(&chunk[0], consume);
+            if (term >= 0) {
+                http_transport_rewind(io, n - consume);
+                break;
+            }
+            carry_len = 0;
+            i64 back = consume;
+            if (back > 3) { back = 3; }
+            while (back > 0) {
+                back = back - 1;
+                carry[carry_len] = chunk[consume - 1 - back];
+                carry_len = carry_len + 1;
+            }
+        }
+
+        i64 line_end = http_find_crlf(raw.data, raw.len, 0);
+        if (line_end < 0) {
+            raw.drop();
+            return Err(HTTP_ERR_MALFORMED, "malformed request");
+        }
+        i64 sp1 = 0;
+        while (sp1 < line_end && raw.data[sp1] != (u8)' ') { sp1 = sp1 + 1; }
+        if (sp1 == 0 || sp1 >= line_end) {
+            raw.drop();
+            return Err(HTTP_ERR_MALFORMED, "malformed request line");
+        }
+        i64 sp2 = sp1 + 1;
+        while (sp2 < line_end && raw.data[sp2] != (u8)' ') { sp2 = sp2 + 1; }
+        if (sp2 == sp1 + 1 || sp2 >= line_end) {
+            raw.drop();
+            return Err(HTTP_ERR_MALFORMED, "malformed request line");
+        }
+
+        self.method_str.clear();
+        self.method_str.push_bytes(&raw.data[0], sp1);
+        self.method = (str)self.method_str.data;
+
+        self.target_str.clear();
+        self.target_str.push_bytes(&raw.data[sp1 + 1], sp2 - sp1 - 1);
+        self.target = (str)self.target_str.data;
+
+        i64 qmark = 0;
+        i64 tlen = self.target_str.len;
+        while (qmark < tlen && self.target_str.data[qmark] != (u8)'?') {
+            qmark = qmark + 1;
+        }
+        self.path_str.clear();
+        self.path_str.push_bytes(&self.target_str.data[0], qmark);
+        self.query_str.clear();
+        if (qmark < tlen) {
+            self.query_str.push_bytes(&self.target_str.data[qmark + 1], tlen - qmark - 1);
+        }
+
+        i64 vlen = line_end - (sp2 + 1);
+        if (vlen == 8 && http_equal_ci(raw.data, sp2 + 1, line_end, "HTTP/1.0")) {
+            self.version = HttpVersion.Http10;
+            self.close = true;
+        } else if (vlen == 8 && http_equal_ci(raw.data, sp2 + 1, line_end, "HTTP/1.1")) {
+            self.version = HttpVersion.Http11;
+            self.close = false;
+        } else {
+            raw.drop();
+            return Err(HTTP_ERR_MALFORMED, "unsupported HTTP version");
+        }
+
+        self.content_length = -1;
+        self.chunked = false;
+        bool has_content_length = false;
+        u8* data = raw.data;
+        i64 header_start = line_end + 2;
+        i64 header_end = raw.len - 2;
+
+        while (header_start < header_end) {
+            i64 end = http_find_crlf(data, header_end, header_start);
+            if (end < 0) {
+                raw.drop();
+                return Err(HTTP_ERR_MALFORMED, "malformed request headers");
+            }
+            i64 colon = header_start;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon == end || colon == header_start) {
+                raw.drop();
+                return Err(HTTP_ERR_MALFORMED, "malformed request headers");
+            }
+            i64 value_start = colon + 1;
+            while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+
+            if (http_equal_ci(data, header_start, colon, "host")) {
+                self.host_str.clear();
+                self.host_str.push_bytes(&data[value_start], end - value_start);
+                self.host = (str)self.host_str.data;
+            } else if (http_equal_ci(data, header_start, colon, "content-length")) {
+                i64 cl = 0;
+                if (!http_parse_i64(data, value_start, end, &mut cl)) {
+                    raw.drop();
+                    return Err(HTTP_ERR_MALFORMED, "malformed Content-Length");
+                }
+                if (has_content_length && cl != self.content_length) {
+                    raw.drop();
+                    return Err(HTTP_ERR_MALFORMED, "conflicting Content-Length headers");
+                }
+                self.content_length = cl;
+                has_content_length = true;
+            } else if (http_equal_ci(data, header_start, colon, "transfer-encoding")) {
+                if (http_equal_ci(data, value_start, end, "chunked")) {
+                    self.chunked = true;
+                }
+            } else if (http_equal_ci(data, header_start, colon, "connection")) {
+                if (http_equal_ci(data, value_start, end, "close")) {
+                    self.close = true;
+                } else if (http_equal_ci(data, value_start, end, "keep-alive")) {
+                    self.close = false;
+                }
+            }
+            header_start = end + 2;
+        }
+
+        if (self.chunked) {
+            self.content_length = -1;
+        }
+
+        self.headers.clear();
+        self.headers.push_bytes(&raw.data[line_end + 2], raw.len - line_end - 2);
+        raw.drop();
+        return Ok(1);
+    }
+
+    Result<i64, Error> read_exact(*self, StreamIo* io, i64 count, i64 max_body) {
+        if (count < 0 || count > max_body) { return Err(HTTP_ERR_LIMIT, "request body exceeds limit"); }
+        i64 done = 0;
+        u8 buf[1024];
+        while (done < count) {
+            i64 want = count - done;
+            if (want > 1024) { want = 1024; }
+            Result<i64, Error> r = transport_read(io, &buf[0], want);
+            if (r.is_err() || r.value() == 0) { return Err(HTTP_ERR_IO, "I/O error"); }
+            self.body_buf.push_bytes(&buf[0], r.value());
+            done = done + r.value();
+        }
+        self.body = (str)self.body_buf.data;
+        return Ok(done);
+    }
+
+    Result<i64, Error> read_chunked(*self, StreamIo* io, i64 max_body) {
+        i64 total = 0;
+        String line = String.new();
+        u8 byte[1];
+        while (true) {
+            if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
+                line.drop();
+                return Err(HTTP_ERR_IO, "I/O error");
+            }
+            i64 size = 0;
+            if (!http_parse_hex(line.data, 0, line.len, &mut size)) {
+                line.drop();
+                return Err(HTTP_ERR_MALFORMED, "malformed chunk size");
+            }
+            if (size == 0) {
+                while (true) {
+                    if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
+                        line.drop();
+                        return Err(HTTP_ERR_IO, "I/O error");
+                    }
+                    if (line.len == 0) {
+                        line.drop();
+                        self.body = (str)self.body_buf.data;
+                        return Ok(total);
+                    }
+                }
+            }
+            if (total + size > max_body) {
+                line.drop();
+                return Err(HTTP_ERR_LIMIT, "chunked body exceeds limit");
+            }
+            Result<i64, Error> got = self.read_exact(io, size, max_body);
+            if (got.is_err()) {
+                line.drop();
+                return got;
+            }
+            Result<i64, Error> crlf = transport_read(io, &byte[0], 1);
+            if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\r') {
+                line.drop();
+                return Err(HTTP_ERR_MALFORMED, "malformed chunk ending");
+            }
+            crlf = transport_read(io, &byte[0], 1);
+            if (crlf.is_err() || crlf.value() != 1 || byte[0] != (u8)'\n') {
+                line.drop();
+                return Err(HTTP_ERR_MALFORMED, "malformed chunk ending");
+            }
+            total = total + size;
+        }
+        line.drop();
+        return Err(HTTP_ERR_MALFORMED, "malformed request");
+    }
+
+    Result<i64, Error> read_body(*self, StreamIo* io, i64 max_body) {
+        if (self.chunked) { return self.read_chunked(io, max_body); }
+        if (self.content_length > 0) { return self.read_exact(io, self.content_length, max_body); }
+        self.body = (str)0;
+        return Ok(0);
+    }
+
     Result<i64, Error> write(*self, StreamIo* io) {
         String head = String.new();
         head.push_str(self.method);
@@ -634,6 +964,12 @@ impl HttpRequest {
 impl Drop for HttpRequest {
     void drop(*self) {
         self.headers.drop();
+        self.method_str.drop();
+        self.target_str.drop();
+        self.host_str.drop();
+        self.path_str.drop();
+        self.query_str.drop();
+        self.body_buf.drop();
     }
 }
 
@@ -1873,4 +2209,456 @@ impl HttpConnection {
         }
         return false;
     }
+
+    HttpConnection from_stream(TcpStream stream) {
+        HttpConnection conn;
+        conn.stream = move stream;
+        conn.use_tls = false;
+        conn.version = HttpVersion.Http11;
+        conn.is_h2 = false;
+        conn.read_buf = (u8*)malloc(4096);
+        conn.read_buf_len = 0;
+        conn.read_buf_pos = 0;
+        return move conn;
+    }
 }
+
+// --- Server Utilities -----------------------------------------------------
+
+void http_append_hex(String* out, i64 val) {
+    if (val == 0) {
+        out.push((u8)'0');
+        return;
+    }
+    u8 digits[16];
+    i64 n = 0;
+    i64 v = val;
+    while (v > 0) {
+        i64 rem = v % 16;
+        if (rem < 10) { digits[n] = (u8)('0' + rem); }
+        else { digits[n] = (u8)('a' + (rem - 10)); }
+        v = v / 16;
+        n = n + 1;
+    }
+    while (n > 0) {
+        n = n - 1;
+        out.push(digits[n]);
+    }
+}
+
+void http_parse_host_port(str addr, String* out_ip, u16* out_port) {
+    out_ip.clear();
+    if (addr == (str)0 || strlen(addr) == 0) {
+        out_ip.push_str("0.0.0.0");
+        *out_port = (u16)80;
+        return;
+    }
+    u8* s = (u8*)addr;
+    i64 len = strlen(addr);
+    if (s[0] == (u8)':') {
+        out_ip.push_str("0.0.0.0");
+        i64 p = 0;
+        http_parse_i64(s, 1, len, &mut p);
+        *out_port = (u16)p;
+        return;
+    }
+    i64 colon = -1;
+    for (i64 i = 0; i < len; i = i + 1) {
+        if (s[i] == (u8)':') { colon = i; break; }
+    }
+    if (colon >= 0) {
+        out_ip.push_bytes(s, colon);
+        i64 p = 0;
+        http_parse_i64(s, colon + 1, len, &mut p);
+        *out_port = (u16)p;
+        return;
+    }
+    out_ip.push_str(addr);
+    *out_port = (u16)80;
+}
+
+// --- ResponseWriter (Go's http.ResponseWriter) ----------------------------
+
+struct ResponseWriter {
+    StreamIo io;
+    HttpVersion version;
+    i32 status_code;
+    String headers;
+    bool header_written;
+    bool chunked;
+    bool close_connection;
+    bool is_h2;
+    i64 h2_stream_id;
+    void* h2_conn_ptr;
+}
+
+impl ResponseWriter {
+    ResponseWriter new(StreamIo io, HttpVersion version, bool close_conn) {
+        ResponseWriter w;
+        w.io = io;
+        w.version = version;
+        w.status_code = 200;
+        w.headers = String.new();
+        w.header_written = false;
+        w.chunked = false;
+        w.close_connection = close_conn;
+        w.is_h2 = false;
+        w.h2_stream_id = 0;
+        w.h2_conn_ptr = (void*)0;
+        return move w;
+    }
+
+    /// Set response header field. Mirrors Go's w.Header().Set(k, v).
+    void set_header(&mut self, str name, str value) {
+        self.headers.push_str(name);
+        self.headers.push_str(": ");
+        self.headers.push_str(value);
+        self.headers.push_str("\r\n");
+    }
+
+    /// Write HTTP status code. Mirrors Go's w.WriteHeader(code).
+    void write_header(&mut self, i32 status) {
+        if (self.header_written) { return; }
+        self.status_code = status;
+        self.flush_header(-1);
+    }
+
+    void flush_header(&mut self, i64 content_len) {
+        if (self.header_written) { return; }
+        self.header_written = true;
+
+        String wire = String.new();
+        wire.push_str("HTTP/1.1 ");
+        http_append_i64(&mut wire, (i64)self.status_code);
+        wire.push((u8)' ');
+        wire.push_str(http_status_reason(self.status_code));
+        wire.push_str("\r\n");
+
+        bool has_cl = false;
+        u8* hdata = self.headers.data;
+        i64 hlen = self.headers.len;
+        i64 pos = 0;
+        while (pos < hlen) {
+            i64 end = http_find_crlf(hdata, hlen, pos);
+            if (end < 0) { end = hlen; }
+            i64 colon = pos;
+            while (colon < end && hdata[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end && http_equal_ci(hdata, pos, colon, "content-length")) {
+                has_cl = true;
+                break;
+            }
+            if (end >= hlen) { break; }
+            pos = end + 2;
+        }
+
+        if (!has_cl) {
+            if (content_len >= 0) {
+                wire.push_str("Content-Length: ");
+                http_append_i64(&mut wire, content_len);
+                wire.push_str("\r\n");
+            } else if (self.version == HttpVersion.Http11 && !self.close_connection) {
+                wire.push_str("Transfer-Encoding: chunked\r\n");
+                self.chunked = true;
+            }
+        }
+
+        if (self.close_connection) {
+            wire.push_str("Connection: close\r\n");
+        }
+
+        wire.push_str((str)self.headers.data);
+        wire.push_str("\r\n");
+        transport_write(&self.io, (u8*)wire.data, wire.len);
+        wire.drop();
+    }
+
+    /// Write response payload. Mirrors Go's w.Write(p).
+    Result<i64, Error> write(&mut self, u8* buf, i64 len) {
+        if (!self.header_written) {
+            self.flush_header(-1);
+        }
+        if (len <= 0) { return Ok(0); }
+        if (self.chunked) {
+            return self.write_chunk(buf, len);
+        }
+        return transport_write(&self.io, buf, len);
+    }
+
+    /// Write string response payload.
+    Result<i64, Error> write_str(&mut self, str text) {
+        if (text == (str)0) { return Ok(0); }
+        return self.write((u8*)text, strlen(text));
+    }
+
+    Result<i64, Error> write_chunk(&mut self, u8* buf, i64 len) {
+        if (len <= 0) { return Ok(0); }
+        String ch = String.new();
+        http_append_hex(&mut ch, len);
+        ch.push_str("\r\n");
+        Result<i64, Error> r1 = transport_write(&self.io, (u8*)ch.data, ch.len);
+        ch.drop();
+        if (r1.is_err()) { return r1; }
+        Result<i64, Error> r2 = transport_write(&self.io, buf, len);
+        if (r2.is_err()) { return r2; }
+        Result<i64, Error> r3 = transport_write(&self.io, (u8*)"\r\n", 2);
+        if (r3.is_err()) { return r3; }
+        return Ok(len);
+    }
+
+    void finish(&mut self) {
+        if (!self.header_written) {
+            self.flush_header(0);
+        }
+        if (self.chunked) {
+            transport_write(&self.io, (u8*)"0\r\n\r\n", 5);
+        }
+    }
+}
+
+impl Drop for ResponseWriter {
+    void drop(*self) {
+        self.headers.drop();
+    }
+}
+
+// --- Routing & Multiplexer (Go's http.ServeMux) ---------------------------
+
+struct RouteEntry {
+    str pattern;
+    void(ResponseWriter*, HttpRequest*) handler;
+}
+
+struct ServeMux {
+    Vec<RouteEntry> routes;
+}
+
+impl ServeMux {
+    ServeMux new() {
+        ServeMux mux;
+        mux.routes = Vec<RouteEntry>.new();
+        return move mux;
+    }
+
+    void handle_func(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        RouteEntry e;
+        e.pattern = pattern;
+        e.handler = handler;
+        self.routes.push(e);
+    }
+
+    void serve_http(&mut self, ResponseWriter* w, HttpRequest* r) {
+        str p = r.path();
+        i64 plen = strlen(p);
+        i64 n = self.routes.len();
+
+        for (i64 i = 0; i < n; i = i + 1) {
+            RouteEntry* e = self.routes.get_ptr(i);
+            if (strcmp(e.pattern, p) == 0) {
+                void(ResponseWriter*, HttpRequest*) h = e.handler;
+                h(w, r);
+                return;
+            }
+        }
+
+        i64 best_idx = -1;
+        i64 best_len = -1;
+        for (i64 i = 0; i < n; i = i + 1) {
+            RouteEntry* e = self.routes.get_ptr(i);
+            i64 elen = strlen(e.pattern);
+            if (elen > best_len && plen >= elen) {
+                if (memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
+                    best_idx = i;
+                    best_len = elen;
+                }
+            }
+        }
+
+        if (best_idx >= 0) {
+            RouteEntry* e = self.routes.get_ptr(best_idx);
+            void(ResponseWriter*, HttpRequest*) h = e.handler;
+            h(w, r);
+            return;
+        }
+
+        w.set_header("Content-Type", "text/plain; charset=utf-8");
+        w.write_header(404);
+        w.write_str("404 page not found\n");
+    }
+}
+
+impl Drop for ServeMux {
+    void drop(*self) {
+        self.routes.drop();
+    }
+}
+
+// --- Server (Go's http.Server) --------------------------------------------
+
+struct HttpServer {
+    str addr;
+    ServeMux mux;
+    ServeMux* custom_mux;
+    i64 read_timeout_secs;
+    i64 write_timeout_secs;
+    i64 max_header_bytes;
+    i64 max_body_bytes;
+}
+
+impl HttpServer {
+    HttpServer new(str addr) {
+        HttpServer s;
+        s.addr = addr;
+        s.mux = ServeMux.new();
+        s.custom_mux = (ServeMux*)0;
+        s.read_timeout_secs = 30;
+        s.write_timeout_secs = 30;
+        s.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
+        s.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
+        return move s;
+    }
+
+    void handle_func(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.handle_func(pattern, handler);
+    }
+
+    void set_mux(&mut self, ServeMux* mux) {
+        self.custom_mux = mux;
+    }
+
+    void serve_conn(&mut self, TcpStream stream) {
+        HttpConnection conn = HttpConnection.from_stream(move stream);
+        StreamIo io = http_transport_io(&conn);
+
+        while (true) {
+            HttpRequest req = HttpRequest.empty();
+            Result<i64, Error> hr = req.read_head(&io, self.max_header_bytes);
+            if (hr.failed() || hr.value() == 0) {
+                req.drop();
+                break;
+            }
+
+            // HTTP/1.1 mandatory Host header check (RFC 9112 §3.2)
+            if (req.version == HttpVersion.Http11 && (req.host == (str)0 || strlen(req.host) == 0)) {
+                ResponseWriter bad_w = ResponseWriter.new(io, req.version, true);
+                bad_w.set_header("Content-Type", "text/plain; charset=utf-8");
+                bad_w.set_header("Connection", "close");
+                bad_w.write_header(400);
+                bad_w.write_str("400 Bad Request: missing required Host header\n");
+                bad_w.finish();
+                bad_w.drop();
+                req.drop();
+                break;
+            }
+
+            // Expect: 100-continue handling (RFC 9110 §10.1.1)
+            String expect = req.get_header("expect");
+            if (expect.len > 0 && http_equal_ci(expect.data, 0, expect.len, "100-continue")) {
+                transport_write(&io, (u8*)"HTTP/1.1 100 Continue\r\n\r\n", 25);
+            }
+            expect.drop();
+
+            Result<i64, Error> br = req.read_body(&io, self.max_body_bytes);
+            if (br.failed()) {
+                req.drop();
+                break;
+            }
+
+            bool close_conn = req.close;
+            ResponseWriter w = ResponseWriter.new(io, req.version, close_conn);
+            if (self.custom_mux != (ServeMux*)0) {
+                self.custom_mux.serve_http(&mut w, &mut req);
+            } else {
+                self.mux.serve_http(&mut w, &mut req);
+            }
+            w.finish();
+
+            w.drop();
+            req.drop();
+
+            if (close_conn) {
+                break;
+            }
+        }
+        conn.close();
+        conn.drop();
+    }
+
+    Result<i64, Error> listen_and_serve(&mut self) {
+        String ip = String.new();
+        u16 port = 80;
+        http_parse_host_port(self.addr, &mut ip, &mut port);
+
+        Result<SocketAddr, AddrError> ar = SocketAddr.v4((str)ip.data, port);
+        ip.drop();
+        if (ar.failed()) {
+            return Err(HTTP_ERR_CONNECT, "invalid bind address");
+        }
+        SocketAddr sa = ar.unwrap();
+        TcpListener listener = TcpListener.bind(&sa, 128);
+        if (!listener.valid()) {
+            return Err(HTTP_ERR_CONNECT, "failed to bind socket");
+        }
+
+        while (true) {
+            Result<i64, Error> a = listener.accept();
+            if (a.failed()) {
+                continue;
+            }
+            TcpStream stream = TcpStream.from_fd((i32)a.value());
+            if (self.read_timeout_secs > 0) {
+                stream.sock.set_recv_timeout(self.read_timeout_secs);
+            }
+            if (self.write_timeout_secs > 0) {
+                stream.sock.set_send_timeout(self.write_timeout_secs);
+            }
+
+            self.serve_conn(move stream);
+        }
+        return Ok(0);
+    }
+}
+
+impl Drop for HttpServer {
+    void drop(*self) {
+        self.mux.drop();
+    }
+}
+
+// --- Top-Level Go-like Functions ------------------------------------------
+
+ServeMux g_default_mux;
+
+void http_handle_func(str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+    g_default_mux.handle_func(pattern, handler);
+}
+
+Result<i64, Error> http_listen_and_serve(str addr) {
+    HttpServer s = HttpServer.new(addr);
+    s.set_mux(&g_default_mux);
+    Result<i64, Error> r = s.listen_and_serve();
+    s.drop();
+    return r;
+}
+
+Result<i64, Error> http_listen_and_serve(str addr, void(ResponseWriter*, HttpRequest*) handler) {
+    HttpServer s = HttpServer.new(addr);
+    s.handle_func("/", handler);
+    Result<i64, Error> r = s.listen_and_serve();
+    s.drop();
+    return r;
+}
+
+Result<HttpResponse, Error> http_get(str url) {
+    HttpClient client = HttpClient.new();
+    Result<HttpResponse, Error> r = client.get(url);
+    client.drop();
+    return r;
+}
+
+Result<HttpResponse, Error> http_post(str url, str content_type, str body) {
+    HttpClient client = HttpClient.new();
+    Result<HttpResponse, Error> r = client.post(url, content_type, body);
+    client.drop();
+    return r;
+}
+

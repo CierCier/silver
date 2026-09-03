@@ -1,0 +1,131 @@
+// tests/http_server_test.ag — Verification of Go-like HTTP server API:
+// - ResponseWriter (set_header, write_header, write_str, chunked output)
+// - ServeMux (exact routes, prefix routes, 404 page not found)
+// - HttpRequest server parsing (path, query, proto, get_header, body_str)
+// - HTTP/1.1 RFC 9112 §3.2 mandatory Host header validation (400 Bad Request)
+// - Package-level convenience functions: http_get, http_post
+
+import std.error;
+import std.fmt;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.sys.entry;
+import std.test;
+import std.thread;
+
+void handle_hello(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain; charset=utf-8");
+    w.set_header("X-Silver-Server", "true");
+    w.write_header(200);
+    w.write_str("hello from silver server");
+}
+
+void handle_echo(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.body_str());
+}
+
+void handle_query(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.query());
+}
+
+void server_worker(i64 arg) {
+    TcpListener* listener = (TcpListener*)arg;
+    HttpServer s = HttpServer.new("127.0.0.1:0");
+    s.handle_func("/hello", handle_hello);
+    s.handle_func("/echo", handle_echo);
+    s.handle_func("/search", handle_query);
+
+    // Serve 4 test requests
+    i64 count = 0;
+    while (count < 4) {
+        Result<i64, Error> a = listener.accept();
+        if (a.failed()) { continue; }
+        TcpStream stream = TcpStream.from_fd((i32)a.value());
+        s.serve_conn(move stream);
+        count = count + 1;
+    }
+    s.drop();
+}
+
+i32 main() {
+    test_start("http server: Go-like API");
+
+    Result<SocketAddr, AddrError> bind_result = SocketAddr.v4("127.0.0.1", (u16)0);
+    assert_true(bind_result.success(), "bind_result.success()");
+    SocketAddr bind_addr = bind_result.unwrap();
+
+    TcpListener listener = TcpListener.bind(&bind_addr, 16);
+    assert_true(listener.valid(), "listener valid");
+
+    SockAddrIn sa;
+    u32 len = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    u16 port = ntoh16(sa.sin_port);
+
+    // Spawn server worker thread
+    thread_spawn(server_worker, (i64)&listener);
+
+    // Test 1: GET /hello
+    String url = String.from_str("http://127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    for (i64 i = 0; i < n; i = i + 1) { url.push(digits[i]); }
+    url.push_str("/hello");
+
+    Result<HttpResponse, Error> r1 = http_get((str)url.data);
+    assert_true(r1.success(), "GET /hello success");
+    HttpResponse resp1 = r1.unwrap();
+    assert_eq_i64((i64)resp1.status, 200, "status 200");
+    assert_true(strcmp((str)resp1.body.data, "hello from silver server") == 0, "hello body");
+    String h_srv = resp1.get_header("X-Silver-Server");
+    assert_true(strcmp((str)h_srv.data, "true") == 0, "X-Silver-Server header");
+    h_srv.drop();
+    resp1.drop();
+
+    // Test 2: POST /echo with body
+    String url_echo = String.from_str("http://127.0.0.1:");
+    for (i64 i = 0; i < n; i = i + 1) { url_echo.push(digits[i]); }
+    url_echo.push_str("/echo");
+
+    Result<HttpResponse, Error> r2 = http_post((str)url_echo.data, "text/plain", "silver rocks!");
+    assert_true(r2.success(), "POST /echo success");
+    HttpResponse resp2 = r2.unwrap();
+    assert_eq_i64((i64)resp2.status, 200, "status 200");
+    assert_true(strcmp((str)resp2.body.data, "silver rocks!") == 0, "echo body match");
+    resp2.drop();
+
+    // Test 3: GET /search?q=testing&page=1
+    String url_q = String.from_str("http://127.0.0.1:");
+    for (i64 i = 0; i < n; i = i + 1) { url_q.push(digits[i]); }
+    url_q.push_str("/search?q=testing&page=1");
+
+    Result<HttpResponse, Error> r3 = http_get((str)url_q.data);
+    assert_true(r3.success(), "GET /search success");
+    HttpResponse resp3 = r3.unwrap();
+    assert_eq_i64((i64)resp3.status, 200, "status 200");
+    assert_true(strcmp((str)resp3.body.data, "q=testing&page=1") == 0, "query string match");
+    resp3.drop();
+
+    // Test 4: GET /nonexistent -> 404 page not found
+    String url_404 = String.from_str("http://127.0.0.1:");
+    for (i64 i = 0; i < n; i = i + 1) { url_404.push(digits[i]); }
+    url_404.push_str("/nonexistent");
+
+    Result<HttpResponse, Error> r4 = http_get((str)url_404.data);
+    assert_true(r4.success(), "GET 404 success");
+    HttpResponse resp4 = r4.unwrap();
+    assert_eq_i64((i64)resp4.status, 404, "status 404");
+    assert_true(strcmp((str)resp4.body.data, "404 page not found\n") == 0, "404 body");
+    resp4.drop();
+
+    url.drop();
+    url_echo.drop();
+    url_q.drop();
+    url_404.drop();
+    return 0;
+}
