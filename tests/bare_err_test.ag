@@ -1,0 +1,24 @@
+import std.test;
+import std.result;
+import std.error;
+
+Result<i64, Error> compute(bool succeed) {
+    if (succeed) {
+        return Ok(42);
+    }
+    return Err(404, "not found");
+}
+
+i32 main() {
+    Result<i64, Error> ok_res = compute(true);
+    assert_true(ok_res.is_ok(), "ok_res should be ok");
+    assert_eq_i64(42, ok_res.unwrap(), "ok value should be 42");
+
+    Result<i64, Error> err_res = compute(false);
+    assert_true(err_res.is_err(), "err_res should be err");
+    Error err = err_res.get_error();
+    assert_eq_i64(404, err.code, "error code should be 404");
+    assert_true(err.message == "not found", "error message should match");
+
+    return done();
+}
