@@ -58,6 +58,37 @@ i32 main() {
         assert_true(memcmp(&buf[0], (const void*)"ping!", 5) == 0, "echo matches");
     }
 
+    // Connected UDP test (POSIX / RFC 768)
+    test_start("connected udp socket");
+    assert_true(client.connect(&server_addr), "client connect to server");
+    assert_true(server.connect(&from), "server connect to client");
+
+    Result<SocketAddr, Error> p_res = client.peer_addr();
+    assert_true(p_res.success(), "client peer_addr ok");
+    Result<SocketAddr, Error> l_res = client.local_addr();
+    assert_true(l_res.success(), "client local_addr ok");
+
+    i64 c_sent = client.send((u8*)"connected", 9);
+    assert_eq_i64(9, c_sent, "connected send 9 bytes");
+
+    u8 c_buf[32];
+    i64 s_got = server.recv(&c_buf[0], 32);
+    assert_eq_i64(9, s_got, "connected recv 9 bytes");
+    assert_true(memcmp(&c_buf[0], (const void*)"connected", 9) == 0, "connected payload matches");
+
+    // Socket options test
+    test_start("udp socket options");
+    assert_true(client.set_broadcast(true), "set_broadcast true");
+    client.set_send_timeout(2);
+    assert_true(client.set_nonblocking(true), "set_nonblocking true");
+    assert_true(client.set_nonblocking(false), "set_nonblocking false");
+
+    // IPv6 socket creation test
+    test_start("udp ipv6 socket");
+    UdpSocket v6_sock = UdpSocket.new_v6();
+    assert_true(v6_sock.valid(), "ipv6 socket valid");
+    v6_sock.close();
+
     server.close();
     client.close();
     return done();

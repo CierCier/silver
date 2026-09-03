@@ -9,6 +9,7 @@ import std.sys.socket;
 import std.sys.errno;
 import std.net.inet;
 import std.mem.drop;
+import std.mem.memory;
 import std.time;
 
 // ---------------------------------------------------------------------------
@@ -92,14 +93,21 @@ struct UdpSocket {
 }
 
 impl UdpSocket {
-    /// Create an unbound UDP socket. Returns a closed socket on failure.
+    /// Create an unbound IPv4 UDP socket. Returns a closed socket on failure.
     UdpSocket new() {
         UdpSocket u;
         u.sock = Socket.new(AddressFamily.INET, SocketType.DGRAM, SOCK_CLOEXEC, 0);
         return u;
     }
 
-    /// Bind to a borrowed socket address. This socket is IPv4-only.
+    /// Create an unbound IPv6 UDP socket. Returns a closed socket on failure.
+    UdpSocket new_v6() {
+        UdpSocket u;
+        u.sock = Socket.new(AddressFamily.INET6, SocketType.DGRAM, SOCK_CLOEXEC, 0);
+        return u;
+    }
+
+    /// Bind to a borrowed socket address (supports IPv4, IPv6, and Unix datagrams).
     bool bind(*self, SocketAddr* addr) {
         if (self.sock.invalid()) { return false; }
         Result<i64, Error> r = match *addr {
@@ -108,6 +116,35 @@ impl UdpSocket {
             Unix(sa) : try_bind(self.sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
         };
         return r.is_ok();
+    }
+
+    /// Connect the UDP socket to a remote address (RFC 768 / POSIX).
+    /// Filters incoming datagrams to only those from `addr`, and enables
+    /// calling send() and recv() without specifying the destination address.
+    bool connect(*self, SocketAddr* addr) {
+        if (self.sock.invalid()) { return false; }
+        Result<i64, Error> r = match *addr {
+            V4(sa) : try_connect(self.sock.fd, (void*)&sa, 16),
+            V6(sa) : try_connect(self.sock.fd, (void*)&sa, 28),
+            Unix(sa) : try_connect(self.sock.fd, (void*)&sa, sockaddr_un_len((SockAddrUn*)&sa))
+        };
+        return r.is_ok();
+    }
+
+    /// Send `len` bytes to the connected peer address.
+    i64 send(*self, u8* buf, i64 len) {
+        if (self.sock.invalid()) { return -EINVAL; }
+        Result<i64, Error> r = try_sendto(self.sock.fd, (void*)buf, len, 0, (void*)0, 0);
+        if (r.is_err()) { return -r.errno(); }
+        return r.value();
+    }
+
+    /// Receive up to `len` bytes from the connected peer address.
+    i64 recv(*self, u8* buf, i64 len) {
+        if (self.sock.invalid()) { return -EINVAL; }
+        Result<i64, Error> r = try_recvfrom(self.sock.fd, (void*)buf, len, 0, (void*)0, (u32*)0);
+        if (r.is_err()) { return -r.errno(); }
+        return r.value();
     }
 
     /// Send `len` bytes to a borrowed destination address.
@@ -124,24 +161,128 @@ impl UdpSocket {
         return r.value();
     }
 
-    /// Receive up to `len` bytes. If non-null, fill `src` with the IPv4
-    /// sender address.
+    /// Receive up to `len` bytes. If non-null, fill `src` with the
+    /// sender address (supports IPv4, IPv6, and Unix datagrams).
     i64 recv_from(*self, u8* buf, i64 len, SocketAddr* src) {
         if (self.sock.invalid()) { return -EINVAL; }
-        SockAddrIn src_addr;
-        u32 addr_len = 16;
+        u8 storage[128];
+        u32 addr_len = 128;
         Result<i64, Error> r = try_recvfrom(
-            self.sock.fd, (void*)buf, len, 0, (void*)&src_addr, &addr_len);
+            self.sock.fd, (void*)buf, len, 0, (void*)&storage[0], &addr_len);
         if (r.is_err()) { return -r.errno(); }
-        if (src != (SocketAddr*)0) {
-            *src = SocketAddr.V4(src_addr);
+        if (src != (SocketAddr*)0 && addr_len >= 2) {
+            u16* fptr = (u16*)&storage[0];
+        u16 family = *fptr;
+            if (family == (u16)AddressFamily.INET) {
+                SockAddrIn sa;
+                memcpy((void*)&sa, (const void*)&storage[0], 16);
+                *src = SocketAddr.V4(sa);
+            } else if (family == (u16)AddressFamily.INET6) {
+                SockAddrIn6 sa6;
+                memcpy((void*)&sa6, (const void*)&storage[0], 28);
+                *src = SocketAddr.V6(sa6);
+            } else if (family == (u16)AddressFamily.UNIX) {
+                SockAddrUn sun;
+                memcpy((void*)&sun, (const void*)&storage[0], 110);
+                *src = SocketAddr.Unix(sun);
+            }
         }
         return r.value();
     }
 
-    /// Set receive timeout in seconds.
+    /// Get the locally-bound socket address (via getsockname).
+    Result<SocketAddr, Error> local_addr(*self) {
+        if (self.sock.invalid()) { return Err(EINVAL, "invalid socket"); }
+        u8 storage[128];
+        u32 len = 128;
+        Result<i64, Error> r = try_getsockname(self.sock.fd, (void*)&storage[0], &len);
+        if (r.is_err()) { return Err(r.errno(), "getsockname failed"); }
+        u16* fptr = (u16*)&storage[0];
+        u16 family = *fptr;
+        if (family == (u16)AddressFamily.INET) {
+            SockAddrIn sa;
+            memcpy((void*)&sa, (const void*)&storage[0], 16);
+            return Ok(SocketAddr.V4(sa));
+        } else if (family == (u16)AddressFamily.INET6) {
+            SockAddrIn6 sa6;
+            memcpy((void*)&sa6, (const void*)&storage[0], 28);
+            return Ok(SocketAddr.V6(sa6));
+        } else if (family == (u16)AddressFamily.UNIX) {
+            SockAddrUn sun;
+            memcpy((void*)&sun, (const void*)&storage[0], 110);
+            return Ok(SocketAddr.Unix(sun));
+        }
+        return Err(EINVAL, "unknown address family");
+    }
+
+    /// Get the connected remote peer address (via getpeername).
+    Result<SocketAddr, Error> peer_addr(*self) {
+        if (self.sock.invalid()) { return Err(EINVAL, "invalid socket"); }
+        u8 storage[128];
+        u32 len = 128;
+        Result<i64, Error> r = try_getpeername(self.sock.fd, (void*)&storage[0], &len);
+        if (r.is_err()) { return Err(r.errno(), "getpeername failed"); }
+        u16* fptr = (u16*)&storage[0];
+        u16 family = *fptr;
+        if (family == (u16)AddressFamily.INET) {
+            SockAddrIn sa;
+            memcpy((void*)&sa, (const void*)&storage[0], 16);
+            return Ok(SocketAddr.V4(sa));
+        } else if (family == (u16)AddressFamily.INET6) {
+            SockAddrIn6 sa6;
+            memcpy((void*)&sa6, (const void*)&storage[0], 28);
+            return Ok(SocketAddr.V6(sa6));
+        } else if (family == (u16)AddressFamily.UNIX) {
+            SockAddrUn sun;
+            memcpy((void*)&sun, (const void*)&storage[0], 110);
+            return Ok(SocketAddr.Unix(sun));
+        }
+        return Err(EINVAL, "unknown address family");
+    }
+
+    /// Get the bound port (via getsockname). Returns 0 on failure.
+    u16 local_port(*self) {
+        Result<SocketAddr, Error> a = self.local_addr();
+        if (a.failed()) { return (u16)0; }
+        return match a.unwrap() {
+            V4(sa) : ntoh16(sa.sin_port),
+            V6(sa) : ntoh16(sa.sin6_port),
+            Unix(sa) : (u16)0
+        };
+    }
+
+    /// Set receive timeout in seconds (SO_RCVTIMEO).
     void set_recv_timeout(*self, i64 sec) {
         self.sock.set_recv_timeout(sec);
+    }
+
+    /// Set send timeout in seconds (SO_SNDTIMEO).
+    void set_send_timeout(*self, i64 sec) {
+        self.sock.set_send_timeout(sec);
+    }
+
+    /// Enable or disable UDP broadcast (SO_BROADCAST).
+    bool set_broadcast(*self, bool on) {
+        if (self.sock.invalid()) { return false; }
+        i32 val = on ? 1 : 0;
+        Result<i64, Error> r = try_setsockopt(
+            self.sock.fd, SocketOptionLevel.SOCKET, SocketOption.BROADCAST, (void*)&val, 4);
+        return r.is_ok();
+    }
+
+    /// Set non-blocking mode on the socket.
+    bool set_nonblocking(*self, bool nonblocking) {
+        if (self.sock.invalid()) { return false; }
+        Result<i64, Error> flags = try_fcntl(self.sock.fd, F_GETFL, 0);
+        if (flags.is_err()) { return false; }
+        i64 fl = flags.value();
+        if (nonblocking) {
+            fl = fl | O_NONBLOCK;
+        } else {
+            fl = fl & ~O_NONBLOCK;
+        }
+        Result<i64, Error> r = try_fcntl(self.sock.fd, F_SETFL, fl);
+        return r.is_ok();
     }
 
     bool valid(*self)    { return self.sock.valid(); }
@@ -150,16 +291,6 @@ impl UdpSocket {
     /// Close the underlying socket.
     void close(*self) {
         self.sock.close();
-    }
-
-    /// Get the bound port (via getsockname). Returns 0 on failure.
-    u16 local_port(*self) {
-        if (self.sock.invalid()) { return (u16)0; }
-        SockAddrIn sa;
-        u32 len = 16;
-        Result<i64, Error> r = try_getsockname(self.sock.fd, (void*)&sa, &len);
-        if (r.is_err()) { return (u16)0; }
-        return ntoh16(sa.sin_port);
     }
 }
 
