@@ -64,6 +64,10 @@ i32 main() {
         i += 1;
     }
     assert_true(found_ct, "content-type header present");
+    i64 ct_len = 0;
+    u8* ct_val = h2_response_get_header(&resp, "content-type", &ct_len);
+    assert_true(ct_val != (u8*)0, "content-type found via h2_response_get_header");
+    assert_eq_i64(0, resp.rst_error, "no rst error");
 
     free(resp.body);
     hpack_free_fields(&resp.headers[0], resp.header_count);
