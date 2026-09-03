@@ -256,31 +256,31 @@ impl TlsStream {
 
     Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
-            return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
+            return Err(TLS_ERR, "TLS stream is closed");
         }
         i32 r = ssl_read(self.ssl, (void*)buf, (i32)len);
-        if (r > 0) { return Result<i64, Error>.Ok((i64)r); }
-        if (r == 0) { return Result<i64, Error>.Ok(0); }
+        if (r > 0) { return Ok((i64)r); }
+        if (r == 0) { return Ok(0); }
         i32 e = ssl_get_error(self.ssl, r);
-        if (e == SSL_ERROR_ZERO_RETURN) { return Result<i64, Error>.Ok(0); }
-        if (e == SSL_ERROR_SYSCALL) { return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS I/O error")); }
-        return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS read error"));
+        if (e == SSL_ERROR_ZERO_RETURN) { return Ok(0); }
+        if (e == SSL_ERROR_SYSCALL) { return Err(TLS_ERR, "TLS I/O error"); }
+        return Err(TLS_ERR, "TLS read error");
     }
 
     Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
-            return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS stream is closed"));
+            return Err(TLS_ERR, "TLS stream is closed");
         }
         i64 done = 0;
         while (done < len) {
             i32 r = ssl_write(self.ssl, (void*)((i64)buf + done), (i32)(len - done));
             if (r <= 0) {
-                if (done > 0) { return Result<i64, Error>.Ok(done); }
-                return Result<i64, Error>.Err(Error.new(TLS_ERR, "TLS write error"));
+                if (done > 0) { return Ok(done); }
+                return Err(TLS_ERR, "TLS write error");
             }
             done = done + (i64)r;
         }
-        return Result<i64, Error>.Ok(done);
+        return Ok(done);
     }
 
     /// Negotiated protocol version ("TLSv1.3", "TLSv1.2", ...) or "unknown".
