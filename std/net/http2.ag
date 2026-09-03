@@ -367,7 +367,7 @@ i64 h2_read_response(H2Connection* c, i64 sid, H2Response* out) {
 /// Returns the block length, or -1.
 i64 h2_build_headers(str method, str scheme, str authority, str path,
                      HpackField* extra, i64 n_extra, u8* out, i64 cap) {
-    HpackField req[16];
+    HpackField req[36];
     i64 nreq = 0;
     req[0].name = (u8*)":method";   req[0].name_len = 7;
     req[0].value = (u8*)method;     req[0].value_len = strlen(method);
@@ -379,7 +379,7 @@ i64 h2_build_headers(str method, str scheme, str authority, str path,
     req[3].value = (u8*)path;       req[3].value_len = strlen(path);
     nreq = 4;
     i64 i = 0;
-    while (i < n_extra && nreq < 16) {
+    while (i < n_extra && nreq < 36) {
         req[nreq] = extra[i];
         nreq += 1;
         i += 1;
@@ -387,19 +387,54 @@ i64 h2_build_headers(str method, str scheme, str authority, str path,
     return hpack_encode(&req[0], nreq, out, cap);
 }
 
-/// Send the HEADERS (+ DATA) frames for a new stream. Returns the stream id.
+/// Send the HEADERS (+ CONTINUATION + DATA) frames for a new stream. Returns the stream id.
 i64 h2_send_request_frames(H2Connection* c, str method, str scheme, str authority,
                            str path, HpackField* extra, i64 n_extra,
                            u8* body, i64 body_len) {
-    u8 hpack_buf[4096];
+    u8* hpack_buf = alloc<u8>(H2_MAX_HEADER_BLOCK);
     i64 hlen = h2_build_headers(method, scheme, authority, path, extra, n_extra,
-                                &hpack_buf[0], 4096);
-    if (hlen < 0) { return -1; }
+                                hpack_buf, H2_MAX_HEADER_BLOCK);
+    if (hlen < 0) {
+        free((void*)hpack_buf);
+        return -1;
+    }
     i64 sid = c.next_stream_id;
     c.next_stream_id += 2;
-    i64 hflags = H2_FLAG_END_HEADERS;
-    if (body_len == 0) { hflags = hflags | H2_FLAG_END_STREAM; }
-    if (h2_send_frame(c, H2_HEADERS, hflags, sid, &hpack_buf[0], hlen) != 0) { return -1; }
+
+    i64 max_frame = c.peer_max_frame_size;
+    if (max_frame <= 0) { max_frame = H2_DEFAULT_MAX_FRAME; }
+
+    if (hlen <= max_frame) {
+        i64 hflags = H2_FLAG_END_HEADERS;
+        if (body_len == 0) { hflags = hflags | H2_FLAG_END_STREAM; }
+        if (h2_send_frame(c, H2_HEADERS, hflags, sid, hpack_buf, hlen) != 0) {
+            free((void*)hpack_buf);
+            return -1;
+        }
+    } else {
+        // First fragment: HEADERS frame without END_HEADERS (RFC 9113 §6.2)
+        i64 hflags = 0;
+        if (body_len == 0) { hflags = hflags | H2_FLAG_END_STREAM; }
+        if (h2_send_frame(c, H2_HEADERS, hflags, sid, hpack_buf, max_frame) != 0) {
+            free((void*)hpack_buf);
+            return -1;
+        }
+        // Following fragments: CONTINUATION frames up to END_HEADERS (RFC 9113 §6.10)
+        i64 sent_h = max_frame;
+        while (sent_h < hlen) {
+            i64 hchunk = hlen - sent_h;
+            if (hchunk > max_frame) { hchunk = max_frame; }
+            i64 cflags = 0;
+            if (sent_h + hchunk >= hlen) { cflags = H2_FLAG_END_HEADERS; }
+            if (h2_send_frame(c, H2_CONTINUATION, cflags, sid, &hpack_buf[sent_h], hchunk) != 0) {
+                free((void*)hpack_buf);
+                return -1;
+            }
+            sent_h += hchunk;
+        }
+    }
+    free((void*)hpack_buf);
+
     i64 sent = 0;
     while (sent < body_len) {
         i64 chunk = body_len - sent;
