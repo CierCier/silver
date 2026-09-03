@@ -78,9 +78,9 @@ impl Result<i64, Error> {
     Result<i64, Error> from_raw(i64 raw) {
         if (is_errno(raw)) {
             i64 code = -raw;
-            return Result.Err(Error.new(code, errno_name(code)));
+            return Err(code, errno_name(code));
         }
-        return Result.Ok(raw);
+        return Ok(raw);
     }
 
     // True when this result failed with exactly errno `err`.
