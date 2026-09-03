@@ -302,8 +302,13 @@ bool http_parse_hex(u8* data, i64 start, i64 end, i64* out) {
         digits = digits + 1;
         i = i + 1;
     }
+    if (digits == 0) { return false; }
     while (i < end && http_is_space(data[i])) { i = i + 1; }
-    if (digits == 0 || i != end) { return false; }
+    // Chunk extensions (RFC 9112 §7.1.1): ignore unrecognized chunk extensions starting with ';'
+    if (i < end && data[i] == (u8)';') {
+        i = end;
+    }
+    if (i != end) { return false; }
     *out = value;
     return true;
 }

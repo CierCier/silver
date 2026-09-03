@@ -354,6 +354,12 @@ i32 run_get_public_case() {
         "5\r\nhello\r\n0\r\n\r\n"),
         "HTTP/1.1 chunked response parsed");
 
+    test_start("HTTP/1.1 chunked with extensions");
+    assert_eq_i64(0, run_http_case(HttpVersion.Http11,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        "5;ext=foo;bar\r\nhello\r\n0;final\r\n\r\n"),
+        "HTTP/1.1 chunked with extensions parsed");
+
     test_start("client.post convenience");
     assert_eq_i64(0, run_verb_case("POST", "payload", "X-Token: abc\r\n"),
         "POST with body and headers");
