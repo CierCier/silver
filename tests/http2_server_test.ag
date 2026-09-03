@@ -119,12 +119,12 @@ i32 main() {
     assert_eq_i64(0, h2_send_preface(&c2), "h2 preface sent");
 
     H2Response resp2;
-    u8 echo_body[11] = { (u8)'f', (u8)'a', (u8)'s', (u8)'t', (u8)' ', (u8)'s', (u8)'i', (u8)'l', (u8)'v', (u8)'e', (u8)'r' };
-    i64 rc2 = h2_request_body(&c2, "POST", "http", "127.0.0.1", "/echo", (HpackField*)0, 0, &echo_body[0], 11, &resp2);
+    str echo_body = "fast silver";
+    i64 rc2 = h2_request_body(&c2, "POST", "http", "127.0.0.1", "/echo", (HpackField*)0, 0, (u8*)echo_body, strlen(echo_body), &resp2);
     assert_eq_i64(0, rc2, "h2 POST request succeeded");
     assert_eq_i64(200, resp2.status, "status is 200");
     assert_true(resp2.body != (u8*)0, "echo body non-null");
-    assert_true(memcmp((const void*)resp2.body, (const void*)"fast silver", 11) == 0, "echo body matches");
+    assert_true(memcmp((const void*)resp2.body, (const void*)echo_body, strlen(echo_body)) == 0, "echo body matches");
     h2_free_response(&resp2);
     c2.drop();
     stream2.close();

@@ -2717,14 +2717,9 @@ impl HttpServer {
         // Transparent HTTP/2 prior-knowledge (h2c) detection
         if (self.enable_h2) {
             u8 magic[24];
-            Result<i64, Error> mr = transport_read(&io, &magic[0], 24);
-            if (mr.success() && mr.value() == 24) {
-                u8 exp[24] = {
-                    0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54,
-                    0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a,
-                    0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a
-                };
-                if (memcmp((const void*)&magic[0], (const void*)&exp[0], 24) == 0) {
+            Result<i64, Error> mr = transport_read(&io, &magic[0], H2_CLIENT_PREFACE_LEN);
+            if (mr.success() && mr.value() == H2_CLIENT_PREFACE_LEN) {
+                if (memcmp((const void*)&magic[0], (const void*)H2_CLIENT_PREFACE, H2_CLIENT_PREFACE_LEN) == 0) {
                     if (self.custom_mux != (ServeMux*)0) {
                         h2_serve_conn(&io, self.custom_mux, self.max_body_bytes);
                     } else {

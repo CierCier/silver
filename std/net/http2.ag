@@ -43,6 +43,46 @@ const i64 H2_SET_MAX_HEADER_LIST_SIZE = 0x6;
 const i64 H2_DEFAULT_WINDOW = 65535;
 const i64 H2_DEFAULT_MAX_FRAME = 16384;
 const i64 H2_MAX_HEADER_BLOCK = 65536;
+
+const str H2_CLIENT_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const i64 H2_CLIENT_PREFACE_LEN = 24;
+
+void h2_pack_u16(u8* buf, i64 val) {
+    buf[0] = (u8)((val >> 8) & 0xFF);
+    buf[1] = (u8)(val & 0xFF);
+}
+
+void h2_pack_u32(u8* buf, i64 val) {
+    buf[0] = (u8)((val >> 24) & 0xFF);
+    buf[1] = (u8)((val >> 16) & 0xFF);
+    buf[2] = (u8)((val >> 8) & 0xFF);
+    buf[3] = (u8)(val & 0xFF);
+}
+
+bool h2_is_connection_header(u8* name, i64 len) {
+    // RFC 9113 §8.3.1: Connection-specific headers must not be emitted in HTTP/2
+    if (len == 10 && (memcmp((const void*)name, (const void*)"connection", 10) == 0 ||
+                      memcmp((const void*)name, (const void*)"Connection", 10) == 0)) {
+        return true;
+    }
+    if (len == 17 && (memcmp((const void*)name, (const void*)"transfer-encoding", 17) == 0 ||
+                      memcmp((const void*)name, (const void*)"Transfer-Encoding", 17) == 0)) {
+        return true;
+    }
+    if (len == 10 && (memcmp((const void*)name, (const void*)"keep-alive", 10) == 0 ||
+                      memcmp((const void*)name, (const void*)"Keep-Alive", 10) == 0)) {
+        return true;
+    }
+    if (len == 7 && (memcmp((const void*)name, (const void*)"upgrade", 7) == 0 ||
+                     memcmp((const void*)name, (const void*)"Upgrade", 7) == 0)) {
+        return true;
+    }
+    if (len == 16 && (memcmp((const void*)name, (const void*)"proxy-connection", 16) == 0 ||
+                      memcmp((const void*)name, (const void*)"Proxy-Connection", 16) == 0)) {
+        return true;
+    }
+    return false;
+}
 const i64 H2_MAX_STREAMS = 8;
 
 // --- Connection state -----------------------------------------------------
@@ -232,12 +272,7 @@ i64 h2_send_frame(H2Connection* c, i64 ftype, i64 flags, i64 stream_id, u8* payl
 
 /// Send the magic client preface and an empty SETTINGS frame.
 i64 h2_send_preface(H2Connection* c) {
-    u8 magic[24] = {
-        0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, // "PRI * HT"
-        0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, // "TP/2.0\r\n"
-        0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a  // "\r\nSM\r\n\r\n"
-    };
-    if (h2_write_full(&c.io, &magic[0], 24) != 0) { return -1; }
+    if (h2_write_full(&c.io, (u8*)H2_CLIENT_PREFACE, H2_CLIENT_PREFACE_LEN) != 0) { return -1; }
     return h2_send_frame(c, H2_SETTINGS, 0, 0, (u8*)0, 0);
 }
 
@@ -688,54 +723,36 @@ i64 h2_wait_all(H2Connection* c) {
 // --- Server Operations (RFC 9113) -----------------------------------------
 
 /// Verify 24-byte client connection preface (RFC 9113 §3.4).
-/// "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 bool h2_check_client_preface(StreamIo* io) {
     u8 magic[24];
-    if (h2_read_full(io, &magic[0], 24) != 0) { return false; }
-    u8 expected[24] = {
-        0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, // "PRI * HT"
-        0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, // "TP/2.0\r\n"
-        0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a  // "\r\nSM\r\n\r\n"
-    };
-    return memcmp((const void*)&magic[0], (const void*)&expected[0], 24) == 0;
+    if (h2_read_full(io, &magic[0], H2_CLIENT_PREFACE_LEN) != 0) { return false; }
+    return memcmp((const void*)&magic[0], (const void*)H2_CLIENT_PREFACE, H2_CLIENT_PREFACE_LEN) == 0;
 }
 
 /// Send the server's initial SETTINGS frame (RFC 9113 §6.5).
 i64 h2_send_server_settings(H2Connection* c) {
     u8 payload[18];
-    // Parameter 1: MAX_CONCURRENT_STREAMS = 128
-    payload[0] = (u8)0; payload[1] = (u8)H2_SET_MAX_CONCURRENT_STREAMS;
-    payload[2] = (u8)0; payload[3] = (u8)0; payload[4] = (u8)0; payload[5] = (u8)128;
-    // Parameter 2: INITIAL_WINDOW_SIZE = 65535
-    payload[6] = (u8)0; payload[7] = (u8)H2_SET_INITIAL_WINDOW_SIZE;
-    payload[8] = (u8)0; payload[9] = (u8)0; payload[10] = (u8)0xFF; payload[11] = (u8)0xFF;
-    // Parameter 3: MAX_FRAME_SIZE = 16384
-    payload[12] = (u8)0; payload[13] = (u8)H2_SET_MAX_FRAME_SIZE;
-    payload[14] = (u8)0; payload[15] = (u8)0; payload[16] = (u8)0x40; payload[17] = (u8)0x00;
+    h2_pack_u16(&payload[0], H2_SET_MAX_CONCURRENT_STREAMS);
+    h2_pack_u32(&payload[2], 128);
+    h2_pack_u16(&payload[6], H2_SET_INITIAL_WINDOW_SIZE);
+    h2_pack_u32(&payload[8], 65535);
+    h2_pack_u16(&payload[12], H2_SET_MAX_FRAME_SIZE);
+    h2_pack_u32(&payload[14], 16384);
     return h2_send_frame(c, H2_SETTINGS, 0, 0, &payload[0], 18);
 }
 
 /// Send a GOAWAY frame (RFC 9113 §6.8).
 i64 h2_send_goaway(H2Connection* c, i64 last_stream_id, i64 error_code) {
     u8 payload[8];
-    payload[0] = (u8)((last_stream_id >> 24) & 0x7F);
-    payload[1] = (u8)((last_stream_id >> 16) & 0xFF);
-    payload[2] = (u8)((last_stream_id >> 8) & 0xFF);
-    payload[3] = (u8)(last_stream_id & 0xFF);
-    payload[4] = (u8)((error_code >> 24) & 0xFF);
-    payload[5] = (u8)((error_code >> 16) & 0xFF);
-    payload[6] = (u8)((error_code >> 8) & 0xFF);
-    payload[7] = (u8)(error_code & 0xFF);
+    h2_pack_u32(&payload[0], last_stream_id & 0x7FFFFFFF);
+    h2_pack_u32(&payload[4], error_code);
     return h2_send_frame(c, H2_GOAWAY, 0, 0, &payload[0], 8);
 }
 
 /// Send a RST_STREAM frame (RFC 9113 §6.4).
 i64 h2_send_rst_stream(H2Connection* c, i64 stream_id, i64 error_code) {
     u8 payload[4];
-    payload[0] = (u8)((error_code >> 24) & 0xFF);
-    payload[1] = (u8)((error_code >> 16) & 0xFF);
-    payload[2] = (u8)((error_code >> 8) & 0xFF);
-    payload[3] = (u8)(error_code & 0xFF);
+    h2_pack_u32(&payload[0], error_code);
     return h2_send_frame(c, H2_RST_STREAM, 0, stream_id, &payload[0], 4);
 }
 
@@ -744,7 +761,7 @@ i64 h2_send_response_headers(H2Connection* c, i64 stream_id, i32 status, str hea
     HpackField fields[36];
     i64 nfields = 1;
 
-    u8 status_buf[4];
+    u8 status_buf[8];
     status_buf[0] = (u8)('0' + ((status / 100) % 10));
     status_buf[1] = (u8)('0' + ((status / 10) % 10));
     status_buf[2] = (u8)('0' + (status % 10));
@@ -772,14 +789,7 @@ i64 h2_send_response_headers(H2Connection* c, i64 stream_id, i32 status, str hea
                 while (vstart < end && (hdata[vstart] == (u8)' ' || hdata[vstart] == (u8)'\t')) {
                     vstart += 1;
                 }
-                // Exclude connection-specific headers per RFC 9113 §8.3.1
-                i64 nlen = colon - pos;
-                bool skip = false;
-                if (nlen == 10 && memcmp((const void*)&hdata[pos], (const void*)"connection", 10) == 0) { skip = true; }
-                if (nlen == 10 && memcmp((const void*)&hdata[pos], (const void*)"Connection", 10) == 0) { skip = true; }
-                if (nlen == 17 && memcmp((const void*)&hdata[pos], (const void*)"transfer-encoding", 17) == 0) { skip = true; }
-                if (nlen == 17 && memcmp((const void*)&hdata[pos], (const void*)"Transfer-Encoding", 17) == 0) { skip = true; }
-                if (!skip) {
+                if (!h2_is_connection_header(&hdata[pos], colon - pos)) {
                     fields[nfields].name = &hdata[pos];
                     fields[nfields].name_len = colon - pos;
                     fields[nfields].value = &hdata[vstart];
