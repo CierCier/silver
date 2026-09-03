@@ -125,6 +125,48 @@ String build_url(u16 port, str path) {
     return 0;
 }
 
+i32 run_trailer_case() {
+    u16 port = 0;
+    i32 r = bind_loopback(&g_listener, &port);
+    if (r != 0) { return r; }
+    Result<SocketAddr, AddrError> connect_result =
+        SocketAddr.v4("127.0.0.1", port);
+    @assert(!(connect_result.failed()), "connect_result.failed()");
+    SocketAddr connect_addr = connect_result.unwrap();
+
+    HttpClient client = HttpClient.new();
+    Result<HttpConnection, Error> connection_result =
+        client.connect(&connect_addr, HttpVersion.Http11);
+    @assert(!(connection_result.failed()), "connection_result.failed()");
+    HttpConnection connection = connection_result.unwrap();
+
+    Result<i64, Error> accept_result = g_listener.accept();
+    @assert(!(accept_result.failed()), "accept_result.failed()");
+    TcpStream server = TcpStream.from_fd((i32)accept_result.value());
+
+    str response_wire =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        "5\r\nhello\r\n0\r\nExpires: never\r\nX-Checksum: abc123\r\n\r\n";
+    Result<i64, Error> server_write =
+        server.write((u8*)response_wire, strlen(response_wire));
+    @assert(!(server_write.failed()), "server_write.failed()");
+
+    HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/trailer", "fixture.test");
+    Result<HttpResponse, Error> response_result =
+        connection.send(&request, 65536, 1024);
+    @assert(!(response_result.failed()), "response_result.failed()");
+    HttpResponse response = response_result.unwrap();
+    @assert(!(response.status != 200), "response.status != 200");
+    @assert(!(!response.body.equals("hello")), "body == hello");
+    String tr1 = response.get_trailer("expires");
+    @assert(!(!tr1.equals("never")), "Expires trailer matches");
+    String tr2 = response.get_trailer("X-Checksum");
+    @assert(!(!tr2.equals("abc123")), "X-Checksum trailer matches");
+    String tr_missing = response.get_trailer("missing");
+    @assert(!(tr_missing.len != 0), "missing trailer is empty");
+    return 0;
+}
+
 /// Loopback case for the convenience verbs. `body`/`headers` select the
 /// helper arity: POST is called with body+headers, PUT with body, HEAD bare.
 i32 run_verb_case(str verb, str body, str headers) {
@@ -359,6 +401,10 @@ i32 run_get_public_case() {
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         "5;ext=foo;bar\r\nhello\r\n0;final\r\n\r\n"),
         "HTTP/1.1 chunked with extensions parsed");
+
+    test_start("HTTP/1.1 chunked with trailers");
+    assert_eq_i64(0, run_trailer_case(),
+        "HTTP/1.1 chunked with trailers parsed");
 
     test_start("client.post convenience");
     assert_eq_i64(0, run_verb_case("POST", "payload", "X-Token: abc\r\n"),

@@ -55,6 +55,7 @@ struct HttpResponse {
     String reason;
     String headers;
     String body;
+    String trailers;
     i64 content_length;
     bool chunked;
     bool close_delimited;
@@ -614,6 +615,7 @@ impl HttpResponse {
         response.reason = String.new();
         response.headers = String.new();
         response.body = String.new();
+        response.trailers = String.new();
         response.content_length = -1;
         response.chunked = false;
         response.close_delimited = false;
@@ -742,11 +744,14 @@ impl HttpResponse {
             }
             if (size == 0) {
                 // Zero-size chunk: consume trailers until the blank line.
+                self.trailers.clear();
                 while (true) {
                     if (!http_read_line(io, &line, HTTP_CHUNK_LINE_MAX)) {
                         return Err(HTTP_ERR_IO, "I/O error");
                     }
                     if (line.len == 0) { return Ok(total); }
+                    self.trailers.push_str((str)line.data);
+                    self.trailers.push_str("\r\n");
                 }
             }
             if (total + size > max_body) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
@@ -866,6 +871,30 @@ impl HttpResponse {
         return String.new();
     }
 
+    /// The value of the first trailer field with the given name (case-insensitive), or
+    /// an empty string when absent. Trailers are only present on chunked responses
+    /// that included trailing header fields after the zero chunk.
+    String get_trailer(*self, str name) {
+        u8* data = self.trailers.data;
+        i64 len = self.trailers.len;
+        i64 pos = 0;
+        while (pos < len) {
+            i64 end = http_find_crlf(data, len, pos);
+            if (end < 0) { end = len; }
+            i64 colon = pos;
+            while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
+            if (colon > pos && colon < end
+                && http_equal_ci(data, pos, colon, name)) {
+                i64 value_start = colon + 1;
+                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
+                return self.trailers.substr(value_start, end - value_start);
+            }
+            if (end >= len) { break; }
+            pos = end + 2;
+        }
+        return String.new();
+    }
+
     /// Read the head, skipping interim 1xx responses (100 Continue, 102, 103)
     /// until the final response; 101 Switching Protocols is final.
     Result<i64, Error> read_final_head(*self, StreamIo* io, i64 max_header) {
@@ -891,6 +920,7 @@ impl Drop for HttpResponse {
         self.reason.drop();
         self.headers.drop();
         self.body.drop();
+        self.trailers.drop();
     }
 }
 
@@ -948,6 +978,12 @@ impl HttpStream {
         return self.head.get_header(name);
     }
 
+    /// The value of `name` (case-insensitive) in the response trailers, or an
+    /// empty string when absent or before the stream has finished reading.
+    String get_trailer(*self, str name) {
+        return self.head.get_trailer(name);
+    }
+
     /// "200 OK"-style status text.
     String status_text(*self) {
         return self.head.status_text();
@@ -994,6 +1030,7 @@ impl HttpStream {
                 }
                 if (size == 0) {
                     // Zero-size chunk: consume trailers until the blank line.
+                    self.head.trailers.clear();
                     while (true) {
                         if (!http_read_line(io, &self.chunk_line, HTTP_CHUNK_LINE_MAX)) {
                             return Err(HTTP_ERR_IO, "I/O error");
@@ -1002,6 +1039,8 @@ impl HttpStream {
                             self.body_finished = true;
                             return Ok(0);
                         }
+                        self.head.trailers.push_str((str)self.chunk_line.data);
+                        self.head.trailers.push_str("\r\n");
                     }
                 }
                 self.chunk_remaining = size;
