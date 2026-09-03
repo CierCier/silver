@@ -120,6 +120,10 @@ i64 sys_io_uring_enter(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_POLL.IO_URING_ENTER, a1, a2, a3, a4);
 }
 
+i64 sys_io_uring_enter6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+    return syscall6((i64)RAW_POLL.IO_URING_ENTER, a1, a2, a3, a4, a5, a6);
+}
+
 i64 sys_io_uring_register(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_POLL.IO_URING_REGISTER, a1, a2, a3);
 }

@@ -1,0 +1,473 @@
+// std.sys.io_uring — Linux io_uring asynchronous I/O framework.
+//
+// Provides raw kernel structs, constants, syscall wrappers, and an
+// RAII IoUring ring manager for high-throughput zero-syscall submission
+// and completion queue processing.
+
+import std.error;
+import std.mem.memory;
+import std.sys.raw.poll;
+import std.sys.result;
+
+// Setup flags (IORING_SETUP_*)
+const u32 IORING_SETUP_IOPOLL        = 1;
+const u32 IORING_SETUP_SQPOLL        = 2;
+const u32 IORING_SETUP_SQ_AFF        = 4;
+const u32 IORING_SETUP_CQSIZE        = 8;
+const u32 IORING_SETUP_CLAMP         = 16;
+const u32 IORING_SETUP_ATTACH_WQ     = 32;
+const u32 IORING_SETUP_R_DISABLED    = 64;
+const u32 IORING_SETUP_SUBMIT_ALL    = 128;
+const u32 IORING_SETUP_COOP_TASKRUN  = 256;
+const u32 IORING_SETUP_TASKRUN_FLAG  = 512;
+const u32 IORING_SETUP_SQE128        = 1024;
+const u32 IORING_SETUP_CQE32         = 2048;
+const u32 IORING_SETUP_SINGLE_ISSUER = 4096;
+const u32 IORING_SETUP_DEFER_TASKRUN = 8192;
+const u32 IORING_SETUP_NO_MMAP       = 16384;
+const u32 IORING_SETUP_NO_SQARRAY    = 65536;
+
+// Kernel features (IORING_FEAT_*)
+const u32 IORING_FEAT_SINGLE_MMAP     = 1;
+const u32 IORING_FEAT_NODROP          = 2;
+const u32 IORING_FEAT_SUBMIT_STABLE   = 4;
+const u32 IORING_FEAT_RW_CUR_POS      = 8;
+const u32 IORING_FEAT_CUR_PERSONALITY = 16;
+const u32 IORING_FEAT_FAST_POLL       = 32;
+const u32 IORING_FEAT_POLL_32BITS     = 64;
+const u32 IORING_FEAT_SQPOLL_NONFIXED = 128;
+const u32 IORING_FEAT_EXT_ARG         = 256;
+const u32 IORING_FEAT_NATIVE_WORKERS  = 512;
+const u32 IORING_FEAT_RSRC_TAGS       = 1024;
+const u32 IORING_FEAT_CQE_SKIP        = 2048;
+const u32 IORING_FEAT_LINKED_FILE     = 4096;
+const u32 IORING_FEAT_REG_REG_RING    = 8192;
+
+// Magic mmap offsets (IORING_OFF_*)
+const i64 IORING_OFF_SQ_RING = 0;
+const i64 IORING_OFF_CQ_RING = 0x8000000;
+const i64 IORING_OFF_SQES    = 0x10000000;
+
+// io_uring_enter flags
+const u32 IORING_ENTER_GETEVENTS = 1;
+const u32 IORING_ENTER_SQ_WAKEUP = 2;
+const u32 IORING_ENTER_SQ_WAIT   = 4;
+const u32 IORING_ENTER_EXT_ARG   = 8;
+
+// io_uring opcodes
+enum IoUringOp {
+    NOP = 0;
+    READV = 1;
+    WRITEV = 2;
+    FSYNC = 3;
+    POLL_ADD = 6;
+    POLL_REMOVE = 7;
+    TIMEOUT = 11;
+    TIMEOUT_REMOVE = 12;
+    ACCEPT = 13;
+    ASYNC_CANCEL = 14;
+    LINK_TIMEOUT = 15;
+    CONNECT = 16;
+    FALLOCATE = 17;
+    OPENAT = 18;
+    CLOSE = 19;
+    READ = 22;
+    WRITE = 23;
+    SEND = 26;
+    RECV = 27;
+    SPLICE = 30;
+    SHUTDOWN = 34;
+    SOCKET = 45;
+}
+
+// Memory offsets for submission ring (40 bytes)
+struct IoSqringOffsets {
+    u32 head;
+    u32 tail;
+    u32 ring_mask;
+    u32 ring_entries;
+    u32 flags;
+    u32 dropped;
+    u32 array;
+    u32 resv1;
+    u64 user_addr;
+}
+
+// Memory offsets for completion ring (40 bytes)
+struct IoCqringOffsets {
+    u32 head;
+    u32 tail;
+    u32 ring_mask;
+    u32 ring_entries;
+    u32 overflow;
+    u32 cqes;
+    u32 flags;
+    u32 resv1;
+    u64 user_addr;
+}
+
+// Parameters structure passed to io_uring_setup (120 bytes)
+struct IoUringParams {
+    u32 sq_entries;
+    u32 cq_entries;
+    u32 flags;
+    u32 sq_thread_cpu;
+    u32 sq_thread_idle;
+    u32 features;
+    u32 wq_fd;
+    u32 resv0;
+    u32 resv1;
+    u32 resv2;
+    IoSqringOffsets sq_off;
+    IoCqringOffsets cq_off;
+}
+
+// Submission Queue Entry (64 bytes)
+struct IoUringSqe {
+    u8  opcode;
+    u8  flags;
+    u16 ioprio;
+    i32 fd;
+    u64 off;
+    u64 addr;
+    u32 len;
+    u32 rw_flags;
+    u64 user_data;
+    u16 buf_index;
+    u16 personality;
+    u32 file_index;
+    u64 addr3;
+    u64 pad;
+}
+
+// Completion Queue Entry (16 bytes)
+struct IoUringCqe {
+    u64 user_data;
+    i32 res;
+    u32 flags;
+}
+
+// Raw syscall helpers
+Result<i64, Error> try_io_uring_setup(u32 entries, IoUringParams* params) {
+    return Result<i64, Error>.from_raw(sys_io_uring_setup((i64)entries, (i64)params));
+}
+
+Result<i64, Error> try_io_uring_enter(i32 fd, u32 to_submit, u32 min_complete, u32 flags) {
+    return Result<i64, Error>.from_raw(sys_io_uring_enter6((i64)fd, (i64)to_submit, (i64)min_complete, (i64)flags, 0, 0));
+}
+
+Result<i64, Error> try_io_uring_register(i32 fd, u32 opcode, void* arg, u32 nr_args) {
+    return Result<i64, Error>.from_raw(sys_io_uring_register((i64)fd, (i64)opcode, (i64)arg));
+}
+
+// High-level RAII io_uring instance
+struct IoUring {
+    i32 ring_fd;
+    u32 flags;
+    u32 features;
+
+    void* sq_ring_ptr;
+    i64   sq_ring_sz;
+
+    void* sqes_ptr;
+    i64   sqes_sz;
+
+    void* cq_ring_ptr;
+    i64   cq_ring_sz;
+    bool  single_mmap;
+
+    // SQ ring pointers
+    u32* sq_khead;
+    u32* sq_ktail;
+    u32* sq_kring_mask;
+    u32* sq_kring_entries;
+    u32* sq_kflags;
+    u32* sq_kdropped;
+    u32* sq_array;
+    IoUringSqe* sqes;
+
+    u32 sq_sqe_head;
+    u32 sq_sqe_tail;
+
+    // CQ ring pointers
+    u32* cq_khead;
+    u32* cq_ktail;
+    u32* cq_kring_mask;
+    u32* cq_kring_entries;
+    u32* cq_koverflow;
+    IoUringCqe* cqes;
+    u32* cq_kflags;
+}
+
+impl IoUring {
+    Result<IoUring, Error> new(u32 entries) {
+        IoUringParams p;
+        memset((void*)&p, (u8)0, 120);
+
+        Result<i64, Error> r = try_io_uring_setup(entries, &p);
+        if (r.is_err()) {
+            return Err(r.errno(), "io_uring_setup failed");
+        }
+        i32 fd = (i32)r.value();
+
+        i64 sring_sz = (i64)(p.sq_off.array + p.sq_entries * 4);
+        i64 cring_sz = (i64)(p.cq_off.cqes + p.cq_entries * 16);
+        bool single_mmap = (p.features & IORING_FEAT_SINGLE_MMAP) != 0;
+
+        void* sq_ring = (void*)0;
+        void* cq_ring = (void*)0;
+        i64 ring_sz = sring_sz;
+
+        if (single_mmap) {
+            if (cring_sz > sring_sz) {
+                ring_sz = cring_sz;
+            }
+            sring_sz = ring_sz;
+            cring_sz = ring_sz;
+        }
+
+        // Map SQ ring (MAP_SHARED | MAP_POPULATE)
+        Result<i64, Error> m_sq = try_mmap((void*)0, sring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+        if (m_sq.is_err()) {
+            try_close(fd);
+            return Err(m_sq.errno(), "mmap sq_ring failed");
+        }
+        sq_ring = (void*)m_sq.value();
+
+        if (single_mmap) {
+            cq_ring = sq_ring;
+        } else {
+            Result<i64, Error> m_cq = try_mmap((void*)0, cring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
+            if (m_cq.is_err()) {
+                try_munmap(sq_ring, sring_sz);
+                try_close(fd);
+                return Err(m_cq.errno(), "mmap cq_ring failed");
+            }
+            cq_ring = (void*)m_cq.value();
+        }
+
+        // Map SQEs
+        i64 sqes_sz = (i64)(p.sq_entries * 64);
+        Result<i64, Error> m_sqes = try_mmap((void*)0, sqes_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+        if (m_sqes.is_err()) {
+            if (!single_mmap) {
+                try_munmap(cq_ring, cring_sz);
+            }
+            try_munmap(sq_ring, sring_sz);
+            try_close(fd);
+            return Err(m_sqes.errno(), "mmap sqes failed");
+        }
+        void* sqes_ptr = (void*)m_sqes.value();
+
+        u8* sq_base = (u8*)sq_ring;
+        u8* cq_base = (u8*)cq_ring;
+
+        IoUring ring;
+        ring.ring_fd = fd;
+        ring.flags = p.flags;
+        ring.features = p.features;
+
+        ring.sq_ring_ptr = sq_ring;
+        ring.sq_ring_sz = sring_sz;
+        ring.sqes_ptr = sqes_ptr;
+        ring.sqes_sz = sqes_sz;
+        ring.cq_ring_ptr = cq_ring;
+        ring.cq_ring_sz = cring_sz;
+        ring.single_mmap = single_mmap;
+
+        ring.sq_khead = (u32*)(sq_base + (i64)p.sq_off.head);
+        ring.sq_ktail = (u32*)(sq_base + (i64)p.sq_off.tail);
+        ring.sq_kring_mask = (u32*)(sq_base + (i64)p.sq_off.ring_mask);
+        ring.sq_kring_entries = (u32*)(sq_base + (i64)p.sq_off.ring_entries);
+        ring.sq_kflags = (u32*)(sq_base + (i64)p.sq_off.flags);
+        ring.sq_kdropped = (u32*)(sq_base + (i64)p.sq_off.dropped);
+        ring.sq_array = (u32*)(sq_base + (i64)p.sq_off.array);
+        ring.sqes = (IoUringSqe*)sqes_ptr;
+
+        ring.sq_sqe_head = *ring.sq_khead;
+        ring.sq_sqe_tail = *ring.sq_ktail;
+
+        ring.cq_khead = (u32*)(cq_base + (i64)p.cq_off.head);
+        ring.cq_ktail = (u32*)(cq_base + (i64)p.cq_off.tail);
+        ring.cq_kring_mask = (u32*)(cq_base + (i64)p.cq_off.ring_mask);
+        ring.cq_kring_entries = (u32*)(cq_base + (i64)p.cq_off.ring_entries);
+        ring.cq_koverflow = (u32*)(cq_base + (i64)p.cq_off.overflow);
+        ring.cqes = (IoUringCqe*)(cq_base + (i64)p.cq_off.cqes);
+        ring.cq_kflags = (u32*)(cq_base + (i64)p.cq_off.flags);
+
+        return Ok(move ring);
+    }
+
+    i32 fd(*self) {
+        return self.ring_fd;
+    }
+
+    bool is_valid(*self) {
+        return self.ring_fd >= 0;
+    }
+
+    // Allocate the next SQE in the submission ring
+    IoUringSqe* get_sqe(*self) {
+        if (!self.is_valid()) {
+            return (IoUringSqe*)0;
+        }
+        u32 head = *self.sq_khead;
+        u32 tail = self.sq_sqe_tail;
+        if (tail - head >= *self.sq_kring_entries) {
+            return (IoUringSqe*)0; // Ring is full
+        }
+        u32 index = tail & *self.sq_kring_mask;
+        IoUringSqe* sqe = &self.sqes[index];
+        memset((void*)sqe, (u8)0, 64);
+        self.sq_sqe_tail = tail + 1;
+        return sqe;
+    }
+
+    // SQE preparation helpers
+    void prep_nop(*self, IoUringSqe* sqe, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.NOP;
+        sqe.user_data = user_data;
+    }
+
+    void prep_read(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 nbytes, u64 offset, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.READ;
+        sqe.fd = fd;
+        sqe.addr = (u64)buf;
+        sqe.len = nbytes;
+        sqe.off = offset;
+        sqe.user_data = user_data;
+    }
+
+    void prep_write(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 nbytes, u64 offset, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.WRITE;
+        sqe.fd = fd;
+        sqe.addr = (u64)buf;
+        sqe.len = nbytes;
+        sqe.off = offset;
+        sqe.user_data = user_data;
+    }
+
+    void prep_accept(*self, IoUringSqe* sqe, i32 fd, void* addr, u32* addrlen, u32 flags, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.ACCEPT;
+        sqe.fd = fd;
+        sqe.addr = (u64)addr;
+        sqe.off = (u64)addrlen;
+        sqe.rw_flags = flags;
+        sqe.user_data = user_data;
+    }
+
+    void prep_connect(*self, IoUringSqe* sqe, i32 fd, void* addr, u32 addrlen, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.CONNECT;
+        sqe.fd = fd;
+        sqe.addr = (u64)addr;
+        sqe.off = (u64)addrlen;
+        sqe.user_data = user_data;
+    }
+
+    void prep_send(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 len, u32 flags, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.SEND;
+        sqe.fd = fd;
+        sqe.addr = (u64)buf;
+        sqe.len = len;
+        sqe.rw_flags = flags;
+        sqe.user_data = user_data;
+    }
+
+    void prep_recv(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 len, u32 flags, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.RECV;
+        sqe.fd = fd;
+        sqe.addr = (u64)buf;
+        sqe.len = len;
+        sqe.rw_flags = flags;
+        sqe.user_data = user_data;
+    }
+
+    void prep_close(*self, IoUringSqe* sqe, i32 fd, u64 user_data) {
+        sqe.opcode = (u8)IoUringOp.CLOSE;
+        sqe.fd = fd;
+        sqe.user_data = user_data;
+    }
+
+    // Flush prepared SQEs and submit to kernel
+    Result<i64, Error> submit(*self) {
+        return self.submit_and_wait(0);
+    }
+
+    Result<i64, Error> submit_and_wait(*self, u32 wait_nr) {
+        if (!self.is_valid()) {
+            return Err(EINVAL, "io_uring is closed");
+        }
+
+        u32 tail = self.sq_sqe_tail;
+        if (self.sq_sqe_head != tail) {
+            u32 mask = *self.sq_kring_mask;
+            while (self.sq_sqe_head < tail) {
+                u32 idx = self.sq_sqe_head & mask;
+                self.sq_array[idx] = idx;
+                self.sq_sqe_head += 1;
+            }
+            *self.sq_ktail = tail;
+        }
+
+        u32 to_submit = tail - *self.sq_khead;
+        u32 flags = 0;
+        if (wait_nr > 0) {
+            flags = flags | IORING_ENTER_GETEVENTS;
+        }
+
+        return try_io_uring_enter(self.ring_fd, to_submit, wait_nr, flags);
+    }
+
+    // Non-blocking check for a completion event
+    bool peek_cqe(*self, IoUringCqe* out_cqe) {
+        if (!self.is_valid()) {
+            return false;
+        }
+        u32 head = *self.cq_khead;
+        u32 tail = *self.cq_ktail;
+        if (head == tail) {
+            return false;
+        }
+        u32 index = head & *self.cq_kring_mask;
+        IoUringCqe* cqe = &self.cqes[index];
+        out_cqe.user_data = cqe.user_data;
+        out_cqe.res = cqe.res;
+        out_cqe.flags = cqe.flags;
+        return true;
+    }
+
+    // Acknowledge consumption of a completion event
+    void cqe_seen(*self, IoUringCqe* cqe) {
+        if (!self.is_valid()) {
+            return;
+        }
+        *self.cq_khead += 1;
+    }
+
+    // Clean up mappings and close ring fd
+    void close(*self) {
+        if (self.ring_fd < 0) {
+            return;
+        }
+        if (self.sqes_ptr != (void*)0) {
+            try_munmap(self.sqes_ptr, self.sqes_sz);
+            self.sqes_ptr = (void*)0;
+        }
+        if (!self.single_mmap && self.cq_ring_ptr != (void*)0) {
+            try_munmap(self.cq_ring_ptr, self.cq_ring_sz);
+            self.cq_ring_ptr = (void*)0;
+        }
+        if (self.sq_ring_ptr != (void*)0) {
+            try_munmap(self.sq_ring_ptr, self.sq_ring_sz);
+            self.sq_ring_ptr = (void*)0;
+        }
+        try_close(self.ring_fd);
+        self.ring_fd = -1;
+    }
+}
+
+impl Drop for IoUring {
+    void drop(*self) {
+        self.close();
+    }
+}

@@ -31,6 +31,7 @@ const i64 MAP_SHARED = 1;
 const i64 MAP_PRIVATE = 2;
 const i64 MAP_FIXED = 16;
 const i64 MAP_ANONYMOUS = 32;
+const i64 MAP_POPULATE = 32768;
 
 // mremap flag bits. (MREMAP_FIXED is not supported by try_mremap, which
 // does not take a new_address argument.)

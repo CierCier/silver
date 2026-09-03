@@ -1,0 +1,168 @@
+// Integration test for Linux io_uring asynchronous I/O framework
+// Verifies ring setup, SQE submission, CQE reaping, NOP, async file I/O, and socket send/recv.
+
+import std.error;
+import std.io.file;
+import std.mem.memory;
+import std.net.inet;
+import std.net.socket;
+import std.net.tcp;
+import std.sys.io_uring;
+import std.sys.raw.fs;
+import std.sys.raw.socket;
+import std.sys.result;
+import std.test;
+
+void test_io_uring_structures() {
+    test_start("io_uring struct layouts");
+    assert_true(@size(IoUringSqe) == 64, "IoUringSqe 64 bytes");
+    assert_true(@size(IoUringCqe) == 16, "IoUringCqe 16 bytes");
+    assert_true(@size(IoUringParams) == 120, "IoUringParams 120 bytes");
+    assert_true(@size(IoSqringOffsets) == 40, "IoSqringOffsets 40 bytes");
+    assert_true(@size(IoCqringOffsets) == 40, "IoCqringOffsets 40 bytes");
+}
+
+void test_io_uring_nop() {
+    test_start("io_uring NOP submission and completion");
+
+    Result<IoUring, Error> ring_res = IoUring.new(4);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+    @assert(ring.is_valid());
+
+    IoUringSqe* sqe = ring.get_sqe();
+    assert_true(sqe != (IoUringSqe*)0, "got sqe slot");
+
+    ring.prep_nop(sqe, 0x1337);
+
+    Result<i64, Error> submit_res = ring.submit_and_wait(1);
+    assert_true(submit_res.is_ok(), "submit NOP");
+
+    IoUringCqe cqe;
+    bool has_cqe = ring.peek_cqe(&cqe);
+    assert_true(has_cqe, "got completion");
+    assert_true(cqe.user_data == 0x1337, "user_data matches");
+    assert_true(cqe.res == 0, "NOP result is 0");
+
+    ring.cqe_seen(&cqe);
+
+    // No more completions
+    assert_true(!ring.peek_cqe(&cqe), "ring drained");
+}
+
+void test_io_uring_file_io() {
+    test_start("io_uring async file write and read");
+
+    str path = "/tmp/__silver_uring_test.txt";
+    Result<i64, Error> wr_fd = try_open(path, O_RDWR | O_CREAT | O_TRUNC, 438);
+    @assert(wr_fd.is_ok());
+    i32 fd = (i32)wr_fd.value();
+
+    Result<IoUring, Error> ring_res = IoUring.new(8);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+
+    // 1. Async Write
+    IoUringSqe* sqe_w = ring.get_sqe();
+    assert_true(sqe_w != (IoUringSqe*)0, "got write sqe");
+    str text = "Hello from Silver io_uring async!";
+    ring.prep_write(sqe_w, fd, (void*)text, 33, 0, 0xcafe);
+
+    Result<i64, Error> sub1 = ring.submit_and_wait(1);
+    assert_true(sub1.is_ok(), "submitted write");
+
+    IoUringCqe cqe_w;
+    assert_true(ring.peek_cqe(&cqe_w), "peek write cqe");
+    assert_true(cqe_w.user_data == 0xcafe, "write cqe user_data");
+    assert_true(cqe_w.res == 33, "wrote 33 bytes");
+    ring.cqe_seen(&cqe_w);
+
+    // 2. Async Read back at offset 0
+    u8 read_buf[64];
+    memset((void*)&read_buf[0], (u8)0, 64);
+
+    IoUringSqe* sqe_r = ring.get_sqe();
+    assert_true(sqe_r != (IoUringSqe*)0, "got read sqe");
+    ring.prep_read(sqe_r, fd, (void*)&read_buf[0], 33, 0, 0xbabe);
+
+    Result<i64, Error> sub2 = ring.submit_and_wait(1);
+    assert_true(sub2.is_ok(), "submitted read");
+
+    IoUringCqe cqe_r;
+    assert_true(ring.peek_cqe(&cqe_r), "peek read cqe");
+    assert_true(cqe_r.user_data == 0xbabe, "read cqe user_data");
+    assert_true(cqe_r.res == 33, "read 33 bytes");
+    ring.cqe_seen(&cqe_r);
+
+    assert_true(memcmp((void*)&read_buf[0], (void*)text, 33) == 0, "file contents match");
+
+    try_close(fd);
+    sys_unlink((i64)path);
+}
+
+void test_io_uring_socket_io() {
+    test_start("io_uring async socket send and recv");
+
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 16);
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &slen);
+    SocketAddr local = SocketAddr.v4("127.0.0.1", ntoh16(sa.sin_port)).unwrap();
+
+    Result<TcpStream, Error> client_res = TcpStream.connect(&local);
+    assert_true(client_res.is_ok(), "client connected");
+    TcpStream client = client_res.unwrap();
+
+    Result<i64, Error> accept_res = listener.accept();
+    assert_true(accept_res.is_ok(), "server accepted");
+    TcpStream server = TcpStream.from_fd((i32)accept_res.value());
+
+    Result<IoUring, Error> ring_res = IoUring.new(8);
+    assert_true(ring_res.is_ok(), "created socket ring");
+    IoUring ring = ring_res.unwrap();
+
+    // Submit async send on client socket
+    IoUringSqe* sqe_s = ring.get_sqe();
+    assert_true(sqe_s != (IoUringSqe*)0, "got send sqe");
+    str msg = "async socket uring message!";
+    ring.prep_send(sqe_s, client.sock.fd, (void*)msg, 27, 0, 0x1111);
+
+    // Submit async recv on server socket in same batch!
+    u8 recv_buf[64];
+    memset((void*)&recv_buf[0], (u8)0, 64);
+    IoUringSqe* sqe_r = ring.get_sqe();
+    assert_true(sqe_r != (IoUringSqe*)0, "got recv sqe");
+    ring.prep_recv(sqe_r, server.sock.fd, (void*)&recv_buf[0], 64, 0, 0x2222);
+
+    // Submit both and wait for 2 completions
+    Result<i64, Error> sub = ring.submit_and_wait(2);
+    assert_true(sub.is_ok(), "submitted batch");
+
+    // Reap both completions
+    i64 completed = 0;
+    while (completed < 2) {
+        IoUringCqe cqe;
+        if (ring.peek_cqe(&cqe)) {
+            if (cqe.user_data == 0x1111) {
+                assert_true(cqe.res == 27, "send completed 27 bytes");
+            } else if (cqe.user_data == 0x2222) {
+                assert_true(cqe.res == 27, "recv completed 27 bytes");
+            } else {
+                assert_true(false, "unexpected user_data");
+            }
+            ring.cqe_seen(&cqe);
+            completed += 1;
+        }
+    }
+
+    assert_true(memcmp((void*)&recv_buf[0], (void*)msg, 27) == 0, "socket message match");
+}
+
+i32 main() {
+    test_io_uring_structures();
+    test_io_uring_nop();
+    test_io_uring_file_io();
+    test_io_uring_socket_io();
+    return done();
+}
