@@ -334,9 +334,14 @@ void tls_provider_close(void* state) {
     tls.close();
 }
 
+bool tls_provider_is_h2(void* state) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.is_h2();
+}
+
 /// Enable https in std.net.http: registers this module's TLS transport.
 /// Call once before making https requests.
 void tls_init() {
     tls_provider_register(tls_provider_handshake, tls_provider_read,
-        tls_provider_write, tls_provider_close);
+        tls_provider_write, tls_provider_close, tls_provider_is_h2);
 }
