@@ -9,6 +9,7 @@ use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
+use crate::codegen::SilverGenerator;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -35,6 +36,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let _ = self
                     .emit_method_call_expression(receiver, method, arguments, true, &expr.span)?;
                 Ok(())
+            }
+            ast::ExpressionKind::Block(block) => {
+                self.generate_block(block)
             }
             _ => {
                 let _ = self.emit_expression_value(expr)?;

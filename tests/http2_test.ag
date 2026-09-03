@@ -46,17 +46,20 @@ void server_worker(i32 fd) {
     s.handle_func("/echo", handle_echo);
 
     Result<i64, Error> a = listener.accept();
-    if (a.success()) {
-        TcpStream stream = TcpStream.from_fd((i32)a.value());
-        s.serve_conn(move stream);
-    }
-    s.drop();
+	match a {
+		Ok(v) : {
+			TcpStream stream = TcpStream.from_fd((i32)v);
+			s.serve_conn(move stream);
+			s.drop();
+		},
+		Err(e): @eprintln("error starting stream {}", e.message),
+	};
 }
 
 i32 main() {
     test_start("http2: h2c hello");
 
-    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)0);
+    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", 0);
     assert_true(addr.success(), "address valid");
     SocketAddr a = addr.unwrap();
 
