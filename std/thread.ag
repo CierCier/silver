@@ -20,8 +20,8 @@ import std.mem.alloc;
 // CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM.
 const i64 THREAD_CLONE_FLAGS = 331520;
 
-// Dedicated stack size per thread (16-byte aligned top).
-const i64 THREAD_STACK_SIZE = 65536;
+// Dedicated stack size per thread (16-byte aligned top, 2MB).
+const i64 THREAD_STACK_SIZE = 2097152;
 
 // Raw clone shim. Spawns a thread running fn(arg) on a fresh stack_top.
 // Parent path returns the child tid in %rax. Child resumes after `syscall`

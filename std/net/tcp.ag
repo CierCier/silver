@@ -243,9 +243,21 @@ impl TcpListener {
         return listener;
     }
 
+    TcpListener from_fd(i32 fd) {
+        TcpListener listener;
+        listener.sock = Socket.from_fd(fd);
+        return listener;
+    }
+
     bool valid(*self) { return self.sock.valid(); }
     bool invalid(*self) { return self.sock.invalid(); }
     i32 raw_fd(*self) { return self.sock.fd; }
+
+    i32 take_fd(&mut self) {
+        i32 fd = self.sock.fd;
+        self.sock.fd = -1;
+        return fd;
+    }
 
     // Bind a TCP listener: socket + SO_REUSEADDR + bind + listen.
     TcpListener bind(SocketAddr* addr, i64 backlog) {

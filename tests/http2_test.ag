@@ -1,14 +1,15 @@
-// tests/http2_test.ag — HTTP/2 client (h2c prior-knowledge) against the node
-// http2 server on 127.0.0.1:18444.
+// tests/http2_test.ag — HTTP/2 client against native Silver HTTP/2 server.
 //
 // Verifies the client preface/SETTINGS exchange, a HEADERS request with
-// HPACK, and the HEADERS+DATA response (status, headers, body), including
-// a Huffman-encoded response header block (node Huffman-encodes by default).
+// HPACK, and the HEADERS+DATA response (status, headers, body).
+// Spawns the server on a different thread using `launch` and runs the client.
 
 import std.error;
+import std.fmt;
 import std.mem.alloc;
 import std.mem.memory;
 import std.net.hpack;
+import std.net.http;
 import std.net.http2;
 import std.net.inet;
 import std.net.tcp;
@@ -26,14 +27,55 @@ Result<i64, Error> tcp_io_write(void* ctx, u8* buf, i64 len) {
     return s.write(buf, len);
 }
 
+void handle_hello(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("content-type", "text/plain");
+    w.write_header(200);
+    w.write_str("hello h2");
+}
+
+void handle_echo(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("content-type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.body_str());
+}
+
+void server_worker(i32 fd) {
+    TcpListener listener = TcpListener.from_fd(fd);
+    HttpServer s = HttpServer.new("127.0.0.1:0");
+    s.handle_func("/hello", handle_hello);
+    s.handle_func("/echo", handle_echo);
+
+    Result<i64, Error> a = listener.accept();
+    if (a.success()) {
+        TcpStream stream = TcpStream.from_fd((i32)a.value());
+        s.serve_conn(move stream);
+    }
+    s.drop();
+}
+
 i32 main() {
     test_start("http2: h2c hello");
 
-    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)18444);
+    Result<SocketAddr, AddrError> addr = SocketAddr.v4("127.0.0.1", (u16)0);
     assert_true(addr.success(), "address valid");
     SocketAddr a = addr.unwrap();
 
-    Result<TcpStream, Error> cr = TcpStream.connect_timeout(&a, 2);
+    TcpListener listener = TcpListener.bind(&a, 16);
+    assert_true(listener.valid(), "listener valid");
+
+    SockAddrIn sa;
+    u32 len = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    u16 port = ntoh16(sa.sin_port);
+
+    i32 lfd = listener.take_fd();
+    Task<void> srv = launch server_worker(lfd);
+
+    Result<SocketAddr, AddrError> target_addr = SocketAddr.v4("127.0.0.1", port);
+    assert_true(target_addr.success(), "target address valid");
+    SocketAddr ta = target_addr.unwrap();
+
+    Result<TcpStream, Error> cr = TcpStream.connect_timeout(&ta, 2);
     assert_true(cr.success(), "h2c connect ok");
     TcpStream s = cr.unwrap();
     StreamIo io;
@@ -45,8 +87,14 @@ i32 main() {
     h2_init(&c, &io);
     assert_eq_i64(0, h2_send_preface(&c), "preface sent");
 
+    String auth = String.from_str("127.0.0.1:");
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+    for (i64 i = 0; i < n; i = i + 1) { auth.push(digits[i]); }
+    str authority = (str)auth.data;
+
     H2Response resp;
-    i64 rc = h2_request(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, &resp);
+    i64 rc = h2_request(&c, "GET", "http", authority, "/hello", (HpackField*)0, 0, &resp);
     assert_eq_i64(0, rc, "h2 request succeeded");
     assert_eq_i64(200, resp.status, ":status is 200");
     assert_eq_i64(8, resp.body_len, "body length");
@@ -75,7 +123,7 @@ i32 main() {
     // second request on the same connection: 404 path
     test_start("http2: h2c 404");
     H2Response resp2;
-    rc = h2_request(&c, "GET", "http", "127.0.0.1:18444", "/missing", (HpackField*)0, 0, &resp2);
+    rc = h2_request(&c, "GET", "http", authority, "/missing", (HpackField*)0, 0, &resp2);
     assert_eq_i64(0, rc, "h2 request (404) succeeded");
     assert_eq_i64(404, resp2.status, ":status is 404");
     free(resp2.body);
@@ -90,7 +138,7 @@ i32 main() {
     extra[1].value = (u8*)"10";            extra[1].value_len = 2;
     u8* body = (u8*)"hello post";
     H2Response resp3;
-    rc = h2_request_body(&c, "POST", "http", "127.0.0.1:18444", "/echo",
+    rc = h2_request_body(&c, "POST", "http", authority, "/echo",
                          &extra[0], 2, body, 10, &resp3);
     assert_eq_i64(0, rc, "POST succeeded");
     assert_eq_i64(200, resp3.status, "POST status 200");
@@ -108,7 +156,7 @@ i32 main() {
     cont_extra[1].name = (u8*)"x-second-header"; cont_extra[1].name_len = 15;
     cont_extra[1].value = (u8*)"another-value-to-ensure-continuation"; cont_extra[1].value_len = 36;
     H2Response resp_cont;
-    rc = h2_request(&c, "GET", "http", "127.0.0.1:18444", "/hello", &cont_extra[0], 2, &resp_cont);
+    rc = h2_request(&c, "GET", "http", authority, "/hello", &cont_extra[0], 2, &resp_cont);
     assert_eq_i64(0, rc, "h2 request with CONTINUATION succeeded");
     assert_eq_i64(200, resp_cont.status, ":status is 200");
     assert_eq_i64(8, resp_cont.body_len, "body length");
@@ -118,9 +166,9 @@ i32 main() {
 
     // multiplexed: three concurrent GETs on fresh streams
     test_start("http2: h2c multiplexed streams");
-    i64 s0 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
-    i64 s1 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
-    i64 s2 = h2_begin(&c, "GET", "http", "127.0.0.1:18444", "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    i64 s0 = h2_begin(&c, "GET", "http", authority, "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    i64 s1 = h2_begin(&c, "GET", "http", authority, "/hello", (HpackField*)0, 0, (u8*)0, 0);
+    i64 s2 = h2_begin(&c, "GET", "http", authority, "/hello", (HpackField*)0, 0, (u8*)0, 0);
     assert_true(s0 >= 0 && s1 >= 0 && s2 >= 0, "streams allocated");
     assert_eq_i64(0, h2_wait_all(&c), "multiplexed responses complete");
     i64 mi = 0;
@@ -134,8 +182,11 @@ i32 main() {
         assert_true(memcmp((const void*)c.streams[idx].resp.body, (const void*)"hello h2", 8) == 0, "mux body");
         mi += 1;
     }
-    // Multiplexed responses are owned by the connection; H2Connection's Drop
-    // frees them on scope exit.
+
+    c.drop();
+    s.close();
+    wait srv;
+    auth.drop();
 
     return done();
 }

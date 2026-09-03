@@ -33,8 +33,8 @@ void handle_query(ResponseWriter* w, HttpRequest* r) {
     w.write_str(r.query());
 }
 
-void server_worker(i64 arg) {
-    TcpListener* listener = (TcpListener*)arg;
+void server_worker(i32 fd) {
+    TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
     s.handle_func("/hello", handle_hello);
     s.handle_func("/echo", handle_echo);
@@ -67,8 +67,8 @@ i32 main() {
     try_getsockname(listener.raw_fd(), (void*)&sa, &len);
     u16 port = ntoh16(sa.sin_port);
 
-    // Spawn server worker thread
-    thread_spawn(server_worker, (i64)&listener);
+    i32 lfd = listener.take_fd();
+    Task<void> srv = launch server_worker(lfd);
 
     // Test 1: GET /hello
     String url = String.from_str("http://127.0.0.1:");
@@ -127,5 +127,6 @@ i32 main() {
     url_echo.drop();
     url_q.drop();
     url_404.drop();
+    wait srv;
     return 0;
 }

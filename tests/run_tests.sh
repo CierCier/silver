@@ -390,9 +390,9 @@ if ! is_skipped tls_test; then
     done
 fi
 
-# Start the node HTTP/2 server once, before the loop, if http2_test will run.
+# Start the node HTTP/2 server once, before the loop, if http2_tls_test will run.
 H2_NODE_PID=""
-if ! is_skipped http2_test; then
+if ! is_skipped http2_tls_test; then
     (cd "$ROOT" && exec node tests/h2_server.js >"$WORKDIR/h2_node.log" 2>&1) &
     H2_NODE_PID=$!
     for _ in $(seq 1 50); do

@@ -31,8 +31,8 @@ void handle_h2_echo(ResponseWriter* w, HttpRequest* r) {
     w.write_str(r.body_str());
 }
 
-void server_h2_worker(i64 arg) {
-    TcpListener* listener = (TcpListener*)arg;
+void server_h2_worker(i32 fd) {
+    TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
     s.handle_func("/hello", handle_h2_hello);
     s.handle_func("/echo", handle_h2_echo);
@@ -74,8 +74,8 @@ i32 main() {
     try_getsockname(listener.raw_fd(), (void*)&sa, &len);
     u16 port = ntoh16(sa.sin_port);
 
-    // Spawn server worker thread
-    thread_spawn(server_h2_worker, (i64)&listener);
+    i32 lfd = listener.take_fd();
+    Task<void> srv = launch server_h2_worker(lfd);
 
     // --- Client 1: HTTP/2 (h2c) GET /hello ---
     Result<SocketAddr, AddrError> cr_addr = SocketAddr.v4("127.0.0.1", port);
@@ -143,6 +143,7 @@ i32 main() {
     assert_true(strcmp((str)resp3.body.data, "hello h2 world") == 0, "HTTP/1.1 received same response");
     resp3.drop();
     url.drop();
+    wait srv;
 
     return 0;
 }
