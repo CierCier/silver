@@ -1,0 +1,88 @@
+import std.io;
+import std.string;
+import std.slice;
+import std.mem.vec;
+
+i64 takes_str_slice(&str s) {
+    return s.len;
+}
+
+i64 takes_int_slice([i64] s) {
+    return s.len;
+}
+
+i32 sum_arr_slice([i32] s) {
+    i32 sum = 0;
+    for (i64 i = 0; i < s.len; i = i + 1) {
+        sum = sum + s[i];
+    }
+    return sum;
+}
+
+bool check_prefix(&str s, &str prefix) {
+    return s.starts_with_slice(prefix);
+}
+
+i32 main() {
+    // 1. First-class &str initialized with string literal
+    &str hello = "hello world";
+    if (hello.len != 11) {
+        return 1;
+    }
+    if (hello[0] != (u8)'h' || hello[4] != (u8)'o') {
+        return 2;
+    }
+
+    // 2. Auto-borrow String to &str
+    String s = String.from_str("silver slice");
+    if (takes_str_slice(&s) != 12) {
+        return 3;
+    }
+    if (takes_str_slice(s) != 12) {
+        return 4;
+    }
+
+    // 3. Auto-borrow Vec<i64> to [i64]
+    Vec<i64> v = Vec.new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    if (takes_int_slice(&v) != 3) {
+        return 5;
+    }
+    if (takes_int_slice(v) != 3) {
+        return 6;
+    }
+
+    // 4. Auto-borrow fixed-size Array to [i32]
+    i32 arr[4] = {1, 2, 3, 4};
+    if (sum_arr_slice(&arr) != 10) {
+        return 7;
+    }
+    if (sum_arr_slice(arr) != 10) {
+        return 8;
+    }
+
+    // 5. Sub-slicing
+    Slice<u8> sub = hello[0:5];
+    if (sub.len != 5) {
+        return 9;
+    }
+    if (sub[0] != (u8)'h' || sub[4] != (u8)'o') {
+        return 10;
+    }
+
+    // 6. Slicing methods and comparisons
+    if (!hello.starts_with("hello")) {
+        return 11;
+    }
+    if (!hello.starts_with_slice(sub)) {
+        return 12;
+    }
+    if (!check_prefix(hello, "hello")) {
+        return 13;
+    }
+
+    println("All first-class slice tests passed successfully!");
+    return 0;
+}
