@@ -1464,7 +1464,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             .module
             .get_global(&item.name.name)
             .unwrap_or_else(|| self.module.add_global(llvm_ty, None, &item.name.name));
-        global.set_linkage(Linkage::External);
+        if global.get_initializer().is_none() && global.get_linkage() != Linkage::LinkOnceODR {
+            global.set_linkage(Linkage::External);
+        }
         self.extern_globals
             .insert(item.name.name.clone(), item.var_type.clone());
         self.symbol_table.intern_symbol(

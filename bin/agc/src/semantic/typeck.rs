@@ -3337,6 +3337,9 @@ impl TypeChecker {
                 {
                     let substituted = self.substitute_type(param_ty, &inferred_mapping);
                     if self.is_assignable(&substituted, arg_ty) {
+                        if substituted != *arg_ty {
+                            score += 1;
+                        }
                         mapping = inferred_mapping;
                         matched = true;
                     } else if self.is_implicitly_castable(arg_ty, &substituted) {
@@ -3350,6 +3353,9 @@ impl TypeChecker {
                 if !matched {
                     let substituted = self.substitute_type(param_ty, &mapping);
                     if self.is_assignable(&substituted, arg_ty) {
+                        if substituted != *arg_ty {
+                            score += 1;
+                        }
                         matched = true;
                     } else if self.is_implicitly_castable(arg_ty, &substituted) {
                         score += 1;
@@ -3671,6 +3677,9 @@ impl TypeChecker {
                     {
                         let substituted = self.substitute_type(&param_ty, &inferred_mapping);
                         if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty {
+                                score += 1;
+                            }
                             mapping = inferred_mapping;
                             matched = true;
                         } else if let Type::Reference {
@@ -3679,6 +3688,9 @@ impl TypeChecker {
                         } = &substituted
                             && (inner.as_ref() == arg_ty || self.is_assignable(inner, arg_ty))
                         {
+                            if inner.as_ref() != arg_ty {
+                                score += 1;
+                            }
                             mapping = inferred_mapping;
                             matched = true;
                         } else if self.is_implicitly_castable(arg_ty, &substituted) {
@@ -3693,6 +3705,9 @@ impl TypeChecker {
                     if !matched {
                         let substituted = self.substitute_type(&param_ty, &mapping);
                         if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty {
+                                score += 1;
+                            }
                             matched = true;
                         } else if let Type::Reference {
                             is_mutable: false,
@@ -3700,6 +3715,9 @@ impl TypeChecker {
                         } = &substituted
                             && (inner.as_ref() == arg_ty || self.is_assignable(inner, arg_ty))
                         {
+                            if inner.as_ref() != arg_ty {
+                                score += 1;
+                            }
                             matched = true;
                         } else if self.is_implicitly_castable(arg_ty, &substituted) {
                             score += 1;

@@ -590,6 +590,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::TypeKind::Pointer(pointer) => {
                 Self::owner_name_candidates_from_type(&pointer.inner)
             }
+            ast::TypeKind::Slice(slice) => {
+                let named = ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "Slice".to_string(),
+                        span: ty.span,
+                    }],
+                    generics: Some(vec![*slice.element_type.clone()]),
+                };
+                Self::owner_name_candidates_from_type(&ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(named)),
+                    span: ty.span,
+                })
+            }
             ast::TypeKind::Primitive(p) => vec![format!("{:?}", p).to_lowercase()],
             _ => Vec::new(),
         }

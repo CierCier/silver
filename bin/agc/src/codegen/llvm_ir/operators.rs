@@ -481,13 +481,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     !matches!(
                         ty.kind.as_ref(),
                         ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
-                    ) && Self::extract_named_type(&ty)
-                        .map(|named| {
-                            let key = Self::named_type_key(named);
-                            self.struct_fields.contains_key(&key)
-                                || self.enum_payload_layouts.contains_key(&key)
-                        })
-                        .unwrap_or(false)
+                    ) && (matches!(ty.kind.as_ref(), ast::TypeKind::Slice(_))
+                        || Self::extract_named_type_owned(&ty)
+                            .map(|named| {
+                                let key = Self::named_type_key(&named);
+                                self.struct_fields.contains_key(&key)
+                                    || self.struct_fields.contains_key(&named.path[0].name)
+                                    || self.enum_payload_layouts.contains_key(&key)
+                            })
+                            .unwrap_or(false))
                 });
                 if lhs_struct && let Some(method_name) = operator_method_name(operator) {
                     let method_ident = ast::Identifier {
