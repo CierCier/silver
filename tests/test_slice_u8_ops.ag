@@ -1,0 +1,101 @@
+import std.test;
+import std.slice;
+import std.string;
+
+i32 main() {
+    test_start("Slice<u8> string comparisons");
+    {
+        str msg = "hello world";
+        Slice<u8> s = msg[0:5];
+        assert_true(s.equals_str("hello"), "equals_str hello");
+        assert_false(s.equals_str("world"), "not equals_str world");
+
+        assert_true(s == "hello", "s == hello");
+        assert_false(s == "world", "s == world");
+        assert_true(s != "world", "s != world");
+
+        assert_true(msg[0:5] == "hello", "msg[0:5] == hello");
+
+        Slice<u8> s2 = msg[0:5];
+        assert_true(s == s2, "s == s2");
+
+        Slice<u8> s3 = msg[6:11];
+        assert_false(s == s3, "s != s3");
+
+        String str_obj = String.from_str("hello");
+        assert_true(s == str_obj, "s == String");
+        assert_true(str_obj == s, "String == s");
+    }
+
+    test_start("Slice<u8> starts_with, ends_with, contains");
+    {
+        str path = "/api/v1/users";
+        Slice<u8> p = path[:];
+        assert_true(p.starts_with("/api"), "starts_with /api");
+        assert_false(p.starts_with("/v1"), "not starts_with /v1");
+        assert_true(p.ends_with("users"), "ends_with users");
+        assert_false(p.ends_with("/api"), "not ends_with /api");
+        assert_true(p.contains("v1"), "contains v1");
+        assert_false(p.contains("notfound"), "not contains notfound");
+
+        Slice<u8> prefix_slice = "/api"[:];
+        assert_true(p.starts_with_slice(prefix_slice), "starts_with_slice /api");
+    }
+
+    test_start("Slice<u8> trim");
+    {
+        str raw = "  \t\r\n hello world  \n";
+        Slice<u8> r = raw[:];
+        Slice<u8> trimmed = r.trim();
+        assert_true(trimmed == "hello world", "trimmed == hello world");
+        assert_eq_i64(11, trimmed.len, "trimmed.len == 11");
+    }
+
+    test_start("Slice<u8> split_once and HTTP parsing");
+    {
+        str req_line = "GET /plaintext HTTP/1.1";
+        Slice<u8> line = req_line[:];
+
+        Optional<[Slice<u8>, Slice<u8>]> first_split = line.split_once(" ");
+        assert_true(first_split.is_some(), "first_split is some");
+        let [method, rest] = first_split.unwrap();
+
+        assert_true(method == "GET", "method == GET");
+
+        Optional<[Slice<u8>, Slice<u8>]> second_split = rest.split_once_byte((u8)' ');
+        assert_true(second_split.is_some(), "second_split is some");
+        let [req_path, version] = second_split.unwrap();
+
+        assert_true(req_path == "/plaintext", "path == /plaintext");
+        assert_true(version == "HTTP/1.1", "version == HTTP/1.1");
+    }
+
+    test_start("Slice<u8> parse_i64");
+    {
+        str num1 = "123456";
+        Optional<i64> v1 = num1[:].parse_i64();
+        assert_true(v1.is_some(), "v1 is some");
+        assert_eq_i64(123456, v1.unwrap(), "v1 == 123456");
+
+        str num2 = " -42 \n";
+        Optional<i64> v2 = num2[:].parse_i64();
+        assert_true(v2.is_some(), "v2 is some");
+        assert_eq_i64(-42, v2.unwrap(), "v2 == -42");
+
+        str invalid = "123abc";
+        Optional<i64> v3 = invalid[:].parse_i64();
+        assert_true(v3.is_none(), "v3 is none");
+    }
+
+    test_start("Slice<u8> to_string");
+    {
+        str orig = "convert me";
+        Slice<u8> sl = orig[:];
+        String s = sl.to_string();
+        assert_true(s == "convert me", "to_string content matches");
+        assert_eq_i64(10, s.len(), "to_string len matches");
+    }
+
+    done();
+    return 0;
+}

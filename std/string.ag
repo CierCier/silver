@@ -1135,3 +1135,36 @@ Result<Vec<String>, Error> read_lines(str path) {
     content.drop();
     return Ok(move res);
 }
+
+impl Slice<u8> {
+    /// Convert a byte slice to an owned heap String with trailing null terminator.
+    String to_string(&self) {
+        String s = String.with_capacity(self.len + 1);
+        if (self.len > 0 && self.data != (u8*)0) {
+            s.push_bytes(self.data, self.len);
+        }
+        return move s;
+    }
+
+    bool __eq(&self, &String other) {
+        if (self.len != other.len) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
+    }
+
+    bool __ne(&self, &String other) {
+        return !self.__eq(other);
+    }
+}
+
+impl String {
+    bool __eq(&self, Slice<u8> other) {
+        if (self.len != other.len) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
+    }
+
+    bool __ne(&self, Slice<u8> other) {
+        return !self.__eq(other);
+    }
+}

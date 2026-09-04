@@ -9,6 +9,7 @@ import std.optional;
 import std.iter;
 import std.io.file;
 import std.mem.alloc;
+import std.mem.memory;
 
 /// A view into a contiguous sequence of elements.
 struct Slice<T> {
@@ -213,5 +214,226 @@ impl<T> SliceIter<T> {
         }
         return c;
     }
-
 }
+
+impl Slice<u8> {
+    /// Returns true if this byte slice equals a null-terminated C-string `text`.
+    bool equals_str(&self, str text) {
+        if (text == (str)0) { return self.len == 0; }
+        i64 tlen = strlen(text);
+        if (self.len != tlen) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)text, tlen) == 0;
+    }
+
+    /// Returns true if this byte slice equals another byte slice `other`.
+    bool equals_slice(&self, Slice<u8> other) {
+        if (self.len != other.len) { return false; }
+        if (self.len == 0) { return true; }
+        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
+    }
+
+    /// Equality operator against string literal / C-string.
+    bool __eq(&self, str other) {
+        return self.equals_str(other);
+    }
+
+    /// Inequality operator against string literal / C-string.
+    bool __ne(&self, str other) {
+        return !self.__eq(other);
+    }
+
+    /// Equality operator against another Slice<u8>.
+    bool __eq(&self, Slice<u8> other) {
+        return self.equals_slice(other);
+    }
+
+    /// Inequality operator against another Slice<u8>.
+    bool __ne(&self, Slice<u8> other) {
+        return !self.__eq(other);
+    }
+
+    /// Returns true if this slice starts with the C-string `prefix`.
+    bool starts_with(&self, str prefix) {
+        if (prefix == (str)0) { return false; }
+        i64 plen = strlen(prefix);
+        if (plen == 0) { return true; }
+        if (self.len < plen) { return false; }
+        return memcmp((const void*)self.data, (const void*)prefix, plen) == 0;
+    }
+
+    /// Returns true if this slice starts with the byte slice `prefix`.
+    bool starts_with_slice(&self, Slice<u8> prefix) {
+        if (prefix.len == 0) { return true; }
+        if (self.len < prefix.len) { return false; }
+        return memcmp((const void*)self.data, (const void*)prefix.data, prefix.len) == 0;
+    }
+
+    /// Returns true if this slice ends with the C-string `suffix`.
+    bool ends_with(&self, str suffix) {
+        if (suffix == (str)0) { return false; }
+        i64 slen = strlen(suffix);
+        if (slen == 0) { return true; }
+        if (self.len < slen) { return false; }
+        return memcmp((const void*)&self.data[self.len - slen], (const void*)suffix, slen) == 0;
+    }
+
+    /// Returns true if this slice ends with the byte slice `suffix`.
+    bool ends_with_slice(&self, Slice<u8> suffix) {
+        if (suffix.len == 0) { return true; }
+        if (self.len < suffix.len) { return false; }
+        return memcmp((const void*)&self.data[self.len - suffix.len], (const void*)suffix.data, suffix.len) == 0;
+    }
+
+    /// Returns the first index of byte `b`, or -1 if not found.
+    i64 find_byte(&self, u8 b) {
+        i64 i = 0;
+        while (i < self.len) {
+            if (self.data[i] == b) { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /// Returns the first index of the substring `needle`, or -1 if not found.
+    i64 find(&self, str needle) {
+        if (needle == (str)0) { return -1; }
+        i64 nlen = strlen(needle);
+        if (nlen == 0) { return 0; }
+        if (self.len < nlen) { return -1; }
+        i64 limit = self.len - nlen;
+        i64 i = 0;
+        while (i <= limit) {
+            if (memcmp((const void*)&self.data[i], (const void*)needle, nlen) == 0) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /// Returns the first index of byte slice `needle`, or -1 if not found.
+    i64 find_slice(&self, Slice<u8> needle) {
+        if (needle.len == 0) { return 0; }
+        if (self.len < needle.len) { return -1; }
+        i64 limit = self.len - needle.len;
+        i64 i = 0;
+        while (i <= limit) {
+            if (memcmp((const void*)&self.data[i], (const void*)needle.data, needle.len) == 0) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /// Returns true if this slice contains substring `needle`.
+    bool contains(&self, str needle) {
+        return self.find(needle) >= 0;
+    }
+
+    /// Returns true if this slice contains byte slice `needle`.
+    bool contains_slice(&self, Slice<u8> needle) {
+        return self.find_slice(needle) >= 0;
+    }
+
+    /// Strips leading whitespace (spaces, tabs, newlines, CRs).
+    Slice<u8> trim_start(&self) {
+        i64 start = 0;
+        while (start < self.len) {
+            u8 b = self.data[start];
+            if (b != (u8)' ' && b != (u8)'\t' && b != (u8)'\n' && b != (u8)'\r') {
+                break;
+            }
+            start = start + 1;
+        }
+        return self.sub_slice(start, self.len - start);
+    }
+
+    /// Strips trailing whitespace (spaces, tabs, newlines, CRs).
+    Slice<u8> trim_end(&self) {
+        i64 end = self.len;
+        while (end > 0) {
+            u8 b = self.data[end - 1];
+            if (b != (u8)' ' && b != (u8)'\t' && b != (u8)'\n' && b != (u8)'\r') {
+                break;
+            }
+            end = end - 1;
+        }
+        return self.sub_slice(0, end);
+    }
+
+    /// Strips both leading and trailing whitespace.
+    Slice<u8> trim(&self) {
+        return self.trim_start().trim_end();
+    }
+
+    /// Splits slice at the first occurrence of string `delimiter`.
+    Optional<[Slice<u8>, Slice<u8>]> split_once(&self, str delimiter) {
+        i64 idx = self.find(delimiter);
+        if (idx < 0) { return None; }
+        i64 dlen = strlen(delimiter);
+        Slice<u8> first = self.sub_slice(0, idx);
+        Slice<u8> second = self.sub_slice(idx + dlen, self.len - (idx + dlen));
+        return Some([first, second]);
+    }
+
+    /// Splits slice at the first occurrence of byte `delimiter`.
+    Optional<[Slice<u8>, Slice<u8>]> split_once_byte(&self, u8 delimiter) {
+        i64 idx = self.find_byte(delimiter);
+        if (idx < 0) { return None; }
+        Slice<u8> first = self.sub_slice(0, idx);
+        Slice<u8> second = self.sub_slice(idx + 1, self.len - (idx + 1));
+        return Some([first, second]);
+    }
+
+    /// Splits slice at the first occurrence of slice `delimiter`.
+    Optional<[Slice<u8>, Slice<u8>]> split_once_slice(&self, Slice<u8> delimiter) {
+        i64 idx = self.find_slice(delimiter);
+        if (idx < 0) { return None; }
+        Slice<u8> first = self.sub_slice(0, idx);
+        Slice<u8> second = self.sub_slice(idx + delimiter.len, self.len - (idx + delimiter.len));
+        return Some([first, second]);
+    }
+
+    /// Parses non-null-terminated ASCII integer with optional leading +/- and whitespace.
+    Optional<i64> parse_i64(&self) {
+        if (self.len == 0) { return None; }
+        i64 i = 0;
+        while (i < self.len && (self.data[i] == (u8)' ' || self.data[i] == (u8)'\t')) {
+            i = i + 1;
+        }
+        if (i == self.len) { return None; }
+        bool negative = false;
+        if (self.data[i] == (u8)'-') {
+            negative = true;
+            i = i + 1;
+        } else if (self.data[i] == (u8)'+') {
+            i = i + 1;
+        }
+        if (i == self.len) { return None; }
+        i64 val = 0;
+        i64 digits = 0;
+        while (i < self.len) {
+            u8 c = self.data[i];
+            if (c >= (u8)'0' && c <= (u8)'9') {
+                val = val * 10 + (i64)(c - (u8)'0');
+                digits = digits + 1;
+                i = i + 1;
+            } else {
+                break;
+            }
+        }
+        while (i < self.len && (self.data[i] == (u8)' ' || self.data[i] == (u8)'\t' || self.data[i] == (u8)'\r' || self.data[i] == (u8)'\n')) {
+            i = i + 1;
+        }
+        if (digits == 0 || i != self.len) {
+            return None;
+        }
+        if (negative) {
+            val = -val;
+        }
+        return Some(val);
+    }
+}
+
