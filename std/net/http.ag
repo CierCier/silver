@@ -18,6 +18,7 @@ import std.net.http_status;
 import std.net.inet;
 import std.net.tcp;
 import std.net.transport;
+import std.slice;
 import std.string;
 import std.sync;
 import std.sys.result;
@@ -50,6 +51,8 @@ struct HttpRequest {
     str body;
     bool close;
     str url; // full URL for Go-style requests; null for manual requests
+    Slice<u8> path_slice;
+    Slice<u8> method_slice;
     String method_str;
     String target_str;
     String host_str;
@@ -546,6 +549,8 @@ impl HttpRequest {
         request.headers = String.new();
         request.body = body;
         request.close = true;
+        request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -572,6 +577,8 @@ impl HttpRequest {
         request.body = (str)0;
         request.close = true;
         request.url = (str)0;
+        request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -597,6 +604,8 @@ impl HttpRequest {
         request.body = (str)0;
         request.close = false;
         request.url = (str)0;
+        request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -620,6 +629,8 @@ impl HttpRequest {
         self.body = (str)0;
         self.close = false;
         self.url = (str)0;
+        self.path_slice = Slice<u8>.from_raw((u8*)0, 0);
+        self.method_slice = Slice<u8>.from_raw((u8*)0, 0);
         self.method_str.clear();
         self.target_str.clear();
         self.host_str.clear();
@@ -739,6 +750,22 @@ impl HttpRequest {
         return "/";
     }
 
+    /// Zero-copy request path slice without query string.
+    Slice<u8> path_slice(*self) {
+        if (self.path_slice.len > 0) { return self.path_slice; }
+        if (self.path_str.len > 0) { return self.path_str.as_slice(); }
+        if (self.target != (str)0) { return self.target[:]; }
+        return "/"[:];
+    }
+
+    /// Zero-copy request method slice.
+    Slice<u8> method_slice(*self) {
+        if (self.method_slice.len > 0) { return self.method_slice; }
+        if (self.method_str.len > 0) { return self.method_str.as_slice(); }
+        if (self.method != (str)0) { return self.method[:]; }
+        return "GET"[:];
+    }
+
     /// Query string component without '?'. Mirrors Go's req.URL.RawQuery.
     str query(*self) {
         if (self.query_str.len > 0) { return (str)self.query_str.data; }
@@ -813,6 +840,7 @@ impl HttpRequest {
         self.method_str.clear();
         self.method_str.push_bytes(&self.raw_buf.data[0], sp1);
         self.method = (str)self.method_str.data;
+        self.method_slice = self.raw_buf.as_slice().sub_slice(0, sp1);
 
         self.target_str.clear();
         self.target_str.push_bytes(&self.raw_buf.data[sp1 + 1], sp2 - sp1 - 1);
@@ -826,6 +854,7 @@ impl HttpRequest {
         }
         self.path_str.clear();
         self.path_str.push_bytes(&self.target_str.data[0], qmark);
+        self.path_slice = self.raw_buf.as_slice().sub_slice(sp1 + 1, qmark);
         self.query_str.clear();
         if (qmark < tlen) {
             self.query_str.push_bytes(&self.target_str.data[qmark + 1], tlen - qmark - 1);
@@ -2563,17 +2592,16 @@ impl ServeMux {
     }
 
     void serve_http(&mut self, ResponseWriter* w, HttpRequest* r) {
-        str p = r.path();
+        Slice<u8> p = r.path_slice();
         str m = r.method;
         if (m == (str)0) { m = "GET"; }
-        i64 plen = strlen(p);
         i64 n = self.routes.len();
 
         // 1. Exact path matches
         bool has_exact_path = false;
         for (i64 i = 0; i < n; i = i + 1) {
             RouteEntry* e = self.routes.get_ptr(i);
-            if (strcmp(e.pattern, p) == 0) {
+            if (p == e.pattern) {
                 has_exact_path = true;
                 if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
                     void(ResponseWriter*, HttpRequest*) h = e.handler;
@@ -2587,7 +2615,7 @@ impl ServeMux {
         if (has_exact_path && strcmp(m, "HEAD") == 0) {
             for (i64 i = 0; i < n; i = i + 1) {
                 RouteEntry* e = self.routes.get_ptr(i);
-                if (strcmp(e.pattern, p) == 0 && strcmp(e.method, "GET") == 0) {
+                if (p == e.pattern && strcmp(e.method, "GET") == 0) {
                     void(ResponseWriter*, HttpRequest*) h = e.handler;
                     h(w, r);
                     return;
@@ -2601,7 +2629,7 @@ impl ServeMux {
             bool first = true;
             for (i64 i = 0; i < n; i = i + 1) {
                 RouteEntry* e = self.routes.get_ptr(i);
-                if (strcmp(e.pattern, p) == 0) {
+                if (p == e.pattern) {
                     str em = e.method;
                     if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
                         em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
@@ -2626,10 +2654,8 @@ impl ServeMux {
         for (i64 i = 0; i < n; i = i + 1) {
             RouteEntry* e = self.routes.get_ptr(i);
             i64 elen = strlen(e.pattern);
-            if (elen > best_len && plen >= elen) {
-                if (memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
-                    best_len = elen;
-                }
+            if (elen > best_len && p.starts_with(e.pattern)) {
+                best_len = elen;
             }
         }
 
@@ -2638,7 +2664,7 @@ impl ServeMux {
             for (i64 i = 0; i < n; i = i + 1) {
                 RouteEntry* e = self.routes.get_ptr(i);
                 i64 elen = strlen(e.pattern);
-                if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
+                if (elen == best_len && p.starts_with(e.pattern)) {
                     if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
                         void(ResponseWriter*, HttpRequest*) h = e.handler;
                         h(w, r);
@@ -2652,7 +2678,7 @@ impl ServeMux {
                 for (i64 i = 0; i < n; i = i + 1) {
                     RouteEntry* e = self.routes.get_ptr(i);
                     i64 elen = strlen(e.pattern);
-                    if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0 && strcmp(e.method, "GET") == 0) {
+                    if (elen == best_len && p.starts_with(e.pattern) && strcmp(e.method, "GET") == 0) {
                         void(ResponseWriter*, HttpRequest*) h = e.handler;
                         h(w, r);
                         return;
@@ -2666,7 +2692,7 @@ impl ServeMux {
             for (i64 i = 0; i < n; i = i + 1) {
                 RouteEntry* e = self.routes.get_ptr(i);
                 i64 elen = strlen(e.pattern);
-                if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
+                if (elen == best_len && p.starts_with(e.pattern)) {
                     str em = e.method;
                     if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
                         em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
@@ -2817,6 +2843,7 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str t
                     if (strcmp((str)fields[i].name, ":method") == 0) {
                         req.method_str.push_bytes(fields[i].value, fields[i].value_len);
                         req.method = (str)req.method_str.data;
+                        req.method_slice = Slice<u8>.from_raw(fields[i].value, fields[i].value_len);
                     } else if (strcmp((str)fields[i].name, ":path") == 0) {
                         req.target_str.push_bytes(fields[i].value, fields[i].value_len);
                         req.target = (str)req.target_str.data;
@@ -2824,6 +2851,7 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str t
                         i64 qlen = fields[i].value_len;
                         while (q < qlen && fields[i].value[q] != (u8)'?') { q += 1; }
                         req.path_str.push_bytes(fields[i].value, q);
+                        req.path_slice = Slice<u8>.from_raw(fields[i].value, q);
                         if (q < qlen) {
                             req.query_str.push_bytes(&fields[i].value[q + 1], qlen - q - 1);
                         }
