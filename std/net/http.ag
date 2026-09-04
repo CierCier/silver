@@ -2747,6 +2747,7 @@ struct HttpServer {
     ServeMux* custom_mux;
     i64 read_timeout_secs;
     i64 write_timeout_secs;
+    i64 keep_alive_timeout_ms;
     i64 max_header_bytes;
     i64 max_body_bytes;
     bool enable_h2;
@@ -2927,10 +2928,15 @@ impl HttpServer {
         s.custom_mux = (ServeMux*)0;
         s.read_timeout_secs = 30;
         s.write_timeout_secs = 30;
+        s.keep_alive_timeout_ms = 50;
         s.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
         s.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
         s.enable_h2 = true;
         return move s;
+    }
+
+    void set_keep_alive_timeout_ms(&mut self, i64 ms) {
+        self.keep_alive_timeout_ms = ms;
     }
 
     void handle_func(&mut self, str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
@@ -2991,12 +2997,20 @@ impl HttpServer {
 
         HttpRequest req = HttpRequest.empty();
         ResponseWriter w = ResponseWriter.new(io, HttpVersion.Http11, false);
+        i64 req_count = 0;
 
         while (true) {
             req.reset();
+            if (req_count > 0 && self.keep_alive_timeout_ms > 0) {
+                conn.stream.sock.set_recv_timeout_ms(self.keep_alive_timeout_ms);
+            }
             Result<i64, Error> hr = req.read_head(&io, self.max_header_bytes);
             if (hr.failed() || hr.value() == 0) {
                 break;
+            }
+            req_count = req_count + 1;
+            if (self.read_timeout_secs > 0) {
+                conn.stream.sock.set_recv_timeout(self.read_timeout_secs);
             }
 
             // HTTP/1.1 mandatory Host header check (RFC 9112 §3.2)
@@ -3112,12 +3126,20 @@ impl HttpServer {
         }
         HttpRequest req = HttpRequest.empty();
         ResponseWriter w = ResponseWriter.new(io, HttpVersion.Http11, false);
+        i64 req_count = 0;
 
         while (true) {
             req.reset();
+            if (req_count > 0 && self.keep_alive_timeout_ms > 0) {
+                conn.stream.sock.set_recv_timeout_ms(self.keep_alive_timeout_ms);
+            }
             Result<i64, Error> hr = req.read_head(&io, self.max_header_bytes);
             if (hr.failed() || hr.value() == 0) {
                 break;
+            }
+            req_count = req_count + 1;
+            if (self.read_timeout_secs > 0) {
+                conn.stream.sock.set_recv_timeout(self.read_timeout_secs);
             }
 
             req.is_tls_req = true;

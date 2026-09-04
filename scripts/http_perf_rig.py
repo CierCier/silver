@@ -118,7 +118,7 @@ def run_benchmark(
 ) -> dict:
     """Run ApacheBench via nix-shell -p apacheHttpd."""
     url = f"http://127.0.0.1:{port}{endpoint}"
-    ab_args = f"-n {requests} -c {concurrency}"
+    ab_args = f"-n {requests} -c {concurrency} -l"
     if keep_alive:
         ab_args += " -k"
     ab_args += f" {url}"

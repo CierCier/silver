@@ -58,10 +58,24 @@ impl Socket {
         try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, (void*)&tv, 16);
     }
 
+    /// Set receive timeout in milliseconds.
+    void set_recv_timeout_ms(*self, i64 ms) {
+        if (self.invalid()) { return; }
+        Timeval tv = { .tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000 };
+        try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, (void*)&tv, 16);
+    }
+
     /// Set send timeout in seconds (SO_SNDTIMEO).
     void set_send_timeout(*self, i64 sec) {
         if (self.invalid()) { return; }
         Timeval tv = { .tv_sec = sec, .tv_usec = 0 };
+        try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.SNDTIMEO, (void*)&tv, 16);
+    }
+
+    /// Set send timeout in milliseconds (SO_SNDTIMEO).
+    void set_send_timeout_ms(*self, i64 ms) {
+        if (self.invalid()) { return; }
+        Timeval tv = { .tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000 };
         try_setsockopt(self.fd, SocketOptionLevel.SOCKET, SocketOption.SNDTIMEO, (void*)&tv, 16);
     }
 
