@@ -2342,6 +2342,7 @@ struct ResponseWriter {
     HttpVersion version;
     i32 status_code;
     String headers;
+    String wire_buf;
     bool header_written;
     bool chunked;
     bool close_connection;
@@ -2358,6 +2359,7 @@ impl ResponseWriter {
         w.version = version;
         w.status_code = 200;
         w.headers = String.new();
+        w.wire_buf = String.new();
         w.header_written = false;
         w.chunked = false;
         w.close_connection = close_conn;
@@ -2372,6 +2374,7 @@ impl ResponseWriter {
         self.version = version;
         self.status_code = 200;
         self.headers.clear();
+        self.wire_buf.clear();
         self.header_written = false;
         self.chunked = false;
         self.close_connection = close_conn;
@@ -2396,7 +2399,6 @@ impl ResponseWriter {
     void write_header(&mut self, i32 status) {
         if (self.header_written) { return; }
         self.status_code = status;
-        self.flush_header(-1);
     }
 
     void flush_header(&mut self, i64 content_len) {
@@ -2407,44 +2409,51 @@ impl ResponseWriter {
             h2_send_response_headers((H2Connection*)self.h2_conn_ptr, self.h2_stream_id, self.status_code, (str)self.headers.data, content_len == 0);
             return;
         }
-
-        String wire = String.new();
-        wire.push_str("HTTP/1.1 ");
-        http_append_i64(&mut wire, (i64)self.status_code);
-        wire.push((u8)' ');
-        wire.push_str(http_status_reason(self.status_code));
-        wire.push_str("\r\n");
+        self.wire_buf.clear();
+        self.wire_buf.push_str("HTTP/1.1 ");
+        http_append_i64(&mut self.wire_buf, (i64)self.status_code);
+        self.wire_buf.push((u8)' ');
+        self.wire_buf.push_str(http_status_reason(self.status_code));
+        self.wire_buf.push_str("\r\n");
 
         bool has_cl = self.has_content_length;
         if (!has_cl) {
             if (content_len >= 0) {
-                wire.push_str("Content-Length: ");
-                http_append_i64(&mut wire, content_len);
-                wire.push_str("\r\n");
+                self.wire_buf.push_str("Content-Length: ");
+                http_append_i64(&mut self.wire_buf, content_len);
+                self.wire_buf.push_str("\r\n");
             } else if (self.version == HttpVersion.Http11 && !self.close_connection) {
-                wire.push_str("Transfer-Encoding: chunked\r\n");
+                self.wire_buf.push_str("Transfer-Encoding: chunked\r\n");
                 self.chunked = true;
             }
         }
 
         if (self.close_connection) {
-            wire.push_str("Connection: close\r\n");
+            self.wire_buf.push_str("Connection: close\r\n");
         } else if (self.version == HttpVersion.Http10) {
-            wire.push_str("Connection: keep-alive\r\n");
+            self.wire_buf.push_str("Connection: keep-alive\r\n");
         }
 
-        wire.push_str((str)self.headers.data);
-        wire.push_str("\r\n");
-        transport_write(&self.io, (u8*)wire.data, wire.len);
-        wire.drop();
+        self.wire_buf.push_str((str)self.headers.data);
+        self.wire_buf.push_str("\r\n");
     }
 
     /// Write response payload. Mirrors Go's w.Write(p).
     Result<i64, Error> write(&mut self, u8* buf, i64 len) {
         if (!self.header_written) {
             self.flush_header(-1);
+            if (!self.is_h2 && !self.chunked && len > 0) {
+                self.wire_buf.push_bytes(buf, len);
+                Result<i64, Error> wr = transport_write(&self.io, (u8*)self.wire_buf.data, self.wire_buf.len);
+                self.wire_buf.clear();
+                if (wr.is_err()) { return wr; }
+                return Ok(len);
+            }
+            if (!self.is_h2) {
+                transport_write(&self.io, (u8*)self.wire_buf.data, self.wire_buf.len);
+                self.wire_buf.clear();
+            }
         }
-        if (len <= 0) { return Ok(0); }
         if (self.is_h2) {
             i64 r = h2_send_response_data((H2Connection*)self.h2_conn_ptr, self.h2_stream_id, buf, len, false);
             if (r != 0) { return Err(HTTP_ERR_IO, "HTTP/2 data write failed"); }
@@ -2480,6 +2489,10 @@ impl ResponseWriter {
     void finish(&mut self) {
         if (!self.header_written) {
             self.flush_header(0);
+            if (!self.is_h2) {
+                transport_write(&self.io, (u8*)self.wire_buf.data, self.wire_buf.len);
+                self.wire_buf.clear();
+            }
         }
         if (self.is_h2) {
             h2_send_response_data((H2Connection*)self.h2_conn_ptr, self.h2_stream_id, (u8*)0, 0, true);
@@ -2494,6 +2507,7 @@ impl ResponseWriter {
 impl Drop for ResponseWriter {
     void drop(*self) {
         self.headers.drop();
+        self.wire_buf.drop();
     }
 }
 
