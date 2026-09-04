@@ -76,8 +76,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )? {
                     value = casted;
                 } else {
-                    value = self.cast_value_to_ast_type(
+                    value = self.cast_expr_to_ast_type(
                         value,
+                        Some(argument),
                         &func_type.parameters[index],
                         &argument.span,
                     )?;
@@ -269,8 +270,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )? {
                         value = casted;
                     } else {
-                        value = self.cast_value_to_ast_type(
+                        value = self.cast_expr_to_ast_type(
                             value,
+                            Some(argument),
                             &signature.params[index],
                             &argument.span,
                         )?;
@@ -870,7 +872,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )? {
                         casted
                     } else {
-                        self.cast_value_to_ast_type(receiver_arg, first_param, &receiver.span)?
+                        self.cast_expr_to_ast_type(
+                            receiver_arg,
+                            Some(receiver),
+                            first_param,
+                            &receiver.span,
+                        )?
                     };
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
@@ -962,8 +969,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )? {
                         value = casted;
                     } else {
-                        value = self.cast_value_to_ast_type(
+                        value = self.cast_expr_to_ast_type(
                             value,
+                            Some(argument),
                             &signature.params[param_index],
                             &argument.span,
                         )?;

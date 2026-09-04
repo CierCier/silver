@@ -769,4 +769,51 @@ mod tests {
             "expected internal linkage for static global:\n{ir}"
         );
     }
+
+    #[test]
+    fn slice_coercion_codegen() {
+        let source = r#"
+            struct String {
+                u8* data;
+                i64 len;
+                i64 capacity;
+            }
+
+            i64 inspect_slice(&str s) {
+                return s.len;
+            }
+
+            i64 test_literal() {
+                return inspect_slice("hello world");
+            }
+
+            i64 test_string(String* s) {
+                return inspect_slice(s);
+            }
+
+            i64 inspect_arr([i32] s) {
+                return s.len;
+            }
+
+            i64 test_arr() {
+                i32 arr[4] = {1, 2, 3, 4};
+                return inspect_arr(&arr);
+            }
+        "#;
+        let ir = lower_to_llvm(source);
+        // Verify compile-time literal length (11 for "hello world") and no strlen call
+        assert!(
+            ir.contains("i64 11"),
+            "expected compile-time constant length 11 for 'hello world':\n{ir}"
+        );
+        assert!(
+            !ir.contains("call i64 @strlen"),
+            "string literal slice coercion must not call strlen:\n{ir}"
+        );
+        // Verify array length 4
+        assert!(
+            ir.contains("i64 4"),
+            "expected compile-time constant length 4 for array:\n{ir}"
+        );
+    }
 }

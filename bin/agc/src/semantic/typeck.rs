@@ -1097,8 +1097,14 @@ impl TypeChecker {
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => {
                     // Array-to-pointer decay: `i64 arr[9]` as an expression
-                    // yields `i64*` pointing to the first element.
+                    // yields `i64*` pointing to the first element, UNLESS
+                    // a Slice or Array is expected (e.g. passing to `[T]` slice).
                     if let Type::Array { element, .. } = &ty {
+                        if let Some(exp) = expected {
+                            if matches!(exp, Type::Slice { .. } | Type::Array { .. }) {
+                                return ty;
+                            }
+                        }
                         return Type::Pointer {
                             inner: element.clone(),
                             is_mutable: true,
@@ -1793,7 +1799,13 @@ impl TypeChecker {
                 expression,
                 is_mutable: _is_mutable,
             } => {
-                let inner = self.check_expr(expression, None);
+                let inner = if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref()
+                    && let Some(Type::Array { .. }) = self.lookup_type(&ident.name)
+                {
+                    self.lookup_type(&ident.name).unwrap()
+                } else {
+                    self.check_expr(expression, None)
+                };
                 // Reject address-of on volatile variables (local or global):
                 // the pointee could be observed changing underneath, so a plain
                 // pointer view would bypass the volatile access guarantees.

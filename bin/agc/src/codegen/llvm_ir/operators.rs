@@ -366,7 +366,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.emit_typed_initializer_value(items, &target_ty, &right.span)?
                 } else {
                     let rhs = self.emit_expression_value(right)?;
-                    self.cast_value_to_ast_type(rhs, &target_ty, &right.span)?
+                    self.cast_expr_to_ast_type(rhs, Some(right), &target_ty, &right.span)?
                 };
                 // Release the value being overwritten so `x = y` on a
                 // Drop-typed x does not leak the old resource (the scope-exit
@@ -1315,6 +1315,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .into_struct_value();
                         }
                         Ok(result.as_basic_value_enum())
+                    } else if let Some(coerced) = self.try_coerce_to_slice(value, None, target_struct_ty, span)? {
+                        Ok(coerced)
                     } else {
                         Err(CodegenError::with_span(
                             format!(
@@ -1354,28 +1356,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             (BasicValueEnum::PointerValue(ptr_val), BasicTypeEnum::StructType(struct_ty)) => {
-                let fields = struct_ty.get_field_types();
-                if fields.len() == 2 && fields[0].is_pointer_type() && fields[1].is_int_type() {
-                    let i64_ty = self.context.i64_type();
-                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let strlen_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
-                    let strlen_fn = self
-                        .module
-                        .get_function("strlen")
-                        .unwrap_or_else(|| self.module.add_function("strlen", strlen_ty, None));
-                    let len_call = self
-                        .builder
-                        .build_call(strlen_fn, &[ptr_val.into()], "str.len")
-                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
-                    let len_val = len_call
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| CodegenError::with_span("strlen returned void", *span))?
-                        .into_int_value();
-                    let undef = struct_ty.get_undef();
-                    let s1 = self.builder.build_insert_value(undef, ptr_val, 0, "str2slice.ptr").map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
-                    let s2 = self.builder.build_insert_value(s1, len_val, 1, "str2slice.len").map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
-                    Ok(s2.as_basic_value_enum())
+                if let Some(coerced) = self.try_coerce_to_slice(value, None, struct_ty, span)? {
+                    Ok(coerced)
                 } else {
                     Err(CodegenError::with_span(
                         format!(
@@ -1432,14 +1414,252 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    pub(crate) fn try_coerce_to_slice(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        source_expr: Option<&ast::Expression>,
+        target_struct_ty: inkwell::types::StructType<'ctx>,
+        span: &Span,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let dst_fields = target_struct_ty.get_field_types();
+        if dst_fields.len() != 2
+            || !dst_fields[0].is_pointer_type()
+            || !dst_fields[1].is_int_type()
+        {
+            return Ok(None);
+        }
+
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+
+        // 1. Check if source_expr is a string literal -> compile-time constant length!
+        if let Some(expr) = source_expr {
+            if let ast::ExpressionKind::Literal(ast::Literal::String(s)) = expr.kind.as_ref() {
+                if let BasicValueEnum::PointerValue(ptr_val) = value {
+                    let const_len = i64_ty.const_int(s.len() as u64, false);
+                    let mut result = target_struct_ty.get_undef();
+                    result = self
+                        .builder
+                        .build_insert_value(result, ptr_val, 0, "lit2slice.ptr")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    result = self
+                        .builder
+                        .build_insert_value(result, const_len, 1, "lit2slice.len")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    return Ok(Some(result.as_basic_value_enum()));
+                }
+            }
+
+            let src_ast_ty = self.resolve_argument_type(expr);
+            if let Some(src_ty) = src_ast_ty {
+                let mut is_ref = false;
+                let mut inner_ty = &src_ty;
+                if let ast::TypeKind::Reference(r) = src_ty.kind.as_ref() {
+                    is_ref = true;
+                    inner_ty = &r.inner;
+                } else if let ast::TypeKind::Pointer(p) = src_ty.kind.as_ref() {
+                    is_ref = true;
+                    inner_ty = &p.inner;
+                }
+
+                // Check for String or Vec
+                let is_string_or_vec = match inner_ty.kind.as_ref() {
+                    ast::TypeKind::Named(named) => {
+                        let name = named.path.last().map(|id| id.name.as_str());
+                        name == Some("String") || name == Some("Vec")
+                    }
+                    _ => false,
+                };
+
+                if is_string_or_vec {
+                    let (data_ptr, len_val) = if is_ref {
+                        let ptr_val = value.into_pointer_value();
+                        let three_field_ty = self.context.struct_type(
+                            &[ptr_ty.into(), i64_ty.into(), i64_ty.into()],
+                            false,
+                        );
+                        let data_gep = self
+                            .builder
+                            .build_struct_gep(three_field_ty, ptr_val, 0, "obj.ref.data")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        let data = self
+                            .builder
+                            .build_load(ptr_ty, data_gep, "obj.data")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        let len_gep = self
+                            .builder
+                            .build_struct_gep(three_field_ty, ptr_val, 1, "obj.ref.len")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        let len = self
+                            .builder
+                            .build_load(i64_ty, len_gep, "obj.len")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        (data, len)
+                    } else if value.is_struct_value() {
+                        let struct_val = value.into_struct_value();
+                        let data = self
+                            .builder
+                            .build_extract_value(struct_val, 0, "obj.data")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        let len = self
+                            .builder
+                            .build_extract_value(struct_val, 1, "obj.len")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                        (data, len)
+                    } else {
+                        return Ok(None);
+                    };
+
+                    let cast_ptr = self.cast_value_to_basic_type(data_ptr, dst_fields[0], span)?;
+                    let cast_len = self.cast_value_to_basic_type(len_val, dst_fields[1], span)?;
+                    let mut result = target_struct_ty.get_undef();
+                    result = self
+                        .builder
+                        .build_insert_value(result, cast_ptr, 0, "slice.res.ptr")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    result = self
+                        .builder
+                        .build_insert_value(result, cast_len, 1, "slice.res.len")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    return Ok(Some(result.as_basic_value_enum()));
+                }
+
+                // Check for Array
+                if let ast::TypeKind::Array(array) = inner_ty.kind.as_ref() {
+                    let const_len = i64_ty.const_int(array.size as u64, false);
+                    let elem_0_ptr = if is_ref {
+                        let ptr_val = value.into_pointer_value();
+                        let array_llvm_ty = self.lower_basic_type(inner_ty)?;
+                        let zero = self.context.i32_type().const_zero();
+                        unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    array_llvm_ty,
+                                    ptr_val,
+                                    &[zero, zero],
+                                    "arr.slice.ptr",
+                                )
+                                .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        }
+                    } else if value.is_pointer_value() {
+                        value.into_pointer_value()
+                    } else {
+                        return Ok(None);
+                    };
+
+                    let cast_ptr = self.cast_value_to_basic_type(
+                        elem_0_ptr.as_basic_value_enum(),
+                        dst_fields[0],
+                        span,
+                    )?;
+                    let mut result = target_struct_ty.get_undef();
+                    result = self
+                        .builder
+                        .build_insert_value(result, cast_ptr, 0, "slice.arr.ptr")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    result = self
+                        .builder
+                        .build_insert_value(result, const_len, 1, "slice.arr.len")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                        .into_struct_value();
+                    return Ok(Some(result.as_basic_value_enum()));
+                }
+            }
+        }
+
+        // 2. StructValue with >= 2 fields (e.g. String or Vec passed by value without source_expr):
+        if let BasicValueEnum::StructValue(struct_val) = value {
+            let src_fields = struct_val.get_type().get_field_types();
+            if src_fields.len() >= 2
+                && src_fields[0].is_pointer_type()
+                && src_fields[1].is_int_type()
+            {
+                let elem_ptr = self
+                    .builder
+                    .build_extract_value(struct_val, 0, "slice.cast.ptr")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                let cast_ptr = self.cast_value_to_basic_type(elem_ptr, dst_fields[0], span)?;
+                let len_val = self
+                    .builder
+                    .build_extract_value(struct_val, 1, "slice.cast.len")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+                let cast_len = self.cast_value_to_basic_type(len_val, dst_fields[1], span)?;
+                let mut result = target_struct_ty.get_undef();
+                result = self
+                    .builder
+                    .build_insert_value(result, cast_ptr, 0, "slice.res.ptr")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                    .into_struct_value();
+                result = self
+                    .builder
+                    .build_insert_value(result, cast_len, 1, "slice.res.len")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), *span))?
+                    .into_struct_value();
+                return Ok(Some(result.as_basic_value_enum()));
+            }
+        }
+
+        // 3. Fallback for PointerValue (C-string str -> Slice<u8> via strlen):
+        if let BasicValueEnum::PointerValue(ptr_val) = value {
+            let strlen_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+            let strlen_fn = self
+                .module
+                .get_function("strlen")
+                .unwrap_or_else(|| self.module.add_function("strlen", strlen_ty, None));
+            let len_call = self
+                .builder
+                .build_call(strlen_fn, &[ptr_val.into()], "str.len")
+                .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+            let len_val = len_call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::with_span("strlen returned void", *span))?
+                .into_int_value();
+            let undef = target_struct_ty.get_undef();
+            let s1 = self
+                .builder
+                .build_insert_value(undef, ptr_val, 0, "str2slice.ptr")
+                .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+            let s2 = self
+                .builder
+                .build_insert_value(s1, len_val, 1, "str2slice.len")
+                .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
+            return Ok(Some(s2.as_basic_value_enum()));
+        }
+
+        Ok(None)
+    }
+
+    pub(crate) fn cast_expr_to_ast_type(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        source_expr: Option<&ast::Expression>,
+        target_type: &ast::Type,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let target = self.lower_basic_type(target_type)?;
+        if let BasicTypeEnum::StructType(target_struct_ty) = target {
+            if let Some(coerced) =
+                self.try_coerce_to_slice(value, source_expr, target_struct_ty, span)?
+            {
+                return Ok(coerced);
+            }
+        }
+        self.cast_value_to_basic_type(value, target, span)
+    }
+
     pub(crate) fn cast_value_to_ast_type(
         &mut self,
         value: BasicValueEnum<'ctx>,
         target_type: &ast::Type,
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let target = self.lower_basic_type(target_type)?;
-        self.cast_value_to_basic_type(value, target, span)
+        self.cast_expr_to_ast_type(value, None, target_type, span)
     }
 
     /// Apply a user-defined `cast Target(...)` impl method if one exists for

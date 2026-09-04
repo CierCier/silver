@@ -796,7 +796,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     };
                     if let Some(annotation) = &let_stmt.type_annotation {
                         init_value =
-                            self.cast_value_to_ast_type(init_value, annotation, &init_expr.span)?;
+                            self.cast_expr_to_ast_type(init_value, Some(init_expr), annotation, &init_expr.span)?;
                     }
                     let inferred_ty = if let Some(annotation) = &let_stmt.type_annotation {
                         annotation.clone()

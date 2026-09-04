@@ -1624,7 +1624,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         self.clear_field_flags(&ident.name)?;
                     }
                     if let Some(return_ty) = self.current_return_type.clone() {
-                        value = self.cast_value_to_ast_type(value, &return_ty, &expr_span)?;
+                        value = self.cast_expr_to_ast_type(value, Some(expr), &return_ty, &expr_span)?;
                     }
                     Some((value, expr_span))
                 } else {

@@ -541,6 +541,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 _ => self.resolve_argument_type(operand),
             },
+            ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
+                self.resolve_argument_type(inner)
+            }
             _ => None,
         }
     }
