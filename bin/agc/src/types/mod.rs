@@ -794,10 +794,26 @@ impl<'a> TypeParser<'a> {
         }
         if self.consume_byte(b'&') {
             let is_mutable = self.consume_str("mut ");
+            if !is_mutable && self.consume_str("str") {
+                return Ok(Type::Slice {
+                    element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+                });
+            }
             let inner = self.parse_type()?;
+            if !is_mutable && matches!(&inner, Type::Slice { .. }) {
+                return Ok(inner);
+            }
             return Ok(Type::Reference {
                 is_mutable,
                 inner: Box::new(inner),
+            });
+        }
+        if self.consume_byte(b'[') {
+            let element = self.parse_type()?;
+            self.skip_ws();
+            self.expect_byte(b']')?;
+            return Ok(Type::Slice {
+                element: Box::new(element),
             });
         }
         if self.consume_str("unit") {

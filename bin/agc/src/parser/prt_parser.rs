@@ -941,6 +941,24 @@ impl PRT_Parser {
             };
             let (inner, next) = self.parse_type_prefix(tokens, cursor, end)?;
             let start_span = tokens[start].span;
+            if lifetime.is_none()
+                && !is_mutable
+                && matches!(inner.kind.as_ref(), ast::TypeKind::Primitive(ast::PrimitiveType::Str))
+            {
+                let slice = ast::Type {
+                    kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                        element_type: Box::new(ast::Type {
+                            kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::U8)),
+                            span: inner.span,
+                        }),
+                    }))),
+                    span: start_span.extend_to(&tokens[next - 1].span),
+                };
+                return Some((slice, next));
+            }
+            if !is_mutable && matches!(inner.kind.as_ref(), ast::TypeKind::Slice(_)) {
+                return Some((inner, next));
+            }
             let reference = ast::Type {
                 kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                     is_mutable,
@@ -956,11 +974,13 @@ impl PRT_Parser {
             let open = cursor;
             cursor += 1;
             let mut params = Vec::new();
+            let mut has_comma = false;
             while cursor < end && !matches!(tokens[cursor].kind, Token::RightBracket) {
                 let (param, next) = self.parse_type_prefix(tokens, cursor, end)?;
                 params.push(param);
                 cursor = next;
                 if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                    has_comma = true;
                     cursor += 1;
                 }
             }
@@ -968,9 +988,18 @@ impl PRT_Parser {
                 return None;
             }
             cursor += 1;
-            ast::Type {
-                kind: Box::new(ast::TypeKind::Tuple(params)),
-                span: tokens[open].span.extend_to(&tokens[cursor - 1].span),
+            if params.len() == 1 && !has_comma {
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                        element_type: Box::new(params.into_iter().next().unwrap()),
+                    }))),
+                    span: tokens[open].span.extend_to(&tokens[cursor - 1].span),
+                }
+            } else {
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Tuple(params)),
+                    span: tokens[open].span.extend_to(&tokens[cursor - 1].span),
+                }
             }
         } else {
             let mut path = Vec::new();
@@ -6507,4 +6536,31 @@ mod tests {
             ast::WherePredicate::Lifetime { .. }
         ));
     }
+
+    #[test]
+    fn parses_first_class_slice_types() {
+        let tokens = lex("&str x; [u8] y; &[i64] z; [i32, i32] t;").expect("lex failed");
+        let parser = PRT_Parser::new(None);
+
+        // &str -> Slice(u8)
+        let (ty_str, next1) = parser.parse_type_prefix(&tokens, 0, tokens.len()).expect("parse &str failed");
+        let ast::TypeKind::Slice(s1) = ty_str.kind.as_ref() else { panic!("expected Slice for &str"); };
+        assert!(matches!(s1.element_type.kind.as_ref(), ast::TypeKind::Primitive(ast::PrimitiveType::U8)));
+
+        // [u8] -> Slice(u8)
+        let (ty_slice, next2) = parser.parse_type_prefix(&tokens, next1 + 2, tokens.len()).expect("parse [u8] failed");
+        let ast::TypeKind::Slice(s2) = ty_slice.kind.as_ref() else { panic!("expected Slice for [u8]"); };
+        assert!(matches!(s2.element_type.kind.as_ref(), ast::TypeKind::Primitive(ast::PrimitiveType::U8)));
+
+        // &[i64] -> Slice(i64)
+        let (ty_ref_slice, next3) = parser.parse_type_prefix(&tokens, next2 + 2, tokens.len()).expect("parse &[i64] failed");
+        let ast::TypeKind::Slice(s3) = ty_ref_slice.kind.as_ref() else { panic!("expected Slice for &[i64]"); };
+        assert!(matches!(s3.element_type.kind.as_ref(), ast::TypeKind::Primitive(ast::PrimitiveType::I64)));
+
+        // [i32, i32] -> Tuple([i32, i32])
+        let (ty_tuple, _) = parser.parse_type_prefix(&tokens, next3 + 2, tokens.len()).expect("parse tuple failed");
+        let ast::TypeKind::Tuple(items) = ty_tuple.kind.as_ref() else { panic!("expected Tuple"); };
+        assert_eq!(items.len(), 2);
+    }
 }
+
