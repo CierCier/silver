@@ -108,7 +108,7 @@ test_specific_flags() {
         channel_test) echo "--static-runtime" ;;
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
-        tls_test|http2_tls_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
+        tls_test|http2_tls_test|https_server_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
         module_import_test) echo "-I $MODLIB_DIR" ;;
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
@@ -364,7 +364,8 @@ fi
 if [ -z "$SILVER_OPENSSL_LIB" ] || ! command -v node >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
 tls_test
-http2_tls_test"
+http2_tls_test
+https_server_test"
 fi
 if ! command -v go >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
@@ -481,7 +482,7 @@ run_single_test_worker() {
 
     local run_dir="$WORKDIR/$name.rundir"
     mkdir -p "$run_dir"
-    if [ "$name" = "tls_test" ] || [ "$name" = "http2_tls_test" ]; then
+    if [ "$name" = "tls_test" ] || [ "$name" = "http2_tls_test" ] || [ "$name" = "https_server_test" ]; then
         run_dir="$ROOT"
     fi
 

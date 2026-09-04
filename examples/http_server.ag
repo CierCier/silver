@@ -1,0 +1,76 @@
+// examples/http_server.ag — High-performance HTTP server in Silver.
+//
+// Demonstrates:
+//   1. Setting up an HTTP server with route multiplexing (ServeMux)
+//   2. High-throughput plaintext and JSON endpoints (TechEmpower style)
+//   3. Request headers, body reading, and keep-alive handling
+//
+// Compile and run:
+//   cargo run -p agc --release -- examples/http_server.ag -o /tmp/http_server
+//   /tmp/http_server
+//
+// Benchmark with Apache Bench (ab):
+//   nix-shell -p apacheHttpd --run "ab -n 50000 -c 100 -k http://127.0.0.1:8080/plaintext"
+
+import std.error;
+import std.io;
+import std.net.http;
+
+void handle_index(ResponseWriter* w, HttpRequest* _r) {
+    w.set_header("Content-Type", "text/plain; charset=utf-8");
+    w.set_header("Content-Length", "144");
+    w.write_header(200);
+    w.write_str("Welcome to Silver HTTP Server!\nEndpoints:\n  /plaintext - Fast throughput benchmark\n  /json      - JSON payload\n  /echo      - Echo request body\n");
+}
+
+void handle_plaintext(ResponseWriter* w, HttpRequest* _r) {
+    w.set_header("Content-Type", "text/plain");
+    w.set_header("Content-Length", "14");
+    w.write_header(200);
+    w.write_str("Hello, World!\n");
+}
+
+void handle_json(ResponseWriter* w, HttpRequest* _r) {
+    w.set_header("Content-Type", "application/json");
+    w.set_header("Content-Length", "28");
+    w.write_header(200);
+    w.write_str("{\"message\":\"Hello, World!\"}\n");
+}
+
+void handle_echo(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.body_str());
+}
+
+i32 main() {
+    HttpServer server = HttpServer.new("0.0.0.0:8080");
+
+    // Register routes
+    server.get("/", handle_index);
+    server.get("/plaintext", handle_plaintext);
+    server.get("/json", handle_json);
+    server.post("/echo", handle_echo);
+
+    @println("=========================================================");
+    @println("  Silver High-Performance HTTP Server");
+    @println("  Listening on http://127.0.0.1:8080");
+    @println("=========================================================");
+    @println("");
+    @println("Test with curl:");
+    @println("  curl http://127.0.0.1:8080/plaintext");
+    @println("");
+    @println("Benchmark throughput with Apache Bench (ab):");
+    @println("  nix-shell -p apacheHttpd --run \"ab -n 50000 -c 100 -k http://127.0.0.1:8080/plaintext\"");
+    @println("");
+    @println("Press Ctrl+C to stop.");
+    @println("---------------------------------------------------------");
+
+    Result<i64, Error> r = server.listen_and_serve();
+    if (r.failed()) {
+        Error err = r.get_error();
+        @eprintln("Server error: {}", err.message);
+        return 1;
+    }
+    return 0;
+}

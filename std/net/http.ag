@@ -58,6 +58,8 @@ struct HttpRequest {
     String body_buf;
     i64 content_length;
     bool chunked;
+    bool is_tls_req;
+    String tls_version_str;
 }
 
 struct HttpResponse {
@@ -551,6 +553,8 @@ impl HttpRequest {
         request.body_buf = String.new();
         request.content_length = -1;
         request.chunked = false;
+        request.is_tls_req = false;
+        request.tls_version_str = String.new();
         return move request;
     }
 
@@ -574,6 +578,8 @@ impl HttpRequest {
         request.body_buf = String.new();
         request.content_length = -1;
         request.chunked = false;
+        request.is_tls_req = false;
+        request.tls_version_str = String.new();
         return move request;
     }
 
@@ -596,7 +602,27 @@ impl HttpRequest {
         request.body_buf = String.new();
         request.content_length = -1;
         request.chunked = false;
+        request.is_tls_req = false;
+        request.tls_version_str = String.new();
         return move request;
+    }
+
+    bool is_tls(*self) {
+        return self.is_tls_req;
+    }
+
+    str tls_version(*self) {
+        if (self.tls_version_str.len > 0) {
+            return (str)self.tls_version_str.data;
+        }
+        return "";
+    }
+
+    str scheme(*self) {
+        if (self.is_tls_req) {
+            return "https";
+        }
+        return "http";
     }
 
     void header(&mut self, str name, str value) {
@@ -970,6 +996,7 @@ impl Drop for HttpRequest {
         self.path_str.drop();
         self.query_str.drop();
         self.body_buf.drop();
+        self.tls_version_str.drop();
     }
 }
 
@@ -2258,11 +2285,11 @@ void http_append_hex(String* out, i64 val) {
     }
 }
 
-void http_parse_host_port(str addr, String* out_ip, u16* out_port) {
+void http_parse_host_port(str addr, String* out_ip, u16* out_port, u16 default_port) {
     out_ip.clear();
     if (addr == (str)0 || strlen(addr) == 0) {
         out_ip.push_str("0.0.0.0");
-        *out_port = (u16)80;
+        *out_port = default_port;
         return;
     }
     u8* s = (u8*)addr;
@@ -2286,7 +2313,11 @@ void http_parse_host_port(str addr, String* out_ip, u16* out_port) {
         return;
     }
     out_ip.push_str(addr);
-    *out_port = (u16)80;
+    *out_port = default_port;
+}
+
+void http_parse_host_port(str addr, String* out_ip, u16* out_port) {
+    http_parse_host_port(addr, out_ip, out_port, (u16)80);
 }
 
 // --- ResponseWriter (Go's http.ResponseWriter) ----------------------------
@@ -2381,6 +2412,8 @@ impl ResponseWriter {
 
         if (self.close_connection) {
             wire.push_str("Connection: close\r\n");
+        } else if (self.version == HttpVersion.Http10) {
+            wire.push_str("Connection: keep-alive\r\n");
         }
 
         wire.push_str((str)self.headers.data);
@@ -2637,6 +2670,20 @@ impl Drop for ServeMux {
 
 // --- Server (Go's http.Server) --------------------------------------------
 
+struct TlsConfig {
+    str cert_file;
+    str key_file;
+}
+
+impl TlsConfig {
+    TlsConfig new(str cert_file, str key_file) {
+        TlsConfig c;
+        c.cert_file = cert_file;
+        c.key_file = key_file;
+        return c;
+    }
+}
+
 struct HttpServer {
     str addr;
     ServeMux mux;
@@ -2650,7 +2697,7 @@ struct HttpServer {
 
 // --- HTTP/2 Connection Reactor --------------------------------------------
 
-void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
+void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str tls_ver) {
     H2Connection c;
     h2_init(&c, io);
 
@@ -2730,6 +2777,10 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
 
                 HttpRequest req = HttpRequest.empty();
                 req.version = HttpVersion.Http20;
+                req.is_tls_req = is_tls;
+                if (tls_ver != (str)0 && strlen(tls_ver) > 0) {
+                    req.tls_version_str.push_str(tls_ver);
+                }
 
                 for (i64 i = 0; i < nf; i = i + 1) {
                     if (strcmp((str)fields[i].name, ":method") == 0) {
@@ -2803,6 +2854,10 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
     free((void*)hbuf);
     free((void*)payload);
     c.drop();
+}
+
+void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
+    h2_serve_conn(io, mux, max_body, false, "");
 }
 
 impl HttpServer {
@@ -2950,6 +3005,7 @@ impl HttpServer {
             match a {
                 Ok(fd) : {
                     TcpStream stream = TcpStream.from_fd((i32)fd);
+                    stream.set_nodelay(true);
                     if (self.read_timeout_secs > 0) {
                         stream.sock.set_recv_timeout(self.read_timeout_secs);
                     }
@@ -2963,6 +3019,138 @@ impl HttpServer {
             };
         }
         return Ok(0);
+    }
+
+    void serve_tls_conn(&mut self, TcpStream stream, str cert_file, str key_file) {
+        HttpConnection conn = HttpConnection.from_stream(move stream);
+        Error err;
+        bool ok = transport_tls_accept((void*)&conn.tls_state[0], conn.stream.sock.fd, cert_file, key_file, &err);
+        if (!ok) {
+            conn.close();
+            conn.drop();
+            return;
+        }
+        conn.use_tls = true;
+        StreamIo io = http_transport_io(&conn);
+
+        // Transparent HTTP/2 ALPN check
+        if (self.enable_h2 && transport_tls_is_h2((void*)&conn.tls_state[0])) {
+            conn.is_h2 = true;
+            u8 magic[24];
+            Result<i64, Error> mr = transport_read(&io, &magic[0], H2_CLIENT_PREFACE_LEN);
+            if (mr.success() && mr.value() == H2_CLIENT_PREFACE_LEN) {
+                if (memcmp((const void*)&magic[0], (const void*)H2_CLIENT_PREFACE, H2_CLIENT_PREFACE_LEN) == 0) {
+                    str tls_ver = transport_tls_version((void*)&conn.tls_state[0]);
+                    if (self.custom_mux != (ServeMux*)0) {
+                        h2_serve_conn(&io, self.custom_mux, self.max_body_bytes, true, tls_ver);
+                    } else {
+                        h2_serve_conn(&io, &self.mux, self.max_body_bytes, true, tls_ver);
+                    }
+                }
+            }
+            conn.close();
+            conn.drop();
+            return;
+        }
+        while (true) {
+            HttpRequest req = HttpRequest.empty();
+            Result<i64, Error> hr = req.read_head(&io, self.max_header_bytes);
+            if (hr.failed() || hr.value() == 0) {
+                req.drop();
+                break;
+            }
+
+            req.is_tls_req = true;
+            str tls_ver = transport_tls_version((void*)&conn.tls_state[0]);
+            if (tls_ver != (str)0 && strlen(tls_ver) > 0) {
+                req.tls_version_str.push_str(tls_ver);
+            }
+
+            // HTTP/1.1 mandatory Host header check (RFC 9112 §3.2)
+            if (req.version == HttpVersion.Http11 && (req.host == (str)0 || strlen(req.host) == 0)) {
+                ResponseWriter bad_w = ResponseWriter.new(io, req.version, true);
+                bad_w.set_header("Content-Type", "text/plain; charset=utf-8");
+                bad_w.set_header("Connection", "close");
+                bad_w.write_header(400);
+                bad_w.write_str("400 Bad Request: missing required Host header\n");
+                bad_w.finish();
+                bad_w.drop();
+                req.drop();
+                break;
+            }
+
+            // Expect: 100-continue handling (RFC 9110 §10.1.1)
+            String expect = req.get_header("expect");
+            if (expect.len > 0 && http_equal_ci(expect.data, 0, expect.len, "100-continue")) {
+                transport_write(&io, (u8*)"HTTP/1.1 100 Continue\r\n\r\n", 25);
+            }
+            expect.drop();
+
+            Result<i64, Error> br = req.read_body(&io, self.max_body_bytes);
+            if (br.failed()) {
+                req.drop();
+                break;
+            }
+
+            bool close_conn = req.close;
+            ResponseWriter w = ResponseWriter.new(io, req.version, close_conn);
+            if (self.custom_mux != (ServeMux*)0) {
+                self.custom_mux.serve_http(&mut w, &mut req);
+            } else {
+                self.mux.serve_http(&mut w, &mut req);
+            }
+            w.finish();
+
+            w.drop();
+            req.drop();
+
+            if (close_conn) {
+                break;
+            }
+        }
+        conn.close();
+        conn.drop();
+    }
+
+    Result<i64, Error> listen_and_serve_tls(&mut self, str cert_file, str key_file) {
+        String ip = String.new();
+        u16 port = 443;
+        http_parse_host_port(self.addr, &mut ip, &mut port, (u16)443);
+
+        Result<SocketAddr, AddrError> ar = SocketAddr.v4((str)ip.data, port);
+        ip.drop();
+        if (ar.failed()) {
+            return Err(HTTP_ERR_CONNECT, "invalid bind address");
+        }
+        SocketAddr sa = ar.unwrap();
+        TcpListener listener = TcpListener.bind(&sa, 128);
+        if (!listener.valid()) {
+            return Err(HTTP_ERR_CONNECT, "failed to bind socket");
+        }
+
+        while (true) {
+            Result<i64, Error> a = listener.accept();
+            match a {
+                Ok(fd) : {
+                    TcpStream stream = TcpStream.from_fd((i32)fd);
+                    stream.set_nodelay(true);
+                    if (self.read_timeout_secs > 0) {
+                        stream.sock.set_recv_timeout(self.read_timeout_secs);
+                    }
+                    if (self.write_timeout_secs > 0) {
+                        stream.sock.set_send_timeout(self.write_timeout_secs);
+                    }
+
+                    self.serve_tls_conn(move stream, cert_file, key_file);
+                },
+                Err(e) : { continue; },
+            };
+        }
+        return Ok(0);
+    }
+
+    Result<i64, Error> listen_and_serve_tls_config(&mut self, TlsConfig cfg) {
+        return self.listen_and_serve_tls(cfg.cert_file, cfg.key_file);
     }
 }
 
@@ -2993,6 +3181,38 @@ Result<i64, Error> http_listen_and_serve(str addr, void(ResponseWriter*, HttpReq
     HttpServer s = HttpServer.new(addr);
     s.handle_func("*", "/", handler);
     Result<i64, Error> r = s.listen_and_serve();
+    s.drop();
+    return r;
+}
+
+Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_file) {
+    HttpServer s = HttpServer.new(addr);
+    s.set_mux(&g_default_mux);
+    Result<i64, Error> r = s.listen_and_serve_tls(cert_file, key_file);
+    s.drop();
+    return r;
+}
+
+Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_file, void(ResponseWriter*, HttpRequest*) handler) {
+    HttpServer s = HttpServer.new(addr);
+    s.handle_func("*", "/", handler);
+    Result<i64, Error> r = s.listen_and_serve_tls(cert_file, key_file);
+    s.drop();
+    return r;
+}
+
+Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg) {
+    HttpServer s = HttpServer.new(addr);
+    s.set_mux(&g_default_mux);
+    Result<i64, Error> r = s.listen_and_serve_tls_config(cfg);
+    s.drop();
+    return r;
+}
+
+Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg, void(ResponseWriter*, HttpRequest*) handler) {
+    HttpServer s = HttpServer.new(addr);
+    s.handle_func("*", "/", handler);
+    Result<i64, Error> r = s.listen_and_serve_tls_config(cfg);
     s.drop();
     return r;
 }

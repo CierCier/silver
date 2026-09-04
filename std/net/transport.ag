@@ -41,6 +41,8 @@ struct TlsProvider {
     Result<i64, Error>(void*, u8*, i64) write;
     void(void*) close;
     bool(void*) is_h2;
+    bool(void*, i32, str, str, Error*) accept;
+    str(void*) version;
 }
 
 TlsProvider g_tls_provider;
@@ -50,14 +52,17 @@ void tls_provider_register(bool(void*, i32, str, bool, str, Error*) handshake,
                            Result<i64, Error>(void*, u8*, i64) read,
                            Result<i64, Error>(void*, u8*, i64) write,
                            void(void*) close,
-                           bool(void*) is_h2) {
+                           bool(void*) is_h2,
+                           bool(void*, i32, str, str, Error*) accept,
+                           str(void*) version) {
     g_tls_provider.handshake = handshake;
     g_tls_provider.read = read;
     g_tls_provider.write = write;
     g_tls_provider.close = close;
     g_tls_provider.is_h2 = is_h2;
+    g_tls_provider.accept = accept;
+    g_tls_provider.version = version;
 }
-
 bool transport_tls_is_h2(void* state) {
     bool(void*) f = g_tls_provider.is_h2;
     if ((i64)f != 0) { return f(state); }
@@ -84,4 +89,19 @@ StreamIo transport_tls_io(void* state) {
 void transport_tls_close(void* state) {
     void(void*) f = g_tls_provider.close;
     if ((i64)f != 0) { f(state); }
+}
+
+bool transport_tls_accept(void* state, i32 fd, str cert_file, str key_file, Error* err) {
+    bool(void*, i32, str, str, Error*) f = g_tls_provider.accept;
+    if ((i64)f == 0) {
+        *err = Error.new(-7, "TLS not initialized: import std.net.tls and call tls_init()");
+        return false;
+    }
+    return f(state, fd, cert_file, key_file, err);
+}
+
+str transport_tls_version(void* state) {
+    str(void*) f = g_tls_provider.version;
+    if ((i64)f != 0) { return f(state); }
+    return "";
 }

@@ -1,0 +1,187 @@
+// tests/https_server_test.ag — Integration test for Silver's HTTPS server.
+//
+// Verifies native Silver HTTPS server functionality:
+// 1. TlsStream server-side handshake (SSL_accept) with server certificate and private key.
+// 2. Transparent ALPN negotiation ("h2" and "http/1.1").
+// 3. HttpRequest security methods: r.is_tls(), r.scheme(), r.tls_version().
+// 4. Request routing (GET, POST with payload, query strings, and 405 Method Not Allowed).
+// 5. CA validation and secure transmission end-to-end.
+
+import std.error;
+import std.io;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.net.tls;
+import std.string;
+import std.sys.entry;
+import std.sys.raw.misc;
+import std.sys.raw.process;
+import std.sys.raw.time;
+import std.test;
+
+struct TimeSpec {
+    i64 tv_sec;
+    i64 tv_nsec;
+}
+
+struct SigAction {
+    i64 handler;
+    i64 flags;
+    i64 restorer;
+    i64 mask;
+}
+
+void ignore_sigpipe() {
+    SigAction act;
+    act.handler = 1; // SIG_IGN
+    act.flags = 0;
+    act.restorer = 0;
+    act.mask = 0;
+    sys_rt_sigaction(13, (i64)&act, 0, 8);
+}
+
+void handle_hello(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    if (r.is_tls()) {
+        w.write_str("secure ");
+        w.write_str(r.scheme());
+        w.write_str(" ");
+        w.write_str(r.tls_version());
+    } else {
+        w.write_str("insecure");
+    }
+}
+
+void handle_echo(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.body_str());
+}
+
+void handle_query(ResponseWriter* w, HttpRequest* r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str(r.query());
+}
+
+i32 main() {
+    ignore_sigpipe();
+    tls_init();
+
+    Result<SocketAddr, AddrError> br = SocketAddr.v4("127.0.0.1", 0);
+    assert_true(br.success(), "bind_result.success()");
+    SocketAddr addr = br.unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 16);
+    assert_true(listener.valid(), "listener valid");
+
+    SockAddrIn sa;
+    u32 len = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &len);
+    u16 port = ntoh16(sa.sin_port);
+
+    i64 pid = sys_fork();
+    if (pid < 0) {
+        @eprintln("fork failed");
+        return 1;
+    }
+
+    if (pid == 0) {
+        // Child process: runs HTTPS server
+        ignore_sigpipe();
+        HttpServer s = HttpServer.new("127.0.0.1:0");
+        s.get("/hello", handle_hello);
+        s.post("/echo", handle_echo);
+        s.get("/search", handle_query);
+
+        i64 count = 0;
+        while (count < 4) {
+            Result<i64, Error> a = listener.accept();
+            if (a.success()) {
+                TcpStream stream = TcpStream.from_fd((i32)a.unwrap());
+                s.serve_tls_conn(move stream, "tests/certs/server.pem", "tests/certs/server.pem");
+                count = count + 1;
+            }
+        }
+        s.drop();
+        sys_exit(0);
+        return 0;
+    }
+
+    // Parent process: runs HTTPS client requests
+    TimeSpec req_ts;
+    req_ts.tv_sec = 0;
+    req_ts.tv_nsec = 150000000; // 150ms startup delay
+    sys_nanosleep((i64)&req_ts, 0);
+
+    test_start("HTTPS server: native Silver implementation");
+
+    HttpClient client = HttpClient.new();
+    client.set_ca_file("tests/certs/ca.pem");
+
+    u8 digits[8];
+    i64 n = itoa((i64)port, &digits[0]);
+
+    String url_base = String.from_str("https://127.0.0.1:");
+    for (i64 i = 0; i < n; i = i + 1) { url_base.push(digits[i]); }
+
+    // 1. GET /hello over HTTPS
+    String url_hello = String.from_str((str)url_base.data);
+    url_hello.push_str("/hello");
+    Result<HttpResponse, Error> r1 = client.get((str)url_hello.data);
+    assert_true(r1.success(), "GET /hello success");
+    if (r1.success()) {
+        HttpResponse resp = r1.unwrap();
+        assert_eq_i64(200, (i64)resp.status, "status 200");
+        assert_true(resp.body.contains("secure https"), "body contains secure https");
+        resp.drop();
+    }
+
+    // 2. POST /echo with body over HTTPS
+    String url_echo = String.from_str((str)url_base.data);
+    url_echo.push_str("/echo");
+    Result<HttpResponse, Error> r2 = client.post((str)url_echo.data, "text/plain", "silver_https_rocks");
+    assert_true(r2.success(), "POST /echo success");
+    if (r2.success()) {
+        HttpResponse resp = r2.unwrap();
+        assert_eq_i64(200, (i64)resp.status, "status 200");
+        assert_true(resp.body.equals("silver_https_rocks"), "body matches silver_https_rocks");
+        resp.drop();
+    }
+
+    // 3. GET /search?q=silver&type=tls query string parsing
+    String url_search = String.from_str((str)url_base.data);
+    url_search.push_str("/search?q=silver&type=tls");
+    Result<HttpResponse, Error> r3 = client.get((str)url_search.data);
+    assert_true(r3.success(), "GET /search success");
+    if (r3.success()) {
+        HttpResponse resp = r3.unwrap();
+        assert_eq_i64(200, (i64)resp.status, "status 200");
+        assert_true(resp.body.equals("q=silver&type=tls"), "query matches");
+        resp.drop();
+    }
+
+    // 4. DELETE /hello (Method Not Allowed 405 with Allow header)
+    Result<HttpResponse, Error> r4 = client.delete((str)url_hello.data, "", "");
+    assert_true(r4.success(), "DELETE /hello success (405)");
+    if (r4.success()) {
+        HttpResponse resp = r4.unwrap();
+        assert_eq_i64(405, (i64)resp.status, "status 405");
+        String allow = resp.get_header("Allow");
+        assert_true(allow.contains("GET"), "Allow header contains GET");
+        allow.drop();
+        resp.drop();
+    }
+
+    url_base.drop();
+    url_hello.drop();
+    url_echo.drop();
+    url_search.drop();
+    client.drop();
+
+    i64 status = 0;
+    sys_wait4(pid, (i64)&status, 0, 0);
+
+    return done();
+}

@@ -75,6 +75,14 @@ extern "C" {
     i32 ssl_use_certificate_file(i64 ssl, str file, i32 filetype);
     #[link_name("SSL_use_PrivateKey_file")]
     i32 ssl_use_private_key_file(i64 ssl, str file, i32 filetype);
+    #[link_name("SSL_CTX_use_certificate_file")]
+    i32 ssl_ctx_use_certificate_file(i64 ctx, str file, i32 filetype);
+    #[link_name("SSL_CTX_use_PrivateKey_file")]
+    i32 ssl_ctx_use_private_key_file(i64 ctx, str file, i32 filetype);
+    #[link_name("SSL_CTX_set_alpn_select_cb")]
+    void ssl_ctx_set_alpn_select_cb(i64 ctx, void* cb, void* arg);
+    #[link_name("SSL_select_next_proto")]
+    i32 ssl_select_next_proto(void* out, void* outlen, u8* server, u32 server_len, u8* client, u32 client_len);
     #[link_name("SSL_set_alpn_protos")]
     i32 ssl_set_alpn_protos(i64 ssl, u8* protos, u32 len);
     #[link_name("SSL_get0_alpn_selected")]
@@ -138,20 +146,26 @@ i64 ssl_client_ctx(bool verify, str ca_file) {
     return ssl_make_client_ctx(verify, ca_file);
 }
 
+u8 g_server_alpn_protos[12] = {
+    (u8)2, (u8)'h', (u8)'2',
+    (u8)8, (u8)'h', (u8)'t', (u8)'t', (u8)'p', (u8)'/', (u8)'1', (u8)'.', (u8)'1'
+};
+
+i32 ssl_server_alpn_select_cb(i64 _ssl, void* out, void* outlen, u8* in_protos, u32 inlen, void* _arg) {
+    ssl_select_next_proto(out, outlen, &g_server_alpn_protos[0], (u32)12, in_protos, inlen);
+    return 0;
+}
+
 i64 ssl_make_server_ctx(str cert_file, str key_file) {
     i64 ctx = ssl_ctx_new(ssl_tls_server_method());
     if (ctx == 0) { return 0; }
     ssl_ctx_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, (i64)TLS1_2_VERSION, (void*)0);
-    // The server context needs an SSL to load the certificate into.
-    i64 ssl = ssl_new(ctx);
-    if (ssl == 0) { ssl_ctx_free(ctx); return 0; }
-    if (ssl_use_certificate_file(ssl, cert_file, SSL_FILETYPE_PEM) != 1
-        || ssl_use_private_key_file(ssl, key_file, SSL_FILETYPE_PEM) != 1) {
-        ssl_free(ssl);
+    ssl_ctx_set_alpn_select_cb(ctx, (void*)ssl_server_alpn_select_cb, (void*)0);
+    if (ssl_ctx_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) != 1
+        || ssl_ctx_use_private_key_file(ctx, key_file, SSL_FILETYPE_PEM) != 1) {
         ssl_ctx_free(ctx);
         return 0;
     }
-    ssl_free(ssl);
     return ctx;
 }
 
@@ -339,9 +353,20 @@ bool tls_provider_is_h2(void* state) {
     return tls.is_h2();
 }
 
+bool tls_provider_accept(void* state, i32 fd, str cert_file, str key_file, Error* err) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.accept(fd, cert_file, key_file, err);
+}
+
+str tls_provider_version(void* state) {
+    TlsStream* tls = (TlsStream*)state;
+    return tls.version();
+}
+
 /// Enable https in std.net.http: registers this module's TLS transport.
-/// Call once before making https requests.
+/// Call once before making https requests or running https servers.
 void tls_init() {
     tls_provider_register(tls_provider_handshake, tls_provider_read,
-        tls_provider_write, tls_provider_close, tls_provider_is_h2);
+        tls_provider_write, tls_provider_close, tls_provider_is_h2,
+        tls_provider_accept, tls_provider_version);
 }
