@@ -2450,6 +2450,7 @@ impl Drop for ResponseWriter {
 // --- Routing & Multiplexer (Go's http.ServeMux) ---------------------------
 
 struct RouteEntry {
+    str method;
     str pattern;
     void(ResponseWriter*, HttpRequest*) handler;
 }
@@ -2465,47 +2466,163 @@ impl ServeMux {
         return move mux;
     }
 
-    void handle_func(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+    void handle_func(&mut self, str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         RouteEntry e;
+        e.method = method;
         e.pattern = pattern;
         e.handler = handler;
         self.routes.push(e);
     }
 
+    void get(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("GET", pattern, handler);
+    }
+
+    void post(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("POST", pattern, handler);
+    }
+
+    void put(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("PUT", pattern, handler);
+    }
+
+    void delete(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("DELETE", pattern, handler);
+    }
+
+    void patch(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("PATCH", pattern, handler);
+    }
+
+    void options(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.handle_func("OPTIONS", pattern, handler);
+    }
+
     void serve_http(&mut self, ResponseWriter* w, HttpRequest* r) {
         str p = r.path();
+        str m = r.method;
+        if (m == (str)0) { m = "GET"; }
         i64 plen = strlen(p);
         i64 n = self.routes.len();
 
+        // 1. Exact path matches
+        bool has_exact_path = false;
         for (i64 i = 0; i < n; i = i + 1) {
             RouteEntry* e = self.routes.get_ptr(i);
             if (strcmp(e.pattern, p) == 0) {
-                void(ResponseWriter*, HttpRequest*) h = e.handler;
-                h(w, r);
-                return;
+                has_exact_path = true;
+                if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
+                    void(ResponseWriter*, HttpRequest*) h = e.handler;
+                    h(w, r);
+                    return;
+                }
             }
         }
 
-        i64 best_idx = -1;
+        // Exact path: if request is HEAD, allow GET handler as fallback
+        if (has_exact_path && strcmp(m, "HEAD") == 0) {
+            for (i64 i = 0; i < n; i = i + 1) {
+                RouteEntry* e = self.routes.get_ptr(i);
+                if (strcmp(e.pattern, p) == 0 && strcmp(e.method, "GET") == 0) {
+                    void(ResponseWriter*, HttpRequest*) h = e.handler;
+                    h(w, r);
+                    return;
+                }
+            }
+        }
+
+        // Exact path matched but method did not: 405 Method Not Allowed
+        if (has_exact_path) {
+            String allow = String.new();
+            bool first = true;
+            for (i64 i = 0; i < n; i = i + 1) {
+                RouteEntry* e = self.routes.get_ptr(i);
+                if (strcmp(e.pattern, p) == 0) {
+                    str em = e.method;
+                    if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
+                        em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
+                    }
+                    if (!allow.contains(em)) {
+                        if (!first) { allow.push_str(", "); }
+                        allow.push_str(em);
+                        first = false;
+                    }
+                }
+            }
+            w.set_header("Allow", (str)allow.data);
+            w.set_header("Content-Type", "text/plain; charset=utf-8");
+            w.write_header(405);
+            w.write_str("405 Method Not Allowed\n");
+            allow.drop();
+            return;
+        }
+
+        // 2. Prefix matches (find longest matching prefix)
         i64 best_len = -1;
         for (i64 i = 0; i < n; i = i + 1) {
             RouteEntry* e = self.routes.get_ptr(i);
             i64 elen = strlen(e.pattern);
             if (elen > best_len && plen >= elen) {
                 if (memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
-                    best_idx = i;
                     best_len = elen;
                 }
             }
         }
 
-        if (best_idx >= 0) {
-            RouteEntry* e = self.routes.get_ptr(best_idx);
-            void(ResponseWriter*, HttpRequest*) h = e.handler;
-            h(w, r);
+        if (best_len >= 0) {
+            // Check matching method on best prefix
+            for (i64 i = 0; i < n; i = i + 1) {
+                RouteEntry* e = self.routes.get_ptr(i);
+                i64 elen = strlen(e.pattern);
+                if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
+                    if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
+                        void(ResponseWriter*, HttpRequest*) h = e.handler;
+                        h(w, r);
+                        return;
+                    }
+                }
+            }
+
+            // Prefix: if HEAD, allow GET handler as fallback
+            if (strcmp(m, "HEAD") == 0) {
+                for (i64 i = 0; i < n; i = i + 1) {
+                    RouteEntry* e = self.routes.get_ptr(i);
+                    i64 elen = strlen(e.pattern);
+                    if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0 && strcmp(e.method, "GET") == 0) {
+                        void(ResponseWriter*, HttpRequest*) h = e.handler;
+                        h(w, r);
+                        return;
+                    }
+                }
+            }
+
+            // Prefix matched but method did not: 405 Method Not Allowed
+            String allow = String.new();
+            bool first = true;
+            for (i64 i = 0; i < n; i = i + 1) {
+                RouteEntry* e = self.routes.get_ptr(i);
+                i64 elen = strlen(e.pattern);
+                if (elen == best_len && memcmp((const void*)p, (const void*)e.pattern, elen) == 0) {
+                    str em = e.method;
+                    if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
+                        em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
+                    }
+                    if (!allow.contains(em)) {
+                        if (!first) { allow.push_str(", "); }
+                        allow.push_str(em);
+                        first = false;
+                    }
+                }
+            }
+            w.set_header("Allow", (str)allow.data);
+            w.set_header("Content-Type", "text/plain; charset=utf-8");
+            w.write_header(405);
+            w.write_str("405 Method Not Allowed\n");
+            allow.drop();
             return;
         }
 
+        // 3. Fallback: 404 page not found
         w.set_header("Content-Type", "text/plain; charset=utf-8");
         w.write_header(404);
         w.write_str("404 page not found\n");
@@ -2702,10 +2819,33 @@ impl HttpServer {
         return move s;
     }
 
-    void handle_func(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
-        self.mux.handle_func(pattern, handler);
+    void handle_func(&mut self, str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.handle_func(method, pattern, handler);
     }
 
+    void get(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.get(pattern, handler);
+    }
+
+    void post(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.post(pattern, handler);
+    }
+
+    void put(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.put(pattern, handler);
+    }
+
+    void delete(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.delete(pattern, handler);
+    }
+
+    void patch(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.patch(pattern, handler);
+    }
+
+    void options(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+        self.mux.options(pattern, handler);
+    }
     void set_mux(&mut self, ServeMux* mux) {
         self.custom_mux = mux;
     }
@@ -2836,9 +2976,10 @@ impl Drop for HttpServer {
 
 ServeMux g_default_mux;
 
-void http_handle_func(str pattern, void(ResponseWriter*, HttpRequest*) handler) {
-    g_default_mux.handle_func(pattern, handler);
+void http_handle_func(str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
+    g_default_mux.handle_func(method, pattern, handler);
 }
+
 
 Result<i64, Error> http_listen_and_serve(str addr) {
     HttpServer s = HttpServer.new(addr);
@@ -2850,7 +2991,7 @@ Result<i64, Error> http_listen_and_serve(str addr) {
 
 Result<i64, Error> http_listen_and_serve(str addr, void(ResponseWriter*, HttpRequest*) handler) {
     HttpServer s = HttpServer.new(addr);
-    s.handle_func("/", handler);
+    s.handle_func("*", "/", handler);
     Result<i64, Error> r = s.listen_and_serve();
     s.drop();
     return r;

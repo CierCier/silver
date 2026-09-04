@@ -36,13 +36,13 @@ void handle_query(ResponseWriter* w, HttpRequest* r) {
 void server_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
-    s.handle_func("/hello", handle_hello);
-    s.handle_func("/echo", handle_echo);
-    s.handle_func("/search", handle_query);
+    s.get("/hello", handle_hello);
+    s.post("/echo", handle_echo);
+    s.get("/search", handle_query);
 
-    // Serve 4 test requests
+    // Serve 6 test requests (4 successful/not found, 2 method not allowed)
     i64 count = 0;
-    while (count < 4) {
+    while (count < 6) {
         Result<i64, Error> a = listener.accept();
         match a {
             Ok(fd) : {
@@ -126,6 +126,26 @@ i32 main() {
     assert_eq_i64((i64)resp4.status, 404, "status 404");
     assert_true(strcmp((str)resp4.body.data, "404 page not found\n") == 0, "404 body");
     resp4.drop();
+
+    // Test 5: POST /hello -> 405 Method Not Allowed (only GET is registered)
+    Result<HttpResponse, Error> r5 = http_post((str)url.data, "text/plain", "invalid method payload");
+    assert_true(r5.success(), "POST /hello completed");
+    HttpResponse resp5 = r5.unwrap();
+    assert_eq_i64((i64)resp5.status, 405, "status 405 Method Not Allowed");
+    String allow5 = resp5.get_header("Allow");
+    assert_true(allow5.contains("GET"), "Allow header specifies GET");
+    allow5.drop();
+    resp5.drop();
+
+    // Test 6: GET /echo -> 405 Method Not Allowed (only POST is registered)
+    Result<HttpResponse, Error> r6 = http_get((str)url_echo.data);
+    assert_true(r6.success(), "GET /echo completed");
+    HttpResponse resp6 = r6.unwrap();
+    assert_eq_i64((i64)resp6.status, 405, "status 405 Method Not Allowed");
+    String allow6 = resp6.get_header("Allow");
+    assert_true(allow6.contains("POST"), "Allow header specifies POST");
+    allow6.drop();
+    resp6.drop();
 
     url.drop();
     url_echo.drop();

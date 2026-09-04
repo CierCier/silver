@@ -34,8 +34,8 @@ void handle_h2_echo(ResponseWriter* w, HttpRequest* r) {
 void server_h2_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
-    s.handle_func("/hello", handle_h2_hello);
-    s.handle_func("/echo", handle_h2_echo);
+    s.get("/hello", handle_h2_hello);
+    s.post("/echo", handle_h2_echo);
 
     // Serve 3 connections: 2 HTTP/2 connections and 1 HTTP/1.1 connection
     i64 count = 0;

@@ -42,8 +42,8 @@ void handle_echo(ResponseWriter* w, HttpRequest* r) {
 void server_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
-    s.handle_func("/hello", handle_hello);
-    s.handle_func("/echo", handle_echo);
+    s.get("/hello", handle_hello);
+    s.post("/echo", handle_echo);
 
     Result<i64, Error> a = listener.accept();
 	match a {
