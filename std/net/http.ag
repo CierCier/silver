@@ -2330,6 +2330,7 @@ struct ResponseWriter {
     bool header_written;
     bool chunked;
     bool close_connection;
+    bool has_content_length;
     bool is_h2;
     i64 h2_stream_id;
     void* h2_conn_ptr;
@@ -2345,6 +2346,7 @@ impl ResponseWriter {
         w.header_written = false;
         w.chunked = false;
         w.close_connection = close_conn;
+        w.has_content_length = false;
         w.is_h2 = false;
         w.h2_stream_id = 0;
         w.h2_conn_ptr = (void*)0;
@@ -2353,6 +2355,9 @@ impl ResponseWriter {
 
     /// Set response header field. Mirrors Go's w.Header().Set(k, v).
     void set_header(&mut self, str name, str value) {
+        if (http_equal_ci((u8*)name, 0, strlen(name), "content-length")) {
+            self.has_content_length = true;
+        }
         self.headers.push_str(name);
         self.headers.push_str(": ");
         self.headers.push_str(value);
@@ -2382,23 +2387,7 @@ impl ResponseWriter {
         wire.push_str(http_status_reason(self.status_code));
         wire.push_str("\r\n");
 
-        bool has_cl = false;
-        u8* hdata = self.headers.data;
-        i64 hlen = self.headers.len;
-        i64 pos = 0;
-        while (pos < hlen) {
-            i64 end = http_find_crlf(hdata, hlen, pos);
-            if (end < 0) { end = hlen; }
-            i64 colon = pos;
-            while (colon < end && hdata[colon] != (u8)':') { colon = colon + 1; }
-            if (colon > pos && colon < end && http_equal_ci(hdata, pos, colon, "content-length")) {
-                has_cl = true;
-                break;
-            }
-            if (end >= hlen) { break; }
-            pos = end + 2;
-        }
-
+        bool has_cl = self.has_content_length;
         if (!has_cl) {
             if (content_len >= 0) {
                 wire.push_str("Content-Length: ");
