@@ -4089,7 +4089,11 @@ impl TypeChecker {
                     ast::PrimitiveType::C32 | ast::PrimitiveType::C64 | ast::PrimitiveType::C80
                 )
             ),
-            ast::Literal::String(_) => is_string(expected),
+            ast::Literal::String(_) => {
+                is_string(expected)
+                    || matches!(expected, Type::Slice { element } if Self::is_byte_like(element))
+                    || matches!(expected, Type::Reference { inner, .. } | Type::Pointer { inner, .. } if matches!(inner.as_ref(), Type::Slice { element } if Self::is_byte_like(element)))
+            }
             ast::Literal::Char(value) => {
                 if matches!(expected, Type::Primitive(ast::PrimitiveType::Char)) {
                     return true;
@@ -4274,9 +4278,65 @@ impl TypeChecker {
         }
     }
 
+    pub(crate) fn is_byte_like(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Primitive(
+                ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
+            )
+        )
+    }
+
+    pub(crate) fn can_coerce_to_slice(&self, found: &Type, expected_elem: &Type) -> bool {
+        match found {
+            Type::Slice { element } => {
+                self.is_assignable(expected_elem, element)
+                    || (Self::is_byte_like(expected_elem) && Self::is_byte_like(element))
+            }
+            Type::Primitive(ast::PrimitiveType::Str) => Self::is_byte_like(expected_elem),
+            Type::Named { path, generics } => {
+                if path.last().map(|s| s.as_str()) == Some("String") && generics.is_empty() {
+                    Self::is_byte_like(expected_elem)
+                } else if path.last().map(|s| s.as_str()) == Some("Vec") && generics.len() == 1 {
+                    self.is_assignable(expected_elem, &generics[0])
+                        || (Self::is_byte_like(expected_elem) && Self::is_byte_like(&generics[0]))
+                } else {
+                    false
+                }
+            }
+            Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
+                if Self::is_byte_like(inner) && Self::is_byte_like(expected_elem) {
+                    true
+                } else {
+                    self.can_coerce_to_slice(inner, expected_elem)
+                }
+            }
+            Type::Array { element, .. } => {
+                self.is_assignable(expected_elem, element)
+                    || (Self::is_byte_like(expected_elem) && Self::is_byte_like(element))
+            }
+            _ => false,
+        }
+    }
+
     fn is_assignable(&self, expected: &Type, found: &Type) -> bool {
         if expected == found || Self::void_compatible(expected, found) {
             return true;
+        }
+
+        if let Type::Slice { element } = expected {
+            if self.can_coerce_to_slice(found, element) {
+                return true;
+            }
+        }
+        if let Type::Reference { is_mutable: false, inner }
+        | Type::Pointer { is_mutable: false, inner, .. } = expected
+        {
+            if let Type::Slice { element } = inner.as_ref() {
+                if self.can_coerce_to_slice(found, element) {
+                    return true;
+                }
+            }
         }
 
         // References and pointers share the same representation: a reference
@@ -4531,6 +4591,29 @@ impl TypeChecker {
                     element: found_elem,
                 },
             ) => self.infer_type_params(element, found_elem, type_params, mapping),
+            (
+                Type::Slice { element },
+                Type::Named { path, generics },
+            ) if path.last().map(|s| s.as_str()) == Some("Vec") && generics.len() == 1 => {
+                self.infer_type_params(element, &generics[0], type_params, mapping)
+            }
+            (
+                Type::Slice { element },
+                Type::Array {
+                    element: found_elem,
+                    ..
+                },
+            ) => self.infer_type_params(element, found_elem, type_params, mapping),
+            (
+                Type::Slice { .. },
+                Type::Reference { inner, .. } | Type::Pointer { inner, .. },
+            ) => self.infer_type_params(expected, inner, type_params, mapping),
+            (
+                Type::Reference { inner, .. },
+                found,
+            ) if matches!(inner.as_ref(), Type::Slice { .. }) => {
+                self.infer_type_params(inner, found, type_params, mapping)
+            }
             (Type::Optional { inner }, Type::Optional { inner: found_inner }) => {
                 self.infer_type_params(inner, found_inner, type_params, mapping)
             }
@@ -5062,6 +5145,33 @@ impl TypeChecker {
             .contains_key(&(self.method_key(from), self.method_key(to)))
         {
             return true;
+        }
+
+        if let Type::Slice { element } = to {
+            if self.can_coerce_to_slice(from, element) {
+                return true;
+            }
+        }
+        if let Type::Reference { is_mutable: false, inner }
+        | Type::Pointer { is_mutable: false, inner, .. } = to
+        {
+            if let Type::Slice { element } = inner.as_ref() {
+                if self.can_coerce_to_slice(from, element) {
+                    return true;
+                }
+            }
+        }
+        if let Type::Slice { element } = from {
+            if matches!(to, Type::Primitive(ast::PrimitiveType::Str)) && Self::is_byte_like(element) {
+                return true;
+            }
+            if let Type::Pointer { is_mutable: false, inner, .. } = to {
+                if self.is_assignable(inner, element)
+                    || (Self::is_byte_like(inner) && Self::is_byte_like(element))
+                {
+                    return true;
+                }
+            }
         }
 
         match (from, to) {
@@ -8703,5 +8813,70 @@ mod tests {
                 .any(|t| matches!(t.kind, crate::lexer::Token::Let)),
             "`let` should lex as a keyword token"
         );
+    }
+
+    #[test]
+    fn slice_auto_borrow_coercions() {
+        let tc = TypeChecker::new();
+        let u8_slice = Type::Slice {
+            element: Box::new(Type::Primitive(ast::PrimitiveType::U8)),
+        };
+        let i64_slice = Type::Slice {
+            element: Box::new(Type::Primitive(ast::PrimitiveType::I64)),
+        };
+
+        let string_ty = Type::Named {
+            path: vec!["String".to_string()],
+            generics: Vec::new(),
+        };
+        let ref_string = Type::Reference {
+            is_mutable: false,
+            inner: Box::new(string_ty.clone()),
+        };
+        let str_ty = Type::Primitive(ast::PrimitiveType::Str);
+
+        let vec_i64 = Type::Named {
+            path: vec!["Vec".to_string()],
+            generics: vec![Type::Primitive(ast::PrimitiveType::I64)],
+        };
+        let ref_vec_i64 = Type::Reference {
+            is_mutable: false,
+            inner: Box::new(vec_i64.clone()),
+        };
+
+        let arr_i64 = Type::Array {
+            element: Box::new(Type::Primitive(ast::PrimitiveType::I64)),
+            size: 10,
+        };
+        let ref_arr_i64 = Type::Reference {
+            is_mutable: false,
+            inner: Box::new(arr_i64.clone()),
+        };
+
+        // String, &String, str -> Slice<u8> (&str)
+        assert!(tc.is_assignable(&u8_slice, &string_ty));
+        assert!(tc.is_assignable(&u8_slice, &ref_string));
+        assert!(tc.is_assignable(&u8_slice, &str_ty));
+        assert!(tc.is_implicitly_castable(&string_ty, &u8_slice));
+        assert!(tc.is_implicitly_castable(&ref_string, &u8_slice));
+        assert!(tc.is_implicitly_castable(&str_ty, &u8_slice));
+
+        // Vec<i64>, &Vec<i64>, Array, &Array -> Slice<i64> ([i64])
+        assert!(tc.is_assignable(&i64_slice, &vec_i64));
+        assert!(tc.is_assignable(&i64_slice, &ref_vec_i64));
+        assert!(tc.is_assignable(&i64_slice, &arr_i64));
+        assert!(tc.is_assignable(&i64_slice, &ref_arr_i64));
+        assert!(tc.is_implicitly_castable(&vec_i64, &i64_slice));
+        assert!(tc.is_implicitly_castable(&ref_vec_i64, &i64_slice));
+        assert!(tc.is_implicitly_castable(&arr_i64, &i64_slice));
+        assert!(tc.is_implicitly_castable(&ref_arr_i64, &i64_slice));
+
+        // Incompatible types rejected
+        assert!(!tc.is_assignable(&i64_slice, &string_ty));
+        assert!(!tc.is_assignable(&u8_slice, &vec_i64));
+
+        // String literal matches u8_slice
+        let str_lit = ast::Literal::String("hello world".to_string());
+        assert!(tc.literal_matches_expected(&str_lit, &u8_slice));
     }
 }
