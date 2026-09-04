@@ -53,6 +53,8 @@ struct HttpRequest {
     str url; // full URL for Go-style requests; null for manual requests
     Slice<u8> path_slice;
     Slice<u8> method_slice;
+    Slice<u8> host_slice;
+    Slice<u8> headers_slice;
     String method_str;
     String target_str;
     String host_str;
@@ -551,6 +553,8 @@ impl HttpRequest {
         request.close = true;
         request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.host_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.headers_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -579,6 +583,8 @@ impl HttpRequest {
         request.url = (str)0;
         request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.host_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.headers_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -606,6 +612,8 @@ impl HttpRequest {
         request.url = (str)0;
         request.path_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.host_slice = Slice<u8>.from_raw((u8*)0, 0);
+        request.headers_slice = Slice<u8>.from_raw((u8*)0, 0);
         request.method_str = String.new();
         request.target_str = String.new();
         request.host_str = String.new();
@@ -631,6 +639,8 @@ impl HttpRequest {
         self.url = (str)0;
         self.path_slice = Slice<u8>.from_raw((u8*)0, 0);
         self.method_slice = Slice<u8>.from_raw((u8*)0, 0);
+        self.host_slice = Slice<u8>.from_raw((u8*)0, 0);
+        self.headers_slice = Slice<u8>.from_raw((u8*)0, 0);
         self.method_str.clear();
         self.target_str.clear();
         self.host_str.clear();
@@ -712,27 +722,44 @@ impl HttpRequest {
         self.close = false;
     }
 
-    /// The value of `name` (case-insensitive) in the request headers, or
-    /// an empty string when absent. Mirrors Go's Request.Header.Get.
-    String get_header(*self, str name) {
-        u8* data = self.headers.data;
-        i64 len = self.headers.len;
+    /// The value of `name` (case-insensitive) as a zero-copy Slice<u8>,
+    /// or empty slice if absent.
+    Slice<u8> header_slice(*self, str name) {
+        u8* data = (u8*)0;
+        i64 len = 0;
+        if (self.headers_slice.len > 0) {
+            data = self.headers_slice.data;
+            len = self.headers_slice.len;
+        } else if (self.headers.len > 0) {
+            data = self.headers.data;
+            len = self.headers.len;
+        } else {
+            return Slice<u8>.from_raw((u8*)0, 0);
+        }
         i64 pos = 0;
         while (pos < len) {
             i64 end = http_find_crlf(data, len, pos);
             if (end < 0) { end = len; }
             i64 colon = pos;
             while (colon < end && data[colon] != (u8)':') { colon = colon + 1; }
-            if (colon > pos && colon < end
-                && http_equal_ci(data, pos, colon, name)) {
+            if (colon > pos && colon < end && http_equal_ci(data, pos, colon, name)) {
                 i64 value_start = colon + 1;
-                while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
-                return self.headers.substr(value_start, end - value_start);
+                while (value_start < end && http_is_space(data[value_start])) {
+                    value_start = value_start + 1;
+                }
+                return Slice<u8>.from_raw(&data[value_start], end - value_start);
             }
             if (end >= len) { break; }
             pos = end + 2;
         }
-        return String.new();
+        return Slice<u8>.from_raw((u8*)0, 0);
+    }
+
+    /// The value of `name` (case-insensitive) in the request headers, or
+    /// an empty string when absent. Mirrors Go's Request.Header.Get.
+    String get_header(*self, str name) {
+        Slice<u8> s = self.header_slice(name);
+        return s.to_string();
     }
 
     /// Protocol string e.g. "HTTP/1.1". Mirrors Go's Request.Proto.
@@ -891,6 +918,7 @@ impl HttpRequest {
             while (value_start < end && http_is_space(data[value_start])) { value_start = value_start + 1; }
 
             if (http_equal_ci(data, header_start, colon, "host")) {
+                self.host_slice = Slice<u8>.from_raw(&data[value_start], end - value_start);
                 self.host_str.clear();
                 self.host_str.push_bytes(&data[value_start], end - value_start);
                 self.host = (str)self.host_str.data;
@@ -922,8 +950,7 @@ impl HttpRequest {
             self.content_length = -1;
         }
 
-        self.headers.clear();
-        self.headers.push_bytes(&self.raw_buf.data[line_end + 2], self.raw_buf.len - line_end - 2);
+        self.headers_slice = self.raw_buf.as_slice().sub_slice(line_end + 2, self.raw_buf.len - (line_end + 2));
         return Ok(1);
     }
 
@@ -3014,7 +3041,7 @@ impl HttpServer {
             }
 
             // HTTP/1.1 mandatory Host header check (RFC 9112 §3.2)
-            if (req.version == HttpVersion.Http11 && (req.host == (str)0 || strlen(req.host) == 0)) {
+            if (req.version == HttpVersion.Http11 && req.host_slice.len == 0 && (req.host == (str)0 || strlen(req.host) == 0)) {
                 ResponseWriter bad_w = ResponseWriter.new(io, req.version, true);
                 bad_w.set_header("Content-Type", "text/plain; charset=utf-8");
                 bad_w.set_header("Connection", "close");
@@ -3026,11 +3053,10 @@ impl HttpServer {
             }
 
             // Expect: 100-continue handling (RFC 9110 §10.1.1)
-            String expect = req.get_header("expect");
-            if (expect.len > 0 && http_equal_ci(expect.data, 0, expect.len, "100-continue")) {
+            Slice<u8> expect = req.header_slice("expect");
+            if (expect.len > 0 && expect.equals_str("100-continue")) {
                 transport_write(&io, (u8*)"HTTP/1.1 100 Continue\r\n\r\n", 25);
             }
-            expect.drop();
 
             Result<i64, Error> br = req.read_body(&io, self.max_body_bytes);
             if (br.failed()) {
@@ -3149,7 +3175,7 @@ impl HttpServer {
             }
 
             // HTTP/1.1 mandatory Host header check (RFC 9112 §3.2)
-            if (req.version == HttpVersion.Http11 && (req.host == (str)0 || strlen(req.host) == 0)) {
+            if (req.version == HttpVersion.Http11 && req.host_slice.len == 0 && (req.host == (str)0 || strlen(req.host) == 0)) {
                 ResponseWriter bad_w = ResponseWriter.new(io, req.version, true);
                 bad_w.set_header("Content-Type", "text/plain; charset=utf-8");
                 bad_w.set_header("Connection", "close");
@@ -3161,11 +3187,10 @@ impl HttpServer {
             }
 
             // Expect: 100-continue handling (RFC 9110 §10.1.1)
-            String expect = req.get_header("expect");
-            if (expect.len > 0 && http_equal_ci(expect.data, 0, expect.len, "100-continue")) {
+            Slice<u8> expect = req.header_slice("expect");
+            if (expect.len > 0 && expect.equals_str("100-continue")) {
                 transport_write(&io, (u8*)"HTTP/1.1 100 Continue\r\n\r\n", 25);
             }
-            expect.drop();
 
             Result<i64, Error> br = req.read_body(&io, self.max_body_bytes);
             if (br.failed()) {
