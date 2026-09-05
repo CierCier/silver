@@ -596,6 +596,7 @@ pub struct ParallelGraphExecutor<'a> {
     pub store: &'a CacheStore,
     pub jobs: usize,
     pub progress: Option<Arc<BuildProgress>>,
+    pub root_inputs: &'a [PathBuf],
 }
 
 impl<'a> ParallelGraphExecutor<'a> {
@@ -605,6 +606,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         store: &'a CacheStore,
         jobs: usize,
         progress: Option<Arc<BuildProgress>>,
+        root_inputs: &'a [PathBuf],
     ) -> Self {
         Self {
             graph,
@@ -612,7 +614,16 @@ impl<'a> ParallelGraphExecutor<'a> {
             store,
             jobs: if jobs == 0 { num_cpus() } else { jobs },
             progress,
+            root_inputs,
         }
+    }
+
+    fn is_root_input(&self, source_path: &Path) -> bool {
+        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        self.root_inputs.iter().any(|root| {
+            let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            root_canon == canonical
+        })
     }
 
     pub fn execute(&self) -> Result<ParallelBuildReport, Vec<String>> {
@@ -642,6 +653,9 @@ impl<'a> ParallelGraphExecutor<'a> {
                 let mut layer_misses = Vec::new();
                 for module_name in layer {
                     if let Some(node) = self.graph.nodes.get(&module_name) {
+                        if self.is_root_input(&node.source_path) {
+                            continue;
+                        }
                         if let Some(cached) = self.loader.get_cached_module(&node.source_path, &node.module_path) {
                             total_hits += 1;
                             object_artifacts.push(cached.obj_path);
@@ -689,8 +703,15 @@ impl<'a> ParallelGraphExecutor<'a> {
             return Err(recorded_errors);
         }
 
+        let non_root_count = self
+            .graph
+            .nodes
+            .values()
+            .filter(|n| !self.is_root_input(&n.source_path))
+            .count();
+
         Ok(ParallelBuildReport {
-            total_modules: self.graph.nodes.len(),
+            total_modules: non_root_count,
             cache_hits: total_hits,
             compiled_modules: total_compiled,
             object_artifacts,

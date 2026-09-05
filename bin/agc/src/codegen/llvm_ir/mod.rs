@@ -169,6 +169,7 @@ pub struct LlvmIrGenerator<'ctx> {
     /// Monotonic counter for per-launch-site trampoline function names.
     pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,
+    pub(crate) root_symbols: HashSet<String>,
     /// (LLVM function name, doc comment text) pairs collected while
     /// generating; spliced into the printed IR in `finish()` as `;` lines.
     pub(crate) doc_comments: Vec<(String, String)>,

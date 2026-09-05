@@ -241,8 +241,18 @@ impl Profiler {
             return;
         }
 
-        let total_time_ms: f64 = self.records.iter().map(|r| r.elapsed_ms).sum();
-        let total_mem_delta_kb: i64 = self.records.iter().map(|r| r.memory_delta_kb()).sum();
+        let total_time_ms: f64 = self
+            .records
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.elapsed_ms)
+            .sum();
+        let total_mem_delta_kb: i64 = self
+            .records
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.memory_delta_kb())
+            .sum();
         let peak_mem_kb = self
             .records
             .iter()

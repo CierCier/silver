@@ -179,8 +179,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             fn_source_info: rustc_hash::FxHashMap::default(),
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             leak_check: false,
+            root_symbols: HashSet::default(),
         };
         generator.generate_program(program)?;
+        generator.emit_backtrace_table();
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())
     }
@@ -292,9 +294,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            root_symbols: HashSet::default(),
         };
         generator.declare_imported_modules(program, imported_modules)?;
         generator.generate_program(program)?;
+        generator.emit_backtrace_table();
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())
     }
@@ -629,6 +633,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            root_symbols: HashSet::default(),
         };
         generator.declare_imported_modules(program, imported_modules)?;
 
@@ -667,6 +672,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             table.absorb_from(&generator.symbol_table);
             crate::profiler::end_phase("codegen IR generation");
 
+            crate::profiler::begin_phase("eliminate dead functions");
+            generator.eliminate_dead_functions(&machine)?;
+            crate::profiler::end_phase("eliminate dead functions");
+
+            crate::profiler::begin_phase("emit backtrace table");
+            generator.emit_backtrace_table();
+            crate::profiler::end_phase("emit backtrace table");
+
             crate::profiler::begin_phase("LLVM opt passes");
             generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;
             crate::profiler::end_phase("LLVM opt passes");
@@ -696,6 +709,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator.generate_program(program)?;
         table.absorb_from(&generator.symbol_table);
         crate::profiler::end_phase("codegen IR generation");
+
+        crate::profiler::begin_phase("eliminate dead functions");
+        generator.eliminate_dead_functions(&machine)?;
+        crate::profiler::end_phase("eliminate dead functions");
+
+        crate::profiler::begin_phase("emit backtrace table");
+        generator.emit_backtrace_table();
+        crate::profiler::end_phase("emit backtrace table");
 
         crate::profiler::begin_phase("LLVM opt passes");
         generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;

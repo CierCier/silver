@@ -486,6 +486,61 @@ mod tests {
     }
 
     #[test]
+    fn test_globaldce_removes_dead_internal_function() {
+        use inkwell::module::Linkage;
+        use inkwell::targets::TargetTriple;
+        Target::initialize_all(&InitializationConfig::default());
+        let context = Context::create();
+        let module = context.create_module("test_dce");
+        let i32_type = context.i32_type();
+        let fn_type = i32_type.fn_type(&[], false);
+
+        // main (external)
+        let main_fn = module.add_function("main", fn_type, Some(Linkage::External));
+        let bb = context.append_basic_block(main_fn, "entry");
+        let builder = context.create_builder();
+        builder.position_at_end(bb);
+        builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
+
+        // dead_func (internal)
+        let dead_fn = module.add_function("dead_func", fn_type, Some(Linkage::Internal));
+        let bb2 = context.append_basic_block(dead_fn, "entry");
+        builder.position_at_end(bb2);
+        builder.build_return(Some(&i32_type.const_int(42, false))).unwrap();
+
+        let triple = TargetTriple::create("x86_64-unknown-linux-gnu");
+        let target = Target::from_triple(&triple).unwrap();
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                OptimizationLevel::None,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .unwrap();
+
+        let pipeline = std::ffi::CString::new("globaldce").unwrap();
+        let options = inkwell::passes::PassBuilderOptions::create();
+        unsafe {
+            let err = llvm_sys::transforms::pass_builder::LLVMRunPasses(
+                module.as_mut_ptr(),
+                pipeline.as_ptr(),
+                machine.as_mut_ptr(),
+                options.as_mut_ptr(),
+            );
+            assert!(err.is_null());
+        }
+
+        assert!(module.get_function("main").is_some());
+        assert!(
+            module.get_function("dead_func").is_none(),
+            "dead_func should have been eliminated by globaldce"
+        );
+    }
+
+    #[test]
     fn no_scalar_literal_globals_in_ir() {
         let ir = lower_to_llvm(
             "i32 main() {

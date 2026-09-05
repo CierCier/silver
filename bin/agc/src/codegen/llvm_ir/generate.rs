@@ -413,7 +413,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// resolved at link time via ptrtoint; file/line come from the AST
     /// spans), plus a count global. The runtime resolves return addresses
     /// against this table when printing a stack trace on abort/assert.
-    fn emit_backtrace_table(&mut self) {
+    pub(crate) fn emit_backtrace_table(&mut self) {
         let functions: Vec<_> = self
             .module
             .get_functions()
@@ -517,6 +517,82 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         count.set_linkage(inkwell::module::Linkage::LinkOnceODR);
     }
 
+    pub(crate) fn eliminate_dead_functions(
+        &mut self,
+        machine: &inkwell::targets::TargetMachine,
+    ) -> CodegenResult<()> {
+        let has_main = self
+            .module
+            .get_function("main")
+            .is_some_and(|f| f.count_basic_blocks() > 0);
+        if !has_main {
+            return Ok(());
+        }
+
+        let mut original_linkages: rustc_hash::FxHashMap<String, inkwell::module::Linkage> =
+            rustc_hash::FxHashMap::default();
+
+        for function in self.module.get_functions() {
+            if function.count_basic_blocks() == 0 {
+                continue;
+            }
+            let name = function.get_name().to_string_lossy();
+            let is_root = name == "main"
+                || name == "_start"
+                || name == "memset"
+                || name == "memcpy"
+                || name == "memmove"
+                || name == "strlen"
+                || name == "abort"
+                || name.starts_with("__")
+                || self.root_symbols.contains(name.as_ref());
+
+            original_linkages.insert(name.into_owned(), function.get_linkage());
+            if !is_root {
+                function.set_linkage(inkwell::module::Linkage::Internal);
+            }
+        }
+
+        let pipeline = std::ffi::CString::new("globaldce")
+            .expect("pipeline CString should not contain null bytes");
+        let options = inkwell::passes::PassBuilderOptions::create();
+        unsafe {
+            let err = llvm_sys::transforms::pass_builder::LLVMRunPasses(
+                self.module.as_mut_ptr(),
+                pipeline.as_ptr(),
+                machine.as_mut_ptr(),
+                options.as_mut_ptr(),
+            );
+            if !err.is_null() {
+                let detail = {
+                    let msg = llvm_sys::error::LLVMGetErrorMessage(err);
+                    let text = if msg.is_null() {
+                        "<no detail>".to_string()
+                    } else {
+                        std::ffi::CStr::from_ptr(msg).to_string_lossy().into_owned()
+                    };
+                    llvm_sys::error::LLVMDisposeErrorMessage(msg);
+                    text
+                };
+                return Err(CodegenError::new(format!(
+                    "globaldce returned an error: {detail}"
+                )));
+            }
+        }
+
+        for function in self.module.get_functions() {
+            if function.count_basic_blocks() == 0 {
+                continue;
+            }
+            let name = function.get_name().to_string_lossy();
+            if let Some(orig) = original_linkages.get(name.as_ref()) {
+                function.set_linkage(*orig);
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn finalize_debug(&mut self) {
         if let Some(debug) = self.debug.take() {
             debug.finalize();
@@ -587,6 +663,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         );
 
         if link_name.is_some() {
+            self.root_symbols.insert(llvm_name.to_string());
+            self.root_symbols.insert(func.name.name.clone());
             self.imported_function_links
                 .insert(func.name.name.clone(), llvm_name.to_string());
             self.register_function_signature(
@@ -942,7 +1020,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             }
             self.generate_item(item)?;
         }
-        self.emit_backtrace_table();
         Ok(())
     }
 

@@ -877,9 +877,20 @@ pub fn run(cli: Cli) {
                 graph.display_graph();
             }
 
-            let total_steps = graph.nodes.len()
-                + if matches!(plan.emit, EmitKind::Exe) {
-                    1
+            let dep_nodes_count = graph
+                .nodes
+                .values()
+                .filter(|n| {
+                    let canon_n = std::fs::canonicalize(&n.source_path).unwrap_or_else(|_| n.source_path.clone());
+                    !plan.inputs.iter().any(|inp| {
+                        let canon_inp = std::fs::canonicalize(inp).unwrap_or_else(|_| inp.clone());
+                        canon_inp == canon_n
+                    })
+                })
+                .count();
+            let total_steps = dep_nodes_count
+                + if matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
+                    plan.inputs.len()
                 } else {
                     0
                 };
@@ -899,6 +910,7 @@ pub fn run(cli: Cli) {
                         store,
                         plan.jobs,
                         Some(progress.clone()),
+                        &plan.inputs,
                     );
                     match executor.execute() {
                         Ok(report) => {
@@ -1625,7 +1637,7 @@ pub fn run(cli: Cli) {
                         total_modules,
                         &total_graph_elements,
                         cached_count,
-                        compiled_count,
+                        compiled_count + plan.inputs.len(),
                     );
                 }
                 // Clean up temp dir
