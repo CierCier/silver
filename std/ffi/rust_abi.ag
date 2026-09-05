@@ -1,0 +1,160 @@
+// Raw stable C ABI declarations for the optional Rust-backed tooling bridge.
+//
+// Build the bridge first (`cargo build -p silver-ffi`) and pass its output
+// directory with `-L` when compiling a Silver program that imports this file.
+// The declarations intentionally expose only repr(C) data, pointer/length
+// views, explicit owned buffers, and opaque process handles. Ownership is
+// explicit: RustFfiBuffer, RustFfiError, and RustFfiProcess release their
+// owned state through Silver Drop when the scope ends.
+//
+// The native-ergonomic layer over this ABI lives in std/ffi/rust.ag; import
+// std.ffi (or std.ffi.rust) for Result<T, Error>-shaped calls.
+
+import std.mem.memory;
+
+struct RustFfiSlice {
+    const u8* data;
+    i64 len;
+}
+
+struct RustFfiBuffer {
+    u8* data;
+    i64 len;
+    i64 cap;
+}
+
+struct RustFfiError {
+    i32 code;
+    RustFfiBuffer message;
+}
+
+struct RustFfiProcess {
+    void* handle;
+}
+
+const i32 SILVER_FFI_ABI_VERSION = 1;
+const i32 SILVER_FFI_OK = 0;
+const i32 SILVER_FFI_ERR_INVALID_ARGUMENT = 1;
+const i32 SILVER_FFI_ERR_NULL_POINTER = 2;
+const i32 SILVER_FFI_ERR_INVALID_UTF8 = 3;
+const i32 SILVER_FFI_ERR_IO = 4;
+const i32 SILVER_FFI_ERR_PROCESS = 5;
+const i32 SILVER_FFI_ERR_NOT_FOUND = 6;
+const i32 SILVER_FFI_ERR_CALLBACK_STOPPED = 7;
+const i32 SILVER_FFI_ERR_INVALID_HANDLE = 8;
+const i32 SILVER_FFI_ERR_PANIC = 9;
+
+#[link(silver_ffi)]
+extern "C" {
+    i32 silver_ffi_abi_version();
+    void silver_ffi_buffer_init(RustFfiBuffer* buffer);
+    void silver_ffi_buffer_free(RustFfiBuffer* buffer);
+    void silver_ffi_error_init(RustFfiError* error);
+    void silver_ffi_error_clear(RustFfiError* error);
+    // Process-lifetime NUL-terminated static text for a status code.
+    str silver_ffi_status_message(i32 code);
+
+    i32 silver_path_join(const RustFfiSlice* base,
+                         const RustFfiSlice* child,
+                         RustFfiBuffer* out,
+                         RustFfiError* error);
+    i32 silver_fs_exists(const RustFfiSlice* path,
+                         i32* out_exists,
+                         RustFfiError* error);
+    i32 silver_fs_read_file(const RustFfiSlice* path,
+                            RustFfiBuffer* out,
+                            RustFfiError* error);
+    i32 silver_fs_write_file(const RustFfiSlice* path,
+                             const RustFfiSlice* contents,
+                             RustFfiError* error);
+    i32 silver_fs_remove_file(const RustFfiSlice* path,
+                              RustFfiError* error);
+    i32 silver_fs_create_dir(const RustFfiSlice* path,
+                             RustFfiError* error);
+    i32 silver_fs_remove_dir(const RustFfiSlice* path,
+                             RustFfiError* error);
+    i32 silver_fs_read_file_callback(
+        const RustFfiSlice* path,
+        i32 (void*, const RustFfiSlice*) callback,
+        void* userdata,
+        RustFfiError* error);
+
+    i32 silver_env_get(const RustFfiSlice* key,
+                       RustFfiBuffer* out,
+                       RustFfiError* error);
+    i32 silver_env_current_dir(RustFfiBuffer* out, RustFfiError* error);
+
+    i32 silver_process_spawn(const RustFfiSlice* program,
+                             const RustFfiSlice* args,
+                             i64 arg_count,
+                             void** out_handle,
+                             RustFfiError* error);
+    i32 silver_process_wait(void* handle,
+                            i32* out_exit_code,
+                            RustFfiError* error);
+    void silver_process_free(void** handle);
+}
+
+RustFfiSlice rust_ffi_slice(const u8* data, i64 len) {
+    RustFfiSlice result;
+    result.data = data;
+    result.len = len;
+    return result;
+}
+
+RustFfiSlice rust_ffi_text(str text) {
+    if (text == (str)0) {
+        return rust_ffi_slice((const u8*)0, 0);
+    }
+    return rust_ffi_slice((const u8*)text, strlen(text));
+}
+
+RustFfiBuffer rust_ffi_buffer_new() {
+    RustFfiBuffer result;
+    result.data = (u8*)0;
+    result.len = 0;
+    result.cap = 0;
+    return move result;
+}
+
+RustFfiSlice rust_ffi_buffer_slice(&RustFfiBuffer buffer) {
+    return rust_ffi_slice((const u8*)buffer.data, buffer.len);
+}
+
+RustFfiError rust_ffi_error_new() {
+    RustFfiError result;
+    result.code = SILVER_FFI_OK;
+    result.message = rust_ffi_buffer_new();
+    silver_ffi_error_init(&result);
+    return move result;
+}
+
+RustFfiProcess rust_ffi_process_new() {
+    RustFfiProcess result;
+    result.handle = (void*)0;
+    return move result;
+}
+
+void rust_ffi_process_close(RustFfiProcess* self) {
+    if (self.handle != (void*)0) {
+        silver_process_free(&self.handle);
+    }
+}
+
+impl Drop for RustFfiBuffer {
+    void drop(*self) {
+        silver_ffi_buffer_free(self);
+    }
+}
+
+impl Drop for RustFfiError {
+    void drop(*self) {
+        silver_ffi_error_clear(self);
+    }
+}
+
+impl Drop for RustFfiProcess {
+    void drop(*self) {
+        rust_ffi_process_close(self);
+    }
+}

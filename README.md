@@ -77,6 +77,7 @@ i32 main() {
   - `bin/aglsp/` — Silver Language Server Protocol implementation (`aglsp`)
   - `bin/agsm/` — Source maps and module artifact generator (`agsm`)
 - `std/` — Standard library sources (memory management, concurrency, I/O, collections, runtime)
+- `ffi/rust/` — Optional Rust implementation behind Silver's stable C ABI
 - `examples/` — Sample Silver programs
 - `tests/` — Test suites including language unit tests, memory pentests, and integration tests
 - `docs/` — Language specifications and architecture design docs
@@ -125,6 +126,26 @@ Run with leak checking enabled:
 ```bash
 cargo run -p agc -- --leak-check run path/to/file.ag
 ```
+
+### Rust-backed C ABI
+
+The optional `silver-ffi` crate provides filesystem, environment, process,
+owned-buffer, error, and callback primitives through a versioned C ABI. It is
+not Rust ABI compatibility and does not change Silver's freestanding runtime.
+`std/ffi/` adds a native layer over the same ABI — `Result<T, Error>`
+returns, `String` values, and `Drop`-owned process handles — so Rust-backed
+tooling reads like ordinary stdlib code.
+
+```bash
+cargo build -p silver-ffi
+cargo run -p agc -- examples/rust_ffi_tool.ag \
+  -L target/debug -o /tmp/rust_ffi_tool
+LD_LIBRARY_PATH="$PWD/target/debug" /tmp/rust_ffi_tool
+```
+
+See [`docs/rust-ffi.md`](docs/rust-ffi.md) and
+[`ffi/rust/README.md`](ffi/rust/README.md) for ownership, panic containment,
+platform assumptions, and the complete ABI contract.
 
 ### Modules & Packaging
 

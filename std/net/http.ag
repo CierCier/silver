@@ -2871,7 +2871,9 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str t
                     if (strcmp((str)fields[i].name, ":method") == 0) {
                         req.method_str.push_bytes(fields[i].value, fields[i].value_len);
                         req.method = (str)req.method_str.data;
-                        req.method_slice = Slice<u8>.from_raw(fields[i].value, fields[i].value_len);
+                        // Slices must view the request-owned copies: the HPACK
+                        // field buffers are freed before routing runs.
+                        req.method_slice = Slice<u8>.from_raw(req.method_str.data, req.method_str.len);
                     } else if (strcmp((str)fields[i].name, ":path") == 0) {
                         req.target_str.push_bytes(fields[i].value, fields[i].value_len);
                         req.target = (str)req.target_str.data;
@@ -2879,7 +2881,7 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str t
                         i64 qlen = fields[i].value_len;
                         while (q < qlen && fields[i].value[q] != (u8)'?') { q += 1; }
                         req.path_str.push_bytes(fields[i].value, q);
-                        req.path_slice = Slice<u8>.from_raw(fields[i].value, q);
+                        req.path_slice = Slice<u8>.from_raw(req.path_str.data, req.path_str.len);
                         if (q < qlen) {
                             req.query_str.push_bytes(&fields[i].value[q + 1], qlen - q - 1);
                         }

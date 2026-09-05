@@ -1,0 +1,9 @@
+// std/ffi.ag — Silver foreign-function interfaces: re-exports the std.ffi
+// submodules.
+//
+// The Rust-backed C ABI bridge is split by altitude: std.ffi.rust_abi holds
+// the raw extern declarations and RAII wrappers, and std.ffi.rust holds the
+// native Result<T, Error>-shaped layer. Import std.ffi for both; import
+// std.ffi.rust_abi alone for the raw ABI without the String/Result stack.
+import std.ffi.rust_abi;
+import std.ffi.rust;

@@ -1,0 +1,10 @@
+[package]
+name = "silver-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Stable C ABI bridge for Rust-backed Silver tooling"
+
+[lib]
+name = "silver_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]

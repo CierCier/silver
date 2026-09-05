@@ -109,6 +109,7 @@ test_specific_flags() {
         guard_test) echo "--static-runtime" ;;
         launch_send_test) echo "--static-runtime" ;;
         tls_test|http2_tls_test|https_server_test) [ -n "$SILVER_OPENSSL_LIB" ] && echo "-L $SILVER_OPENSSL_LIB" ;;
+        rust_ffi_test) [ -n "${SILVER_FFI_LIBRARY_DIR:-}" ] && echo "-L $SILVER_FFI_LIBRARY_DIR" ;;
         module_import_test) echo "-I $MODLIB_DIR" ;;
         cfg_test) echo "--cfg cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1" ;;
         ternary_test) echo "--cfg cpu.sse41=1" ;;
@@ -211,8 +212,13 @@ else
 fi
 
 is_skipped() {
-    # If a specific test is passed explicitly on the CLI, do not skip it
-    if [ "$EXPLICIT_TEST" -eq 1 ]; then
+    # An explicitly named test bypasses only its own skip entry; unrelated
+    # optional servers should still be skipped when running one test.
+    # Normalize like the selector below: strip any directory prefix and the
+    # optional .ag suffix so "tests/foo.ag" and "foo" both match "foo".
+    local explicit_name="${CLI_TEST_NAME##*/}"
+    explicit_name="${explicit_name%.ag}"
+    if [ "$EXPLICIT_TEST" -eq 1 ] && [ "$explicit_name" = "$1" ]; then
         return 1
     fi
     while IFS= read -r line; do
@@ -367,6 +373,23 @@ tls_test
 http2_tls_test
 https_server_test"
 fi
+# Default the Rust FFI library dir to this checkout's Cargo target directory
+# when the bridge was already built there; an explicit value always wins.
+if [ -z "${SILVER_FFI_LIBRARY_DIR:-}" ]; then
+    for __ffi_dir in "$ROOT/target/debug" "$ROOT/target/release"; do
+        if [ -f "$__ffi_dir/libsilver_ffi.a" ] || [ -f "$__ffi_dir/libsilver_ffi.so" ]; then
+            SILVER_FFI_LIBRARY_DIR="$__ffi_dir"
+            break
+        fi
+    done
+fi
+if [ -z "${SILVER_FFI_LIBRARY_DIR:-}" ] || {
+    [ ! -f "$SILVER_FFI_LIBRARY_DIR/libsilver_ffi.a" ] &&
+    [ ! -f "$SILVER_FFI_LIBRARY_DIR/libsilver_ffi.so" ];
+}; then
+    SKIP_TESTS="$SKIP_TESTS
+rust_ffi_test  # build ffi/rust and set SILVER_FFI_LIBRARY_DIR to run this test"
+fi
 if ! command -v go >/dev/null 2>&1; then
     SKIP_TESTS="$SKIP_TESTS
 http_perf_test"
@@ -478,6 +501,16 @@ run_single_test_worker() {
     if expected_compile_failure "$name"; then
         printf 'FAIL_UNEXPECTED_COMPILE\t%s\t0\t0\t0\t0\t0\t0\n' "$name" > "$res_file"
         return
+    fi
+
+    # Cargo prefers the shared FFI artifact when both library types exist.
+    # Make that artifact discoverable without changing other test processes.
+    if [ "$name" = "rust_ffi_test" ] && [ -n "${SILVER_FFI_LIBRARY_DIR:-}" ]; then
+        if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            export LD_LIBRARY_PATH="$SILVER_FFI_LIBRARY_DIR:$LD_LIBRARY_PATH"
+        else
+            export LD_LIBRARY_PATH="$SILVER_FFI_LIBRARY_DIR"
+        fi
     fi
 
     local run_dir="$WORKDIR/$name.rundir"
