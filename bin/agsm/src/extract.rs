@@ -202,7 +202,9 @@ pub fn build_artifact(
             .map_err(|e| ExtractError::Io(e.to_string()))?;
         let obj_path = base_dir.join(format!("{}.o", config.name));
 
-        let mut cmd = std::process::Command::new("cc");
+        let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let compiler_name = compiler.to_string_lossy().into_owned();
+        let mut cmd = std::process::Command::new(&compiler);
         cmd.arg("-c")
             .arg("-fPIC")
             .arg("-O2")
@@ -223,7 +225,9 @@ pub fn build_artifact(
             cmd.arg(format!("--target={target}"));
         }
 
-        let output = cmd.output().map_err(|err| ExtractError::Unsupported(format!("failed to run cc for stubs: {err}")))?;
+        let output = cmd.output().map_err(|err| {
+            ExtractError::Unsupported(format!("failed to run {compiler_name} for stubs: {err}"))
+        })?;
         let _ = std::fs::remove_file(&stub_c_path);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

@@ -187,7 +187,7 @@ impl TypeChecker {
         if let Err(message) = ast::apply_generic_defaults(&mut normalized, &defaults) {
             self.error(message, source.span);
         }
-        Type::from_ast(&normalized)
+        Self::expand_imported_type_aliases(Type::from_ast(&normalized), &self.type_aliases)
     }
 
     pub fn with_imported_modules(mut self, modules: &[ModuleArtifact]) -> Self {
@@ -6433,7 +6433,34 @@ impl TypeChecker {
     }
 
     pub fn resolve_type_aliases_in_program(program: &mut ast::Program) {
-        let aliases: HashMap<String, ast::Type> = program
+        let aliases = Self::local_type_aliases(program);
+        Self::resolve_type_aliases_in_program_with_aliases(program, &aliases);
+    }
+
+    pub fn resolve_type_aliases_in_program_with_imports(
+        program: &mut ast::Program,
+        modules: &[ModuleArtifact],
+    ) {
+        let mut aliases = Self::local_type_aliases(program);
+        for module in modules {
+            for export in &module.exports {
+                if export.kind != crate::module_artifact::ExportKind::TypeAlias {
+                    continue;
+                }
+                let Some(type_key) = &export.type_key else {
+                    continue;
+                };
+                let Ok(type_def) = ast_type_from_canonical_key(type_key) else {
+                    continue;
+                };
+                aliases.entry(export.name.clone()).or_insert(type_def);
+            }
+        }
+        Self::resolve_type_aliases_in_program_with_aliases(program, &aliases);
+    }
+
+    fn local_type_aliases(program: &ast::Program) -> HashMap<String, ast::Type> {
+        program
             .items
             .iter()
             .filter_map(|item| {
@@ -6443,8 +6470,13 @@ impl TypeChecker {
                     None
                 }
             })
-            .collect();
+            .collect()
+    }
 
+    fn resolve_type_aliases_in_program_with_aliases(
+        program: &mut ast::Program,
+        aliases: &HashMap<String, ast::Type>,
+    ) {
         if aliases.is_empty() {
             return;
         }
@@ -6452,6 +6484,79 @@ impl TypeChecker {
         for item in &mut program.items {
             Self::resolve_type_aliases_in_item(item, &aliases);
         }
+    }
+
+    fn expand_imported_type_aliases(
+        ty: Type,
+        aliases: &HashMap<String, ast::Type>,
+    ) -> Type {
+        fn expand(
+            ty: Type,
+            aliases: &HashMap<String, ast::Type>,
+            visiting: &mut HashSet<String>,
+        ) -> Type {
+            match ty {
+                Type::Named { path, generics } => {
+                    let generics = generics
+                        .into_iter()
+                        .map(|generic| expand(generic, aliases, visiting))
+                        .collect::<Vec<_>>();
+                    if path.len() == 1
+                        && generics.is_empty()
+                        && let Some(alias) = aliases.get(&path[0])
+                        && visiting.insert(path[0].clone())
+                    {
+                        let expanded = expand(Type::from_ast(alias), aliases, visiting);
+                        visiting.remove(&path[0]);
+                        return expanded;
+                    }
+                    Type::Named { path, generics }
+                }
+                Type::Reference { is_mutable, inner } => Type::Reference {
+                    is_mutable,
+                    inner: Box::new(expand(*inner, aliases, visiting)),
+                },
+                Type::Pointer {
+                    is_mutable,
+                    is_volatile,
+                    inner,
+                } => Type::Pointer {
+                    is_mutable,
+                    is_volatile,
+                    inner: Box::new(expand(*inner, aliases, visiting)),
+                },
+                Type::Slice { element } => Type::Slice {
+                    element: Box::new(expand(*element, aliases, visiting)),
+                },
+                Type::Task(inner) => Type::Task(Box::new(expand(*inner, aliases, visiting))),
+                Type::Array { element, size } => Type::Array {
+                    element: Box::new(expand(*element, aliases, visiting)),
+                    size,
+                },
+                Type::Optional { inner } => Type::Optional {
+                    inner: Box::new(expand(*inner, aliases, visiting)),
+                },
+                Type::Tuple(items) => Type::Tuple(
+                    items
+                        .into_iter()
+                        .map(|item| expand(item, aliases, visiting))
+                        .collect(),
+                ),
+                Type::Function {
+                    params,
+                    return_type,
+                } => Type::Function {
+                    params: params
+                        .into_iter()
+                        .map(|param| expand(param, aliases, visiting))
+                        .collect(),
+                    return_type: Box::new(expand(*return_type, aliases, visiting)),
+                },
+                other => other,
+            }
+        }
+
+        expand(ty, aliases, &mut HashSet::default())
     }
 
     fn resolve_type_aliases_in_item(item: &mut ast::Item, aliases: &HashMap<String, ast::Type>) {
@@ -6559,41 +6664,74 @@ impl TypeChecker {
     }
 
     fn resolve_type_aliases_in_type(ty: &mut ast::Type, aliases: &HashMap<String, ast::Type>) {
-        // Resolve top-level alias
+        Self::resolve_type_aliases_in_type_with_visiting(ty, aliases, &mut HashSet::default());
+    }
+
+    fn resolve_type_aliases_in_type_with_visiting(
+        ty: &mut ast::Type,
+        aliases: &HashMap<String, ast::Type>,
+        visiting: &mut HashSet<String>,
+    ) {
         if let ast::TypeKind::Named(named) = ty.kind.as_ref()
             && named.path.len() == 1
             && named.generics.is_none()
-            && let Some(aliased) = aliases.get(&named.path[0].name)
+            && let Some(alias_name) = named.path.first().map(|name| name.name.clone())
+            && let Some(aliased) = aliases.get(&alias_name)
         {
-            *ty = aliased.clone();
+            if !visiting.insert(alias_name.clone()) {
+                return;
+            }
+            let mut expanded = aliased.clone();
+            Self::resolve_type_aliases_in_type_with_visiting(&mut expanded, aliases, visiting);
+            visiting.remove(&alias_name);
+            *ty = expanded;
             return;
         }
-        // Recurse into child types
+
         match ty.kind.as_mut() {
             ast::TypeKind::Named(named) => {
                 if let Some(generics) = &mut named.generics {
                     for g in generics.iter_mut() {
-                        Self::resolve_type_aliases_in_type(g, aliases);
+                        Self::resolve_type_aliases_in_type_with_visiting(g, aliases, visiting);
                     }
                 }
             }
             ast::TypeKind::Reference(r) => {
-                Self::resolve_type_aliases_in_type(&mut r.inner, aliases)
+                Self::resolve_type_aliases_in_type_with_visiting(&mut r.inner, aliases, visiting)
             }
-            ast::TypeKind::Pointer(p) => Self::resolve_type_aliases_in_type(&mut p.inner, aliases),
+            ast::TypeKind::Pointer(p) => {
+                Self::resolve_type_aliases_in_type_with_visiting(&mut p.inner, aliases, visiting)
+            }
             ast::TypeKind::Slice(s) => {
-                Self::resolve_type_aliases_in_type(&mut s.element_type, aliases)
+                Self::resolve_type_aliases_in_type_with_visiting(
+                    &mut s.element_type,
+                    aliases,
+                    visiting,
+                )
             }
-            ast::TypeKind::Optional(inner) => Self::resolve_type_aliases_in_type(inner, aliases),
+            ast::TypeKind::Array(array) => {
+                Self::resolve_type_aliases_in_type_with_visiting(
+                    &mut array.element_type,
+                    aliases,
+                    visiting,
+                )
+            }
+            ast::TypeKind::Optional(inner) => {
+                Self::resolve_type_aliases_in_type_with_visiting(inner, aliases, visiting)
+            }
             ast::TypeKind::Function(f) => {
                 for p in &mut f.parameters {
-                    Self::resolve_type_aliases_in_type(p, aliases);
+                    Self::resolve_type_aliases_in_type_with_visiting(p, aliases, visiting);
                 }
-                Self::resolve_type_aliases_in_type(&mut f.return_type, aliases);
+                Self::resolve_type_aliases_in_type_with_visiting(
+                    &mut f.return_type,
+                    aliases,
+                    visiting,
+                );
             }
             ast::TypeKind::Tuple(items) => {
                 for item in items.iter_mut() {
-                    Self::resolve_type_aliases_in_type(item, aliases);
+                    Self::resolve_type_aliases_in_type_with_visiting(item, aliases, visiting);
                 }
             }
             _ => {}
@@ -7820,6 +7958,133 @@ mod tests {
                 || e.message.contains("unknown function")
         });
         assert!(!has_alloc_error, "unexpected error for alloc: {:?}", errors);
+    }
+
+    #[test]
+    fn type_checks_imported_opaque_handle_typedef() {
+        let artifact = ModuleArtifact {
+            module_name: "llvm".to_string(),
+            module_path: "vendor.llvm.llvm".to_string(),
+            source_path: "vendor/llvm/llvm.submodule.toml".to_string(),
+            source_hash_fnv1a64: 1,
+            compiler_version: "foreign".to_string(),
+            target_triple: "unknown".to_string(),
+            code_artifacts: crate::module_artifact::ModuleCodeArtifacts::default(),
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: vec![
+                crate::module_artifact::ModuleExport {
+                    kind: crate::module_artifact::ExportKind::Struct,
+                    name: "LLVMOpaqueContext".to_string(),
+                    signature: "struct{}".to_string(),
+                    type_params: Vec::new(),
+                    link_name: None,
+                    abi: None,
+                    is_variadic: false,
+                    type_key: Some("LLVMOpaqueContext".to_string()),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                },
+                crate::module_artifact::ModuleExport {
+                    kind: crate::module_artifact::ExportKind::TypeAlias,
+                    name: "LLVMContextRef".to_string(),
+                    signature: "type *mut LLVMOpaqueContext".to_string(),
+                    type_params: Vec::new(),
+                    link_name: None,
+                    abi: None,
+                    is_variadic: false,
+                    type_key: Some("*mut LLVMOpaqueContext".to_string()),
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                },
+                crate::module_artifact::ModuleExport {
+                    kind: crate::module_artifact::ExportKind::Function,
+                    name: "LLVMContextCreate".to_string(),
+                    signature: "fn() -> *mut LLVMOpaqueContext".to_string(),
+                    type_params: Vec::new(),
+                    link_name: Some("LLVMContextCreate".to_string()),
+                    abi: Some(crate::module_artifact::ModuleAbi::C),
+                    is_variadic: false,
+                    type_key: None,
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                },
+                crate::module_artifact::ModuleExport {
+                    kind: crate::module_artifact::ExportKind::Function,
+                    name: "LLVMContextDispose".to_string(),
+                    signature: "fn(*mut LLVMOpaqueContext) -> void".to_string(),
+                    type_params: Vec::new(),
+                    link_name: Some("LLVMContextDispose".to_string()),
+                    abi: Some(crate::module_artifact::ModuleAbi::C),
+                    is_variadic: false,
+                    type_key: None,
+                    fields: Vec::new(),
+                    layout: None,
+                    enum_backing_type: None,
+                    enum_variants: Vec::new(),
+                    trait_items: Vec::new(),
+                    const_value: None,
+                    is_mutable: false,
+                },
+            ],
+            native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
+            generic_templates: Vec::new(),
+            artifact_path: None,
+        };
+
+        let mut program = parse(
+            "type MyContext = LLVMContextRef; type MyOtherContext = MyContext; \
+             i32 main() { MyOtherContext context = LLVMContextCreate(); \
+             LLVMContextDispose(context); return 0; }",
+        );
+        TypeChecker::resolve_type_aliases_in_program_with_imports(
+            &mut program,
+            std::slice::from_ref(&artifact),
+        );
+        let function = program
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Function(function) if function.name.name == "main" => {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .expect("main function missing");
+        let ast::StatementKind::Let(let_statement) = &function.body.statements[0].kind else {
+            panic!("expected opaque-handle let statement");
+        };
+        let Some(type_annotation) = &let_statement.type_annotation else {
+            panic!("expected opaque-handle type annotation");
+        };
+        let ast::TypeKind::Pointer(pointer) = type_annotation.kind.as_ref() else {
+            panic!("expected imported handle to normalize to a pointer");
+        };
+        assert!(pointer.is_mutable);
+        let ast::TypeKind::Named(named) = pointer.inner.kind.as_ref() else {
+            panic!("expected pointer to the opaque record");
+        };
+        assert_eq!(named.path.last().map(|part| part.name.as_str()), Some("LLVMOpaqueContext"));
+        let (errors, _) = TypeChecker::new()
+            .with_imported_modules(std::slice::from_ref(&artifact))
+            .check_program(&program);
+        assert!(errors.is_empty(), "opaque typedef errors: {errors:?}");
     }
 
     #[test]

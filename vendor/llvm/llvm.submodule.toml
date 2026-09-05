@@ -1,0 +1,47 @@
+name = "llvm"
+standard = "c11"
+
+# Prefer the versioned executable, while allowing source installs whose
+# llvm-config is exposed through PATH or LLVM_CONFIG.
+llvm_config = ["llvm-config-22", "llvm-config"]
+llvm_config_version = 22
+
+# Keep the complete public C surface in one foreign translation unit. The
+# support headers are included explicitly so their public typedefs and macros
+# are available even when a consumer imports only this module.
+includes = [
+    "llvm-c/Analysis.h",
+    "llvm-c/BitReader.h",
+    "llvm-c/BitWriter.h",
+    "llvm-c/Comdat.h",
+    "llvm-c/Core.h",
+    "llvm-c/DataTypes.h",
+    "llvm-c/DebugInfo.h",
+    "llvm-c/Deprecated.h",
+    "llvm-c/Disassembler.h",
+    "llvm-c/DisassemblerTypes.h",
+    "llvm-c/Error.h",
+    "llvm-c/ErrorHandling.h",
+    "llvm-c/ExecutionEngine.h",
+    "llvm-c/ExternC.h",
+    "llvm-c/IRReader.h",
+    "llvm-c/LLJIT.h",
+    "llvm-c/LLJITUtils.h",
+    "llvm-c/Linker.h",
+    "llvm-c/Object.h",
+    "llvm-c/Orc.h",
+    "llvm-c/OrcEE.h",
+    "llvm-c/Remarks.h",
+    "llvm-c/Support.h",
+    "llvm-c/Target.h",
+    "llvm-c/TargetMachine.h",
+    "llvm-c/Transforms/PassBuilder.h",
+    "llvm-c/Types.h",
+    "llvm-c/Visibility.h",
+    "llvm-c/blake3.h",
+    "llvm-c/lto.h",
+]
+
+# LLVM's C API is intentionally handle-heavy. Exporting the forward-declared
+# records gives those handles stable Silver names without inventing layouts.
+export_opaque_types = true

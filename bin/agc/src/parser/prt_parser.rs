@@ -1117,8 +1117,9 @@ impl PRT_Parser {
             }
         }
 
+        let mut current_is_const = is_const;
         while cursor < end && matches!(tokens[cursor].kind, Token::Star) {
-            let is_mutable = !is_const;
+            let is_mutable = !current_is_const;
             ty = ast::Type {
                 kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
                     is_mutable,
@@ -1127,6 +1128,7 @@ impl PRT_Parser {
                 })),
                 span: tokens[start].span.extend_to(&tokens[cursor].span),
             };
+            current_is_const = false;
             cursor += 1;
         }
 
@@ -5861,6 +5863,29 @@ mod tests {
         };
         assert_eq!(func.name.name, "puts");
         assert_eq!(func.signature.parameters.len(), 1);
+    }
+
+    #[test]
+    fn parses_nested_const_pointer_qualifier_at_the_inner_level() {
+        let source = "extern void probe(const i8** names);";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        let ast::ItemKind::ExternFunction(function) = &program.items[0].kind else {
+            panic!("expected extern function item");
+        };
+        let ast::TypeKind::Pointer(outer) = function.signature.parameters[0]
+            .param_type
+            .kind
+            .as_ref()
+        else {
+            panic!("expected outer pointer");
+        };
+        assert!(outer.is_mutable);
+        let ast::TypeKind::Pointer(inner) = outer.inner.kind.as_ref() else {
+            panic!("expected inner pointer");
+        };
+        assert!(!inner.is_mutable);
     }
 
     #[test]

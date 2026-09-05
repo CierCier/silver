@@ -1076,7 +1076,10 @@ pub fn run(cli: Cli) {
                 }
 
                 profiler::begin_phase("type check");
-                TypeChecker::resolve_type_aliases_in_program(&mut ast);
+                TypeChecker::resolve_type_aliases_in_program_with_imports(
+                    &mut ast,
+                    &imported_modules,
+                );
                 let mut checker = TypeChecker::new().with_imported_modules(&imported_modules);
                 let (type_errors, mut monomorphs) =
                     checker.check_program_with_table(&ast, &mut symbol_table);
