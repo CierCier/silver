@@ -766,7 +766,10 @@ impl<'a> ParallelGraphExecutor<'a> {
         symbol_table.record_program_symbols(&ast, crate::symbol_table::CompilerPhase::Parse);
         crate::driver::run_semantic_hooks(&mut ast, &mut symbol_table, &import_lowering.module_artifacts);
 
-        crate::semantic::typeck::TypeChecker::resolve_type_aliases_in_program(&mut ast);
+        crate::semantic::typeck::TypeChecker::resolve_type_aliases_in_program_with_imports(
+            &mut ast,
+            &import_lowering.module_artifacts,
+        );
         let mut checker = crate::semantic::typeck::TypeChecker::new().with_imported_modules(&import_lowering.module_artifacts);
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
         if !type_errors.is_empty() {

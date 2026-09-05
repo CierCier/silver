@@ -33,6 +33,8 @@ pub struct SourcemapConfig {
     pub defines: Vec<String>,
     pub libs: Vec<String>,
     pub pkg_config: Vec<String>,
+    pub llvm_config: Vec<String>,
+    pub llvm_config_version: Option<u32>,
     pub prefix_strip: Vec<String>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -85,6 +87,8 @@ struct TargetConfig {
     defines: Option<Vec<String>>,
     libs: Option<Vec<String>>,
     pkg_config: Option<PkgConfigList>,
+    llvm_config: Option<PkgConfigList>,
+    llvm_config_version: Option<u32>,
     prefix_strip: Option<PkgConfigList>,
     allow: Option<PkgConfigList>,
     deny: Option<PkgConfigList>,
@@ -107,6 +111,10 @@ struct RawConfig {
     libs: Vec<String>,
     #[serde(default)]
     pkg_config: Option<PkgConfigList>,
+    #[serde(default)]
+    llvm_config: Option<PkgConfigList>,
+    #[serde(default)]
+    llvm_config_version: Option<u32>,
     #[serde(default)]
     prefix_strip: Option<PkgConfigList>,
     #[serde(default)]
@@ -157,6 +165,27 @@ pub struct PkgConfigResolution {
     pub lib_paths: Vec<PathBuf>,
     pub defines: Vec<String>,
     pub libs: Vec<String>,
+}
+
+fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn merge_resolution(into: &mut PkgConfigResolution, addition: PkgConfigResolution) {
+    for path in addition.include_paths {
+        push_unique(&mut into.include_paths, path);
+    }
+    for path in addition.lib_paths {
+        push_unique(&mut into.lib_paths, path);
+    }
+    for define in addition.defines {
+        push_unique(&mut into.defines, define);
+    }
+    for lib in addition.libs {
+        push_unique(&mut into.libs, lib);
+    }
 }
 
 pub fn query_pkg_config(packages: &[String]) -> Result<PkgConfigResolution, ConfigError> {
@@ -229,10 +258,221 @@ pub fn query_pkg_config(packages: &[String]) -> Result<PkgConfigResolution, Conf
             if !lib.is_empty() && !resolution.libs.iter().any(|l| l == lib) {
                 resolution.libs.push(lib.to_string());
             }
+        } else if let Some((path, lib)) = parse_library_path(token) {
+            push_unique(&mut resolution.lib_paths, path);
+            push_unique(&mut resolution.libs, lib);
         }
     }
 
     Ok(resolution)
+}
+
+/// Resolve LLVM's headers and libraries through the installation's own
+/// versioned `llvm-config` tool rather than guessing package or library names.
+pub fn query_llvm_config(
+    commands: &[String],
+    expected_major: Option<u32>,
+) -> Result<PkgConfigResolution, ConfigError> {
+    if commands.is_empty() {
+        return Ok(PkgConfigResolution::default());
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(command) = std::env::var("LLVM_CONFIG")
+        && !command.trim().is_empty()
+    {
+        candidates.push(command);
+    }
+    for command in commands {
+        if !candidates.iter().any(|candidate| candidate == command) {
+            candidates.push(command.clone());
+        }
+    }
+
+    let mut failures = Vec::new();
+    for command in &candidates {
+        let version = match run_llvm_config(command, &["--version"]) {
+            Ok(version) => version,
+            Err(error) => {
+                failures.push(format!("{command}: {error}"));
+                continue;
+            }
+        };
+        let major = parse_llvm_major(&version);
+        if let Some(expected) = expected_major
+            && major != Some(expected)
+        {
+            failures.push(format!(
+                "{command}: found LLVM {}, expected major {expected}",
+                version.trim()
+            ));
+            continue;
+        }
+
+        let result = (|| {
+            let mut resolution = PkgConfigResolution::default();
+            let include_dir = run_llvm_config(command, &["--includedir"])?;
+            if !include_dir.trim().is_empty() {
+                push_unique(
+                    &mut resolution.include_paths,
+                    PathBuf::from(include_dir.trim()),
+                );
+            }
+            let prefix = run_llvm_config(command, &["--prefix"])?;
+            if let Some(resource_include) = clang_resource_include(Path::new(prefix.trim()), major)
+            {
+                push_unique(&mut resolution.include_paths, resource_include);
+            }
+            let lib_dir = run_llvm_config(command, &["--libdir"])?;
+            if !lib_dir.trim().is_empty() {
+                push_unique(&mut resolution.lib_paths, PathBuf::from(lib_dir.trim()));
+            }
+            parse_llvm_flags(
+                &run_llvm_config(command, &["--cflags"])?,
+                &mut resolution,
+                true,
+                false,
+            );
+            parse_llvm_flags(
+                &run_llvm_config(command, &["--ldflags"])?,
+                &mut resolution,
+                false,
+                true,
+            );
+            parse_llvm_flags(
+                &run_llvm_config(command, &["--libs"])?,
+                &mut resolution,
+                false,
+                true,
+            );
+            parse_llvm_flags(
+                &run_llvm_config(command, &["--system-libs"])?,
+                &mut resolution,
+                false,
+                true,
+            );
+            Ok::<_, String>(resolution)
+        })();
+
+        match result {
+            Ok(resolution) => return Ok(resolution),
+            Err(error) => failures.push(format!("{command}: {error}")),
+        }
+    }
+
+    Err(ConfigError::LlvmConfig {
+        commands: candidates,
+        expected_major,
+        message: failures.join("; "),
+    })
+}
+
+fn run_llvm_config(command: &str, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to execute: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(if stderr.trim().is_empty() {
+            format!("exited with status {}", output.status)
+        } else {
+            stderr.trim().to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn parse_llvm_major(version: &str) -> Option<u32> {
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse().ok())
+}
+
+fn clang_resource_include(prefix: &Path, major: Option<u32>) -> Option<PathBuf> {
+    let path = prefix
+        .join("lib")
+        .join("clang")
+        .join(major?.to_string())
+        .join("include");
+    path.is_dir().then_some(path)
+}
+
+fn parse_llvm_flags(
+    output: &str,
+    resolution: &mut PkgConfigResolution,
+    include_flags: bool,
+    library_flags: bool,
+) {
+    let mut tokens = output.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if include_flags && (token == "-I" || token == "-isystem") {
+            if let Some(path) = tokens.next()
+                && !path.is_empty()
+            {
+                push_unique(&mut resolution.include_paths, PathBuf::from(path));
+            }
+        } else if include_flags {
+            if let Some(path) = token.strip_prefix("-I")
+                && !path.is_empty()
+            {
+                push_unique(&mut resolution.include_paths, PathBuf::from(path));
+            } else if let Some(define) = token.strip_prefix("-D")
+                && !define.is_empty()
+            {
+                push_unique(&mut resolution.defines, define.to_string());
+            }
+        }
+
+        if library_flags && (token == "-L" || token == "-l") {
+            if let Some(value) = tokens.next()
+                && !value.is_empty()
+            {
+                if token == "-L" {
+                    push_unique(&mut resolution.lib_paths, PathBuf::from(value));
+                } else if let Some((path, lib)) = parse_library_path(value) {
+                    push_unique(&mut resolution.lib_paths, path);
+                    push_unique(&mut resolution.libs, lib);
+                } else {
+                    push_unique(&mut resolution.libs, value.to_string());
+                }
+            }
+        } else if library_flags {
+            if let Some(path) = token.strip_prefix("-L")
+                && !path.is_empty()
+            {
+                push_unique(&mut resolution.lib_paths, PathBuf::from(path));
+            } else if let Some(lib) = token.strip_prefix("-l")
+                && !lib.is_empty()
+            {
+                push_unique(&mut resolution.libs, lib.to_string());
+            } else if let Some((path, lib)) = parse_library_path(token) {
+                push_unique(&mut resolution.lib_paths, path);
+                push_unique(&mut resolution.libs, lib);
+            }
+        }
+    }
+}
+
+fn parse_library_path(token: &str) -> Option<(PathBuf, String)> {
+    let path = Path::new(token);
+    if !path.is_absolute() {
+        return None;
+    }
+    let filename = path.file_name()?.to_str()?;
+    let filename = filename.strip_prefix("lib")?;
+    let library = filename
+        .strip_suffix(".a")
+        .or_else(|| filename.split_once(".so").map(|(name, _)| name))
+        .or_else(|| filename.strip_suffix(".dylib"))?;
+    if library.is_empty() {
+        return None;
+    }
+    Some((
+        path.parent()?.to_path_buf(),
+        path.to_string_lossy().into_owned(),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +489,11 @@ pub enum ConfigError {
     },
     PkgConfig {
         packages: Vec<String>,
+        message: String,
+    },
+    LlvmConfig {
+        commands: Vec<String>,
+        expected_major: Option<u32>,
         message: String,
     },
 }
@@ -281,6 +526,10 @@ impl SourcemapConfig {
             .pkg_config
             .map(PkgConfigList::into_vec)
             .unwrap_or_default();
+        let llvm_config = raw
+            .llvm_config
+            .map(PkgConfigList::into_vec)
+            .unwrap_or_default();
         let prefix_strip = raw
             .prefix_strip
             .map(PkgConfigList::into_vec)
@@ -302,6 +551,8 @@ impl SourcemapConfig {
             defines: raw.defines,
             libs: raw.libs,
             pkg_config,
+            llvm_config,
+            llvm_config_version: raw.llvm_config_version,
             prefix_strip,
             allow,
             deny,
@@ -331,13 +582,25 @@ impl SourcemapConfig {
             .as_ref()
             .map(|p| p.clone().into_vec())
             .unwrap_or_else(|| self.pkg_config.clone());
-        let pkg_res = query_pkg_config(&pkg_packages)?;
+        let llvm_commands = overrides
+            .llvm_config
+            .as_ref()
+            .map(|config| config.clone().into_vec())
+            .unwrap_or_else(|| self.llvm_config.clone());
+        let llvm_version = overrides
+            .llvm_config_version
+            .or(self.llvm_config_version);
+        let mut tool_res = query_pkg_config(&pkg_packages)?;
+        merge_resolution(
+            &mut tool_res,
+            query_llvm_config(&llvm_commands, llvm_version)?,
+        );
 
         let mut include_paths = overrides
             .include_paths
             .clone()
             .unwrap_or_else(|| self.include_paths.clone());
-        for p in pkg_res.include_paths {
+        for p in tool_res.include_paths {
             if !include_paths.contains(&p) {
                 include_paths.push(p);
             }
@@ -347,7 +610,7 @@ impl SourcemapConfig {
             .lib_paths
             .clone()
             .unwrap_or_else(|| self.lib_paths.clone());
-        for p in pkg_res.lib_paths {
+        for p in tool_res.lib_paths {
             if !lib_paths.contains(&p) {
                 lib_paths.push(p);
             }
@@ -357,14 +620,14 @@ impl SourcemapConfig {
             .defines
             .clone()
             .unwrap_or_else(|| self.defines.clone());
-        for d in pkg_res.defines {
+        for d in tool_res.defines {
             if !defines.iter().any(|existing| existing == &d) {
                 defines.push(d);
             }
         }
 
         let mut libs = overrides.libs.clone().unwrap_or_else(|| self.libs.clone());
-        for l in pkg_res.libs {
+        for l in tool_res.libs {
             if !libs.iter().any(|existing| existing == &l) {
                 libs.push(l);
             }
@@ -414,31 +677,35 @@ impl SourcemapConfig {
     }
 
     fn base_config(&self, target: Option<String>) -> Result<ResolvedConfig, ConfigError> {
-        let pkg_res = query_pkg_config(&self.pkg_config)?;
+        let mut tool_res = query_pkg_config(&self.pkg_config)?;
+        merge_resolution(
+            &mut tool_res,
+            query_llvm_config(&self.llvm_config, self.llvm_config_version)?,
+        );
 
         let mut include_paths = self.include_paths.clone();
-        for p in pkg_res.include_paths {
+        for p in tool_res.include_paths {
             if !include_paths.contains(&p) {
                 include_paths.push(p);
             }
         }
 
         let mut lib_paths = self.lib_paths.clone();
-        for p in pkg_res.lib_paths {
+        for p in tool_res.lib_paths {
             if !lib_paths.contains(&p) {
                 lib_paths.push(p);
             }
         }
 
         let mut defines = self.defines.clone();
-        for d in pkg_res.defines {
+        for d in tool_res.defines {
             if !defines.iter().any(|existing| existing == &d) {
                 defines.push(d);
             }
         }
 
         let mut libs = self.libs.clone();
-        for l in pkg_res.libs {
+        for l in tool_res.libs {
             if !libs.iter().any(|existing| existing == &l) {
                 libs.push(l);
             }
@@ -512,6 +779,21 @@ impl fmt::Display for ConfigError {
                     packages.join(", ")
                 )
             }
+            Self::LlvmConfig {
+                commands,
+                expected_major,
+                message,
+            } => {
+                let expected = expected_major
+                    .map(|major| format!(" (expected LLVM major {major})"))
+                    .unwrap_or_default();
+                write!(
+                    formatter,
+                    "llvm-config{} failed for `{}`: {message}",
+                    expected,
+                    commands.join(", ")
+                )
+            }
         }
     }
 }
@@ -536,6 +818,7 @@ includes = ["raylib.h"]
         assert!(config.include_paths.is_empty());
         assert!(config.libs.is_empty());
         assert!(config.pkg_config.is_empty());
+        assert!(config.llvm_config.is_empty());
     }
 
     #[test]
@@ -600,6 +883,81 @@ pkg_config = ["raylib", "glfw3"]
         )
         .unwrap();
         assert_eq!(config_list.pkg_config, vec!["raylib", "glfw3"]);
+    }
+
+    #[test]
+    fn parses_llvm_config_candidates_and_version() {
+        let config = SourcemapConfig::parse(
+            r#"
+name = "llvm"
+includes = ["llvm-c/Core.h"]
+llvm_config = ["llvm-config-22", "llvm-config"]
+llvm_config_version = 22
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.llvm_config,
+            vec!["llvm-config-22", "llvm-config"]
+        );
+        assert_eq!(config.llvm_config_version, Some(22));
+    }
+
+    #[test]
+    fn parses_llvm_config_flags_without_duplicates() {
+        let mut resolution = PkgConfigResolution::default();
+        parse_llvm_flags(
+            "-I/include -isystem /system -D_GNU_SOURCE",
+            &mut resolution,
+            true,
+            false,
+        );
+        parse_llvm_flags(
+            "-L/lib -lLLVM-22 -lLLVM-22 -lpthread /usr/lib/libzstd.a",
+            &mut resolution,
+            false,
+            true,
+        );
+
+        assert_eq!(
+            resolution.include_paths,
+            vec![PathBuf::from("/include"), PathBuf::from("/system")]
+        );
+        assert_eq!(resolution.defines, vec!["_GNU_SOURCE"]);
+        assert_eq!(
+            resolution.lib_paths,
+            vec![PathBuf::from("/lib"), PathBuf::from("/usr/lib")]
+        );
+        assert_eq!(
+            resolution.libs,
+            vec!["LLVM-22", "pthread", "/usr/lib/libzstd.a"]
+        );
+        assert_eq!(
+            parse_library_path("/usr/lib/libzstd.a"),
+            Some((PathBuf::from("/usr/lib"), "/usr/lib/libzstd.a".to_string()))
+        );
+        assert_eq!(
+            parse_library_path("/usr/lib/libxml2.so.2"),
+            Some((PathBuf::from("/usr/lib"), "/usr/lib/libxml2.so.2".to_string()))
+        );
+    }
+
+    #[test]
+    fn discovers_clang_resource_include_from_llvm_prefix() {
+        let prefix =
+            std::env::temp_dir().join(format!("agsm-llvm-resource-{}", std::process::id()));
+        let resource = prefix.join("lib/clang/22/include");
+        std::fs::create_dir_all(&resource).unwrap();
+
+        assert_eq!(
+            clang_resource_include(&prefix, Some(22)),
+            Some(resource.clone())
+        );
+        assert_eq!(clang_resource_include(&prefix, Some(21)), None);
+        assert_eq!(clang_resource_include(&prefix, None), None);
+
+        std::fs::remove_dir_all(prefix).unwrap();
     }
 
     #[test]
