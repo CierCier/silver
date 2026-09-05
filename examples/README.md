@@ -28,6 +28,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 |------|---------------|
 | `strings.ag` | `String` type — `push`, `push_str`, `clone`, `equals`, `clear` |
 | `file_io.ag` | `File` open/read/write/close, `file_delete`, error handling |
+| `rust_ffi_tool.ag` | Optional Rust C ABI: files, callbacks, environment, and processes |
 
 ## Advanced Features
 

@@ -1,0 +1,173 @@
+// Integration coverage for the optional Rust-backed C ABI: the raw extern
+// surface and the native-ergonomic layer in std/ffi/.
+//
+// The test harness skips this test unless SILVER_FFI_LIBRARY_DIR points at a
+// directory containing libsilver_ffi.a or libsilver_ffi.so.
+import std.test;
+import std.ffi;
+
+i64 g_callback_bytes = 0;
+
+i32 collect_bytes(void* userdata, const RustFfiSlice* chunk) {
+    if (userdata == (void*)0 || chunk == (const RustFfiSlice*)0) {
+        return 1;
+    }
+    i64* total = (i64*)userdata;
+    *total = *total + chunk.len;
+    return 0;
+}
+
+i32 main() {
+    test_start("Rust FFI ABI, filesystem, and native layer");
+    assert_eq_i32(SILVER_FFI_ABI_VERSION, silver_ffi_abi_version(),
+        "ABI version");
+
+    RustFfiError error = rust_ffi_error_new();
+    RustFfiSlice path = rust_ffi_text("rust_ffi_test.txt");
+    RustFfiSlice text = rust_ffi_text("hello from Rust FFI");
+    RustFfiBuffer output = rust_ffi_buffer_new();
+
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_fs_write_file((const RustFfiSlice*)&path,
+            (const RustFfiSlice*)&text, &error), "write file");
+
+    i32 exists = 0;
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_fs_exists((const RustFfiSlice*)&path, &exists, &error),
+        "exists call");
+    assert_eq_i32(1, exists, "file exists");
+
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_fs_read_file((const RustFfiSlice*)&path, &output, &error),
+        "read file");
+    assert_eq_i64(text.len, output.len, "owned buffer length");
+
+    g_callback_bytes = 0;
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_fs_read_file_callback((const RustFfiSlice*)&path, collect_bytes,
+            (void*)&g_callback_bytes, &error), "callback read");
+    assert_eq_i64(text.len, g_callback_bytes, "callback byte count");
+
+    RustFfiBuffer joined = rust_ffi_buffer_new();
+    RustFfiSlice base = rust_ffi_text("/tmp");
+    RustFfiSlice child = rust_ffi_text("silver");
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_path_join((const RustFfiSlice*)&base,
+            (const RustFfiSlice*)&child, &joined, &error), "path join");
+    assert_eq_i64(11, joined.len, "joined path length");
+
+    RustFfiBuffer environment = rust_ffi_buffer_new();
+    RustFfiSlice key = rust_ffi_text("PATH");
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_env_get((const RustFfiSlice*)&key, &environment, &error),
+        "environment lookup");
+    assert_true(environment.len > 0, "environment value is non-empty");
+
+    RustFfiProcess process = rust_ffi_process_new();
+    RustFfiSlice program = rust_ffi_text("/bin/true");
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_process_spawn((const RustFfiSlice*)&program,
+            (const RustFfiSlice*)0, (i64)0,
+            &process.handle, &error), "process spawn");
+    i32 exit_code = -1;
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_process_wait(process.handle, &exit_code, &error),
+        "process wait");
+    assert_eq_i32(0, exit_code, "process exit code");
+    assert_eq_i32(SILVER_FFI_ERR_INVALID_HANDLE,
+        silver_process_wait(process.handle, &exit_code, &error),
+        "wait is one-shot");
+
+    assert_eq_i32(SILVER_FFI_OK,
+        silver_fs_remove_file((const RustFfiSlice*)&path, &error),
+        "remove file");
+
+    // --- Native-ergonomic layer ---------------------------------------
+    assert_true(strlen(rust_ffi_status_name(SILVER_FFI_ERR_NOT_FOUND)) > 0,
+        "status name is non-empty static text");
+
+    Result<bool, Error> native_written = rust_ffi_write_string(
+        "rust_ffi_native.txt", "native layer");
+    assert_true(native_written.is_ok(), "native write is ok");
+    assert_true(rust_ffi_exists("rust_ffi_native.txt"), "native exists");
+
+    Result<String, Error> native_read = rust_ffi_read_to_string(
+        "rust_ffi_native.txt");
+    assert_true(native_read.is_ok(), "native read is ok");
+    String native_text = native_read.unwrap();
+    assert_true(native_text.equals("native layer"), "native read contents");
+    native_text.drop();
+
+    assert_true(!rust_ffi_exists("rust_ffi_missing_file.txt"),
+        "native missing file reports absent");
+    Result<bool, Error> native_removed = rust_ffi_remove_file(
+        "rust_ffi_native.txt");
+    assert_true(native_removed.is_ok(), "native remove is ok");
+    assert_true(!rust_ffi_exists("rust_ffi_native.txt"), "native removed");
+
+    Result<bool, Error> made_dir = rust_ffi_create_dir("rust_ffi_native_dir");
+    assert_true(made_dir.is_ok(), "native create dir");
+    Result<bool, Error> made_again = rust_ffi_create_dir("rust_ffi_native_dir");
+    assert_true(made_again.is_ok(), "native create dir is idempotent");
+    assert_true(rust_ffi_exists("rust_ffi_native_dir"), "native dir exists");
+    Result<bool, Error> removed_dir = rust_ffi_remove_dir("rust_ffi_native_dir");
+    assert_true(removed_dir.is_ok(), "native remove dir");
+    assert_true(!rust_ffi_exists("rust_ffi_native_dir"), "native dir removed");
+
+    Result<String, Error> env_value = rust_ffi_env_get("PATH");
+    assert_true(env_value.is_ok(), "native env get");
+    String env_text = env_value.unwrap();
+    assert_true(env_text.len() > 0, "native env value non-empty");
+    env_text.drop();
+
+    Result<String, Error> env_missing = rust_ffi_env_get(
+        "SILVER_FFI_ABSENT_VARIABLE");
+    assert_true(env_missing.is_err(), "native env missing is err");
+    Error env_error = env_missing.unwrap_err();
+    assert_eq_i64((i64)SILVER_FFI_ERR_NOT_FOUND, env_error.code,
+        "native env missing code");
+
+    Result<String, Error> cwd = rust_ffi_current_dir();
+    assert_true(cwd.is_ok(), "native current dir");
+    String cwd_text = cwd.unwrap();
+    assert_true(cwd_text.len() > 0, "native current dir non-empty");
+    cwd_text.drop();
+
+    Result<String, Error> joined_native = rust_ffi_path_join("/tmp", "silver");
+    assert_true(joined_native.is_ok(), "native path join");
+    String joined_text = joined_native.unwrap();
+    assert_true(joined_text.equals("/tmp/silver"), "native joined path text");
+    joined_text.drop();
+
+    Vec<str> spawn_args = Vec<str>.new();
+    spawn_args.push("-c");
+    spawn_args.push("exit 7");
+    Result<RustFfiProcess, Error> spawned =
+        RustFfiProcess.spawn_with_args("/bin/sh", &spawn_args);
+    assert_true(spawned.is_ok(), "native spawn with args");
+    RustFfiProcess arg_child = spawned.unwrap();
+    Result<i32, Error> child_exit = arg_child.join();
+    assert_true(child_exit.is_ok(), "native join");
+    assert_eq_i32(7, child_exit.unwrap(), "native join exit code");
+    Result<i32, Error> joined_twice = arg_child.join();
+    assert_true(joined_twice.is_err(), "native join is one-shot");
+    Error join_error = joined_twice.unwrap_err();
+    assert_eq_i64((i64)SILVER_FFI_ERR_INVALID_HANDLE, join_error.code,
+        "native one-shot join code");
+
+    Result<RustFfiProcess, Error> spawned_plain = RustFfiProcess.spawn(
+        "/bin/true");
+    assert_true(spawned_plain.is_ok(), "native spawn without args");
+    RustFfiProcess plain_child = spawned_plain.unwrap();
+    Result<i32, Error> plain_exit = plain_child.join();
+    assert_true(plain_exit.is_ok(), "native plain join");
+    assert_eq_i32(0, plain_exit.unwrap(), "native plain exit code");
+
+    Result<RustFfiProcess, Error> bad_spawn = RustFfiProcess.spawn(
+        "/definitely/not/a/program");
+    assert_true(bad_spawn.is_err(), "native spawn of missing program fails");
+    Error spawn_error = bad_spawn.unwrap_err();
+    assert_eq_i64((i64)SILVER_FFI_ERR_NOT_FOUND, spawn_error.code,
+        "native spawn missing program code");
+    return done();
+}

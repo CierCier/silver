@@ -1,0 +1,193 @@
+// Native-ergonomic layer over the Rust-backed C ABI declared in
+// std/ffi/rust_abi.ag.
+//
+// Presents the bridge in the shapes of the rest of the stdlib: Result<T,
+// Error> returns, owned String values, str arguments, and Drop-managed
+// process handles. The wrappers pass a null error slot to the raw ABI (the
+// status code carries the failure) and build native Error values from
+// silver_ffi_status_message: static text owned by the Rust library for the
+// whole process, so the borrowed str satisfies the std/error.ag lifetime
+// rule without copying or leaking. The raw ABI remains available for
+// streaming callbacks and exact Rust-side message buffers.
+
+import std.ffi.rust_abi;
+import std.mem.alloc;
+import std.string;
+import std.error;
+import std.result;
+import std.mem.vec;
+
+/// Process-lifetime message text for a raw ABI status code.
+str rust_ffi_status_name(i32 status) {
+    return silver_ffi_status_message(status);
+}
+
+/// True when `path` exists; false on any failed lookup, like file_exists.
+bool rust_ffi_exists(str path) {
+    RustFfiSlice p = rust_ffi_text(path);
+    i32 exists = 0;
+    i32 status = silver_fs_exists((const RustFfiSlice*)&p, &exists,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return false;
+    }
+    return exists == 1;
+}
+
+/// Read the whole file at `path` into an owned String.
+Result<String, Error> rust_ffi_read_to_string(str path) {
+    RustFfiSlice p = rust_ffi_text(path);
+    RustFfiBuffer out = rust_ffi_buffer_new();
+    i32 status = silver_fs_read_file((const RustFfiSlice*)&p, &out,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    String contents = String.with_capacity(out.len + 1);
+    contents.push_bytes(out.data, out.len);
+    return Ok(move contents);
+}
+
+/// Write `contents` to `path`, replacing any existing file.
+Result<bool, Error> rust_ffi_write_string(str path, str contents) {
+    RustFfiSlice p = rust_ffi_text(path);
+    RustFfiSlice c = rust_ffi_text(contents);
+    i32 status = silver_fs_write_file((const RustFfiSlice*)&p,
+        (const RustFfiSlice*)&c, (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    return Ok(true);
+}
+
+/// Remove the file at `path`.
+Result<bool, Error> rust_ffi_remove_file(str path) {
+    RustFfiSlice p = rust_ffi_text(path);
+    i32 status = silver_fs_remove_file((const RustFfiSlice*)&p,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    return Ok(true);
+}
+
+/// Create `path` and every missing parent directory (idempotent).
+Result<bool, Error> rust_ffi_create_dir(str path) {
+    RustFfiSlice p = rust_ffi_text(path);
+    i32 status = silver_fs_create_dir((const RustFfiSlice*)&p,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    return Ok(true);
+}
+
+/// Remove the empty directory at `path`.
+Result<bool, Error> rust_ffi_remove_dir(str path) {
+    RustFfiSlice p = rust_ffi_text(path);
+    i32 status = silver_fs_remove_dir((const RustFfiSlice*)&p,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    return Ok(true);
+}
+
+/// Look up an environment variable; Err carries NOT_FOUND when absent.
+Result<String, Error> rust_ffi_env_get(str key) {
+    RustFfiSlice k = rust_ffi_text(key);
+    RustFfiBuffer out = rust_ffi_buffer_new();
+    i32 status = silver_env_get((const RustFfiSlice*)&k, &out,
+        (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    String value = String.with_capacity(out.len + 1);
+    value.push_bytes(out.data, out.len);
+    return Ok(move value);
+}
+
+/// The process working directory as an owned String.
+Result<String, Error> rust_ffi_current_dir() {
+    RustFfiBuffer out = rust_ffi_buffer_new();
+    i32 status = silver_env_current_dir(&out, (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    String value = String.with_capacity(out.len + 1);
+    value.push_bytes(out.data, out.len);
+    return Ok(move value);
+}
+
+/// Join two path components into an owned String.
+Result<String, Error> rust_ffi_path_join(str base, str child) {
+    RustFfiSlice b = rust_ffi_text(base);
+    RustFfiSlice c = rust_ffi_text(child);
+    RustFfiBuffer out = rust_ffi_buffer_new();
+    i32 status = silver_path_join((const RustFfiSlice*)&b,
+        (const RustFfiSlice*)&c, &out, (RustFfiError*)0);
+    if (status != SILVER_FFI_OK) {
+        return Err((i64)status, rust_ffi_status_name(status));
+    }
+    String value = String.with_capacity(out.len + 1);
+    value.push_bytes(out.data, out.len);
+    return Ok(move value);
+}
+
+impl RustFfiProcess {
+    /// Spawn `program` with no arguments. The handle frees through Drop.
+    Result<RustFfiProcess, Error> spawn(str program) {
+        RustFfiSlice p = rust_ffi_text(program);
+        RustFfiProcess process = rust_ffi_process_new();
+        i32 status = silver_process_spawn((const RustFfiSlice*)&p,
+            (const RustFfiSlice*)0, (i64)0, &process.handle,
+            (RustFfiError*)0);
+        if (status != SILVER_FFI_OK) {
+            return Err((i64)status, rust_ffi_status_name(status));
+        }
+        return Ok(move process);
+    }
+
+    /// Spawn `program` with the borrowed argument list `args` (non-null).
+    Result<RustFfiProcess, Error> spawn_with_args(str program, Vec<str>* args) {
+        RustFfiSlice p = rust_ffi_text(program);
+        i64 count = args.len();
+        RustFfiSlice* slices = (RustFfiSlice*)0;
+        if (count > 0) {
+            slices = (RustFfiSlice*)malloc(@size(RustFfiSlice) * count);
+            i64 i = 0;
+            while (i < count) {
+                slices[i] = rust_ffi_text(args.get(i));
+                i = i + 1;
+            }
+        }
+        RustFfiProcess process = rust_ffi_process_new();
+        i32 status = silver_process_spawn((const RustFfiSlice*)&p,
+            (const RustFfiSlice*)slices, count, &process.handle,
+            (RustFfiError*)0);
+        if (slices != (RustFfiSlice*)0) {
+            free(slices);
+        }
+        if (status != SILVER_FFI_OK) {
+            return Err((i64)status, rust_ffi_status_name(status));
+        }
+        return Ok(move process);
+    }
+
+    /// Join the process: block until it exits and return its exit code. A
+    /// signal death reports 128 + signal on Unix. Join is one-shot; a second
+    /// call errors with INVALID_HANDLE.
+    Result<i32, Error> join(*self) {
+        if (self.handle == (void*)0) {
+            return Err((i64)SILVER_FFI_ERR_INVALID_HANDLE,
+                rust_ffi_status_name(SILVER_FFI_ERR_INVALID_HANDLE));
+        }
+        i32 exit_code = -1;
+        i32 status = silver_process_wait(self.handle, &exit_code,
+            (RustFfiError*)0);
+        if (status != SILVER_FFI_OK) {
+            return Err((i64)status, rust_ffi_status_name(status));
+        }
+        return Ok(exit_code);
+    }
+}

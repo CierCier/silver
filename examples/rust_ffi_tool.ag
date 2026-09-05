@@ -1,0 +1,162 @@
+// A development tool that uses the native Rust-FFI layer (Result<String,
+// Error> shapes, Drop-owned handles) plus one raw callback read.
+//
+// Build the bridge and pass its artifact directory before compiling:
+//   cargo build -p silver-ffi
+//   cargo run -p agc -- examples/rust_ffi_tool.ag \
+//       -L target/debug -o /tmp/rust_ffi_tool
+//   LD_LIBRARY_PATH="$PWD/target/debug" /tmp/rust_ffi_tool
+
+import std.ffi;
+
+i64 g_bytes_read = 0;
+
+i32 count_bytes(void* userdata, const RustFfiSlice* chunk) {
+    if (userdata == (void*)0 || chunk == (const RustFfiSlice*)0) {
+        return 1;
+    }
+    i64* total = (i64*)userdata;
+    *total = *total + chunk.len;
+    return 0;
+}
+
+i32 main() {
+    if (silver_ffi_abi_version() != SILVER_FFI_ABI_VERSION) {
+        @eprintln("Rust FFI ABI version mismatch");
+        return 1;
+    }
+
+    // Native layer: str arguments, Result returns, Drop-owned values.
+    Result<bool, Error> written = rust_ffi_write_string("rust_ffi_tool.txt",
+        "created by Silver through Rust\n");
+    if (written.is_err()) {
+        Error err = written.unwrap_err();
+        @eprintln("write failed: {}", err.message);
+        return 1;
+    }
+
+    if (!rust_ffi_exists("rust_ffi_tool.txt")) {
+        @eprintln("file should exist after write");
+        return 1;
+    }
+
+    Result<String, Error> read = rust_ffi_read_to_string("rust_ffi_tool.txt");
+    if (read.is_err()) {
+        Error err = read.unwrap_err();
+        @eprintln("read failed: {}", err.message);
+        return 1;
+    }
+    String contents = read.unwrap();
+    @println("read {} bytes through the Rust bridge", contents.len());
+    contents.drop();
+
+    Result<String, Error> joined = rust_ffi_path_join("/tmp", "silver-tool");
+    if (joined.is_err()) {
+        Error err = joined.unwrap_err();
+        @eprintln("path join failed: {}", err.message);
+        return 1;
+    }
+    String joined_path = joined.unwrap();
+    @println("joined path: {}", (str)joined_path.to_str());
+    joined_path.drop();
+
+    Result<String, Error> cwd = rust_ffi_current_dir();
+    if (cwd.is_ok()) {
+        String dir = cwd.unwrap();
+        @println("working directory: {}", (str)dir.to_str());
+        dir.drop();
+    }
+
+    Result<String, Error> path_var = rust_ffi_env_get("PATH");
+    if (path_var.is_ok()) {
+        String value = path_var.unwrap();
+        @println("PATH is {} bytes", value.len());
+        value.drop();
+    }
+
+    Result<String, Error> missing = rust_ffi_env_get("SILVER_FFI_MISSING_VAR");
+    if (missing.is_ok()) {
+        @eprintln("missing variable should not be present");
+        return 1;
+    }
+    Error missing_err = missing.unwrap_err();
+    if (missing_err.code != (i64)SILVER_FFI_ERR_NOT_FOUND) {
+        @eprintln("expected NOT_FOUND, got code {}", missing_err.code);
+        return 1;
+    }
+
+    Result<bool, Error> made = rust_ffi_create_dir("rust_ffi_demo_dir");
+    if (made.is_err()) {
+        Error err = made.unwrap_err();
+        @eprintln("create dir failed: {}", err.message);
+        return 1;
+    }
+    if (!rust_ffi_exists("rust_ffi_demo_dir")) {
+        @eprintln("directory should exist after create");
+        return 1;
+    }
+    Result<bool, Error> removed_dir = rust_ffi_remove_dir("rust_ffi_demo_dir");
+    if (removed_dir.is_err()) {
+        Error err = removed_dir.unwrap_err();
+        @eprintln("remove dir failed: {}", err.message);
+        return 1;
+    }
+
+    // Process spawning with a borrowed Vec<str> argument list.
+    Vec<str> args = Vec<str>.new();
+    args.push("-c");
+    args.push("exit 7");
+    Result<RustFfiProcess, Error> spawned =
+        RustFfiProcess.spawn_with_args("/bin/sh", &args);
+    if (spawned.is_err()) {
+        Error err = spawned.unwrap_err();
+        @eprintln("spawn failed: {}", err.message);
+        return 1;
+    }
+    RustFfiProcess process = spawned.unwrap();
+    Result<i32, Error> exited = process.join();
+    if (exited.is_err()) {
+        Error err = exited.unwrap_err();
+        @eprintln("join failed: {}", err.message);
+        return 1;
+    }
+    i32 exit_code = exited.unwrap();
+    @println("process exited with {}", exit_code);
+    if (exit_code != 7) {
+        return 1;
+    }
+
+    Result<RustFfiProcess, Error> quick = RustFfiProcess.spawn("/bin/true");
+    if (quick.is_err()) {
+        Error err = quick.unwrap_err();
+        @eprintln("plain spawn failed: {}", err.message);
+        return 1;
+    }
+    RustFfiProcess plain = quick.unwrap();
+    Result<i32, Error> plain_exit = plain.join();
+    if (plain_exit.is_err() || plain_exit.unwrap() != 0) {
+        @eprintln("plain process did not exit cleanly");
+        return 1;
+    }
+
+    // Raw layer: stream borrowed chunks through a C callback when the whole
+    // file should not be materialized.
+    RustFfiError error = rust_ffi_error_new();
+    RustFfiSlice stream_path = rust_ffi_text("rust_ffi_tool.txt");
+    g_bytes_read = 0;
+    i32 status = silver_fs_read_file_callback((const RustFfiSlice*)&stream_path,
+        count_bytes, (void*)&g_bytes_read, &error);
+    if (status != SILVER_FFI_OK) {
+        @eprintln("callback read failed with status {}", status);
+        return 1;
+    }
+    @println("callback streamed {} bytes", g_bytes_read);
+
+    Result<bool, Error> cleaned = rust_ffi_remove_file("rust_ffi_tool.txt");
+    if (cleaned.is_err()) {
+        Error err = cleaned.unwrap_err();
+        @eprintln("cleanup failed: {}", err.message);
+        return 1;
+    }
+    return 0;
+}

@@ -4,6 +4,7 @@ members = [
     "bin/agc",
     "bin/aglsp",
     "bin/agsm",
+    "ffi/rust",
 ]
 
 

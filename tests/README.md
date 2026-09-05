@@ -26,6 +26,7 @@ compiled and executed by the test harness.
 | `syscall_test.ag` | Raw inline-asm syscall (`sys_exit(42)`) |
 | `syscall_wrapper_test.ag` | `std.sys.syscall` wrappers (`sys_exit(42)`) |
 | `vec_test.ag` | Tests for `std.vec` (Vec_i32, Vec_i64, Vec_f64, Vec_ptr) |
+| `rust_ffi_test.ag` | Optional Rust C ABI layout, ownership, callbacks, process handles, and the native `Result`-shaped layer |
 
 ## Running Tests
 
@@ -40,6 +41,13 @@ bash tests/run_tests.sh
 
 # Run a single test by name (the .ag suffix is optional)
 bash tests/run_tests.sh vec_test
+```
+
+The Rust bridge test is opt-in because it needs the built native artifact:
+
+```bash
+cargo build -p silver-ffi
+SILVER_FFI_LIBRARY_DIR="$PWD/target/debug" bash tests/run_tests.sh rust_ffi_test
 ```
 
 A test fails when it does not compile, or when the produced binary exits with
