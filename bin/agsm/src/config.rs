@@ -258,6 +258,9 @@ pub fn query_pkg_config(packages: &[String]) -> Result<PkgConfigResolution, Conf
             if !lib.is_empty() && !resolution.libs.iter().any(|l| l == lib) {
                 resolution.libs.push(lib.to_string());
             }
+        } else if let Some((path, lib)) = parse_library_path(token) {
+            push_unique(&mut resolution.lib_paths, path);
+            push_unique(&mut resolution.libs, lib);
         }
     }
 
@@ -428,6 +431,9 @@ fn parse_llvm_flags(
             {
                 if token == "-L" {
                     push_unique(&mut resolution.lib_paths, PathBuf::from(value));
+                } else if let Some((path, lib)) = parse_library_path(value) {
+                    push_unique(&mut resolution.lib_paths, path);
+                    push_unique(&mut resolution.libs, lib);
                 } else {
                     push_unique(&mut resolution.libs, value.to_string());
                 }
@@ -463,7 +469,10 @@ fn parse_library_path(token: &str) -> Option<(PathBuf, String)> {
     if library.is_empty() {
         return None;
     }
-    Some((path.parent()?.to_path_buf(), library.to_string()))
+    Some((
+        path.parent()?.to_path_buf(),
+        path.to_string_lossy().into_owned(),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,14 +929,17 @@ llvm_config_version = 22
             resolution.lib_paths,
             vec![PathBuf::from("/lib"), PathBuf::from("/usr/lib")]
         );
-        assert_eq!(resolution.libs, vec!["LLVM-22", "pthread", "zstd"]);
+        assert_eq!(
+            resolution.libs,
+            vec!["LLVM-22", "pthread", "/usr/lib/libzstd.a"]
+        );
         assert_eq!(
             parse_library_path("/usr/lib/libzstd.a"),
-            Some((PathBuf::from("/usr/lib"), "zstd".to_string()))
+            Some((PathBuf::from("/usr/lib"), "/usr/lib/libzstd.a".to_string()))
         );
         assert_eq!(
             parse_library_path("/usr/lib/libxml2.so.2"),
-            Some((PathBuf::from("/usr/lib"), "xml2".to_string()))
+            Some((PathBuf::from("/usr/lib"), "/usr/lib/libxml2.so.2".to_string()))
         );
     }
 

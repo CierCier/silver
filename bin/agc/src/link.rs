@@ -30,6 +30,15 @@ pub(crate) fn run_tool(mut command: Command, label: &str) -> Result<(), String> 
         }
     ))
 }
+
+fn add_native_library(command: &mut Command, library: &str) {
+    if Path::new(library).is_absolute() {
+        command.arg(library);
+    } else {
+        command.arg(format!("-l{library}"));
+    }
+}
+
 // ---- Cached cc queries — each arg is a LazyLock, spawned once ----
 
 static CC_LIB_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
@@ -156,9 +165,16 @@ fn link_has_shared_libraries(
         return true;
     }
     native_libs.iter().any(|lib| {
-        search_dirs
-            .iter()
-            .any(|dir| dir.join(format!("lib{lib}.so")).exists())
+        let path = Path::new(lib);
+        if path.is_absolute() {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".so") || name.ends_with(".dylib"))
+        } else {
+            search_dirs
+                .iter()
+                .any(|dir| dir.join(format!("lib{lib}.so")).exists())
+        }
     })
 }
 
@@ -243,7 +259,7 @@ pub(crate) fn link_exe_with_ld_lld(
     }
 
     for lib in native_libs {
-        link.arg(format!("-l{lib}"));
+        add_native_library(&mut link, lib);
     }
 
     run_tool(link, lld_name)
@@ -298,7 +314,7 @@ pub(crate) fn link_exe_with_cc(
         link.arg(format!("-Wl,-rpath,{}", dir.display()));
     }
     for lib in native_libs {
-        link.arg(format!("-l{lib}"));
+        add_native_library(&mut link, lib);
     }
     run_tool(link, "cc linker")
 }
@@ -329,7 +345,7 @@ pub(crate) fn link_shared_module(
         link.arg(format!("-Wl,-rpath,{}", dir.display()));
     }
     for lib in native_libs {
-        link.arg(format!("-l{lib}"));
+        add_native_library(&mut link, lib);
     }
     run_tool(link, "cc shared linker")
 }
