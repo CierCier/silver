@@ -1,0 +1,99 @@
+// tests/perf/bench_server_http.ag — Apache Bench (ab) target for the std
+// HTTP server (std.net.http HttpServer.serve_conn).
+//
+// listen_and_serve() serves one connection at a time; to measure the server
+// machinery itself this program runs MAX_THREADS acceptor workers all
+// blocked in accept() on the same listener (thread-per-connection, blocking
+// I/O). Each worker owns a private HttpServer so threads share nothing.
+//
+//   ./target/debug/agc -O2 tests/perf/bench_server_http.ag -o /tmp/bench_http
+//   /tmp/bench_http &
+//   ab -k -n 100000 -c 8 http://127.0.0.1:18095/plaintext
+
+import std.error;
+import std.net.http;
+import std.net.inet;
+import std.net.tcp;
+import std.sys.entry;
+import std.sys.raw.misc;
+import std.sys.raw.process;
+import std.thread;
+
+const i64 BENCH_PORT = 18095;
+const i64 N_WORKERS = 63; // + main thread = 64 (thread registry ceiling)
+
+struct SigAction {
+    i64 handler;
+    i64 flags;
+    i64 restorer;
+    i64 mask;
+}
+
+void ignore_sigpipe() {
+    SigAction act;
+    act.handler = 1; // SIG_IGN
+    act.flags = 0;
+    act.restorer = 0;
+    act.mask = 0;
+    sys_rt_sigaction(13, (i64)&act, 0, 8);
+}
+
+void handle_plaintext(ResponseWriter* w, HttpRequest* _r) {
+    w.set_header("Content-Type", "text/plain");
+    w.write_header(200);
+    w.write_str("Hello, World!");
+}
+
+/// Acceptor loop: block in accept(), serve the connection to completion
+/// (keep-alive handled inside serve_conn), then accept again.
+void acceptor_worker(i64 arg) {
+    i32 lfd = (i32)arg;
+    TcpListener listener = TcpListener.from_fd(lfd);
+    HttpServer s = HttpServer.new("127.0.0.1:18095");
+    // Default idle timeout is 50ms; a shared-CI sandbox can deschedule the
+    // client longer than that, closing the connection mid-benchmark (RST).
+    s.set_keep_alive_timeout_ms(5000);
+    s.get("/plaintext", handle_plaintext);
+
+    while (true) {
+        Result<i64, Error> a = listener.accept();
+        match a {
+            Ok(fd) : {
+                TcpStream stream = TcpStream.from_fd((i32)fd);
+                stream.set_nodelay(true);
+                s.serve_conn(move stream);
+            },
+            Err(e) : { continue; },
+        };
+    }
+}
+
+i32 main() {
+    ignore_sigpipe();
+
+    Result<SocketAddr, AddrError> br = SocketAddr.v4("127.0.0.1", (u16)BENCH_PORT);
+    if (br.failed()) {
+        @eprintln("bad bind addr");
+        return 1;
+    }
+    SocketAddr addr = br.unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 512);
+    if (!listener.valid()) {
+        @eprintln("bind failed on port {}", BENCH_PORT);
+        return 1;
+    }
+    @println("bench_server_http: listening on 127.0.0.1:{}", BENCH_PORT);
+
+    i64 lfd = listener.take_fd();
+    i64 spawned = 0;
+    while (spawned < N_WORKERS) {
+        TaskRecord* h = thread_spawn(acceptor_worker, lfd);
+        if (h == (TaskRecord*)0) { break; }
+        spawned = spawned + 1;
+    }
+    @println("bench_server_http: {} acceptor workers", spawned);
+
+    // Main thread joins the accept pool as worker #64.
+    acceptor_worker(lfd);
+    return 0;
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "ports": {"preview": 3000, "additional": {}},
+  "scripts": {
+    "setup": {"enabled": true, "command": "set -e; sudo apt-get update -q; sudo apt-get install -y -q apache2-utils valgrind; curl -sSf -o /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init; chmod +x /tmp/rustup-init; /tmp/rustup-init -y --default-toolchain stable --profile minimal; . \"$HOME/.cargo/env\"; curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor --output /etc/apt/keyrings/llvm.gpg; sudo chmod 0644 /etc/apt/keyrings/llvm.gpg; echo 'deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null; sudo apt-get update -q; sudo apt-get install -y -q clang-22 lld-22 llvm-22-dev libpolly-22-dev libzstd-dev zlib1g-dev libssl-dev; . \"$HOME/.cargo/env\"; LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 cargo build -p agc"},
+    "run": {"enabled": true, "command": null},
+    "archive": {"enabled": true, "command": null},
+    "check": {"enabled": true, "command": null}
+  },
+  "mcpServers": []
+}

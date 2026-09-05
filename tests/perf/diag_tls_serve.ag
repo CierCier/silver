@@ -1,0 +1,118 @@
+// tests/perf/diag_tls_serve.ag — localize where concurrent HTTPS responses
+// are lost: counts accept / handshake-ok / request-read / response-written
+// stages per connection, serving a fixed response directly over TLS.
+
+import std.error;
+import std.net.inet;
+import std.net.tcp;
+import std.net.tls;
+import std.sys.entry;
+import std.sys.raw.misc;
+import std.sys.raw.process;
+import std.thread;
+
+struct SigAction {
+    i64 handler;
+    i64 flags;
+    i64 restorer;
+    i64 mask;
+}
+
+void ignore_sigpipe() {
+    SigAction act;
+    act.handler = 1; // SIG_IGN
+    act.flags = 0;
+    act.restorer = 0;
+    act.mask = 0;
+    sys_rt_sigaction(13, (i64)&act, 0, 8);
+}
+
+i64 g_stage_accept = 0;
+i64 g_stage_handshake = 0;
+i64 g_stage_request = 0;
+i64 g_stage_response = 0;
+i64 g_stage_handshake_fail = 0;
+
+const str HTTP_RESP = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello, World!";
+
+void serve_worker(i64 arg) {
+    i32 lfd = (i32)arg;
+    TcpListener listener = TcpListener.from_fd(lfd);
+
+    while (true) {
+        Result<i64, Error> a = listener.accept();
+        match a {
+            Ok(fd) : {
+                g_stage_accept = g_stage_accept + 1;
+                TcpStream stream = TcpStream.from_fd((i32)fd);
+                stream.set_nodelay(true);
+
+                TlsStream tls;
+                Error err;
+                bool ok = tls.accept(stream.sock.fd, "tests/certs/server.pem", "tests/certs/server.pem", &err);
+                if (!ok) {
+                    g_stage_handshake_fail = g_stage_handshake_fail + 1;
+                    @eprintln("handshake fail: {}", err.message);
+                    stream.close();
+                    continue;
+                }
+                g_stage_handshake = g_stage_handshake + 1;
+
+                // Read one HTTP request head directly over TLS.
+                u8 buf[1024];
+                i64 got = 0;
+                while (got < 4) {
+                    Result<i64, Error> r = tls.read(&buf[0], 1024);
+                    if (r.failed() || r.value() == 0) { break; }
+                    got = got + r.value();
+                    // stop after the blank line ends the request head
+                    bool saw_end = false;
+                    i64 i = 0;
+                    while (i + 3 < got) {
+                        if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+                            saw_end = true;
+                            break;
+                        }
+                        i = i + 1;
+                    }
+                    if (saw_end) { break; }
+                }
+                if (got >= 4) {
+                    g_stage_request = g_stage_request + 1;
+                    Result<i64, Error> wr = tls.write((u8*)HTTP_RESP, 78);
+                    if (wr.success() && wr.value() == 78) {
+                        g_stage_response = g_stage_response + 1;
+                    } else {
+                        @eprintln("response write failed");
+                    }
+                } else {
+                    @eprintln("request read short: {}", got);
+                }
+
+                tls.close();
+                stream.close();
+            },
+            Err(e) : { continue; },
+        };
+    }
+}
+
+i32 main() {
+    ignore_sigpipe();
+    tls_init();
+
+    Result<SocketAddr, AddrError> br = SocketAddr.v4("127.0.0.1", 18498);
+    SocketAddr addr = br.unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 512);
+    i64 lfd = listener.take_fd();
+
+    i64 spawned = 0;
+    while (spawned < 15) {
+        TaskRecord* h = thread_spawn(serve_worker, lfd);
+        if (h == (TaskRecord*)0) { break; }
+        spawned = spawned + 1;
+    }
+    @println("diag_tls_serve: {} workers on 18498", spawned);
+    serve_worker(lfd);
+    return 0;
+}

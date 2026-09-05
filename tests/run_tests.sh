@@ -115,6 +115,7 @@ test_specific_flags() {
         ternary_test) echo "--cfg cpu.sse41=1" ;;
         target_feature_test) echo "--cfg cpu.avx2=1" ;;
         cfg_derived_test) echo "-O2" ;;
+        volatile_attr_test) echo "-O2" ;;
         *) echo "" ;;
     esac
 }

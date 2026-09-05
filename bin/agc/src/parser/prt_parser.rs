@@ -3579,11 +3579,18 @@ impl PRT_Parser {
             let mut inner = bracket_start + 1;
             while inner < bracket_end {
                 let name_token = &tokens[inner];
-                let Token::Identifier(name) = &name_token.kind else {
-                    return Err(ParseError::InvalidSyntax {
-                        message: "expected attribute name".to_string(),
-                        span: name_token.span,
-                    });
+                // `volatile` is a reserved keyword (the load/store qualifier),
+                // but `#[volatile]` is the keep-alive attribute spelled with
+                // the same word — accept the keyword as an attribute name.
+                let name = match &name_token.kind {
+                    Token::Identifier(name) => name.clone(),
+                    Token::Volatile => "volatile".to_string(),
+                    _ => {
+                        return Err(ParseError::InvalidSyntax {
+                            message: "expected attribute name".to_string(),
+                            span: name_token.span,
+                        });
+                    }
                 };
                 inner += 1;
 

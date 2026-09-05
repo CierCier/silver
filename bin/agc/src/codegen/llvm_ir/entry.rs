@@ -180,6 +180,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
             leak_check: false,
             root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
         };
         generator.generate_program(program)?;
         generator.emit_backtrace_table();
@@ -295,6 +296,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             task_trampoline_counter: 0,
             leak_check,
             root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
         };
         generator.declare_imported_modules(program, imported_modules)?;
         generator.generate_program(program)?;
@@ -634,6 +636,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             task_trampoline_counter: 0,
             leak_check,
             root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
         };
         generator.declare_imported_modules(program, imported_modules)?;
 

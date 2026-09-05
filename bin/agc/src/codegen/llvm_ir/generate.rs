@@ -532,6 +532,48 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut original_linkages: rustc_hash::FxHashMap<String, inkwell::module::Linkage> =
             rustc_hash::FxHashMap::default();
 
+        // #[volatile] items: list them in `@llvm.used` so `globaldce`
+        // treats them as roots. This is what keeps private (internal
+        // linkage) functions and globals alive even when nothing in the
+        // module references them — the same mechanism C's
+        // `__attribute__((used))` lowers to.
+        if !self.keep_items.is_empty() {
+            let ptr_ty = self
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            let mut refs: Vec<LLVMValueRef> = Vec::new();
+            for name in &self.keep_items {
+                if let Some(global) = self.module.get_global(name) {
+                    refs.push(global.as_pointer_value().as_value_ref());
+                } else if let Some(function) = self.module.get_function(name) {
+                    refs.push(
+                        function
+                            .as_global_value()
+                            .as_pointer_value()
+                            .as_value_ref(),
+                    );
+                }
+            }
+            if !refs.is_empty() {
+                let used_ty = ptr_ty.array_type(refs.len() as u32);
+                let used = if let Some(existing) = self.module.get_global("llvm.used") {
+                    existing
+                } else {
+                    self.module.add_global(used_ty, None, "llvm.used")
+                };
+                let array = unsafe {
+                    llvm_sys::core::LLVMConstArray2(
+                        ptr_ty.as_any_type_enum().as_type_ref(),
+                        refs.as_mut_ptr(),
+                        refs.len() as u64,
+                    )
+                };
+                used.set_initializer(&unsafe { ArrayValue::new(array) });
+                used.set_linkage(inkwell::module::Linkage::Appending);
+                used.set_section(Some("llvm.metadata"));
+            }
+        }
+
         for function in self.module.get_functions() {
             if function.count_basic_blocks() == 0 {
                 continue;
@@ -633,6 +675,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        let keep_item = attributes
+            .iter()
+            .any(|attr| attr.name.name == "volatile");
         let link_name = function_link_name(attributes);
         let symbol_name = self.free_function_symbol_name(
             &func.name.name,
@@ -645,6 +690,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let llvm_name = link_name.unwrap_or(&symbol_name);
 
         self.register_source_function_symbol(&func.name.name, &symbol_name);
+
+        if keep_item {
+            // #[volatile] — never dead-strip this item. root_symbols keeps
+            // it out of the globaldce internalization pass; keep_items also
+            // lists it in @llvm.used so private (internal-linkage) instances
+            // survive even when nothing references them.
+            self.root_symbols.insert(llvm_name.to_string());
+            self.root_symbols.insert(func.name.name.clone());
+            self.keep_items.push(llvm_name.to_string());
+        }
 
         self.register_function_signature(
             llvm_name,
@@ -978,7 +1033,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     )?;
                 }
                 ast::ItemKind::GlobalVariable(global_variable_item) => {
-                    self.generate_global_variable_item(global_variable_item, &item.visibility)?;
+                    self.generate_global_variable_item(
+                        global_variable_item,
+                        &item.visibility,
+                        &item.attributes,
+                    )?;
                 }
                 ast::ItemKind::ExternBlock(extern_block_item) => {
                     self.generate_extern_block_item(
@@ -1029,7 +1088,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.emit_function_item_body(function_item, &item.attributes)
             }
             ast::ItemKind::GlobalVariable(global_variable_item) => {
-                self.generate_global_variable_item(global_variable_item, &item.visibility)
+                self.generate_global_variable_item(
+                    global_variable_item,
+                    &item.visibility,
+                    &item.attributes,
+                )
             }
             ast::ItemKind::Struct(struct_item) => {
                 self.generate_struct_item(struct_item, &item.visibility, &item.attributes)

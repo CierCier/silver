@@ -520,6 +520,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         item: &ast::GlobalVariableItem,
         visibility: &ast::Visibility,
+        attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
         let llvm_ty = self.lower_basic_type(&item.var_type)?;
         let global = self
@@ -545,6 +546,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         global.set_initializer(&initializer);
         if item.is_volatile {
             self.volatile_globals.insert(item.name.name.clone());
+        }
+        if attributes
+            .iter()
+            .any(|attr| attr.name.name == "volatile")
+        {
+            // #[volatile] — never dead-strip this global: listed in
+            // @llvm.used so globaldce keeps it even when internal and
+            // unreferenced.
+            self.keep_items.push(item.name.name.clone());
         }
         self.global_variables
             .insert(item.name.name.clone(), item.var_type.clone());

@@ -611,6 +611,11 @@ i64 memcmp_v256(u8* p1, u8* p2, i64 blocks) {
 /// Compare the first `n` bytes of two regions. Returns 0 when equal, else the
 /// difference of the first differing bytes. Null inputs are not tolerated
 /// (matches the C contract).
+///
+/// #[volatile] keeps this shim alive through dead-code elimination: LLVM's
+/// optimizer lowers memcmp-shaped code to `memcmp` calls after the DCE pass
+/// has run, so nothing in the source tree ever references this by name.
+#[volatile]
 i32 memcmp(const void* s1, const void* s2, i64 n) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
@@ -670,6 +675,10 @@ i32 memcmp(const void* s1, const void* s2, i64 n) {
 /// otherwise. LLVM's optimizer recognizes memcmp-shaped code at -O2 and
 /// lowers it to a `bcmp` call; the no-libc runtime provides this shim so
 /// optimized builds link.
+///
+/// #[volatile] for the same reason as memcmp: the call sites are introduced
+/// by the optimizer after DCE, so the shim must survive it unconditionally.
+#[volatile]
 i32 bcmp(const void* s1, const void* s2, i64 n) {
     return memcmp(s1, s2, n);
 }
