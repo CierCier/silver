@@ -330,6 +330,15 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
     let Some(line_data) = elf_section(&elf, ".debug_line") else {
         return Vec::new();
     };
+    // Relocation keys are file-absolute (target section offset + r_offset);
+    // resolve the line table's own offset once so per-row lookups can use
+    // section-relative positions.
+    let line_sec_off = elf
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_line")
+        .map(|s| s.offset)
+        .unwrap_or(0);
     let funcs: Vec<(String, u64, u64)> = elf
         .symbols
         .iter()
@@ -422,7 +431,7 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
                     0x02 => {
                         // set address (64-bit, may be relocated)
                         let raw = sr.u64().unwrap_or(0);
-                        let field_off = pos + 4 + prog_start_in_table + sub_start + 1;
+                        let field_off = line_sec_off + pos + 4 + prog_start_in_table + sub_start + 1;
                         let reloc = elf.relocations.get(&field_off).copied().unwrap_or(0);
                         address = raw.wrapping_add(reloc);
                     }
