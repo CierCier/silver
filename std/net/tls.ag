@@ -103,6 +103,9 @@ const i64 TLSEXT_NAMETYPE_HOST_NAME = 0;
 
 const i32 SSL_ERROR_ZERO_RETURN = 6;
 const i32 SSL_ERROR_SYSCALL = 5;
+const i32 SSL_ERROR_WANT_WRITE = 3;
+const i32 SSL_ERROR_WANT_READ = 2;
+const i32 SSL_ERROR_SSL = 1;
 
 /// OpenSSL handle + configuration. The socket fd stays owned by the caller's
 /// TcpStream; close() only tears down the TLS session.
@@ -256,9 +259,17 @@ impl TlsStream {
             *err = Error.new(TLS_ERR, "TLS socket setup failed");
             return false;
         }
-        if (ssl_accept(ssl) != 1) {
+        i32 ar = ssl_accept(ssl);
+        if (ar != 1) {
+            i32 e = ssl_get_error(ssl, ar);
+            str reason = "TLS handshake failed: other";
+            if (e == SSL_ERROR_SSL) { reason = "TLS handshake failed: protocol error"; }
+            else if (e == SSL_ERROR_WANT_READ) { reason = "TLS handshake failed: want_read"; }
+            else if (e == SSL_ERROR_WANT_WRITE) { reason = "TLS handshake failed: want_write"; }
+            else if (e == SSL_ERROR_SYSCALL) { reason = "TLS handshake failed: syscall (peer reset/eof)"; }
+            else if (e == SSL_ERROR_ZERO_RETURN) { reason = "TLS handshake failed: eof"; }
             ssl_free(ssl);
-            *err = Error.new(TLS_ERR, "TLS handshake failed");
+            *err = Error.new(TLS_ERR, reason);
             return false;
         }
         self.ssl = ssl;

@@ -347,7 +347,16 @@ Supported linkage specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`,
 
 #[link_name("native_c_pow")]
 extern "C" f64 c_pow(f64 base, f64 exp);
+
+#[volatile]           // never dead-code-eliminated (globaldce root)
+fn runtime_shim(...) { ... }
 ```
+
+`#[volatile]` on a top-level function or global keeps the item alive even
+when nothing references it: it survives dead-code elimination at `-O2+`
+(the standard-library `memcmp`/`bcmp` shims use it, because LLVM introduces
+calls to them only after DCE has run). It is unrelated to the `volatile`
+type qualifier, which makes loads/stores LLVM-volatile.
 
 `@attr(...)` is **not** attribute syntax — `@` is for expression macro calls
 (`@println`, `@size`, etc.).

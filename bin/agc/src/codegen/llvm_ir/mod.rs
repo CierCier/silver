@@ -170,6 +170,10 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,
     pub(crate) root_symbols: HashSet<String>,
+    /// LLVM names of `#[volatile]` items (functions and globals): emitted
+    /// into `@llvm.used` so `globaldce` treats them as roots and never
+    /// dead-strips them, even when private and unreferenced.
+    pub(crate) keep_items: Vec<String>,
     /// (LLVM function name, doc comment text) pairs collected while
     /// generating; spliced into the printed IR in `finish()` as `;` lines.
     pub(crate) doc_comments: Vec<(String, String)>,

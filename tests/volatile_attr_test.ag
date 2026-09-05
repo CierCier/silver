@@ -1,0 +1,50 @@
+// tests/volatile_attr_test.ag — #[volatile] attribute (dead-code-elimination
+// guard, compiled at -O2 by run_tests.sh).
+//
+// Verifies at -O2 (where globaldce runs):
+//   - #[volatile] functions survive DCE even when nothing references them.
+//   - #[volatile] globals (including `static` internal-linkage ones) survive.
+//   - Unmarked functions are still eliminated (DCE actually ran).
+//   - The stdlib's memcmp/bcmp shims (#[volatile] in std/mem/memory.ag)
+//     survive, so LLVM's -O2 memcmp-shaped lowering links and runs.
+//
+// Without the attribute, this program fails to LINK at -O2: main's
+// equality loop is lowered to a `bcmp` call after DCE, and the shim would
+// have been dead-stripped.
+
+import std.mem.memory;
+
+#[volatile]
+i32 kept_fn(i64 x) {
+    i64 y = x * 2;
+    if (y > 100) {
+        return 1;
+    }
+    return 2;
+}
+
+#[volatile]
+static i64 kept_counter = 41;
+
+i32 dropped_fn(i64 _x) {
+    return 3;
+}
+
+i32 main() {
+    // memcmp-shaped byte-equality loop: LLVM's optimizer lowers this to a
+    // `bcmp` call at -O2, so this program only links when the #[volatile]
+    // shims survived dead-code elimination.
+    u8 a[64];
+    u8 b[64];
+    i64 i = 0;
+    while (i < 64) {
+        a[i] = (u8)i;
+        b[i] = (u8)(i ^ 0);
+        i = i + 1;
+    }
+    i32 r = memcmp((const void*)&a[0], (const void*)&b[0], 64);
+    if (r != 0) {
+        return 1;
+    }
+    return 0;
+}
