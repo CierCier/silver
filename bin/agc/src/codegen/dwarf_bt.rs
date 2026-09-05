@@ -876,7 +876,11 @@ mod tests {
         let agc = std::env::var("AGC").unwrap_or_else(|_| {
             let target = std::env::var("CARGO_TARGET_DIR")
                 .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
-            format!("{target}/debug/agc")
+            // Match the test binary's profile: `cargo test --release` never
+            // rebuilds target/debug/agc, so a stale cached debug binary would
+            // compile the probe against a drifted frontend.
+            let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+            format!("{target}/{profile}/agc")
         });
         let status = std::process::Command::new(&agc)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))

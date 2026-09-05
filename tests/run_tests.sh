@@ -214,7 +214,11 @@ fi
 is_skipped() {
     # An explicitly named test bypasses only its own skip entry; unrelated
     # optional servers should still be skipped when running one test.
-    if [ "$EXPLICIT_TEST" -eq 1 ] && [ "$CLI_TEST_NAME" = "$1" ]; then
+    # Normalize like the selector below: strip any directory prefix and the
+    # optional .ag suffix so "tests/foo.ag" and "foo" both match "foo".
+    local explicit_name="${CLI_TEST_NAME##*/}"
+    explicit_name="${explicit_name%.ag}"
+    if [ "$EXPLICIT_TEST" -eq 1 ] && [ "$explicit_name" = "$1" ]; then
         return 1
     fi
     while IFS= read -r line; do
