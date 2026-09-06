@@ -1,4 +1,13 @@
+i32 add_two(i32 x) {
+    return x + 2;
+}
+
 i32 main() {
     @println("Her De Der, Theres silver in this vein!");
     return 0;
+}
+
+#[test]
+void test_add_two() {
+    assert_eq_i32(add_two(3), 5, "add_two(3) == 5");
 }

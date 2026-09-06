@@ -1,0 +1,18 @@
+// tests/test_attribute_test.ag
+// Tests #[test] discovery and execution.
+
+i32 helper_add(i32 a, i32 b) {
+    return a + b;
+}
+
+#[test]
+void test_arithmetic() {
+    assert_eq_i32(helper_add(2, 3), 5, "helper_add(2, 3) == 5");
+    assert_ne_i32(helper_add(2, 3), 6, "helper_add(2, 3) != 6");
+}
+
+#[test]
+void test_booleans() {
+    assert_eq_bool(true, true, "true == true");
+    assert_eq_bool(false, false, "false == false");
+}

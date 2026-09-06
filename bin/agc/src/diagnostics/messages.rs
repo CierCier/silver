@@ -470,3 +470,15 @@ pub fn memset_expects_three() -> &'static str {
 pub fn memmove_expects_three() -> &'static str {
     "@memmove expects exactly 3 arguments (dst, src, len)"
 }
+
+pub fn test_takes_no_arguments() -> &'static str {
+    "#[test] attribute takes no arguments"
+}
+
+pub fn test_fn_must_take_no_parameters(name: &str) -> String {
+    format!("test function `{name}` must take no parameters")
+}
+
+pub fn test_fn_must_return_void(name: &str) -> String {
+    format!("test function `{name}` must return void")
+}

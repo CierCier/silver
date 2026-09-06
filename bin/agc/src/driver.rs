@@ -290,6 +290,10 @@ pub struct Cli {
     /// Do not capture test output (print test stdout and stderr immediately)
     #[arg(long = "nocapture", action = ArgAction::SetTrue, help_heading = "Testing")]
     pub nocapture: bool,
+
+    /// Generate and run test harness for #[test] functions
+    #[arg(long = "test-harness", action = ArgAction::SetTrue, hide = true)]
+    pub test_harness: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -351,6 +355,7 @@ pub(crate) struct CompilePlan {
     pub(crate) progress: bool,
     pub(crate) auto_output: bool,
     pub(crate) warning_config: crate::semantic::linter::WarningConfig,
+    pub(crate) test_harness: bool,
 }
 
 impl CompilePlan {
@@ -715,6 +720,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             }
         },
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
+        test_harness: cli.test_harness,
     })
 }
 
@@ -1252,6 +1258,30 @@ pub fn run(cli: Cli) {
                     }
                 };
 
+                if plan.test_harness {
+                    ast.items.insert(
+                        0,
+                        ast::Item {
+                            kind: ast::ItemKind::Import(ast::ImportItem {
+                                path: vec![
+                                    ast::Identifier {
+                                        name: "std".to_string(),
+                                        span: lexer::Span::default(),
+                                    },
+                                    ast::Identifier {
+                                        name: "test".to_string(),
+                                        span: lexer::Span::default(),
+                                    },
+                                ],
+                                selection: None,
+                            }),
+                            span: lexer::Span::default(),
+                            visibility: ast::Visibility::Private,
+                            attributes: Vec::new(),
+                        },
+                    );
+                }
+
                 let base_dir = input.parent();
                 profiler::begin_phase("import lowering");
                 let import_lowering = match parser::FileImportResolverHook::new(&loader)
@@ -1304,6 +1334,48 @@ pub fn run(cli: Cli) {
 
                 semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
                 crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
+
+                if plan.test_harness {
+                    let test_fns: Vec<String> = ast
+                        .items
+                        .iter()
+                        .filter_map(|item| {
+                            if let ast::ItemKind::Function(func) = &item.kind {
+                                if item.span.file == input_file
+                                    && crate::attributes::is_test_function(&item.attributes)
+                                {
+                                    return Some(func.name.name.clone());
+                                }
+                            }
+                            None
+                        })
+                        .collect();
+
+                    // Strip any existing `main` function.
+                    ast.items.retain(|item| {
+                        if let ast::ItemKind::Function(func) = &item.kind {
+                            func.name.name != "main"
+                        } else {
+                            true
+                        }
+                    });
+
+                    let mut harness_code = String::from("i32 main() {\n");
+                    for name in &test_fns {
+                        harness_code
+                            .push_str(&format!("    test_start(\"{name}\");\n    {name}();\n"));
+                    }
+                    harness_code.push_str("    return done();\n}\n");
+
+                    let harness_file = lexer::register_source("<test_harness>", &harness_code);
+                    let harness_graph = crate::grammar::parse_ag(&harness_code);
+                    let harness_ast =
+                        crate::grammar::lower_source_graph(&harness_graph, harness_file as usize);
+                    ast.items.extend(harness_ast.items);
+                } else {
+                    ast.items
+                        .retain(|item| !crate::attributes::is_test_function(&item.attributes));
+                }
 
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
@@ -1937,6 +2009,7 @@ fn run_init(cli: &Cli) -> Result<package::InitializedPackage, String> {
 struct TestTarget {
     name: String,
     path: PathBuf,
+    is_source_test: bool,
 }
 
 #[derive(Debug)]
@@ -2064,6 +2137,19 @@ fn test_specific_flags(test_path: &Path, content: &str) -> Vec<String> {
     flags
 }
 
+fn scan_dir_for_ag_files(dir: &Path, acc: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan_dir_for_ag_files(&path, acc);
+            } else if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ag") {
+                acc.push(path);
+            }
+        }
+    }
+}
+
 fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
     let mut targets = Vec::new();
     let current_dir = env::current_dir()
@@ -2083,12 +2169,19 @@ fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
 
     if !explicit_ag_inputs.is_empty() {
         for path in explicit_ag_inputs {
+            let is_source_test = std::fs::read_to_string(&path)
+                .map(|s| s.contains("#[test]"))
+                .unwrap_or(false);
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("test")
                 .to_string();
-            targets.push(TestTarget { name: stem, path });
+            targets.push(TestTarget {
+                name: stem,
+                path,
+                is_source_test,
+            });
         }
     } else {
         let manifest_path = root_dir.join(package::MANIFEST_FILE);
@@ -2101,9 +2194,13 @@ fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
                         for t in resolved_tests {
                             let canon = std::fs::canonicalize(&t.entry).unwrap_or_else(|_| t.entry.clone());
                             manifest_targets.insert(canon);
+                            let is_source_test = std::fs::read_to_string(&t.entry)
+                                .map(|s| s.contains("#[test]"))
+                                .unwrap_or(false);
                             targets.push(TestTarget {
                                 name: t.name,
                                 path: t.entry,
+                                is_source_test,
                             });
                         }
                     }
@@ -2127,7 +2224,73 @@ fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
                             if stem == "mem_growth_watch" && filter_terms.is_empty() {
                                 continue;
                             }
-                            targets.push(TestTarget { name: stem, path });
+                            let is_source_test = std::fs::read_to_string(&path)
+                                .map(|s| s.contains("#[test]"))
+                                .unwrap_or(false);
+                            targets.push(TestTarget {
+                                name: stem,
+                                path,
+                                is_source_test,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut source_seen = manifest_targets;
+        for t in &targets {
+            if let Ok(canon) = std::fs::canonicalize(&t.path) {
+                source_seen.insert(canon);
+            }
+        }
+
+        let src_dir = root_dir.join("src");
+        if src_dir.is_dir() {
+            let mut src_files = Vec::new();
+            scan_dir_for_ag_files(&src_dir, &mut src_files);
+            for path in src_files {
+                let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if !source_seen.insert(canon) {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if content.contains("#[test]") {
+                        let name = path
+                            .strip_prefix(&root_dir)
+                            .unwrap_or(&path)
+                            .display()
+                            .to_string();
+                        targets.push(TestTarget {
+                            name,
+                            path,
+                            is_source_test: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&root_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ag") {
+                    let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if !source_seen.insert(canon) {
+                        continue;
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if content.contains("#[test]") {
+                            let stem = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("test")
+                                .to_string();
+                            targets.push(TestTarget {
+                                name: stem,
+                                path,
+                                is_source_test: true,
+                            });
                         }
                     }
                 }
@@ -2166,6 +2329,9 @@ fn execute_test(
     compile_cmd.arg("-o");
     compile_cmd.arg(&temp_bin);
     compile_cmd.arg("--no-progress");
+    if target.is_source_test {
+        compile_cmd.arg("--test-harness");
+    }
 
     if let Some(opt) = &cli.opt_level {
         compile_cmd.arg(format!("-O{opt}"));
@@ -2555,6 +2721,7 @@ mod tests {
             progress: false,
             auto_output: false,
             warning_config: crate::semantic::linter::WarningConfig::default(),
+            test_harness: false,
         }
     }
 

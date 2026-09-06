@@ -144,6 +144,11 @@ pub fn function_always_inline(attributes: &[ast::Attribute]) -> bool {
     })
 }
 
+/// True when the function carries `#[test]`.
+pub fn is_test_function(attributes: &[ast::Attribute]) -> bool {
+    attributes.iter().any(|attr| attr.name.name == "test")
+}
+
 /// Collect every `#[target_feature("...")]` name on a function into an LLVM
 /// `target-features` attribute value ("+a,+b"), or `None` when none are
 /// present. Multiple attributes AND-compose.

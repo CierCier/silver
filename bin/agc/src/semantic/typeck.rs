@@ -245,6 +245,23 @@ impl TypeChecker {
             if let ast::ItemKind::Function(func) = &item.kind {
                 self.errors
                     .extend(Self::check_function_attributes(&item.attributes));
+                if crate::attributes::is_test_function(&item.attributes) {
+                    if !func.parameters.is_empty() {
+                        self.errors.push(TypeError {
+                            message: msg::test_fn_must_take_no_parameters(&func.name.name),
+                            span: func.name.span,
+                        });
+                    }
+                    if let Some(ref ret) = func.return_type {
+                        let ret_ty = Type::from_ast(ret);
+                        if !matches!(ret_ty, Type::Unit | Type::Primitive(ast::PrimitiveType::Void)) {
+                            self.errors.push(TypeError {
+                                message: msg::test_fn_must_return_void(&func.name.name),
+                                span: ret.span,
+                            });
+                        }
+                    }
+                }
                 self.check_function(func);
             }
             if let ast::ItemKind::ExternFunction(_) = &item.kind {
@@ -838,6 +855,13 @@ impl TypeChecker {
                             });
                         }
                     }
+                }
+            } else if attr.name.name == "test" {
+                if !attr.args.is_empty() {
+                    errors.push(TypeError {
+                        message: msg::test_takes_no_arguments().to_string(),
+                        span: attr.span,
+                    });
                 }
             }
         }
@@ -8539,6 +8563,49 @@ mod tests {
                 .iter()
                 .any(|error| error.message.contains("link expects a library name")),
             "expected invalid link attribute error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_test_function() {
+        let program = parse("#[test] void my_test() {} i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected type errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_test_function_with_parameters() {
+        let program = parse("#[test] void my_test(i32 x) {} i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("must take no parameters")),
+            "expected parameter error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_test_function_with_non_void_return() {
+        let program = parse("#[test] i32 my_test() { return 0; } i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("must return void")),
+            "expected return void error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_test_attribute_with_arguments() {
+        let program = parse("#[test(arg)] void my_test() {} i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("#[test] attribute takes no arguments")),
+            "expected no arguments error, got {errors:?}"
         );
     }
 

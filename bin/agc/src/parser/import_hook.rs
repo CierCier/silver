@@ -386,7 +386,8 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
         crate::profiler::begin_phase(&format!("parse {label}"));
     }
     let graph = crate::grammar::parse_ag(&src);
-    let program = crate::grammar::lower_source_graph(&graph, file_id as usize);
+    let mut program = crate::grammar::lower_source_graph(&graph, file_id as usize);
+    program.items.retain(|item| !crate::attributes::is_test_function(&item.attributes));
     if verbose {
         crate::profiler::end_phase(&format!("parse {label}"));
     }
