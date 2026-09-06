@@ -1,11 +1,50 @@
-// std/args.ag — process argument access.
-// References accessor functions compiled from entry.ag.
+// std/args.ag — command line argument access.
+import std.mem.vec;
+import std.string;
 
 extern "C" {
     i32 silver_argc();
     i8** silver_argv();
 }
 
+/// Returns the command line arguments as a vector of owned Strings.
+/// The first element (index 0) is the program name / executable path.
+Vec<String> args() {
+    Vec<String> res = Vec<String>.new();
+    i32 count = silver_argc();
+    i8** v = silver_argv();
+    if (v == (i8**)0 || count <= 0) {
+        return res;
+    }
+    for (i32 i = 0; i < count; i += 1) {
+        if (v[i] != (i8*)0) {
+            String s = String.from_str((str)v[i]);
+            res.push(move s);
+        }
+    }
+    return res;
+}
+
+/// Returns the argument at `index` as an owned String, or an empty String if out of bounds.
+String arg(i64 index) {
+    i32 count = silver_argc();
+    i8** v = silver_argv();
+    if (index < 0 || index >= (i64)count || v == (i8**)0 || v[index] == (i8*)0) {
+        return String.new();
+    }
+    return String.from_str((str)v[index]);
+}
+
+/// Returns the total count of command line arguments.
+i64 count() {
+    i32 c = silver_argc();
+    if (c < 0) {
+        return 0;
+    }
+    return (i64)c;
+}
+
+/// Structured CLI argument accessor.
 struct Args {
     i32 argc;
     i8** argv;
@@ -19,7 +58,33 @@ impl Args {
         return a;
     }
 
-    i32 argc(*self) {
+    i32 count(&self) {
         return self.argc;
+    }
+
+    i32 argc(&self) {
+        return self.argc;
+    }
+
+    i64 len(&self) {
+        if (self.argc < 0) {
+            return 0;
+        }
+        return (i64)self.argc;
+    }
+
+    String get(&self, i64 index) {
+        if (index < 0 || index >= (i64)self.argc || self.argv == (i8**)0 || self.argv[index] == (i8*)0) {
+            return String.new();
+        }
+        return String.from_str((str)self.argv[index]);
+    }
+
+    Vec<String> to_vec(&self) {
+        return args();
+    }
+
+    Vec<String> all() {
+        return args();
     }
 }

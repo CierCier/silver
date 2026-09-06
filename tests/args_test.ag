@@ -1,0 +1,36 @@
+import std.test;
+import std.args;
+
+i32 main() {
+    test_start("std.args: basic argument access");
+    Vec<String> a = args();
+    assert_true(a.len() >= 1, "at least program name is in args");
+    assert_true(count() >= 1, "count matches");
+
+    String prog = arg(0);
+    assert_true(prog.len() > 0, "program name is non-empty");
+
+    test_start("std.args: structured Args access");
+    Args s_args = Args.new();
+    assert_true(s_args.len() >= 1, "Args struct len >= 1");
+    assert_eq_i64(s_args.len(), (i64)s_args.argc(), "argc matches len");
+    String s_prog = s_args.get(0);
+    assert_true(s_prog.len() > 0, "Args.get(0) is non-empty");
+
+    test_start("std.args: iteration over Vec<String>");
+    i64 total = a.len();
+    i64 seen = 0;
+    for item in a {
+        seen = seen + 1;
+        assert_true(item.len() >= 0, "iterated string length is valid");
+    }
+    assert_eq_i64(total, seen, "iterated over all elements in args vector");
+
+    test_start("std.args: out of bounds arg returns empty string");
+    String oob = arg(9999);
+    assert_eq_i64(0, oob.len(), "out of bounds argument returns empty string");
+    String oob_s = s_args.get(9999);
+    assert_eq_i64(0, oob_s.len(), "Args out of bounds returns empty string");
+
+    return done();
+}
