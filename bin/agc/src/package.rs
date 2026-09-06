@@ -19,6 +19,8 @@ use toml::Value;
 pub const MANIFEST_FILE: &str = "silver.toml";
 const DEFAULT_PACKAGE_VERSION: &str = "0.1.0";
 const DEFAULT_ENTRY: &str = "src/main.ag";
+const DEFAULT_ENTRY_SOURCE: &str =
+    "i32 main() {\n    @println(\"Her De Der, Theres silver in this vein!\");\n    return 0;\n}\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitializedPackage {
@@ -104,7 +106,7 @@ pub fn initialize_package(
         )
     })?;
     if !entry_path.exists() {
-        if let Err(error) = fs::write(&entry_path, "i32 main() {\n    return 0;\n}\n") {
+        if let Err(error) = fs::write(&entry_path, DEFAULT_ENTRY_SOURCE) {
             let mut rollback_errors = Vec::new();
             for path in [&entry_path, &manifest_path] {
                 match fs::remove_file(path) {
@@ -129,12 +131,31 @@ pub fn initialize_package(
         }
     }
 
+    init_git_repository(&root);
+
     Ok(InitializedPackage {
         root,
         name,
         manifest_path,
         entry_path,
     })
+}
+
+fn is_git_in_path() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn init_git_repository(root: &Path) {
+    if !root.join(".git").exists() && is_git_in_path() {
+        let _ = Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output();
+    }
 }
 
 fn validate_init_name(name: &str) -> Result<(), String> {
@@ -372,10 +393,7 @@ impl PackageGraph {
                 .manifest_path
                 .parent()
                 .ok_or_else(|| {
-                    format!(
-                        "package `{}` manifest has no parent directory",
-                        owner.name
-                    )
+                    format!("package `{}` manifest has no parent directory", owner.name)
                 })?
                 .to_path_buf();
 
@@ -479,14 +497,13 @@ impl PackageGraph {
             }),
             ResolvedTargetSource::Manifest(child_id) => {
                 let child = self.package(*child_id).ok_or_else(|| {
-                    format!("manifest-backed target `{}` points to a missing package", target.name)
+                    format!(
+                        "manifest-backed target `{}` points to a missing package",
+                        target.name
+                    )
                 })?;
-                let child_target = find_target(
-                    child,
-                    target.kind,
-                    None,
-                    Some(target.name.as_str()),
-                )?;
+                let child_target =
+                    find_target(child, target.kind, None, Some(target.name.as_str()))?;
                 self.flatten_target(child.id, child_target, seen)
             }
         };
@@ -800,10 +817,11 @@ fn validate_keys(
     manifest_path: &Path,
     label: &str,
 ) -> Result<(), PackageError> {
-    if let Some(key) = table
-        .keys()
-        .find(|key| !allowed.iter().any(|allowed_key| *allowed_key == key.as_str()))
-    {
+    if let Some(key) = table.keys().find(|key| {
+        !allowed
+            .iter()
+            .any(|allowed_key| *allowed_key == key.as_str())
+    }) {
         return Err(PackageError::new(format!(
             "package manifest `{}`: {label} contains unsupported field `{key}`",
             manifest_path.display()
@@ -1110,7 +1128,8 @@ impl PackageResolver {
         self.states.clear();
         self.packages.clear();
         self.stack.clear();
-        let manifest_path = canonical_manifest_path(root.as_ref()).map_err(|error| error.to_string())?;
+        let manifest_path =
+            canonical_manifest_path(root.as_ref()).map_err(|error| error.to_string())?;
         let resolved = ResolvedManifest {
             manifest: parse_manifest(&manifest_path).map_err(|error| error.to_string())?,
             source: PackageSource::Local {
@@ -1140,8 +1159,7 @@ impl PackageResolver {
 
         let key = resolved.key.clone();
         let id = PackageId(self.packages.len());
-        self.states
-            .insert(key.clone(), LoadState::Loading(id));
+        self.states.insert(key.clone(), LoadState::Loading(id));
         self.stack.push((id, resolved.manifest.name.clone()));
         self.packages.push(Package {
             id,
@@ -1157,10 +1175,8 @@ impl PackageResolver {
         let result = self.load_package_contents(id, resolved);
         self.stack.pop();
         if result.is_ok() {
-            self.states.insert(
-                resolved_key(&self.packages[id.0]),
-                LoadState::Loaded(id),
-            );
+            self.states
+                .insert(resolved_key(&self.packages[id.0]), LoadState::Loaded(id));
         } else {
             self.states.remove(&key);
         }
@@ -1200,19 +1216,21 @@ impl PackageResolver {
         let mut targets = Vec::new();
         for target in &resolved.manifest.targets {
             let source = match &target.source {
-                TargetSourceSpec::Entry(entry) => ResolvedTargetSource::Entry(resolve_entry_path(
-                    &manifest_dir,
-                    entry,
-                    &format!("{}.{}", target.kind.label(), target.name),
-                    target.kind == TargetKind::Lib,
-                )
-                .map_err(|error| {
-                    format!(
-                        "{}\n  manifest: {}",
-                        error,
-                        resolved.manifest.manifest_path.display()
+                TargetSourceSpec::Entry(entry) => ResolvedTargetSource::Entry(
+                    resolve_entry_path(
+                        &manifest_dir,
+                        entry,
+                        &format!("{}.{}", target.kind.label(), target.name),
+                        target.kind == TargetKind::Lib,
                     )
-                })?),
+                    .map_err(|error| {
+                        format!(
+                            "{}\n  manifest: {}",
+                            error,
+                            resolved.manifest.manifest_path.display()
+                        )
+                    })?,
+                ),
                 TargetSourceSpec::Manifest(source) => {
                     let child = self
                         .resolve_source(&manifest_dir, source)
@@ -1251,8 +1269,8 @@ impl PackageResolver {
     ) -> Result<ResolvedManifest, String> {
         match source {
             ManifestSourceSpec::Local(path) => {
-                let manifest_path = resolve_manifest_path(base_dir, path)
-                    .map_err(|error| error.to_string())?;
+                let manifest_path =
+                    resolve_manifest_path(base_dir, path).map_err(|error| error.to_string())?;
                 Ok(ResolvedManifest {
                     manifest: parse_manifest(&manifest_path).map_err(|error| error.to_string())?,
                     source: PackageSource::Local {
@@ -1263,8 +1281,8 @@ impl PackageResolver {
             }
             ManifestSourceSpec::Git(git) => {
                 let checkout = self.git_cache.resolve(git)?;
-                let manifest_path = canonical_manifest_path(&checkout.root)
-                    .map_err(|error| error.to_string())?;
+                let manifest_path =
+                    canonical_manifest_path(&checkout.root).map_err(|error| error.to_string())?;
                 let manifest_path_in_repository = PathBuf::from(MANIFEST_FILE);
                 Ok(ResolvedManifest {
                     manifest: parse_manifest(&manifest_path).map_err(|error| error.to_string())?,
@@ -1329,11 +1347,7 @@ impl GitCache {
     fn resolve(&self, source: &GitSourceSpec) -> Result<GitCheckout, String> {
         let repository_url = canonical_git_url(&source.url);
         let repository_hash = stable_hash(&repository_url);
-        let repository_dir = self
-            .root
-            .join("git")
-            .join(repository_hash)
-            .join("repo.git");
+        let repository_dir = self.root.join("git").join(repository_hash).join("repo.git");
         let parent = repository_dir
             .parent()
             .ok_or_else(|| "invalid Git cache path".to_string())?;
@@ -1360,7 +1374,10 @@ impl GitCache {
                     OsString::from(&repository_url),
                     repository_dir.as_os_str().to_os_string(),
                 ],
-                &format!("clone Git dependency `{}`", display_git_url(&repository_url)),
+                &format!(
+                    "clone Git dependency `{}`",
+                    display_git_url(&repository_url)
+                ),
             )?;
         } else {
             run_git(
@@ -1373,11 +1390,15 @@ impl GitCache {
                     OsString::from(&repository_url),
                     OsString::from("+refs/heads/*:refs/heads/*"),
                 ],
-                &format!("update Git dependency `{}`", display_git_url(&repository_url)),
+                &format!(
+                    "update Git dependency `{}`",
+                    display_git_url(&repository_url)
+                ),
             )?;
         }
 
-        let resolved_commit = resolve_git_revision(&repository_dir, &repository_url, &source.selector)?;
+        let resolved_commit =
+            resolve_git_revision(&repository_dir, &repository_url, &source.selector)?;
         let tree_dir = repository_dir
             .parent()
             .ok_or_else(|| "invalid Git repository cache path".to_string())?
@@ -1625,7 +1646,10 @@ manifest = "modules/std"
         let parsed = parse_manifest(&manifest).unwrap();
         assert_eq!(parsed.name, "hello");
         assert_eq!(parsed.version, "0.1.0");
-        assert_eq!(parsed.url.as_deref(), Some("https://github.com/example/hello"));
+        assert_eq!(
+            parsed.url.as_deref(),
+            Some("https://github.com/example/hello")
+        );
         assert_eq!(parsed.targets.len(), 4);
         assert!(matches!(
             parsed
@@ -1653,10 +1677,12 @@ manifest = "modules/std"
     fn rejects_missing_identity_and_invalid_target_sources() {
         let root = unique_temp_dir("manifest-errors");
         let missing_name = write_manifest(&root, "version = \"0.1.0\"\n");
-        assert!(parse_manifest(&missing_name)
-            .unwrap_err()
-            .to_string()
-            .contains("name"));
+        assert!(
+            parse_manifest(&missing_name)
+                .unwrap_err()
+                .to_string()
+                .contains("name")
+        );
 
         fs::write(
             &missing_name,
@@ -1688,7 +1714,10 @@ manifest = "modules/std"
         );
         let mut resolver = PackageResolver::with_cache_root(root.join("cache"));
         let error = resolver.resolve(&manifest).unwrap_err();
-        assert!(error.contains("target `bin.app` entry source not found"), "{error}");
+        assert!(
+            error.contains("target `bin.app` entry source not found"),
+            "{error}"
+        );
 
         fs::write(
             &manifest,
@@ -1706,10 +1735,7 @@ manifest = "modules/std"
     #[test]
     fn rejects_unsupported_manifest_fields_without_panicking() {
         let root = unique_temp_dir("manifest-unknown");
-        let manifest = write_manifest(
-            &root,
-            "name = \"x\"\nversion = \"0.1.0\"\nunknown = true\n",
-        );
+        let manifest = write_manifest(&root, "name = \"x\"\nversion = \"0.1.0\"\nunknown = true\n");
         let error = parse_manifest(&manifest).unwrap_err().to_string();
         assert!(error.contains("unsupported field `unknown`"), "{error}");
         let _ = fs::remove_dir_all(root);
@@ -1735,7 +1761,10 @@ manifest = "modules/std"
             "name = \"x\"\nversion = \"0.1.0\"\n[dependencies.foo]\nmanifest = \"git+https://example.invalid/foo.git\"\nrev = \"HEAD~1\"\n",
         );
         let error = parse_manifest(&manifest).unwrap_err().to_string();
-        assert!(error.contains("full 40-character hexadecimal commit ID"), "{error}");
+        assert!(
+            error.contains("full 40-character hexadecimal commit ID"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1834,7 +1863,10 @@ manifest = "modules/std"
         let mut resolver = PackageResolver::with_cache_root(root.join("cache"));
         let graph = resolver.resolve(&root).unwrap();
         let imports = graph.dependency_imports().unwrap();
-        let scoped = imports.iter().filter(|import| import.name == "common").collect::<Vec<_>>();
+        let scoped = imports
+            .iter()
+            .filter(|import| import.name == "common")
+            .collect::<Vec<_>>();
         assert_eq!(scoped.len(), 2);
         assert_ne!(scoped[0].owner_root, scoped[1].owner_root);
 
@@ -1960,11 +1992,21 @@ manifest = "modules/std"
 
         assert_eq!(initialized.name, "demo");
         assert!(initialized.manifest_path.is_file());
-        assert!(initialized.entry_path.is_file());
+        assert_eq!(
+            fs::read_to_string(&initialized.entry_path).unwrap(),
+            DEFAULT_ENTRY_SOURCE
+        );
         let manifest = fs::read_to_string(&initialized.manifest_path).unwrap();
         assert!(manifest.contains("name = \"demo\""));
         assert!(manifest.contains("[bin.\"demo\"]"));
-        assert_eq!(parse_manifest(&initialized.manifest_path).unwrap().name, "demo");
+        assert_eq!(
+            parse_manifest(&initialized.manifest_path).unwrap().name,
+            "demo"
+        );
+
+        if is_git_in_path() {
+            assert!(root.join(".git").is_dir());
+        }
 
         let error = initialize_package(&root, None).unwrap_err();
         assert!(error.contains("already exists"), "{error}");
@@ -1980,10 +2022,32 @@ manifest = "modules/std"
 
         let initialized = initialize_package(&root, Some("custom-name")).unwrap();
         assert_eq!(initialized.name, "custom-name");
-        assert_eq!(fs::read_to_string(entry).unwrap(), "i32 main() { return 7; }\n");
-        assert!(fs::read_to_string(initialized.manifest_path)
-            .unwrap()
-            .contains("[bin.\"custom-name\"]"));
+        assert_eq!(
+            fs::read_to_string(entry).unwrap(),
+            "i32 main() { return 7; }\n"
+        );
+        assert!(
+            fs::read_to_string(initialized.manifest_path)
+                .unwrap()
+                .contains("[bin.\"custom-name\"]")
+        );
+        if is_git_in_path() {
+            assert!(root.join(".git").is_dir());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preserves_existing_git_repository() {
+        let root = unique_temp_dir("init-preserve-git");
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let marker = git_dir.join("marker");
+        fs::write(&marker, "keep-me").unwrap();
+
+        let initialized = initialize_package(&root, None).unwrap();
+        assert!(initialized.manifest_path.is_file());
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "keep-me");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2000,11 +2064,15 @@ manifest = "modules/std"
         let error = initialize_package(&root, None).unwrap_err();
         assert!(error.contains("failed to write package entry"), "{error}");
         assert!(!root.join(MANIFEST_FILE).exists());
+        assert!(!root.join(".git").exists());
         assert!(fs::symlink_metadata(&entry).is_err());
 
         let initialized = initialize_package(&root, None).unwrap();
         assert!(initialized.manifest_path.is_file());
         assert!(initialized.entry_path.is_file());
+        if is_git_in_path() {
+            assert!(root.join(".git").is_dir());
+        }
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -143,8 +143,9 @@ choose the resulting artifact path.
 directory it uses the current working directory; otherwise it creates or uses
 the supplied directory. The default package name is the target directory's
 final component. `--name NAME` overrides that detected name. Initialization
-refuses to overwrite an existing `silver.toml` and preserves an existing
-`src/main.ag`.
+`src/main.ag`. If `git` is available in `PATH`, initialization also initializes
+a new Git repository in the package directory by default, preserving an existing
+`.git` directory if one is already present.
 
 The existing direct `.ag` forms and module artifact behavior remain supported:
 `-I`, `--root`, `build`, `check`, `run`, `.agm` loading, and source-relative
