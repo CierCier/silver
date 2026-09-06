@@ -200,13 +200,15 @@ fn toml_basic_string(value: &str) -> String {
 pub enum TargetKind {
     Bin,
     Lib,
+    Test,
 }
 
 impl TargetKind {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Bin => "bin",
             Self::Lib => "lib",
+            Self::Test => "test",
         }
     }
 }
@@ -228,6 +230,13 @@ impl TargetSelection {
     pub fn lib(name: Option<String>) -> Self {
         Self {
             kind: TargetKind::Lib,
+            name,
+        }
+    }
+
+    pub fn test(name: Option<String>) -> Self {
+        Self {
+            kind: TargetKind::Test,
             name,
         }
     }
@@ -524,6 +533,23 @@ impl PackageGraph {
         seen.remove(&package_id);
         result
     }
+
+    pub fn test_targets(&self, package_id: PackageId) -> Result<Vec<ResolvedTarget>, String> {
+        let package = self
+            .package(package_id)
+            .ok_or_else(|| format!("package `{package_id:?}` not found in graph"))?;
+        let mut targets = Vec::new();
+        for target in &package.targets {
+            if target.kind == TargetKind::Test {
+                let mut seen = HashSet::new();
+                let resolved = self.flatten_target(package_id, target, &mut seen)?;
+                if resolved.entry.is_file() {
+                    targets.push(resolved);
+                }
+            }
+        }
+        Ok(targets)
+    }
 }
 
 fn dependency_import_source(graph: &PackageGraph, target: &ResolvedTarget) -> PathBuf {
@@ -600,7 +626,7 @@ pub fn parse_manifest_text(
 
     validate_keys(
         table,
-        &["name", "version", "url", "bin", "lib", "dependencies"],
+        &["name", "version", "url", "bin", "lib", "test", "dependencies"],
         &manifest_path,
         "package manifest",
     )?;
@@ -610,7 +636,11 @@ pub fn parse_manifest_text(
     let url = optional_string(table, "url", &manifest_path)?;
     let mut targets = Vec::new();
 
-    for (kind, field) in [(TargetKind::Bin, "bin"), (TargetKind::Lib, "lib")] {
+    for (kind, field) in [
+        (TargetKind::Bin, "bin"),
+        (TargetKind::Lib, "lib"),
+        (TargetKind::Test, "test"),
+    ] {
         let Some(targets_table) = table.get(field) else {
             continue;
         };
@@ -643,6 +673,32 @@ pub fn parse_manifest_text(
                 kind,
                 source,
             });
+        }
+    }
+
+    // Auto-discover integration test files in tests/*.ag if not explicitly defined
+    if let Some(manifest_dir) = manifest_path.parent() {
+        let tests_dir = manifest_dir.join("tests");
+        if tests_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&tests_dir) {
+                let mut auto_tests = Vec::new();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ag") {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if !targets.iter().any(|t| t.kind == TargetKind::Test && t.name == stem) {
+                                auto_tests.push(ManifestTarget {
+                                    name: stem.to_string(),
+                                    kind: TargetKind::Test,
+                                    source: TargetSourceSpec::Entry(PathBuf::from(format!("tests/{stem}.ag"))),
+                                });
+                            }
+                        }
+                    }
+                }
+                auto_tests.sort_by(|a, b| a.name.cmp(&b.name));
+                targets.extend(auto_tests);
+            }
         }
     }
 
@@ -2086,6 +2142,39 @@ manifest = "modules/std"
         if is_git_in_path() {
             assert!(root.join(".git").is_dir());
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discovers_tests_and_manifest_test_targets() {
+        let root = unique_temp_dir("pkg-test-discovery");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join("src").join("main.ag"), "i32 main() { return 0; }").unwrap();
+        fs::write(root.join("tests").join("unit_test.ag"), "i32 main() { return 0; }").unwrap();
+        fs::write(root.join("tests").join("custom_test.ag"), "i32 main() { return 0; }").unwrap();
+
+        let manifest = r#"
+name = "test_pkg"
+version = "0.1.0"
+
+[bin."test_pkg"]
+entry = "src/main.ag"
+
+[test."explicit_test"]
+entry = "tests/custom_test.ag"
+"#;
+        let manifest_path = root.join(MANIFEST_FILE);
+        fs::write(&manifest_path, manifest).unwrap();
+
+        let mut resolver = PackageResolver::new().unwrap();
+        let graph = resolver.resolve(&manifest_path).unwrap();
+        let test_targets = graph.test_targets(graph.root).unwrap();
+
+        let target_names: Vec<&str> = test_targets.iter().map(|t| t.name.as_str()).collect();
+        assert!(target_names.contains(&"explicit_test"));
+        assert!(target_names.contains(&"unit_test"));
+
         let _ = fs::remove_dir_all(root);
     }
 }
