@@ -13,6 +13,7 @@ use crate::module_artifact::{
     ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
 };
 use crate::module_loader::{ModuleLoader, module_loader_default_dirs};
+use crate::package;
 use crate::parser::ast;
 use crate::semantic::{
     self,
@@ -42,6 +43,7 @@ use crate::link::{link_exe, link_shared_module};
 {usage-heading} {usage}
 
 Commands:
+  init        Create a new Silver package
   build, b    Compile and link an executable (default)
   run, r      Compile and immediately execute the output binary
   check, c    Analyze source files and report errors without codegen or linking
@@ -124,6 +126,36 @@ pub struct Cli {
         help_heading = "Search Paths & Linking"
     )]
     root: Option<PathBuf>,
+
+    /// Select a package binary target (defaults to the package's name or sole binary).
+    #[arg(
+        long = "bin",
+        value_name = "NAME",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with = "lib",
+        help_heading = "Package"
+    )]
+    bin: Option<String>,
+
+    /// Select a package library target (defaults to the package's name or sole library).
+    #[arg(
+        long = "lib",
+        value_name = "NAME",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with = "bin",
+        help_heading = "Package"
+    )]
+    lib: Option<String>,
+
+    /// Initialize a package in the current directory or a target directory.
+    #[arg(long = "init", action = ArgAction::SetTrue, hide = true)]
+    init: bool,
+
+    /// Override the package name used by `init`.
+    #[arg(long = "name", value_name = "NAME", help_heading = "Package")]
+    init_name: Option<String>,
 
     /// Define a preprocessor symbol (accepted for clang-compat; not yet used)
     #[arg(short = 'D', value_name = "NAME[=VALUE]", action = ArgAction::Append, help_heading = "Search Paths & Linking")]
@@ -279,6 +311,10 @@ pub(crate) struct CompilePlan {
     pub(crate) inputs: Vec<PathBuf>,
     pub(crate) output: PathBuf,
     pub(crate) package_root: PathBuf,
+    pub(crate) package_roots: Vec<PathBuf>,
+    pub(crate) package_imports: Vec<package::DependencyImport>,
+    pub(crate) package_target_kind: Option<package::TargetKind>,
+    pub(crate) package_target_name: Option<String>,
     pub(crate) include_dirs: Vec<PathBuf>,
     pub(crate) defines: Vec<String>,
     pub(crate) lib_dirs: Vec<PathBuf>,
@@ -314,6 +350,10 @@ impl CompilePlan {
         parts.push(format!("emit={:?}", self.emit));
         parts.push(format!("output={}", self.output.display()));
         parts.push(format!("root={}", self.package_root.display()));
+        if let Some(kind) = self.package_target_kind {
+            let name = self.package_target_name.as_deref().unwrap_or("<default>");
+            parts.push(format!("package_target={kind:?}:{name}"));
+        }
 
         if let Some(t) = &self.target {
             parts.push(format!("target={t}"));
@@ -418,9 +458,154 @@ fn with_ext_or_default(inputs: &[PathBuf], ext: &str) -> PathBuf {
 }
 
 fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
-    let emit = derive_emit(&cli)?;
+    if cli.lib.is_some() && cli.run_mode {
+        return Err("`run --lib` is invalid: library targets are emitted as modules and cannot be executed".to_string());
+    }
 
-    if cli.inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean {
+    let mut emit = derive_emit(&cli)?;
+    if cli.lib.is_some() {
+        if let Some(explicit_emit) = cli.emit
+            && !matches!(explicit_emit, EmitKind::Check | EmitKind::Module)
+        {
+            return Err("`--lib` requires `--emit=module` (or `check`) rather than an executable/object emit".to_string());
+        }
+        if cli.emit.is_none() && (cli.compile_only || cli.emit_asm || cli.emit_llvm) {
+            return Err("`--lib` requires module output; use `--emit=module` or `--emit=check`".to_string());
+        }
+        if matches!(emit, EmitKind::Exe) {
+            emit = EmitKind::Module;
+        }
+    }
+
+    let mut inputs = cli.inputs;
+    let explicit_root = cli.root;
+    let current_dir = env::current_dir()
+        .map_err(|e| format!("failed to determine current working directory: {e}"))?;
+    let mut package_root = explicit_root
+        .clone()
+        .unwrap_or_else(|| current_dir.clone());
+    let mut package_roots = Vec::new();
+    let mut package_imports = Vec::new();
+    let mut package_target_kind = None;
+    let mut package_target_name = None;
+    let mut include_dirs = cli.include_dirs;
+    let selector_package_manifest = if inputs.is_empty() {
+        cli.bin
+            .as_deref()
+            .or(cli.lib.as_deref())
+            .filter(|value| !value.is_empty())
+            .and_then(|value| {
+                let path = PathBuf::from(value);
+                let manifest = if path.is_dir() {
+                    path.join(package::MANIFEST_FILE)
+                } else if path.file_name().and_then(|name| name.to_str())
+                    == Some(package::MANIFEST_FILE)
+                {
+                    path
+                } else {
+                    return None;
+                };
+                manifest.is_file().then_some(manifest)
+            })
+    } else {
+        None
+    };
+
+    let package_candidate = if matches!(
+        emit,
+        EmitKind::Exe
+            | EmitKind::Check
+            | EmitKind::Obj
+            | EmitKind::Asm
+            | EmitKind::LlvmIr
+            | EmitKind::Module
+    ) && !cli.clean
+    {
+        match inputs.as_slice() {
+            [] => {
+                if let Some(manifest) = selector_package_manifest.clone() {
+                    Some(manifest)
+                } else {
+                    let current_manifest = current_dir.join(package::MANIFEST_FILE);
+                    if current_manifest.is_file() {
+                        Some(current_manifest)
+                    } else {
+                        explicit_root.as_deref().and_then(|root| {
+                            let manifest = root.join(package::MANIFEST_FILE);
+                            manifest.is_file().then_some(manifest)
+                        })
+                    }
+                }
+            }
+            [input] if input.is_dir() => {
+                let manifest = input.join(package::MANIFEST_FILE);
+                manifest.is_file().then_some(manifest)
+            }
+            [input]
+                if input
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(package::MANIFEST_FILE)
+                    && input.is_file() =>
+            {
+                Some(input.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let package_selection = match (&cli.bin, &cli.lib) {
+        (Some(name), None) => package::TargetSelection::bin(
+            (!name.is_empty() && selector_package_manifest.is_none()).then(|| name.clone()),
+        ),
+        (None, Some(name)) => package::TargetSelection::lib(
+            (!name.is_empty() && selector_package_manifest.is_none()).then(|| name.clone()),
+        ),
+        (None, None) => package::TargetSelection::bin(None),
+        (Some(_), Some(_)) => {
+            return Err("only one of --bin or --lib may be specified".to_string());
+        }
+    };
+
+    if (cli.bin.is_some() || cli.lib.is_some()) && package_candidate.is_none() {
+        return Err("--bin and --lib require a package directory or silver.toml input".to_string());
+    }
+
+    if let Some(manifest_path) = package_candidate {
+        let cache_root = match &cli.cache_dir {
+            Some(path) => package::PackageResolver::with_cache_root(path.clone()),
+            None => package::PackageResolver::new()
+                .map_err(|error| format!("failed to initialize package cache: {error}"))?,
+        };
+        let mut resolver = cache_root;
+        let graph = resolver.resolve(&manifest_path)?;
+        let target = graph.select_target(&package_selection)?;
+        let target_package = graph
+            .package(target.package)
+            .ok_or_else(|| "resolved package graph has no selected target package".to_string())?;
+        let manifest_dir = target_package
+            .manifest_path
+            .parent()
+            .ok_or_else(|| "selected package manifest has no parent directory".to_string())?;
+        package_root = manifest_dir.to_path_buf();
+        package_roots = graph.package_roots();
+        package_imports = graph.dependency_imports()?;
+        package_target_kind = Some(target.kind);
+        package_target_name = Some(target.name.clone());
+        if let Some(root) = explicit_root
+            && root != package_root
+            && !include_dirs.contains(&root)
+        {
+            // Preserve the historical --root search path when the package
+            // manifest is supplied from a different directory.
+            include_dirs.push(root);
+        }
+        inputs = vec![target.entry];
+    }
+
+    if inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean {
         return Err(
             "at least one input file is required (except for --emit=grammar or --clean)"
                 .to_string(),
@@ -428,7 +613,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     }
 
     // For now keep multi-input support limited to link stage, like most compilers.
-    if cli.inputs.len() > 1 {
+    if inputs.len() > 1 {
         match emit {
             EmitKind::Exe | EmitKind::Tokens | EmitKind::Ast | EmitKind::Grammar => {}
             _ => {
@@ -450,22 +635,29 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         env::temp_dir().join(format!("agc_run_{}_{}", std::process::id(), timestamp))
+    } else if auto_output
+        && emit == EmitKind::Module
+        && package_target_kind == Some(package::TargetKind::Lib)
+    {
+        PathBuf::from(format!(
+            "{}.agm",
+            package_target_name.as_deref().unwrap_or("lib")
+        ))
     } else {
         cli.output
-            .unwrap_or_else(|| default_output_for(emit, &cli.inputs))
-    };
-    let package_root = match cli.root {
-        Some(root) => root,
-        None => env::current_dir()
-            .map_err(|e| format!("failed to determine current working directory: {e}"))?,
+            .unwrap_or_else(|| default_output_for(emit, &inputs))
     };
 
     Ok(CompilePlan {
         emit,
-        inputs: cli.inputs,
+        inputs,
         output,
         package_root,
-        include_dirs: cli.include_dirs,
+        package_roots,
+        package_imports,
+        package_target_kind,
+        package_target_name,
+        include_dirs,
         defines: cli.defines,
         lib_dirs: cli.lib_dirs,
         libs: cli.libs,
@@ -548,17 +740,28 @@ fn build_module_loader(plan: &CompilePlan) -> ModuleLoader {
             }
         }
     }
-    // Search roots (checked after relative path and cwd): --root, then -I, then sysroot.
+    // Search roots (checked after relative path and cwd): package roots,
+    // explicit --root/-I paths, then sysroot. Every package gets its own
+    // artifact directory so prebuilt dependency modules remain consumable.
     loader.add_search_dir(&plan.package_root);
-
-    // Automatically search lib/silver/ under the package root for module artifacts.
-    let local_lib = plan.package_root.join("lib").join("silver");
-    if local_lib.is_dir() {
-        loader.add_search_dir(local_lib);
+    for package_root in &plan.package_roots {
+        loader.add_search_dir(package_root);
+        let package_lib = package_root.join("lib").join("silver");
+        if package_lib.is_dir() {
+            loader.add_search_dir(package_lib);
+        }
     }
 
     for dir in &plan.include_dirs {
         loader.add_search_dir(dir);
+    }
+
+    for import in &plan.package_imports {
+        loader.add_package_import(
+            &import.name,
+            &import.source,
+            &import.owner_root,
+        );
     }
 
     for dir in module_loader_default_dirs(plan.sysroot.as_deref()) {
@@ -661,6 +864,27 @@ fn collect_dependency_link_artifacts(
 
 /// Execute the full compile pipeline for a parsed CLI.
 pub fn run(cli: Cli) {
+    if cli.init {
+        match run_init(&cli) {
+            Ok(package) => {
+                println!(
+                    "Created package `{}` in {}",
+                    package.name,
+                    package.root.display()
+                );
+            }
+            Err(error) => {
+                eprintln!("agc: error: {error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if cli.init_name.is_some() {
+        eprintln!("agc: error: `--name` is only valid with `init`");
+        std::process::exit(2);
+    }
+
     match derive_plan(cli) {
         Ok(mut plan) => {
             if plan.verbose || std::env::var_os("AGC_VERBOSE").is_some() {
@@ -1018,7 +1242,10 @@ pub fn run(cli: Cli) {
                 let base_dir = input.parent();
                 profiler::begin_phase("import lowering");
                 let import_lowering = match parser::FileImportResolverHook::new(&loader)
-                    .with_entry_import(!matches!(plan.emit, EmitKind::Module))
+                    .with_entry_import(
+                        plan.package_target_kind != Some(package::TargetKind::Lib)
+                            && !matches!(plan.emit, EmitKind::Module),
+                    )
                     .lower_program_imports(&mut ast, base_dir, Some(input))
                 {
                     Ok(result) => result,
@@ -1682,6 +1909,17 @@ pub fn run(cli: Cli) {
         }
     }
 }
+
+fn run_init(cli: &Cli) -> Result<package::InitializedPackage, String> {
+    let target_dir = match cli.inputs.as_slice() {
+        [] => env::current_dir()
+            .map_err(|error| format!("failed to determine current directory: {error}"))?,
+        [target_dir] => target_dir.clone(),
+        _ => return Err("`init` accepts at most one target directory".to_string()),
+    };
+    package::initialize_package(&target_dir, cli.init_name.as_deref())
+}
+
 #[allow(dead_code)]
 fn _is_ag_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("ag")
@@ -1765,6 +2003,10 @@ mod tests {
             inputs: Vec::new(),
             output: PathBuf::from("a.out"),
             package_root: PathBuf::from("."),
+            package_roots: Vec::new(),
+            package_imports: Vec::new(),
+            package_target_kind: None,
+            package_target_name: None,
             include_dirs: Vec::new(),
             defines: Vec::new(),
             lib_dirs: Vec::new(),
@@ -1833,6 +2075,32 @@ mod tests {
         let error = artifact_compatibility_error(&artifact, &test_plan())
             .expect("expected compiler version mismatch");
         assert!(error.contains("compiler version"));
+    }
+
+    #[test]
+    fn package_target_flags_accept_default_selection() {
+        let cli = Cli::try_parse_from(["agc", "--lib"]).expect("bare --lib parses");
+        assert_eq!(cli.lib.as_deref(), Some(""));
+        assert!(cli.bin.is_none());
+
+        let cli = Cli::try_parse_from(["agc", "--bin", "worker"]).expect("named --bin parses");
+        assert_eq!(cli.bin.as_deref(), Some("worker"));
+        assert!(cli.lib.is_none());
+    }
+
+    #[test]
+    fn init_flags_accept_a_target_directory_and_name_override() {
+        let cli = Cli::try_parse_from([
+            "agc",
+            "--init",
+            "/tmp/example",
+            "--name",
+            "custom",
+        ])
+        .expect("init parses");
+        assert!(cli.init);
+        assert_eq!(cli.inputs, vec![PathBuf::from("/tmp/example")]);
+        assert_eq!(cli.init_name.as_deref(), Some("custom"));
     }
 
     #[test]
