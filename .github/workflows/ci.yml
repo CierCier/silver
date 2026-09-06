@@ -61,7 +61,7 @@ jobs:
 
       - name: Run Rust FFI Silver integration test
         run: |
-          SILVER_FFI_LIBRARY_DIR="$GITHUB_WORKSPACE/target/debug" bash tests/run_tests.sh rust_ffi_test
+          SILVER_FFI_LIBRARY_DIR="$GITHUB_WORKSPACE/target/debug" python3 tests/run_tests.py rust_ffi_test
 
       - name: Run integration tests
-        run: bash tests/run_tests.sh --release
+        run: python3 tests/run_tests.py --release

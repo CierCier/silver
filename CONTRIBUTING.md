@@ -49,7 +49,7 @@ This project is still evolving quickly, so the most helpful contributions are th
 - Import `std.test` for shared assertion helpers (`assert_true`, `assert_eq_i64`, `done()`).
 - Return the result of `done()` from `main()` so the test harness sees the failure count.
 - Do not write ad-hoc `printf`-based assertion helpers; use the standard module.
-- Tests that intentionally exit nonzero must be registered in `tests/run_tests.sh` `expected_exit`.
+- Tests that intentionally exit nonzero must be registered in `tests/run_tests.py` `EXPECTED_EXIT`.
 
 ### Standard Library
 

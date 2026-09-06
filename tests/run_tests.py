@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Integration test harness for the Silver compiler (agc).
-Provides a modern parallel TUI test runner replacing run_tests.sh.
+Provides a modern parallel TUI test runner for integration tests.
 """
 
 import argparse

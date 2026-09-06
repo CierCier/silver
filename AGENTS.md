@@ -303,4 +303,4 @@ When introducing a new syntax item or language capability, follow this checklist
 - **DO NOT** mix compilation phases. Do not perform type checking or code generation directly inside the parser, and do not resolve imports during codegen.
 - **DO NOT** assume struct fields are recursively dropped. You must write explicit drops inside custom destructors.
 - **DO NOT** guess platform layout dimensions. Always use target data classification interfaces provided by System V AMD64 ABI specifications in `codegen/abi.rs`.
-- **DO NOT** modify the runtime (`std/rt/') in a way that breaks compatibility with existing test suite expectations. Always run 'bash tests/run_tests.sh' after changes.
+- **DO NOT** modify the runtime (`std/rt/') in a way that breaks compatibility with existing test suite expectations. Always run 'python3 tests/run_tests.py' after changes.

@@ -30,29 +30,34 @@ compiled and executed by the test harness.
 
 ## Running Tests
 
-The harness is `tests/run_tests.sh`. It builds `agc` (debug profile), then
-compiles every `tests/*.ag` into a temporary directory and executes it,
-printing a `PASS`/`FAIL` line per test and a final summary. It exits nonzero
-if any test fails.
+The harness is `tests/run_tests.py`. It builds `agc` (debug or release profile),
+then compiles and executes `tests/*.ag` in parallel with a terminal progress UI,
+reporting passes, failures, durations, and summaries.
 
 ```bash
 # Run all integration tests (from the repo root, or anywhere)
-bash tests/run_tests.sh
+python3 tests/run_tests.py
 
 # Run a single test by name (the .ag suffix is optional)
-bash tests/run_tests.sh vec_test
+python3 tests/run_tests.py vec_test
+
+# Run tests using the release build of agc
+python3 tests/run_tests.py --release
+
+# Specify thread count
+python3 tests/run_tests.py -j 8
 ```
 
 The Rust bridge test is opt-in because it needs the built native artifact:
 
 ```bash
 cargo build -p silver-ffi
-SILVER_FFI_LIBRARY_DIR="$PWD/target/debug" bash tests/run_tests.sh rust_ffi_test
+SILVER_FFI_LIBRARY_DIR="$PWD/target/debug" python3 tests/run_tests.py rust_ffi_test
 ```
 
 A test fails when it does not compile, or when the produced binary exits with
 an unexpected status. Most tests are expected to exit `0`; per-test expected
-exit codes are declared in `expected_exit` at the top of `run_tests.sh`
+exit codes are declared in `EXPECTED_EXIT` in `run_tests.py`
 (e.g. the syscall tests intentionally exit `42` via `sys_exit`). Tests that
 must be skipped entirely can be listed in `SKIP_TESTS`, with a comment
 explaining why; the list is currently empty.
@@ -98,5 +103,5 @@ status if configured in the harness's `expected_exit` function.
 1. Create a new `.ag` file in this directory following the pattern above.
 2. The harness discovers `tests/*.ag` automatically; no registration needed.
 3. If the test intentionally exits with a nonzero status, add its expected
-   exit code to `expected_exit` in `run_tests.sh` with a comment.
-4. Run `bash tests/run_tests.sh <name>` to verify it passes.
+   exit code to `EXPECTED_EXIT` in `run_tests.py` with a comment.
+4. Run `python3 tests/run_tests.py <name>` to verify it passes.
