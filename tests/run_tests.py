@@ -319,15 +319,19 @@ def run_single_test(
     stdin_data = get_test_stdin(name)
     t0 = time.perf_counter()
     try:
-        rp = subprocess.run(
-            [str(bin_path)],
-            cwd=str(run_dir),
-            input=stdin_data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_secs,
-            env=env,
-        )
+        run_kwargs = {
+            "cwd": str(run_dir),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "timeout": timeout_secs,
+            "env": env,
+        }
+        if stdin_data is not None:
+            run_kwargs["input"] = stdin_data
+        else:
+            run_kwargs["stdin"] = subprocess.DEVNULL
+
+        rp = subprocess.run([str(bin_path)], **run_kwargs)
     except subprocess.TimeoutExpired:
         return TestResult(name, "FAIL", f"timed out after {timeout_secs}s", compile_ms=compile_ms)
     except Exception as e:
@@ -423,12 +427,12 @@ class TestDashboard:
                 # Streaming plain log for non-tty
                 badge = f"[{res.status}]"
                 timing = f"({res.compile_ms + res.run_ms}ms)" if res.status == "PASS" else f"({res.reason})"
-                print(f"  {badge:6} {res.name:<28} {timing}")
+                print(f"  {badge:6} {res.name:<28} {timing}", flush=True)
                 if res.status == "FAIL":
                     if res.compile_output:
-                        print("    [Compiler Output]:\n" + "\n".join("      " + l for l in res.compile_output.splitlines()))
+                        print("    [Compiler Output]:\n" + "\n".join("      " + l for l in res.compile_output.splitlines()), flush=True)
                     if res.run_output:
-                        print("    [Runtime Output]:\n" + "\n".join("      " + l for l in res.run_output.splitlines()))
+                        print("    [Runtime Output]:\n" + "\n".join("      " + l for l in res.run_output.splitlines()), flush=True)
             else:
                 self._render_tui(finished_res=res)
 
