@@ -30,6 +30,14 @@ pub enum ResolvedSourceImportKind {
     Module,
 }
 
+#[derive(Debug, Clone)]
+struct PackageImport {
+    module_path: String,
+    source_path: PathBuf,
+    kind: ResolvedSourceImportKind,
+    owner_root: PathBuf,
+}
+
 use parking_lot::Mutex;
 use std::sync::Arc;
 use crate::cache_store::{CacheStore, CacheKey, CacheKeyBuilder, CachedModule};
@@ -37,6 +45,7 @@ use crate::cache_store::{CacheStore, CacheKey, CacheKeyBuilder, CachedModule};
 #[derive(Debug)]
 pub struct ModuleLoader {
     pub search_dirs: Vec<PathBuf>,
+    package_imports: Vec<PackageImport>,
     pub cwd: Option<PathBuf>,
     /// Cache of loaded module artifacts keyed by module path (e.g. "std.mem.vec").
     pub module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
@@ -59,6 +68,7 @@ impl ModuleLoader {
     pub fn new() -> Self {
         Self {
             search_dirs: Vec::new(),
+            package_imports: Vec::new(),
             cwd: std::env::current_dir().ok(),
             module_cache: Mutex::new(HashMap::default()),
             cache_store: None,
@@ -100,7 +110,35 @@ impl ModuleLoader {
     }
 
     pub fn add_search_dir(&mut self, dir: impl Into<PathBuf>) {
-        self.search_dirs.push(dir.into());
+        let dir = dir.into();
+        if !self.search_dirs.contains(&dir) {
+            self.search_dirs.push(dir);
+        }
+    }
+
+    pub fn add_package_import(
+        &mut self,
+        module_path: impl Into<String>,
+        source_path: impl Into<PathBuf>,
+        owner_root: impl Into<PathBuf>,
+    ) {
+        let source_path = source_path.into();
+        let (source_path, kind) = if source_path.extension().and_then(|ext| ext.to_str()) == Some("agm") {
+            (source_path, ResolvedSourceImportKind::Module)
+        } else {
+            let artifact_path = source_path.with_extension("agm");
+            if artifact_path.is_file() {
+                (artifact_path, ResolvedSourceImportKind::Module)
+            } else {
+                (source_path, ResolvedSourceImportKind::File)
+            }
+        };
+        self.package_imports.push(PackageImport {
+            module_path: module_path.into(),
+            source_path,
+            kind,
+            owner_root: owner_root.into(),
+        });
     }
 
     fn load_cached_module(&self, module_path: &str) -> Result<ModuleArtifact, String> {
@@ -311,6 +349,24 @@ impl ModuleLoader {
             });
         }
 
+        // Package aliases are scoped to the package containing the importing
+        // source, so nested packages can reuse a dependency name safely.
+        if let Some(import) = self
+            .package_imports
+            .iter()
+            .filter(|import| {
+                import.module_path == module_path
+                    && base_dir.is_some_and(|base| base.starts_with(&import.owner_root))
+            })
+            .max_by_key(|import| import.owner_root.components().count())
+        {
+            return Some(ResolvedSourceImport {
+                module_path: module_path.clone(),
+                source_path: import.source_path.clone(),
+                kind: import.kind,
+            });
+        }
+
         // Priority 3+: include dirs then sysroot dirs as appended by build_module_loader.
         for root in &self.search_dirs {
             // Skip roots already checked as base_dir or cwd.
@@ -328,6 +384,25 @@ impl ModuleLoader {
                     kind,
                 });
             }
+        }
+
+        // Module dependency closure resolution has no importing source path.
+        // Use a deterministic fallback for aliases that are unambiguous in
+        // the resolved graph.
+        let mut imports = self
+            .package_imports
+            .iter()
+            .filter(|import| import.module_path == module_path);
+        if let Some(import) = imports.next()
+            && imports.all(|candidate| {
+                candidate.source_path == import.source_path && candidate.kind == import.kind
+            })
+        {
+            return Some(ResolvedSourceImport {
+                module_path,
+                source_path: import.source_path.clone(),
+                kind: import.kind,
+            });
         }
 
         None
@@ -747,6 +822,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(rel_dir);
         let _ = std::fs::remove_dir_all(include_dir);
         let _ = std::fs::remove_dir_all(sys_dir);
+    }
+
+    #[test]
+    fn package_aliases_prefer_the_most_specific_owner_root() {
+        let root = unique_temp_dir("package-alias-scope");
+        let child = root.join("child");
+        let root_source = root.join("root-dep.ag");
+        let child_source = child.join("child-dep.ag");
+        std::fs::create_dir_all(child.join("src")).unwrap();
+        std::fs::write(&root_source, "root").unwrap();
+        std::fs::write(&child_source, "child").unwrap();
+
+        let mut loader = ModuleLoader::new();
+        loader.add_package_import("dep", &root_source, &root);
+        loader.add_package_import("dep", &child_source, &child);
+        let path = [ident("dep")];
+
+        let resolved = loader
+            .find_source_import(&path, Some(&child.join("src")))
+            .expect("nested package alias");
+        assert_eq!(resolved.source_path, child_source);
+
+        let resolved = loader
+            .find_source_import(&path, Some(&root.join("src")))
+            .expect("root package alias");
+        assert_eq!(resolved.source_path, root_source);
+
+        assert!(loader.find_source_import(&path, None).is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

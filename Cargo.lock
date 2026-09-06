@@ -19,6 +19,7 @@ dependencies = [
  "quickcheck_macros",
  "rayon",
  "rustc-hash",
+ "toml",
 ]
 
 [[package]]

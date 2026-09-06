@@ -18,6 +18,7 @@ pub mod mangling;
 pub mod module_artifact;
 pub mod module_loader;
 pub mod parser;
+pub mod package;
 pub mod profiler;
 pub mod semantic;
 pub mod symbol_index;
