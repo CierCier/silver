@@ -9,18 +9,17 @@ bundle_name="silver-linux-x86_64-${release_name}"
 stage_dir="$dist_dir/$bundle_name"
 archive_path="$dist_dir/$bundle_name.tar.gz"
 
-echo "Building bootstrap artifacts..."
-bash "$root_dir/update-bootstrap.sh"
+echo "Building compiler and tools..."
+cargo build --release -p agc -p aglsp -p agsm
 
 echo "Preparing Linux bundle at $archive_path"
 rm -rf "$stage_dir"
-mkdir -p "$stage_dir/bin" "$stage_dir/include" "$stage_dir/lib"
+mkdir -p "$stage_dir/bin" "$stage_dir/include/silver/std" "$stage_dir/lib"
 
 cp "$root_dir/target/release/agc" "$stage_dir/bin/agc"
 [ -f "$root_dir/target/release/aglsp" ] && cp "$root_dir/target/release/aglsp" "$stage_dir/bin/aglsp"
 [ -f "$root_dir/target/release/agsm" ] && cp "$root_dir/target/release/agsm" "$stage_dir/bin/agsm"
-cp -R "$root_dir/bootstrap/include/silver" "$stage_dir/include/silver"
-cp -R "$root_dir/bootstrap/lib/silver" "$stage_dir/lib/silver"
+cp -R "$root_dir/std/"* "$stage_dir/include/silver/std/"
 cp "$root_dir/README.md" "$stage_dir/README.md"
 cp "$root_dir/LICENSE" "$stage_dir/LICENSE"
 

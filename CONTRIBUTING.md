@@ -14,7 +14,6 @@ This project is still evolving quickly, so the most helpful contributions are th
 
 - Follow existing naming, structure, and code style in the surrounding files.
 - Keep new code readable; avoid clever shortcuts that make maintenance harder.
-- Update bootstrap outputs when your changes affect the compiler or standard library.
 - Add or update tests when behavior changes.
 
 
@@ -70,12 +69,6 @@ Run tests:
 
 ```bash
 cargo test -p agc
-```
-
-Refresh bootstrap artifacts when needed:
-
-```bash
-bash ./update-bootstrap.sh
 ```
 
 ## Pull Requests

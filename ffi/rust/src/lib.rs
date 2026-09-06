@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn process_spawn_rejects_a_live_output_handle() {
         unsafe {
-            let program = slice("/bin/true");
+            let program = slice("true");
             let mut handle = ptr::null_mut();
             let mut exit_code = -1;
             let mut error = SilverError::empty();

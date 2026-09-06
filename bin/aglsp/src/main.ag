@@ -1,0 +1,4 @@
+i32 main() {
+    @println("Her De Der, Theres silver in this vein!");
+    return 0;
+}

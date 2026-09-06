@@ -149,8 +149,21 @@ fn is_git_in_path() -> bool {
         .unwrap_or(false)
 }
 
+fn is_inside_git_repo(root: &Path) -> bool {
+    if root.join(".git").exists() {
+        return true;
+    }
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| output.status.success() && output.stdout.starts_with(b"true"))
+        .unwrap_or(false)
+}
+
 fn init_git_repository(root: &Path) {
-    if !root.join(".git").exists() && is_git_in_path() {
+    if !is_inside_git_repo(root) && is_git_in_path() {
         let _ = Command::new("git")
             .arg("init")
             .current_dir(root)

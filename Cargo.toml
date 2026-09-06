@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "bin/agc",
-    "bin/aglsp",
+    "bootstrap/aglsp",
     "bin/agsm",
     "ffi/rust",
 ]

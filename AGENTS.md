@@ -45,7 +45,7 @@ silver/
 │   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
 ├── examples/                    # Silver example applications (.ag files)
-├── bootstrap/                   # Generated locally — NOT committed to git
+├── bootstrap/                   # Rust bootstrap compiler and tooling projects
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```

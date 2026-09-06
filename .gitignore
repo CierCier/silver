@@ -1,9 +1,7 @@
-bootstrap/bin/
 target/
 a.out
 *.o
 dist/
 *.ll
 *.agm
-bootstrap/
 bench/

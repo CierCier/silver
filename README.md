@@ -82,7 +82,7 @@ i32 main() {
 - `tests/` — Test suites including language unit tests, memory pentests, and integration tests
 - `docs/` — Language specifications and architecture design docs
 - `vendor/` — Third-party library headers and bindings (e.g. `vendor.gfx`)
-- `bootstrap/` — Generated compiler and standard library artifacts
+- `bootstrap/` — Rust bootstrap compiler and tooling projects
 
 ---
 
