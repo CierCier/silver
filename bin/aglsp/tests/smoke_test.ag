@@ -1,0 +1,7 @@
+import std.test;
+
+i32 main() {
+    test_start("aglsp smoke test");
+    assert_true(true, "aglsp package test discovery");
+    return done();
+}

@@ -48,6 +48,7 @@ Commands:
   run, r      Compile and immediately execute the output binary
   check, c    Analyze source files and report errors without codegen or linking
   clean       Remove cached compiler build artifacts
+  test, t     Compile and run tests for a package or file
 
 {all-args}{after-help}",
     styles = Styles::styled()
@@ -281,6 +282,14 @@ pub struct Cli {
     /// Disable build progress
     #[arg(long = "no-progress", action = ArgAction::SetTrue)]
     pub no_progress: bool,
+
+    /// Test mode: compile and run tests
+    #[arg(long = "test", action = ArgAction::SetTrue, hide = true)]
+    pub test_mode: bool,
+
+    /// Do not capture test output (print test stdout and stderr immediately)
+    #[arg(long = "nocapture", action = ArgAction::SetTrue, help_heading = "Testing")]
+    pub nocapture: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -878,6 +887,10 @@ pub fn run(cli: Cli) {
                 std::process::exit(2);
             }
         }
+        return;
+    }
+    if cli.test_mode {
+        run_tests(cli);
         return;
     }
     if cli.init_name.is_some() {
@@ -1918,6 +1931,514 @@ fn run_init(cli: &Cli) -> Result<package::InitializedPackage, String> {
         _ => return Err("`init` accepts at most one target directory".to_string()),
     };
     package::initialize_package(&target_dir, cli.init_name.as_deref())
+}
+
+#[derive(Debug, Clone)]
+struct TestTarget {
+    name: String,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct TestExecutionResult {
+    name: String,
+    passed: bool,
+    duration: std::time::Duration,
+    error_message: Option<String>,
+    output: String,
+}
+
+fn expected_exit_code(test_path: &Path, content: &str) -> i32 {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("//") {
+            let rest = rest.trim();
+            if let Some(code_str) = rest
+                .strip_prefix("expected_exit:")
+                .or_else(|| rest.strip_prefix("expected_exit ="))
+                .or_else(|| rest.strip_prefix("exit:"))
+            {
+                if let Ok(code) = code_str.trim().parse::<i32>() {
+                    return code;
+                }
+            }
+        }
+    }
+
+    let stem = test_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    match stem {
+        "syscall_test" | "syscall_wrapper_test" => 42,
+        "static_volatile_test" => 7,
+        "assert_fail_test" | "backtrace_test" => 134,
+        _ => 0,
+    }
+}
+
+fn test_specific_flags(test_path: &Path, content: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    let stem = test_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("//") {
+            let rest = rest.trim();
+            if let Some(f_str) = rest
+                .strip_prefix("compile_flags:")
+                .or_else(|| rest.strip_prefix("flags:"))
+            {
+                for part in f_str.split_whitespace() {
+                    flags.push(part.to_string());
+                }
+            }
+        }
+    }
+
+    match stem {
+        "cfg_test" => {
+            flags.push("--cfg".to_string());
+            flags.push("cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1".to_string());
+        }
+        "ternary_test" => {
+            flags.push("--cfg".to_string());
+            flags.push("cpu.sse41=1".to_string());
+        }
+        "target_feature_test" => {
+            flags.push("--cfg".to_string());
+            flags.push("cpu.avx2=1".to_string());
+        }
+        "cfg_derived_test" | "volatile_attr_test" => {
+            flags.push("-O2".to_string());
+        }
+        "static_link_test" | "thread_test" | "launch_wait_test" | "channel_test" | "guard_test"
+        | "launch_send_test" => {
+            flags.push("--static-runtime".to_string());
+        }
+        "tls_test" | "http2_tls_test" | "https_server_test" => {
+            if let Ok(lib) = env::var("SILVER_OPENSSL_LIB") {
+                if !lib.is_empty() {
+                    flags.push("-L".to_string());
+                    flags.push(lib);
+                }
+            }
+        }
+        "rust_ffi_test" => {
+            if let Ok(lib) = env::var("SILVER_FFI_LIBRARY_DIR") {
+                if !lib.is_empty() {
+                    flags.push("-L".to_string());
+                    flags.push(lib);
+                }
+            }
+        }
+        "module_import_test" => {
+            if let Ok(dir) = env::var("MODLIB_DIR") {
+                if !dir.is_empty() {
+                    flags.push("-I".to_string());
+                    flags.push(dir);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    const LEAK_CHECK_TESTS: &[&str] = &[
+        "memory_pentest",
+        "alloc_validity_test",
+        "string_test",
+        "vec_test",
+        "mem_test",
+        "memmove_scalar_test",
+        "channel_test",
+        "memory_stress",
+        "http_test",
+        "cookie_test",
+        "assignment_drop_test",
+        "field_predrop_test",
+        "temp_operator_test",
+        "enum_move_test",
+        "enum_cascade_test",
+    ];
+    if LEAK_CHECK_TESTS.contains(&stem) && !flags.iter().any(|f| f == "--leak-check") {
+        flags.push("--leak-check".to_string());
+    }
+
+    flags
+}
+
+fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
+    let mut targets = Vec::new();
+    let current_dir = env::current_dir()
+        .map_err(|e| format!("failed to determine current directory: {e}"))?;
+    let root_dir = cli.root.clone().unwrap_or(current_dir);
+
+    let mut explicit_ag_inputs = Vec::new();
+    let mut filter_terms = Vec::new();
+
+    for input in &cli.inputs {
+        if input.extension().and_then(|e| e.to_str()) == Some("ag") && input.is_file() {
+            explicit_ag_inputs.push(input.clone());
+        } else if let Some(s) = input.to_str() {
+            filter_terms.push(s.to_string());
+        }
+    }
+
+    if !explicit_ag_inputs.is_empty() {
+        for path in explicit_ag_inputs {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("test")
+                .to_string();
+            targets.push(TestTarget { name: stem, path });
+        }
+    } else {
+        let manifest_path = root_dir.join(package::MANIFEST_FILE);
+        let mut manifest_targets = std::collections::HashSet::new();
+
+        if manifest_path.is_file() {
+            if let Ok(mut resolver) = package::PackageResolver::new() {
+                if let Ok(graph) = resolver.resolve(&manifest_path) {
+                    if let Ok(resolved_tests) = graph.test_targets(graph.root()) {
+                        for t in resolved_tests {
+                            let canon = std::fs::canonicalize(&t.entry).unwrap_or_else(|_| t.entry.clone());
+                            manifest_targets.insert(canon);
+                            targets.push(TestTarget {
+                                name: t.name,
+                                path: t.entry,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let tests_dir = root_dir.join("tests");
+        if tests_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&tests_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ag") {
+                        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                        if !manifest_targets.contains(&canon) {
+                            let stem = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("test")
+                                .to_string();
+                            if stem == "mem_growth_watch" && filter_terms.is_empty() {
+                                continue;
+                            }
+                            targets.push(TestTarget { name: stem, path });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !filter_terms.is_empty() {
+        targets.retain(|target| {
+            filter_terms.iter().any(|term| {
+                target.name.to_lowercase().contains(&term.to_lowercase())
+                    || target.path.to_string_lossy().to_lowercase().contains(&term.to_lowercase())
+            })
+        });
+    }
+
+    targets.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(targets)
+}
+
+fn execute_test(
+    cli: &Cli,
+    target: &TestTarget,
+    agc_exe: &Path,
+    temp_dir: &Path,
+    index: usize,
+) -> TestExecutionResult {
+    let start = std::time::Instant::now();
+    let temp_bin = temp_dir.join(format!("test_bin_{index}"));
+    let content = std::fs::read_to_string(&target.path).unwrap_or_default();
+    let expected_code = expected_exit_code(&target.path, &content);
+    let extra_flags = test_specific_flags(&target.path, &content);
+
+    let mut compile_cmd = std::process::Command::new(agc_exe);
+    compile_cmd.arg(&target.path);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&temp_bin);
+    compile_cmd.arg("--no-progress");
+
+    if let Some(opt) = &cli.opt_level {
+        compile_cmd.arg(format!("-O{opt}"));
+    }
+    if cli.leak_check {
+        compile_cmd.arg("--leak-check");
+    }
+    if let Some(target_triple) = &cli.target {
+        compile_cmd.arg("--target");
+        compile_cmd.arg(target_triple);
+    }
+    if let Some(sysroot) = &cli.sysroot {
+        compile_cmd.arg("--sysroot");
+        compile_cmd.arg(sysroot);
+    }
+    if let Some(root) = &cli.root {
+        compile_cmd.arg("--root");
+        compile_cmd.arg(root);
+    }
+    for inc in &cli.include_dirs {
+        compile_cmd.arg("-I");
+        compile_cmd.arg(inc);
+    }
+    for def in &cli.defines {
+        compile_cmd.arg("-D");
+        compile_cmd.arg(def);
+    }
+    for lib_dir in &cli.lib_dirs {
+        compile_cmd.arg("-L");
+        compile_cmd.arg(lib_dir);
+    }
+    for lib in &cli.libs {
+        compile_cmd.arg("-l");
+        compile_cmd.arg(lib);
+    }
+    for cfg in &cli.cfg_flags {
+        compile_cmd.arg("--cfg");
+        compile_cmd.arg(cfg);
+    }
+    if cli.no_cache {
+        compile_cmd.arg("--no-cache");
+    }
+    if let Some(cache_dir) = &cli.cache_dir {
+        compile_cmd.arg("--cache-dir");
+        compile_cmd.arg(cache_dir);
+    }
+
+    for flag in &extra_flags {
+        compile_cmd.arg(flag);
+    }
+
+    let compile_output = match compile_cmd.output() {
+        Ok(out) => out,
+        Err(e) => {
+            return TestExecutionResult {
+                name: target.name.clone(),
+                passed: false,
+                duration: start.elapsed(),
+                error_message: Some(format!("failed to spawn compiler: {e}")),
+                output: String::new(),
+            };
+        }
+    };
+
+    if !compile_output.status.success() {
+        let stderr = String::from_utf8_lossy(&compile_output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&compile_output.stdout).to_string();
+        let mut output = String::new();
+        if !stdout.is_empty() {
+            output.push_str(&stdout);
+            if !stdout.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+        if !stderr.is_empty() {
+            output.push_str(&stderr);
+        }
+        return TestExecutionResult {
+            name: target.name.clone(),
+            passed: false,
+            duration: start.elapsed(),
+            error_message: Some("compilation failed".to_string()),
+            output,
+        };
+    }
+
+    let mut run_cmd = std::process::Command::new(&temp_bin);
+    run_cmd.args(&cli.run_args);
+
+    let run_output = match run_cmd.output() {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_bin);
+            return TestExecutionResult {
+                name: target.name.clone(),
+                passed: false,
+                duration: start.elapsed(),
+                error_message: Some(format!("failed to execute test binary: {e}")),
+                output: String::new(),
+            };
+        }
+    };
+
+    let _ = std::fs::remove_file(&temp_bin);
+
+    let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+    let mut output = String::new();
+    if !stdout.is_empty() {
+        output.push_str(&stdout);
+        if !stdout.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    if !stderr.is_empty() {
+        output.push_str(&stderr);
+    }
+
+    #[cfg(unix)]
+    let actual_code = {
+        use std::os::unix::process::ExitStatusExt;
+        run_output
+            .status
+            .code()
+            .unwrap_or_else(|| run_output.status.signal().map(|s| 128 + s).unwrap_or(-1))
+    };
+    #[cfg(not(unix))]
+    let actual_code = run_output.status.code().unwrap_or(-1);
+    let mut passed = actual_code == expected_code;
+    let mut error_message = None;
+
+    if !passed {
+        error_message = Some(format!(
+            "exited with code {actual_code}, expected {expected_code}"
+        ));
+    } else {
+        let stem = target.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if stem == "backtrace_test" && (!stderr.contains("level3") || !stderr.contains("args: x=")) {
+            passed = false;
+            error_message = Some("backtrace_test stderr missing expected frame markers".to_string());
+        } else if stem == "assert_fail_test" && !stderr.contains("assertion failed") {
+            passed = false;
+            error_message = Some("assert_fail_test stderr missing 'assertion failed'".to_string());
+        }
+    }
+
+    TestExecutionResult {
+        name: target.name.clone(),
+        passed,
+        duration: start.elapsed(),
+        error_message,
+        output,
+    }
+}
+
+fn run_tests(cli: Cli) {
+    let targets = match discover_tests(&cli) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("agc: {}: {e}", "error".red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    if targets.is_empty() {
+        eprintln!("agc: {}: no tests found", "error".red().bold());
+        std::process::exit(1);
+    }
+
+    let agc_exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("agc"));
+    let temp_root = env::temp_dir().join(format!(
+        "agc-tests-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&temp_root);
+
+    let count = targets.len();
+    println!("\nrunning {count} test{}", if count == 1 { "" } else { "s" });
+
+    let overall_start = std::time::Instant::now();
+    let mut passed_count = 0;
+    let mut failed_count = 0;
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    let jobs = if cli.jobs == 0 {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    } else {
+        cli.jobs
+    };
+
+    if jobs <= 1 || targets.len() <= 1 {
+        for (i, target) in targets.iter().enumerate() {
+            let res = execute_test(&cli, target, &agc_exe, &temp_root, i);
+            if cli.nocapture && !res.output.is_empty() {
+                print!("{}", res.output);
+            }
+            let ms = res.duration.as_millis();
+            if res.passed {
+                passed_count += 1;
+                println!("test {} ... {} ({} ms)", res.name, "ok".green(), ms);
+            } else {
+                failed_count += 1;
+                let msg = res.error_message.as_deref().unwrap_or("failed");
+                println!("test {} ... {} ({msg})", res.name, "FAILED".red().bold());
+                failures.push((res.name, res.output));
+            }
+        }
+    } else {
+        use rayon::prelude::*;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+
+        let results: Vec<TestExecutionResult> = pool.install(|| {
+            targets
+                .par_iter()
+                .enumerate()
+                .map(|(i, target)| execute_test(&cli, target, &agc_exe, &temp_root, i))
+                .collect()
+        });
+
+        for res in results {
+            if cli.nocapture && !res.output.is_empty() {
+                print!("{}", res.output);
+            }
+            let ms = res.duration.as_millis();
+            if res.passed {
+                passed_count += 1;
+                println!("test {} ... {} ({} ms)", res.name, "ok".green(), ms);
+            } else {
+                failed_count += 1;
+                let msg = res.error_message.as_deref().unwrap_or("failed");
+                println!("test {} ... {} ({msg})", res.name, "FAILED".red().bold());
+                failures.push((res.name, res.output));
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+
+    let total_secs = overall_start.elapsed().as_secs_f64();
+
+    if !failures.is_empty() {
+        println!("\nfailures:\n");
+        for (name, output) in &failures {
+            println!("---- {name} stdout/stderr ----");
+            if output.is_empty() {
+                println!("<no output>");
+            } else {
+                println!("{output}");
+            }
+        }
+        println!("failures:");
+        for (name, _) in &failures {
+            println!("    {name}");
+        }
+        println!(
+            "\ntest result: {}. {passed_count} passed; {failed_count} failed; finished in {total_secs:.2}s\n",
+            "FAILED".red().bold()
+        );
+        std::process::exit(1);
+    } else {
+        println!(
+            "\ntest result: {}. {passed_count} passed; 0 failed; finished in {total_secs:.2}s\n",
+            "ok".green()
+        );
+        std::process::exit(0);
+    }
 }
 
 #[allow(dead_code)]

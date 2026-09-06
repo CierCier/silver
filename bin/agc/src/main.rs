@@ -39,6 +39,9 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
         } else if cmd == "clean" {
             out.push(OsString::from("--clean"));
             i = command_index + 1;
+        } else if cmd == "test" || cmd == "t" {
+            out.push(OsString::from("--test"));
+            i = command_index + 1;
         } else if cmd == "build" || cmd == "b" {
             i = command_index + 1;
         }
@@ -133,7 +136,7 @@ fn find_command_index(argv: &[OsString]) -> Option<usize> {
 fn is_command_name(arg: &str) -> bool {
     matches!(
         arg,
-        "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean"
+        "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean" | "test" | "t"
     )
 }
 
@@ -311,7 +314,7 @@ mod tests {
     #[test]
     fn command_like_target_names_are_preserved() {
         for option in ["--bin", "--lib"] {
-            for target in ["run", "check"] {
+            for target in ["run", "check", "test"] {
                 let normalized = normalize_argv_for_clap(vec![
                     OsString::from("agc"),
                     OsString::from(option),
@@ -331,6 +334,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_command_is_normalized() {
+        let normalized = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("test"),
+            OsString::from("tests/args_test.ag"),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                OsString::from("agc"),
+                OsString::from("--test"),
+                OsString::from("tests/args_test.ag"),
+            ]
+        );
+
+        let normalized_short = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("t"),
+            OsString::from("tests/args_test.ag"),
+        ]);
+
+        assert_eq!(
+            normalized_short,
+            vec![
+                OsString::from("agc"),
+                OsString::from("--test"),
+                OsString::from("tests/args_test.ag"),
+            ]
+        );
     }
 
     #[test]
