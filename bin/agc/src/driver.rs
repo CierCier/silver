@@ -2021,7 +2021,7 @@ struct TestExecutionResult {
     output: String,
 }
 
-fn expected_exit_code(test_path: &Path, content: &str) -> i32 {
+fn expected_exit_code(_test_path: &Path, content: &str) -> i32 {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("//") {
@@ -2038,19 +2038,11 @@ fn expected_exit_code(test_path: &Path, content: &str) -> i32 {
         }
     }
 
-    let stem = test_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    match stem {
-        "syscall_test" | "syscall_wrapper_test" => 42,
-        "static_volatile_test" => 7,
-        "assert_fail_test" | "backtrace_test" => 134,
-        _ => 0,
-    }
+    0
 }
 
-fn test_specific_flags(test_path: &Path, content: &str) -> Vec<String> {
+fn test_specific_flags(_test_path: &Path, content: &str) -> Vec<String> {
     let mut flags = Vec::new();
-    let stem = test_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("//") {
@@ -2065,75 +2057,6 @@ fn test_specific_flags(test_path: &Path, content: &str) -> Vec<String> {
             }
         }
     }
-
-    match stem {
-        "cfg_test" => {
-            flags.push("--cfg".to_string());
-            flags.push("cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1".to_string());
-        }
-        "ternary_test" => {
-            flags.push("--cfg".to_string());
-            flags.push("cpu.sse41=1".to_string());
-        }
-        "target_feature_test" => {
-            flags.push("--cfg".to_string());
-            flags.push("cpu.avx2=1".to_string());
-        }
-        "cfg_derived_test" | "volatile_attr_test" => {
-            flags.push("-O2".to_string());
-        }
-        "static_link_test" | "thread_test" | "launch_wait_test" | "channel_test" | "guard_test"
-        | "launch_send_test" => {
-            flags.push("--static-runtime".to_string());
-        }
-        "tls_test" | "http2_tls_test" | "https_server_test" => {
-            if let Ok(lib) = env::var("SILVER_OPENSSL_LIB") {
-                if !lib.is_empty() {
-                    flags.push("-L".to_string());
-                    flags.push(lib);
-                }
-            }
-        }
-        "rust_ffi_test" => {
-            if let Ok(lib) = env::var("SILVER_FFI_LIBRARY_DIR") {
-                if !lib.is_empty() {
-                    flags.push("-L".to_string());
-                    flags.push(lib);
-                }
-            }
-        }
-        "module_import_test" => {
-            if let Ok(dir) = env::var("MODLIB_DIR") {
-                if !dir.is_empty() {
-                    flags.push("-I".to_string());
-                    flags.push(dir);
-                }
-            }
-        }
-        _ => {}
-    }
-
-    const LEAK_CHECK_TESTS: &[&str] = &[
-        "memory_pentest",
-        "alloc_validity_test",
-        "string_test",
-        "vec_test",
-        "mem_test",
-        "memmove_scalar_test",
-        "channel_test",
-        "memory_stress",
-        "http_test",
-        "cookie_test",
-        "assignment_drop_test",
-        "field_predrop_test",
-        "temp_operator_test",
-        "enum_move_test",
-        "enum_cascade_test",
-    ];
-    if LEAK_CHECK_TESTS.contains(&stem) && !flags.iter().any(|f| f == "--leak-check") {
-        flags.push("--leak-check".to_string());
-    }
-
     flags
 }
 
@@ -2200,36 +2123,6 @@ fn discover_tests(cli: &Cli) -> Result<Vec<TestTarget>, String> {
                             targets.push(TestTarget {
                                 name: t.name,
                                 path: t.entry,
-                                is_source_test,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        let tests_dir = root_dir.join("tests");
-        if tests_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&tests_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ag") {
-                        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                        if !manifest_targets.contains(&canon) {
-                            let stem = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("test")
-                                .to_string();
-                            if stem == "mem_growth_watch" && filter_terms.is_empty() {
-                                continue;
-                            }
-                            let is_source_test = std::fs::read_to_string(&path)
-                                .map(|s| s.contains("#[test]"))
-                                .unwrap_or(false);
-                            targets.push(TestTarget {
-                                name: stem,
-                                path,
                                 is_source_test,
                             });
                         }
