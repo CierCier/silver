@@ -1,0 +1,34 @@
+// tests/test_assertions_test.ag — test assertions in std.test
+import std.test;
+
+i32 main() {
+    test_start("std.test: assertion helpers");
+
+    check(true, "check true");
+    assert_true(true, "assert_true");
+    assert_false(false, "assert_false");
+
+    assert_eq_i64(42, 42, "assert_eq_i64");
+    assert_ne_i64(42, 43, "assert_ne_i64");
+
+    assert_eq_i32(10, 10, "assert_eq_i32");
+    assert_ne_i32(10, 20, "assert_ne_i32");
+
+    assert_eq_u64((u64)100, (u64)100, "assert_eq_u64");
+    assert_ne_u64((u64)100, (u64)200, "assert_ne_u64");
+
+    assert_eq_bool(true, true, "assert_eq_bool true");
+    assert_eq_bool(false, false, "assert_eq_bool false");
+
+    void* null_ptr = (void*)0;
+    i64 dummy = 123;
+    void* non_null_ptr = (void*)&dummy;
+
+    assert_null(null_ptr, "assert_null");
+    assert_not_null(non_null_ptr, "assert_not_null");
+
+    assert_eq_str("hello", "hello", "assert_eq_str");
+    assert_ne_str("hello", "world", "assert_ne_str");
+
+    return done();
+}

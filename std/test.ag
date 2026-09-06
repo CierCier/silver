@@ -128,14 +128,68 @@ void assert_eq_i64(i64 expected, i64 actual, str msg) {
     tests_passed += 1;
 }
 
+/// Check i64 inequality. Fail-fast via @assert.
+void assert_ne_i64(i64 unexpected, i64 actual, str msg) {
+    @assert(unexpected != actual, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
 /// Check i32 equality. Fail-fast via @assert.
 void assert_eq_i32(i32 expected, i32 actual, str msg) {
     assert_eq_i64((i64)expected, (i64)actual, msg);
 }
 
+/// Check i32 inequality. Fail-fast via @assert.
+void assert_ne_i32(i32 unexpected, i32 actual, str msg) {
+    assert_ne_i64((i64)unexpected, (i64)actual, msg);
+}
+
+/// Check u64 equality. Fail-fast via @assert.
+void assert_eq_u64(u64 expected, u64 actual, str msg) {
+    @assert(expected == actual, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
+/// Check u64 inequality. Fail-fast via @assert.
+void assert_ne_u64(u64 unexpected, u64 actual, str msg) {
+    @assert(unexpected != actual, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
+/// Check bool equality. Fail-fast via @assert.
+void assert_eq_bool(bool expected, bool actual, str msg) {
+    @assert(expected == actual, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
+/// Check pointer is null. Fail-fast via @assert.
+void assert_null(void* ptr, str msg) {
+    @assert(ptr == (void*)0, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
+/// Check pointer is not null. Fail-fast via @assert.
+void assert_not_null(void* ptr, str msg) {
+    @assert(ptr != (void*)0, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
 /// Check string equality. Fail-fast via @assert.
 void assert_eq_str(str expected, str actual, str msg) {
     @assert(strcmp(expected, actual) == 0, msg);
+    @println("  [PASS] {}", msg);
+    tests_passed += 1;
+}
+
+/// Check string inequality. Fail-fast via @assert.
+void assert_ne_str(str unexpected, str actual, str msg) {
+    @assert(strcmp(unexpected, actual) != 0, msg);
     @println("  [PASS] {}", msg);
     tests_passed += 1;
 }
