@@ -113,7 +113,7 @@ $XDG_CACHE_HOME/silver/git/<url-hash>/repo.git
 ```
 
 When `XDG_CACHE_HOME` is unset, the fallback is
-`$HOME/.cache/silver/git/<url-hash>/repo.git`. Selected commits are materialized
+`$HOME/.local/cache/silver/git/<url-hash>/repo.git`. Selected commits are materialized
 under the same cache entry, so different selectors can share a repository
 clone while retaining immutable commit trees. Credentials and URL userinfo
 are not printed in diagnostics.

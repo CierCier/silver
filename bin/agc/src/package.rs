@@ -1443,7 +1443,11 @@ fn default_cache_root() -> Result<PathBuf, String> {
     let home = env::var_os("HOME").ok_or_else(|| {
         "cannot determine Silver cache directory: set XDG_CACHE_HOME or HOME".to_string()
     })?;
-    Ok(PathBuf::from(home).join(".cache").join("silver"))
+    Ok(fallback_cache_root(home))
+}
+
+fn fallback_cache_root(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join(".local").join("cache").join("silver")
 }
 
 fn resolve_git_revision(
@@ -1572,6 +1576,14 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "i32 main() { return 0; }\n").unwrap();
         path
+    }
+
+    #[test]
+    fn default_cache_root_uses_local_cache_fallback() {
+        assert_eq!(
+            fallback_cache_root("/home/example"),
+            PathBuf::from("/home/example/.local/cache/silver")
+        );
     }
 
     fn git_command(repo: &Path, args: &[&str]) {
