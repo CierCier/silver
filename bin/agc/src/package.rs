@@ -104,12 +104,29 @@ pub fn initialize_package(
         )
     })?;
     if !entry_path.exists() {
-        fs::write(&entry_path, "i32 main() {\n    return 0;\n}\n").map_err(|error| {
-            format!(
-                "failed to write package entry `{}`: {error}",
+        if let Err(error) = fs::write(&entry_path, "i32 main() {\n    return 0;\n}\n") {
+            let mut rollback_errors = Vec::new();
+            for path in [&entry_path, &manifest_path] {
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => rollback_errors.push(format!(
+                        "failed to remove `{}` during rollback: {error}",
+                        path.display()
+                    )),
+                }
+            }
+
+            let rollback = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "failed to write package entry `{}`: {error}{rollback}",
                 entry_path.display()
-            )
-        })?;
+            ));
+        }
     }
 
     Ok(InitializedPackage {
@@ -1955,6 +1972,27 @@ manifest = "modules/std"
         assert!(fs::read_to_string(initialized.manifest_path)
             .unwrap()
             .contains("[bin.\"custom-name\"]"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolls_back_generated_files_when_entry_creation_fails() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("init-rollback");
+        let entry = root.join(DEFAULT_ENTRY);
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        symlink(root.join("missing").join("entry-target"), &entry).unwrap();
+
+        let error = initialize_package(&root, None).unwrap_err();
+        assert!(error.contains("failed to write package entry"), "{error}");
+        assert!(!root.join(MANIFEST_FILE).exists());
+        assert!(fs::symlink_metadata(&entry).is_err());
+
+        let initialized = initialize_package(&root, None).unwrap();
+        assert!(initialized.manifest_path.is_file());
+        assert!(initialized.entry_path.is_file());
         let _ = fs::remove_dir_all(root);
     }
 }

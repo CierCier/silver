@@ -110,18 +110,25 @@ fn find_command_index(argv: &[OsString]) -> Option<usize> {
         if arg.starts_with('-') {
             if command_scan_option_requires_value(arg) {
                 i = i.saturating_add(2);
+            } else if command_scan_option_has_optional_value(arg)
+                && command_scan_optional_value_is_present(argv, i)
+            {
+                i = i.saturating_add(2);
             } else {
                 i += 1;
             }
             continue;
         }
-        return matches!(
-            arg,
-            "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean"
-        )
-            .then_some(i);
+        return is_command_name(arg).then_some(i);
     }
     None
+}
+
+fn is_command_name(arg: &str) -> bool {
+    matches!(
+        arg,
+        "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean"
+    )
 }
 
 fn command_scan_option_requires_value(arg: &str) -> bool {
@@ -131,8 +138,6 @@ fn command_scan_option_requires_value(arg: &str) -> bool {
             | "--output"
             | "-I"
             | "--root"
-            | "--bin"
-            | "--lib"
             | "--name"
             | "-D"
             | "-L"
@@ -145,9 +150,18 @@ fn command_scan_option_requires_value(arg: &str) -> bool {
             | "-j"
             | "--jobs"
             | "--emit"
-            | "-O"
             | "--run-arg"
     )
+}
+
+fn command_scan_option_has_optional_value(arg: &str) -> bool {
+    matches!(arg, "-O" | "--bin" | "--lib")
+}
+
+fn command_scan_optional_value_is_present(argv: &[OsString], index: usize) -> bool {
+    argv.get(index + 1)
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| !value.starts_with('-') && !is_command_name(value))
 }
 
 fn run_option_requires_value(arg: &str) -> bool {
@@ -256,6 +270,51 @@ mod tests {
                 OsString::from("custom"),
                 OsString::from("--init"),
                 OsString::from("project"),
+            ]
+        );
+    }
+
+    #[test]
+    fn commands_after_optional_value_options_are_not_swallowed() {
+        for option in ["-O", "--bin", "--lib"] {
+            let normalized = normalize_argv_for_clap(vec![
+                OsString::from("agc"),
+                OsString::from(option),
+                OsString::from("run"),
+                OsString::from("main.ag"),
+            ]);
+
+            assert_eq!(
+                normalized,
+                vec![
+                    OsString::from("agc"),
+                    OsString::from(option),
+                    OsString::from("--run"),
+                    OsString::from("main.ag"),
+                ],
+                "command was swallowed after {option}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_value_is_consumed_before_a_command() {
+        let normalized = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("--bin"),
+            OsString::from("worker"),
+            OsString::from("run"),
+            OsString::from("main.ag"),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                OsString::from("agc"),
+                OsString::from("--bin"),
+                OsString::from("worker"),
+                OsString::from("--run"),
+                OsString::from("main.ag"),
             ]
         );
     }
