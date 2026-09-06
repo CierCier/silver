@@ -82,6 +82,12 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
         } else if is_run && run_option_requires_value(arg_str) {
             out.push(arg.clone());
             pending_option_value = true;
+        } else if is_run && run_option_has_optional_value(arg_str) {
+            out.push(arg.clone());
+            pending_option_value = argv
+                .get(i + 1)
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| !value.starts_with('-'));
         } else if is_run && !arg_str.starts_with('-') {
             if !seen_input_file {
                 seen_input_file = true;
@@ -159,9 +165,13 @@ fn command_scan_option_has_optional_value(arg: &str) -> bool {
 }
 
 fn command_scan_optional_value_is_present(argv: &[OsString], index: usize) -> bool {
+    let option = argv[index].to_str().unwrap_or("");
     argv.get(index + 1)
         .and_then(|value| value.to_str())
-        .is_some_and(|value| !value.starts_with('-') && !is_command_name(value))
+        .is_some_and(|value| {
+            // Command-first forms (`run --bin NAME`) disambiguate command-like target names.
+            !value.starts_with('-') && (option != "-O" || !is_command_name(value))
+        })
 }
 
 fn run_option_requires_value(arg: &str) -> bool {
@@ -184,6 +194,10 @@ fn run_option_requires_value(arg: &str) -> bool {
             | "--emit"
             | "--run-arg"
     )
+}
+
+fn run_option_has_optional_value(arg: &str) -> bool {
+    matches!(arg, "-O" | "--bin" | "--lib")
 }
 
 fn main() {
@@ -275,34 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn commands_after_optional_value_options_are_not_swallowed() {
-        for option in ["-O", "--bin", "--lib"] {
-            let normalized = normalize_argv_for_clap(vec![
-                OsString::from("agc"),
-                OsString::from(option),
-                OsString::from("run"),
-                OsString::from("main.ag"),
-            ]);
-
-            assert_eq!(
-                normalized,
-                vec![
-                    OsString::from("agc"),
-                    OsString::from(option),
-                    OsString::from("--run"),
-                    OsString::from("main.ag"),
-                ],
-                "command was swallowed after {option}"
-            );
-        }
-    }
-
-    #[test]
-    fn optional_value_is_consumed_before_a_command() {
+    fn command_after_optional_optimization_is_not_swallowed() {
         let normalized = normalize_argv_for_clap(vec![
             OsString::from("agc"),
-            OsString::from("--bin"),
-            OsString::from("worker"),
+            OsString::from("-O"),
             OsString::from("run"),
             OsString::from("main.ag"),
         ]);
@@ -311,10 +301,59 @@ mod tests {
             normalized,
             vec![
                 OsString::from("agc"),
-                OsString::from("--bin"),
-                OsString::from("worker"),
+                OsString::from("-O"),
                 OsString::from("--run"),
                 OsString::from("main.ag"),
+            ]
+        );
+    }
+
+    #[test]
+    fn command_like_target_names_are_preserved() {
+        for option in ["--bin", "--lib"] {
+            for target in ["run", "check"] {
+                let normalized = normalize_argv_for_clap(vec![
+                    OsString::from("agc"),
+                    OsString::from(option),
+                    OsString::from(target),
+                    OsString::from("main.ag"),
+                ]);
+
+                assert_eq!(
+                    normalized,
+                    vec![
+                        OsString::from("agc"),
+                        OsString::from(option),
+                        OsString::from(target),
+                        OsString::from("main.ag"),
+                    ],
+                    "target name was mistaken for a command after {option}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_command_consumes_selector_values_before_program_input() {
+        let normalized = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("run"),
+            OsString::from("--bin"),
+            OsString::from("worker"),
+            OsString::from("main.ag"),
+            OsString::from("arg"),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                OsString::from("agc"),
+                OsString::from("--run"),
+                OsString::from("--bin"),
+                OsString::from("worker"),
+                OsString::from("main.ag"),
+                OsString::from("--run-arg"),
+                OsString::from("arg"),
             ]
         );
     }
