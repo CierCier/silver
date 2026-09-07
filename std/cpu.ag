@@ -24,7 +24,15 @@ bool g_has_avx512f;
 /// Run cpuid(leaf, subleaf) and store eax/ebx/ecx/edx at buf[0..3]
 /// (64-bit slots, low 32 bits valid). Returns eax (unused).
 i64 cpuid_buf(i64 leaf, i64 subleaf, i64 buf) {
-    return asm("movq %rdi, %rcx\ncpuid\nmovl %eax, 0(%rsi)\nmovl %ebx, 8(%rsi)\nmovl %ecx, 16(%rsi)\nmovl %edx, 24(%rsi)\nmovl %eax, %eax", [leaf, subleaf, buf], ["rbx", "rdx"]);
+    return asm("
+        movq %rdi, %rcx
+        cpuid
+        movl %eax, 0(%rsi)
+        movl %ebx, 8(%rsi)
+        movl %ecx, 16(%rsi)
+        movl %edx, 24(%rsi)
+        movl %eax, %eax
+    ", [leaf, subleaf, buf], ["rbx", "rdx"]);
 }
 
 /// Bit `bit` of cpuid leaf 1 ECX.
@@ -46,7 +54,11 @@ bool cpuid_leaf7_ebx(i64 bit) {
 
 /// Low 32 bits of XCR0 (via xgetbv), zero-extended.
 i64 xcr0_low() {
-    return asm("movl $$0, %ecx\nxgetbv\nmovl %eax, %eax", [], ["rdx"]);
+    return asm("
+        movl $$0, %ecx
+        xgetbv
+        movl %eax, %eax
+    ", [], ["rdx"]);
 }
 
 /// True when the OS saves the XMM/YMM/ZMM state required by `required`

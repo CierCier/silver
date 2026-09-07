@@ -474,7 +474,10 @@ impl String {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
         while (i + 16 <= self.len) {
-            i64 non_ascii = asm("movdqu (%rax), %xmm0\npmovmskb %xmm0, %eax", [&self.data[i]], ["xmm0"]);
+            i64 non_ascii = asm("
+                movdqu (%rax), %xmm0
+                pmovmskb %xmm0, %eax
+            ", [&self.data[i]], ["xmm0"]);
             if (non_ascii == 0) {
                 i = i + 16;
             } else {

@@ -30,7 +30,17 @@ const i64 THREAD_STACK_SIZE = 2097152;
 // Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
 // arg->r10 (the asm("syscall") wrapper convention).
 i64 thread_clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
-    return asm("syscall\ntest %rax, %rax\njnz 1f\nmov %r10, %rdi\ncall *%rdx\nmov $$0, %rdi\nmov $$60, %eax\nsyscall\n1:", [56, flags, stack_top, fn, arg]);
+    return asm("
+        syscall
+        test %rax, %rax
+        jnz 1f
+        mov %r10, %rdi
+        call *%rdx
+        mov $$0, %rdi
+        mov $$60, %eax
+        syscall
+        1:
+    ", [56, flags, stack_top, fn, arg]);
 }
 
 // Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
