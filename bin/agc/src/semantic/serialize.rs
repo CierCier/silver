@@ -521,13 +521,12 @@ pub fn generate_json_decode_source(s: &ast::StructItem) -> String {
     let struct_name = &s.name.name;
     let mut body = String::new();
     body.push_str(&format!("impl JsonDecode for {struct_name} {{\n"));
-    body.push_str("    bool json_decode(*self, JsonReader* input) {\n");
     body.push_str(&format!(
-        "        Result<{struct_name}, JsonError> r = {struct_name}.from_json(input);\n"
+        "    Result<{struct_name}, JsonError> json_decode(*self, JsonReader* input) {{\n"
     ));
-    body.push_str("        if (r.is_err()) { return false; }\n");
-    body.push_str("        *self = r.unwrap();\n");
-    body.push_str("        return true;\n");
+    body.push_str(&format!(
+        "        return {struct_name}.from_json(input);\n"
+    ));
     body.push_str("    }\n");
     body.push_str("}\n");
     body
@@ -655,19 +654,23 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 }
                 _ => {
                     // Non-primitive field: Vec<T>, Optional<T>, nested
-                    // structs, or user types with a JsonDecode impl. Zero-init
-                    // local, decode through the receiver, then move into the
-                    // result so partial failures never leave dangling values.
+                    // structs, or user types with a JsonDecode impl. Decode
+                    // through a zero-init receiver, then move the value into
+                    // the result so partial failures never leave dangling
+                    // values.
                     let field_type_src = type_to_source(&field.field_type);
                     body.push_str(&format!("                {field_type_src} elem;\n"));
-                    body.push_str("                if (!elem.json_decode(input)) {\n");
+                    body.push_str(&format!(
+                        "                Result<{field_type_src}, JsonError> elem_res = elem.json_decode(input);\n"
+                    ));
+                    body.push_str("                if (elem_res.is_err()) {\n");
                     body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
                     body.push_str("                }\n");
                     body.push_str(&format!(
-                        "                result.{field_name} = move elem;\n"
+                        "                result.{field_name} = elem_res.unwrap();\n"
                     ));
                 }
             }

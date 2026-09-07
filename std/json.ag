@@ -46,14 +46,12 @@ trait FromJson {
     Result<Self, JsonError> from_json(JsonReader* input);
 }
 
-// Decode a value of type Self from the reader, writing it into *self and
-// returning success. Unlike FromJson, this has a receiver so generic
-// containers can decode their element type T without knowing it: they call
-// `T elem; elem.json_decode(input)` on a zero-initialized local and the
-// value lands in the local. The bool return keeps nested generic calls
-// small (no large struct returns through monomorphized code).
+// Decode a value of type Self from the reader. Unlike FromJson, this has a
+// receiver so generic containers can decode their element type T without
+// knowing it: they call `T slot; slot.json_decode(input)` on a
+// zero-initialized local and the impls return a fresh decoded value.
 trait JsonDecode {
-    bool json_decode(*self, JsonReader* input);
+    Result<Self, JsonError> json_decode(*self, JsonReader* input);
 }
 
 struct JsonWriter {
@@ -878,147 +876,170 @@ impl FromJson for f64 {
 impl<T> FromJson for Optional<T> {
     Result<Optional<T>, JsonError> from_json(JsonReader* input) {
         Optional<T> slot;
-        if (!slot.json_decode(input)) {
-            JsonError error = JsonError.at_index(input.index);
-            return Err(move error);
-        }
-        return Ok(move slot);
+        return slot.json_decode(input);
     }
 }
 
 impl JsonDecode for i8 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<i8, JsonError> json_decode(*self, JsonReader* input) {
         i64 value = 0;
-        if (!input.read_i64(&value)) { return false; }
-        *self = (i8)value;
-        return true;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i8)value);
     }
 }
 
 impl JsonDecode for i16 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<i16, JsonError> json_decode(*self, JsonReader* input) {
         i64 value = 0;
-        if (!input.read_i64(&value)) { return false; }
-        *self = (i16)value;
-        return true;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i16)value);
     }
 }
 
 impl JsonDecode for i32 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<i32, JsonError> json_decode(*self, JsonReader* input) {
         i64 value = 0;
-        if (!input.read_i64(&value)) { return false; }
-        *self = (i32)value;
-        return true;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i32)value);
     }
 }
 
 impl JsonDecode for i64 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<i64, JsonError> json_decode(*self, JsonReader* input) {
         i64 value = 0;
-        if (!input.read_i64(&value)) { return false; }
-        *self = value;
-        return true;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
     }
 }
 
 impl JsonDecode for u8 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<u8, JsonError> json_decode(*self, JsonReader* input) {
         u64 value = 0;
-        if (!input.read_u64(&value)) { return false; }
-        *self = (u8)value;
-        return true;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u8)value);
     }
 }
 
 impl JsonDecode for u16 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<u16, JsonError> json_decode(*self, JsonReader* input) {
         u64 value = 0;
-        if (!input.read_u64(&value)) { return false; }
-        *self = (u16)value;
-        return true;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u16)value);
     }
 }
 
 impl JsonDecode for u32 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<u32, JsonError> json_decode(*self, JsonReader* input) {
         u64 value = 0;
-        if (!input.read_u64(&value)) { return false; }
-        *self = (u32)value;
-        return true;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u32)value);
     }
 }
 
 impl JsonDecode for u64 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<u64, JsonError> json_decode(*self, JsonReader* input) {
         u64 value = 0;
-        if (!input.read_u64(&value)) { return false; }
-        *self = value;
-        return true;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
     }
 }
 
 impl JsonDecode for f32 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<f32, JsonError> json_decode(*self, JsonReader* input) {
         f64 value = 0.0;
-        if (!input.read_f64(&value)) { return false; }
-        *self = (f32)value;
-        return true;
+        if (!input.read_f64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((f32)value);
     }
 }
 
 impl JsonDecode for f64 {
-    bool json_decode(*self, JsonReader* input) {
+    Result<f64, JsonError> json_decode(*self, JsonReader* input) {
         f64 value = 0.0;
-        if (!input.read_f64(&value)) { return false; }
-        *self = value;
-        return true;
+        if (!input.read_f64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
     }
 }
 
 impl JsonDecode for bool {
-    bool json_decode(*self, JsonReader* input) {
+    Result<bool, JsonError> json_decode(*self, JsonReader* input) {
         bool value = false;
-        if (!input.read_bool(&value)) { return false; }
-        *self = value;
-        return true;
+        if (!input.read_bool(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
     }
 }
 
 impl JsonDecode for String {
-    bool json_decode(*self, JsonReader* input) {
+    Result<String, JsonError> json_decode(*self, JsonReader* input) {
         String value = input.read_string();
-        if (input.failed) { return false; }
-        *self = move value;
-        return true;
+        if (input.failed) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(move value);
     }
 }
 
 impl<T> JsonDecode for Optional<T> {
-    bool json_decode(*self, JsonReader* input) {
+    Result<Optional<T>, JsonError> json_decode(*self, JsonReader* input) {
         input.skip_whitespace();
         u8* bytes = (u8*)input.input;
         if (input.index < input.length && bytes[input.index] == (u8)110) {
             if (input.literal("null")) {
                 Optional<T> none = None;
-                *self = move none;
-                return true;
+                return Ok(move none);
             }
         }
-        // Zero-init local: valid receiver address, safe to drop.
-        T elem;
-        bool ok = elem.json_decode(input);
-        if (!ok) { return false; }
-        Optional<T> some = Some(move elem);
-        *self = move some;
-        return true;
+        // Zero-init local anchors the element-type dispatch.
+        T slot;
+        Result<T, JsonError> inner = slot.json_decode(input);
+        if (inner.is_err()) {
+            return Err(inner.unwrap_err());
+        }
+        Optional<T> some = Some(inner.unwrap());
+        return Ok(move some);
     }
 }
 
 impl<T> JsonDecode for Vec<T> {
-    bool json_decode(*self, JsonReader* input) {
+    Result<Vec<T>, JsonError> json_decode(*self, JsonReader* input) {
         Vec<T> out = Vec<T>.new();
-        if (!input.begin_array()) { return false; }
+        if (!input.begin_array()) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
         while (true) {
             input.skip_whitespace();
             if (input.failed) { break; }
@@ -1030,15 +1051,17 @@ impl<T> JsonDecode for Vec<T> {
             if (out.len > 0) {
                 if (!input.comma()) { break; }
             }
-            // Zero-init local: valid receiver address, safe to drop.
-            T elem;
-            bool ok = elem.json_decode(input);
-            if (!ok) { break; }
-            out.push(move elem);
+            // Zero-init local anchors the element-type dispatch.
+            T slot;
+            Result<T, JsonError> elem = slot.json_decode(input);
+            if (elem.is_err()) { break; }
+            out.push(elem.unwrap());
         }
-        if (input.failed) { return false; }
-        *self = move out;
-        return true;
+        if (input.failed) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(move out);
     }
 }
 
@@ -1057,11 +1080,7 @@ impl<T> ToJson for Vec<T> {
 impl<T> FromJson for Vec<T> {
     Result<Vec<T>, JsonError> from_json(JsonReader* input) {
         Vec<T> slot;
-        if (!slot.json_decode(input)) {
-            JsonError error = JsonError.at_index(input.index);
-            return Err(move error);
-        }
-        return Ok(move slot);
+        return slot.json_decode(input);
     }
 }
 
