@@ -541,7 +541,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
         "    Result<{struct_name}, JsonError> from_json(JsonReader* input) {{\n"
     ));
     body.push_str("        if (!input.begin_object()) {\n");
-    body.push_str("            JsonError err = JsonError.invalid();\n");
+    body.push_str("            JsonError err = JsonError.at_index(input.index);\n");
     body.push_str(&format!(
         "            return Result<{struct_name}, JsonError>.Err(move err);\n"
     ));
@@ -554,7 +554,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
         body.push_str("            String key = input.read_string();\n");
         body.push_str("            if (input.failed) { break; }\n");
         body.push_str("            if (!input.expect((u8)58)) {\n");
-        body.push_str("                JsonError err = JsonError.invalid();\n");
+        body.push_str("                JsonError err = JsonError.at_index(input.index);\n");
         body.push_str(&format!(
             "                return Result<{struct_name}, JsonError>.Err(move err);\n"
         ));
@@ -584,7 +584,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "i8" | "i16" | "i32" | "i64" | "i128" => {
                     body.push_str("                i64 val = 0;\n");
                     body.push_str("                if (!input.read_i64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -596,7 +596,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "u8" | "u16" | "u32" | "u64" | "u128" => {
                     body.push_str("                u64 val = 0;\n");
                     body.push_str("                if (!input.read_u64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -608,7 +608,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "f32" | "f64" => {
                     body.push_str("                f64 val = 0.0;\n");
                     body.push_str("                if (!input.read_f64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -620,7 +620,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "bool" => {
                     body.push_str("                bool val = false;\n");
                     body.push_str("                if (!input.read_bool(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -632,7 +632,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "str" => {
                     body.push_str("                String val = input.read_string();\n");
                     body.push_str("                if (input.failed) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -644,7 +644,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "String" => {
                     body.push_str("                String val = input.read_string();\n");
                     body.push_str("                if (input.failed) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -661,7 +661,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                     let field_type_src = type_to_source(&field.field_type);
                     body.push_str(&format!("                {field_type_src} elem;\n"));
                     body.push_str("                if (!elem.json_decode(input)) {\n");
-                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
                     body.push_str(&format!(
                         "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
                     ));
@@ -675,7 +675,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
         }
         body.push_str("            else {\n");
         body.push_str("                if (!input.skip_value()) {\n");
-        body.push_str("                    JsonError err = JsonError.invalid();\n");
+        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
         body.push_str(&format!(
             "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
         ));
@@ -683,7 +683,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
         body.push_str("            }\n");
         body.push_str("            if (input.at_object_end()) { break; }\n");
         body.push_str("            if (!input.comma()) {\n");
-        body.push_str("                JsonError err = JsonError.invalid();\n");
+        body.push_str("                JsonError err = JsonError.at_index(input.index);\n");
         body.push_str(&format!(
             "                return Result<{struct_name}, JsonError>.Err(move err);\n"
         ));
@@ -692,7 +692,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
     }
 
     body.push_str("        if (!input.end_object()) {\n");
-    body.push_str("            JsonError err = JsonError.invalid();\n");
+    body.push_str("            JsonError err = JsonError.at_index(input.index);\n");
     body.push_str("            return Err(move err);\n");
     body.push_str("        }\n");
     body.push_str("        return Ok(move result);\n");

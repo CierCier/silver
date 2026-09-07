@@ -98,5 +98,19 @@ i32 main() {
     assert_true(r8.end_object(), "object closes after skips");
     assert_eq_i64(id, 7, "id read while unknown fields skipped");
 
+    test_start("json: error offsets");
+
+    // A malformed payload reports the byte offset where decoding stopped.
+    Result<i64, JsonError> bad = @from_json(i64, "{\"id\": \"str\"}");
+    assert_true(bad.is_err(), "wrong-typed value fails");
+    if (bad.is_err()) {
+        JsonError e = bad.get_error();
+        assert_true(e.offset() >= 0, "error carries the failure offset");
+    }
+
+    // Scalar decode of a clean value reports no error.
+    Result<i64, JsonError> good = @from_json(i64, "42");
+    assert_true(good.is_ok(), "clean value decodes");
+
     return done();
 }

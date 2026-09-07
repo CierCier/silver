@@ -14,11 +14,27 @@ import std.optional;
 
 enum JsonError {
     Invalid;
+    At(i64); // byte offset where decoding failed
 }
 
 impl JsonError {
     JsonError invalid() {
         return JsonError.Invalid;
+    }
+
+    /// Error carrying the reader's byte offset at the failure point.
+    JsonError at_index(i64 index) {
+        return JsonError.At(move index);
+    }
+
+    /// Byte offset of the failure, or -1 when unknown.
+    i64 offset(*self) {
+        i64 result = -1;
+        match *self {
+            Invalid : result = -1,
+            At(idx) : result = idx,
+        }
+        return result;
     }
 }
 
@@ -731,7 +747,7 @@ impl FromJson for i64 {
     Result<i64, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -742,7 +758,7 @@ impl FromJson for i32 {
     Result<i32, JsonError> from_json(JsonReader* input) {
         i32 value = 0;
         if (!input.read_i32(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -753,7 +769,7 @@ impl FromJson for bool {
     Result<bool, JsonError> from_json(JsonReader* input) {
         bool value = false;
         if (!input.read_bool(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -763,7 +779,7 @@ impl FromJson for String {
     Result<String, JsonError> from_json(JsonReader* input) {
         String value = input.read_string();
         if (input.failed) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         Result<String, JsonError> result = Ok(move value);
@@ -775,7 +791,7 @@ impl FromJson for i8 {
     Result<i8, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((i8)value);
@@ -786,7 +802,7 @@ impl FromJson for i16 {
     Result<i16, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((i16)value);
@@ -797,7 +813,7 @@ impl FromJson for u8 {
     Result<u8, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u8)value);
@@ -808,7 +824,7 @@ impl FromJson for u16 {
     Result<u16, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u16)value);
@@ -819,7 +835,7 @@ impl FromJson for u32 {
     Result<u32, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u32)value);
@@ -830,7 +846,7 @@ impl FromJson for u64 {
     Result<u64, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -841,7 +857,7 @@ impl FromJson for f32 {
     Result<f32, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((f32)value);
@@ -852,7 +868,7 @@ impl FromJson for f64 {
     Result<f64, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -863,7 +879,7 @@ impl<T> FromJson for Optional<T> {
     Result<Optional<T>, JsonError> from_json(JsonReader* input) {
         Optional<T> slot;
         if (!slot.json_decode(input)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(move slot);
@@ -1042,7 +1058,7 @@ impl<T> FromJson for Vec<T> {
     Result<Vec<T>, JsonError> from_json(JsonReader* input) {
         Vec<T> slot;
         if (!slot.json_decode(input)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(move slot);
