@@ -1,7 +1,7 @@
 import std.io;
 import std.math;
 
-trait Area<Self> {
+trait Area {
     f64 area(Self self);
     str kind(Self self) { return "shape"; }
 }
@@ -10,7 +10,7 @@ struct Circle {
     f64 radius;
 }
 
-impl Area<Circle> for Circle {
+impl Area for Circle {
     f64 area(Circle self) {
         return M_PI * self.radius * self.radius;
     }

@@ -126,9 +126,7 @@ impl HashMap<K, V> {
         V* new_vals = alloc_n<V>(new_cap);
         // +16 for SIMD control byte padding
         u8* new_ctrl = alloc_n<u8>(new_cap + 16);
-        for (i64 j = 0; j < new_cap + 16; j = j + 1) {
-            new_ctrl[j] = CTRL_EMPTY;
-        }
+        silver_rt_memset(new_ctrl, (u8)CTRL_EMPTY, new_cap + 16);
 
         // Rehash existing entries — move owned K/V via Place Index so non-Copy
         // (String, Vec) transfers ownership (`new[slot]=move old[i]`) and the

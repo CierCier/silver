@@ -129,8 +129,11 @@ struct MethodSig {
     type_params: Vec<String>,
     owner: Type,
     bounds: Vec<TypeBoundPredicate>,
-    source_impl: ast::ImplItem,
-    source_method: ast::ImplFunction,
+    // Shared handles: all methods of one impl block reference the same
+    // Arc'd impl, so registering N methods clones the impl once instead of
+    // N times (the O(N^2) AST blow-up that dominated typecheck RSS).
+    source_impl: std::sync::Arc<ast::ImplItem>,
+    source_method: std::sync::Arc<ast::ImplFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +142,7 @@ struct FunctionSig {
     return_type: Type,
     type_params: Vec<String>,
     bounds: Vec<TypeBoundPredicate>,
-    source: ast::FunctionItem,
+    source: std::sync::Arc<ast::FunctionItem>,
     is_variadic: bool,
     /// True when the signature came from an imported module artifact: the
     /// source is a signature-only placeholder with no body, and any
@@ -364,7 +367,7 @@ impl TypeChecker {
                             // generic function yields a correctly-typed
                             // mangled instance (identity__i64). The body stays
                             // empty; codegen emits an external declaration.
-                            source: ast::FunctionItem {
+                            source: std::sync::Arc::new(ast::FunctionItem {
                                 name: ast::Identifier {
                                     name: export.name.clone(),
                                     span: Span::default(),
@@ -393,7 +396,7 @@ impl TypeChecker {
                                     statements: Vec::new(),
                                     span: Span::default(),
                                 },
-                            },
+                            }),
                             is_variadic: export.is_variadic,
                             is_imported: true,
                         };
@@ -417,14 +420,14 @@ impl TypeChecker {
                                 type_params: export.type_params.clone(),
                                 owner: owner_ty.clone(),
                                 bounds: Vec::new(),
-                                source_impl: ast::ImplItem {
+                                source_impl: std::sync::Arc::new(ast::ImplItem {
                                     generics: None,
                                     trait_ref: None,
                                     self_type: owner_ty.to_ast(),
                                     items: Vec::new(),
                                     implicit_type_params: Vec::new(),
-                                },
-                                source_method: ast::ImplFunction {
+                                }),
+                                source_method: std::sync::Arc::new(ast::ImplFunction {
                                     name: ast::Identifier {
                                         name: method_name.to_string(),
                                         span: Span::default(),
@@ -476,7 +479,7 @@ impl TypeChecker {
                                     },
                                     attributes: Vec::new(),
                                     span: Span::default(),
-                                },
+                                }),
                             };
                             let symbol_id =
                                 (self.method_symbols.len() + 100_000 + self.methods.len()) as u64;
@@ -3955,7 +3958,7 @@ impl TypeChecker {
                 return_type,
                 type_params,
                 bounds,
-                source: func.clone(),
+                source: std::sync::Arc::new(func.clone()),
                 is_variadic,
                 is_imported: false,
             });
@@ -4224,7 +4227,7 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::Function {
-            source: Box::new(candidate.source.clone()),
+            source: Box::new((*candidate.source).clone()),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
@@ -4245,8 +4248,8 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::ImplMethod {
-            impl_item: Box::new(candidate.source_impl.clone()),
-            method: Box::new(candidate.source_method.clone()),
+            impl_item: Box::new((*candidate.source_impl).clone()),
+            method: Box::new((*candidate.source_method).clone()),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
@@ -6151,6 +6154,10 @@ impl TypeChecker {
             let self_ty = Type::from_ast(&impl_item.self_type);
             let self_key = self.method_key(&self_ty);
 
+            // One Arc per impl block, shared by every method's MethodSig:
+            // registering N methods clones the impl body once, not N times.
+            let shared_impl = std::sync::Arc::new(impl_item.clone());
+
             let mut impl_type_params = Vec::new();
             if let Some(generics) = &impl_item.generics {
                 for param in &generics.params {
@@ -6222,8 +6229,8 @@ impl TypeChecker {
                                 type_params,
                                 owner: self_ty.clone(),
                                 bounds: func_bounds,
-                                source_impl: impl_item.clone(),
-                                source_method: (**func).clone(),
+                                source_impl: shared_impl.clone(),
+                                source_method: std::sync::Arc::new((**func).clone()),
                             },
                         );
                         self.methods

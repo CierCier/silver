@@ -348,22 +348,48 @@ i64 __leak_align_up(i64 value, i64 alignment) {
 }
 
 // -- Tracking insert/find ----------------------------------------------------
+//
+// Open addressing with linear probing: every record lives at
+// hash(user_ptr) + probe. Freed slots stay as tombstones (state 2) so probe
+// chains never break; an empty slot terminates a lookup. The old linear
+// scans made each alloc/free O(N) — a 16k-record leak-check run degraded
+// ~480x — while these lookups are amortized O(1).
 
-i64 __leak_find_empty() {
-    for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
-        if (__leak_states[i] == (u8)0 || __leak_states[i] == (u8)2) {
-            return i;
+/// Multiplicative (Fibonacci) hash; the i64 multiply wraps, which is exactly
+/// the modular arithmetic the mask needs.
+i64 __leak_hash_idx(i64 user) {
+    return ((user * -7046029254386353131) >> 48) & (LEAK_MAX_RECORDS - 1);
+}
+
+i64 __leak_find_empty(i64 user) {
+    i64 idx = __leak_hash_idx(user);
+    i64 probes = LEAK_MAX_RECORDS;
+    while (probes > 0) {
+        u8 state = __leak_states[idx];
+        if (state == (u8)0 || state == (u8)2) {
+            return idx;
         }
+        idx = (idx + 1) & (LEAK_MAX_RECORDS - 1);
+        probes = probes - 1;
     }
     return -1;
 }
 
 i64 __leak_find_user(i64 user) {
-    for (i64 i = 0; i < LEAK_MAX_RECORDS; i = i + 1) {
-        if ((__leak_states[i] == (u8)1 || __leak_states[i] == (u8)3)
-            && __leak_user_ptrs[i] == user) {
-            return i;
+    i64 idx = __leak_hash_idx(user);
+    i64 probes = LEAK_MAX_RECORDS;
+    while (probes > 0) {
+        u8 state = __leak_states[idx];
+        if (state == (u8)0) {
+            return -1;
         }
+        if (state == (u8)1 || state == (u8)3) {
+            if (__leak_user_ptrs[idx] == user) {
+                return idx;
+            }
+        }
+        idx = (idx + 1) & (LEAK_MAX_RECORDS - 1);
+        probes = probes - 1;
     }
     return -1;
 }
@@ -402,7 +428,7 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
     i64* canary_after = (i64*)(user + size);
     canary_after[0] = LEAK_CANARY_LIVE;
 
-    i64 slot = __leak_find_empty();
+    i64 slot = __leak_find_empty(user);
     if (slot < 0) {
         __silver_leak_abort("record table full");
     }

@@ -85,6 +85,38 @@ pub fn add_derived_cfgs(set: &mut CfgSet, opt_level: Option<&str>, target: Optio
     };
     set.insert_if_absent(&format!("arch.{arch}"));
     set.insert_if_absent(&format!("os.{os}"));
+
+    // Native builds (no explicit --target) advertise the host CPU features
+    // as cpu.* keys. `@cfg(cpu.x)` then folds to the runtime probe global
+    // (g_has_x), so dispatch stays correct on any machine; `#[cfg(cpu.x)]`
+    // items compile in when the build host supports the feature. Only keys
+    // whose probe globals std/cpu.ag defines are derived.
+    if target.is_none() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("sse4.1") {
+                set.insert_if_absent("cpu.sse41");
+            }
+            if std::is_x86_feature_detected!("sse4.2") {
+                set.insert_if_absent("cpu.sse42");
+            }
+            if std::is_x86_feature_detected!("popcnt") {
+                set.insert_if_absent("cpu.popcnt");
+            }
+            if std::is_x86_feature_detected!("fma") {
+                set.insert_if_absent("cpu.fma");
+            }
+            if std::is_x86_feature_detected!("avx") {
+                set.insert_if_absent("cpu.avx");
+            }
+            if std::is_x86_feature_detected!("avx2") {
+                set.insert_if_absent("cpu.avx2");
+            }
+            if std::is_x86_feature_detected!("avx512f") {
+                set.insert_if_absent("cpu.avx512f");
+            }
+        }
+    }
 }
 
 /// Best-effort OS extraction from a target triple: the token that matches a
@@ -339,5 +371,35 @@ mod tests {
         add_derived_cfgs(&mut set, None, Some("aarch64-apple-darwin"));
         assert!(set.contains("arch.aarch64"));
         assert!(set.contains("os.darwin"));
+    }
+
+    #[test]
+    fn native_build_derives_host_cpu_features() {
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, None);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Derived cpu.* keys must match the host's detected features.
+            assert_eq!(
+                set.contains("cpu.avx2"),
+                std::is_x86_feature_detected!("avx2")
+            );
+            assert_eq!(
+                set.contains("cpu.sse41"),
+                std::is_x86_feature_detected!("sse4.1")
+            );
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            assert!(!set.contains("cpu.avx2"));
+        }
+    }
+
+    #[test]
+    fn cross_target_derives_no_cpu_features() {
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, Some("x86_64-unknown-linux-gnu"));
+        assert!(!set.contains("cpu.avx2"));
+        assert!(!set.contains("cpu.sse41"));
     }
 }

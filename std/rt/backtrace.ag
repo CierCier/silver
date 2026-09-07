@@ -10,8 +10,8 @@
 // a global initializer) and file/line taken from the function's AST span.
 // Every function is compiled with the "frame-pointer"="all" attribute, so
 // the runtime can walk the rbp chain and resolve each return address to a
-// function name + source position by scanning the table for the entry with
-// the largest addr <= return address.
+// function name + source position. The tables are sorted lazily at first
+// use, then lookups are binary searches.
 //
 // Pure Silver + inline asm; no libc dependency. Used by abort() and
 // __silver_assert_failed to print a named stack trace before dying.
@@ -123,49 +123,133 @@ void bt_write_hex(i64 fd, i64 value) {
     sys_write(fd, (i64)&buf[0], 19);
 }
 
+// -- Lazy sort + binary search ----------------------------------------------
+//
+// Function addresses are link-time relocations, so the tables cannot be
+// pre-sorted by the compiler. On first resolution the entries table is
+// sorted by address and the line table by (address, offset); every later
+// lookup is O(log N) instead of a linear scan.
+
+i32 g_bt_sorted;
+
+bool bt_line_before(BtLine a, BtLine b) {
+    if (a.addr != b.addr) {
+        return a.addr < b.addr;
+    }
+    return a.offset < b.offset;
+}
+
+void bt_qsort_entries(i64 lo, i64 hi) {
+    if (lo >= hi) { return; }
+    i64 i = lo;
+    i64 j = hi;
+    i64 pivot = __silver_bt_entries[(lo + hi) / 2].addr;
+    while (i <= j) {
+        while (__silver_bt_entries[i].addr < pivot) { i = i + 1; }
+        while (__silver_bt_entries[j].addr > pivot) { j = j - 1; }
+        if (i <= j) {
+            BtEntry tmp = __silver_bt_entries[i];
+            __silver_bt_entries[i] = __silver_bt_entries[j];
+            __silver_bt_entries[j] = tmp;
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    bt_qsort_entries(lo, j);
+    bt_qsort_entries(i, hi);
+}
+
+void bt_qsort_lines(i64 lo, i64 hi) {
+    if (lo >= hi) { return; }
+    i64 i = lo;
+    i64 j = hi;
+    BtLine pivot = __silver_bt_lines[(lo + hi) / 2];
+    while (i <= j) {
+        while (bt_line_before(__silver_bt_lines[i], pivot)) { i = i + 1; }
+        while (bt_line_before(pivot, __silver_bt_lines[j])) { j = j - 1; }
+        if (i <= j) {
+            BtLine tmp = __silver_bt_lines[i];
+            __silver_bt_lines[i] = __silver_bt_lines[j];
+            __silver_bt_lines[j] = tmp;
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    bt_qsort_lines(lo, j);
+    bt_qsort_lines(i, hi);
+}
+
+/// One-time in-place sort of both tables (guarded by a static flag).
+void bt_ensure_sorted() {
+    if (g_bt_sorted != 0) {
+        return;
+    }
+    if (__silver_bt_count > 1) {
+        bt_qsort_entries(0, __silver_bt_count - 1);
+    }
+    if (__silver_bt_lines_count > 1) {
+        bt_qsort_lines(0, __silver_bt_lines_count - 1);
+    }
+    g_bt_sorted = 1;
+}
+
 /// Resolve a return address to the entry with the largest addr <= it
 /// (the function containing the address). Returns -1 when unresolved.
 i64 bt_resolve(i64 ret_addr) {
+    i64 count = __silver_bt_count;
+    if (count <= 0) {
+        return -1;
+    }
+    bt_ensure_sorted();
+    i64 lo = 0;
+    i64 hi = count - 1;
     i64 best = -1;
-    i64 best_addr = 0;
-    i64 i = 0;
-    while (i < __silver_bt_count) {
-        BtEntry e = __silver_bt_entries[i];
-        if (e.addr <= ret_addr && e.addr > best_addr) {
-            best = i;
-            best_addr = e.addr;
+    while (lo <= hi) {
+        i64 mid = (lo + hi) / 2;
+        if (__silver_bt_entries[mid].addr <= ret_addr) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
-        i = i + 1;
     }
     return best;
 }
 
 /// Look up the exact source line for a return address: the line table is
-/// scanned for the entry whose function start matches and whose offset is
-/// the largest one <= (ret_addr - fn_start). Returns (file, line) via the
-/// output pointers, or 0 line when unresolved.
+/// sorted by (function start, offset), so a composite binary search finds
+/// the last entry with (addr, offset) <= (fn_addr, ret_addr - fn_addr).
+/// Returns (file, line) via the output pointers, or 0 line when unresolved.
 void bt_line_lookup(i64 fn_addr, i64 ret_addr, u8** out_file, i64* out_line) {
+    i64 count = __silver_bt_lines_count;
+    if (count <= 0) {
+        *out_line = 0;
+        return;
+    }
+    bt_ensure_sorted();
+    i64 off = ret_addr - fn_addr;
+    i64 lo = 0;
+    i64 hi = count - 1;
     i64 best = -1;
-    i64 best_off = 0;
-    i64 i = 0;
-    while (i < __silver_bt_lines_count) {
-        BtLine l = __silver_bt_lines[i];
-        if (l.addr == fn_addr) {
-            i64 off = ret_addr - fn_addr;
-            if (off >= l.offset && l.offset >= best_off) {
-                best = i;
-                best_off = l.offset;
-            }
+    while (lo <= hi) {
+        i64 mid = (lo + hi) / 2;
+        BtLine l = __silver_bt_lines[mid];
+        if (l.addr < fn_addr || (l.addr == fn_addr && l.offset <= off)) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
-        i = i + 1;
     }
     if (best >= 0) {
         BtLine l = __silver_bt_lines[best];
-        *out_file = l.file;
-        *out_line = l.line;
-    } else {
-        *out_line = 0;
+        if (l.addr == fn_addr) {
+            *out_file = l.file;
+            *out_line = l.line;
+            return;
+        }
     }
+    *out_line = 0;
 }
 
 /// Print the spilled arguments of the function whose frame pointer is

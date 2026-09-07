@@ -94,23 +94,18 @@ impl Vec<T> {
     /// For Copy T (i32, POD structs) `move` is a bitwise copy.
     void push(&mut self, T value) {
         if (self.len >= self.cap) {
-            i64 new_cap = 1;
+            i64 new_cap = 8;
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
             T* new_data = (T*)(malloc(@size(T) * new_cap));
             if (self.data != (T*)0) {
-                i64 i = 0;
-                while (i < self.len) {
-                    // FIXME: ideal `new_data[i] = move self.data[i]` (Place Index)
-                    // needs `move` to accept `Index` (typeck.rs:1767). Use two-step
-                    // via `tmp` so `move` is on an identifier and typeck passes.
-                    // Old buffer is `free`d without drops, so shallow copy is not
-                    // double-freed; replace with direct `move old[i]` once allowed.
-                    T tmp = self.data[i];
-                    new_data[i] = move tmp;
-                    i = i + 1;
-                }
+                // Every T is bitwise relocatable: transfer the live prefix
+                // with one SIMD memcpy, then free the old buffer wholesale.
+                // The pre-memcpy loop moved elements one by one; ownership
+                // travels with the bytes either way, and the old buffer is
+                // freed without per-element drops.
+                silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
                 free(self.data);
             }
             self.data = new_data;
@@ -210,12 +205,7 @@ impl Vec<T> {
         }
         T* new_data = (T*)(malloc(@size(T) * min_capacity));
         if (self.data != (T*)0) {
-            i64 i = 0;
-            while (i < self.len) {
-                T tmp = self.data[i];
-                new_data[i] = move tmp;
-                i = i + 1;
-            }
+            silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
             free(self.data);
         }
         self.data = new_data;
@@ -235,12 +225,7 @@ impl Vec<T> {
         } else {
             if (self.len < self.cap) {
                 T* new_data = (T*)(malloc(@size(T) * self.len));
-                i64 i = 0;
-                while (i < self.len) {
-                    T tmp = self.data[i];
-                    new_data[i] = move tmp;
-                    i = i + 1;
-                }
+                silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
                 free(self.data);
                 self.data = new_data;
                 self.cap = self.len;

@@ -1,24 +1,16 @@
 // Test suite for Rc<T> — reference-counted smart pointer
-// Note: uses manual allocation instead of Rc.new() because
-// monomorphization of static methods with generic args (T val)
-// is currently deferred to the caller's scope, which may not
-// resolve alloc<T>() from imported modules.
+// Uses the public Rc API (new/clone/get/drop) against the co-allocated
+// RcBox<T> { count, value } layout.
 import std.test;  // assert_true, assert_eq_i32, done, STDOUT
 import std.mem;
 
 i32 main() {
     STDOUT.write_str("=== Rc Test Suite ===\n\n");
 
-    // Test 1: Rc.new with primitive — use manual construction
+    // Test 1: Rc.new with primitive
     STDOUT.write_str("--- Test 1: Rc.new with primitive ---\n");
     {
-        i32* p = alloc<i32>();
-        *p = 42;
-        i32* c = alloc<i32>();
-        *c = 1;
-        Rc<i32> r;
-        r.ptr = p;
-        r.count = c;
+        Rc<i32> r = Rc<i32>.new(42);
         i32* rp = r.get(&r);
         assert_eq_i32(*rp, 42, "Rc has value 42");
         r.drop();
@@ -27,13 +19,7 @@ i32 main() {
     // Test 2: Rc.clone
     STDOUT.write_str("--- Test 2: Rc.clone ---\n");
     {
-        i32* p = alloc<i32>();
-        *p = 42;
-        i32* c = alloc<i32>();
-        *c = 1;
-        Rc<i32> a;
-        a.ptr = p;
-        a.count = c;
+        Rc<i32> a = Rc<i32>.new(42);
         Rc<i32> b = a.clone(&a);
         i32* pa = a.get(&a);
         i32* pb = b.get(&b);
@@ -47,13 +33,7 @@ i32 main() {
     // Test 3: Shared mutation
     STDOUT.write_str("--- Test 3: Shared mutation ---\n");
     {
-        i32* p = alloc<i32>();
-        *p = 100;
-        i32* c = alloc<i32>();
-        *c = 1;
-        Rc<i32> a;
-        a.ptr = p;
-        a.count = c;
+        Rc<i32> a = Rc<i32>.new(100);
         Rc<i32> b = a.clone(&a);
         i32* pa = a.get(&a);
         *pa = 200;
@@ -67,13 +47,7 @@ i32 main() {
     // Test 4: Three-way sharing
     STDOUT.write_str("--- Test 4: Three-way sharing ---\n");
     {
-        i32* p = alloc<i32>();
-        *p = 1;
-        i32* c = alloc<i32>();
-        *c = 1;
-        Rc<i32> a;
-        a.ptr = p;
-        a.count = c;
+        Rc<i32> a = Rc<i32>.new(1);
         Rc<i32> b = a.clone(&a);
         Rc<i32> cc = a.clone(&a);
         i32* pa = a.get(&a);
