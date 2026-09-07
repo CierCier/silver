@@ -304,6 +304,15 @@ impl JsonReader {
     bool end_array(*self) { return self.expect((u8)93); }
     bool comma(*self) { return self.expect((u8)44); }
 
+    /// True when the next non-whitespace byte closes the current object.
+    /// Peeking avoids the failed flag that expect() sets on mismatch, so a
+    /// normally-terminated object never poisons an enclosing decode.
+    bool at_object_end(*self) {
+        self.skip_whitespace();
+        u8* bytes = (u8*)self.input;
+        return self.index < self.length && bytes[self.index] == (u8)125;
+    }
+
     bool literal(*self, str value) {
         u8* input = (u8*)self.input;
         u8* expected = (u8*)value;

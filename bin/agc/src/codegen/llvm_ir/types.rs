@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
@@ -135,11 +137,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // enums (`Optional`, `OptInt`).
                 if named.path.len() == 1 {
                     let monomorph = Self::monomorph_owner_name_from_named(named);
-                    if let Some(struct_ty) = self
-                        .enum_payload_layouts
-                        .get(&monomorph)
-                        .or_else(|| self.enum_payload_layouts.get(&named.path[0].name))
+                    if let Some(struct_ty) = self.enum_payload_layouts.get(&monomorph) {
+                        return Ok(struct_ty.as_basic_type_enum());
+                    }
+                    // A generic enum instance (e.g. Result<Nested, JsonError>)
+                    // may not be registered yet when a signature is lowered
+                    // before its definition (forward-referenced call sites).
+                    // Register it now so the payload size comes from the
+                    // concrete type args instead of the generic placeholder.
+                    if let Some(args) = &named.generics
+                        && !args.is_empty()
+                        && let Some(params) = self.struct_generics.get(&named.path[0].name).cloned()
                     {
+                        let mut mapping = HashMap::default();
+                        for (param, arg) in params.iter().zip(args.iter()) {
+                            mapping.insert(param.clone(), arg.clone());
+                        }
+                        let base = named.path[0].name.clone();
+                        self.register_monomorphized_enum(&base, &monomorph, &mapping)?;
+                        if let Some(struct_ty) = self.enum_payload_layouts.get(&monomorph) {
+                            return Ok(struct_ty.as_basic_type_enum());
+                        }
+                    }
+                    if let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name) {
                         return Ok(struct_ty.as_basic_type_enum());
                     }
                 }

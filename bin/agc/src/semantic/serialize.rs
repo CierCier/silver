@@ -139,6 +139,32 @@ pub fn parse_serialize_attribute(
     Ok(formats)
 }
 
+/// Render a type back to source text with generics (Vec<String>), matching
+/// how the user wrote it, for use in synthesized code.
+fn type_to_source(ty: &ast::Type) -> String {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => {
+            let base = named
+                .path
+                .iter()
+                .map(|id| id.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+            if let Some(generics) = &named.generics {
+                let args = generics
+                    .iter()
+                    .map(|arg| type_to_source(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{base}<{args}>")
+            } else {
+                base
+            }
+        }
+        _ => type_to_canonical_name(ty),
+    }
+}
+
 /// Helper to canonicalize a type into a simple name string.
 fn type_to_canonical_name(ty: &ast::Type) -> String {
     match ty.kind.as_ref() {
@@ -259,9 +285,22 @@ pub fn synthesize_serialization_for_program(program: &mut ast::Program) {
         // FromJson
         if !existing_to_impls.contains(&("FromJson".to_string(), struct_name.clone())) {
             let from_json_src = generate_from_json_source(s);
+            if struct_name == "Message" {
+                eprintln!("=== SYNTH from_json ===\n{from_json_src}=== END ===");
+            }
             if let Some(item) = parse_impl_snippet(&from_json_src) {
                 synthesized_items.push(item);
                 existing_to_impls.insert(("FromJson".to_string(), struct_name.clone()));
+            }
+        }
+
+        // JsonDecode: lets containers (Vec<T>, Optional<T>) decode this
+        // struct as an element type.
+        if !existing_to_impls.contains(&("JsonDecode".to_string(), struct_name.clone())) {
+            let json_decode_src = generate_json_decode_source(s);
+            if let Some(item) = parse_impl_snippet(&json_decode_src) {
+                synthesized_items.push(item);
+                existing_to_impls.insert(("JsonDecode".to_string(), struct_name.clone()));
             }
         }
     }
@@ -478,6 +517,22 @@ pub fn generate_to_json_source(s: &ast::StructItem) -> String {
     body
 }
 
+pub fn generate_json_decode_source(s: &ast::StructItem) -> String {
+    let struct_name = &s.name.name;
+    let mut body = String::new();
+    body.push_str(&format!("impl JsonDecode for {struct_name} {{\n"));
+    body.push_str("    bool json_decode(*self, JsonReader* input) {\n");
+    body.push_str(&format!(
+        "        Result<{struct_name}, JsonError> r = {struct_name}.from_json(input);\n"
+    ));
+    body.push_str("        if (r.is_err()) { return false; }\n");
+    body.push_str("        *self = r.unwrap();\n");
+    body.push_str("        return true;\n");
+    body.push_str("    }\n");
+    body.push_str("}\n");
+    body
+}
+
 pub fn generate_from_json_source(s: &ast::StructItem) -> String {
     let struct_name = &s.name.name;
     let mut body = String::new();
@@ -495,6 +550,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
 
     if !s.fields.is_empty() {
         body.push_str("        while (true) {\n");
+        body.push_str("            if (input.at_object_end()) { break; }\n");
         body.push_str("            String key = input.read_string();\n");
         body.push_str("            if (input.failed) { break; }\n");
         body.push_str("            if (!input.expect((u8)58)) {\n");
@@ -597,11 +653,41 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                         "                result.{field_name} = move val;\n"
                     ));
                 }
-                _ => {}
+                _ => {
+                    // Non-primitive field: Vec<T>, Optional<T>, nested
+                    // structs, or user types with a JsonDecode impl. Zero-init
+                    // local, decode through the receiver, then move into the
+                    // result so partial failures never leave dangling values.
+                    let field_type_src = type_to_source(&field.field_type);
+                    body.push_str(&format!("                {field_type_src} elem;\n"));
+                    body.push_str("                if (!elem.json_decode(input)) {\n");
+                    body.push_str("                    JsonError err = JsonError.invalid();\n");
+                    body.push_str(&format!(
+                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                    ));
+                    body.push_str("                }\n");
+                    body.push_str(&format!(
+                        "                result.{field_name} = move elem;\n"
+                    ));
+                }
             }
             body.push_str("            }\n");
         }
-        body.push_str("            if (!input.comma()) { break; }\n");
+        body.push_str("            else {\n");
+        body.push_str("                if (!input.skip_value()) {\n");
+        body.push_str("                    JsonError err = JsonError.invalid();\n");
+        body.push_str(&format!(
+            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+        ));
+        body.push_str("                }\n");
+        body.push_str("            }\n");
+        body.push_str("            if (input.at_object_end()) { break; }\n");
+        body.push_str("            if (!input.comma()) {\n");
+        body.push_str("                JsonError err = JsonError.invalid();\n");
+        body.push_str(&format!(
+            "                return Result<{struct_name}, JsonError>.Err(move err);\n"
+        ));
+        body.push_str("            }\n");
         body.push_str("        }\n");
     }
 

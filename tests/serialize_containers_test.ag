@@ -1,0 +1,126 @@
+// #[serialize] synthesis for container fields: Vec<T>, Optional<T>, and
+// nested structs must round-trip, and unknown keys must be skipped instead
+// of desyncing the reader. LSP message structs look exactly like this.
+import std.io.file;
+import std.json;
+import std.string;
+import std.optional;
+import std.test;
+
+#[serialize]
+struct Nested {
+    i32 count;
+    String label;
+}
+
+#[serialize]
+struct Message {
+    i32 id;
+    String title;
+    Vec<String> tags;
+    Optional<i32> priority;
+    Vec<Nested> items;
+    Nested meta;
+}
+
+impl Nested {
+    Nested new(i32 count, str label) {
+        Nested n;
+        n.count = count;
+        n.label = String.from_str(label);
+        return move n;
+    }
+}
+
+bool cstr_eq(str a, str b) {
+    return strcmp((const char*)a, (const char*)b) == 0;
+}
+
+i32 main() {
+    test_start("serialize: encode container fields");
+
+    Message m;
+    m.id = 7;
+    m.title = String.from_str("t");
+    m.tags = Vec<String>.new();
+    m.tags.push(String.from_str("a"));
+    m.tags.push(String.from_str("b"));
+    m.priority = Optional<i32>.some((i32)3);
+    m.items = Vec<Nested>.new();
+    m.items.push(Nested.new(1, "one"));
+    m.meta = Nested.new(2, "two");
+
+    JsonWriter w = JsonWriter.new();
+    m.to_json(&w);
+    assert_true(true, "encode runs");
+    w.output.write_u8((u8)0);
+    str encoded = (str)w.output.data;
+    assert_true(cstr_eq(encoded,
+        "{\"id\":7,\"title\":\"t\",\"tags\":[\"a\",\"b\"],\"priority\":3,"
+        "\"items\":[{\"count\":1,\"label\":\"one\"}],"
+        "\"meta\":{\"count\":2,\"label\":\"two\"}}"),
+        "nested containers encode correctly");
+
+    test_start("serialize: decode container fields");
+
+    Result<Message, JsonError> res = @from_json(Message, encoded);
+    assert_true(res.is_ok(), "message decodes");
+    Message back = res.unwrap();
+    assert_eq_i64(back.id, 7, "id");
+    assert_true(back.title.equals("t"), "title");
+    assert_eq_i64(back.tags.len, 2, "two tags");
+    assert_true(back.tags.data[0].equals("a"), "first tag");
+    assert_true(back.tags.data[1].equals("b"), "second tag");
+    assert_true(back.priority.is_some(), "priority present");
+    if (back.priority.is_some()) {
+        Optional<i32> p = back.priority;
+        assert_eq_i64(p.unwrap(), 3, "priority value");
+    }
+    assert_eq_i64(back.items.len, 1, "one item");
+    assert_eq_i64(back.items.data[0].count, 1, "item count");
+    assert_true(back.items.data[0].label.equals("one"), "item label");
+    assert_eq_i64(back.meta.count, 2, "meta count");
+    assert_true(back.meta.label.equals("two"), "meta label");
+    back.tags.data[0].drop();
+    back.tags.data[1].drop();
+    back.tags.drop();
+    back.items.data[0].label.drop();
+    back.items.drop();
+    back.meta.label.drop();
+
+    test_start("serialize: decode tolerates unknown fields");
+
+    Result<Message, JsonError> res2 = @from_json(Message,
+        "{\"workDoneToken\":\"tok\",\"id\":9,\"title\":\"x\",\"tags\":[],"
+        "\"priority\":null,\"items\":[],\"extra\":{\"deep\":[1,2]},"
+        "\"meta\":{\"count\":4,\"label\":\"m\"}}");
+    assert_true(res2.is_ok(), "unknown fields skipped");
+    Message m2 = res2.unwrap();
+    assert_eq_i64(m2.id, 9, "id still read");
+    assert_true(m2.priority.is_none(), "null optional is none");
+    assert_eq_i64(m2.meta.count, 4, "nested still decoded");
+    assert_true(m2.meta.label.equals("m"), "nested label");
+    m2.tags.drop();
+    m2.items.drop();
+    m2.meta.label.drop();
+
+    test_start("serialize: missing fields default");
+
+    Result<Message, JsonError> res3 = @from_json(Message,
+        "{\"id\":1,\"title\":\"y\",\"tags\":[],\"items\":[],\"meta\":{\"count\":0,\"label\":\"\"}}");
+    assert_true(res3.is_ok(), "minimal message decodes");
+    Message m3 = res3.unwrap();
+    assert_true(m3.priority.is_none(), "missing optional defaults to none");
+    m3.tags.drop();
+    m3.items.drop();
+    m3.meta.label.drop();
+
+    m.tags.data[0].drop();
+    m.tags.data[1].drop();
+    m.tags.drop();
+    m.items.data[0].label.drop();
+    m.items.drop();
+    m.meta.label.drop();
+
+    return done();
+}
