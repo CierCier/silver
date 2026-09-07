@@ -1,0 +1,142 @@
+// Path and file-URI helpers: percent encode/decode, file:// conversion,
+// and the small path operations an editor server needs (join, normalize).
+import std.io.file;
+import std.path;
+import std.string;
+import std.optional;
+import std.test;
+
+bool cstr_eq(str a, str b) {
+    return strcmp((const char*)a, (const char*)b) == 0;
+}
+
+i32 main() {
+    test_start("path: join");
+
+    String j1 = path_join("/a/b", "c.ag");
+    assert_true(j1.equals("/a/b/c.ag"), "plain join");
+    j1.drop();
+    String j2 = path_join("/a/b/", "c.ag");
+    assert_true(j2.equals("/a/b/c.ag"), "trailing slash not doubled");
+    j2.drop();
+    String j3 = path_join("/a/b", "/abs.ag");
+    assert_true(j3.equals("/abs.ag"), "absolute child wins");
+    j3.drop();
+    String j4 = path_join("", "c.ag");
+    assert_true(j4.equals("c.ag"), "empty base");
+    j4.drop();
+    String j5 = path_join("/a/b", "");
+    assert_true(j5.equals("/a/b"), "empty child");
+    j5.drop();
+    String j6 = path_join("a", "b");
+    assert_true(j6.equals("a/b"), "relative join");
+    j6.drop();
+
+    test_start("path: basename, dirname, extension");
+
+    String b1 = path_basename("/a/b/c.ag");
+    assert_true(b1.equals("c.ag"), "basename");
+    b1.drop();
+    String b2 = path_basename("c.ag");
+    assert_true(b2.equals("c.ag"), "no dir");
+    b2.drop();
+    String b3 = path_basename("/a/b/");
+    assert_true(b3.equals(""), "trailing slash");
+    b3.drop();
+
+    String d1 = path_dirname("/a/b/c.ag");
+    assert_true(d1.equals("/a/b"), "dirname");
+    d1.drop();
+    String d2 = path_dirname("c.ag");
+    assert_true(d2.equals("."), "no dir gives dot");
+    d2.drop();
+    String d3 = path_dirname("/a");
+    assert_true(d3.equals("/"), "root dirname");
+    d3.drop();
+
+    String e1 = path_extension("/a/b.tar.gz");
+    assert_true(e1.equals(".gz"), "extension");
+    e1.drop();
+    String e2 = path_extension("/a/b");
+    assert_true(e2.equals(""), "no extension");
+    e2.drop();
+
+    test_start("path: normalize");
+
+    String n1 = path_normalize("/a//b/./c");
+    assert_true(n1.equals("/a/b/c"), "collapse and dot removal");
+    n1.drop();
+    String n2 = path_normalize("/a/b/../c");
+    assert_true(n2.equals("/a/c"), "parent removal");
+    n2.drop();
+    String n3 = path_normalize("../a");
+    assert_true(n3.equals("../a"), "leading parent kept");
+    n3.drop();
+    String n4 = path_normalize("a/../..");
+    assert_true(n4.equals(".."), "excess parents");
+    n4.drop();
+    String n5 = path_normalize("../../x");
+    assert_true(n5.equals("../../x"), "leading parents kept");
+    n5.drop();
+    String n6 = path_normalize("../..");
+    assert_true(n6.equals("../.."), "two leading parents kept");
+    n6.drop();
+    String n7 = path_normalize("a/../../b");
+    assert_true(n7.equals("../b"), "parent above consumed component kept");
+    n7.drop();
+
+    test_start("path: percent encode/decode");
+
+    String pd1 = percent_decode("a%20b%2Fc");
+    assert_true(pd1.equals("a b/c"), "decode basic");
+    pd1.drop();
+    String pd2 = percent_decode("a%2");
+    assert_true(pd2.equals("a%2"), "invalid escape kept literally");
+    pd2.drop();
+    String pd3 = percent_decode("a+b");
+    assert_true(pd3.equals("a+b"), "plus untouched in paths");
+    pd3.drop();
+
+    String pe1 = percent_encode_path("/a b/c.ag");
+    assert_true(pe1.equals("/a%20b/c.ag"), "space encoded, slash kept");
+    pe1.drop();
+    String pe2 = percent_encode_path("t\u{e9}st");
+    assert_true(pe2.equals("t%C3%A9st"), "non-ascii encoded");
+    pe2.drop();
+    String pe3 = percent_decode("t%C3%A9st");
+    assert_true(pe3.equals("t\u{e9}st"), "round trip non-ascii");
+    pe3.drop();
+
+    test_start("path: file URI conversion");
+
+    Optional<String> u1 = file_uri_to_path("file:///a/b%20c.ag");
+    assert_true(u1.is_some(), "file URI parses");
+    if (u1.is_some()) {
+        String p = u1.unwrap();
+        assert_true(p.equals("/a/b c.ag"), "host-less URI decodes");
+        p.drop();
+    }
+
+    Optional<String> u2 = file_uri_to_path("file://localhost/a.ag");
+    assert_true(u2.is_some(), "localhost accepted");
+    if (u2.is_some()) {
+        String p = u2.unwrap();
+        assert_true(p.equals("/a.ag"), "localhost stripped");
+        p.drop();
+    }
+
+    Optional<String> u3 = file_uri_to_path("http://example.com/x");
+    assert_true(u3.is_none(), "non-file scheme rejected");
+
+    Optional<String> u4 = file_uri_to_path("file://host/a.ag");
+    assert_true(u4.is_none(), "foreign host rejected");
+
+    String back = path_to_file_uri("/a/b c.ag");
+    assert_true(back.equals("file:///a/b%20c.ag"), "path to URI");
+    back.drop();
+    String back2 = path_to_file_uri("");
+    assert_true(back2.equals("file://"), "empty path");
+    back2.drop();
+
+    return done();
+}

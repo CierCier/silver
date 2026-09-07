@@ -519,3 +519,67 @@ impl<K> Iterator for HashSetDrain<K> {
         return None;
     }
 }
+
+struct HashSetIntoIter<K> {
+    K* keys;
+    u8* ctrl;
+    i64 capacity;
+    i64 idx;
+}
+
+impl<K> IntoIterator for HashSet<K> {
+    type Item = K;
+    type IntoIter = HashSetIntoIter<K>;
+    /// Consumes the set, moving its buffers into the iterator. `self` is
+    /// by value so `move self.keys` leaves the set moved-from.
+    HashSetIntoIter<K> into_iter(self) {
+        HashSetIntoIter<K> it;
+        it.keys = move self.keys;
+        it.ctrl = move self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        self.keys = (K*)0;
+        self.ctrl = (u8*)0;
+        self.capacity = 0;
+        self.len = 0;
+        return it;
+    }
+}
+
+impl<K> Drop for HashSetIntoIter<K> {
+    void drop(*self) {
+        if (self.ctrl != (u8*)0) {
+            // Frees the buffer only. Keys not yet moved out by next() are
+            // the caller's responsibility to drop before abandoning the
+            // iterator (same convention as VecIter and HashMapIntoIter:
+            // containers own their backing buffer, never element contents).
+            free(self.keys);
+            free(self.ctrl);
+            self.keys = (K*)0;
+            self.ctrl = (u8*)0;
+        }
+        self.capacity = 0;
+        self.idx = 0;
+    }
+}
+
+impl<K> Iterator for HashSetIntoIter<K> {
+    type Item = K;
+    /// Consuming iterator — moves each key out so owned K transfers;
+    /// `Copy` K bitwise-copies via the same `move`.
+    Optional<K> next(*self) {
+        if (self.ctrl == (u8*)0) {
+            return None;
+        }
+        while (self.idx < self.capacity) {
+            u8 ctrl = self.ctrl[self.idx];
+            if (ctrl < (u8)0x80) {
+                K k = move self.keys[self.idx];
+                self.idx = self.idx + 1;
+                return Some(k);
+            }
+            self.idx = self.idx + 1;
+        }
+        return None;
+    }
+}

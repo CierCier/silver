@@ -9,14 +9,32 @@ import std.string;
 import std.result;
 import std.fmt;
 import std.mem.memory;
+import std.mem.vec;
+import std.optional;
 
 enum JsonError {
     Invalid;
+    At(i64); // byte offset where decoding failed
 }
 
 impl JsonError {
     JsonError invalid() {
         return JsonError.Invalid;
+    }
+
+    /// Error carrying the reader's byte offset at the failure point.
+    JsonError at_index(i64 index) {
+        return JsonError.At(move index);
+    }
+
+    /// Byte offset of the failure, or -1 when unknown.
+    i64 offset(*self) {
+        i64 result = -1;
+        match *self {
+            Invalid : result = -1,
+            At(idx) : result = idx,
+        }
+        return result;
     }
 }
 
@@ -26,6 +44,25 @@ trait ToJson {
 
 trait FromJson {
     Result<Self, JsonError> from_json(JsonReader* input);
+}
+
+// Decode a value of type Self from the reader. Unlike FromJson, this has a
+// receiver so generic containers can decode their element type T without
+// knowing it: they call `T slot; slot.json_decode(input)` on a
+// zero-initialized local and the impls return a fresh decoded value.
+trait JsonDecode {
+    Result<Self, JsonError> json_decode(*self, JsonReader* input);
+}
+
+// Release resources owned by a JSON-decoded value. The decoder creates the
+// elements, so when a container decode fails part-way it must destroy the
+// elements it already decoded (containers own only their backing buffer,
+// never element contents). Every type with a JsonDecode impl must also
+// provide JsonDispose so containers can clean up partial results: element
+// impls no-op for scalars and recurse for containers; #[serialize]
+// synthesis emits one per struct.
+trait JsonDispose {
+    void dispose(*self);
 }
 
 struct JsonWriter {
@@ -78,17 +115,34 @@ impl JsonWriter {
                 self.output.write_str("\\\"");
             } else if (ch == (u8)92) {
                 self.output.write_str("\\\\");
+            } else if (ch == (u8)8) {
+                self.output.write_str("\\b");
+            } else if (ch == (u8)12) {
+                self.output.write_str("\\f");
             } else if (ch == (u8)10) {
                 self.output.write_str("\\n");
             } else if (ch == (u8)13) {
                 self.output.write_str("\\r");
             } else if (ch == (u8)9) {
                 self.output.write_str("\\t");
+            } else if (ch < (u8)32) {
+                self.write_hex4((u32)ch);
             } else {
                 self.output.write_u8(ch);
             }
             i = i + 1;
         }
+    }
+
+    void write_hex4(*self, u32 value) {
+        self.output.write_str("\\u00");
+        self.output.write_u8(self.hex_digit((value >> 4) & 0xF));
+        self.output.write_u8(self.hex_digit(value & 0xF));
+    }
+
+    u8 hex_digit(*self, u32 v) {
+        if (v < 10) { return (u8)((u32)48 + v); }
+        return (u8)((u32)97 + v - 10);
     }
 
     void write_string(*self, str value) {
@@ -111,6 +165,16 @@ impl JsonWriter {
     void write_i64(*self, i64 value) {
         self.before_value();
         self.output.write_i64(value);
+    }
+
+    void write_i128(*self, i128 value) {
+        self.before_value();
+        self.output.write_i128(value);
+    }
+
+    void write_u128(*self, u128 value) {
+        self.before_value();
+        self.output.write_u128(value);
     }
 
     void write_u64(*self, u64 value) {
@@ -275,6 +339,15 @@ impl JsonReader {
     bool end_array(*self) { return self.expect((u8)93); }
     bool comma(*self) { return self.expect((u8)44); }
 
+    /// True when the next non-whitespace byte closes the current object.
+    /// Peeking avoids the failed flag that expect() sets on mismatch, so a
+    /// normally-terminated object never poisons an enclosing decode.
+    bool at_object_end(*self) {
+        self.skip_whitespace();
+        u8* bytes = (u8*)self.input;
+        return self.index < self.length && bytes[self.index] == (u8)125;
+    }
+
     bool literal(*self, str value) {
         u8* input = (u8*)self.input;
         u8* expected = (u8*)value;
@@ -347,6 +420,104 @@ impl JsonReader {
         i64 value = 0;
         if (!self.read_i64(&value)) { return false; }
         *out = (i32)value;
+        return true;
+    }
+
+    /// Parse a full-width signed 128-bit integer. Values beyond i128::MIN/
+    /// i128::MAX fail instead of wrapping.
+    bool read_i128(*self, i128* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        bool negative = false;
+        if (self.index < self.length && bytes[self.index] == (u8)45) {
+            negative = true;
+            self.index = self.index + 1;
+        }
+        i128 value = (i128)0;
+        i128 lo = (i128)(-170141183460469231731687303715884105727) - (i128)1; // i128::MIN
+        i128 hi = (i128)170141183460469231731687303715884105727;              // i128::MAX
+        i128 lo_div = lo / (i128)10;
+        i128 hi_div = hi / (i128)10;
+        i128 lo_rem = lo % (i128)10;
+        i128 hi_rem = hi % (i128)10;
+        i64 digits = 0;
+        if (self.index < self.length && bytes[self.index] == (u8)48) {
+            digits = 1;
+            self.index = self.index + 1;
+            if (self.index < self.length && bytes[self.index] >= (u8)48 && bytes[self.index] <= (u8)57) {
+                self.failed = true;
+                return false;
+            }
+        } else {
+            while (self.index < self.length) {
+                u8 ch = bytes[self.index];
+                if (ch < (u8)48 || ch > (u8)57) { break; }
+                i128 digit = (i128)(ch - (u8)48);
+                if (negative) {
+                    if (value < lo_div || (value == lo_div && digit > ((i128)0 - lo_rem))) {
+                        self.failed = true;
+                        return false;
+                    }
+                    value = value * (i128)10 - digit;
+                } else {
+                    if (value > hi_div || (value == hi_div && digit > hi_rem)) {
+                        self.failed = true;
+                        return false;
+                    }
+                    value = value * (i128)10 + digit;
+                }
+                self.index = self.index + 1;
+                digits = digits + 1;
+            }
+        }
+        if (digits == 0) {
+            self.failed = true;
+            return false;
+        }
+        *out = value;
+        return true;
+    }
+
+    /// Parse a full-width unsigned 128-bit integer. Values beyond u128::MAX
+    /// fail instead of wrapping; a minus sign is an error.
+    bool read_u128(*self, u128* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        if (self.index < self.length && bytes[self.index] == (u8)45) {
+            self.failed = true;
+            return false;
+        }
+        u128 value = (u128)0;
+        u128 hi = (u128)-1; // u128::MAX
+        u128 hi_div = hi / (u128)10;
+        u128 hi_rem = hi % (u128)10;
+        i64 digits = 0;
+        if (self.index < self.length && bytes[self.index] == (u8)48) {
+            digits = 1;
+            self.index = self.index + 1;
+            if (self.index < self.length && bytes[self.index] >= (u8)48 && bytes[self.index] <= (u8)57) {
+                self.failed = true;
+                return false;
+            }
+        } else {
+            while (self.index < self.length) {
+                u8 ch = bytes[self.index];
+                if (ch < (u8)48 || ch > (u8)57) { break; }
+                u128 digit = (u128)(ch - (u8)48);
+                if (value > hi_div || (value == hi_div && digit > hi_rem)) {
+                    self.failed = true;
+                    return false;
+                }
+                value = value * (u128)10 + digit;
+                self.index = self.index + 1;
+                digits = digits + 1;
+            }
+        }
+        if (digits == 0) {
+            self.failed = true;
+            return false;
+        }
+        *out = value;
         return true;
     }
 
@@ -515,9 +686,39 @@ impl JsonReader {
             self.index = self.index + 1;
             if (escaped == (u8)34) { result.push((u8)34); }
             else if (escaped == (u8)92) { result.push((u8)92); }
+            else if (escaped == (u8)98) { result.push((u8)8); }
+            else if (escaped == (u8)102) { result.push((u8)12); }
             else if (escaped == (u8)110) { result.push((u8)10); }
             else if (escaped == (u8)114) { result.push((u8)13); }
             else if (escaped == (u8)116) { result.push((u8)9); }
+            else if (escaped == (u8)117) {
+                u32 cp = self.read_hex4();
+                if (self.failed) { return move result; }
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    // High surrogate: the next escape must be a low surrogate.
+                    if (self.index + 1 >= self.length
+                        || bytes[self.index] != (u8)92
+                        || bytes[self.index + 1] != (u8)117) {
+                        self.failed = true;
+                        return move result;
+                    }
+                    self.index = self.index + 2;
+                    u32 low = self.read_hex4();
+                    if (self.failed || low < 0xDC00 || low > 0xDFFF) {
+                        self.failed = true;
+                        return move result;
+                    }
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    // Lone low surrogate has no high half.
+                    self.failed = true;
+                    return move result;
+                }
+                if (!result.push_codepoint(cp)) {
+                    self.failed = true;
+                    return move result;
+                }
+            }
             else { self.failed = true; return move result; }
         }
         self.failed = true;
@@ -531,6 +732,122 @@ impl JsonReader {
             return false;
         }
         return self.expect((u8)58);
+    }
+
+    u32 read_hex4(*self) {
+        if (self.index + 4 > self.length) {
+            self.failed = true;
+            return 0;
+        }
+        u8* bytes = (u8*)self.input;
+        u32 value = 0;
+        i64 i = 0;
+        while (i < 4) {
+            i32 d = self.hex_digit(bytes[self.index + i]);
+            if (d < 0) {
+                self.failed = true;
+                return 0;
+            }
+            value = value * 16 + (u32)d;
+            i = i + 1;
+        }
+        self.index = self.index + 4;
+        return value;
+    }
+
+    i32 hex_digit(*self, u8 c) {
+        if (c >= (u8)48 && c <= (u8)57) { return (i32)(c - (u8)48); }
+        if (c >= (u8)97 && c <= (u8)102) { return (i32)(c - (u8)97) + 10; }
+        if (c >= (u8)65 && c <= (u8)70) { return (i32)(c - (u8)65) + 10; }
+        return -1;
+    }
+
+    /// Consume one JSON value of any shape (object, array, string, number,
+    /// literal). Fields with unknown names are skipped so parsing tolerates
+    /// extra keys in the payload. Malformed containers (missing commas,
+    /// trailing commas) fail instead of being silently accepted, and nesting
+    /// deeper than 256 is rejected so hostile input cannot exhaust the stack.
+    bool skip_value(*self) {
+        return self.skip_value_depth(0);
+    }
+
+    bool skip_value_depth(*self, i64 depth) {
+        if (depth > 256) {
+            self.failed = true;
+            return false;
+        }
+        self.skip_whitespace();
+        if (self.failed) { return false; }
+        u8* bytes = (u8*)self.input;
+        if (self.index >= self.length) {
+            self.failed = true;
+            return false;
+        }
+        u8 ch = bytes[self.index];
+        if (ch == (u8)123) {
+            if (!self.begin_object()) { return false; }
+            bool first = true;
+            while (true) {
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)125) {
+                    self.index = self.index + 1;
+                    break;
+                }
+                if (!first) {
+                    if (!self.comma()) { return false; }
+                    self.skip_whitespace();
+                    if (self.failed) { return false; }
+                    if (self.index < self.length && bytes[self.index] == (u8)125) {
+                        // Trailing comma before the closing brace.
+                        self.failed = true;
+                        return false;
+                    }
+                }
+                String key = self.read_string();
+                if (self.failed) { return false; }
+                if (!self.expect((u8)58)) { return false; }
+                if (!self.skip_value_depth(depth + 1)) { return false; }
+                first = false;
+            }
+            return true;
+        } else if (ch == (u8)91) {
+            if (!self.begin_array()) { return false; }
+            bool first = true;
+            while (true) {
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)93) {
+                    self.index = self.index + 1;
+                    break;
+                }
+                if (!first) {
+                    if (!self.comma()) { return false; }
+                    self.skip_whitespace();
+                    if (self.failed) { return false; }
+                    if (self.index < self.length && bytes[self.index] == (u8)93) {
+                        // Trailing comma before the closing bracket.
+                        self.failed = true;
+                        return false;
+                    }
+                }
+                if (!self.skip_value_depth(depth + 1)) { return false; }
+                first = false;
+            }
+            return true;
+        } else if (ch == (u8)34) {
+            String s = self.read_string();
+            return !self.failed;
+        } else if (ch == (u8)116) {
+            return self.literal("true");
+        } else if (ch == (u8)102) {
+            return self.literal("false");
+        } else if (ch == (u8)110) {
+            return self.literal("null");
+        } else {
+            f64 number = 0.0;
+            return self.read_f64(&number);
+        }
     }
 
     bool ok(*self) {
@@ -547,31 +864,24 @@ impl ToJson for u8 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*
 impl ToJson for u16 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u32 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u64 { void to_json(*self, JsonWriter* out) { out.write_u64(*self); } }
+impl ToJson for i128 { void to_json(*self, JsonWriter* out) { out.write_i128(*self); } }
+impl ToJson for u128 { void to_json(*self, JsonWriter* out) { out.write_u128(*self); } }
 impl ToJson for f64 { void to_json(*self, JsonWriter* out) { out.write_f64(*self); } }
 impl ToJson for f32 { void to_json(*self, JsonWriter* out) { out.write_f64((f64)*self); } }
 impl ToJson for bool { void to_json(*self, JsonWriter* out) { out.write_bool(*self); } }
 impl ToJson for str { void to_json(*self, JsonWriter* out) { out.write_string(*self); } }
 impl ToJson for String { void to_json(*self, JsonWriter* out) { out.write_string((str)self.data); } }
-impl ToJson for Optional<i32> {
+impl<T> ToJson for Optional<T> {
     void to_json(*self, JsonWriter* out) {
-        Optional<i32> value = *self;
-        if (value.is_some()) {
-            i32 inner = value.unwrap();
-            out.write_i64((i64)inner);
-        } else {
+        if (self.is_none()) {
             out.write_null();
+            return;
         }
-    }
-}
-impl ToJson for Optional<f64> {
-    void to_json(*self, JsonWriter* out) {
-        Optional<f64> value = *self;
-        if (value.is_some()) {
-            f64 inner = value.unwrap();
-            out.write_f64(inner);
-        } else {
-            out.write_null();
-        }
+        // unwrap consumes the optional (by-value receiver), so restore the
+        // payload afterwards: serialization must not move the caller's value.
+        T inner = (*self).unwrap();
+        inner.to_json(out);
+        *self = Optional.Some(move inner);
     }
 }
 
@@ -580,7 +890,7 @@ impl FromJson for i64 {
     Result<i64, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -591,7 +901,7 @@ impl FromJson for i32 {
     Result<i32, JsonError> from_json(JsonReader* input) {
         i32 value = 0;
         if (!input.read_i32(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -602,7 +912,7 @@ impl FromJson for bool {
     Result<bool, JsonError> from_json(JsonReader* input) {
         bool value = false;
         if (!input.read_bool(&mut value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -612,7 +922,7 @@ impl FromJson for String {
     Result<String, JsonError> from_json(JsonReader* input) {
         String value = input.read_string();
         if (input.failed) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         Result<String, JsonError> result = Ok(move value);
@@ -624,7 +934,7 @@ impl FromJson for i8 {
     Result<i8, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((i8)value);
@@ -635,7 +945,7 @@ impl FromJson for i16 {
     Result<i16, JsonError> from_json(JsonReader* input) {
         i64 value = 0;
         if (!input.read_i64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((i16)value);
@@ -646,7 +956,7 @@ impl FromJson for u8 {
     Result<u8, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u8)value);
@@ -657,7 +967,7 @@ impl FromJson for u16 {
     Result<u16, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u16)value);
@@ -668,7 +978,7 @@ impl FromJson for u32 {
     Result<u32, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((u32)value);
@@ -679,7 +989,29 @@ impl FromJson for u64 {
     Result<u64, JsonError> from_json(JsonReader* input) {
         u64 value = 0;
         if (!input.read_u64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl FromJson for i128 {
+    Result<i128, JsonError> from_json(JsonReader* input) {
+        i128 value = (i128)0;
+        if (!input.read_i128(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl FromJson for u128 {
+    Result<u128, JsonError> from_json(JsonReader* input) {
+        u128 value = (u128)0;
+        if (!input.read_u128(&value)) {
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
@@ -690,7 +1022,7 @@ impl FromJson for f32 {
     Result<f32, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok((f32)value);
@@ -701,50 +1033,304 @@ impl FromJson for f64 {
     Result<f64, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
         if (!input.read_f64(&value)) {
-            JsonError error = JsonError.invalid();
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         return Ok(value);
     }
 }
 
-impl FromJson for Optional<i32> {
-    Result<Optional<i32>, JsonError> from_json(JsonReader* input) {
+impl<T> FromJson for Optional<T> {
+    Result<Optional<T>, JsonError> from_json(JsonReader* input) {
+        Optional<T> slot;
+        return slot.json_decode(input);
+    }
+}
+
+impl JsonDecode for i8 {
+    Result<i8, JsonError> json_decode(*self, JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i8)value);
+    }
+}
+
+impl JsonDecode for i16 {
+    Result<i16, JsonError> json_decode(*self, JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i16)value);
+    }
+}
+
+impl JsonDecode for i32 {
+    Result<i32, JsonError> json_decode(*self, JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i32)value);
+    }
+}
+
+impl JsonDecode for i64 {
+    Result<i64, JsonError> json_decode(*self, JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for i128 {
+    Result<i128, JsonError> json_decode(*self, JsonReader* input) {
+        i128 value = (i128)0;
+        if (!input.read_i128(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for u128 {
+    Result<u128, JsonError> json_decode(*self, JsonReader* input) {
+        u128 value = (u128)0;
+        if (!input.read_u128(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for u8 {
+    Result<u8, JsonError> json_decode(*self, JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u8)value);
+    }
+}
+
+impl JsonDecode for u16 {
+    Result<u16, JsonError> json_decode(*self, JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u16)value);
+    }
+}
+
+impl JsonDecode for u32 {
+    Result<u32, JsonError> json_decode(*self, JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u32)value);
+    }
+}
+
+impl JsonDecode for u64 {
+    Result<u64, JsonError> json_decode(*self, JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for f32 {
+    Result<f32, JsonError> json_decode(*self, JsonReader* input) {
+        f64 value = 0.0;
+        if (!input.read_f64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((f32)value);
+    }
+}
+
+impl JsonDecode for f64 {
+    Result<f64, JsonError> json_decode(*self, JsonReader* input) {
+        f64 value = 0.0;
+        if (!input.read_f64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for bool {
+    Result<bool, JsonError> json_decode(*self, JsonReader* input) {
+        bool value = false;
+        if (!input.read_bool(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(value);
+    }
+}
+
+impl JsonDecode for String {
+    Result<String, JsonError> json_decode(*self, JsonReader* input) {
+        String value = input.read_string();
+        if (input.failed) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok(move value);
+    }
+}
+
+impl<T> JsonDecode for Optional<T> {
+    Result<Optional<T>, JsonError> json_decode(*self, JsonReader* input) {
         input.skip_whitespace();
         u8* bytes = (u8*)input.input;
         if (input.index < input.length && bytes[input.index] == (u8)110) {
             if (input.literal("null")) {
-                Optional<i32> none = None;
+                Optional<T> none = None;
                 return Ok(move none);
             }
         }
-        i32 value = 0;
-        if (!input.read_i32(&value)) {
-            JsonError error = JsonError.invalid();
-            return Err(move error);
+        // Zero-init local anchors the element-type dispatch.
+        T slot;
+        Result<T, JsonError> inner = slot.json_decode(input);
+        if (inner.is_err()) {
+            return Err(inner.unwrap_err());
         }
-        Optional<i32> some = Some(value);
+        Optional<T> some = Some(inner.unwrap());
         return Ok(move some);
     }
 }
 
-impl FromJson for Optional<f64> {
-    Result<Optional<f64>, JsonError> from_json(JsonReader* input) {
-        input.skip_whitespace();
-        u8* bytes = (u8*)input.input;
-        if (input.index < input.length && bytes[input.index] == (u8)110) {
-            if (input.literal("null")) {
-                Optional<f64> none = None;
-                return Ok(move none);
-            }
-        }
-        f64 value = 0.0;
-        if (!input.read_f64(&value)) {
-            JsonError error = JsonError.invalid();
+impl<T> JsonDecode for Vec<T> {
+    Result<Vec<T>, JsonError> json_decode(*self, JsonReader* input) {
+        Vec<T> out = Vec<T>.new();
+        if (!input.begin_array()) {
+            JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
-        Optional<f64> some = Some(value);
-        return Ok(move some);
+        bool first = true;
+        bool elem_failed = false;
+        JsonError elem_error = JsonError.invalid();
+        while (true) {
+            input.skip_whitespace();
+            if (input.failed) { break; }
+            u8* bytes = (u8*)input.input;
+            if (input.index < input.length && bytes[input.index] == (u8)93) {
+                input.index = input.index + 1;
+                break;
+            }
+            if (!first) {
+                if (!input.comma()) { break; }
+                input.skip_whitespace();
+                if (input.failed) { break; }
+                if (input.index < input.length && bytes[input.index] == (u8)93) {
+                    // Trailing comma before the closing bracket.
+                    input.failed = true;
+                    break;
+                }
+            }
+            // Zero-init local anchors the element-type dispatch.
+            T slot;
+            Result<T, JsonError> elem = slot.json_decode(input);
+            if (elem.is_err()) {
+                elem_failed = true;
+                elem_error = elem.unwrap_err();
+                break;
+            }
+            out.push(elem.unwrap());
+            first = false;
+        }
+        if (input.failed) {
+            out.dispose();
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        if (elem_failed) {
+            out.dispose();
+            return Err(move elem_error);
+        }
+        return Ok(move out);
+    }
+}
+
+impl<T> ToJson for Vec<T> {
+    void to_json(*self, JsonWriter* out) {
+        out.begin_array();
+        i64 i = 0;
+        while (i < self.len) {
+            self.data[i].to_json(out);
+            i = i + 1;
+        }
+        out.end_array();
+    }
+}
+
+impl<T> FromJson for Vec<T> {
+    Result<Vec<T>, JsonError> from_json(JsonReader* input) {
+        Vec<T> slot;
+        return slot.json_decode(input);
+    }
+}
+
+impl JsonDispose for i8 { void dispose(*self) {} }
+impl JsonDispose for i16 { void dispose(*self) {} }
+impl JsonDispose for i32 { void dispose(*self) {} }
+impl JsonDispose for i64 { void dispose(*self) {} }
+impl JsonDispose for u8 { void dispose(*self) {} }
+impl JsonDispose for u16 { void dispose(*self) {} }
+impl JsonDispose for u32 { void dispose(*self) {} }
+impl JsonDispose for u64 { void dispose(*self) {} }
+impl JsonDispose for i128 { void dispose(*self) {} }
+impl JsonDispose for u128 { void dispose(*self) {} }
+impl JsonDispose for f32 { void dispose(*self) {} }
+impl JsonDispose for f64 { void dispose(*self) {} }
+impl JsonDispose for bool { void dispose(*self) {} }
+impl JsonDispose for str { void dispose(*self) {} }
+
+impl JsonDispose for String {
+    void dispose(*self) {
+        self.drop();
+    }
+}
+
+impl<T> JsonDispose for Optional<T> {
+    void dispose(*self) {
+        if (self.is_none()) { return; }
+        T inner = (*self).unwrap();
+        inner.dispose();
+        *self = Optional<T>.none();
+    }
+}
+
+impl<T> JsonDispose for Vec<T> {
+    void dispose(*self) {
+        i64 i = 0;
+        while (i < self.len) {
+            self.data[i].dispose();
+            i = i + 1;
+        }
+        self.drop();
     }
 }
 

@@ -1,0 +1,284 @@
+// std/path.ag — file path and file-URI helpers.
+//
+// LSP messages carry document URIs (file:///a/b%20c.ag) while the compiler
+// works with plain paths. These helpers convert between the two and provide
+// the small path operations an editor server needs.
+import std.string;
+import std.mem.vec;
+import std.mem.memory;
+import std.mem.alloc;
+import std.optional;
+
+/// Append `child` to `base`, inserting a single separator. An absolute
+/// `child` wins over `base`; a trailing slash on `base` is not doubled.
+String path_join(str base, str child) {
+    String result = String.new();
+    u8* base_bytes = (u8*)base;
+    u8* child_bytes = (u8*)child;
+    i64 base_len = cstr_len(base_bytes);
+    i64 child_len = cstr_len(child_bytes);
+    if (child_len == 0) {
+        result.push_str(base);
+        return move result;
+    }
+    if (base_len == 0) {
+        result.push_str(child);
+        return move result;
+    }
+    if (child_bytes[0] == (u8)47) {
+        result.push_str(child);
+        return move result;
+    }
+    result.push_str(base);
+    if (base_bytes[base_len - 1] != (u8)47) {
+        result.push((u8)47);
+    }
+    result.push_str(child);
+    return move result;
+}
+
+/// The final path segment (text after the last '/'), empty when the path
+/// ends with a separator.
+String path_basename(str path) {
+    u8* bytes = (u8*)path;
+    i64 len = cstr_len(bytes);
+    i64 i = len;
+    while (i > 0) {
+        if (bytes[i - 1] == (u8)47) {
+            break;
+        }
+        i = i - 1;
+    }
+    String result = String.new();
+    result.push_bytes(&bytes[i], len - i);
+    return move result;
+}
+
+/// The directory portion (text up to the last '/'), "." when there is none.
+String path_dirname(str path) {
+    u8* bytes = (u8*)path;
+    i64 len = cstr_len(bytes);
+    i64 i = len;
+    while (i > 0) {
+        if (bytes[i - 1] == (u8)47) {
+            break;
+        }
+        i = i - 1;
+    }
+    String result = String.new();
+    if (i == 0) {
+        result.push_str(".");
+    } else if (i == 1) {
+        result.push((u8)47);
+    } else {
+        result.push_bytes(bytes, i - 1);
+    }
+    return move result;
+}
+
+/// The extension of the final segment (text after the last '.'), empty when
+/// there is none or the segment is "." or "..".
+String path_extension(str path) {
+    String base = path_basename(path);
+    i64 len = base.len;
+    i64 i = len;
+    while (i > 0) {
+        if (base.data[i - 1] == (u8)46) {
+            break;
+        }
+        i = i - 1;
+    }
+    String result = String.new();
+    if (i > 0 && i < len) {
+        result.push_bytes(&base.data[i - 1], len - i + 1);
+    }
+    base.drop();
+    return move result;
+}
+
+/// Lexically normalize a path: collapse duplicate separators and resolve
+/// "." and ".." segments. A leading ".." above the root stays as-is.
+String path_normalize(str path) {
+    String result = String.new();
+    u8* bytes = (u8*)path;
+    i64 len = cstr_len(bytes);
+    i64 i = 0;
+    bool absolute = false;
+    if (i < len && bytes[i] == (u8)47) {
+        absolute = true;
+        i = i + 1;
+    }
+    Vec<String> parts = Vec<String>.new();
+    while (i <= len) {
+        i64 start = i;
+        while (i < len && bytes[i] != (u8)47) {
+            i = i + 1;
+        }
+        if (i > start) {
+            String part = String.new();
+            part.push_bytes(&bytes[start], i - start);
+            if (part.equals(".")) {
+                part.drop();
+            } else if (part.equals("..")) {
+                part.drop();
+                if (parts.len > 0) {
+                    String last = parts.pop();
+                    if (last.equals("..")) {
+                        // Leading parents cannot collapse: keep both.
+                        parts.push(move last);
+                        String up = String.new();
+                        up.push_str("..");
+                        parts.push(move up);
+                    } else {
+                        last.drop();
+                    }
+                } else if (!absolute) {
+                    String up = String.new();
+                    up.push_str("..");
+                    parts.push(move up);
+                }
+            } else {
+                parts.push(move part);
+            }
+        }
+        i = i + 1;
+    }
+    if (absolute) {
+        result.push((u8)47);
+    }
+    i64 k = 0;
+    while (k < parts.len) {
+        if (k > 0) {
+            result.push((u8)47);
+        }
+        result.push_str((str)parts.data[k].data);
+        k = k + 1;
+    }
+    if (result.len == 0) {
+        result.push_str(absolute ? "/" : ".");
+    }
+    drop_vec_strings(&parts);
+    return move result;
+}
+
+void drop_vec_strings(Vec<String>* parts) {
+    i64 k = 0;
+    while (k < parts.len) {
+        parts.data[k].drop();
+        k = k + 1;
+    }
+    parts.drop();
+}
+
+bool is_hex_digit(u8 c) {
+    return (c >= (u8)48 && c <= (u8)57)
+        || (c >= (u8)97 && c <= (u8)102)
+        || (c >= (u8)65 && c <= (u8)70);
+}
+
+i32 hex_value(u8 c) {
+    if (c >= (u8)48 && c <= (u8)57) { return (i32)(c - (u8)48); }
+    if (c >= (u8)97 && c <= (u8)102) { return (i32)(c - (u8)97) + 10; }
+    return (i32)(c - (u8)65) + 10;
+}
+
+/// Decode percent-escapes (%XX). Invalid escapes are copied literally so a
+/// malformed URI degrades gracefully instead of failing the whole message.
+String percent_decode(str text) {
+    String result = String.new();
+    u8* bytes = (u8*)text;
+    i64 len = cstr_len(bytes);
+    i64 i = 0;
+    while (i < len) {
+        if (bytes[i] == (u8)37 && i + 2 < len
+            && is_hex_digit(bytes[i + 1]) && is_hex_digit(bytes[i + 2])) {
+            i32 hi = hex_value(bytes[i + 1]);
+            i32 lo = hex_value(bytes[i + 2]);
+            result.push((u8)((hi << 4) | lo));
+            i = i + 3;
+        } else {
+            result.push(bytes[i]);
+            i = i + 1;
+        }
+    }
+    return move result;
+}
+
+bool is_unreserved(u8 c) {
+    return (c >= (u8)48 && c <= (u8)57)
+        || (c >= (u8)65 && c <= (u8)90)
+        || (c >= (u8)97 && c <= (u8)122)
+        || c == (u8)45 || c == (u8)95 || c == (u8)46 || c == (u8)126;
+}
+
+/// Percent-encode every byte except unreserved characters and '/', so the
+/// result is a valid path component of a file URI.
+String percent_encode_path(str text) {
+    String result = String.new();
+    u8* bytes = (u8*)text;
+    i64 len = cstr_len(bytes);
+    i64 i = 0;
+    while (i < len) {
+        u8 c = bytes[i];
+        if (is_unreserved(c) || c == (u8)47) {
+            result.push(c);
+        } else {
+            result.push((u8)37);
+            result.push(hex_upper(c >> 4));
+            result.push(hex_upper(c & 0xF));
+        }
+        i = i + 1;
+    }
+    return move result;
+}
+
+u8 hex_upper(i32 v) {
+    if (v < 10) { return (u8)((u32)48 + v); }
+    return (u8)((u32)65 + v - 10);
+}
+
+/// Convert a file:// URI to a plain path. Returns None for non-file schemes
+/// or URIs whose host is neither empty nor "localhost".
+Optional<String> file_uri_to_path(str uri) {
+    u8* bytes = (u8*)uri;
+    i64 len = cstr_len(bytes);
+    if (len < 8 || bytes[0] != (u8)102 || bytes[1] != (u8)105
+        || bytes[2] != (u8)108 || bytes[3] != (u8)101
+        || bytes[4] != (u8)58 || bytes[5] != (u8)47 || bytes[6] != (u8)47) {
+        return Optional<String>.none();
+    }
+    i64 i = 7;
+    if (bytes[i] != (u8)47) {
+        // Host component present: only "localhost" is accepted.
+        i64 host_start = i;
+        while (i < len && bytes[i] != (u8)47) {
+            i = i + 1;
+        }
+        if (i >= len || i - host_start != 9) {
+            return Optional<String>.none();
+        }
+        i64 k = 0;
+        const u8* want = (const u8*)"localhost";
+        while (k < 9) {
+            if (bytes[host_start + k] != want[k]) {
+                return Optional<String>.none();
+            }
+            k = k + 1;
+        }
+    }
+    String path = String.new();
+    path.push_bytes(&bytes[i], len - i);
+    String decoded = percent_decode((str)path);
+    path.drop();
+    return Optional<String>.some(move decoded);
+}
+
+/// Convert a plain path to a file:// URI.
+String path_to_file_uri(str path) {
+    String encoded = percent_encode_path(path);
+    String result = String.new();
+    result.push_str("file://");
+    result.push_str((str)encoded);
+    encoded.drop();
+    return move result;
+}

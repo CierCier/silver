@@ -18,15 +18,39 @@ trait Display {
 impl Display for i64 {
     void fmt(*self, BufWriter* out) { out.write_i64(*self); }
 }
+impl Display for i32 {
+    void fmt(*self, BufWriter* out) { out.write_i64((i64)*self); }
+}
+impl Display for i16 {
+    void fmt(*self, BufWriter* out) { out.write_i64((i64)*self); }
+}
+impl Display for i8 {
+    void fmt(*self, BufWriter* out) { out.write_i64((i64)*self); }
+}
 impl Display for u64 {
     void fmt(*self, BufWriter* out) { out.write_u64(*self); }
 }
+impl Display for u32 {
+    void fmt(*self, BufWriter* out) { out.write_u64((u64)*self); }
+}
+impl Display for u16 {
+    void fmt(*self, BufWriter* out) { out.write_u64((u64)*self); }
+}
+impl Display for u8 {
+    void fmt(*self, BufWriter* out) { out.write_u64((u64)*self); }
+}
 impl Display for f64 {
     void fmt(*self, BufWriter* out) { out.write_f64(*self); }
+}
+impl Display for f32 {
+    void fmt(*self, BufWriter* out) { out.write_f64((f64)*self); }
 }
 impl Display for bool {
     void fmt(*self, BufWriter* out) { out.write_bool(*self); }
 }
 impl Display for str {
     void fmt(*self, BufWriter* out) { out.write_str(*self); }
+}
+impl Display for String {
+    void fmt(*self, BufWriter* out) { out.write_str((str)self.data); }
 }

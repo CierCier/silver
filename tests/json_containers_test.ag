@@ -1,0 +1,211 @@
+// Generic container JSON: Vec<T> and Optional<T> encode/decode through the
+// JsonDecode composition trait. LSP message types are built from exactly
+// these shapes (arrays of diagnostics, optional fields, nested objects).
+import std.io.file;
+import std.json;
+import std.string;
+import std.mem.vec;
+import std.optional;
+import std.test;
+
+struct Bag {
+    Vec<String> names;
+    Optional<i32> age;
+}
+
+// Element decoder that rejects values by returning Err without touching the
+// reader's failed flag: containers must propagate this, not accept a
+// partial vector.
+struct Checked {
+    i32 v;
+}
+
+impl JsonDecode for Checked {
+    Result<Checked, JsonError> json_decode(*self, JsonReader* input) {
+        Checked c;
+        i64 raw = 0;
+        if (!input.read_i64(&raw)) {
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        if (raw <= 0) {
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        c.v = (i32)raw;
+        return Ok(move c);
+    }
+}
+
+impl JsonDispose for Checked {
+    void dispose(*self) {}
+}
+
+impl ToJson for Bag {
+    void to_json(*self, JsonWriter* out) {
+        out.begin_object();
+        out.field("names");
+        self.names.to_json(out);
+        out.field("age");
+        self.age.to_json(out);
+        out.end_object();
+    }
+}
+
+bool cstr_eq(str a, str b) {
+    return strcmp((const char*)a, (const char*)b) == 0;
+}
+
+struct BadStr {
+    String s;
+}
+
+impl JsonDecode for BadStr {
+    Result<BadStr, JsonError> json_decode(*self, JsonReader* input) {
+        String val = input.read_string();
+        if (input.failed) {
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        if (val.equals("boom")) {
+            val.drop();
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        BadStr b;
+        b.s = move val;
+        return Ok(move b);
+    }
+}
+
+impl JsonDispose for BadStr {
+    void dispose(*self) {
+        self.s.dispose();
+    }
+}
+
+i32 main() {
+    test_start("json containers: Vec<i32> decode");
+
+    Result<Vec<i32>, JsonError> v1 = @from_json(Vec<i32>, "[1,2,3]");
+    assert_true(v1.is_ok(), "Vec<i32> parses");
+    Vec<i32> a = v1.unwrap();
+    assert_eq_i64(a.len, 3, "len 3");
+    assert_eq_i64(a.data[0], 1, "first element");
+    assert_eq_i64(a.data[2], 3, "last element");
+    a.drop();
+
+    test_start("json containers: empty Vec");
+
+    Result<Vec<i32>, JsonError> v2 = @from_json(Vec<i32>, "[]");
+    Vec<i32> b = v2.unwrap();
+    assert_eq_i64(b.len, 0, "empty vec");
+    b.drop();
+
+    test_start("json containers: Vec<String> decode and encode");
+
+    Result<Vec<String>, JsonError> v3 = @from_json(Vec<String>, "[\"a\",\"b\"]");
+    Vec<String> c = v3.unwrap();
+    assert_eq_i64(c.len, 2, "two strings");
+    assert_true(c.data[0].equals("a"), "first string");
+    assert_true(c.data[1].equals("b"), "second string");
+
+    JsonWriter w1 = JsonWriter.new();
+    c.to_json(&w1);
+    w1.output.write_u8((u8)0);
+    str enc1 = (str)w1.output.data;
+    assert_true(cstr_eq(enc1, "[\"a\",\"b\"]"), "Vec<String> encodes");
+    c.data[0].drop();
+    c.data[1].drop();
+    c.drop();
+
+    test_start("json containers: Optional<String> some/none");
+
+    Result<Optional<String>, JsonError> o1 = @from_json(Optional<String>, "\"x\"");
+    Optional<String> s1 = o1.unwrap();
+    assert_true(s1.is_some(), "some parses");
+    String inner = s1.unwrap();
+    assert_true(inner.equals("x"), "payload correct");
+    inner.drop();
+
+    Result<Optional<String>, JsonError> o2 = @from_json(Optional<String>, "null");
+    Optional<String> s2 = o2.unwrap();
+    assert_true(s2.is_none(), "null is none");
+
+    test_start("json containers: Optional<Vec<i32>>");
+
+    Result<Optional<Vec<i32>>, JsonError> o3 = @from_json(Optional<Vec<i32>>, "[5,6]");
+    Optional<Vec<i32>> s3 = o3.unwrap();
+    assert_true(s3.is_some(), "nested optional some");
+    Vec<i32> d = s3.unwrap();
+    assert_eq_i64(d.len, 2, "two elements");
+    d.drop();
+
+    Result<Optional<Vec<i32>>, JsonError> o4 = @from_json(Optional<Vec<i32>>, "null");
+    Optional<Vec<i32>> s4 = o4.unwrap();
+    assert_true(s4.is_none(), "nested optional none");
+
+    test_start("json containers: Optional to_json preserves the value");
+
+    // Serializing must not consume the optional: encode twice and both
+    // outputs must match (unwrap-and-restore ownership).
+    Optional<String> keep = Optional<String>.some(String.from_str("keep"));
+    JsonWriter w2 = JsonWriter.new();
+    keep.to_json(&w2);
+    w2.output.write_u8((u8)0);
+    str enc2 = (str)w2.output.data;
+    JsonWriter w3 = JsonWriter.new();
+    keep.to_json(&w3);
+    w3.output.write_u8((u8)0);
+    str enc3 = (str)w3.output.data;
+    assert_true(cstr_eq(enc2, "\"keep\""), "first encode correct");
+    assert_true(cstr_eq(enc2, enc3), "second encode identical (value restored)");
+    assert_true(keep.is_some(), "optional still some after serialize");
+
+    test_start("json containers: element errors propagate");
+
+    Result<Vec<Checked>, JsonError> cv = @from_json(Vec<Checked>, "[1,-5,3]");
+    assert_true(cv.is_err(), "rejected element fails the whole vector");
+    Result<Vec<Checked>, JsonError> cv2 = @from_json(Vec<Checked>, "[1,2,3]");
+    assert_true(cv2.is_ok(), "valid elements pass");
+    if (cv2.is_ok()) {
+        Vec<Checked> okv = cv2.unwrap();
+        assert_eq_i64(okv.len, 3, "all three elements decoded");
+        assert_eq_i64(okv.data[1].v, 2, "second element value");
+        okv.drop();
+    }
+
+    test_start("json containers: partial decode releases elements");
+
+    // A decoder that rejects a value without failing the reader: the vector
+    // must return Err AND release the elements decoded before the failure
+    // (leak-check verifies the Strings are freed).
+    Result<Vec<BadStr>, JsonError> pv = @from_json(Vec<BadStr>, "[\"ok\",\"boom\"]");
+    assert_true(pv.is_err(), "rejected tail element fails the vector");
+    Result<Vec<BadStr>, JsonError> pv2 = @from_json(Vec<BadStr>, "[\"ok\",\"fine\"]");
+    assert_true(pv2.is_ok(), "clean elements pass");
+    if (pv2.is_ok()) {
+        Vec<BadStr> good = pv2.unwrap();
+        assert_eq_i64(good.len, 2, "both elements decoded");
+        good.data[0].s.drop();
+        good.data[1].s.drop();
+        good.drop();
+    }
+
+    test_start("json containers: struct with Vec and Optional fields");
+
+    Bag bag;
+    bag.names = Vec<String>.new();
+    bag.names.push(String.from_str("n1"));
+    bag.age = Optional<i32>.some((i32)42);
+    JsonWriter w4 = JsonWriter.new();
+    bag.to_json(&w4);
+    w4.output.write_u8((u8)0);
+    str enc4 = (str)w4.output.data;
+    assert_true(cstr_eq(enc4, "{\"names\":[\"n1\"],\"age\":42}"),
+        "struct round-trips through containers");
+    bag.names.data[0].drop();
+    bag.names.drop();
+
+    return done();
+}

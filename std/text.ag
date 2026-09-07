@@ -1,0 +1,150 @@
+// std/text.ag — text-position utilities for editor protocols.
+//
+// LSP positions are (line, UTF-16 code unit) pairs over UTF-8 sources while
+// compiler spans are byte offsets. These helpers convert between the two.
+// Line breaks are `\n` only, matching the bootstrap LSP's position math.
+import std.string;
+
+struct TextPosition {
+    i64 line;
+    i64 character; // UTF-16 code units within the line
+}
+
+impl TextPosition {
+    TextPosition new(i64 line, i64 character) {
+        TextPosition pos;
+        pos.line = line;
+        pos.character = character;
+        return move pos;
+    }
+}
+
+/// Decode the UTF-8 codepoint starting at `index`, writing its byte length
+/// (1..4) to out_len. Malformed sequences decode as U+FFFD with length 1 so
+/// position arithmetic never stalls on invalid bytes.
+u32 decode_codepoint(u8* bytes, i64 len, i64 index, i64* out_len) {
+    *out_len = 1;
+    if (index < 0 || index >= len) {
+        return 0xFFFD;
+    }
+    u8 lead = bytes[index];
+    u32 cp = 0;
+    i64 seq_len = 1;
+    if (lead < 0x80) {
+        return lead;
+    } else if ((lead & 0xE0) == 0xC0) {
+        cp = (u32)(lead & 0x1F);
+        seq_len = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        cp = (u32)(lead & 0x0F);
+        seq_len = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        cp = (u32)(lead & 0x07);
+        seq_len = 4;
+    } else {
+        return 0xFFFD;
+    }
+    if (index + seq_len > len) {
+        return 0xFFFD;
+    }
+    i64 i = 1;
+    while (i < seq_len) {
+        u8 cont = bytes[index + i];
+        if ((cont & 0xC0) != 0x80) {
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | (u32)(cont & 0x3F);
+        i = i + 1;
+    }
+    // Reject overlong encodings, surrogate code points, and values above
+    // U+10FFFF so malformed input decodes as U+FFFD with length one.
+    bool valid = false;
+    if (seq_len == 2) {
+        valid = cp >= 0x80 && cp <= 0x7FF;
+    } else if (seq_len == 3) {
+        valid = cp >= 0x800 && cp <= 0xFFFF && !(cp >= 0xD800 && cp <= 0xDFFF);
+    } else {
+        valid = cp >= 0x10000 && cp <= 0x10FFFF;
+    }
+    if (!valid) {
+        return 0xFFFD;
+    }
+    *out_len = seq_len;
+    return cp;
+}
+
+/// UTF-16 code-unit width of a codepoint: 1 for the BMP, 2 for surrogate
+/// pairs (anything outside U+0000..U+FFFF).
+i64 utf16_width(u32 cp) {
+    if (cp >= 0x10000) {
+        return 2;
+    }
+    return 1;
+}
+
+/// Total UTF-16 code units in a UTF-8 string.
+i64 utf16_len(str text) {
+    u8* bytes = (u8*)text;
+    i64 len = cstr_len(bytes);
+    i64 total = 0;
+    i64 i = 0;
+    while (i < len) {
+        i64 clen = 0;
+        u32 cp = decode_codepoint(bytes, len, i, &clen);
+        total = total + utf16_width(cp);
+        i = i + clen;
+    }
+    return total;
+}
+
+/// Byte offset to (line, UTF-16 column). Offsets past the end clamp to the
+/// text length; an offset in the middle of a codepoint counts that codepoint.
+TextPosition byte_to_position(str text, i64 offset) {
+    u8* bytes = (u8*)text;
+    i64 len = cstr_len(bytes);
+    if (offset > len) {
+        offset = len;
+    }
+    TextPosition pos = TextPosition.new(0, 0);
+    i64 i = 0;
+    while (i < offset) {
+        i64 clen = 0;
+        u32 cp = decode_codepoint(bytes, len, i, &clen);
+        if (cp == 0x0A) {
+            pos.line = pos.line + 1;
+            pos.character = 0;
+        } else {
+            pos.character = pos.character + utf16_width(cp);
+        }
+        i = i + clen;
+    }
+    return pos;
+}
+
+/// (line, UTF-16 column) to byte offset. A column past the end of its line
+/// clamps to the line break, an unknown line clamps to the text end.
+i64 position_to_byte(str text, i64 line, i64 character) {
+    u8* bytes = (u8*)text;
+    i64 len = cstr_len(bytes);
+    i64 i = 0;
+    i64 cur_line = 0;
+    i64 cur_col = 0;
+    while (i < len) {
+        if (cur_line == line && cur_col >= character) {
+            return i;
+        }
+        i64 clen = 0;
+        u32 cp = decode_codepoint(bytes, len, i, &clen);
+        if (cp == 0x0A) {
+            if (cur_line == line) {
+                return i; // column beyond the line's content
+            }
+            cur_line = cur_line + 1;
+            cur_col = 0;
+        } else {
+            cur_col = cur_col + utf16_width(cp);
+        }
+        i = i + clen;
+    }
+    return len;
+}

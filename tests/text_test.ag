@@ -1,0 +1,136 @@
+// UTF-16 position mapping: LSP positions are (line, UTF-16 code unit) pairs
+// while compiler spans are byte offsets. Exercises the conversions on
+// ASCII, multi-byte, and astral-plane text.
+import std.io.file;
+import std.string;
+import std.text;
+import std.test;
+
+i32 main() {
+    test_start("text: UTF-16 length");
+
+    assert_eq_i64(utf16_len("abc"), 3, "ascii width = bytes");
+    assert_eq_i64(utf16_len("caf\u{e9}"), 4, "é is one UTF-16 unit");
+    assert_eq_i64(utf16_len("\u{e9}\u{e9}"), 2, "two BMP codepoints");
+    String smile = String.new();
+    smile.push_codepoint(0x1F600);
+    assert_eq_i64(utf16_len((str)smile), 2, "astral codepoint is two units");
+    smile.push((u8)97);
+    assert_eq_i64(utf16_len((str)smile), 3, "astral + ascii = 3 units");
+    smile.drop();
+
+    test_start("text: byte_to_position");
+
+    // line 0: "ab"; line 1: "cd" + é (bytes 5-6) + f (byte 7) + 😀 (bytes 8-11)
+    String doc = String.new();
+    doc.push((u8)97);            // a
+    doc.push((u8)98);            // b
+    doc.push((u8)10);            // \n
+    doc.push((u8)99);            // c
+    doc.push((u8)100);           // d
+    doc.push_codepoint(0xE9);    // é (2 bytes, 1 unit)
+    doc.push((u8)102);           // f
+    doc.push_codepoint(0x1F600); // 😀 (4 bytes, 2 units)
+    assert_eq_i64(cstr_len((u8*)(str)doc), 12, "doc is 12 bytes");
+
+    TextPosition p0 = byte_to_position((str)doc, 0);
+    assert_eq_i64(p0.line, 0, "offset 0 line 0");
+    assert_eq_i64(p0.character, 0, "offset 0 col 0");
+
+    TextPosition p1 = byte_to_position((str)doc, 1);
+    assert_eq_i64(p1.line, 0, "offset 1 line 0");
+    assert_eq_i64(p1.character, 1, "offset 1 col 1");
+
+    TextPosition p2 = byte_to_position((str)doc, 2);
+    assert_eq_i64(p2.line, 0, "offset at newline is end of line 0");
+    assert_eq_i64(p2.character, 2, "newline offset col 2");
+
+    TextPosition p3 = byte_to_position((str)doc, 3);
+    assert_eq_i64(p3.line, 1, "after newline is line 1");
+    assert_eq_i64(p3.character, 0, "line 1 starts at col 0");
+
+    // é spans bytes 5-6; byte 7 starts f (column 3: c, d, é).
+    TextPosition p4 = byte_to_position((str)doc, 6);
+    assert_eq_i64(p4.line, 1, "mid-codepoint counts é");
+    assert_eq_i64(p4.character, 3, "c d é = 3 UTF-16 units");
+
+    TextPosition p5 = byte_to_position((str)doc, 11);
+    assert_eq_i64(p5.line, 1, "end of line 1");
+    assert_eq_i64(p5.character, 6, "c d é f 😀 = 6 units");
+
+    TextPosition p6 = byte_to_position((str)doc, 999);
+    assert_eq_i64(p6.line, 1, "past-end offset clamps");
+    assert_eq_i64(p6.character, 6, "clamped to text end");
+
+    test_start("text: position_to_byte");
+
+    assert_eq_i64(position_to_byte((str)doc, 0, 0), 0, "start");
+    assert_eq_i64(position_to_byte((str)doc, 0, 2), 2, "end of line 0");
+    assert_eq_i64(position_to_byte((str)doc, 0, 5), 2, "column past line end clamps to newline");
+    assert_eq_i64(position_to_byte((str)doc, 1, 0), 3, "line 1 start");
+    assert_eq_i64(position_to_byte((str)doc, 1, 3), 7, "third unit is f");
+    assert_eq_i64(position_to_byte((str)doc, 1, 4), 8, "fourth unit starts smile");
+    assert_eq_i64(position_to_byte((str)doc, 1, 6), 12, "document end");
+    assert_eq_i64(position_to_byte((str)doc, 1, 9), 12, "column past line end clamps");
+    assert_eq_i64(position_to_byte((str)doc, 42, 0), 12, "unknown line clamps to end");
+
+    test_start("text: round trips");
+
+    // Every codepoint boundary maps back to its own byte offset. Bytes 6 and
+    // 9-11 sit mid-codepoint, where positions intentionally snap forward.
+    i64 boundary = 0;
+    while (boundary <= 12) {
+        if (boundary != 6 && boundary != 9 && boundary != 10 && boundary != 11) {
+            TextPosition pos = byte_to_position((str)doc, boundary);
+            i64 back = position_to_byte((str)doc, pos.line, pos.character);
+            assert_eq_i64(back, boundary, "round trip at codepoint boundary");
+        }
+        boundary = boundary + 1;
+    }
+
+    test_start("text: malformed UTF-8 decodes as U+FFFD");
+
+    // Overlong encoding C0 8A (2-byte form of U+000A): must not count as a
+    // newline and must advance exactly one byte.
+    String over = String.new();
+    over.push((u8)0xC0);
+    over.push((u8)0x8A);
+    over.push((u8)97);
+    // Malformed bytes each decode as one replacement character: C0 8A 61
+    // is FFFD FFFD 'a' — 3 units, and never a newline.
+    assert_eq_i64(utf16_len((str)over), 3, "overlong pair: each byte one replacement");
+    TextPosition op = byte_to_position((str)over, 1);
+    assert_eq_i64(op.line, 0, "overlong byte is not a newline");
+    assert_eq_i64(op.character, 1, "overlong byte is one replacement unit");
+    over.drop();
+
+    // Above U+10FFFF: F4 90 80 80 decodes as four replacement characters.
+    String above = String.new();
+    above.push((u8)0xF4);
+    above.push((u8)0x90);
+    above.push((u8)0x80);
+    above.push((u8)0x80);
+    assert_eq_i64(utf16_len((str)above), 4, "out-of-range: each byte one replacement");
+    above.drop();
+
+    // UTF-8-encoded surrogate ED A0 80 decodes as three replacements.
+    String surr = String.new();
+    surr.push((u8)0xED);
+    surr.push((u8)0xA0);
+    surr.push((u8)0x80);
+    assert_eq_i64(utf16_len((str)surr), 3, "surrogate bytes: each one replacement");
+    surr.drop();
+
+    test_start("text: \r\n line endings");
+
+    String crlf = String.new();
+    crlf.push_bytes((u8*)"a\r\nb", 4);
+    TextPosition rp = byte_to_position((str)crlf, 4);
+    assert_eq_i64(rp.line, 1, "\\r\\n moves to line 1");
+    assert_eq_i64(rp.character, 1, "b at col 1");
+    assert_eq_i64(position_to_byte((str)crlf, 1, 0), 3, "line 1 starts after \\n");
+    crlf.drop();
+
+    doc.drop();
+    return done();
+}
