@@ -54,6 +54,17 @@ trait JsonDecode {
     Result<Self, JsonError> json_decode(*self, JsonReader* input);
 }
 
+// Release resources owned by a JSON-decoded value. The decoder creates the
+// elements, so when a container decode fails part-way it must destroy the
+// elements it already decoded (containers own only their backing buffer,
+// never element contents). Every type with a JsonDecode impl must also
+// provide JsonDispose so containers can clean up partial results: element
+// impls no-op for scalars and recurse for containers; #[serialize]
+// synthesis emits one per struct.
+trait JsonDispose {
+    void dispose(*self);
+}
+
 struct JsonWriter {
     BufWriter output;
     u8 contexts[32]; // 1 = object, 2 = array
@@ -1097,10 +1108,12 @@ impl<T> JsonDecode for Vec<T> {
             first = false;
         }
         if (input.failed) {
+            out.dispose();
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
         if (elem_failed) {
+            out.dispose();
             return Err(move elem_error);
         }
         return Ok(move out);
@@ -1123,6 +1136,45 @@ impl<T> FromJson for Vec<T> {
     Result<Vec<T>, JsonError> from_json(JsonReader* input) {
         Vec<T> slot;
         return slot.json_decode(input);
+    }
+}
+
+impl JsonDispose for i8 { void dispose(*self) {} }
+impl JsonDispose for i16 { void dispose(*self) {} }
+impl JsonDispose for i32 { void dispose(*self) {} }
+impl JsonDispose for i64 { void dispose(*self) {} }
+impl JsonDispose for u8 { void dispose(*self) {} }
+impl JsonDispose for u16 { void dispose(*self) {} }
+impl JsonDispose for u32 { void dispose(*self) {} }
+impl JsonDispose for u64 { void dispose(*self) {} }
+impl JsonDispose for f32 { void dispose(*self) {} }
+impl JsonDispose for f64 { void dispose(*self) {} }
+impl JsonDispose for bool { void dispose(*self) {} }
+impl JsonDispose for str { void dispose(*self) {} }
+
+impl JsonDispose for String {
+    void dispose(*self) {
+        self.drop();
+    }
+}
+
+impl<T> JsonDispose for Optional<T> {
+    void dispose(*self) {
+        if (self.is_none()) { return; }
+        T inner = (*self).unwrap();
+        inner.dispose();
+        *self = Optional<T>.none();
+    }
+}
+
+impl<T> JsonDispose for Vec<T> {
+    void dispose(*self) {
+        i64 i = 0;
+        while (i < self.len) {
+            self.data[i].dispose();
+            i = i + 1;
+        }
+        self.drop();
     }
 }
 

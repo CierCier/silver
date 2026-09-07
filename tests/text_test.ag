@@ -96,27 +96,29 @@ i32 main() {
     over.push((u8)0xC0);
     over.push((u8)0x8A);
     over.push((u8)97);
-    assert_eq_i64(utf16_len((str)over), 2, "overlong pair is U+FFFD + 'a'");
+    // Malformed bytes each decode as one replacement character: C0 8A 61
+    // is FFFD FFFD 'a' — 3 units, and never a newline.
+    assert_eq_i64(utf16_len((str)over), 3, "overlong pair: each byte one replacement");
     TextPosition op = byte_to_position((str)over, 1);
     assert_eq_i64(op.line, 0, "overlong byte is not a newline");
     assert_eq_i64(op.character, 1, "overlong byte is one replacement unit");
     over.drop();
 
-    // Above U+10FFFF: F4 90 80 80.
+    // Above U+10FFFF: F4 90 80 80 decodes as four replacement characters.
     String above = String.new();
     above.push((u8)0xF4);
     above.push((u8)0x90);
     above.push((u8)0x80);
     above.push((u8)0x80);
-    assert_eq_i64(utf16_len((str)above), 1, "out-of-range decodes as U+FFFD");
+    assert_eq_i64(utf16_len((str)above), 4, "out-of-range: each byte one replacement");
     above.drop();
 
-    // UTF-8-encoded surrogate ED A0 80 (U+D800).
+    // UTF-8-encoded surrogate ED A0 80 decodes as three replacements.
     String surr = String.new();
     surr.push((u8)0xED);
     surr.push((u8)0xA0);
     surr.push((u8)0x80);
-    assert_eq_i64(utf16_len((str)surr), 1, "surrogate codepoint is U+FFFD");
+    assert_eq_i64(utf16_len((str)surr), 3, "surrogate bytes: each one replacement");
     surr.drop();
 
     test_start("text: \r\n line endings");

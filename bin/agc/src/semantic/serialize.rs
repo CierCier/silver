@@ -300,6 +300,16 @@ pub fn synthesize_serialization_for_program(program: &mut ast::Program) {
                 existing_to_impls.insert(("JsonDecode".to_string(), struct_name.clone()));
             }
         }
+
+        // JsonDispose: partial container decodes release this struct's
+        // resources when the decode fails after it was stored.
+        if !existing_to_impls.contains(&("JsonDispose".to_string(), struct_name.clone())) {
+            let json_dispose_src = generate_json_dispose_source(s);
+            if let Some(item) = parse_impl_snippet(&json_dispose_src) {
+                synthesized_items.push(item);
+                existing_to_impls.insert(("JsonDispose".to_string(), struct_name.clone()));
+            }
+        }
     }
 
     program.items.extend(synthesized_items);
@@ -524,6 +534,23 @@ pub fn generate_json_decode_source(s: &ast::StructItem) -> String {
     body.push_str(&format!(
         "        return {struct_name}.from_json(input);\n"
     ));
+    body.push_str("    }\n");
+    body.push_str("}\n");
+    body
+}
+
+/// JsonDispose lets a struct be a container element: when a Vec/Optional
+/// decode fails part-way, the decoder runs dispose on already-decoded
+/// elements to release their resources.
+pub fn generate_json_dispose_source(s: &ast::StructItem) -> String {
+    let struct_name = &s.name.name;
+    let mut body = String::new();
+    body.push_str(&format!("impl JsonDispose for {struct_name} {{\n"));
+    body.push_str("    void dispose(*self) {\n");
+    for field in &s.fields {
+        let field_name = &field.name.name;
+        body.push_str(&format!("        (*self).{field_name}.dispose();\n"));
+    }
     body.push_str("    }\n");
     body.push_str("}\n");
     body
