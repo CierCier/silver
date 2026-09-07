@@ -144,6 +144,14 @@ i64 bt_xchg(i64 addr) {
     return asm("movq $1, %rax\nxchgq %rax, (%rdi)", [0, addr], ["memory"]);
 }
 
+/// Read the publication flag through inline asm: the memory clobber makes the
+/// load opaque to the optimizer, so a table read can never be hoisted or
+/// cached above it. (The x86 load itself is already acquire under TSO; this
+/// closes the compiler-level half of the race at any opt level.)
+i64 bt_sorted_load(i64 addr) {
+    return asm("movl (%rdi), %eax", [0, addr], ["memory"]);
+}
+
 void bt_lock_acquire() {
     i64 addr = (i64)&g_bt_lock;
     while (bt_xchg(addr) != 0) {
@@ -205,7 +213,7 @@ void bt_qsort_lines(i64 lo, i64 hi) {
 
 /// One-time in-place sort of both tables (double-checked under the spinlock).
 void bt_ensure_sorted() {
-    if (g_bt_sorted != 0) {
+    if (bt_sorted_load((i64)&g_bt_sorted) != 0) {
         return;
     }
     bt_lock_acquire();
