@@ -1,0 +1,102 @@
+// JSON protocol robustness: full escape decoding (\b \f \uXXXX + surrogate
+// pairs), control-character escaping on write, and skip_value for unknown
+// fields. These are the properties an LSP transport relies on.
+import std.io.file;
+import std.json;
+import std.string;
+import std.test;
+
+i32 main() {
+    test_start("json: \\uXXXX basic escapes");
+
+    // BMP codepoint (é) and the named control escapes.
+    JsonReader r1 = JsonReader.new("\"caf\\u00e9 \\b\\f\\n\\t\"");
+    String s1 = r1.read_string();
+    assert_true(!r1.failed, "basic \\u escape parses");
+    assert_eq_i64(s1.char_len(), 9, "café + space + 4 controls = 9 codepoints");
+    s1.drop();
+
+    test_start("json: surrogate pair decode");
+
+    // U+1F600 (grinning face) arrives as a surrogate pair escape.
+    JsonReader r2 = JsonReader.new("\"\\ud83d\\ude00\"");
+    String s2 = r2.read_string();
+    assert_true(!r2.failed, "surrogate pair parses");
+    assert_eq_i64(s2.char_len(), 1, "pair collapses to one codepoint");
+    assert_eq_i64(s2.byte_len(), 4, "encodes as 4 UTF-8 bytes");
+    s2.drop();
+
+    // Lone surrogates must be rejected.
+    JsonReader r3 = JsonReader.new("\"\\ud83d\"");
+    String s3 = r3.read_string();
+    assert_true(r3.failed, "lone high surrogate rejected");
+    s3.drop();
+
+    test_start("json: writer escapes control bytes");
+
+    // Text containing control bytes must round-trip through write/read.
+    String payload = String.new();
+    payload.push((u8)65);           // A
+    payload.push_codepoint(0x1F600);
+    payload.push((u8)1);            // SOH: no named escape, must be \u0001
+    payload.push((u8)12);           // FF: \f
+    JsonWriter w = JsonWriter.new();
+    w.write_string((str)payload);
+    w.output.write_u8((u8)0);
+    str encoded = (str)w.output.data;
+
+    JsonReader r4 = JsonReader.new(encoded);
+    String back = r4.read_string();
+    assert_true(!r4.failed, "escaped payload re-reads");
+    assert_true(back.equals((str)payload), "control bytes round-trip");
+    back.drop();
+    payload.drop();
+
+    test_start("json: skip_value");
+
+    // Object with nested containers.
+    JsonReader r5 = JsonReader.new("{\"a\":1,\"b\":{\"c\":[1,{\"d\":\"x\"}]},\"e\":true}");
+    assert_true(r5.skip_value(), "object value skipped");
+    assert_true(r5.ok(), "skip consumed the whole input");
+
+    // Array of mixed values.
+    JsonReader r6 = JsonReader.new("[1,-2.5,\"s\",true,null,{\"k\":[]},[\"n\"]]");
+    assert_true(r6.skip_value(), "array value skipped");
+    assert_true(r6.ok(), "array skip consumed the whole input");
+
+    // Scalars.
+    JsonReader r7 = JsonReader.new("  42 ");
+    assert_true(r7.skip_value(), "number skipped");
+    assert_true(r7.ok(), "number skip consumed input");
+
+    test_start("json: unknown fields tolerated in manual parse");
+
+    // The LSP request shape: the client adds extra fields; the server reads
+    // only the fields it knows and skips the rest.
+    JsonReader r8 = JsonReader.new("{\"workDoneToken\":\"tok-1\",\"id\":7,\"partialResult\":{\"x\":2}}");
+    assert_true(r8.begin_object(), "object opens");
+    i64 id = -1;
+    while (true) {
+        r8.skip_whitespace();
+        if (r8.failed) { break; }
+        u8* bytes = (u8*)r8.input;
+        if (r8.index < r8.length && bytes[r8.index] == (u8)125) { break; }
+        String key = r8.read_string();
+        if (r8.failed) { break; }
+        if (!r8.expect((u8)58)) { break; }
+        if (key.equals("id")) {
+            r8.read_i64(&id);
+        } else if (key.equals("workDoneToken")) {
+            String tok = r8.read_string();
+            assert_true(tok.equals("tok-1"), "workDoneToken value read");
+            tok.drop();
+        } else {
+            assert_true(r8.skip_value(), "unknown field skipped");
+        }
+        if (!r8.comma()) { break; }
+    }
+    assert_true(r8.end_object(), "object closes after skips");
+    assert_eq_i64(id, 7, "id read while unknown fields skipped");
+
+    return done();
+}

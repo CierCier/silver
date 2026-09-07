@@ -78,17 +78,34 @@ impl JsonWriter {
                 self.output.write_str("\\\"");
             } else if (ch == (u8)92) {
                 self.output.write_str("\\\\");
+            } else if (ch == (u8)8) {
+                self.output.write_str("\\b");
+            } else if (ch == (u8)12) {
+                self.output.write_str("\\f");
             } else if (ch == (u8)10) {
                 self.output.write_str("\\n");
             } else if (ch == (u8)13) {
                 self.output.write_str("\\r");
             } else if (ch == (u8)9) {
                 self.output.write_str("\\t");
+            } else if (ch < (u8)32) {
+                self.write_hex4((u32)ch);
             } else {
                 self.output.write_u8(ch);
             }
             i = i + 1;
         }
+    }
+
+    void write_hex4(*self, u32 value) {
+        self.output.write_str("\\u00");
+        self.output.write_u8(self.hex_digit((value >> 4) & 0xF));
+        self.output.write_u8(self.hex_digit(value & 0xF));
+    }
+
+    u8 hex_digit(*self, u32 v) {
+        if (v < 10) { return (u8)((u32)48 + v); }
+        return (u8)((u32)97 + v - 10);
     }
 
     void write_string(*self, str value) {
@@ -515,9 +532,39 @@ impl JsonReader {
             self.index = self.index + 1;
             if (escaped == (u8)34) { result.push((u8)34); }
             else if (escaped == (u8)92) { result.push((u8)92); }
+            else if (escaped == (u8)98) { result.push((u8)8); }
+            else if (escaped == (u8)102) { result.push((u8)12); }
             else if (escaped == (u8)110) { result.push((u8)10); }
             else if (escaped == (u8)114) { result.push((u8)13); }
             else if (escaped == (u8)116) { result.push((u8)9); }
+            else if (escaped == (u8)117) {
+                u32 cp = self.read_hex4();
+                if (self.failed) { return move result; }
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    // High surrogate: the next escape must be a low surrogate.
+                    if (self.index + 1 >= self.length
+                        || bytes[self.index] != (u8)92
+                        || bytes[self.index + 1] != (u8)117) {
+                        self.failed = true;
+                        return move result;
+                    }
+                    self.index = self.index + 2;
+                    u32 low = self.read_hex4();
+                    if (self.failed || low < 0xDC00 || low > 0xDFFF) {
+                        self.failed = true;
+                        return move result;
+                    }
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    // Lone low surrogate has no high half.
+                    self.failed = true;
+                    return move result;
+                }
+                if (!result.push_codepoint(cp)) {
+                    self.failed = true;
+                    return move result;
+                }
+            }
             else { self.failed = true; return move result; }
         }
         self.failed = true;
@@ -531,6 +578,98 @@ impl JsonReader {
             return false;
         }
         return self.expect((u8)58);
+    }
+
+    u32 read_hex4(*self) {
+        if (self.index + 4 > self.length) {
+            self.failed = true;
+            return 0;
+        }
+        u8* bytes = (u8*)self.input;
+        u32 value = 0;
+        i64 i = 0;
+        while (i < 4) {
+            i32 d = self.hex_digit(bytes[self.index + i]);
+            if (d < 0) {
+                self.failed = true;
+                return 0;
+            }
+            value = value * 16 + (u32)d;
+            i = i + 1;
+        }
+        self.index = self.index + 4;
+        return value;
+    }
+
+    i32 hex_digit(*self, u8 c) {
+        if (c >= (u8)48 && c <= (u8)57) { return (i32)(c - (u8)48); }
+        if (c >= (u8)97 && c <= (u8)102) { return (i32)(c - (u8)97) + 10; }
+        if (c >= (u8)65 && c <= (u8)70) { return (i32)(c - (u8)65) + 10; }
+        return -1;
+    }
+
+    /// Consume one JSON value of any shape (object, array, string, number,
+    /// literal). Fields with unknown names are skipped so parsing tolerates
+    /// extra keys in the payload.
+    bool skip_value(*self) {
+        self.skip_whitespace();
+        if (self.failed) { return false; }
+        u8* bytes = (u8*)self.input;
+        if (self.index >= self.length) {
+            self.failed = true;
+            return false;
+        }
+        u8 ch = bytes[self.index];
+        if (ch == (u8)123) {
+            if (!self.begin_object()) { return false; }
+            while (true) {
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)125) {
+                    self.index = self.index + 1;
+                    break;
+                }
+                String key = self.read_string();
+                if (self.failed) { return false; }
+                if (!self.expect((u8)58)) { return false; }
+                if (!self.skip_value()) { return false; }
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)44) {
+                    self.index = self.index + 1;
+                }
+            }
+            return true;
+        } else if (ch == (u8)91) {
+            if (!self.begin_array()) { return false; }
+            while (true) {
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)93) {
+                    self.index = self.index + 1;
+                    break;
+                }
+                if (!self.skip_value()) { return false; }
+                self.skip_whitespace();
+                if (self.failed) { return false; }
+                if (self.index < self.length && bytes[self.index] == (u8)44) {
+                    self.index = self.index + 1;
+                }
+            }
+            return true;
+        } else if (ch == (u8)34) {
+            String s = self.read_string();
+            return !self.failed;
+        } else if (ch == (u8)116) {
+            return self.literal("true");
+        } else if (ch == (u8)102) {
+            return self.literal("false");
+        } else if (ch == (u8)110) {
+            return self.literal("null");
+        } else {
+            f64 number = 0.0;
+            return self.read_f64(&number);
+        }
     }
 
     bool ok(*self) {
