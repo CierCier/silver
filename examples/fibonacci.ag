@@ -1,0 +1,14 @@
+import std.io;
+
+i64 fib(i64 n) {
+    if (n <= 1) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+i32 main() {
+    i64 result = fib(10);
+    @println("fib(10) = {}", result);
+    return 0;
+}

@@ -1311,6 +1311,7 @@ pub fn run(cli: Cli) {
                 // Compile-time cfg gate: drop #[cfg(...)]-rejected items, then
                 // fold @cfg(...) and prune dead branches, before any symbol
                 // registration, semantic analysis, or type checking sees them.
+                profiler::begin_phase("cfg");
                 let mut cfg_set = cfg::CfgSet::parse(&plan.cfg_flags);
                 cfg::add_derived_cfgs(
                     &mut cfg_set,
@@ -1333,7 +1334,11 @@ pub fn run(cli: Cli) {
                 }
 
                 semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
+                profiler::end_phase("cfg");
+
+                profiler::begin_phase("serialize");
                 crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
+                profiler::end_phase("serialize");
 
                 if plan.test_harness {
                     let test_fns: Vec<String> = ast
@@ -1377,9 +1382,11 @@ pub fn run(cli: Cli) {
                         .retain(|item| !crate::attributes::is_test_function(&item.attributes));
                 }
 
+                profiler::begin_phase("symbol_table");
                 let mut symbol_table = CompilerSymbolTable::new();
                 symbol_table.touch_phase(CompilerPhase::Parse, "parse complete");
                 symbol_table.record_program_symbols(&ast, CompilerPhase::Parse);
+                profiler::end_phase("symbol_table");
 
                 profiler::begin_phase("semantic");
                 let semantic_errors =
@@ -1448,7 +1455,9 @@ pub fn run(cli: Cli) {
                     }
                     std::process::exit(2);
                 }
+                profiler::end_phase("type check");
 
+                profiler::begin_phase("safety");
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
                 let escape_errors = crate::semantic::escape_check::check_program(&ast);
@@ -1514,6 +1523,7 @@ pub fn run(cli: Cli) {
                 if had_warning_error {
                     std::process::exit(2);
                 }
+                profiler::end_phase("safety");
 
                 if plan.emit == EmitKind::Check {
                     if plan.verbose {
@@ -1565,8 +1575,6 @@ pub fn run(cli: Cli) {
                         std::process::exit(2);
                     }
                 }
-
-                profiler::end_phase("type check");
 
                 profiler::begin_phase("monomorph");
                 profiler::begin_phase("append_monomorphs fixpoint");
@@ -1922,6 +1930,7 @@ pub fn run(cli: Cli) {
                 return;
             }
             if plan.emit == EmitKind::Check {
+                profiler::print_report();
                 return;
             }
 
