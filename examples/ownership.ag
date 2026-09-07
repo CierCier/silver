@@ -27,7 +27,7 @@ impl Buffer {
     }
 }
 
-impl Drop<Buffer> for Buffer {
+impl Drop for Buffer {
     void drop(Buffer* self) {
         if (self.data != (i32*)0) {
             free(self.data);

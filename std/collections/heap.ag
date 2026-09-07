@@ -42,9 +42,12 @@ impl BinaryHeap<T> {
         return h;
     }
     /// Build a binary heap from a vector by pushing each element.
+    /// Elements are moved out with `pop` (the for-in binding of a generic
+    /// element type is currently typed i64 by the post-monomorph typeck).
     BinaryHeap<T> from_vec(Vec<T> v) {
         BinaryHeap<T> h = BinaryHeap<T>.with_capacity(v.len());
-        for val in v {
+        while (v.len() > 0) {
+            T val = v.pop();
             h.push(move val);
         }
         return h;

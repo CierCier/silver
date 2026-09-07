@@ -23,15 +23,21 @@ impl Deque<T> {
     }
 
     /// Reserve space for `capacity` elements up front.
+    /// Capacities stay powers of two so ring indexing masks instead of divides.
     Deque<T> with_capacity(i64 capacity) {
         Deque<T> d;
         if (capacity != 0) {
-            d.data = (T*)(malloc(@size(T) * capacity));
+            i64 cap = 8;
+            while (cap < capacity) {
+                cap = cap * 2;
+            }
+            d.data = (T*)(malloc(@size(T) * cap));
+            d.cap = cap;
         } else {
             d.data = (T*)0;
+            d.cap = 0;
         }
         d.len = 0;
-        d.cap = capacity;
         d.head = 0;
         return d;
     }
@@ -56,23 +62,30 @@ impl Deque<T> {
     // -- Mutation --------------------------------------------------------
 
     /// Grow capacity to at least `min_cap`, linearizing the ring buffer.
-    /// Moves elements (`new[i] = move old[(head+i)%old_cap]`) not shallow copy;
-    /// POD-only copy removed.
+    /// The ring wraps at most once, so the two contiguous slices are copied
+    /// with SIMD memcpy; the old buffer is freed without per-element drops
+    /// (all types are bitwise relocatable), so ownership travels with bytes.
     void grow(&mut self, i64 min_cap) {
         i64 new_cap = self.cap;
         if (new_cap == 0) {
-            new_cap = 1;
+            new_cap = 8;
         }
         while (new_cap < min_cap) {
             new_cap = new_cap * 2;
         }
         i64 old_cap = self.cap;
         T* new_data = (T*)(malloc(@size(T) * new_cap));
-        if (old_cap > 0) {
-            i64 i = 0;
-            while (i < self.len) {
-                new_data[i] = move self.data[(self.head + i) % old_cap];
-                i = i + 1;
+        if (old_cap > 0 && self.len > 0) {
+            i64 first = old_cap - self.head;
+            if (first > self.len) {
+                first = self.len;
+            }
+            silver_rt_memcpy((u8*)new_data, (u8*)&self.data[self.head], first * @size(T));
+            if (first < self.len) {
+                silver_rt_memcpy(
+                    (u8*)&new_data[first],
+                    (u8*)self.data,
+                    (self.len - first) * @size(T));
             }
         }
         if (self.data != (T*)0) {
@@ -86,7 +99,7 @@ impl Deque<T> {
     /// Push `value` to the back (O(1) amortized).
     void push_back(&mut self, T value) {
         if (self.len >= self.cap) {
-            i64 min_cap = 1;
+            i64 min_cap = 8;
             if (self.cap != 0) {
                 min_cap = self.cap * 2;
             }
@@ -100,7 +113,7 @@ impl Deque<T> {
     /// Push `value` to the front (O(1) amortized).
     void push_front(&mut self, T value) {
         if (self.len >= self.cap) {
-            i64 min_cap = 1;
+            i64 min_cap = 8;
             if (self.cap != 0) {
                 min_cap = self.cap * 2;
             }

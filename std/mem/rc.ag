@@ -8,6 +8,12 @@
 //   Rc<GraphNode> m = n.clone();  // shared ownership
 //   (*n.get()).payload[0] = 42;
 //
+// The count and the value live in one co-allocated RcBox<T>, so creating a
+// handle is a single heap allocation instead of two (16 bytes of metadata
+// and one spinlock acquisition saved per instance). The handle stores the
+// two interior pointers; the count sits at offset 0 of the box, so freeing
+// it releases the whole allocation.
+//
 // NOTE: Does NOT call T's destructor on last-drop (same as Box/Vec).
 //       The heap memory for T is freed; if T holds owned resources
 //       those must be managed separately.
@@ -17,38 +23,48 @@
 import std.mem.alloc;
 import std.mem.drop;
 
+/// Shared allocation: reference count followed by the value.
+struct RcBox<T> {
+    i32 count;
+    T value;
+}
+
 struct Rc<T> {
     T* ptr;
     i32* count;
 }
 
 impl<T> Rc<T> {
-    /// Create a new reference-counted handle.
+    /// Create a new reference-counted handle (single co-allocated box).
     Rc<T> new(T val) {
-        T* p = alloc<T>();
-        *p = val;
-        i32* c = alloc<i32>();
-        *c = 1;
+        RcBox<T>* b = alloc<RcBox<T>>();
+        (*b).count = 1;
+        (*b).value = val;
         Rc<T> rc;
-        rc.ptr = p;
-        rc.count = c;
+        rc.ptr = &((*b).value);
+        rc.count = &((*b).count);
         return rc;
     }
 
-    /// Create a new reference-counted handle from a heap pointer.
-    /// The count starts at 1 — the caller must ensure `ptr` is heap-allocated.
+    /// Create a new reference-counted handle by adopting a heap pointer.
+    /// `*ptr` is copied into the Rc's co-allocated box and the original
+    /// allocation is freed immediately, so the caller transfers ownership
+    /// and must not use or free `ptr` afterwards. `get()` returns the box
+    /// payload, not the original pointer. The count starts at 1.
     Rc<T> from_ptr(T* ptr) {
-        i32* c = alloc<i32>();
-        *c = 1;
+        RcBox<T>* b = alloc<RcBox<T>>();
+        (*b).count = 1;
+        (*b).value = *ptr;
+        free(ptr);
         Rc<T> rc;
-        rc.ptr = ptr;
-        rc.count = c;
+        rc.ptr = &((*b).value);
+        rc.count = &((*b).count);
         return rc;
     }
 
     /// Clone the handle — increments the reference count.
     Rc<T> clone(*self) {
-        if (self.count != (i32*)0) {
+        if ((i64)self.count != 0) {
             *(self.count) = *(self.count) + 1;
         }
         Rc<T> c;
@@ -65,14 +81,11 @@ impl<T> Rc<T> {
 
 impl<T> Drop for Rc<T> {
     /// Drop one handle — decrements the reference count.
-    /// Frees the value and count when it reaches zero.
+    /// Frees the co-allocated box when it reaches zero.
     void drop(*self) {
-        if (self.count != (i32*)0) {
+        if ((i64)self.count != 0) {
             *(self.count) = *(self.count) - 1;
             if (*(self.count) == 0) {
-                if (self.ptr != (T*)0) {
-                    free(self.ptr);
-                }
                 free(self.count);
             }
         }

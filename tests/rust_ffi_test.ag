@@ -64,11 +64,17 @@ i32 main() {
     assert_true(environment.len > 0, "environment value is non-empty");
 
     RustFfiProcess process = rust_ffi_process_new();
-    RustFfiSlice program = rust_ffi_text("/bin/true");
+    // `sh -c true` instead of a hardcoded /bin/true: sh comes from PATH, so
+    // the test also passes on NixOS.
+    RustFfiSlice program = rust_ffi_text("sh");
+    RustFfiSlice* argv = (RustFfiSlice*)malloc(@size(RustFfiSlice) * 2);
+    argv[0] = rust_ffi_text("-c");
+    argv[1] = rust_ffi_text("true");
     assert_eq_i32(SILVER_FFI_OK,
         silver_process_spawn((const RustFfiSlice*)&program,
-            (const RustFfiSlice*)0, (i64)0,
+            (const RustFfiSlice*)argv, (i64)2,
             &process.handle, &error), "process spawn");
+    free(argv);
     i32 exit_code = -1;
     assert_eq_i32(SILVER_FFI_OK,
         silver_process_wait(process.handle, &exit_code, &error),
@@ -155,8 +161,11 @@ i32 main() {
     assert_eq_i64((i64)SILVER_FFI_ERR_INVALID_HANDLE, join_error.code,
         "native one-shot join code");
 
-    Result<RustFfiProcess, Error> spawned_plain = RustFfiProcess.spawn(
-        "/bin/true");
+    Vec<str> plain_args = Vec<str>.new();
+    plain_args.push("-c");
+    plain_args.push("true");
+    Result<RustFfiProcess, Error> spawned_plain = RustFfiProcess.spawn_with_args(
+        "sh", &plain_args);
     assert_true(spawned_plain.is_ok(), "native spawn without args");
     RustFfiProcess plain_child = spawned_plain.unwrap();
     Result<i32, Error> plain_exit = plain_child.join();

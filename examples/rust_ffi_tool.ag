@@ -126,7 +126,11 @@ i32 main() {
         return 1;
     }
 
-    Result<RustFfiProcess, Error> quick = RustFfiProcess.spawn("/bin/true");
+    Vec<str> plain_args = Vec<str>.new();
+    plain_args.push("-c");
+    plain_args.push("true");
+    Result<RustFfiProcess, Error> quick = RustFfiProcess.spawn_with_args(
+        "sh", &plain_args);
     if (quick.is_err()) {
         Error err = quick.unwrap_err();
         @eprintln("plain spawn failed: {}", err.message);

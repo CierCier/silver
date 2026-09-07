@@ -55,6 +55,7 @@ BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2,
 const u8 IOMODE_UNBUFFERED = 0;   // immediate syscall per write
 const u8 IOMODE_LINE      = 1;   // flush when data contains \n
 const u8 IOMODE_BLOCK     = 2;   // flush when buffer is full or explicit call
+const u8 IOMODE_MEMORY    = 3;   // in-memory @format/@sprint buffer (fd = -1)
 
 // Head of the intrusive linked list of global BufWriters (STDOUT, STDERR).
 // NULL = empty list. No heap allocation, no size limit.
@@ -89,6 +90,38 @@ impl BufWriter {
             if (self.fd >= 0) {
                 __fmt_write_fd(self.fd, src, n);
             }
+            return;
+        }
+
+        // IN-MEMORY writers (IOMODE_MEMORY, @format/@sprint): accumulate
+        // into the buffer, growing it. A negative cap is a stack scratch
+        // buffer (set up by the compiler); a positive cap is heap-owned.
+        // Detection keys on mode (u8, loaded exactly) rather than fd, whose
+        // i32 slot reads as i64 with adjacent garbage upper bits. This also
+        // fixes the old behavior where a chunk larger than the 4096 buffer
+        // was silently dropped.
+        if (self.mode == IOMODE_MEMORY) {
+            i64 active_cap = self.cap;
+            if (active_cap < 0) {
+                active_cap = 0 - active_cap;
+            }
+            if (self.len + n > active_cap) {
+                i64 new_cap = active_cap * 2;
+                if (new_cap < self.len + n) {
+                    new_cap = self.len + n;
+                }
+                u8* heap = (u8*)malloc(new_cap);
+                if (self.len > 0) {
+                    silver_rt_memcpy(heap, (u8*)self.data, self.len);
+                }
+                if (self.cap > 0) {
+                    free((u8*)self.data);
+                }
+                self.data = (i64)heap;
+                self.cap = new_cap;
+            }
+            silver_rt_memcpy((u8*)(self.data + self.len), src, n);
+            self.len = self.len + n;
             return;
         }
 
@@ -186,6 +219,18 @@ impl BufWriter {
     /// Write a single byte.
     void write_u8(*self, u8 c) {
         self.write(&c, 1);
+    }
+
+    /// Promote an in-memory writer (IOMODE_MEMORY) from its stack scratch
+    /// buffer to an owned heap block before @format/@sprint hand the buffer
+    /// off to a String or return it as str. No-op when already heap-owned.
+    void __promote_in_memory(*self) {
+        if (self.mode == IOMODE_MEMORY && self.cap < 0) {
+            u8* heap = (u8*)malloc(self.len);
+            silver_rt_memcpy(heap, (u8*)self.data, self.len);
+            self.data = (i64)heap;
+            self.cap = self.len;
+        }
     }
 
     /// Flush buffered data to the underlying fd via a single sys_write call.

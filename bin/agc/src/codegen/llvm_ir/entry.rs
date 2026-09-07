@@ -1566,10 +1566,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let zero_i64 = self.context.i64_type().const_int(0, false);
                 let neg_one_i32 = self.context.i32_type().const_int(u64::MAX, true);
 
-                // Initialize BufWriter fields: data=0, len=0, cap=0, fd=-1.
-                // The zero-valued fields (data=0, cap=0) trigger ensure_init's lazy
-                // buffer allocation on first write. fd=-1 marks this as a string-only
-                // writer (no file descriptor), preventing flush from writing to a real fd.
+                // In-memory writers start on a 128-byte stack scratch buffer
+                // (data points at it, cap = -128 sentinel) instead of a
+                // 4096-byte heap allocation, so small @format/@sprint calls
+                // never touch the heap. write() grows to heap when the
+                // sentinel is exceeded and __promote_in_memory copies out
+                // before the buffer is handed to a String / returned as str.
+                let scratch_ty = self.context.i8_type().array_type(128);
+                let scratch_ptr = self.create_entry_alloca(
+                    fn_ctx,
+                    "sprint.scratch",
+                    inkwell::types::BasicTypeEnum::ArrayType(scratch_ty),
+                )?;
+                let scratch_addr = self
+                    .builder
+                    .build_ptr_to_int(scratch_ptr, self.context.i64_type(), "sprint.scratch.addr")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint scratch addr failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let neg_128_i64 = self.context.i64_type().const_int((-128i64) as u64, true);
+
+                // Initialize BufWriter fields: data=scratch, len=0, cap=-128,
+                // fd=-1. fd=-1 marks this as a string-only writer (no file
+                // descriptor), preventing flush from writing to a real fd.
                 let data_ptr = self
                     .builder
                     .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
@@ -1579,9 +1601,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             expr.span,
                         )
                     })?;
-                self.builder.build_store(data_ptr, zero_i64).map_err(|e| {
-                    CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span)
-                })?;
+                self.builder
+                    .build_store(data_ptr, scratch_addr)
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span)
+                    })?;
 
                 let len_ptr = self
                     .builder
@@ -1605,9 +1629,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             expr.span,
                         )
                     })?;
-                self.builder.build_store(cap_ptr, zero_i64).map_err(|e| {
-                    CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span)
-                })?;
+                self.builder
+                    .build_store(cap_ptr, neg_128_i64)
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span)
+                    })?;
 
                 let fd_ptr = self
                     .builder
@@ -1622,10 +1648,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span)
                 })?;
 
-                // mode = IOMODE_BLOCK (2) — ensures the writer allocates a buffer
-                // and uses buffered writes. An uninitialized mode risks reading as
-                // IOMODE_UNBUFFERED (0), which would skip buffer allocation and
-                // silently drop all output since fd is -1.
+                // mode = IOMODE_MEMORY (3) — marks this writer as an
+                // in-memory @format/@sprint buffer. The runtime keys its
+                // grow-into-heap path off this (u8 loads are exact), never
+                // off fd, whose i32 slot reads as i64 with garbage upper
+                // bits. An uninitialized mode would read as IOMODE_UNBUFFERED
+                // (0) and silently drop all output since fd is -1.
                 let mode_ptr = self
                     .builder
                     .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 6, "sprint.mode")
@@ -1636,7 +1664,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })?;
                 self.builder
-                    .build_store(mode_ptr, self.context.i8_type().const_int(2, false))
+                    .build_store(mode_ptr, self.context.i8_type().const_int(3, false))
                     .map_err(|e| {
                         CodegenError::with_span(format!("sprint store mode failed: {e}"), expr.span)
                     })?;
@@ -1788,6 +1816,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 &writer_expr,
                 &method,
                 &[zero_expr],
+                true,
+                &expr.span,
+            )?;
+
+            // Hand the buffer off as an owned heap block: if the writer is
+            // still on its stack scratch buffer (cap < 0), copy it out.
+            let promote_method = ast::Identifier {
+                name: "__promote_in_memory".to_string(),
+                span: expr.span,
+            };
+            self.emit_method_call_expression(
+                &writer_expr,
+                &promote_method,
+                &[],
                 true,
                 &expr.span,
             )?;
