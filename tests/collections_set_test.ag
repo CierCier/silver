@@ -235,5 +235,21 @@ i32 main() {
         assert_true(empty.is_disjoint(&a), "empty disjoint a");
         empty.drop(); a.drop(); b.drop(); c.drop();
     }
+    test_start("set: into_iter yields keys via for-in");
+
+    {
+        HashSet<i64> s = HashSet<i64>.new();
+        s.insert(10);
+        s.insert(20);
+        s.insert(30);
+        i64 sum = 0;
+        i64 seen = 0;
+        for x in s {
+            sum = sum + x;
+            seen = seen + 1;
+        }
+        assert_eq_i64(seen, 3, "for-in visits each key once");
+        assert_eq_i64(sum, 60, "keys 10+20+30");
+    }
     return done();
 }
