@@ -11,6 +11,7 @@ import std.error;
 import std.fmt;
 import std.mem.alloc;
 import std.mem.drop;
+import std.optional;
 import std.sys.result;
 
 const i32 EOF = -1;
@@ -659,5 +660,44 @@ bool file_delete(str path) {
 
 bool file_rename(str from, str to) {
     return sys_rename((i64)from, (i64)to) == 0;
+}
+
+/// File metadata for change detection (did a document change on disk?) and
+/// cache invalidation.
+struct FileStat {
+    i64 size;       // bytes
+    i64 mtime_sec;  // modification time, seconds since the epoch
+    i64 mtime_nsec; // nanosecond part of the modification time
+}
+
+/// Little-endian i64 from a raw buffer (x86-64 stat fields are LE).
+i64 read_le_i64(u8* buf, i64 off) {
+    i64 v = 0;
+    i64 i = 7;
+    while (i >= 0) {
+        v = (v << 8) | (i64)buf[off + i];
+        i = i - 1;
+    }
+    return v;
+}
+
+/// stat(2) for a path; None when it does not exist. The kernel writes the
+/// x86-64 `struct stat` (144 bytes) into a raw buffer: st_size lives at
+/// offset 48 and st_mtim (seconds, nanoseconds) at 88/96.
+Optional<FileStat> stat_path(str path) {
+    u8 buf[144];
+    i64 i = 0;
+    while (i < 144) {
+        buf[i] = (u8)0;
+        i += 1;
+    }
+    if (sys_stat((i64)path, (i64)buf) != 0) {
+        return Optional<FileStat>.none();
+    }
+    FileStat st;
+    st.size = read_le_i64(buf, 48);
+    st.mtime_sec = read_le_i64(buf, 88);
+    st.mtime_nsec = read_le_i64(buf, 96);
+    return Optional<FileStat>.some(move st);
 }
 

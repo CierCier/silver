@@ -241,6 +241,17 @@ i32 main() {
     assert_true(r1.equals("second row"), "row 1 match");
     drop_vec_strings(&mut file_lns);
 
+    // stat_path: size and mtime of an existing file, None for missing.
+    Optional<FileStat> st = stat_path(test_file);
+    assert_true(st.is_some(), "stat of existing file");
+    if (st.is_some()) {
+        FileStat info = st.unwrap();
+        assert_true(info.size > 0, "stat size positive for written file");
+        assert_true(info.mtime_sec > 0, "mtime epoch seconds positive");
+    }
+    Optional<FileStat> missing = stat_path("/tmp/silver_file_test_missing.xyz");
+    assert_true(missing.is_none(), "stat of missing file is none");
+
     // Final cleanup
     file_delete(test_file);
     file_delete(test_file2);
