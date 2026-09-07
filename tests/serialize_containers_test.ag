@@ -23,6 +23,12 @@ struct Message {
     Nested meta;
 }
 
+#[serialize]
+struct WideNums {
+    i128 big;
+    u128 ubig;
+}
+
 impl Nested {
     Nested new(i32 count, str label) {
         Nested n;
@@ -114,6 +120,21 @@ i32 main() {
     m3.tags.drop();
     m3.items.drop();
     m3.meta.label.drop();
+
+    test_start("serialize: wide integers");
+
+    Result<WideNums, JsonError> wr = @from_json(WideNums, "{\"big\":42,\"ubig\":7}");
+    assert_true(wr.is_ok(), "i128/u128 fields decode");
+    if (wr.is_ok()) {
+        WideNums w = wr.unwrap();
+        assert_eq_i64((i64)w.big, 42, "i128 field decoded");
+        assert_eq_i64((i64)w.ubig, 7, "u128 field decoded");
+        JsonWriter ww = JsonWriter.new();
+        w.to_json(&ww);
+        ww.output.write_u8((u8)0);
+        assert_true(cstr_eq((str)ww.output.data, "{\"big\":42,\"ubig\":7}"),
+            "wide integers encode");
+    }
 
     m.tags.data[0].drop();
     m.tags.data[1].drop();

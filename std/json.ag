@@ -756,6 +756,8 @@ impl ToJson for u8 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*
 impl ToJson for u16 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u32 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u64 { void to_json(*self, JsonWriter* out) { out.write_u64(*self); } }
+impl ToJson for i128 { void to_json(*self, JsonWriter* out) { out.write_i64((i64)*self); } }
+impl ToJson for u128 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for f64 { void to_json(*self, JsonWriter* out) { out.write_f64(*self); } }
 impl ToJson for f32 { void to_json(*self, JsonWriter* out) { out.write_f64((f64)*self); } }
 impl ToJson for bool { void to_json(*self, JsonWriter* out) { out.write_bool(*self); } }
@@ -886,6 +888,28 @@ impl FromJson for u64 {
     }
 }
 
+impl FromJson for i128 {
+    Result<i128, JsonError> from_json(JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i128)value);
+    }
+}
+
+impl FromJson for u128 {
+    Result<u128, JsonError> from_json(JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u128)value);
+    }
+}
+
 impl FromJson for f32 {
     Result<f32, JsonError> from_json(JsonReader* input) {
         f64 value = 0.0;
@@ -956,6 +980,28 @@ impl JsonDecode for i64 {
             return Err(move error);
         }
         return Ok(value);
+    }
+}
+
+impl JsonDecode for i128 {
+    Result<i128, JsonError> json_decode(*self, JsonReader* input) {
+        i64 value = 0;
+        if (!input.read_i64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((i128)value);
+    }
+}
+
+impl JsonDecode for u128 {
+    Result<u128, JsonError> json_decode(*self, JsonReader* input) {
+        u64 value = 0;
+        if (!input.read_u64(&value)) {
+            JsonError error = JsonError.at_index(input.index);
+            return Err(move error);
+        }
+        return Ok((u128)value);
     }
 }
 
@@ -1147,6 +1193,8 @@ impl JsonDispose for u8 { void dispose(*self) {} }
 impl JsonDispose for u16 { void dispose(*self) {} }
 impl JsonDispose for u32 { void dispose(*self) {} }
 impl JsonDispose for u64 { void dispose(*self) {} }
+impl JsonDispose for i128 { void dispose(*self) {} }
+impl JsonDispose for u128 { void dispose(*self) {} }
 impl JsonDispose for f32 { void dispose(*self) {} }
 impl JsonDispose for f64 { void dispose(*self) {} }
 impl JsonDispose for bool { void dispose(*self) {} }
