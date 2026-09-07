@@ -43,6 +43,10 @@ pub struct TypeChecker {
     /// Default type arguments for local aggregate definitions.
     generic_defaults: HashMap<String, Vec<Option<ast::Type>>>,
     trait_impls: HashMap<String, HashSet<String>>,
+    /// Trait names to base type names with generic impls (`impl<T> FromJson
+    /// for Vec<T>` registers Vec under FromJson); concrete generic types
+    /// resolve against these when no exact impl is registered.
+    generic_trait_impls: HashMap<String, HashSet<String>>,
     /// Base type names that implement Drop (from `impl Drop<X>` — including
     /// generic impls like `impl<T> Drop<Vec<T>>`), used to require explicit
     /// `move` when an owned payload enters an enum.
@@ -749,6 +753,11 @@ impl TypeChecker {
                     .entry(name.clone())
                     .or_default()
                     .insert(key);
+            } else if let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref() {
+                self.generic_trait_impls
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(named.path[0].name.clone());
             }
             // Record the Drop-owner base name for ANY Drop impl (generic
             // templates included): Vec<String> must count even though
@@ -5010,9 +5019,23 @@ impl TypeChecker {
     }
 
     fn has_json_trait_impl(&self, trait_name: &str, ty: &Type) -> bool {
-        self.trait_impls
+        if self
+            .trait_impls
             .get(trait_name)
             .is_some_and(|impls| impls.contains(&ty.canonical_key()))
+        {
+            return true;
+        }
+        // Generic impls are registered by base name: Optional<String> and
+        // Optional<Vec<i32>> resolve against impl<T> for Optional<T>.
+        let base = match ty {
+            Type::Named { path, .. } => path[0].clone(),
+            Type::Optional { .. } => "Optional".to_string(),
+            _ => return false,
+        };
+        self.generic_trait_impls
+            .get(trait_name)
+            .is_some_and(|bases| bases.contains(&base))
     }
 
     pub(crate) fn print_typeck(
