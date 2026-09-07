@@ -13,6 +13,26 @@ import std.sys.raw.socket;
 import std.sys.result;
 import std.test;
 
+// io_uring is kernel-dependent (5.1+). gVisor and older kernels return
+// ENOSYS from io_uring_setup; probe once so the kernel-dependent cases
+// degrade to a skip note instead of aborting, while real kernels still
+// exercise the full protocol.
+bool g_uring_checked = false;
+bool g_uring_available = false;
+
+bool io_uring_available() {
+    if (!g_uring_checked) {
+        g_uring_checked = true;
+        Result<IoUring, Error> probe = IoUring.new(1);
+        if (probe.is_ok()) {
+            g_uring_available = true;
+            IoUring ring = probe.unwrap();
+            ring.close();
+        }
+    }
+    return g_uring_available;
+}
+
 void test_io_uring_structures() {
     test_start("io_uring struct layouts");
     assert_true(@size(IoUringSqe) == 64, "IoUringSqe 64 bytes");
@@ -24,6 +44,11 @@ void test_io_uring_structures() {
 
 void test_io_uring_nop() {
     test_start("io_uring NOP submission and completion");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
 
     Result<IoUring, Error> ring_res = IoUring.new(4);
     @assert(ring_res.is_ok());
@@ -52,6 +77,11 @@ void test_io_uring_nop() {
 
 void test_io_uring_file_io() {
     test_start("io_uring async file write and read");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
 
     str path = "/tmp/__silver_uring_test.txt";
     Result<i64, Error> wr_fd = try_open(path, O_RDWR | O_CREAT | O_TRUNC, 438);
@@ -102,6 +132,11 @@ void test_io_uring_file_io() {
 
 void test_io_uring_socket_io() {
     test_start("io_uring async socket send and recv");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
 
     SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
     TcpListener listener = TcpListener.bind(&addr, 16);
