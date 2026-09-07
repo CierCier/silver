@@ -123,6 +123,46 @@ i32 main() {
 
     test_start("serialize: wide integers");
 
+    // Values that need the full 128-bit range must round-trip exactly:
+    // i128::MAX, i128::MIN, u128::MAX, and u128 above u64::MAX.
+    WideNums wmax;
+    wmax.big = (i128)170141183460469231731687303715884105727;
+    wmax.ubig = (u128)-1;
+    JsonWriter wmax_w = JsonWriter.new();
+    wmax.to_json(&wmax_w);
+    wmax_w.output.write_u8((u8)0);
+    str max_enc = (str)wmax_w.output.data;
+    Result<WideNums, JsonError> wmax_res = @from_json(WideNums, max_enc);
+    assert_true(wmax_res.is_ok(), "wide extremes decode");
+    if (wmax_res.is_ok()) {
+        WideNums w = wmax_res.unwrap();
+        assert_true(w.big == (i128)170141183460469231731687303715884105727,
+            "i128::MAX round-trips");
+        assert_true(w.ubig == (u128)-1, "u128::MAX round-trips");
+        JsonWriter w2 = JsonWriter.new();
+        w.to_json(&w2);
+        w2.output.write_u8((u8)0);
+        assert_true(cstr_eq((str)w2.output.data, max_enc),
+            "re-encode matches first encode");
+    }
+
+    Result<WideNums, JsonError> wsmall = @from_json(WideNums,
+        "{\"big\":-170141183460469231731687303715884105728,\"ubig\":18446744073709551616}");
+    assert_true(wsmall.is_ok(), "i128::MIN and u128 above u64::MAX decode");
+    if (wsmall.is_ok()) {
+        WideNums w = wsmall.unwrap();
+        assert_true(w.big == (i128)(-170141183460469231731687303715884105727) - (i128)1,
+            "i128::MIN round-trips");
+        assert_true(w.ubig == (u128)18446744073709551616,
+            "u128 above u64::MAX round-trips");
+    }
+
+    // 64-bit overflow fails instead of wrapping.
+    Result<WideNums, JsonError> wover = @from_json(WideNums,
+        "{\"big\":99999999999999999999999999999999999999999,\"ubig\":7}");
+    assert_true(wover.is_err(), "beyond-i128 overflow rejected");
+
+    // 64-bit-magnitude values still work through the same path.
     Result<WideNums, JsonError> wr = @from_json(WideNums, "{\"big\":42,\"ubig\":7}");
     assert_true(wr.is_ok(), "i128/u128 fields decode");
     if (wr.is_ok()) {

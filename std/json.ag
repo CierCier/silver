@@ -167,6 +167,16 @@ impl JsonWriter {
         self.output.write_i64(value);
     }
 
+    void write_i128(*self, i128 value) {
+        self.before_value();
+        self.output.write_i128(value);
+    }
+
+    void write_u128(*self, u128 value) {
+        self.before_value();
+        self.output.write_u128(value);
+    }
+
     void write_u64(*self, u64 value) {
         self.before_value();
         self.output.write_u64(value);
@@ -410,6 +420,104 @@ impl JsonReader {
         i64 value = 0;
         if (!self.read_i64(&value)) { return false; }
         *out = (i32)value;
+        return true;
+    }
+
+    /// Parse a full-width signed 128-bit integer. Values beyond i128::MIN/
+    /// i128::MAX fail instead of wrapping.
+    bool read_i128(*self, i128* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        bool negative = false;
+        if (self.index < self.length && bytes[self.index] == (u8)45) {
+            negative = true;
+            self.index = self.index + 1;
+        }
+        i128 value = (i128)0;
+        i128 lo = (i128)(-170141183460469231731687303715884105727) - (i128)1; // i128::MIN
+        i128 hi = (i128)170141183460469231731687303715884105727;              // i128::MAX
+        i128 lo_div = lo / (i128)10;
+        i128 hi_div = hi / (i128)10;
+        i128 lo_rem = lo % (i128)10;
+        i128 hi_rem = hi % (i128)10;
+        i64 digits = 0;
+        if (self.index < self.length && bytes[self.index] == (u8)48) {
+            digits = 1;
+            self.index = self.index + 1;
+            if (self.index < self.length && bytes[self.index] >= (u8)48 && bytes[self.index] <= (u8)57) {
+                self.failed = true;
+                return false;
+            }
+        } else {
+            while (self.index < self.length) {
+                u8 ch = bytes[self.index];
+                if (ch < (u8)48 || ch > (u8)57) { break; }
+                i128 digit = (i128)(ch - (u8)48);
+                if (negative) {
+                    if (value < lo_div || (value == lo_div && digit > ((i128)0 - lo_rem))) {
+                        self.failed = true;
+                        return false;
+                    }
+                    value = value * (i128)10 - digit;
+                } else {
+                    if (value > hi_div || (value == hi_div && digit > hi_rem)) {
+                        self.failed = true;
+                        return false;
+                    }
+                    value = value * (i128)10 + digit;
+                }
+                self.index = self.index + 1;
+                digits = digits + 1;
+            }
+        }
+        if (digits == 0) {
+            self.failed = true;
+            return false;
+        }
+        *out = value;
+        return true;
+    }
+
+    /// Parse a full-width unsigned 128-bit integer. Values beyond u128::MAX
+    /// fail instead of wrapping; a minus sign is an error.
+    bool read_u128(*self, u128* out) {
+        u8* bytes = (u8*)self.input;
+        self.skip_whitespace();
+        if (self.index < self.length && bytes[self.index] == (u8)45) {
+            self.failed = true;
+            return false;
+        }
+        u128 value = (u128)0;
+        u128 hi = (u128)-1; // u128::MAX
+        u128 hi_div = hi / (u128)10;
+        u128 hi_rem = hi % (u128)10;
+        i64 digits = 0;
+        if (self.index < self.length && bytes[self.index] == (u8)48) {
+            digits = 1;
+            self.index = self.index + 1;
+            if (self.index < self.length && bytes[self.index] >= (u8)48 && bytes[self.index] <= (u8)57) {
+                self.failed = true;
+                return false;
+            }
+        } else {
+            while (self.index < self.length) {
+                u8 ch = bytes[self.index];
+                if (ch < (u8)48 || ch > (u8)57) { break; }
+                u128 digit = (u128)(ch - (u8)48);
+                if (value > hi_div || (value == hi_div && digit > hi_rem)) {
+                    self.failed = true;
+                    return false;
+                }
+                value = value * (u128)10 + digit;
+                self.index = self.index + 1;
+                digits = digits + 1;
+            }
+        }
+        if (digits == 0) {
+            self.failed = true;
+            return false;
+        }
+        *out = value;
         return true;
     }
 
@@ -756,8 +864,8 @@ impl ToJson for u8 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*
 impl ToJson for u16 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u32 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
 impl ToJson for u64 { void to_json(*self, JsonWriter* out) { out.write_u64(*self); } }
-impl ToJson for i128 { void to_json(*self, JsonWriter* out) { out.write_i64((i64)*self); } }
-impl ToJson for u128 { void to_json(*self, JsonWriter* out) { out.write_u64((u64)*self); } }
+impl ToJson for i128 { void to_json(*self, JsonWriter* out) { out.write_i128(*self); } }
+impl ToJson for u128 { void to_json(*self, JsonWriter* out) { out.write_u128(*self); } }
 impl ToJson for f64 { void to_json(*self, JsonWriter* out) { out.write_f64(*self); } }
 impl ToJson for f32 { void to_json(*self, JsonWriter* out) { out.write_f64((f64)*self); } }
 impl ToJson for bool { void to_json(*self, JsonWriter* out) { out.write_bool(*self); } }
@@ -890,23 +998,23 @@ impl FromJson for u64 {
 
 impl FromJson for i128 {
     Result<i128, JsonError> from_json(JsonReader* input) {
-        i64 value = 0;
-        if (!input.read_i64(&value)) {
+        i128 value = (i128)0;
+        if (!input.read_i128(&value)) {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
-        return Ok((i128)value);
+        return Ok(value);
     }
 }
 
 impl FromJson for u128 {
     Result<u128, JsonError> from_json(JsonReader* input) {
-        u64 value = 0;
-        if (!input.read_u64(&value)) {
+        u128 value = (u128)0;
+        if (!input.read_u128(&value)) {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
-        return Ok((u128)value);
+        return Ok(value);
     }
 }
 
@@ -985,23 +1093,23 @@ impl JsonDecode for i64 {
 
 impl JsonDecode for i128 {
     Result<i128, JsonError> json_decode(*self, JsonReader* input) {
-        i64 value = 0;
-        if (!input.read_i64(&value)) {
+        i128 value = (i128)0;
+        if (!input.read_i128(&value)) {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
-        return Ok((i128)value);
+        return Ok(value);
     }
 }
 
 impl JsonDecode for u128 {
     Result<u128, JsonError> json_decode(*self, JsonReader* input) {
-        u64 value = 0;
-        if (!input.read_u64(&value)) {
+        u128 value = (u128)0;
+        if (!input.read_u128(&value)) {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
-        return Ok((u128)value);
+        return Ok(value);
     }
 }
 

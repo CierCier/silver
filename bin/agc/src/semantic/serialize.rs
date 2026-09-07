@@ -482,14 +482,24 @@ pub fn generate_to_json_source(s: &ast::StructItem) -> String {
 
         let canonical = type_to_canonical_name(&field.field_type);
         match canonical.as_str() {
-            "i8" | "i16" | "i32" | "i64" | "i128" => {
+            "i8" | "i16" | "i32" | "i64" => {
                 body.push_str(&format!(
                     "        out.write_i64((i64)(*self).{field_name});\n"
                 ));
             }
-            "u8" | "u16" | "u32" | "u64" | "u128" => {
+            "i128" => {
+                body.push_str(&format!(
+                    "        out.write_i128((*self).{field_name});\n"
+                ));
+            }
+            "u8" | "u16" | "u32" | "u64" => {
                 body.push_str(&format!(
                     "        out.write_u64((u64)(*self).{field_name});\n"
+                ));
+            }
+            "u128" => {
+                body.push_str(&format!(
+                    "        out.write_u128((*self).{field_name});\n"
                 ));
             }
             "f32" | "f64" => {
@@ -604,7 +614,7 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
 
             let canonical = type_to_canonical_name(&field.field_type);
             match canonical.as_str() {
-                "i8" | "i16" | "i32" | "i64" | "i128" => {
+                "i8" | "i16" | "i32" | "i64" => {
                     body.push_str("                i64 val = 0;\n");
                     body.push_str("                if (!input.read_i64(&val)) {\n");
                     body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
@@ -616,7 +626,19 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                         "                result.{field_name} = ({canonical})val;\n"
                     ));
                 }
-                "u8" | "u16" | "u32" | "u64" | "u128" => {
+                "i128" => {
+                    body.push_str("                i128 val = (i128)0;\n");
+                    body.push_str("                if (!input.read_i128(&val)) {\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                    body.push_str(&format!(
+                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                    ));
+                    body.push_str("                }\n");
+                    body.push_str(&format!(
+                        "                result.{field_name} = val;\n"
+                    ));
+                }
+                "u8" | "u16" | "u32" | "u64" => {
                     body.push_str("                u64 val = 0;\n");
                     body.push_str("                if (!input.read_u64(&val)) {\n");
                     body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
@@ -626,6 +648,18 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                     body.push_str("                }\n");
                     body.push_str(&format!(
                         "                result.{field_name} = ({canonical})val;\n"
+                    ));
+                }
+                "u128" => {
+                    body.push_str("                u128 val = (u128)0;\n");
+                    body.push_str("                if (!input.read_u128(&val)) {\n");
+                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                    body.push_str(&format!(
+                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                    ));
+                    body.push_str("                }\n");
+                    body.push_str(&format!(
+                        "                result.{field_name} = val;\n"
                     ));
                 }
                 "f32" | "f64" => {
