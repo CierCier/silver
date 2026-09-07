@@ -250,6 +250,14 @@ i32 main() {
         }
         assert_eq_i64(seen, 3, "for-in visits each key once");
         assert_eq_i64(sum, 60, "keys 10+20+30");
+        // The consuming for-in left the set as a valid empty value: re-
+        // iterating is safe and yields nothing, and drop cannot double-free.
+        assert_eq_i64(s.len, 0, "set consumed by for-in");
+        i64 after = 0;
+        for x in s {
+            after = after + 1;
+        }
+        assert_eq_i64(after, 0, "moved-from set iterates empty");
     }
     return done();
 }

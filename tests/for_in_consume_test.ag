@@ -1,0 +1,58 @@
+// For-in consumption: `for x in container` transfers the container's
+// buffers into the iterator. After the loop the original must be a valid
+// empty container — never a dangling view over memory the iterator freed.
+import std.test;
+import std.mem.vec;
+import std.mem.alloc;
+import std.string;
+
+i32 main() {
+    // Copy-typed elements: the pre-fix bug left v dangling after the loop.
+    Vec<i32> v = Vec<i32>.new();
+    v.push(1);
+    v.push(2);
+    i32 n1 = 0;
+    for x in v {
+        n1 = n1 + 1;
+    }
+    assert_eq_i32(2, n1, "first iteration visits all elements");
+    assert_eq_i32(0, v.len, "vector consumed: length zero");
+
+    // Re-iterating the consumed vector must be safe and empty.
+    i32 n2 = 0;
+    for x in v {
+        n2 = n2 + 1;
+    }
+    assert_eq_i32(0, n2, "second iteration yields nothing");
+
+    // Drop the consumed vector: no double free of the iterator's buffer.
+    v.drop();
+
+    // Move-typed elements: same consumption, strings freed exactly once.
+    Vec<String> sv = Vec<String>.new();
+    sv.push(String.from_str("a"));
+    sv.push(String.from_str("b"));
+    i32 sn = 0;
+    for s in sv {
+        sn = sn + 1;
+        s.drop();
+    }
+    assert_eq_i32(2, sn, "string elements visited");
+    assert_eq_i32(0, sv.len, "string vector consumed");
+    sv.drop();
+
+    // Write-back must not clobber unrelated variables.
+    Vec<i32> keep = Vec<i32>.new();
+    keep.push(9);
+    Vec<i32> consume = Vec<i32>.new();
+    consume.push(1);
+    i32 cn = 0;
+    for x in consume {
+        cn = cn + 1;
+    }
+    assert_eq_i32(1, cn, "consume loop runs");
+    assert_eq_i32(1, keep.len, "unrelated vector untouched");
+    keep.drop();
+
+    return done();
+}

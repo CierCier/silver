@@ -597,6 +597,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?
                     .ok_or_else(|| CodegenError::new("into_iter() must not return void"))?;
 
+                // The into_iter call consumed the iterable: the iterator now
+                // owns (and frees) the buffers. Zero the original variable so
+                // it is a valid empty container under the zero-init drop
+                // contract — never a dangling view over freed memory. (A
+                // by-value into_iter cannot null the caller's fields itself:
+                // for Copy containers the receiver is a copy.)
+                if matches!(mode, ast::IterAccessMode::ByValue) {
+                    if let ast::ExpressionKind::Identifier(ident) = iterable.kind.as_ref() {
+                        if let Some(orig_ptr) =
+                            self.lookup_variable(&ident.name).map(|v| v.ptr)
+                        {
+                            let zero = iterable_llvm_ty.const_zero();
+                            self.builder
+                                .build_store(orig_ptr, zero)
+                                .map_err(|e| {
+                                    CodegenError::new(format!(
+                                        "failed to zero consumed iterable: {e}"
+                                    ))
+                                })?;
+                        }
+                    }
+                }
+
                 let iter_llvm_ty = iterator_val.get_type();
 
                 // Use the typeck-resolved iterator type (carries generics), or infer from LLVM value
@@ -612,7 +635,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         iter_name.to_string(),
                         VarInfo {
                             ptr: iter_ptr,
-                            ty: iter_ast_ty,
+                            ty: iter_ast_ty.clone(),
                             is_mutable: true,
                             is_volatile: false,
                             drop_flag: None,
@@ -620,6 +643,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         },
                     );
                 }
+                // The iterator owns the container's buffers; register its
+                // destructor so the loop-end scope exit frees them (no-op for
+                // iterator types without a Drop impl).
+                self.register_drop_flag(iter_name, &iter_ast_ty, iter_ptr)?;
 
                 let next_ident = ast::Identifier {
                     name: "next".to_string(),
