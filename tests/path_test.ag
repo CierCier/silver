@@ -75,6 +75,15 @@ i32 main() {
     String n4 = path_normalize("a/../..");
     assert_true(n4.equals(".."), "excess parents");
     n4.drop();
+    String n5 = path_normalize("../../x");
+    assert_true(n5.equals("../../x"), "leading parents kept");
+    n5.drop();
+    String n6 = path_normalize("../..");
+    assert_true(n6.equals("../.."), "two leading parents kept");
+    n6.drop();
+    String n7 = path_normalize("a/../../b");
+    assert_true(n7.equals("../b"), "parent above consumed component kept");
+    n7.drop();
 
     test_start("path: percent encode/decode");
 

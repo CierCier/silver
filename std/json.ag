@@ -645,8 +645,18 @@ impl JsonReader {
 
     /// Consume one JSON value of any shape (object, array, string, number,
     /// literal). Fields with unknown names are skipped so parsing tolerates
-    /// extra keys in the payload.
+    /// extra keys in the payload. Malformed containers (missing commas,
+    /// trailing commas) fail instead of being silently accepted, and nesting
+    /// deeper than 256 is rejected so hostile input cannot exhaust the stack.
     bool skip_value(*self) {
+        return self.skip_value_depth(0);
+    }
+
+    bool skip_value_depth(*self, i64 depth) {
+        if (depth > 256) {
+            self.failed = true;
+            return false;
+        }
         self.skip_whitespace();
         if (self.failed) { return false; }
         u8* bytes = (u8*)self.input;
@@ -657,6 +667,7 @@ impl JsonReader {
         u8 ch = bytes[self.index];
         if (ch == (u8)123) {
             if (!self.begin_object()) { return false; }
+            bool first = true;
             while (true) {
                 self.skip_whitespace();
                 if (self.failed) { return false; }
@@ -664,19 +675,26 @@ impl JsonReader {
                     self.index = self.index + 1;
                     break;
                 }
+                if (!first) {
+                    if (!self.comma()) { return false; }
+                    self.skip_whitespace();
+                    if (self.failed) { return false; }
+                    if (self.index < self.length && bytes[self.index] == (u8)125) {
+                        // Trailing comma before the closing brace.
+                        self.failed = true;
+                        return false;
+                    }
+                }
                 String key = self.read_string();
                 if (self.failed) { return false; }
                 if (!self.expect((u8)58)) { return false; }
-                if (!self.skip_value()) { return false; }
-                self.skip_whitespace();
-                if (self.failed) { return false; }
-                if (self.index < self.length && bytes[self.index] == (u8)44) {
-                    self.index = self.index + 1;
-                }
+                if (!self.skip_value_depth(depth + 1)) { return false; }
+                first = false;
             }
             return true;
         } else if (ch == (u8)91) {
             if (!self.begin_array()) { return false; }
+            bool first = true;
             while (true) {
                 self.skip_whitespace();
                 if (self.failed) { return false; }
@@ -684,12 +702,18 @@ impl JsonReader {
                     self.index = self.index + 1;
                     break;
                 }
-                if (!self.skip_value()) { return false; }
-                self.skip_whitespace();
-                if (self.failed) { return false; }
-                if (self.index < self.length && bytes[self.index] == (u8)44) {
-                    self.index = self.index + 1;
+                if (!first) {
+                    if (!self.comma()) { return false; }
+                    self.skip_whitespace();
+                    if (self.failed) { return false; }
+                    if (self.index < self.length && bytes[self.index] == (u8)93) {
+                        // Trailing comma before the closing bracket.
+                        self.failed = true;
+                        return false;
+                    }
                 }
+                if (!self.skip_value_depth(depth + 1)) { return false; }
+                first = false;
             }
             return true;
         } else if (ch == (u8)34) {
@@ -1040,6 +1064,9 @@ impl<T> JsonDecode for Vec<T> {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
         }
+        bool first = true;
+        bool elem_failed = false;
+        JsonError elem_error = JsonError.invalid();
         while (true) {
             input.skip_whitespace();
             if (input.failed) { break; }
@@ -1048,18 +1075,33 @@ impl<T> JsonDecode for Vec<T> {
                 input.index = input.index + 1;
                 break;
             }
-            if (out.len > 0) {
+            if (!first) {
                 if (!input.comma()) { break; }
+                input.skip_whitespace();
+                if (input.failed) { break; }
+                if (input.index < input.length && bytes[input.index] == (u8)93) {
+                    // Trailing comma before the closing bracket.
+                    input.failed = true;
+                    break;
+                }
             }
             // Zero-init local anchors the element-type dispatch.
             T slot;
             Result<T, JsonError> elem = slot.json_decode(input);
-            if (elem.is_err()) { break; }
+            if (elem.is_err()) {
+                elem_failed = true;
+                elem_error = elem.unwrap_err();
+                break;
+            }
             out.push(elem.unwrap());
+            first = false;
         }
         if (input.failed) {
             JsonError error = JsonError.at_index(input.index);
             return Err(move error);
+        }
+        if (elem_failed) {
+            return Err(move elem_error);
         }
         return Ok(move out);
     }

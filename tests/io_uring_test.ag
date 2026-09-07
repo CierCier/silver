@@ -28,6 +28,12 @@ bool io_uring_available() {
             g_uring_available = true;
             IoUring ring = probe.unwrap();
             ring.close();
+        } else {
+            Error probe_err = probe.get_error();
+            // ENOSYS: the kernel does not implement io_uring. Any other error
+            // is a real failure — staying available makes the cases run and
+            // fail loudly instead of masking the regression behind a skip.
+            g_uring_available = probe_err.code != 38;
         }
     }
     return g_uring_available;

@@ -549,6 +549,10 @@ impl<K> IntoIterator for HashSet<K> {
 impl<K> Drop for HashSetIntoIter<K> {
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
+            // Frees the buffer only. Keys not yet moved out by next() are
+            // the caller's responsibility to drop before abandoning the
+            // iterator (same convention as VecIter and HashMapIntoIter:
+            // containers own their backing buffer, never element contents).
             free(self.keys);
             free(self.ctrl);
             self.keys = (K*)0;

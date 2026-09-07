@@ -285,9 +285,6 @@ pub fn synthesize_serialization_for_program(program: &mut ast::Program) {
         // FromJson
         if !existing_to_impls.contains(&("FromJson".to_string(), struct_name.clone())) {
             let from_json_src = generate_from_json_source(s);
-            if struct_name == "Message" {
-                eprintln!("=== SYNTH from_json ===\n{from_json_src}=== END ===");
-            }
             if let Some(item) = parse_impl_snippet(&from_json_src) {
                 synthesized_items.push(item);
                 existing_to_impls.insert(("FromJson".to_string(), struct_name.clone()));
@@ -686,6 +683,12 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
         body.push_str("            }\n");
         body.push_str("            if (input.at_object_end()) { break; }\n");
         body.push_str("            if (!input.comma()) {\n");
+        body.push_str("                JsonError err = JsonError.at_index(input.index);\n");
+        body.push_str(&format!(
+            "                return Result<{struct_name}, JsonError>.Err(move err);\n"
+        ));
+        body.push_str("            }\n");
+        body.push_str("            if (input.at_object_end()) {\n");
         body.push_str("                JsonError err = JsonError.at_index(input.index);\n");
         body.push_str(&format!(
             "                return Result<{struct_name}, JsonError>.Err(move err);\n"

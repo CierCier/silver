@@ -56,6 +56,19 @@ u32 decode_codepoint(u8* bytes, i64 len, i64 index, i64* out_len) {
         cp = (cp << 6) | (u32)(cont & 0x3F);
         i = i + 1;
     }
+    // Reject overlong encodings, surrogate code points, and values above
+    // U+10FFFF so malformed input decodes as U+FFFD with length one.
+    bool valid = false;
+    if (seq_len == 2) {
+        valid = cp >= 0x80 && cp <= 0x7FF;
+    } else if (seq_len == 3) {
+        valid = cp >= 0x800 && cp <= 0xFFFF && !(cp >= 0xD800 && cp <= 0xDFFF);
+    } else {
+        valid = cp >= 0x10000 && cp <= 0x10FFFF;
+    }
+    if (!valid) {
+        return 0xFFFD;
+    }
     *out_len = seq_len;
     return cp;
 }

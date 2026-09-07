@@ -88,6 +88,37 @@ i32 main() {
         boundary = boundary + 1;
     }
 
+    test_start("text: malformed UTF-8 decodes as U+FFFD");
+
+    // Overlong encoding C0 8A (2-byte form of U+000A): must not count as a
+    // newline and must advance exactly one byte.
+    String over = String.new();
+    over.push((u8)0xC0);
+    over.push((u8)0x8A);
+    over.push((u8)97);
+    assert_eq_i64(utf16_len((str)over), 2, "overlong pair is U+FFFD + 'a'");
+    TextPosition op = byte_to_position((str)over, 1);
+    assert_eq_i64(op.line, 0, "overlong byte is not a newline");
+    assert_eq_i64(op.character, 1, "overlong byte is one replacement unit");
+    over.drop();
+
+    // Above U+10FFFF: F4 90 80 80.
+    String above = String.new();
+    above.push((u8)0xF4);
+    above.push((u8)0x90);
+    above.push((u8)0x80);
+    above.push((u8)0x80);
+    assert_eq_i64(utf16_len((str)above), 1, "out-of-range decodes as U+FFFD");
+    above.drop();
+
+    // UTF-8-encoded surrogate ED A0 80 (U+D800).
+    String surr = String.new();
+    surr.push((u8)0xED);
+    surr.push((u8)0xA0);
+    surr.push((u8)0x80);
+    assert_eq_i64(utf16_len((str)surr), 1, "surrogate codepoint is U+FFFD");
+    surr.drop();
+
     test_start("text: \r\n line endings");
 
     String crlf = String.new();

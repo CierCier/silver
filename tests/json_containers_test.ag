@@ -13,6 +13,30 @@ struct Bag {
     Optional<i32> age;
 }
 
+// Element decoder that rejects values by returning Err without touching the
+// reader's failed flag: containers must propagate this, not accept a
+// partial vector.
+struct Checked {
+    i32 v;
+}
+
+impl JsonDecode for Checked {
+    Result<Checked, JsonError> json_decode(*self, JsonReader* input) {
+        Checked c;
+        i64 raw = 0;
+        if (!input.read_i64(&raw)) {
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        if (raw <= 0) {
+            JsonError e = JsonError.at_index(input.index);
+            return Err(move e);
+        }
+        c.v = (i32)raw;
+        return Ok(move c);
+    }
+}
+
 impl ToJson for Bag {
     void to_json(*self, JsonWriter* out) {
         out.begin_object();
@@ -105,6 +129,19 @@ i32 main() {
     assert_true(cstr_eq(enc2, "\"keep\""), "first encode correct");
     assert_true(cstr_eq(enc2, enc3), "second encode identical (value restored)");
     assert_true(keep.is_some(), "optional still some after serialize");
+
+    test_start("json containers: element errors propagate");
+
+    Result<Vec<Checked>, JsonError> cv = @from_json(Vec<Checked>, "[1,-5,3]");
+    assert_true(cv.is_err(), "rejected element fails the whole vector");
+    Result<Vec<Checked>, JsonError> cv2 = @from_json(Vec<Checked>, "[1,2,3]");
+    assert_true(cv2.is_ok(), "valid elements pass");
+    if (cv2.is_ok()) {
+        Vec<Checked> okv = cv2.unwrap();
+        assert_eq_i64(okv.len, 3, "all three elements decoded");
+        assert_eq_i64(okv.data[1].v, 2, "second element value");
+        okv.drop();
+    }
 
     test_start("json containers: struct with Vec and Optional fields");
 

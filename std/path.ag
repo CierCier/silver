@@ -123,7 +123,15 @@ String path_normalize(str path) {
                 part.drop();
                 if (parts.len > 0) {
                     String last = parts.pop();
-                    last.drop();
+                    if (last.equals("..")) {
+                        // Leading parents cannot collapse: keep both.
+                        parts.push(move last);
+                        String up = String.new();
+                        up.push_str("..");
+                        parts.push(move up);
+                    } else {
+                        last.drop();
+                    }
                 } else if (!absolute) {
                     String up = String.new();
                     up.push_str("..");

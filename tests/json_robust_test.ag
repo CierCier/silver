@@ -98,6 +98,37 @@ i32 main() {
     assert_true(r8.end_object(), "object closes after skips");
     assert_eq_i64(id, 7, "id read while unknown fields skipped");
 
+    test_start("json: malformed containers rejected");
+
+    JsonReader r9 = JsonReader.new("{\"a\": [1 2]}");
+    assert_true(!r9.skip_value(), "missing comma in array rejected");
+    JsonReader r10 = JsonReader.new("{\"a\": [1,]}");
+    assert_true(!r10.skip_value(), "trailing comma in array rejected");
+    JsonReader r11 = JsonReader.new("{\"a\": 1,}");
+    assert_true(!r11.skip_value(), "trailing comma in object rejected");
+    JsonReader r12 = JsonReader.new("{\"a\": 1 \"b\": 2}");
+    assert_true(!r12.skip_value(), "missing comma in object rejected");
+    JsonReader r13 = JsonReader.new("[1,]");
+    assert_true(!r13.skip_value(), "top-level trailing comma rejected");
+
+    test_start("json: nesting beyond 256 rejected");
+
+    String deep = String.new();
+    i64 di = 0;
+    while (di < 300) {
+        deep.push((u8)91);
+        di = di + 1;
+    }
+    di = 0;
+    while (di < 300) {
+        deep.push((u8)93);
+        di = di + 1;
+    }
+    deep.push((u8)0);
+    JsonReader r14 = JsonReader.new((str)deep.data);
+    assert_true(!r14.skip_value(), "nesting beyond 256 rejected");
+    deep.drop();
+
     test_start("json: error offsets");
 
     // A malformed payload reports the byte offset where decoding stopped.
