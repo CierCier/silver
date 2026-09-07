@@ -64,5 +64,20 @@ i32 main() {
         a.drop();
     }
 
+    // Test 5: from_ptr adopts the caller's allocation
+    STDOUT.write_str("--- Test 5: from_ptr adoption ---\n");
+    {
+        // The Rc consumes the heap allocation (frees it at construction
+        // after relocating the value into its co-allocated box). The
+        // --leak-check run verifies neither the box nor the adopted
+        // allocation leaks.
+        i32* p = alloc<i32>();
+        *p = 777;
+        Rc<i32> r = Rc<i32>.from_ptr(p);
+        i32* rp = r.get(&r);
+        assert_eq_i32(*rp, 777, "from_ptr: Rc reads adopted value");
+        r.drop();
+    }
+
     return done();
 }

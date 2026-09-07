@@ -129,8 +129,32 @@ void bt_write_hex(i64 fd, i64 value) {
 // pre-sorted by the compiler. On first resolution the entries table is
 // sorted by address and the line table by (address, offset); every later
 // lookup is O(log N) instead of a linear scan.
+//
+// The first resolution mutates the process-wide tables in place, so it must
+// be serialized: two threads sorting concurrently (or one searching while
+// another sorts) would corrupt the tables. A tiny asm spinlock — xchg to
+// memory is implicitly locked — guards the one-time initialization; later
+// lookups are unlocked reads of stable tables.
 
+i64 g_bt_lock;
 i32 g_bt_sorted;
+
+/// Atomically exchange 1 with *addr; returns the previous value.
+i64 bt_xchg(i64 addr) {
+    return asm("movq $1, %rax\nxchgq %rax, (%rdi)", [0, addr], ["memory"]);
+}
+
+void bt_lock_acquire() {
+    i64 addr = (i64)&g_bt_lock;
+    while (bt_xchg(addr) != 0) {
+        i64 _p = asm("pause", [], []);
+    }
+}
+
+void bt_lock_release() {
+    i64 addr = (i64)&g_bt_lock;
+    i64 _s = asm("movq $0, (%rdi)", [0, addr], ["memory"]);
+}
 
 bool bt_line_before(BtLine a, BtLine b) {
     if (a.addr != b.addr) {
@@ -179,18 +203,22 @@ void bt_qsort_lines(i64 lo, i64 hi) {
     bt_qsort_lines(i, hi);
 }
 
-/// One-time in-place sort of both tables (guarded by a static flag).
+/// One-time in-place sort of both tables (double-checked under the spinlock).
 void bt_ensure_sorted() {
     if (g_bt_sorted != 0) {
         return;
     }
-    if (__silver_bt_count > 1) {
-        bt_qsort_entries(0, __silver_bt_count - 1);
+    bt_lock_acquire();
+    if (g_bt_sorted == 0) {
+        if (__silver_bt_count > 1) {
+            bt_qsort_entries(0, __silver_bt_count - 1);
+        }
+        if (__silver_bt_lines_count > 1) {
+            bt_qsort_lines(0, __silver_bt_lines_count - 1);
+        }
+        g_bt_sorted = 1;
     }
-    if (__silver_bt_lines_count > 1) {
-        bt_qsort_lines(0, __silver_bt_lines_count - 1);
-    }
-    g_bt_sorted = 1;
+    bt_lock_release();
 }
 
 /// Resolve a return address to the entry with the largest addr <= it

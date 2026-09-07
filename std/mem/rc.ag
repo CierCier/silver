@@ -46,13 +46,16 @@ impl<T> Rc<T> {
         return rc;
     }
 
-    /// Create a new reference-counted handle by copying `*ptr` into a fresh
-    /// box. The caller retains ownership of `ptr` and must free it; the Rc
-    /// owns only the box. The count starts at 1.
+    /// Create a new reference-counted handle by adopting a heap pointer.
+    /// `*ptr` is copied into the Rc's co-allocated box and the original
+    /// allocation is freed immediately, so the caller transfers ownership
+    /// and must not use or free `ptr` afterwards. `get()` returns the box
+    /// payload, not the original pointer. The count starts at 1.
     Rc<T> from_ptr(T* ptr) {
         RcBox<T>* b = alloc<RcBox<T>>();
         (*b).count = 1;
         (*b).value = *ptr;
+        free(ptr);
         Rc<T> rc;
         rc.ptr = &((*b).value);
         rc.count = &((*b).count);
