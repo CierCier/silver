@@ -1660,6 +1660,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
             ast::ExpressionKind::Identifier(identifier) => self.lookup_value_type(&identifier.name),
             ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
+            ast::ExpressionKind::Tuple(items) => {
+                let mut elem_types = Vec::with_capacity(items.len());
+                for item in items {
+                    elem_types.push(self.resolve_receiver_type(item)?);
+                }
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Tuple(elem_types)),
+                    span: expr.span,
+                })
+            }
             ast::ExpressionKind::FieldAccess { .. }
             | ast::ExpressionKind::Index { .. }
             | ast::ExpressionKind::Slice { .. }

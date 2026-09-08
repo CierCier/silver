@@ -973,6 +973,13 @@ impl TypeChecker {
         let last = &block.statements[block.statements.len() - 1];
         let ty = match &last.kind {
             ast::StatementKind::Expression(expr) => self.check_expr(expr, expected),
+            // Diverging statements — control flow never reaches the merge point.
+            ast::StatementKind::Return(_)
+            | ast::StatementKind::Break(_)
+            | ast::StatementKind::Continue => {
+                self.check_statement(last);
+                Type::Never
+            }
             _ => {
                 self.check_statement(last);
                 Type::Unit
@@ -2338,6 +2345,27 @@ impl TypeChecker {
                                 inner.as_ref().clone()
                             }
                         },
+                        Type::Tuple(elem_types) => {
+                            let Some(idx) = Self::literal_integer_value(index) else {
+                                self.error(
+                                    "tuple index must be a constant integer literal".to_string(),
+                                    index.span,
+                                );
+                                return Type::Unknown;
+                            };
+                            if idx < 0 || idx as usize >= elem_types.len() {
+                                self.error(
+                                    format!(
+                                        "tuple index out of bounds: index is {}, but tuple has {} elements",
+                                        idx,
+                                        elem_types.len()
+                                    ),
+                                    index.span,
+                                );
+                                return Type::Unknown;
+                            }
+                            elem_types[idx as usize].clone()
+                        }
                         _ => {
                             if let Some(result_ty) = self.resolve_method_overload_types(
                                 &object_ty,
@@ -2377,6 +2405,27 @@ impl TypeChecker {
                             return Type::Unknown;
                         }
                         (**element).clone()
+                    }
+                    Type::Tuple(elem_types) => {
+                        let Some(idx) = Self::literal_integer_value(index) else {
+                            self.error(
+                                "tuple index must be a constant integer literal".to_string(),
+                                index.span,
+                            );
+                            return Type::Unknown;
+                        };
+                        if idx < 0 || idx as usize >= elem_types.len() {
+                            self.error(
+                                format!(
+                                    "tuple index out of bounds: index is {}, but tuple has {} elements",
+                                    idx,
+                                    elem_types.len()
+                                ),
+                                index.span,
+                            );
+                            return Type::Unknown;
+                        }
+                        elem_types[idx as usize].clone()
                     }
                     Type::Primitive(ast::PrimitiveType::Str) => {
                         // str is a byte pointer: s[i] reads the i-th byte (u8).
@@ -2773,10 +2822,17 @@ impl TypeChecker {
                             arm_types.push(self.check_expr(&arm.body, arm_expected));
                             self.pop_scope();
                         }
-                        if let Some(first) = arm_types.first() {
-                            let unified = first.clone();
+                        let non_never: Vec<&Type> =
+                            arm_types.iter().filter(|t| **t != Type::Never).collect();
+                        if let Some(first) = non_never.first() {
+                            let unified = (*first).clone();
                             for (i, other) in arm_types.iter().enumerate().skip(1) {
-                                if &unified != other {
+                                if other == &Type::Never {
+                                    continue;
+                                }
+                                if &unified != other
+                                    && !Self::void_compatible(&unified, other)
+                                {
                                     self.error(
                                         format!(
                                             "match arm {} has type {}, expected {}",
@@ -2790,7 +2846,7 @@ impl TypeChecker {
                             }
                             unified
                         } else {
-                            Type::Unit
+                            Type::Never
                         }
                     } else {
                         let suggestion = self.type_suggestion(&path[0]);
@@ -2902,10 +2958,17 @@ impl TypeChecker {
                         arm_types.push(self.check_expr(&arm.body, arm_expected));
                         self.pop_scope();
                     }
-                    if let Some(first) = arm_types.first() {
-                        let unified = first.clone();
+                    let non_never: Vec<&Type> =
+                        arm_types.iter().filter(|t| **t != Type::Never).collect();
+                    if let Some(first) = non_never.first() {
+                        let unified = (*first).clone();
                         for (i, other) in arm_types.iter().enumerate().skip(1) {
-                            if &unified != other {
+                            if other == &Type::Never {
+                                continue;
+                            }
+                            if &unified != other
+                                && !Self::void_compatible(&unified, other)
+                            {
                                 self.error(
                                     format!(
                                         "match arm {} has type {}, expected {}",
@@ -2919,7 +2982,7 @@ impl TypeChecker {
                         }
                         unified
                     } else {
-                        Type::Unit
+                        Type::Never
                     }
                 } else {
                     self.error(
@@ -4549,7 +4612,7 @@ impl TypeChecker {
                 params.iter().all(|inner| self.is_concrete_type(inner))
                     && self.is_concrete_type(return_type)
             }
-            Type::Primitive(_) | Type::Unit => true,
+            Type::Primitive(_) | Type::Unit | Type::Never => true,
             Type::Unknown => false,
         }
     }

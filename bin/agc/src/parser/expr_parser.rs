@@ -534,6 +534,26 @@ fn find_matching_brace(tokens: &[LexToken], start: usize, end: usize) -> Option<
     None
 }
 
+fn is_designated_index_init(tokens: &[LexToken], start: usize, end: usize) -> bool {
+    if start >= end || !matches!(tokens[start].kind, Token::LeftBracket) {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (idx, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.kind {
+            Token::LeftBracket => depth += 1,
+            Token::RightBracket => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return idx + 1 < end && matches!(tokens[idx + 1].kind, Token::Assign);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, ParseError> {
     let token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
         message: "expected match pattern".to_string(),
@@ -1244,7 +1264,9 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                             value,
                         });
                     }
-                    Token::LeftBracket => {
+                    Token::LeftBracket
+                        if is_designated_index_init(cursor.tokens, cursor.pos, cursor.end) =>
+                    {
                         cursor.bump();
                         let index = parse_assignment(cursor)?;
                         let Some(close) = cursor.current() else {

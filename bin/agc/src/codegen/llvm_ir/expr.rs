@@ -1197,23 +1197,50 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(ty) = &object_ty
                     && matches!(
                         ty.kind.as_ref(),
-                        ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_)
+                        ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_) | ast::TypeKind::Tuple(_)
                     )
                 {
-                    let (ptr, ty) = self.resolve_lvalue_ptr(expr)?;
-                    let llvm_ty = self.lower_basic_type(&ty)?;
-                    if self.lvalue_is_volatile(expr) {
-                        return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
+                    if let Ok((ptr, ty)) = self.resolve_lvalue_ptr(expr) {
+                        let llvm_ty = self.lower_basic_type(&ty)?;
+                        if self.lvalue_is_volatile(expr) {
+                            return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
+                        }
+                        return self
+                            .builder
+                            .build_load(llvm_ty, ptr, "lvalue.load")
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to load lvalue: {e}"),
+                                    expr.span,
+                                )
+                            });
+                    } else if matches!(ty.kind.as_ref(), ast::TypeKind::Tuple(_)) {
+                        let tuple_val = self.emit_expression_value(object)?;
+                        let BasicValueEnum::StructValue(struct_val) = tuple_val else {
+                            return Err(CodegenError::with_span(
+                                "expected struct value for tuple indexing",
+                                object.span,
+                            ));
+                        };
+                        let idx = match index.kind.as_ref() {
+                            ast::ExpressionKind::Literal(ast::Literal::Integer(n)) => *n,
+                            _ => {
+                                return Err(CodegenError::with_span(
+                                    "tuple index must be a constant integer literal",
+                                    index.span,
+                                ));
+                            }
+                        };
+                        return self
+                            .builder
+                            .build_extract_value(struct_val, idx as u32, "tuple.extract")
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to extract tuple element: {e}"),
+                                    expr.span,
+                                )
+                            });
                     }
-                    return self
-                        .builder
-                        .build_load(llvm_ty, ptr, "lvalue.load")
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed to load lvalue: {e}"),
-                                expr.span,
-                            )
-                        });
                 }
                 // str is a byte pointer: s[i] loads the i-th byte.
                 if let Some(ty) = &object_ty
@@ -2477,8 +2504,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         if let ast::ExpressionKind::Initializer { items } = expr.kind.as_ref() {
             self.emit_typed_initializer_value(items, expected_type, &expr.span)
+        } else if let ast::ExpressionKind::Tuple(items) = expr.kind.as_ref()
+            && let ast::TypeKind::Tuple(types) = expected_type.kind.as_ref()
+        {
+            if items.len() != types.len() {
+                return Err(CodegenError::with_span(
+                    "tuple initializer arity mismatch",
+                    expr.span,
+                ));
+            }
+            let mut field_types = Vec::with_capacity(types.len());
+            for ty in types {
+                field_types.push(self.lower_basic_type(ty)?);
+            }
+            let tuple_ty = self.context.struct_type(&field_types, false);
+            let mut aggregate = tuple_ty.get_undef();
+            for (index, item) in items.iter().enumerate() {
+                let value = self.emit_expression_value_for_expected(item, &types[index])?;
+                let value = self.cast_value_to_basic_type(value, field_types[index], &item.span)?;
+                aggregate = self
+                    .builder
+                    .build_insert_value(aggregate, value, index as u32, "init.tuple.ins")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to initialize tuple field: {e}"),
+                            item.span,
+                        )
+                    })?
+                    .into_struct_value();
+            }
+            Ok(aggregate.as_basic_value_enum())
         } else {
-            self.emit_expression_value(expr)
+            let val = self.emit_expression_value(expr)?;
+            self.cast_expr_to_ast_type(val, Some(expr), expected_type, &expr.span)
         }
     }
 
@@ -3613,8 +3671,49 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         Ok((element_ptr, (*array.element_type).clone()))
                     }
+                    ast::TypeKind::Tuple(types) => {
+                        let idx = match index.kind.as_ref() {
+                            ast::ExpressionKind::Literal(ast::Literal::Integer(n)) => *n,
+                            _ => {
+                                return Err(CodegenError::with_span(
+                                    "tuple index must be a constant integer literal",
+                                    index.span,
+                                ));
+                            }
+                        };
+                        if idx < 0 || idx as usize >= types.len() {
+                            return Err(CodegenError::with_span(
+                                format!(
+                                    "tuple index out of bounds: index is {}, but tuple has {} elements",
+                                    idx,
+                                    types.len()
+                                ),
+                                index.span,
+                            ));
+                        }
+                        let mut field_llvm_types = Vec::with_capacity(types.len());
+                        for ty in types {
+                            field_llvm_types.push(self.lower_basic_type(ty)?);
+                        }
+                        let tuple_llvm_ty = self.context.struct_type(&field_llvm_types, false);
+                        let element_ptr = self
+                            .builder
+                            .build_struct_gep(
+                                tuple_llvm_ty,
+                                object_ptr,
+                                idx as u32,
+                                &format!("tuple.gep.{idx}"),
+                            )
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed tuple index struct GEP: {e}"),
+                                    index.span,
+                                )
+                            })?;
+                        Ok((element_ptr, types[idx as usize].clone()))
+                    }
                     _ => Err(CodegenError::with_span(
-                        "index access currently supports only array and pointer values",
+                        "index access currently supports only array, pointer, and tuple values",
                         object.span,
                     )),
                 }

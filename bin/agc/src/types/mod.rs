@@ -7,6 +7,10 @@ use crate::parser::ast;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Unit,
+    /// Bottom / never type: produced by a block that unconditionally diverges
+    /// via `continue`, `break`, or `return`. Compatible with any expected type
+    /// in a match arm or block position.
+    Never,
     Primitive(ast::PrimitiveType),
     Named {
         path: Vec<String>,
@@ -101,7 +105,7 @@ impl TypeContext {
 
     pub fn layout_of(&self, ty: &Type) -> TypeLayout {
         match ty {
-            Type::Unit => TypeLayout::known(0, 1),
+            Type::Unit | Type::Never => TypeLayout::known(0, 1),
             Type::Primitive(p) => primitive_layout(p, self.pointer_size),
             Type::Named { path, .. } => self
                 .named_layouts
@@ -366,7 +370,7 @@ impl Type {
 
         fn lower(ty: &Type) -> ast::TypeKind {
             match ty {
-                Type::Unit => ast::TypeKind::Tuple(Vec::new()),
+                Type::Unit | Type::Never => ast::TypeKind::Tuple(Vec::new()),
                 Type::Primitive(primitive) => ast::TypeKind::Primitive(primitive.clone()),
                 Type::Named { path, generics } => ast::TypeKind::Named(ast::NamedType {
                     path: path.iter().map(|segment| ident(segment)).collect(),
@@ -485,7 +489,7 @@ impl Type {
                     .collect(),
                 return_type: Box::new(return_type.substitute(mapping)),
             },
-            Type::Primitive(_) | Type::Unit | Type::Unknown => self.clone(),
+            Type::Primitive(_) | Type::Unit | Type::Never | Type::Unknown => self.clone(),
         }
     }
 
@@ -517,6 +521,7 @@ impl Type {
             }
             Type::Reference { inner, .. } => format!("&{}", inner.canonical_key()),
             Type::Unit => "unit".to_string(),
+            Type::Never => "never".to_string(),
             Type::Primitive(p) => format!("{:?}", p).to_lowercase(),
             Type::Named { path, generics } => {
                 if generics.is_empty() {
@@ -568,6 +573,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Unit => write!(f, "void"),
+            Type::Never => write!(f, "!"),
             Type::Primitive(p) => write!(f, "{}", format!("{:?}", p).to_lowercase()),
             Type::Named { path, generics } => {
                 let name = path.join("::");

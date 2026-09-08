@@ -2360,7 +2360,7 @@ fn rewrite_expression_method_calls(
 
 fn type_to_ast(ty: &Type, span: Span) -> ast::Type {
     let kind = match ty {
-        Type::Unit => ast::TypeKind::Tuple(Vec::new()),
+        Type::Unit | Type::Never => ast::TypeKind::Tuple(Vec::new()),
         Type::Primitive(p) => ast::TypeKind::Primitive(p.clone()),
         Type::Named { path, generics } => ast::TypeKind::Named(ast::NamedType {
             path: path
@@ -2542,7 +2542,7 @@ fn is_concrete_type(ty: &Type, scopes: &Vec<HashSet<String>>) -> bool {
             params.iter().all(|inner| is_concrete_type(inner, scopes))
                 && is_concrete_type(return_type, scopes)
         }
-        Type::Primitive(_) | Type::Unit => true,
+        Type::Primitive(_) | Type::Unit | Type::Never => true,
         Type::Unknown => false,
     }
 }
@@ -2897,7 +2897,7 @@ fn is_concrete(ty: &Type) -> bool {
             // A Named type is concrete if all its generic args are concrete.
             generics.iter().all(is_concrete)
         }
-        Type::Primitive(_) | Type::Unit => true,
+        Type::Primitive(_) | Type::Unit | Type::Never => true,
         Type::Pointer { inner, .. } | Type::Reference { inner, .. } => is_concrete(inner),
         Type::Slice { element } => is_concrete(element),
         Type::Task(inner) => is_concrete(inner),

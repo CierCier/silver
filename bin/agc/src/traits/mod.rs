@@ -866,7 +866,7 @@ fn contains_impl_generic(ty: &Type, impl_generics: &HashSet<String>) -> bool {
                 .any(|inner| contains_impl_generic(inner, impl_generics))
                 || contains_impl_generic(return_type, impl_generics)
         }
-        Type::Primitive(_) | Type::Unit | Type::Unknown => false,
+        Type::Primitive(_) | Type::Unit | Type::Never | Type::Unknown => false,
     }
 }
 

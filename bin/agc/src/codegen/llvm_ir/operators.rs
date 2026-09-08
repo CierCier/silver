@@ -340,7 +340,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if !object_ty.is_some_and(|ty| {
                         matches!(
                             ty.kind.as_ref(),
-                            ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_)
+                            ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_) | ast::TypeKind::Tuple(_)
                         )
                     }) {
                         self.check_assignment_mutability(left)?;
@@ -1317,6 +1317,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         Ok(result.as_basic_value_enum())
                     } else if let Some(coerced) = self.try_coerce_to_slice(value, None, target_struct_ty, span)? {
                         Ok(coerced)
+                    } else if let Some(coerced) = self.try_coerce_to_string(value, None, target_struct_ty, span)? {
+                        Ok(coerced)
                     } else {
                         Err(CodegenError::with_span(
                             format!(
@@ -1357,6 +1359,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             (BasicValueEnum::PointerValue(ptr_val), BasicTypeEnum::StructType(struct_ty)) => {
                 if let Some(coerced) = self.try_coerce_to_slice(value, None, struct_ty, span)? {
+                    Ok(coerced)
+                } else if let Some(coerced) = self.try_coerce_to_string(value, None, struct_ty, span)? {
                     Ok(coerced)
                 } else {
                     Err(CodegenError::with_span(
@@ -1635,6 +1639,61 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(None)
     }
 
+    pub(crate) fn try_coerce_to_string(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        _source_expr: Option<&ast::Expression>,
+        target_struct_ty: inkwell::types::StructType<'ctx>,
+        span: &Span,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let dst_fields = target_struct_ty.get_field_types();
+        if dst_fields.len() != 3
+            || !dst_fields[0].is_pointer_type()
+            || !dst_fields[1].is_int_type()
+            || !dst_fields[2].is_int_type()
+        {
+            return Ok(None);
+        }
+
+        let is_string = target_struct_ty.get_name().is_some_and(|n| {
+            let s = n.to_str().unwrap_or("");
+            let s = s.trim_start_matches('%');
+            s == "String" || s.ends_with(".String") || s.ends_with("::String")
+        });
+        if !is_string {
+            return Ok(None);
+        }
+
+        if !value.is_pointer_value() {
+            return Ok(None);
+        }
+
+        let mut candidates = self.overloaded_method_candidates("String", "from_str");
+        if !candidates.contains(&"String__from_str".to_string()) {
+            candidates.push("String__from_str".to_string());
+        }
+
+        for candidate in candidates {
+            if let Some(from_str_fn) = self.module.get_function(&candidate) {
+                let args = vec![inkwell::values::BasicMetadataValueEnum::from(value)];
+                let call = self
+                    .builder
+                    .build_call(from_str_fn, &args, "lit2str")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to call String.from_str: {e}"),
+                            *span,
+                        )
+                    })?;
+                let result = call.try_as_basic_value().basic().ok_or_else(|| {
+                    CodegenError::with_span("String.from_str returned void".to_string(), *span)
+                })?;
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn cast_expr_to_ast_type(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -1646,6 +1705,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let BasicTypeEnum::StructType(target_struct_ty) = target {
             if let Some(coerced) =
                 self.try_coerce_to_slice(value, source_expr, target_struct_ty, span)?
+            {
+                return Ok(coerced);
+            }
+            if let Some(coerced) =
+                self.try_coerce_to_string(value, source_expr, target_struct_ty, span)?
             {
                 return Ok(coerced);
             }

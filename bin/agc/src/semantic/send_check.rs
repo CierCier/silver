@@ -67,7 +67,7 @@ pub(crate) fn structural_send(
     resolve: &dyn Fn(&str) -> Option<DefView>,
 ) -> Result<(), String> {
     match ty {
-        Type::Unit | Type::Primitive(_) => Ok(()),
+        Type::Unit | Type::Primitive(_) | Type::Never => Ok(()),
         // A Task is a plain i64 handle to a thread-registry slot; the result
         // is read only after `wait` (a join barrier), so it need not be Send.
         Type::Task(_) => Ok(()),

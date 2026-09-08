@@ -161,6 +161,14 @@ fn type_to_source(ty: &ast::Type) -> String {
                 base
             }
         }
+        ast::TypeKind::Tuple(types) => {
+            let args = types
+                .iter()
+                .map(type_to_source)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{args}]")
+        }
         _ => type_to_canonical_name(ty),
     }
 }
@@ -191,6 +199,7 @@ fn type_to_canonical_name(ty: &ast::Type) -> String {
         ast::TypeKind::Named(named) => {
             named.path.iter().map(|id| id.name.as_str()).collect::<Vec<_>>().join("::")
         }
+        ast::TypeKind::Tuple(_) => "tuple".to_string(),
         _ => "other".to_string(),
     }
 }
@@ -458,6 +467,48 @@ fn scan_expr_for_json_targets(
     }
 }
 
+fn emit_to_json_value(expr: &str, ty: &ast::Type, body: &mut String) {
+    if let ast::TypeKind::Tuple(elem_types) = ty.kind.as_ref() {
+        body.push_str("        out.begin_array();\n");
+        for (i, elem_ty) in elem_types.iter().enumerate() {
+            let elem_expr = format!("{expr}[{i}]");
+            emit_to_json_value(&elem_expr, elem_ty, body);
+        }
+        body.push_str("        out.end_array();\n");
+        return;
+    }
+    let canonical = type_to_canonical_name(ty);
+    match canonical.as_str() {
+        "i8" | "i16" | "i32" | "i64" => {
+            body.push_str(&format!("        out.write_i64((i64){expr});\n"));
+        }
+        "i128" => {
+            body.push_str(&format!("        out.write_i128({expr});\n"));
+        }
+        "u8" | "u16" | "u32" | "u64" => {
+            body.push_str(&format!("        out.write_u64((u64){expr});\n"));
+        }
+        "u128" => {
+            body.push_str(&format!("        out.write_u128({expr});\n"));
+        }
+        "f32" | "f64" => {
+            body.push_str(&format!("        out.write_f64((f64){expr});\n"));
+        }
+        "bool" => {
+            body.push_str(&format!("        out.write_bool({expr});\n"));
+        }
+        "str" => {
+            body.push_str(&format!("        out.write_string({expr});\n"));
+        }
+        "String" => {
+            body.push_str(&format!("        out.write_string((str){expr}.data);\n"));
+        }
+        _ => {
+            body.push_str(&format!("        {expr}.to_json(out);\n"));
+        }
+    }
+}
+
 pub fn generate_to_json_source(s: &ast::StructItem) -> String {
     let struct_name = &s.name.name;
     let mut body = String::new();
@@ -479,53 +530,8 @@ pub fn generate_to_json_source(s: &ast::StructItem) -> String {
         }
         let field_name = &field.name.name;
         body.push_str(&format!("        out.field(\"{json_key}\");\n"));
-
-        let canonical = type_to_canonical_name(&field.field_type);
-        match canonical.as_str() {
-            "i8" | "i16" | "i32" | "i64" => {
-                body.push_str(&format!(
-                    "        out.write_i64((i64)(*self).{field_name});\n"
-                ));
-            }
-            "i128" => {
-                body.push_str(&format!(
-                    "        out.write_i128((*self).{field_name});\n"
-                ));
-            }
-            "u8" | "u16" | "u32" | "u64" => {
-                body.push_str(&format!(
-                    "        out.write_u64((u64)(*self).{field_name});\n"
-                ));
-            }
-            "u128" => {
-                body.push_str(&format!(
-                    "        out.write_u128((*self).{field_name});\n"
-                ));
-            }
-            "f32" | "f64" => {
-                body.push_str(&format!(
-                    "        out.write_f64((f64)(*self).{field_name});\n"
-                ));
-            }
-            "bool" => {
-                body.push_str(&format!(
-                    "        out.write_bool((*self).{field_name});\n"
-                ));
-            }
-            "str" => {
-                body.push_str(&format!(
-                    "        out.write_string((*self).{field_name});\n"
-                ));
-            }
-            "String" => {
-                body.push_str(&format!(
-                    "        out.write_string((str)(*self).{field_name}.data);\n"
-                ));
-            }
-            _ => {
-                body.push_str(&format!("        (*self).{field_name}.to_json(out);\n"));
-            }
-        }
+        let field_expr = format!("(*self).{field_name}");
+        emit_to_json_value(&field_expr, &field.field_type, &mut body);
     }
 
     body.push_str("        out.end_object();\n");
@@ -549,6 +555,17 @@ pub fn generate_json_decode_source(s: &ast::StructItem) -> String {
     body
 }
 
+fn emit_json_dispose_value(expr: &str, ty: &ast::Type, body: &mut String) {
+    if let ast::TypeKind::Tuple(elem_types) = ty.kind.as_ref() {
+        for (i, elem_ty) in elem_types.iter().enumerate() {
+            let elem_expr = format!("{expr}[{i}]");
+            emit_json_dispose_value(&elem_expr, elem_ty, body);
+        }
+    } else {
+        body.push_str(&format!("        {expr}.dispose();\n"));
+    }
+}
+
 /// JsonDispose lets a struct be a container element: when a Vec/Optional
 /// decode fails part-way, the decoder runs dispose on already-decoded
 /// elements to release their resources.
@@ -559,7 +576,8 @@ pub fn generate_json_dispose_source(s: &ast::StructItem) -> String {
     body.push_str("    void dispose(*self) {\n");
     for field in &s.fields {
         let field_name = &field.name.name;
-        body.push_str(&format!("        (*self).{field_name}.dispose();\n"));
+        let field_expr = format!("(*self).{field_name}");
+        emit_json_dispose_value(&field_expr, &field.field_type, &mut body);
     }
     body.push_str("    }\n");
     body.push_str("}\n");
@@ -612,124 +630,264 @@ pub fn generate_from_json_source(s: &ast::StructItem) -> String {
                 "            {else_prefix}if (key.equals(\"{json_key}\")) {{\n"
             ));
 
-            let canonical = type_to_canonical_name(&field.field_type);
-            match canonical.as_str() {
-                "i8" | "i16" | "i32" | "i64" => {
-                    body.push_str("                i64 val = 0;\n");
-                    body.push_str("                if (!input.read_i64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = ({canonical})val;\n"
-                    ));
+            if let ast::TypeKind::Tuple(elem_types) = field.field_type.kind.as_ref() {
+                body.push_str("                if (!input.begin_array()) {\n");
+                body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                body.push_str(&format!(
+                    "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                ));
+                body.push_str("                }\n");
+                for (i, elem_ty) in elem_types.iter().enumerate() {
+                    if i > 0 {
+                        body.push_str("                if (!input.comma()) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                    }
+                    let canonical = type_to_canonical_name(elem_ty);
+                    match canonical.as_str() {
+                        "i8" | "i16" | "i32" | "i64" => {
+                            body.push_str(&format!("                i64 t_val_{i} = 0;\n"));
+                            body.push_str(&format!("                if (!input.read_i64(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = ({canonical})t_val_{i};\n"
+                            ));
+                        }
+                        "i128" => {
+                            body.push_str(&format!("                i128 t_val_{i} = (i128)0;\n"));
+                            body.push_str(&format!("                if (!input.read_i128(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = t_val_{i};\n"
+                            ));
+                        }
+                        "u8" | "u16" | "u32" | "u64" => {
+                            body.push_str(&format!("                u64 t_val_{i} = 0;\n"));
+                            body.push_str(&format!("                if (!input.read_u64(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = ({canonical})t_val_{i};\n"
+                            ));
+                        }
+                        "u128" => {
+                            body.push_str(&format!("                u128 t_val_{i} = (u128)0;\n"));
+                            body.push_str(&format!("                if (!input.read_u128(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = t_val_{i};\n"
+                            ));
+                        }
+                        "f32" | "f64" => {
+                            body.push_str(&format!("                f64 t_val_{i} = 0.0;\n"));
+                            body.push_str(&format!("                if (!input.read_f64(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = ({canonical})t_val_{i};\n"
+                            ));
+                        }
+                        "bool" => {
+                            body.push_str(&format!("                bool t_val_{i} = false;\n"));
+                            body.push_str(&format!("                if (!input.read_bool(&t_val_{i})) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = t_val_{i};\n"
+                            ));
+                        }
+                        "str" => {
+                            body.push_str(&format!("                String t_val_{i} = input.read_string();\n"));
+                            body.push_str("                if (input.failed) {\n");
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = (str)t_val_{i}.data;\n                t_val_{i}.data = (u8*)0;\n"
+                            ));
+                        }
+                        "String" => {
+                            body.push_str(&format!("                String t_val_{i} = input.read_string();\n"));
+                            body.push_str("                if (input.failed) {\n");
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = move t_val_{i};\n"
+                            ));
+                        }
+                        _ => {
+                            let elem_type_src = type_to_source(elem_ty);
+                            body.push_str(&format!("                {elem_type_src} t_elem_{i};\n"));
+                            body.push_str(&format!(
+                                "                Result<{elem_type_src}, JsonError> t_res_{i} = t_elem_{i}.json_decode(input);\n"
+                            ));
+                            body.push_str(&format!("                if (t_res_{i}.is_err()) {{\n"));
+                            body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                            body.push_str(&format!(
+                                "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                            ));
+                            body.push_str("                }\n");
+                            body.push_str(&format!(
+                                "                result.{field_name}[{i}] = t_res_{i}.unwrap();\n"
+                            ));
+                        }
+                    }
                 }
-                "i128" => {
-                    body.push_str("                i128 val = (i128)0;\n");
-                    body.push_str("                if (!input.read_i128(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = val;\n"
-                    ));
-                }
-                "u8" | "u16" | "u32" | "u64" => {
-                    body.push_str("                u64 val = 0;\n");
-                    body.push_str("                if (!input.read_u64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = ({canonical})val;\n"
-                    ));
-                }
-                "u128" => {
-                    body.push_str("                u128 val = (u128)0;\n");
-                    body.push_str("                if (!input.read_u128(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = val;\n"
-                    ));
-                }
-                "f32" | "f64" => {
-                    body.push_str("                f64 val = 0.0;\n");
-                    body.push_str("                if (!input.read_f64(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = ({canonical})val;\n"
-                    ));
-                }
-                "bool" => {
-                    body.push_str("                bool val = false;\n");
-                    body.push_str("                if (!input.read_bool(&val)) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = val;\n"
-                    ));
-                }
-                "str" => {
-                    body.push_str("                String val = input.read_string();\n");
-                    body.push_str("                if (input.failed) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = (str)val.data;\n                val.data = (u8*)0;\n"
-                    ));
-                }
-                "String" => {
-                    body.push_str("                String val = input.read_string();\n");
-                    body.push_str("                if (input.failed) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = move val;\n"
-                    ));
-                }
-                _ => {
-                    // Non-primitive field: Vec<T>, Optional<T>, nested
-                    // structs, or user types with a JsonDecode impl. Decode
-                    // through a zero-init receiver, then move the value into
-                    // the result so partial failures never leave dangling
-                    // values.
-                    let field_type_src = type_to_source(&field.field_type);
-                    body.push_str(&format!("                {field_type_src} elem;\n"));
-                    body.push_str(&format!(
-                        "                Result<{field_type_src}, JsonError> elem_res = elem.json_decode(input);\n"
-                    ));
-                    body.push_str("                if (elem_res.is_err()) {\n");
-                    body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
-                    body.push_str(&format!(
-                        "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
-                    ));
-                    body.push_str("                }\n");
-                    body.push_str(&format!(
-                        "                result.{field_name} = elem_res.unwrap();\n"
-                    ));
+                body.push_str("                if (!input.end_array()) {\n");
+                body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                body.push_str(&format!(
+                    "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                ));
+                body.push_str("                }\n");
+            } else {
+                let canonical = type_to_canonical_name(&field.field_type);
+                match canonical.as_str() {
+                    "i8" | "i16" | "i32" | "i64" => {
+                        body.push_str("                i64 val = 0;\n");
+                        body.push_str("                if (!input.read_i64(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = ({canonical})val;\n"
+                        ));
+                    }
+                    "i128" => {
+                        body.push_str("                i128 val = (i128)0;\n");
+                        body.push_str("                if (!input.read_i128(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = val;\n"
+                        ));
+                    }
+                    "u8" | "u16" | "u32" | "u64" => {
+                        body.push_str("                u64 val = 0;\n");
+                        body.push_str("                if (!input.read_u64(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = ({canonical})val;\n"
+                        ));
+                    }
+                    "u128" => {
+                        body.push_str("                u128 val = (u128)0;\n");
+                        body.push_str("                if (!input.read_u128(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = val;\n"
+                        ));
+                    }
+                    "f32" | "f64" => {
+                        body.push_str("                f64 val = 0.0;\n");
+                        body.push_str("                if (!input.read_f64(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = ({canonical})val;\n"
+                        ));
+                    }
+                    "bool" => {
+                        body.push_str("                bool val = false;\n");
+                        body.push_str("                if (!input.read_bool(&val)) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = val;\n"
+                        ));
+                    }
+                    "str" => {
+                        body.push_str("                String val = input.read_string();\n");
+                        body.push_str("                if (input.failed) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = (str)val.data;\n                val.data = (u8*)0;\n"
+                        ));
+                    }
+                    "String" => {
+                        body.push_str("                String val = input.read_string();\n");
+                        body.push_str("                if (input.failed) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = move val;\n"
+                        ));
+                    }
+                    _ => {
+                        // Non-primitive field: Vec<T>, Optional<T>, nested
+                        // structs, or user types with a JsonDecode impl. Decode
+                        // through a zero-init receiver, then move the value into
+                        // the result so partial failures never leave dangling
+                        // values.
+                        let field_type_src = type_to_source(&field.field_type);
+                        body.push_str(&format!("                {field_type_src} elem;\n"));
+                        body.push_str(&format!(
+                            "                Result<{field_type_src}, JsonError> elem_res = elem.json_decode(input);\n"
+                        ));
+                        body.push_str("                if (elem_res.is_err()) {\n");
+                        body.push_str("                    JsonError err = JsonError.at_index(input.index);\n");
+                        body.push_str(&format!(
+                            "                    return Result<{struct_name}, JsonError>.Err(move err);\n"
+                        ));
+                        body.push_str("                }\n");
+                        body.push_str(&format!(
+                            "                result.{field_name} = elem_res.unwrap();\n"
+                        ));
+                    }
                 }
             }
             body.push_str("            }\n");
