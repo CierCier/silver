@@ -1,6 +1,12 @@
 import std.io;
 import std.string;
 
+struct User {
+    i32 id;
+    str name;
+    Vec<String> tags;
+}
+
 i32 main() {
     // 1. Vector with elements (auto-import of std.mem.vec)
     Vec<i32> v = @vec(10, 20, 30);
@@ -56,6 +62,15 @@ i32 main() {
     }
     if (empty_strings.len() != 0) {
         return 12;
+    }
+
+    // 7. Initializer struct literal contextual type inference
+    User u = { 0, "cier", @vec() };
+    if (!u.tags.is_empty()) {
+        return 13;
+    }
+    if (u.tags.len() != 0) {
+        return 14;
     }
 
     @println("All @vec tests passed successfully!");

@@ -17,8 +17,8 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::lexer::Span;
 use crate::parser::ast::{
-    self, BinaryOperator, Block, Expression, ExpressionKind, Identifier, Item, ItemKind,
-    Literal, MacroArg, MacroDef, PatternKind, Statement, StatementKind,
+    self, BinaryOperator, Block, Expression, ExpressionKind, Identifier, InitializerItem, Item,
+    ItemKind, Literal, MacroArg, MacroDef, PatternKind, Statement, StatementKind,
     UnaryOperator,
 };
 
@@ -29,6 +29,7 @@ const MAX_EXPANSION_DEPTH: usize = 128;
 /// Expands all user-defined macros throughout the program.
 struct MacroContext<'a> {
     macro_table: &'a HashMap<String, MacroDef>,
+    struct_defs: &'a HashMap<String, ast::StructItem>,
     ret_type: Option<ast::Type>,
     scope_types: HashMap<String, ast::Type>,
     fn_signatures: HashMap<String, Vec<ast::Type>>,
@@ -37,12 +38,16 @@ struct MacroContext<'a> {
 /// Expands all user-defined macros throughout the program.
 pub fn expand_macros_in_program(program: &mut ast::Program) {
     let mut macro_table: HashMap<String, MacroDef> = HashMap::default();
+    let mut struct_defs: HashMap<String, ast::StructItem> = HashMap::default();
     let mut fn_signatures: HashMap<String, Vec<ast::Type>> = HashMap::default();
 
     for item in &program.items {
         match &item.kind {
             ItemKind::Macro(def) => {
                 macro_table.insert(def.name.name.clone(), def.clone());
+            }
+            ItemKind::Struct(s) => {
+                struct_defs.insert(s.name.name.clone(), s.clone());
             }
             ItemKind::Function(func) => {
                 let params = func.parameters.iter().map(|p| p.param_type.clone()).collect();
@@ -66,6 +71,7 @@ pub fn expand_macros_in_program(program: &mut ast::Program) {
 
     let mut ctx = MacroContext {
         macro_table: &macro_table,
+        struct_defs: &struct_defs,
         ret_type: None,
         scope_types: HashMap::default(),
         fn_signatures,
@@ -91,16 +97,30 @@ fn expand_macros_in_item(item: &mut Item, ctx: &mut MacroContext) {
         }
         ItemKind::Impl(impl_item) => {
             for member in &mut impl_item.items {
-                if let ast::ImplItemKind::Function(func) = member {
-                    let prev_ret = ctx.ret_type.clone();
-                    let prev_scope = ctx.scope_types.clone();
-                    ctx.ret_type = func.return_type.clone();
-                    for p in &func.parameters {
-                        ctx.scope_types.insert(p.name.name.clone(), p.param_type.clone());
+                match member {
+                    ast::ImplItemKind::Function(func) => {
+                        let prev_ret = ctx.ret_type.clone();
+                        let prev_scope = ctx.scope_types.clone();
+                        ctx.ret_type = func.return_type.clone();
+                        for p in &func.parameters {
+                            ctx.scope_types.insert(p.name.name.clone(), p.param_type.clone());
+                        }
+                        expand_macros_in_block(&mut func.body, ctx, 0);
+                        ctx.ret_type = prev_ret;
+                        ctx.scope_types = prev_scope;
                     }
-                    expand_macros_in_block(&mut func.body, ctx, 0);
-                    ctx.ret_type = prev_ret;
-                    ctx.scope_types = prev_scope;
+                    ast::ImplItemKind::Cast(cast) => {
+                        let prev_ret = ctx.ret_type.clone();
+                        let prev_scope = ctx.scope_types.clone();
+                        ctx.ret_type = Some(cast.target_type.clone());
+                        for p in &cast.parameters {
+                            ctx.scope_types.insert(p.name.name.clone(), p.param_type.clone());
+                        }
+                        expand_macros_in_block(&mut cast.body, ctx, 0);
+                        ctx.ret_type = prev_ret;
+                        ctx.scope_types = prev_scope;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -297,9 +317,140 @@ fn expand_macros_in_expr(
         ExpressionKind::Block(b) => {
             expand_macros_in_block(b, ctx, depth);
         }
-        ExpressionKind::Array(items) | ExpressionKind::Tuple(items) => {
+        ExpressionKind::Array(items) => {
+            let elem_exp = match expected.map(|t| t.kind.as_ref()) {
+                Some(ast::TypeKind::Array(arr)) => Some(&*arr.element_type),
+                Some(ast::TypeKind::Slice(slice)) => Some(&*slice.element_type),
+                _ => None,
+            };
             for item in items {
-                expand_macros_in_expr(item, ctx, None, depth);
+                expand_macros_in_expr(item, ctx, elem_exp, depth);
+            }
+        }
+        ExpressionKind::Tuple(items) => {
+            let elem_types = match expected.map(|t| t.kind.as_ref()) {
+                Some(ast::TypeKind::Tuple(tup)) => Some(tup),
+                _ => None,
+            };
+            for (i, item) in items.iter_mut().enumerate() {
+                let exp = elem_types.and_then(|t| t.get(i));
+                expand_macros_in_expr(item, ctx, exp, depth);
+            }
+        }
+        ExpressionKind::Initializer { items } => {
+            let struct_name = match expected.map(|t| t.kind.as_ref()) {
+                Some(ast::TypeKind::Named(named)) => named.path.last().map(|id| id.name.as_str()),
+                Some(ast::TypeKind::Generic(g_ty)) => Some(g_ty.name.name.as_str()),
+                _ => None,
+            };
+            let type_args: Option<Vec<ast::Type>> = match expected.map(|t| t.kind.as_ref()) {
+                Some(ast::TypeKind::Named(named)) => named.generics.clone(),
+                Some(ast::TypeKind::Generic(g_ty)) => Some(g_ty.args.clone()),
+                _ => None,
+            };
+            let struct_item = struct_name.and_then(|name| ctx.struct_defs.get(name));
+
+            if let Some(struct_item) = struct_item {
+                for (i, item) in items.iter_mut().enumerate() {
+                    match item {
+                        InitializerItem::Positional(expr) => {
+                            let field_ty = get_struct_field_type(struct_item, type_args.as_deref(), i);
+                            expand_macros_in_expr(expr, ctx, field_ty.as_ref(), depth);
+                        }
+                        InitializerItem::Field { name, value } => {
+                            let field_ty = get_struct_field_type_by_name(struct_item, type_args.as_deref(), &name.name);
+                            expand_macros_in_expr(value, ctx, field_ty.as_ref(), depth);
+                        }
+                        InitializerItem::Index { index, value } => {
+                            expand_macros_in_expr(index, ctx, None, depth);
+                            expand_macros_in_expr(value, ctx, None, depth);
+                        }
+                    }
+                }
+            } else if let Some(ast::TypeKind::Array(arr)) = expected.map(|t| t.kind.as_ref()) {
+                for item in items {
+                    match item {
+                        InitializerItem::Positional(expr) | InitializerItem::Field { value: expr, .. } => {
+                            expand_macros_in_expr(expr, ctx, Some(&arr.element_type), depth);
+                        }
+                        InitializerItem::Index { index, value } => {
+                            expand_macros_in_expr(index, ctx, None, depth);
+                            expand_macros_in_expr(value, ctx, Some(&arr.element_type), depth);
+                        }
+                    }
+                }
+            } else if let Some(ast::TypeKind::Slice(slice)) = expected.map(|t| t.kind.as_ref()) {
+                for item in items {
+                    match item {
+                        InitializerItem::Positional(expr) | InitializerItem::Field { value: expr, .. } => {
+                            expand_macros_in_expr(expr, ctx, Some(&slice.element_type), depth);
+                        }
+                        InitializerItem::Index { index, value } => {
+                            expand_macros_in_expr(index, ctx, None, depth);
+                            expand_macros_in_expr(value, ctx, Some(&slice.element_type), depth);
+                        }
+                    }
+                }
+            } else if let Some(ast::TypeKind::Tuple(types)) = expected.map(|t| t.kind.as_ref()) {
+                for (i, item) in items.iter_mut().enumerate() {
+                    match item {
+                        InitializerItem::Positional(expr) => {
+                            expand_macros_in_expr(expr, ctx, types.get(i), depth);
+                        }
+                        InitializerItem::Field { value, .. } => {
+                            expand_macros_in_expr(value, ctx, types.get(i), depth);
+                        }
+                        InitializerItem::Index { index, value } => {
+                            expand_macros_in_expr(index, ctx, None, depth);
+                            expand_macros_in_expr(value, ctx, None, depth);
+                        }
+                    }
+                }
+            } else {
+                for item in items {
+                    match item {
+                        InitializerItem::Positional(expr) | InitializerItem::Field { value: expr, .. } => {
+                            expand_macros_in_expr(expr, ctx, None, depth);
+                        }
+                        InitializerItem::Index { index, value } => {
+                            expand_macros_in_expr(index, ctx, None, depth);
+                            expand_macros_in_expr(value, ctx, None, depth);
+                        }
+                    }
+                }
+            }
+        }
+        ExpressionKind::StructLiteral { path, fields } => {
+            let struct_item = path.last().and_then(|id| ctx.struct_defs.get(&id.name));
+            let type_args: Option<Vec<ast::Type>> = match expected.map(|t| t.kind.as_ref()) {
+                Some(ast::TypeKind::Named(named)) => named.generics.clone(),
+                Some(ast::TypeKind::Generic(g_ty)) => Some(g_ty.args.clone()),
+                _ => None,
+            };
+            for field in fields {
+                let field_ty = struct_item.and_then(|s| {
+                    get_struct_field_type_by_name(s, type_args.as_deref(), &field.name.name)
+                });
+                expand_macros_in_expr(&mut field.value, ctx, field_ty.as_ref(), depth);
+            }
+        }
+        ExpressionKind::Match { expression, arms } => {
+            expand_macros_in_expr(expression, ctx, None, depth);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    expand_macros_in_expr(guard, ctx, None, depth);
+                }
+                expand_macros_in_expr(&mut arm.body, ctx, expected, depth);
+            }
+        }
+        ExpressionKind::EnumVariant { fields, .. } => {
+            for field in fields {
+                expand_macros_in_expr(field, ctx, None, depth);
+            }
+        }
+        ExpressionKind::Asm { inputs, .. } => {
+            for input in inputs {
+                expand_macros_in_expr(input, ctx, None, depth);
             }
         }
         ExpressionKind::MacroCall { name, args } => {
@@ -1116,6 +1267,56 @@ fn substitute_type(ty: &mut ast::Type, subst: &HashMap<String, ast::Type>) {
         }
         _ => {}
     }
+}
+
+fn get_struct_field_type(
+    struct_item: &ast::StructItem,
+    type_args: Option<&[ast::Type]>,
+    field_idx: usize,
+) -> Option<ast::Type> {
+    let field = struct_item.fields.get(field_idx)?;
+    let mut field_ty = field.field_type.clone();
+    if let (Some(generics), Some(args)) = (&struct_item.generics, type_args) {
+        let mut subst = HashMap::default();
+        for (i, param) in generics.params.iter().enumerate() {
+            let param_name = match param {
+                ast::GenericParam::Type(tp) => &tp.name.name,
+                ast::GenericParam::Lifetime(lp) => &lp.name.name,
+            };
+            if i < args.len() {
+                subst.insert(param_name.clone(), args[i].clone());
+            }
+        }
+        if !subst.is_empty() {
+            substitute_type(&mut field_ty, &subst);
+        }
+    }
+    Some(field_ty)
+}
+
+fn get_struct_field_type_by_name(
+    struct_item: &ast::StructItem,
+    type_args: Option<&[ast::Type]>,
+    field_name: &str,
+) -> Option<ast::Type> {
+    let field = struct_item.fields.iter().find(|f| f.name.name == field_name)?;
+    let mut field_ty = field.field_type.clone();
+    if let (Some(generics), Some(args)) = (&struct_item.generics, type_args) {
+        let mut subst = HashMap::default();
+        for (i, param) in generics.params.iter().enumerate() {
+            let param_name = match param {
+                ast::GenericParam::Type(tp) => &tp.name.name,
+                ast::GenericParam::Lifetime(lp) => &lp.name.name,
+            };
+            if i < args.len() {
+                subst.insert(param_name.clone(), args[i].clone());
+            }
+        }
+        if !subst.is_empty() {
+            substitute_type(&mut field_ty, &subst);
+        }
+    }
+    Some(field_ty)
 }
 
 fn paths_match(a: &[ast::Identifier], b: &[ast::Identifier]) -> bool {
