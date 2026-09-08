@@ -294,10 +294,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         FreeFunctionSig {
             params: params
                 .iter()
-                .map(|param| Type::from_ast(&param.param_type).canonical_key())
+                .map(|param| {
+                    let mut ty = Type::from_ast(&param.param_type);
+                    if param.is_variadic {
+                        ty = Type::Slice {
+                            element: Box::new(ty),
+                        };
+                    }
+                    ty.canonical_key()
+                })
                 .collect(),
             return_type: return_type.map(|ret| Type::from_ast(ret).canonical_key()),
-            is_variadic,
+            is_variadic: is_variadic || params.iter().any(|p| p.is_variadic),
         }
     }
 
@@ -1059,17 +1067,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             Self::substitute_block_types(&mut func.body, &mapping);
             Self::collect_concrete_generic_calls(&func.body, &mut pending);
+            let has_variadic_param = func.parameters.iter().any(|p| p.is_variadic);
+            let sig_params = func
+                .parameters
+                .iter()
+                .map(|p| {
+                    if p.is_variadic {
+                        ast::Type {
+                            kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                                element_type: Box::new(p.param_type.clone()),
+                            }))),
+                            span: p.param_type.span,
+                        }
+                    } else {
+                        p.param_type.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
             // Declare (signature + symbol table) before any body emission.
             self.register_function_signature(
                 &instance,
                 FunctionSig {
-                    params: func
-                        .parameters
-                        .iter()
-                        .map(|p| p.param_type.clone())
-                        .collect(),
+                    params: sig_params.clone(),
                     return_type: func.return_type.clone(),
                     is_variadic: func.is_variadic,
+                    is_slice_variadic: has_variadic_param,
                     linkage: None,
                 },
                 Some(func.name.span),
@@ -1077,11 +1099,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             );
             self.register_source_function_symbol(&fn_name, &instance);
             let fn_ty = self.lower_function_type(
-                &func
-                    .parameters
-                    .iter()
-                    .map(|p| p.param_type.clone())
-                    .collect::<Vec<_>>(),
+                &sig_params,
                 func.return_type.as_ref(),
                 func.is_variadic,
                 None,
@@ -1939,16 +1957,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     );
                     let effective_visibility =
                         Self::method_effective_visibility(impl_visibility, &func.visibility);
+                    let has_variadic_param = func.parameters.iter().any(|p| p.is_variadic);
+                    let sig_params = func
+                        .parameters
+                        .iter()
+                        .map(|param| {
+                            if param.is_variadic {
+                                ast::Type {
+                                    kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                                        element_type: Box::new(param.param_type.clone()),
+                                    }))),
+                                    span: param.param_type.span,
+                                }
+                            } else {
+                                param.param_type.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>();
                     self.register_function_signature(
                         &mangled_name,
                         FunctionSig {
-                            params: func
-                                .parameters
-                                .iter()
-                                .map(|param| param.param_type.clone())
-                                .collect(),
+                            params: sig_params.clone(),
                             return_type: func.return_type.clone(),
                             is_variadic: func.is_variadic,
+                            is_slice_variadic: has_variadic_param,
                             linkage: None,
                         },
                         Some(func.name.span),
@@ -1957,11 +1989,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                     if self.module.get_function(&mangled_name).is_none() {
                         let fn_ty = self.lower_function_type(
-                            &func
-                                .parameters
-                                .iter()
-                                .map(|param| param.param_type.clone())
-                                .collect::<Vec<_>>(),
+                            &sig_params,
                             func.return_type.as_ref(),
                             func.is_variadic,
                             None,
@@ -2001,6 +2029,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .collect(),
                             return_type: Some(cast.target_type.clone()),
                             is_variadic: false,
+                            is_slice_variadic: false,
                             linkage: None,
                         },
                         Some(cast.span),

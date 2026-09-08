@@ -701,16 +701,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.keep_items.push(llvm_name.to_string());
         }
 
+        let has_variadic_param = func.parameters.iter().any(|p| p.is_variadic);
+        let sig_params = func
+            .parameters
+            .iter()
+            .map(|param| {
+                if param.is_variadic {
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                            element_type: Box::new(param.param_type.clone()),
+                        }))),
+                        span: param.param_type.span,
+                    }
+                } else {
+                    param.param_type.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+
         self.register_function_signature(
             llvm_name,
             FunctionSig {
-                params: func
-                    .parameters
-                    .iter()
-                    .map(|param| param.param_type.clone())
-                    .collect(),
+                params: sig_params.clone(),
                 return_type: func.return_type.clone(),
                 is_variadic: func.is_variadic,
+                is_slice_variadic: has_variadic_param,
                 linkage: None,
             },
             Some(func.name.span),
@@ -725,13 +740,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.register_function_signature(
                 &func.name.name,
                 FunctionSig {
-                    params: func
-                        .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect(),
+                    params: sig_params.clone(),
                     return_type: func.return_type.clone(),
                     is_variadic: func.is_variadic,
+                    is_slice_variadic: has_variadic_param,
                     linkage: None,
                 },
                 Some(func.name.span),
@@ -741,11 +753,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         if self.module.get_function(llvm_name).is_none() {
             let fn_ty = self.lower_function_type(
-                &func
-                    .parameters
-                    .iter()
-                    .map(|param| param.param_type.clone())
-                    .collect::<Vec<_>>(),
+                &sig_params,
                 func.return_type.as_ref(),
                 func.is_variadic,
                 None,
@@ -915,16 +923,30 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 if self.module.get_function(&symbol_name).is_some() {
                     continue;
                 }
+                let sig_params = function_item
+                    .parameters
+                    .iter()
+                    .map(|param| {
+                        if param.is_variadic {
+                            ast::Type {
+                                kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                                    element_type: Box::new(param.param_type.clone()),
+                                }))),
+                                span: param.param_type.span,
+                            }
+                        } else {
+                            param.param_type.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let has_variadic_param = function_item.parameters.iter().any(|p| p.is_variadic);
                 self.register_function_signature(
                     &symbol_name,
                     FunctionSig {
-                        params: function_item
-                            .parameters
-                            .iter()
-                            .map(|param| param.param_type.clone())
-                            .collect(),
+                        params: sig_params.clone(),
                         return_type: function_item.return_type.clone(),
                         is_variadic: function_item.is_variadic,
+                        is_slice_variadic: has_variadic_param,
                         linkage: None,
                     },
                     Some(function_item.name.span),
@@ -932,11 +954,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 );
                 self.register_source_function_symbol(&function_item.name.name, &symbol_name);
                 let fn_ty = self.lower_function_type(
-                    &function_item
-                        .parameters
-                        .iter()
-                        .map(|param| param.param_type.clone())
-                        .collect::<Vec<_>>(),
+                    &sig_params,
                     function_item.return_type.as_ref(),
                     function_item.is_variadic,
                     None,
@@ -1539,6 +1557,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect(),
                 return_type: item.signature.return_type.clone(),
                 is_variadic: item.signature.is_variadic,
+                is_slice_variadic: false,
                 linkage: Some(item.linkage.clone()),
             },
             Some(item.name.span),
@@ -1561,6 +1580,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         .collect(),
                     return_type: item.signature.return_type.clone(),
                     is_variadic: item.signature.is_variadic,
+                    is_slice_variadic: false,
                     linkage: Some(item.linkage.clone()),
                 },
                 Some(item.name.span),
@@ -1578,6 +1598,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     .collect(),
                 return_type: item.signature.return_type.clone(),
                 is_variadic: item.signature.is_variadic,
+                is_slice_variadic: false,
                 linkage: Some(item.linkage.clone()),
             };
             let fn_ty = self.lower_function_type(

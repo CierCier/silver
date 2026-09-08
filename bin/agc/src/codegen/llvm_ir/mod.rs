@@ -20,6 +20,7 @@ pub(crate) struct FunctionSig {
     pub(crate) params: Vec<ast::Type>,
     pub(crate) return_type: Option<ast::Type>,
     pub(crate) is_variadic: bool,
+    pub(crate) is_slice_variadic: bool,
     pub(crate) linkage: Option<ast::ExternLinkage>,
 }
 
@@ -36,6 +37,7 @@ pub(crate) struct FreeFunctionSig {
 impl PartialEq for FunctionSig {
     fn eq(&self, other: &Self) -> bool {
         self.is_variadic == other.is_variadic
+            && self.is_slice_variadic == other.is_slice_variadic
             && self.linkage == other.linkage
             && self.params.len() == other.params.len()
             && self

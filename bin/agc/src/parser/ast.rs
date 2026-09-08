@@ -308,6 +308,7 @@ pub struct Parameter {
     pub name: Identifier,
     pub param_type: Type,
     pub is_mutable: bool,
+    pub is_variadic: bool,
     pub span: Span,
 }
 

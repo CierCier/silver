@@ -888,6 +888,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 params: param_ast.clone(),
                                 return_type: return_ast.clone(),
                                 is_variadic: export.is_variadic,
+                                is_slice_variadic: false,
                                 linkage: abi.clone(),
                             },
                             None,
@@ -907,6 +908,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     params: param_ast.clone(),
                                     return_type: return_ast.clone(),
                                     is_variadic: export.is_variadic,
+                                    is_slice_variadic: false,
                                     linkage: abi,
                                 },
                             )?;

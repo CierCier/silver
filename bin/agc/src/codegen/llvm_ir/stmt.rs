@@ -99,6 +99,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let Some(param_value) = function.get_nth_param(index as u32) else {
                 continue;
             };
+            let param_ast_ty = if param.is_variadic {
+                ast::Type {
+                    kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                        element_type: Box::new(param.param_type.clone()),
+                    }))),
+                    span: param.param_type.span,
+                }
+            } else {
+                param.param_type.clone()
+            };
             let alloca =
                 self.create_entry_alloca(function, &param.name.name, param_value.get_type())?;
             self.builder.build_store(alloca, param_value).map_err(|e| {
@@ -112,7 +122,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     param.name.name.clone(),
                     VarInfo {
                         ptr: alloca,
-                        ty: param.param_type.clone(),
+                        ty: param_ast_ty.clone(),
                         is_mutable: param.is_mutable,
                         is_volatile: false,
                         drop_flag: None,
@@ -122,7 +132,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             self.emit_debug_variable(
                 &param.name.name,
-                &param.param_type,
+                &param_ast_ty,
                 &param.name.span,
                 alloca,
                 Some(index as u32 + 1),
@@ -140,10 +150,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             // Skip pointer/reference types: the caller owns the pointee,
             // so we must NOT call the pointee's drop on function exit.
-            if matches!(
-                param.param_type.kind.as_ref(),
-                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
-            ) {
+            // Also skip variadic slice params: the slice is a view of stack elements.
+            if param.is_variadic
+                || matches!(
+                    param.param_type.kind.as_ref(),
+                    ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                )
+            {
                 continue;
             }
             let ty_for_drop = param.param_type.clone();

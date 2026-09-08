@@ -237,15 +237,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map(|sig| sig.is_variadic)
             .unwrap_or_else(|| function.get_type().is_var_arg());
 
+        let is_slice_variadic = signature
+            .as_ref()
+            .map(|sig| sig.is_slice_variadic)
+            .unwrap_or(false);
+
         let mut args = Vec::with_capacity(arguments.len());
-        for (index, argument) in arguments.iter().enumerate() {
-            let mut value = self.emit_expression_value(argument)?;
-            if index < declared_param_count {
+        if is_slice_variadic {
+            let fixed_count = declared_param_count.saturating_sub(1);
+            for (index, argument) in arguments.iter().take(fixed_count).enumerate() {
+                let mut value = self.emit_expression_value(argument)?;
                 if let Some(signature) = &signature {
-                    // By-value argument of a Drop type: the callee's
-                    // parameter destructor runs on exit, transferring
-                    // ownership. Clear the caller's flag to avoid a
-                    // double free; extern functions never drop params.
                     if signature.linkage.is_none() {
                         let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
                             self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
@@ -260,8 +262,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
 
-                    // Prefer a user-defined cast method (e.g. a struct arg that
-                    // `cast i32`s into an i32 parameter) over builtin casts.
                     if let Some(casted) = self.try_apply_user_cast(
                         value,
                         argument,
@@ -283,10 +283,63 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
                     }
                 }
-            } else if is_variadic {
-                value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                args.push(BasicMetadataValueEnum::from(value));
             }
-            args.push(BasicMetadataValueEnum::from(value));
+            let trailing_args = &arguments[fixed_count..];
+            let slice_ty = &signature.as_ref().unwrap().params[fixed_count];
+            let slice_val = self.emit_variadic_slice_pack(slice_ty, trailing_args, function_expr.span)?;
+            args.push(BasicMetadataValueEnum::from(slice_val));
+        } else {
+            for (index, argument) in arguments.iter().enumerate() {
+                let mut value = self.emit_expression_value(argument)?;
+                if index < declared_param_count {
+                    if let Some(signature) = &signature {
+                        // By-value argument of a Drop type: the callee's
+                        // parameter destructor runs on exit, transferring
+                        // ownership. Clear the caller's flag to avoid a
+                        // double free; extern functions never drop params.
+                        if signature.linkage.is_none() {
+                            let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                                self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
+                            } else if index < signature.params.len() {
+                                self.param_type_drops_on_exit(&signature.params[index])
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+                            if arg_drops {
+                                self.clear_drop_flag_of(argument)?;
+                            }
+                        }
+
+                        // Prefer a user-defined cast method (e.g. a struct arg that
+                        // `cast i32`s into an i32 parameter) over builtin casts.
+                        if let Some(casted) = self.try_apply_user_cast(
+                            value,
+                            argument,
+                            &signature.params[index],
+                            &argument.span,
+                        )? {
+                            value = casted;
+                        } else {
+                            value = self.cast_expr_to_ast_type(
+                                value,
+                                Some(argument),
+                                &signature.params[index],
+                                &argument.span,
+                            )?;
+                        }
+
+                        if let Some(linkage) = &signature.linkage {
+                            value =
+                                self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
+                        }
+                    }
+                } else if is_variadic {
+                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                }
+                args.push(BasicMetadataValueEnum::from(value));
+            }
         }
 
         let call = self
@@ -472,6 +525,89 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    pub(crate) fn emit_variadic_slice_pack(
+        &mut self,
+        slice_ast_ty: &ast::Type,
+        arguments: &[ast::Expression],
+        span: Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let function_ctx = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for variadic stack pack"))?;
+        let elem_ast_ty = match slice_ast_ty.kind.as_ref() {
+            ast::TypeKind::Slice(s) => &s.element_type,
+            _ => {
+                return Err(CodegenError::with_span(
+                    "expected slice type for variadic parameter",
+                    span,
+                ))
+            }
+        };
+        let elem_llvm_ty = self.lower_basic_type(elem_ast_ty)?;
+        let i64_ty = self.context.i64_type();
+        let len_val = i64_ty.const_int(arguments.len() as u64, false);
+
+        let data_ptr = if arguments.is_empty() {
+            self.context.ptr_type(inkwell::AddressSpace::default()).const_null()
+        } else {
+            let arr_llvm_ty = elem_llvm_ty.array_type(arguments.len() as u32);
+            let arr_alloca =
+                self.create_entry_alloca(function_ctx, "variadic.pack", arr_llvm_ty.into())?;
+            for (i, arg) in arguments.iter().enumerate() {
+                let mut arg_val = self.emit_expression_value(arg)?;
+                if let Some(casted) = self.try_apply_user_cast(arg_val, arg, elem_ast_ty, &arg.span)? {
+                    arg_val = casted;
+                } else {
+                    arg_val = self.cast_expr_to_ast_type(arg_val, Some(arg), elem_ast_ty, &arg.span)?;
+                }
+                let idx_val = i64_ty.const_int(i as u64, false);
+                let elem_ptr = unsafe {
+                    self.builder.build_gep(
+                        arr_llvm_ty,
+                        arr_alloca,
+                        &[i64_ty.const_zero(), idx_val],
+                        "var.elem.ptr",
+                    ).map_err(|e| CodegenError::with_span(e.to_string(), arg.span))?
+                };
+                self.builder.build_store(elem_ptr, arg_val).map_err(|e| {
+                    CodegenError::with_span(format!("failed to store variadic element: {e}"), arg.span)
+                })?;
+                if self.param_type_drops_on_exit(elem_ast_ty).unwrap_or(false) {
+                    self.clear_drop_flag_of(arg)?;
+                }
+            }
+            let zero = i64_ty.const_zero();
+            unsafe {
+                self.builder.build_gep(
+                    arr_llvm_ty,
+                    arr_alloca,
+                    &[zero, zero],
+                    "var.data.ptr",
+                ).map_err(|e| CodegenError::with_span(e.to_string(), span))?
+            }
+        };
+
+        let slice_struct_ty = match self.lower_basic_type(slice_ast_ty)? {
+            BasicTypeEnum::StructType(st) => st,
+            _ => {
+                return Err(CodegenError::with_span(
+                    "expected struct type for slice",
+                    span,
+                ))
+            }
+        };
+        let s0 = slice_struct_ty.get_undef();
+        let s1 = self
+            .builder
+            .build_insert_value(s0, data_ptr, 0, "var.slice.ptr")
+            .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let s2 = self
+            .builder
+            .build_insert_value(s1, len_val, 1, "var.slice.len")
+            .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        Ok(s2.as_basic_value_enum())
+    }
+
     /// Whether `arguments` match the callee's parameter types, skipping the
     /// first `skip` params (the receiver for instance methods). Returns true
     /// when the signature is unknown so arity alone decides. Argument types
@@ -549,10 +685,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .as_ref()
                 .map(|sig| sig.is_variadic)
                 .unwrap_or(false);
-            if !variadic && declared != arguments.len() {
+            let slice_variadic = signature
+                .as_ref()
+                .map(|sig| sig.is_slice_variadic)
+                .unwrap_or(false);
+            if !variadic && !slice_variadic && declared != arguments.len() {
                 continue;
             }
-            if variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
+            if slice_variadic && arguments.len() < declared.saturating_sub(1) {
+                continue;
+            }
+            if variadic || slice_variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
                 type_match = Some(candidate.clone());
                 break;
             }
@@ -633,12 +776,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .as_ref()
                 .map(|sig| sig.is_variadic)
                 .unwrap_or_else(|| function.get_type().is_var_arg());
-            if variadic
-                || (receiver_is_type && declared == arguments.len())
-                || (!receiver_is_type && declared == arguments.len() + 1)
-            {
+            let slice_variadic = signature
+                .as_ref()
+                .map(|sig| sig.is_slice_variadic)
+                .unwrap_or(false);
+            let arity_matches = if slice_variadic {
+                let fixed_needed = if receiver_is_type {
+                    declared.saturating_sub(1)
+                } else {
+                    declared.saturating_sub(2)
+                };
+                arguments.len() >= fixed_needed
+            } else {
+                (receiver_is_type && declared == arguments.len())
+                    || (!receiver_is_type && declared == arguments.len() + 1)
+            };
+            if variadic || arity_matches {
                 let offset = if receiver_is_type { 0 } else { 1 };
-                if variadic || self.argument_types_match(signature.as_ref(), arguments, offset) {
+                if variadic || slice_variadic || self.argument_types_match(signature.as_ref(), arguments, offset) {
                     if receiver_is_type {
                         if static_type.is_none() {
                             static_type = Some((name.clone(), function));
@@ -703,12 +858,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .as_ref()
             .map(|sig| sig.is_variadic)
             .unwrap_or_else(|| function.get_type().is_var_arg());
+        let is_slice_variadic = signature
+            .as_ref()
+            .map(|sig| sig.is_slice_variadic)
+            .unwrap_or(false);
 
         let inferred_param_count = function.get_type().get_param_types().len();
-        let inject_receiver = signature
-            .as_ref()
-            .map(|sig| sig.params.len() == arguments.len() + 1)
-            .unwrap_or(inferred_param_count == arguments.len() + 1);
+        let inject_receiver = if is_slice_variadic {
+            !receiver_is_type
+        } else {
+            signature
+                .as_ref()
+                .map(|sig| sig.params.len() == arguments.len() + 1)
+                .unwrap_or(inferred_param_count == arguments.len() + 1)
+        };
 
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
         if inject_receiver {
@@ -894,57 +1057,54 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(receiver_arg));
         }
 
-        for (index, argument) in arguments.iter().enumerate() {
-            let param_index = index + usize::from(inject_receiver);
-            let expects_ref = signature
-                .as_ref()
-                .and_then(|sig| sig.params.get(param_index))
-                .map(|p| {
-                    matches!(
-                        p.kind.as_ref(),
-                        ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
-                    )
-                })
-                .unwrap_or(false);
-            let mut value = if expects_ref
-                && self
-                    .resolve_argument_type(argument)
-                    .map(|t| {
-                        !matches!(
-                            t.kind.as_ref(),
-                            ast::TypeKind::Pointer(_)
-                                | ast::TypeKind::Reference(_)
-                                | ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+        if is_slice_variadic {
+            let fixed_count = declared_param_count.saturating_sub(usize::from(inject_receiver) + 1);
+            for (index, argument) in arguments.iter().take(fixed_count).enumerate() {
+                let param_index = index + usize::from(inject_receiver);
+                let expects_ref = signature
+                    .as_ref()
+                    .and_then(|sig| sig.params.get(param_index))
+                    .map(|p| {
+                        matches!(
+                            p.kind.as_ref(),
+                            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
                         )
                     })
-                    .unwrap_or(false)
-            {
-                if let Ok((ptr, _)) = self.resolve_lvalue_ptr(argument) {
-                    ptr.as_basic_value_enum()
+                    .unwrap_or(false);
+                let mut value = if expects_ref
+                    && self
+                        .resolve_argument_type(argument)
+                        .map(|t| {
+                            !matches!(
+                                t.kind.as_ref(),
+                                ast::TypeKind::Pointer(_)
+                                    | ast::TypeKind::Reference(_)
+                                    | ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+                            )
+                        })
+                        .unwrap_or(false)
+                {
+                    if let Ok((ptr, _)) = self.resolve_lvalue_ptr(argument) {
+                        ptr.as_basic_value_enum()
+                    } else {
+                        let val = self.emit_expression_value(argument)?;
+                        let function_ctx = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for argument spill")
+                        })?;
+                        let temp =
+                            self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
+                        self.builder.build_store(temp, val).map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to spill argument for reference param: {e}"),
+                                argument.span,
+                            )
+                        })?;
+                        temp.as_basic_value_enum()
+                    }
                 } else {
-                    let val = self.emit_expression_value(argument)?;
-                    let function_ctx = self.current_fn.ok_or_else(|| {
-                        CodegenError::new("no active function for argument spill")
-                    })?;
-                    let temp =
-                        self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
-                    self.builder.build_store(temp, val).map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to spill argument for reference param: {e}"),
-                            argument.span,
-                        )
-                    })?;
-                    temp.as_basic_value_enum()
-                }
-            } else {
-                self.emit_expression_value(argument)?
-            };
-            if param_index < declared_param_count {
+                    self.emit_expression_value(argument)?
+                };
                 if let Some(signature) = &signature {
-                    // By-value argument of a Drop type: the callee's
-                    // parameter destructor runs on exit, transferring
-                    // ownership. Clear the caller's flag to avoid a
-                    // double free; extern functions never drop params.
                     if signature.linkage.is_none() {
                         let arg_drops = if expects_ref {
                             false
@@ -960,7 +1120,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             self.clear_drop_flag_of(argument)?;
                         }
                     }
-                    // Prefer a user-defined cast method over builtin casts.
                     if let Some(casted) = self.try_apply_user_cast(
                         value,
                         argument,
@@ -976,7 +1135,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             &argument.span,
                         )?;
                     }
-                    // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
                         value = self.coerce_value_to_abi(
                             value,
@@ -985,10 +1143,110 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )?;
                     }
                 }
-            } else if is_variadic {
-                value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                args.push(BasicMetadataValueEnum::from(value));
             }
-            args.push(BasicMetadataValueEnum::from(value));
+            let trailing_args = &arguments[fixed_count..];
+            let slice_param_index = fixed_count + usize::from(inject_receiver);
+            let slice_ty = &signature.as_ref().unwrap().params[slice_param_index];
+            let slice_val = self.emit_variadic_slice_pack(slice_ty, trailing_args, method.span)?;
+            args.push(BasicMetadataValueEnum::from(slice_val));
+        } else {
+            for (index, argument) in arguments.iter().enumerate() {
+                let param_index = index + usize::from(inject_receiver);
+                let expects_ref = signature
+                    .as_ref()
+                    .and_then(|sig| sig.params.get(param_index))
+                    .map(|p| {
+                        matches!(
+                            p.kind.as_ref(),
+                            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                        )
+                    })
+                    .unwrap_or(false);
+                let mut value = if expects_ref
+                    && self
+                        .resolve_argument_type(argument)
+                        .map(|t| {
+                            !matches!(
+                                t.kind.as_ref(),
+                                ast::TypeKind::Pointer(_)
+                                    | ast::TypeKind::Reference(_)
+                                    | ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+                            )
+                        })
+                        .unwrap_or(false)
+                {
+                    if let Ok((ptr, _)) = self.resolve_lvalue_ptr(argument) {
+                        ptr.as_basic_value_enum()
+                    } else {
+                        let val = self.emit_expression_value(argument)?;
+                        let function_ctx = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for argument spill")
+                        })?;
+                        let temp =
+                            self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
+                        self.builder.build_store(temp, val).map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to spill argument for reference param: {e}"),
+                                argument.span,
+                            )
+                        })?;
+                        temp.as_basic_value_enum()
+                    }
+                } else {
+                    self.emit_expression_value(argument)?
+                };
+                if param_index < declared_param_count {
+                    if let Some(signature) = &signature {
+                        // By-value argument of a Drop type: the callee's
+                        // parameter destructor runs on exit, transferring
+                        // ownership. Clear the caller's flag to avoid a
+                        // double free; extern functions never drop params.
+                        if signature.linkage.is_none() {
+                            let arg_drops = if expects_ref {
+                                false
+                            } else if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                                self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
+                            } else if param_index < signature.params.len() {
+                                self.param_type_drops_on_exit(&signature.params[param_index])
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+                            if arg_drops {
+                                self.clear_drop_flag_of(argument)?;
+                            }
+                        }
+                        // Prefer a user-defined cast method over builtin casts.
+                        if let Some(casted) = self.try_apply_user_cast(
+                            value,
+                            argument,
+                            &signature.params[param_index],
+                            &argument.span,
+                        )? {
+                            value = casted;
+                        } else {
+                            value = self.cast_expr_to_ast_type(
+                                value,
+                                Some(argument),
+                                &signature.params[param_index],
+                                &argument.span,
+                            )?;
+                        }
+                        // Apply ABI coercion for extern methods
+                        if let Some(linkage) = &signature.linkage {
+                            value = self.coerce_value_to_abi(
+                                value,
+                                &signature.params[param_index],
+                                linkage,
+                            )?;
+                        }
+                    }
+                } else if is_variadic {
+                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                }
+                args.push(BasicMetadataValueEnum::from(value));
+            }
         }
 
         let call = self

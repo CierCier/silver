@@ -1,0 +1,86 @@
+import std.io;
+
+// Free function with typed variadics
+i32 sum_all(str prefix, i32... numbers) {
+    let total = 0;
+    @println("{}: len={} | total={}", prefix, (i64)numbers.len, (i64)total);
+    for (i64 i = 0; i < numbers.len; i = i + 1) {
+        total = total + numbers[i];
+    }
+    return total;
+}
+
+// Method with typed variadics
+struct Accumulator {
+    i32 count;
+    i32 sum;
+}
+
+impl Accumulator {
+    Accumulator new() {
+        Accumulator a;
+        a.count = 0;
+        a.sum = 0;
+        return a;
+    }
+
+    void add_many(Accumulator* self, i32... items) {
+        for (i64 i = 0; i < items.len; i = i + 1) {
+            self.sum = self.sum + items[i];
+            self.count = self.count + 1;
+        }
+    }
+}
+
+// Single-variadic free function
+void print_strings(str... lines) {
+    for (i64 i = 0; i < lines.len; i = i + 1) {
+        println(lines[i]);
+    }
+}
+
+i32 main() {
+    // 1. Call free function with multiple variadic arguments
+    let s1 = sum_all("three", 10, 20, 30);
+    if (s1 != 60) {
+        return 1;
+    }
+
+    // 2. Call free function with zero variadic arguments
+    let s2 = sum_all("empty");
+    if (s2 != 0) {
+        return 2;
+    }
+
+    // 3. Call free function with single variadic argument
+    let s3 = sum_all("one", 42);
+    if (s3 != 42) {
+        return 3;
+    }
+
+    // 4. Call variadic function with strings
+    print_strings("hello-silver-variadics");
+    print_strings("single");
+
+    // 5. Call struct method with variadics
+    Accumulator acc = Accumulator.new();
+    acc.add_many(1, 2, 3, 4, 5);
+    @println("acc after 5: count={} sum={}", (i64)acc.count, (i64)acc.sum);
+    if (acc.count != 5 || acc.sum != 15) {
+        return 5;
+    }
+
+    acc.add_many();
+    @println("acc after 0: count={} sum={}", (i64)acc.count, (i64)acc.sum);
+    if (acc.count != 5 || acc.sum != 15) {
+        return 6;
+    }
+
+    acc.add_many(10, 20);
+    @println("acc after 2: count={} sum={}", (i64)acc.count, (i64)acc.sum);
+    if (acc.count != 7 || acc.sum != 45) {
+        return 7;
+    }
+
+    return 0;
+}

@@ -384,6 +384,7 @@ impl TypeChecker {
                                         },
                                         param_type: param_type.to_ast(),
                                         is_mutable: false,
+                                        is_variadic: false,
                                         span: Span::default(),
                                     })
                                     .collect(),
@@ -444,6 +445,7 @@ impl TypeChecker {
                                             },
                                             param_type: p.to_ast(),
                                             is_mutable: false,
+                                            is_variadic: false,
                                             span: Span::default(),
                                         })
                                         .collect(),
@@ -892,7 +894,12 @@ impl TypeChecker {
 
         self.push_scope();
         for param in &func.parameters {
-            let param_type = Type::from_ast(&param.param_type);
+            let mut param_type = Type::from_ast(&param.param_type);
+            if param.is_variadic {
+                param_type = Type::Slice {
+                    element: Box::new(param_type),
+                };
+            }
             self.reject_plain_void_value_type(&param_type, param.param_type.span);
             self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
@@ -915,7 +922,12 @@ impl TypeChecker {
 
         self.push_scope();
         for param in &func.parameters {
-            let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
+            let mut param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
+            if param.is_variadic {
+                param_type = Type::Slice {
+                    element: Box::new(param_type),
+                };
+            }
             self.reject_plain_void_value_type(&param_type, param.param_type.span);
             self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
@@ -949,6 +961,7 @@ impl TypeChecker {
         }
         self.pop_scope();
     }
+
 
     fn check_statement(&mut self, stmt: &ast::Statement) {
         match &stmt.kind {
@@ -3314,13 +3327,6 @@ impl TypeChecker {
             let Some(candidate) = self.function_symbols.get(candidate_id).cloned() else {
                 continue;
             };
-            if candidate.is_variadic {
-                if candidate.params.len() > arguments.len() {
-                    continue;
-                }
-            } else if candidate.params.len() != arguments.len() {
-                continue;
-            }
             let mut ok = true;
             let mut score = 0usize;
             let mut mapping = HashMap::default();
@@ -3333,64 +3339,165 @@ impl TypeChecker {
                 }
             }
 
-            for (i, (param_ty, arg_ty)) in candidate.params.iter().zip(arg_types.iter()).enumerate()
-            {
-                let mut matched = false;
-
-                // Phase 0: integer literals cannot narrow into a parameter
-                // type they overflow (e.g. `foo(300)` cannot call `foo(u8)`);
-                // otherwise the natural-typed arg flows through the normal
-                // assignable/cast matching below.
-                if let Some(lit_value) = Self::literal_integer_value(&arguments[i])
-                    && let Type::Primitive(prim) = &self.substitute_type(param_ty, &mapping)
-                    && Self::integer_prim_range(prim).is_some()
-                    && !Self::integer_value_fits(lit_value, prim)
-                {
-                    ok = false;
-                    break;
+            let has_var_param = candidate.source.parameters.iter().any(|p| p.is_variadic);
+            if has_var_param {
+                let fixed_params_count = candidate.params.len().saturating_sub(1);
+                if arguments.len() < fixed_params_count {
+                    continue;
                 }
+                let var_elem_ty = &candidate.params[fixed_params_count];
 
-                // Phase 1: try with inferred type-parameter mapping
-                let mut inferred_mapping = mapping.clone();
-                if !matched
-                    && self.infer_type_params(
-                        param_ty,
-                        arg_ty,
-                        &candidate.type_params,
-                        &mut inferred_mapping,
-                    )
-                {
-                    let substituted = self.substitute_type(param_ty, &inferred_mapping);
-                    if self.is_assignable(&substituted, arg_ty) {
-                        if substituted != *arg_ty {
+                // Check fixed arguments:
+                for (i, param_ty) in candidate.params[..fixed_params_count].iter().enumerate() {
+                    let arg_ty = &arg_types[i];
+                    let mut matched = false;
+                    if let Some(lit_value) = Self::literal_integer_value(&arguments[i])
+                        && let Type::Primitive(prim) = &self.substitute_type(param_ty, &mapping)
+                        && Self::integer_prim_range(prim).is_some()
+                        && !Self::integer_value_fits(lit_value, prim)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    let mut inferred_mapping = mapping.clone();
+                    if self.infer_type_params(param_ty, arg_ty, &candidate.type_params, &mut inferred_mapping) {
+                        let substituted = self.substitute_type(param_ty, &inferred_mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty { score += 1; }
+                            mapping = inferred_mapping;
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
                             score += 1;
+                            mapping = inferred_mapping;
+                            matched = true;
                         }
-                        mapping = inferred_mapping;
-                        matched = true;
-                    } else if self.is_implicitly_castable(arg_ty, &substituted) {
-                        score += 1;
-                        mapping = inferred_mapping;
-                        matched = true;
+                    }
+                    if !matched {
+                        let substituted = self.substitute_type(param_ty, &mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty { score += 1; }
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                            score += 1;
+                            matched = true;
+                        }
+                    }
+                    if !matched {
+                        ok = false;
+                        break;
                     }
                 }
 
-                // Phase 2: fallback for concrete types (e.g. f32 vs f64)
-                if !matched {
-                    let substituted = self.substitute_type(param_ty, &mapping);
-                    if self.is_assignable(&substituted, arg_ty) {
-                        if substituted != *arg_ty {
-                            score += 1;
+                // Check trailing variadic arguments against var_elem_ty:
+                if ok {
+                    for i in fixed_params_count..arguments.len() {
+                        let arg_ty = &arg_types[i];
+                        let mut matched = false;
+                        if let Some(lit_value) = Self::literal_integer_value(&arguments[i])
+                            && let Type::Primitive(prim) = &self.substitute_type(var_elem_ty, &mapping)
+                            && Self::integer_prim_range(prim).is_some()
+                            && !Self::integer_value_fits(lit_value, prim)
+                        {
+                            ok = false;
+                            break;
                         }
-                        matched = true;
-                    } else if self.is_implicitly_castable(arg_ty, &substituted) {
-                        score += 1;
-                        matched = true;
+                        let mut inferred_mapping = mapping.clone();
+                        if self.infer_type_params(var_elem_ty, arg_ty, &candidate.type_params, &mut inferred_mapping) {
+                            let substituted = self.substitute_type(var_elem_ty, &inferred_mapping);
+                            if self.is_assignable(&substituted, arg_ty) {
+                                if substituted != *arg_ty { score += 1; }
+                                mapping = inferred_mapping;
+                                matched = true;
+                            } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                                score += 1;
+                                mapping = inferred_mapping;
+                                matched = true;
+                            }
+                        }
+                        if !matched {
+                            let substituted = self.substitute_type(var_elem_ty, &mapping);
+                            if self.is_assignable(&substituted, arg_ty) {
+                                if substituted != *arg_ty { score += 1; }
+                                matched = true;
+                            } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                                score += 1;
+                                matched = true;
+                            }
+                        }
+                        if !matched {
+                            ok = false;
+                            break;
+                        }
                     }
                 }
+            } else {
+                if candidate.is_variadic {
+                    if candidate.params.len() > arguments.len() {
+                        continue;
+                    }
+                } else if candidate.params.len() != arguments.len() {
+                    continue;
+                }
 
-                if !matched {
-                    ok = false;
-                    break;
+                for (i, (param_ty, arg_ty)) in candidate.params.iter().zip(arg_types.iter()).enumerate()
+                {
+                    let mut matched = false;
+
+                    // Phase 0: integer literals cannot narrow into a parameter
+                    // type they overflow (e.g. `foo(300)` cannot call `foo(u8)`);
+                    // otherwise the natural-typed arg flows through the normal
+                    // assignable/cast matching below.
+                    if let Some(lit_value) = Self::literal_integer_value(&arguments[i])
+                        && let Type::Primitive(prim) = &self.substitute_type(param_ty, &mapping)
+                        && Self::integer_prim_range(prim).is_some()
+                        && !Self::integer_value_fits(lit_value, prim)
+                    {
+                        ok = false;
+                        break;
+                    }
+
+                    // Phase 1: try with inferred type-parameter mapping
+                    let mut inferred_mapping = mapping.clone();
+                    if !matched
+                        && self.infer_type_params(
+                            param_ty,
+                            arg_ty,
+                            &candidate.type_params,
+                            &mut inferred_mapping,
+                        )
+                    {
+                        let substituted = self.substitute_type(param_ty, &inferred_mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty {
+                                score += 1;
+                            }
+                            mapping = inferred_mapping;
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                            score += 1;
+                            mapping = inferred_mapping;
+                            matched = true;
+                        }
+                    }
+
+                    // Phase 2: fallback for concrete types (e.g. f32 vs f64)
+                    if !matched {
+                        let substituted = self.substitute_type(param_ty, &mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty {
+                                score += 1;
+                            }
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                            score += 1;
+                            matched = true;
+                        }
+                    }
+
+                    if !matched {
+                        ok = false;
+                        break;
+                    }
                 }
             }
 
@@ -3635,7 +3742,132 @@ impl TypeChecker {
                 }
             }
 
-            if style == MethodCallStyle::Instance && candidate.params.len() == arg_types.len() + 1 {
+            let has_var_param = candidate.source_method.parameters.iter().any(|p| p.is_variadic);
+            if has_var_param {
+                let fixed_arg_count = if style == MethodCallStyle::Instance {
+                    candidate.params.len().saturating_sub(2)
+                } else {
+                    candidate.params.len().saturating_sub(1)
+                };
+                if arg_types.len() < fixed_arg_count {
+                    continue;
+                }
+                if style == MethodCallStyle::Instance {
+                    let receiver_param = self.substitute_self_type(&candidate.params[0], receiver_ty);
+                    let infer_expected = match &receiver_param {
+                        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => inner.as_ref(),
+                        _ => &receiver_param,
+                    };
+                    let infer_found = match &receiver_param {
+                        Type::Reference { .. } | Type::Pointer { .. } => owner_ty,
+                        _ => receiver_ty,
+                    };
+                    if !self.infer_type_params(
+                        infer_expected,
+                        infer_found,
+                        &candidate.type_params,
+                        &mut mapping,
+                    ) {
+                        ok = false;
+                    } else {
+                        let substituted = self.substitute_type(&receiver_param, &mapping);
+                        if !self.receiver_compatible(&substituted, receiver_ty, &mut score) {
+                            ok = false;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let param_offset = if style == MethodCallStyle::Instance { 1 } else { 0 };
+                // Check fixed arguments:
+                for (i, param_ty) in candidate.params[param_offset..param_offset + fixed_arg_count].iter().enumerate() {
+                    let param_ty = self.substitute_self_type(param_ty, receiver_ty);
+                    let arg_ty = &arg_types[i];
+                    let mut matched = false;
+                    if let Some(exprs) = arg_exprs
+                        && let Some(lit_value) = exprs.get(i).and_then(Self::literal_integer_value)
+                        && let Type::Primitive(prim) = &self.substitute_type(&param_ty, &mapping)
+                        && Self::integer_prim_range(prim).is_some()
+                        && !Self::integer_value_fits(lit_value, prim)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    let mut inferred_mapping = mapping.clone();
+                    if self.infer_type_params(&param_ty, arg_ty, &candidate.type_params, &mut inferred_mapping) {
+                        let substituted = self.substitute_type(&param_ty, &inferred_mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty { score += 1; }
+                            mapping = inferred_mapping;
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                            score += 1;
+                            mapping = inferred_mapping;
+                            matched = true;
+                        }
+                    }
+                    if !matched {
+                        let substituted = self.substitute_type(&param_ty, &mapping);
+                        if self.is_assignable(&substituted, arg_ty) {
+                            if substituted != *arg_ty { score += 1; }
+                            matched = true;
+                        } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                            score += 1;
+                            matched = true;
+                        }
+                    }
+                    if !matched {
+                        ok = false;
+                        break;
+                    }
+                }
+                // Check trailing variadic arguments:
+                if ok {
+                    let var_elem_ty = candidate.params.last().unwrap();
+                    let var_elem_ty = self.substitute_self_type(var_elem_ty, receiver_ty);
+                    for i in fixed_arg_count..arg_types.len() {
+                        let arg_ty = &arg_types[i];
+                        let mut matched = false;
+                        if let Some(exprs) = arg_exprs
+                            && let Some(lit_value) = exprs.get(i).and_then(Self::literal_integer_value)
+                            && let Type::Primitive(prim) = &self.substitute_type(&var_elem_ty, &mapping)
+                            && Self::integer_prim_range(prim).is_some()
+                            && !Self::integer_value_fits(lit_value, prim)
+                        {
+                            ok = false;
+                            break;
+                        }
+                        let mut inferred_mapping = mapping.clone();
+                        if self.infer_type_params(&var_elem_ty, arg_ty, &candidate.type_params, &mut inferred_mapping) {
+                            let substituted = self.substitute_type(&var_elem_ty, &inferred_mapping);
+                            if self.is_assignable(&substituted, arg_ty) {
+                                if substituted != *arg_ty { score += 1; }
+                                mapping = inferred_mapping;
+                                matched = true;
+                            } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                                score += 1;
+                                mapping = inferred_mapping;
+                                matched = true;
+                            }
+                        }
+                        if !matched {
+                            let substituted = self.substitute_type(&var_elem_ty, &mapping);
+                            if self.is_assignable(&substituted, arg_ty) {
+                                if substituted != *arg_ty { score += 1; }
+                                matched = true;
+                            } else if self.is_implicitly_castable(arg_ty, &substituted) {
+                                score += 1;
+                                matched = true;
+                            }
+                        }
+                        if !matched {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            } else if style == MethodCallStyle::Instance && candidate.params.len() == arg_types.len() + 1 {
                 let receiver_param = self.substitute_self_type(&candidate.params[0], receiver_ty);
                 let infer_expected = match &receiver_param {
                     Type::Reference { inner, .. } | Type::Pointer { inner, .. } => inner.as_ref(),
@@ -3664,7 +3896,7 @@ impl TypeChecker {
                 ok = false;
             }
 
-            if ok {
+            if ok && !has_var_param {
                 let mut iter = candidate.params.iter();
                 if style == MethodCallStyle::Instance
                     && candidate.params.len() == arg_types.len() + 1
@@ -3807,7 +4039,8 @@ impl TypeChecker {
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Function(func) => {
-                    self.collect_function_item(func, false, table);
+                    let is_var = func.is_variadic || func.parameters.iter().any(|p| p.is_variadic);
+                    self.collect_function_item(func, is_var, table);
                 }
                 ast::ItemKind::ExternFunction(func) => {
                     let stub = ast::FunctionItem {
@@ -9251,5 +9484,30 @@ mod tests {
         // String literal matches u8_slice
         let str_lit = ast::Literal::String("hello world".to_string());
         assert!(tc.literal_matches_expected(&str_lit, &u8_slice));
+    }
+
+    #[test]
+    fn type_checks_variadic_functions_and_methods() {
+        let program = parse(
+            "i32 sum(str prefix, i32... nums) { \
+                 return (i32) nums.len; \
+             } \
+             struct Counter { i32 n; } \
+             impl Counter { \
+                 void add(Counter* self, i32... items) { \
+                     self.n = self.n + (i32) items.len; \
+                 } \
+             } \
+             i32 main() { \
+                 sum(\"three\", 1, 2, 3); \
+                 sum(\"empty\"); \
+                 Counter c; c.n = 0; \
+                 c.add(10, 20); \
+                 c.add(); \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 }
