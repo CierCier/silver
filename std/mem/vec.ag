@@ -378,6 +378,15 @@ Vec<T> iter_collect<I, T>(I* iter) {
     return out;
 }
 
+/// Constructs a new Vec initialized with the given elements.
+macro [T] Vec<T> vec(T... elements) {
+    Vec<T> v = Vec<T>.with_capacity(elements.len);
+    for e in elements {
+        v.push(e);
+    }
+    return move v;
+}
+
 // -- Ownership smoke (manual check) ---------------------------------------
 // Vec<String> with growth:
 //   Vec<String> v = Vec<String>.new();

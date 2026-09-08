@@ -234,15 +234,17 @@ fn expand_macros_in_expr(
 
             // Check if name is a user macro
             if let Some(def) = macro_table.get(&name.name) {
-                let call_args: Vec<Expression> = args
-                    .iter()
-                    .filter_map(|a| match a {
-                        MacroArg::Expression(e) => Some(e.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut type_args: Vec<ast::Type> = Vec::new();
+                let mut call_args: Vec<Expression> = Vec::new();
+                for a in args.iter() {
+                    match a {
+                        MacroArg::Type(ty) => type_args.push(ty.clone()),
+                        MacroArg::Expression(e) => call_args.push(e.clone()),
+                        _ => {}
+                    }
+                }
 
-                let expanded = expand_macro_invocation(def, &call_args, expr.span, macro_table, depth + 1);
+                let expanded = expand_macro_invocation(def, &type_args, &call_args, expr.span, macro_table, depth + 1);
                 *expr = expanded;
                 // Re-expand in case the macro returned another macro call
                 expand_macros_in_expr(expr, macro_table, depth + 1);
@@ -256,11 +258,28 @@ fn expand_macros_in_expr(
 /// Expands a single user macro invocation.
 fn expand_macro_invocation(
     def: &MacroDef,
+    type_args: &[ast::Type],
     args: &[Expression],
     call_span: Span,
     _macro_table: &HashMap<String, MacroDef>,
     _depth: usize,
 ) -> Expression {
+    // Generic type substitution:
+    let mut type_subst: HashMap<String, ast::Type> = HashMap::default();
+    if let Some(generics) = &def.generics {
+        for (i, param) in generics.params.iter().enumerate() {
+            let param_name = match param {
+                ast::GenericParam::Type(tp) => &tp.name.name,
+                ast::GenericParam::Lifetime(lp) => &lp.name.name,
+            };
+            if i < type_args.len() {
+                type_subst.insert(param_name.clone(), type_args[i].clone());
+            } else if let Some(inferred) = infer_generic_param_type(param_name, def, args) {
+                type_subst.insert(param_name.clone(), inferred);
+            }
+        }
+    }
+
     // Parameter matching:
     let mut param_subst: HashMap<String, Expression> = HashMap::default();
     let mut vararg_subst: Option<(String, Vec<Expression>)> = None;
@@ -286,6 +305,9 @@ fn expand_macro_invocation(
 
     let mut body = def.body.clone();
     apply_hygiene_and_subst(&mut body, &hygiene_map, &param_subst, &vararg_subst);
+    if !type_subst.is_empty() {
+        substitute_types_in_block(&mut body, &type_subst);
+    }
 
     // Try compile-time evaluation if all arguments are constant
     let mut const_env: HashMap<String, Literal> = HashMap::default();
@@ -839,6 +861,235 @@ fn eval_unary_op(op: &UnaryOperator, val: &Literal) -> Option<Literal> {
         (UnaryOperator::Minus, Literal::Float(f)) => Some(Literal::Float(-f)),
         (UnaryOperator::Not, Literal::Bool(b)) => Some(Literal::Bool(!b)),
         (UnaryOperator::BitwiseNot, Literal::Integer(i)) => Some(Literal::Integer(!i)),
+        _ => None,
+    }
+}
+
+fn substitute_types_in_block(block: &mut Block, subst: &HashMap<String, ast::Type>) {
+    if subst.is_empty() {
+        return;
+    }
+    for stmt in &mut block.statements {
+        substitute_types_in_statement(stmt, subst);
+    }
+}
+
+fn substitute_types_in_statement(stmt: &mut Statement, subst: &HashMap<String, ast::Type>) {
+    match &mut stmt.kind {
+        StatementKind::Let(let_stmt) => {
+            if let Some(ty) = &mut let_stmt.type_annotation {
+                substitute_type(ty, subst);
+            }
+            if let Some(init) = &mut let_stmt.initializer {
+                substitute_types_in_expr(init, subst);
+            }
+        }
+        StatementKind::Expression(expr)
+        | StatementKind::Return(Some(expr))
+        | StatementKind::Break(Some(expr)) => {
+            substitute_types_in_expr(expr, subst);
+        }
+        StatementKind::Block(b) => {
+            substitute_types_in_block(b, subst);
+        }
+        StatementKind::Defer(s) => {
+            substitute_types_in_statement(s, subst);
+        }
+        _ => {}
+    }
+}
+
+fn substitute_types_in_expr(expr: &mut Expression, subst: &HashMap<String, ast::Type>) {
+    match expr.kind.as_mut() {
+        ExpressionKind::TypeName(ty) => {
+            substitute_type(ty, subst);
+        }
+        ExpressionKind::Cast { target_type, expression } => {
+            substitute_type(target_type, subst);
+            substitute_types_in_expr(expression, subst);
+        }
+        ExpressionKind::Binary { left, right, .. } => {
+            substitute_types_in_expr(left, subst);
+            substitute_types_in_expr(right, subst);
+        }
+        ExpressionKind::Unary { operand, .. }
+        | ExpressionKind::Postfix { operand, .. }
+        | ExpressionKind::Move(operand)
+        | ExpressionKind::Launch(operand)
+        | ExpressionKind::Wait(operand)
+        | ExpressionKind::Comptime(operand)
+        | ExpressionKind::Reference { expression: operand, .. } => {
+            substitute_types_in_expr(operand, subst);
+        }
+        ExpressionKind::Call { function, arguments } => {
+            substitute_types_in_expr(function, subst);
+            for a in arguments {
+                substitute_types_in_expr(a, subst);
+            }
+        }
+        ExpressionKind::MethodCall { receiver, arguments, .. } => {
+            substitute_types_in_expr(receiver, subst);
+            for a in arguments {
+                substitute_types_in_expr(a, subst);
+            }
+        }
+        ExpressionKind::FieldAccess { object, .. } => {
+            substitute_types_in_expr(object, subst);
+        }
+        ExpressionKind::Index { object, index } => {
+            substitute_types_in_expr(object, subst);
+            substitute_types_in_expr(index, subst);
+        }
+        ExpressionKind::Slice { object, start, end, step } => {
+            substitute_types_in_expr(object, subst);
+            if let Some(s) = start { substitute_types_in_expr(s, subst); }
+            if let Some(e) = end { substitute_types_in_expr(e, subst); }
+            if let Some(st) = step { substitute_types_in_expr(st, subst); }
+        }
+        ExpressionKind::If { condition, then_branch, else_branch } => {
+            substitute_types_in_expr(condition, subst);
+            substitute_types_in_block(then_branch, subst);
+            if let Some(eb) = else_branch { substitute_types_in_block(eb, subst); }
+        }
+        ExpressionKind::Ternary { condition, then_expr, else_expr } => {
+            substitute_types_in_expr(condition, subst);
+            substitute_types_in_expr(then_expr, subst);
+            substitute_types_in_expr(else_expr, subst);
+        }
+        ExpressionKind::Block(b) => {
+            substitute_types_in_block(b, subst);
+        }
+        ExpressionKind::Array(items) | ExpressionKind::Tuple(items) => {
+            for item in items {
+                substitute_types_in_expr(item, subst);
+            }
+        }
+        ExpressionKind::ForIn { iterable, body, .. } => {
+            substitute_types_in_expr(iterable, subst);
+            substitute_types_in_block(body, subst);
+        }
+        ExpressionKind::While { condition, body } => {
+            substitute_types_in_expr(condition, subst);
+            substitute_types_in_block(body, subst);
+        }
+        _ => {}
+    }
+}
+
+fn substitute_type(ty: &mut ast::Type, subst: &HashMap<String, ast::Type>) {
+    match ty.kind.as_mut() {
+        ast::TypeKind::Named(named) => {
+            if named.path.len() == 1 && named.generics.is_none() {
+                if let Some(replacement) = subst.get(&named.path[0].name) {
+                    *ty = replacement.clone();
+                    return;
+                }
+            }
+            if let Some(generics) = &mut named.generics {
+                for g in generics {
+                    substitute_type(g, subst);
+                }
+            }
+        }
+        ast::TypeKind::Pointer(ptr) => {
+            substitute_type(&mut ptr.inner, subst);
+        }
+        ast::TypeKind::Slice(slice) => {
+            substitute_type(&mut slice.element_type, subst);
+        }
+        ast::TypeKind::Array(arr) => {
+            substitute_type(&mut arr.element_type, subst);
+        }
+        ast::TypeKind::Optional(inner) => {
+            substitute_type(inner, subst);
+        }
+        ast::TypeKind::Reference(ref_type) => {
+            substitute_type(&mut ref_type.inner, subst);
+        }
+        ast::TypeKind::Tuple(types) => {
+            for t in types {
+                substitute_type(t, subst);
+            }
+        }
+        ast::TypeKind::Function(fn_type) => {
+            for p in &mut fn_type.parameters {
+                substitute_type(p, subst);
+            }
+            substitute_type(&mut fn_type.return_type, subst);
+        }
+        _ => {}
+    }
+}
+
+fn infer_generic_param_type(
+    param_name: &str,
+    def: &MacroDef,
+    args: &[Expression],
+) -> Option<ast::Type> {
+    for (i, p) in def.parameters.iter().enumerate() {
+        if type_uses_param(&p.param_type, param_name) {
+            if p.is_variadic {
+                if i < args.len() {
+                    return infer_type_from_expr(&args[i]);
+                }
+            } else if i < args.len() {
+                return infer_type_from_expr(&args[i]);
+            }
+        }
+    }
+    if let Some(first) = args.first() {
+        infer_type_from_expr(first)
+    } else {
+        None
+    }
+}
+
+fn type_uses_param(ty: &ast::Type, name: &str) -> bool {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => {
+            if named.path.len() == 1 && named.path[0].name == name {
+                return true;
+            }
+            if let Some(generics) = &named.generics {
+                return generics.iter().any(|g| type_uses_param(g, name));
+            }
+            false
+        }
+        ast::TypeKind::Slice(slice) => type_uses_param(&slice.element_type, name),
+        ast::TypeKind::Array(arr) => type_uses_param(&arr.element_type, name),
+        ast::TypeKind::Pointer(ptr) => type_uses_param(&ptr.inner, name),
+        ast::TypeKind::Optional(inner) => type_uses_param(inner, name),
+        _ => false,
+    }
+}
+
+fn infer_type_from_expr(expr: &Expression) -> Option<ast::Type> {
+    match expr.kind.as_ref() {
+        ExpressionKind::Literal(lit) => match lit {
+            Literal::Integer(_) => Some(ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I32)),
+                span: expr.span,
+            }),
+            Literal::Float(_) => Some(ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::F64)),
+                span: expr.span,
+            }),
+            Literal::String(_) => Some(ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Str)),
+                span: expr.span,
+            }),
+            Literal::Char(_) => Some(ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Char)),
+                span: expr.span,
+            }),
+            Literal::Bool(_) => Some(ast::Type {
+                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                span: expr.span,
+            }),
+            _ => None,
+        },
+        ExpressionKind::TypeName(ty) => Some(ty.clone()),
+        ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
         _ => None,
     }
 }

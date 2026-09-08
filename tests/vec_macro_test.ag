@@ -1,0 +1,45 @@
+import std.io;
+
+i32 main() {
+    // 1. Vector with elements (auto-import of std.mem.vec)
+    Vec<i32> v = @vec(10, 20, 30);
+    if (v.len() != 3) {
+        return 1;
+    }
+    if (v.get(0) != 10 || v.get(1) != 20 || v.get(2) != 30) {
+        return 2;
+    }
+
+    // 2. Vector with explicit type argument
+    Vec<i32> v2 = @vec<i32>(100, 200);
+    if (v2.len() != 2) {
+        return 3;
+    }
+    if (v2.get(0) != 100 || v2.get(1) != 200) {
+        return 4;
+    }
+
+    // 3. Empty vector with explicit type
+    Vec<i32> empty = @vec<i32>();
+    if (!empty.is_empty()) {
+        return 5;
+    }
+    if (empty.len() != 0) {
+        return 6;
+    }
+
+    // 4. String vector with explicit type
+    Vec<str> words = @vec<str>("alpha", "beta", "gamma");
+    if (words.len() != 3) {
+        return 7;
+    }
+
+    // 5. Inferred string vector
+    Vec<str> greetings = @vec("hello", "world");
+    if (greetings.len() != 2) {
+        return 8;
+    }
+
+    @println("All @vec tests passed successfully!");
+    return 0;
+}

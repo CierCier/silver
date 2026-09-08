@@ -1363,6 +1363,37 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
             let name_span = name_token.span;
             cursor.bump();
             let mut args = Vec::new();
+
+            // Optional type arguments: @name<T, U>(...)
+            if matches!(cursor.current().map(|t| &t.kind), Some(Token::Less)) {
+                let saved_pos = cursor.pos;
+                cursor.bump();
+                let mut type_args = Vec::new();
+                let mut valid = true;
+                while !matches!(cursor.current().map(|t| &t.kind), Some(Token::Greater)) {
+                    if let Some((ty, next_pos)) = parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end) {
+                        type_args.push(ty);
+                        cursor.pos = next_pos;
+                        if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+                            cursor.bump();
+                        } else {
+                            break;
+                        }
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if valid && matches!(cursor.current().map(|t| &t.kind), Some(Token::Greater)) {
+                    cursor.bump();
+                    for ty in type_args {
+                        args.push(ast::MacroArg::Type(ty));
+                    }
+                } else {
+                    cursor.pos = saved_pos;
+                }
+            }
+
             if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftParen)) {
                 cursor.bump();
                 while !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightParen)) {

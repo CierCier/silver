@@ -2839,8 +2839,47 @@ impl PRT_Parser {
     ) -> Result<ast::MacroDef, ParseError> {
         let mut cursor = start + 1;
 
+        // Prefix generics: `macro [T] ...` or `macro <T> ...`
+        let mut prefix_generics = None;
+        if cursor < end && matches!(tokens[cursor].kind, Token::Less) {
+            let (parsed_gen, next) = self.parse_generics_prefix(tokens, cursor, end)?;
+            prefix_generics = parsed_gen;
+            cursor = next;
+        } else if cursor < end && matches!(tokens[cursor].kind, Token::LeftBracket) {
+            let bracket_start = cursor;
+            cursor += 1;
+            let mut params = Vec::new();
+            while cursor < end && !matches!(tokens[cursor].kind, Token::RightBracket) {
+                if let Token::Identifier(t_name) = &tokens[cursor].kind {
+                    params.push(ast::GenericParam::Type(ast::TypeParam {
+                        name: ast::Identifier {
+                            name: t_name.clone(),
+                            span: tokens[cursor].span,
+                        },
+                        bounds: Vec::new(),
+                        default: None,
+                        span: tokens[cursor].span,
+                    }));
+                    cursor += 1;
+                    if cursor < end && matches!(tokens[cursor].kind, Token::Comma) {
+                        cursor += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if cursor < end && matches!(tokens[cursor].kind, Token::RightBracket) {
+                cursor += 1;
+                prefix_generics = Some(ast::Generics {
+                    params,
+                    where_clause: None,
+                    span: tokens[bracket_start].span.extend_to(&tokens[cursor - 1].span),
+                });
+            }
+        }
+
         // Check if there is an explicit return type before the macro name:
-        // e.g. `macro i32 add(...)` vs `macro add(...)`
+        // e.g. `macro i32 add(...)` or `macro [T] Vec<T> vec(...)` vs `macro add(...)`
         let mut return_type = None;
         if let Some((parsed_type, after_type)) = self.parse_type_prefix(tokens, cursor, end) {
             if after_type < end && matches!(tokens[after_type].kind, Token::Identifier(_)) {
@@ -2872,9 +2911,13 @@ impl PRT_Parser {
         };
         cursor += 1;
 
-        // Generics: `macro T id<T>(...)` or `macro id<T>(...)`
-        let (mut generics, next) = self.parse_generics_prefix(tokens, cursor, end)?;
-        cursor = next;
+        // Postfix generics: `macro T id<T>(...)` or `macro id<T>(...)`
+        let mut generics = prefix_generics;
+        if generics.is_none() {
+            let (postfix_gen, next) = self.parse_generics_prefix(tokens, cursor, end)?;
+            generics = postfix_gen;
+            cursor = next;
+        }
         let (where_clause, next_after_where) =
             self.parse_where_clause_prefix(tokens, cursor, end)?;
         cursor = next_after_where;

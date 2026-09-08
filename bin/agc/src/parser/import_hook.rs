@@ -160,6 +160,11 @@ impl<'a> FileImportResolverHook<'a> {
             auto_modules.push(vec!["std", "json"]);
         }
 
+        // @vec -> std.mem.vec
+        if uses_macro(&program.items, &["vec"]) {
+            auto_modules.push(vec!["std", "mem", "vec"]);
+        }
+
         for module_path in auto_modules {
             let module_key = module_path.join(".");
             if !self.seen_modules.contains(&module_key) {
