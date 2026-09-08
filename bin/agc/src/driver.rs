@@ -1340,6 +1340,10 @@ pub fn run(cli: Cli) {
                 crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
                 profiler::end_phase("serialize");
 
+                profiler::begin_phase("macro expansion");
+                crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
+                profiler::end_phase("macro expansion");
+
                 if plan.test_harness {
                     let test_fns: Vec<String> = ast
                         .items

@@ -1,0 +1,146 @@
+import std.io;
+
+macro i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+macro mul(a, b) {
+    return a * b;
+}
+
+macro i32 sum(i32... nums) {
+    let s = 0;
+    for n in nums {
+        s = s + n;
+    }
+    return s;
+}
+
+macro i32 count(i32... nums) {
+    return nums.len;
+}
+
+macro i32 first(i32... nums) {
+    return nums[0];
+}
+
+macro i32 max_val(i32 a, i32 b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+macro T identity<T>(T val) {
+    return val;
+}
+
+macro void set_val(i32* ptr, i32 val) {
+    *ptr = val;
+}
+
+macro void inc_val(x) {
+    x = x + 1;
+}
+
+macro i32 double(i32 x) {
+    return x * 2;
+}
+
+macro i32 quad(i32 x) {
+    return @double(@double(x));
+}
+
+i32 main() {
+    // 1. Basic typed macro with comptime evaluation
+    let a = @add(10, 20);
+    if (a != 30) {
+        return 1;
+    }
+
+    // 2. Runtime expression substitution
+    let x = 15;
+    let b = @add(x, 5);
+    if (b != 20) {
+        return 2;
+    }
+
+    // 3. Untyped macro
+    let c = @mul(6, 7);
+    if (c != 42) {
+        return 3;
+    }
+
+    // 4. Variadic macro with loop unrolling (comptime)
+    let d = @sum(1, 2, 3, 4, 5);
+    if (d != 15) {
+        return 4;
+    }
+
+    // 5. Variadic macro with loop unrolling (runtime)
+    let y = 25;
+    let e = @sum(x, y);
+    if (e != 40) {
+        return 5;
+    }
+
+    // 6. Variadic length
+    let f = @count(1, 2, 3, 4);
+    if (f != 4) {
+        return 6;
+    }
+
+    // 7. Variadic indexing
+    let g = @first(99, 100);
+    if (g != 99) {
+        return 7;
+    }
+
+    // 8. Nested macro call
+    let h = @quad(3);
+    if (h != 12) {
+        return 8;
+    }
+
+    // 9. If/else comptime evaluation
+    let m1 = @max_val(50, 20);
+    if (m1 != 50) {
+        return 9;
+    }
+
+    // 10. If/else runtime evaluation
+    let m2 = @max_val(x, 100);
+    if (m2 != 100) {
+        return 10;
+    }
+
+    // 11. Generic macro
+    let id_val = @identity(777);
+    if (id_val != 777) {
+        return 11;
+    }
+
+    // 12. Statement macro with side effects
+    i32 target = 0;
+    i32* p = &target;
+    @set_val(p, 888);
+    if (target != 888) {
+        return 12;
+    }
+
+    // 13. Direct lvalue modification via untyped statement macro
+    @inc_val(target);
+    if (target != 889) {
+        return 13;
+    }
+
+    // 14. Empty variadic macro
+    let empty_sum = @sum();
+    if (empty_sum != 0) {
+        return 14;
+    }
+
+    println("All macro tests passed successfully!");
+    return 0;
+}

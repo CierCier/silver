@@ -2838,6 +2838,22 @@ impl PRT_Parser {
         end: usize,
     ) -> Result<ast::MacroDef, ParseError> {
         let mut cursor = start + 1;
+
+        // Check if there is an explicit return type before the macro name:
+        // e.g. `macro i32 add(...)` vs `macro add(...)`
+        let mut return_type = None;
+        if let Some((parsed_type, after_type)) = self.parse_type_prefix(tokens, cursor, end) {
+            if after_type < end && matches!(tokens[after_type].kind, Token::Identifier(_)) {
+                let next_idx = after_type + 1;
+                if next_idx < end
+                    && matches!(tokens[next_idx].kind, Token::LeftParen | Token::Less)
+                {
+                    return_type = Some(parsed_type);
+                    cursor = after_type;
+                }
+            }
+        }
+
         let name_token = tokens
             .get(cursor)
             .ok_or_else(|| ParseError::InvalidSyntax {
@@ -2850,7 +2866,20 @@ impl PRT_Parser {
                 span: name_token.span,
             });
         };
+        let macro_name = ast::Identifier {
+            name: name.clone(),
+            span: name_token.span,
+        };
         cursor += 1;
+
+        // Generics: `macro T id<T>(...)` or `macro id<T>(...)`
+        let (mut generics, next) = self.parse_generics_prefix(tokens, cursor, end)?;
+        cursor = next;
+        let (where_clause, next_after_where) =
+            self.parse_where_clause_prefix(tokens, cursor, end)?;
+        cursor = next_after_where;
+        generics = self.merge_generics_where(generics, where_clause);
+
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '(' after macro name".to_string(),
@@ -2858,42 +2887,123 @@ impl PRT_Parser {
             });
         }
         cursor += 1;
+
         let mut parameters = Vec::new();
+        let mut macro_is_variadic = false;
         while cursor < end
             && !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen))
         {
-            let param_name_token = tokens[cursor].clone();
+            let mut param_is_variadic = false;
+            let (param_type, param_name_token) = if matches!(
+                tokens.get(cursor).map(|t| &t.kind),
+                Some(Token::DotDotDot)
+            ) {
+                param_is_variadic = true;
+                cursor += 1;
+                let name_tok = tokens
+                    .get(cursor)
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: "expected variadic parameter identifier".to_string(),
+                        span: tokens[cursor - 1].span,
+                    })?;
+                cursor += 1;
+                (
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
+                        span: name_tok.span,
+                    },
+                    name_tok,
+                )
+            } else if let Some((parsed_type, after_type)) =
+                self.parse_type_prefix(tokens, cursor, end)
+            {
+                let mut after = after_type;
+                if matches!(tokens.get(after).map(|t| &t.kind), Some(Token::DotDotDot)) {
+                    param_is_variadic = true;
+                    after += 1;
+                }
+                if after < end && matches!(tokens[after].kind, Token::Identifier(_)) {
+                    cursor = after + 1;
+                    (parsed_type, &tokens[after])
+                } else if !param_is_variadic && matches!(tokens[cursor].kind, Token::Identifier(_)) {
+                    // Untyped parameter: `macro add(a, b)`
+                    let tok = &tokens[cursor];
+                    cursor += 1;
+                    (
+                        ast::Type {
+                            kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
+                            span: tok.span,
+                        },
+                        tok,
+                    )
+                } else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected parameter identifier".to_string(),
+                        span: tokens[cursor].span,
+                    });
+                }
+            } else if matches!(tokens[cursor].kind, Token::Identifier(_)) {
+                let tok = &tokens[cursor];
+                cursor += 1;
+                (
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
+                        span: tok.span,
+                    },
+                    tok,
+                )
+            } else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "expected parameter identifier".to_string(),
+                    span: tokens[cursor].span,
+                });
+            };
+
             let Token::Identifier(param_name) = &param_name_token.kind else {
                 return Err(ParseError::InvalidSyntax {
                     message: "expected parameter identifier".to_string(),
                     span: param_name_token.span,
                 });
             };
+
+            if param_is_variadic {
+                macro_is_variadic = true;
+            }
+
             parameters.push(ast::Parameter {
                 name: ast::Identifier {
                     name: param_name.clone(),
                     span: param_name_token.span,
                 },
-                param_type: ast::Type {
-                    kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
-                    span: param_name_token.span,
-                },
+                param_type: param_type.clone(),
                 is_mutable: false,
-                is_variadic: false,
-                span: param_name_token.span,
+                is_variadic: param_is_variadic,
+                span: param_type.span.extend_to(&param_name_token.span),
             });
-            cursor += 1;
-            if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
+
+            if param_is_variadic {
+                if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
+                    cursor += 1;
+                }
+                if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "variadic parameter must be the last parameter".to_string(),
+                        span: param_name_token.span,
+                    });
+                }
+            } else if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Comma)) {
                 cursor += 1;
             }
         }
+
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::RightParen)) {
             return Err(ParseError::InvalidSyntax {
                 message: "unterminated macro parameter list".to_string(),
-                span: tokens[cursor].span,
+                span: tokens.get(cursor).map(|t| t.span).unwrap_or(name_token.span),
             });
         }
         cursor += 1;
+
         if !matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::LeftBrace)) {
             return Err(ParseError::InvalidSyntax {
                 message: "expected '{' for macro body".to_string(),
@@ -2912,11 +3022,11 @@ impl PRT_Parser {
         let body = self.parse_block_reduction(tokens, body_start, body_end + 1)?;
 
         Ok(ast::MacroDef {
-            name: ast::Identifier {
-                name: name.clone(),
-                span: name_token.span,
-            },
+            name: macro_name,
+            generics,
+            is_variadic: macro_is_variadic,
             parameters,
+            return_type,
             body,
         })
     }

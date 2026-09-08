@@ -962,6 +962,25 @@ impl TypeChecker {
         self.pop_scope();
     }
 
+    fn check_block_value(&mut self, block: &ast::Block, expected: Option<&Type>) -> Type {
+        if block.statements.is_empty() {
+            return Type::Unit;
+        }
+        self.push_scope();
+        for stmt in &block.statements[..block.statements.len() - 1] {
+            self.check_statement(stmt);
+        }
+        let last = &block.statements[block.statements.len() - 1];
+        let ty = match &last.kind {
+            ast::StatementKind::Expression(expr) => self.check_expr(expr, expected),
+            _ => {
+                self.check_statement(last);
+                Type::Unit
+            }
+        };
+        self.pop_scope();
+        ty
+    }
 
     fn check_statement(&mut self, stmt: &ast::Statement) {
         match &stmt.kind {
@@ -1776,8 +1795,7 @@ impl TypeChecker {
                 Type::Unit
             }
             ast::ExpressionKind::Block(block) => {
-                self.check_block(block);
-                Type::Unit
+                self.check_block_value(block, expected)
             }
             ast::ExpressionKind::Array(elements) => {
                 if let Some(Type::Slice { element }) = expected {

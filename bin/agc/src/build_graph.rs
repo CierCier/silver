@@ -782,6 +782,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         crate::cfg::gate_items(&mut ast, &cfg_set);
         crate::semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
         crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
+        crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
 
         let mut symbol_table = crate::symbol_table::CompilerSymbolTable::new();
         symbol_table.record_program_symbols(&ast, crate::symbol_table::CompilerPhase::Parse);

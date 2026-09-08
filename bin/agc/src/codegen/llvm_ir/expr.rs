@@ -1560,6 +1560,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
+            ast::ExpressionKind::Block(block) => self.emit_block_value(block),
             _ => Err(CodegenError::with_span(
                 format!(
                     "expression kind is not supported in LLVM IR codegen yet: {:?}",
@@ -2612,12 +2613,28 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let phi_ty = incoming[0].0.get_type();
-        for (value, _) in incoming.iter().skip(1) {
+        for (value, bb) in incoming.iter_mut().skip(1) {
             if value.get_type() != phi_ty {
-                return Err(CodegenError::with_span(
-                    "if expression branches produce different types",
-                    *span,
-                ));
+                if phi_ty.is_int_type() && value.get_type().is_int_type() {
+                    let target_ty = phi_ty.into_int_type();
+                    let int_val = value.into_int_value();
+                    self.builder.position_at_end(*bb);
+                    let casted = if int_val.get_type().get_bit_width() > target_ty.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(int_val, target_ty, "if.trunc")
+                            .map_err(|e| CodegenError::new(format!("{e}")))?
+                    } else {
+                        self.builder
+                            .build_int_s_extend(int_val, target_ty, "if.sext")
+                            .map_err(|e| CodegenError::new(format!("{e}")))?
+                    };
+                    *value = casted.as_basic_value_enum();
+                } else {
+                    return Err(CodegenError::with_span(
+                        "if expression branches produce different types",
+                        *span,
+                    ));
+                }
             }
         }
 

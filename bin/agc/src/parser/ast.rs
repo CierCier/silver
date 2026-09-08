@@ -98,7 +98,10 @@ pub enum ItemKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroDef {
     pub name: Identifier,
+    pub generics: Option<Generics>,
+    pub is_variadic: bool,
     pub parameters: Vec<Parameter>,
+    pub return_type: Option<Type>,
     pub body: Block,
 }
 
