@@ -27,11 +27,36 @@ static MACRO_COUNTER: AtomicUsize = AtomicUsize::new(1);
 const MAX_EXPANSION_DEPTH: usize = 128;
 
 /// Expands all user-defined macros throughout the program.
+struct MacroContext<'a> {
+    macro_table: &'a HashMap<String, MacroDef>,
+    ret_type: Option<ast::Type>,
+    scope_types: HashMap<String, ast::Type>,
+    fn_signatures: HashMap<String, Vec<ast::Type>>,
+}
+
+/// Expands all user-defined macros throughout the program.
 pub fn expand_macros_in_program(program: &mut ast::Program) {
     let mut macro_table: HashMap<String, MacroDef> = HashMap::default();
+    let mut fn_signatures: HashMap<String, Vec<ast::Type>> = HashMap::default();
+
     for item in &program.items {
-        if let ItemKind::Macro(def) = &item.kind {
-            macro_table.insert(def.name.name.clone(), def.clone());
+        match &item.kind {
+            ItemKind::Macro(def) => {
+                macro_table.insert(def.name.name.clone(), def.clone());
+            }
+            ItemKind::Function(func) => {
+                let params = func.parameters.iter().map(|p| p.param_type.clone()).collect();
+                fn_signatures.insert(func.name.name.clone(), params);
+            }
+            ItemKind::Impl(impl_item) => {
+                for member in &impl_item.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        let params = func.parameters.iter().map(|p| p.param_type.clone()).collect();
+                        fn_signatures.insert(func.name.name.clone(), params);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -39,36 +64,59 @@ pub fn expand_macros_in_program(program: &mut ast::Program) {
         return;
     }
 
+    let mut ctx = MacroContext {
+        macro_table: &macro_table,
+        ret_type: None,
+        scope_types: HashMap::default(),
+        fn_signatures,
+    };
+
     for item in &mut program.items {
-        expand_macros_in_item(item, &macro_table);
+        expand_macros_in_item(item, &mut ctx);
     }
 }
 
-fn expand_macros_in_item(item: &mut Item, macro_table: &HashMap<String, MacroDef>) {
+fn expand_macros_in_item(item: &mut Item, ctx: &mut MacroContext) {
     match &mut item.kind {
         ItemKind::Function(func) => {
-            expand_macros_in_block(&mut func.body, macro_table, 0);
+            let prev_ret = ctx.ret_type.clone();
+            let prev_scope = ctx.scope_types.clone();
+            ctx.ret_type = func.return_type.clone();
+            for p in &func.parameters {
+                ctx.scope_types.insert(p.name.name.clone(), p.param_type.clone());
+            }
+            expand_macros_in_block(&mut func.body, ctx, 0);
+            ctx.ret_type = prev_ret;
+            ctx.scope_types = prev_scope;
         }
         ItemKind::Impl(impl_item) => {
             for member in &mut impl_item.items {
                 if let ast::ImplItemKind::Function(func) = member {
-                    expand_macros_in_block(&mut func.body, macro_table, 0);
+                    let prev_ret = ctx.ret_type.clone();
+                    let prev_scope = ctx.scope_types.clone();
+                    ctx.ret_type = func.return_type.clone();
+                    for p in &func.parameters {
+                        ctx.scope_types.insert(p.name.name.clone(), p.param_type.clone());
+                    }
+                    expand_macros_in_block(&mut func.body, ctx, 0);
+                    ctx.ret_type = prev_ret;
+                    ctx.scope_types = prev_scope;
                 }
             }
         }
         ItemKind::GlobalVariable(global) => {
             if let Some(init) = &mut global.initializer {
-                expand_macros_in_expr(init, macro_table, 0);
+                expand_macros_in_expr(init, ctx, Some(&global.var_type), 0);
             }
         }
         ItemKind::Macro(def) => {
-            expand_macros_in_block(&mut def.body, macro_table, 0);
+            expand_macros_in_block(&mut def.body, ctx, 0);
         }
         _ => {}
     }
 }
 
-fn expand_macros_in_block(block: &mut Block, macro_table: &HashMap<String, MacroDef>, depth: usize) {
+fn expand_macros_in_block(block: &mut Block, ctx: &mut MacroContext, depth: usize) {
     if depth >= MAX_EXPANSION_DEPTH {
         return;
     }
@@ -76,7 +124,7 @@ fn expand_macros_in_block(block: &mut Block, macro_table: &HashMap<String, Macro
     let mut new_statements = Vec::with_capacity(block.statements.len());
 
     for mut stmt in block.statements.drain(..) {
-        expand_macros_in_statement(&mut stmt, macro_table, depth);
+        expand_macros_in_statement(&mut stmt, ctx, depth);
 
         // If this statement was a macro call that expanded into a block of statements,
         // splice the inner statements directly into the enclosing block.
@@ -95,7 +143,7 @@ fn expand_macros_in_block(block: &mut Block, macro_table: &HashMap<String, Macro
 
 fn expand_macros_in_statement(
     stmt: &mut Statement,
-    macro_table: &HashMap<String, MacroDef>,
+    ctx: &mut MacroContext,
     depth: usize,
 ) {
     if depth >= MAX_EXPANSION_DEPTH {
@@ -104,33 +152,42 @@ fn expand_macros_in_statement(
 
     match &mut stmt.kind {
         StatementKind::Block(inner) => {
-            expand_macros_in_block(inner, macro_table, depth);
+            let prev_scope = ctx.scope_types.clone();
+            expand_macros_in_block(inner, ctx, depth);
+            ctx.scope_types = prev_scope;
         }
         StatementKind::Expression(expr) => {
-            expand_macros_in_expr(expr, macro_table, depth);
+            expand_macros_in_expr(expr, ctx, None, depth);
         }
         StatementKind::Let(let_stmt) => {
+            if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
+                if let Some(ty) = &let_stmt.type_annotation {
+                    ctx.scope_types.insert(ident.name.clone(), ty.clone());
+                }
+            }
             if let Some(init) = &mut let_stmt.initializer {
-                expand_macros_in_expr(init, macro_table, depth);
+                expand_macros_in_expr(init, ctx, let_stmt.type_annotation.as_ref(), depth);
             }
         }
         StatementKind::Return(Some(expr)) => {
-            expand_macros_in_expr(expr, macro_table, depth);
+            let ret_ty = ctx.ret_type.clone();
+            expand_macros_in_expr(expr, ctx, ret_ty.as_ref(), depth);
         }
         StatementKind::Return(None) => {}
         StatementKind::Break(Some(expr)) => {
-            expand_macros_in_expr(expr, macro_table, depth);
+            expand_macros_in_expr(expr, ctx, None, depth);
         }
         StatementKind::Break(None) | StatementKind::Continue => {}
         StatementKind::Defer(inner) => {
-            expand_macros_in_statement(inner, macro_table, depth);
+            expand_macros_in_statement(inner, ctx, depth + 1);
         }
     }
 }
 
 fn expand_macros_in_expr(
     expr: &mut Expression,
-    macro_table: &HashMap<String, MacroDef>,
+    ctx: &mut MacroContext,
+    expected: Option<&ast::Type>,
     depth: usize,
 ) {
     if depth >= MAX_EXPANSION_DEPTH {
@@ -139,9 +196,19 @@ fn expand_macros_in_expr(
 
     // First, recursively expand subexpressions:
     match expr.kind.as_mut() {
-        ExpressionKind::Binary { left, right, .. } => {
-            expand_macros_in_expr(left, macro_table, depth);
-            expand_macros_in_expr(right, macro_table, depth);
+        ExpressionKind::Binary { left, operator, right } => {
+            if *operator == BinaryOperator::Assign {
+                let lhs_exp = if let ExpressionKind::Identifier(ident) = left.kind.as_ref() {
+                    ctx.scope_types.get(&ident.name).cloned()
+                } else {
+                    None
+                };
+                expand_macros_in_expr(left, ctx, None, depth);
+                expand_macros_in_expr(right, ctx, lhs_exp.as_ref(), depth);
+            } else {
+                expand_macros_in_expr(left, ctx, None, depth);
+                expand_macros_in_expr(right, ctx, None, depth);
+            }
         }
         ExpressionKind::Unary { operand, .. }
         | ExpressionKind::Postfix { operand, .. }
@@ -149,91 +216,102 @@ fn expand_macros_in_expr(
         | ExpressionKind::Launch(operand)
         | ExpressionKind::Wait(operand)
         | ExpressionKind::Comptime(operand)
-        | ExpressionKind::Reference { expression: operand, .. }
-        | ExpressionKind::Cast { expression: operand, .. } => {
-            expand_macros_in_expr(operand, macro_table, depth);
+        | ExpressionKind::Reference { expression: operand, .. } => {
+            expand_macros_in_expr(operand, ctx, expected, depth);
+        }
+        ExpressionKind::Cast { expression: operand, target_type } => {
+            expand_macros_in_expr(operand, ctx, Some(target_type.as_ref()), depth);
         }
         ExpressionKind::Call { function, arguments } => {
-            expand_macros_in_expr(function, macro_table, depth);
-            for arg in arguments {
-                expand_macros_in_expr(arg, macro_table, depth);
+            expand_macros_in_expr(function, ctx, None, depth);
+            let fn_params = if let ExpressionKind::Identifier(ident) = function.kind.as_ref() {
+                ctx.fn_signatures.get(&ident.name).cloned()
+            } else {
+                None
+            };
+            for (i, arg) in arguments.iter_mut().enumerate() {
+                let exp = fn_params.as_ref().and_then(|p| p.get(i));
+                expand_macros_in_expr(arg, ctx, exp, depth);
             }
         }
-        ExpressionKind::MethodCall { receiver, arguments, .. } => {
-            expand_macros_in_expr(receiver, macro_table, depth);
-            for arg in arguments {
-                expand_macros_in_expr(arg, macro_table, depth);
+        ExpressionKind::MethodCall { receiver, method, arguments } => {
+            expand_macros_in_expr(receiver, ctx, None, depth);
+            let method_params = ctx.fn_signatures.get(&method.name).cloned();
+            let num_args = arguments.len();
+            for (i, arg) in arguments.iter_mut().enumerate() {
+                let exp = method_params.as_ref().and_then(|p| {
+                    if p.len() == num_args + 1 {
+                        p.get(i + 1)
+                    } else {
+                        p.get(i)
+                    }
+                });
+                expand_macros_in_expr(arg, ctx, exp, depth);
             }
         }
         ExpressionKind::FieldAccess { object, .. } => {
-            expand_macros_in_expr(object, macro_table, depth);
+            expand_macros_in_expr(object, ctx, None, depth);
         }
         ExpressionKind::Index { object, index } => {
-            expand_macros_in_expr(object, macro_table, depth);
-            expand_macros_in_expr(index, macro_table, depth);
+            expand_macros_in_expr(object, ctx, None, depth);
+            expand_macros_in_expr(index, ctx, None, depth);
         }
         ExpressionKind::Slice { object, start, end, step } => {
-            expand_macros_in_expr(object, macro_table, depth);
-            if let Some(s) = start {
-                expand_macros_in_expr(s, macro_table, depth);
-            }
-            if let Some(e) = end {
-                expand_macros_in_expr(e, macro_table, depth);
-            }
-            if let Some(st) = step {
-                expand_macros_in_expr(st, macro_table, depth);
-            }
+            expand_macros_in_expr(object, ctx, None, depth);
+            if let Some(s) = start { expand_macros_in_expr(s, ctx, None, depth); }
+            if let Some(e) = end { expand_macros_in_expr(e, ctx, None, depth); }
+            if let Some(st) = step { expand_macros_in_expr(st, ctx, None, depth); }
         }
         ExpressionKind::If { condition, then_branch, else_branch } => {
-            expand_macros_in_expr(condition, macro_table, depth);
-            expand_macros_in_block(then_branch, macro_table, depth);
+            expand_macros_in_expr(condition, ctx, None, depth);
+            expand_macros_in_block(then_branch, ctx, depth);
             if let Some(else_b) = else_branch {
-                expand_macros_in_block(else_b, macro_table, depth);
+                expand_macros_in_block(else_b, ctx, depth);
             }
         }
         ExpressionKind::Ternary { condition, then_expr, else_expr } => {
-            expand_macros_in_expr(condition, macro_table, depth);
-            expand_macros_in_expr(then_expr, macro_table, depth);
-            expand_macros_in_expr(else_expr, macro_table, depth);
+            expand_macros_in_expr(condition, ctx, None, depth);
+            expand_macros_in_expr(then_expr, ctx, expected, depth);
+            expand_macros_in_expr(else_expr, ctx, expected, depth);
         }
         ExpressionKind::UnwrapOr { value, fallback } => {
-            expand_macros_in_expr(value, macro_table, depth);
-            expand_macros_in_expr(fallback, macro_table, depth);
+            expand_macros_in_expr(value, ctx, None, depth);
+            expand_macros_in_expr(fallback, ctx, expected, depth);
         }
         ExpressionKind::While { condition, body } => {
-            expand_macros_in_expr(condition, macro_table, depth);
-            expand_macros_in_block(body, macro_table, depth);
+            expand_macros_in_expr(condition, ctx, None, depth);
+            expand_macros_in_block(body, ctx, depth);
         }
         ExpressionKind::ForIn { iterable, body, .. } => {
-            expand_macros_in_expr(iterable, macro_table, depth);
-            expand_macros_in_block(body, macro_table, depth);
+            expand_macros_in_expr(iterable, ctx, None, depth);
+            expand_macros_in_block(body, ctx, depth);
         }
         ExpressionKind::For { init, condition, increment, body } => {
             if let Some(init_expr) = &mut init.initializer {
-                expand_macros_in_expr(init_expr, macro_table, depth);
+                expand_macros_in_expr(init_expr, ctx, None, depth);
             }
-            expand_macros_in_expr(condition, macro_table, depth);
-            expand_macros_in_expr(increment, macro_table, depth);
-            expand_macros_in_block(body, macro_table, depth);
+            expand_macros_in_expr(condition, ctx, None, depth);
+            expand_macros_in_expr(increment, ctx, None, depth);
+            expand_macros_in_block(body, ctx, depth);
         }
         ExpressionKind::Block(b) => {
-            expand_macros_in_block(b, macro_table, depth);
+            expand_macros_in_block(b, ctx, depth);
         }
         ExpressionKind::Array(items) | ExpressionKind::Tuple(items) => {
             for item in items {
-                expand_macros_in_expr(item, macro_table, depth);
+                expand_macros_in_expr(item, ctx, None, depth);
             }
         }
         ExpressionKind::MacroCall { name, args } => {
             // Expand arguments first
             for arg in args.iter_mut() {
                 if let MacroArg::Expression(arg_expr) = arg {
-                    expand_macros_in_expr(arg_expr, macro_table, depth);
+                    expand_macros_in_expr(arg_expr, ctx, None, depth);
                 }
             }
 
             // Check if name is a user macro
-            if let Some(def) = macro_table.get(&name.name) {
+            if let Some(def) = ctx.macro_table.get(&name.name).cloned() {
                 let mut type_args: Vec<ast::Type> = Vec::new();
                 let mut call_args: Vec<Expression> = Vec::new();
                 for a in args.iter() {
@@ -244,10 +322,10 @@ fn expand_macros_in_expr(
                     }
                 }
 
-                let expanded = expand_macro_invocation(def, &type_args, &call_args, expr.span, macro_table, depth + 1);
+                let expanded = expand_macro_invocation(&def, &type_args, &call_args, expected, expr.span, ctx.macro_table, depth + 1);
                 *expr = expanded;
                 // Re-expand in case the macro returned another macro call
-                expand_macros_in_expr(expr, macro_table, depth + 1);
+                expand_macros_in_expr(expr, ctx, expected, depth + 1);
                 return;
             }
         }
@@ -260,6 +338,7 @@ fn expand_macro_invocation(
     def: &MacroDef,
     type_args: &[ast::Type],
     args: &[Expression],
+    expected: Option<&ast::Type>,
     call_span: Span,
     _macro_table: &HashMap<String, MacroDef>,
     _depth: usize,
@@ -267,15 +346,33 @@ fn expand_macro_invocation(
     // Generic type substitution:
     let mut type_subst: HashMap<String, ast::Type> = HashMap::default();
     if let Some(generics) = &def.generics {
-        for (i, param) in generics.params.iter().enumerate() {
-            let param_name = match param {
-                ast::GenericParam::Type(tp) => &tp.name.name,
-                ast::GenericParam::Lifetime(lp) => &lp.name.name,
-            };
+        let generic_names: Vec<String> = generics
+            .params
+            .iter()
+            .map(|param| match param {
+                ast::GenericParam::Type(tp) => tp.name.name.clone(),
+                ast::GenericParam::Lifetime(lp) => lp.name.name.clone(),
+            })
+            .collect();
+
+        // 1. Explicit type arguments have highest priority:
+        for (i, name) in generic_names.iter().enumerate() {
             if i < type_args.len() {
-                type_subst.insert(param_name.clone(), type_args[i].clone());
-            } else if let Some(inferred) = infer_generic_param_type(param_name, def, args) {
-                type_subst.insert(param_name.clone(), inferred);
+                type_subst.insert(name.clone(), type_args[i].clone());
+            }
+        }
+
+        // 2. Unify with expected return type if available:
+        if let (Some(ret_ty), Some(exp_ty)) = (&def.return_type, expected) {
+            unify_type(ret_ty, exp_ty, &generic_names, &mut type_subst);
+        }
+
+        // 3. Infer from call arguments for any remaining unmapped parameters:
+        for name in &generic_names {
+            if !type_subst.contains_key(name) {
+                if let Some(inferred) = infer_generic_param_type(name, def, args) {
+                    type_subst.insert(name.clone(), inferred);
+                }
             }
         }
     }
@@ -1016,6 +1113,88 @@ fn substitute_type(ty: &mut ast::Type, subst: &HashMap<String, ast::Type>) {
                 substitute_type(p, subst);
             }
             substitute_type(&mut fn_type.return_type, subst);
+        }
+        _ => {}
+    }
+}
+
+fn paths_match(a: &[ast::Identifier], b: &[ast::Identifier]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.name == y.name)
+}
+
+fn unify_type(
+    pattern: &ast::Type,
+    concrete: &ast::Type,
+    generics: &[String],
+    subst: &mut HashMap<String, ast::Type>,
+) {
+    match (pattern.kind.as_ref(), concrete.kind.as_ref()) {
+        (ast::TypeKind::Named(pat_named), _) => {
+            if pat_named.path.len() == 1
+                && pat_named.generics.is_none()
+                && generics.contains(&pat_named.path[0].name)
+            {
+                subst.entry(pat_named.path[0].name.clone()).or_insert_with(|| concrete.clone());
+                return;
+            }
+            if let ast::TypeKind::Named(con_named) = concrete.kind.as_ref() {
+                if paths_match(&pat_named.path, &con_named.path) {
+                    if let (Some(pat_gen), Some(con_gen)) = (&pat_named.generics, &con_named.generics) {
+                        for (p, c) in pat_gen.iter().zip(con_gen.iter()) {
+                            unify_type(p, c, generics, subst);
+                        }
+                    }
+                }
+            } else if let ast::TypeKind::Generic(con_gen) = concrete.kind.as_ref() {
+                if pat_named.path.len() == 1 && pat_named.path[0].name == con_gen.name.name {
+                    if let Some(pat_gen) = &pat_named.generics {
+                        for (p, c) in pat_gen.iter().zip(con_gen.args.iter()) {
+                            unify_type(p, c, generics, subst);
+                        }
+                    }
+                }
+            }
+        }
+        (ast::TypeKind::Generic(pat_gen), _) => {
+            if pat_gen.args.is_empty() && generics.contains(&pat_gen.name.name) {
+                subst.entry(pat_gen.name.name.clone()).or_insert_with(|| concrete.clone());
+                return;
+            }
+            if let ast::TypeKind::Generic(con_gen) = concrete.kind.as_ref() {
+                if pat_gen.name.name == con_gen.name.name {
+                    for (p, c) in pat_gen.args.iter().zip(con_gen.args.iter()) {
+                        unify_type(p, c, generics, subst);
+                    }
+                }
+            } else if let ast::TypeKind::Named(con_named) = concrete.kind.as_ref() {
+                if con_named.path.len() == 1 && con_named.path[0].name == pat_gen.name.name {
+                    if let Some(con_gen_args) = &con_named.generics {
+                        for (p, c) in pat_gen.args.iter().zip(con_gen_args.iter()) {
+                            unify_type(p, c, generics, subst);
+                        }
+                    }
+                }
+            }
+        }
+        (ast::TypeKind::Slice(pat_slice), ast::TypeKind::Slice(con_slice)) => {
+            unify_type(&pat_slice.element_type, &con_slice.element_type, generics, subst);
+        }
+        (ast::TypeKind::Array(pat_arr), ast::TypeKind::Array(con_arr)) => {
+            unify_type(&pat_arr.element_type, &con_arr.element_type, generics, subst);
+        }
+        (ast::TypeKind::Pointer(pat_ptr), ast::TypeKind::Pointer(con_ptr)) => {
+            unify_type(&pat_ptr.inner, &con_ptr.inner, generics, subst);
+        }
+        (ast::TypeKind::Optional(pat_opt), ast::TypeKind::Optional(con_opt)) => {
+            unify_type(pat_opt, con_opt, generics, subst);
+        }
+        (ast::TypeKind::Reference(pat_ref), ast::TypeKind::Reference(con_ref)) => {
+            unify_type(&pat_ref.inner, &con_ref.inner, generics, subst);
+        }
+        (ast::TypeKind::Tuple(pat_tuple), ast::TypeKind::Tuple(con_tuple)) => {
+            for (p, c) in pat_tuple.iter().zip(con_tuple.iter()) {
+                unify_type(p, c, generics, subst);
+            }
         }
         _ => {}
     }

@@ -1,4 +1,5 @@
 import std.io;
+import std.string;
 
 i32 main() {
     // 1. Vector with elements (auto-import of std.mem.vec)
@@ -38,6 +39,23 @@ i32 main() {
     Vec<str> greetings = @vec("hello", "world");
     if (greetings.len() != 2) {
         return 8;
+    }
+
+    // 6. Empty vector with contextual type inference
+    Vec<i32> empty_inferred = @vec();
+    if (!empty_inferred.is_empty()) {
+        return 9;
+    }
+    if (empty_inferred.len() != 0) {
+        return 10;
+    }
+
+    Vec<String> empty_strings = @vec();
+    if (!empty_strings.is_empty()) {
+        return 11;
+    }
+    if (empty_strings.len() != 0) {
+        return 12;
     }
 
     @println("All @vec tests passed successfully!");
