@@ -9,6 +9,7 @@
 
 import std.sys.syscall;
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum RAW_MEMORY {
     MMAP = 9;
@@ -32,78 +33,97 @@ enum RAW_MEMORY {
     PROCESS_MRELEASE = 448;
 }
 
-i64 sys_mmap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+#[cfg(os.linux)]
+i64 raw_sys_mmap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_MEMORY.MMAP, a1, a2, a3, a4, a5, a6);
 }
 
-i64 sys_mprotect(i64 a1, i64 a2, i64 a3) {
+#[cfg(os.linux)]
+i64 raw_sys_mprotect(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_MEMORY.MPROTECT, a1, a2, a3);
 }
 
-i64 sys_munmap(i64 a1, i64 a2) {
+#[cfg(os.linux)]
+i64 raw_sys_munmap(i64 a1, i64 a2) {
     return syscall2((i64)RAW_MEMORY.MUNMAP, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_brk(i64 a1) {
     return syscall1((i64)RAW_MEMORY.BRK, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_mremap(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_MEMORY.MREMAP, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_mincore(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_MEMORY.MINCORE, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_madvise(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_MEMORY.MADVISE, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_mlock(i64 a1, i64 a2) {
     return syscall2((i64)RAW_MEMORY.MLOCK, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_munlock(i64 a1, i64 a2) {
     return syscall2((i64)RAW_MEMORY.MUNLOCK, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_mlockall(i64 a1) {
     return syscall1((i64)RAW_MEMORY.MLOCKALL, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_munlockall() {
     return syscall0((i64)RAW_MEMORY.MUNLOCKALL);
 }
 
+#[cfg(os.linux)]
 i64 sys_remap_file_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_MEMORY.REMAP_FILE_PAGES, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_mbind(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_MEMORY.MBIND, a1, a2, a3, a4, a5, a6);
 }
 
+#[cfg(os.linux)]
 i64 sys_set_mempolicy(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_MEMORY.SET_MEMPOLICY, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_migrate_pages(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_MEMORY.MIGRATE_PAGES, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_move_pages(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_MEMORY.MOVE_PAGES, a1, a2, a3, a4, a5, a6);
 }
 
+#[cfg(os.linux)]
 i64 sys_mlock2(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_MEMORY.MLOCK2, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_process_madvise(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_MEMORY.PROCESS_MADVISE, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_process_mrelease(i64 a1, i64 a2) {
     return syscall2((i64)RAW_MEMORY.PROCESS_MRELEASE, a1, a2);
 }

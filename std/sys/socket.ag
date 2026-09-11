@@ -9,22 +9,26 @@ import std.sys.raw.poll;
 import std.sys.raw.socket;
 import std.sys.result;
 
+#[cfg(os.linux)]
 enum AddressFamily {
     UNIX = 1;
     INET = 2;
     INET6 = 10;
 }
 
+#[cfg(os.linux)]
 enum SocketType {
     STREAM = 1;
     DGRAM = 2;
 }
 
+#[cfg(os.linux)]
 enum SocketOptionLevel {
     SOCKET = 1;
     TCP = 6;
 }
 
+#[cfg(os.linux)]
 enum SocketOption {
     REUSEADDR = 2;
     SO_ERROR = 4;
@@ -35,19 +39,23 @@ enum SocketOption {
     SNDTIMEO = 21;
 }
 
+#[cfg(os.linux)]
 enum TcpOption {
     NODELAY = 1;
     CORK = 3;
     QUICKACK = 12;
 }
 
+#[cfg(os.linux)]
 enum ShutdownHow {
     RD = 0;
     WR = 1;
     RDWR = 2;
 }
 
+#[cfg(os.linux)]
 const i64 SOCK_CLOEXEC = 524288;
+#[cfg(os.linux)]
 const i64 SOCK_NONBLOCK = 2048; // == O_NONBLOCK on Linux
 
 Result<i64, Error> try_socket(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
@@ -99,6 +107,7 @@ Result<i64, Error> try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* add
     return Result<i64, Error>.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
 }
 
+#[cfg(os.linux)]
 // poll(2) file-descriptor descriptor. Layout matches the kernel's struct
 // pollfd (int fd; short events; short revents) — 8 bytes on x86_64.
 struct PollFd {
@@ -107,10 +116,15 @@ struct PollFd {
     i16 revents;
 }
 
+#[cfg(os.linux)]
 const i64 POLLIN = 1;
+#[cfg(os.linux)]
 const i64 POLLPRI = 2;
+#[cfg(os.linux)]
 const i64 POLLOUT = 4;
+#[cfg(os.linux)]
 const i64 POLLERR = 8;
+#[cfg(os.linux)]
 const i64 POLLHUP = 16;
 
 // poll(2): wait for events on `fds`. Ok value: ready fd count (0 = timeout).

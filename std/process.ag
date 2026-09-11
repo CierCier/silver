@@ -3,10 +3,12 @@
 
 import std.sys.raw.process;
 
+#[cfg(os.linux)]
 struct Child {
     i64 pid;
 }
 
+#[cfg(os.linux)]
 void exit(i32 code) {
     sys_exit_group((i64)code);
 }

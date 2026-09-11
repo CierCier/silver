@@ -9,12 +9,14 @@ import std.error;
 import std.sys.raw.fs;
 import std.sys.result;
 
+#[cfg(os.linux)]
 /// Linux struct iovec (void* iov_base, size_t iov_len) — 16 bytes on x86_64.
 struct IoVec {
     void* base;
     i64   len;
 }
 
+#[cfg(os.linux)]
 impl IoVec {
     IoVec new(void* base, i64 len) {
         IoVec iov;

@@ -12,7 +12,7 @@
 // Imported transitively by std.sys.entry and directly by std.thread.
 import std.mem.alloc;
 import std.atomic;
-import std.sys.raw.sync;
+import std.sys.os;
 
 // Maximum concurrently live threads (slots are reclaimed by thread_join).
 const i64 MAX_THREADS = 64;

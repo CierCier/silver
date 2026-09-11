@@ -1784,24 +1784,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    pub(crate) fn emit_asm_expression(
+/// True when the asm blob invokes the `syscall` instruction (word match so
+/// register names like "nosyscall" don't trigger it).
+fn normalized_asm_contains_syscall(code: &str) -> bool {
+    let lower = code.to_ascii_lowercase();
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word == "syscall")
+}
+
+pub(crate) fn emit_asm_expression(
         &mut self,
         code: &str,
         inputs: &[ast::Expression],
         clobbers: &[String],
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        // asm() is currently lowered with the Linux x86_64 syscall register
-        // model ({rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}). On Win64 those
-        // semantics don't exist: user-mode `syscall` is not a stable
-        // contract (WoW64 breaks it) and rdi/rsi are nonvolatile, so a SysV
-        // blob would corrupt callee-saved state. Win64 asm support is a
-        // planned std.sys.win follow-up (docs/windows-port.md §4.1).
-        if crate::codegen::abi::target_is_windows(
-            Some(self.module.get_triple().as_str().to_str().unwrap_or("")),
-        ) {
+        // asm() is lowered with a fixed x86_64 register model shared by both
+        // platforms: inputs land in {rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}
+        // in order, the result is read from {rax}, and rcx/r11 are always
+        // clobbered. On Windows the same model works for ordinary blobs
+        // (memcpy-style SIMD, cpuid, rbp reads): rdi/rsi are nonvolatile on
+        // Win64, so they are implicitly added as clobbers — LLVM then spills
+        // and restores any live values around the asm. User-mode `syscall`
+        // has no stable contract on Windows (WoW64 breaks it) and is rejected.
+        let is_windows = crate::codegen::abi::target_is_windows(Some(
+            self.module.get_triple().as_str().to_str().unwrap_or(""),
+        ));
+        if is_windows
+            && Self::normalized_asm_contains_syscall(code)
+        {
             return Err(CodegenError::with_span(
-                "inline asm() is not yet supported for Windows targets: it is lowered with the Linux x86_64 syscall register model (see docs/windows-port.md §4.1 — Win64 constraint support is planned)",
+                "inline asm(): the `syscall` instruction is not available to user mode on Windows targets (no stable syscall contract; WoW64 breaks it) — use the std.sys.win API instead (docs/windows-port.md §4.2)",
                 *span,
             ));
         }
@@ -1809,7 +1823,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if inputs.len() > 7 {
             return Err(CodegenError::with_span(
                 format!(
-                    "inline asm with {} input(s) unsupported: x86_64 syscall ABI has 1 syscall number register (rax) and 6 argument registers at most",
+                    "inline asm with {} input(s) unsupported: the asm register model has 1 result register (rax) and 6 argument registers at most",
                     inputs.len()
                 ),
                 *span,
@@ -1842,6 +1856,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             constraints.push_str(reg);
         }
         constraints.push_str(",~{rcx},~{r11}");
+        if is_windows {
+            // Win64 nonvolatiles among the fixed input registers: the blob is
+            // free to destroy them; listing them as clobbers makes LLVM spill
+            // and restore live values (they must be preserved per the ABI).
+            constraints.push_str(",~{rdi},~{rsi}");
+        }
         for clobber in clobbers {
             let name = clobber.trim();
             if name.is_empty() {

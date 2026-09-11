@@ -193,9 +193,9 @@ fn msvc_library_dirs() -> Vec<PathBuf> {
 /// default and defers to the installed UCRT.
 fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
     if static_crt {
-        &["libcmt.lib", "libvcruntime.lib", "libucrt.lib", "kernel32.lib"]
+        &["libcmt.lib", "libvcruntime.lib", "libucrt.lib", "kernel32.lib", "shell32.lib", "synchronization.lib"]
     } else {
-        &["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "kernel32.lib"]
+        &["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "kernel32.lib", "shell32.lib", "synchronization.lib"]
     }
 }
 
@@ -383,6 +383,9 @@ pub(crate) fn link_exe_with_lld_link(
     link.arg(format!("/OUT:{}", plan.output.display()));
     link.arg("/MACHINE:X64");
     link.arg("/SUBSYSTEM:CONSOLE");
+    // std.sys.entry defines _start (argv setup, thread join, flush, exit);
+    // the CRT's mainCRTStartup is bypassed.
+    link.arg("/ENTRY:_start");
 
     for obj in object_paths {
         link.arg(obj);

@@ -8,31 +8,51 @@ import std.mem.drop;
 import std.sys.raw.poll;
 import std.sys.result;
 
+#[cfg(os.linux)]
 // Epoll control operations (epoll_ctl op)
 const i32 EPOLL_CTL_ADD = 1;
+#[cfg(os.linux)]
 const i32 EPOLL_CTL_DEL = 2;
+#[cfg(os.linux)]
 const i32 EPOLL_CTL_MOD = 3;
 
+#[cfg(os.linux)]
 // Epoll events bitmask
 const u32 EPOLLIN      = 1;
+#[cfg(os.linux)]
 const u32 EPOLLPRI     = 2;
+#[cfg(os.linux)]
 const u32 EPOLLOUT     = 4;
+#[cfg(os.linux)]
 const u32 EPOLLERR     = 8;
+#[cfg(os.linux)]
 const u32 EPOLLHUP     = 16;
+#[cfg(os.linux)]
 const u32 EPOLLRDNORM  = 64;
+#[cfg(os.linux)]
 const u32 EPOLLRDBAND  = 128;
+#[cfg(os.linux)]
 const u32 EPOLLWRNORM  = 256;
+#[cfg(os.linux)]
 const u32 EPOLLWRBAND  = 512;
+#[cfg(os.linux)]
 const u32 EPOLLMSG     = 1024;
+#[cfg(os.linux)]
 const u32 EPOLLRDHUP   = 8192;
+#[cfg(os.linux)]
 const u32 EPOLLEXCLUSIVE = 268435456;  // 1 << 28
+#[cfg(os.linux)]
 const u32 EPOLLWAKEUP    = 536870912;  // 1 << 29
+#[cfg(os.linux)]
 const u32 EPOLLONESHOT   = 1073741824; // 1 << 30
+#[cfg(os.linux)]
 const u32 EPOLLET        = 2147483648; // 1 << 31 (Edge-Triggered)
 
+#[cfg(os.linux)]
 // epoll_create1 flags
 const i64 EPOLL_CLOEXEC = 524288; // 0o2000000
 
+#[cfg(os.linux)]
 /// Linux x86_64 struct epoll_event (packed 12 bytes).
 #[packed]
 struct EpollEvent {
@@ -40,6 +60,7 @@ struct EpollEvent {
     u64 data;
 }
 
+#[cfg(os.linux)]
 impl EpollEvent {
     EpollEvent new(u32 events, u64 data) {
         EpollEvent ev;
@@ -68,11 +89,13 @@ Result<i64, Error> try_epoll_wait(i32 epfd, EpollEvent* events, i64 maxevents, i
 // Epoll — RAII epoll instance wrapper
 // ---------------------------------------------------------------------------
 
+#[cfg(os.linux)]
 struct Epoll {
     i32 fd;
     bool is_open;
 }
 
+#[cfg(os.linux)]
 impl Epoll {
     /// Create a new epoll file descriptor with EPOLL_CLOEXEC.
     Result<Epoll, Error> new() {
@@ -126,6 +149,7 @@ impl Epoll {
     }
 }
 
+#[cfg(os.linux)]
 impl Drop for Epoll {
     void drop(*self) {
         self.close();

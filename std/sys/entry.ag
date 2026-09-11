@@ -3,6 +3,7 @@ import std.cpu;
 import std.io.file;
 import std.rt.builtins;
 import std.rt.thread_registry;
+import std.sys.os;
 import std.thread;
 //
 // Importing this module inlines a `_start` symbol that:
@@ -27,6 +28,14 @@ extern "C" {
     i32 main();
     i32 __silver_argc;
     i8** __silver_argv;
+    // Win32 argv plumbing (windows entry only; unused declarations are
+    // dead-code-eliminated on other targets).
+    #[link_name("GetCommandLineW")]
+    u16* win_GetCommandLineW();
+    #[link_name("CommandLineToArgvW")]
+    u16** win_CommandLineToArgvW(u16* cmd, i32* count);
+    #[link_name("LocalFree")]
+    u8* win_LocalFree(u8* mem);
 }
 
 i32 silver_argc() {
@@ -37,6 +46,9 @@ i8** silver_argv() {
     return __silver_argv;
 }
 
+// Linux entry: raw ET_EXEC _start. argc/argv come off the process stack and
+// exit goes through exit_group — the classic no-libc crt0 contract.
+#[cfg(os.linux)]
 void _start() {
     asm("
         .section .bss
@@ -63,4 +75,82 @@ void _start() {
         mov $$231, %eax
         syscall
     ");
+}
+
+// Windows entry: linked via /ENTRY:_start (the CRT's mainCRTStartup never
+// runs). Same protocol as the Linux blob, with Win32 plumbing:
+//   - __silver_win_arg_setup fills __silver_argc/__silver_argv from
+//     GetCommandLineW/CommandLineToArgvW (UTF-16 -> UTF-8).
+//   - sys_platform_init switches the console to UTF-8 before any output.
+//   - exit is ExitProcess (never returns, so %r12 needs no preserving).
+#[cfg(os.windows)]
+void _start() {
+    sys_platform_init();
+    __silver_win_arg_setup();
+    __silver_cpu_init();
+    i32 rc = main();
+    __silver_thread_registry_join_all();
+    __silver_flush_all();
+    i32 leak = __silver_leak_check_report();
+    if (leak != 0) {
+        rc = 1;
+    }
+    sys_exit_group((i64)rc);
+}
+
+/// Windows argv plumbing: CommandLineToArgvW, then UTF-16 -> UTF-8 for every
+/// argument. Buffers come from the page allocator and live for the process
+/// lifetime. Called once from _start before __silver_cpu_init.
+#[cfg(os.windows)]
+void __silver_win_arg_setup() {
+    // Define the argv globals in .bss (the Windows counterpart of the Linux
+    // entry blob's section directives). Runs once, before anything reads them.
+    asm("
+        .section .bss
+        __silver_argc: .zero 4
+        __silver_argv: .zero 8
+        .text
+    ");
+    u16* cmd = win_GetCommandLineW();
+    i32 argcw = 0;
+    u16** argvw = win_CommandLineToArgvW(cmd, &argcw);
+    if (argvw == (u16**)0 || argcw <= 0) {
+        // Degenerate command line: still give main() an empty argv.
+        __silver_argc = 0;
+        __silver_argv = (i8**)0;
+        return;
+    }
+    // One allocation: (argcw + 1) pointers, then UTF-8 payloads.
+    i64 ptr_bytes = ((i64)argcw + 1) * 8;
+    i64 payload = 0;
+    i64 i = 0;
+    while (i < argcw) {
+        i64 j = 0;
+        while (argvw[i][j] != 0) { j += 1; }
+        // Worst case 3 UTF-8 bytes per UTF-16 unit + terminator.
+        payload += j * 3 + 4;
+        i += 1;
+    }
+    u8* block = mem_sys_alloc(ptr_bytes + payload);
+    if (block == (u8*)0) {
+        __silver_argc = 0;
+        __silver_argv = (i8**)0;
+        win_LocalFree((u8*)argvw);
+        return;
+    }
+    i8** argv = (i8**)block;
+    i64 cap = payload;
+    i64 off = ptr_bytes;
+    i = 0;
+    while (i < argcw) {
+        argv[i] = (i8*)(block + off);
+        i64 used = win_utf16_to_utf8(argvw[i], block + off, cap);
+        off += used + 1;
+        cap -= used + 1;
+        i += 1;
+    }
+    argv[argcw] = (i8*)0;
+    __silver_argc = argcw;
+    __silver_argv = argv;
+    win_LocalFree((u8*)argvw);
 }

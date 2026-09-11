@@ -16,7 +16,7 @@
 // Pure Silver + inline asm; no libc dependency. Used by abort() and
 // __silver_assert_failed to print a named stack trace before dying.
 
-import std.sys.raw.fs;
+import std.sys.os;
 
 struct BtEntry {
     i64 addr;

@@ -1,0 +1,807 @@
+// std/sys/os.ag — the platform seam of the Silver runtime.
+//
+// Every OS service std consumes goes through the `sys_*` functions below.
+// Each has two cfg-selected implementations:
+//   - `#[cfg(os.linux)]`  delegates to the generated raw syscall wrappers
+//                         (std/sys/raw/*) — behavior identical to before.
+//   - `#[cfg(os.windows)]` calls Win32 directly (kernel32 / ucrt; no libc).
+//
+// The Linux x86_64 `struct stat` BUFFER LAYOUT is part of this seam's
+// contract: sys_stat writes st_size at offset 48 and st_mtim (sec, nsec) at
+// 88/96 into the caller's 144-byte buffer on every platform, because
+// consumers read those fixed offsets (std/io/file.ag).
+//
+// fd semantics on Windows: 0/1/2 resolve to the standard handles lazily;
+// file fds are the Win32 HANDLE truncated to i32 (kernel handles are
+// documented as 32-bit significant). All fds are binary — no CRLF
+// translation anywhere; console output expects UTF-8 (entry sets
+// SetConsoleOutputCP(CP_UTF8)).
+
+import std.sys.raw.fs;
+import std.sys.raw.memory;
+import std.sys.raw.process;
+import std.sys.raw.sync;
+import std.sys.raw.time;
+import std.sys.raw.misc;
+import std.sys.errno;
+
+// ---------------------------------------------------------------------------
+// Win32 externs (kernel32 unless noted). Handles travel as i64; BOOL as i32.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.windows)]
+extern "C" {
+    #[link_name("VirtualAlloc")]
+    u8* win_VirtualAlloc(u8* addr, u64 size, u32 alloc_type, u32 protect);
+    #[link_name("VirtualFree")]
+    i32 win_VirtualFree(u8* addr, u64 size, u32 free_type);
+
+    #[link_name("GetStdHandle")]
+    i64 win_GetStdHandle(i32 which);
+    #[link_name("WriteFile")]
+    i32 win_WriteFile(i64 handle, u8* buf, u32 len, u32* written, u8* overlapped);
+    #[link_name("ReadFile")]
+    i32 win_ReadFile(i64 handle, u8* buf, u32 len, u32* read, u8* overlapped);
+    #[link_name("SetFilePointer")]
+    i32 win_SetFilePointer(i64 handle, i32 dist_low, i32* dist_high, u32 method);
+    #[link_name("CloseHandle")]
+    i32 win_CloseHandle(i64 handle);
+    #[link_name("CreateFileW")]
+    i64 win_CreateFileW(u16* name, u32 access, u32 share, u8* sa, u32 disp, u32 flags, u64 tmpl);
+    #[link_name("GetFileInformationByHandle")]
+    i32 win_GetFileInformationByHandle(i64 handle, u8* info);
+    #[link_name("DeleteFileW")]
+    i32 win_DeleteFileW(u16* name);
+    #[link_name("MoveFileExW")]
+    i32 win_MoveFileExW(u16* from, u16* to, u32 flags);
+
+    #[link_name("WaitOnAddress")]
+    i32 win_WaitOnAddress(u32* addr, u32* compare, u64 size, u32 ms);
+    #[link_name("WakeByAddressSingle")]
+    void win_WakeByAddressSingle(u32* addr);
+    #[link_name("WakeByAddressAll")]
+    void win_WakeByAddressAll(u32* addr);
+
+    #[link_name("ExitProcess")]
+    void win_ExitProcess(u32 code);
+    #[link_name("ExitThread")]
+    void win_ExitThread(u32 code);
+    #[link_name("GetCurrentProcessId")]
+    u32 win_GetCurrentProcessId();
+    #[link_name("TerminateProcess")]
+    i32 win_TerminateProcess(i64 process, u32 code);
+    #[link_name("GetCurrentProcess")]
+    i64 win_GetCurrentProcess();
+
+    #[link_name("QueryPerformanceCounter")]
+    i32 win_QueryPerformanceCounter(i64* count);
+    #[link_name("QueryPerformanceFrequency")]
+    i32 win_QueryPerformanceFrequency(i64* freq);
+    #[link_name("GetSystemTimePreciseAsFileTime")]
+    void win_GetSystemTimePreciseAsFileTime(u64* ft);
+
+    #[link_name("SetConsoleOutputCP")]
+    i32 win_SetConsoleOutputCP(u32 codepage);
+    #[link_name("SetConsoleCP")]
+    i32 win_SetConsoleCP(u32 codepage);
+    #[link_name("CreateThread")]
+    i64 win_CreateThread(u8* attrs, u64 stack_size, u64(u64) start, u8* param, u32 flags, u32* tid);
+    #[link_name("GetCommandLineW")]
+    u16* win_GetCommandLineW();
+    #[link_name("CommandLineToArgvW")]
+    u16** win_CommandLineToArgvW(u16* cmd, i32* count);
+    #[link_name("LocalFree")]
+    u8* win_LocalFree(u8* mem);
+}
+
+#[cfg(os.windows)]
+#[link(bcrypt)]
+extern "C" {
+    #[link_name("BCryptGenRandom")]
+    i32 win_BCryptGenRandom(i64 alg, u8* buf, u64 len, u32 flags);
+}
+
+// Win32 constants used below.
+#[cfg(os.windows)]
+const u32 WIN_MEM_COMMIT = 0x1000;
+#[cfg(os.windows)]
+const u32 WIN_MEM_RESERVE = 0x2000;
+#[cfg(os.windows)]
+const u32 WIN_MEM_RELEASE = 0x8000;
+#[cfg(os.windows)]
+const u32 WIN_PAGE_READWRITE = 4;
+#[cfg(os.windows)]
+const u32 WIN_GENERIC_READ = 0x80000000;
+#[cfg(os.windows)]
+const u32 WIN_GENERIC_WRITE = 0x40000000;
+#[cfg(os.windows)]
+const u32 WIN_FILE_SHARE_RW = 3;
+#[cfg(os.windows)]
+const u32 WIN_CREATE_NEW = 1;
+#[cfg(os.windows)]
+const u32 WIN_CREATE_ALWAYS = 2;
+#[cfg(os.windows)]
+const u32 WIN_OPEN_EXISTING = 3;
+#[cfg(os.windows)]
+const u32 WIN_OPEN_ALWAYS = 4;
+#[cfg(os.windows)]
+const u32 WIN_FILE_ATTRIBUTE_NORMAL = 0x80;
+#[cfg(os.windows)]
+const u32 WIN_FILE_BEGIN = 0;
+#[cfg(os.windows)]
+const u32 WIN_FILE_CURRENT = 1;
+#[cfg(os.windows)]
+const u32 WIN_FILE_END = 2;
+#[cfg(os.windows)]
+const u32 WIN_MOVE_REPLACE = 1;
+#[cfg(os.windows)]
+const u32 WIN_MOVE_COPY_ALLOWED = 2;
+#[cfg(os.windows)]
+const u32 WIN_INFINITE = 0xFFFFFFFF;
+#[cfg(os.windows)]
+const i32 WIN_STD_INPUT = -10;
+#[cfg(os.windows)]
+const i32 WIN_STD_OUTPUT = -11;
+#[cfg(os.windows)]
+const i32 WIN_STD_ERROR = -12;
+#[cfg(os.windows)]
+const u32 WIN_CP_UTF8 = 65001;
+
+// Linux O_* flag bits come from std/sys/result.ag (Linux numeric values);
+// the windows sys_open translates them into Win32 create dispositions.
+
+// ---------------------------------------------------------------------------
+// UTF-8 <-> UTF-16 (Win32 *W APIs take UTF-16; std strings are UTF-8).
+// ---------------------------------------------------------------------------
+
+/// UTF-8 string length in UTF-16 code units (excluding the terminator).
+#[cfg(os.windows)]
+i64 win_utf16_len(u8* s) {
+    i64 n = 0;
+    i64 i = 0;
+    while (s[i] != 0) {
+        u32 cp = (u32)s[i];
+        i64 advance = 1;
+        if ((cp & 0xE0) == 0xC0) { advance = 2; }
+        else if ((cp & 0xF0) == 0xE0) { advance = 3; }
+        else if ((cp & 0xF8) == 0xF0) { advance = 4; }
+        i += advance;
+        n += 1;
+    }
+    return n;
+}
+
+/// Convert NUL-terminated UTF-8 into `dst` (UTF-16, NUL-terminated).
+/// Returns the number of UTF-16 code units written.
+#[cfg(os.windows)]
+i64 win_utf8_to_utf16(u8* s, u16* dst) {
+    i64 out = 0;
+    i64 i = 0;
+    while (s[i] != 0) {
+        u32 cp = (u32)s[i];
+        i64 advance = 1;
+        if ((cp & 0xE0) == 0xC0) {
+            advance = 2;
+            cp = cp & 0x1F;
+        } else if ((cp & 0xF0) == 0xE0) {
+            advance = 3;
+            cp = cp & 0x0F;
+        } else if ((cp & 0xF8) == 0xF0) {
+            advance = 4;
+            cp = cp & 0x07;
+        } else {
+            cp = cp & 0x7F;
+        }
+        i += 1;
+        // Gather continuation bytes.
+        i64 k = 1;
+        while (k < advance) {
+            cp = (cp << 6) | ((u32)s[i] & 0x3F);
+            i += 1;
+            k += 1;
+        }
+        if (cp >= 0x10000) {
+            // Surrogate pair.
+            u32 v = cp - 0x10000;
+            dst[out] = (u16)(0xD800 + (v >> 10));
+            dst[out + 1] = (u16)(0xDC00 + (v & 0x3FF));
+            out += 2;
+        } else {
+            dst[out] = (u16)cp;
+            out += 1;
+        }
+    }
+    dst[out] = 0;
+    return out;
+}
+
+/// Convert a NUL-terminated UTF-16 string to NUL-terminated UTF-8 into dst
+/// (capacity bytes). Returns bytes written.
+#[cfg(os.windows)]
+i64 win_utf16_to_utf8(u16* src, u8* dst, i64 dst_cap) {
+    i64 out = 0;
+    i64 i = 0;
+    while (src[i] != 0 && out < dst_cap - 4) {
+        u32 cp = (u32)src[i];
+        i += 1;
+        if (cp >= 0xD800 && cp < 0xDC00) {
+            u32 lo = (u32)src[i];
+            i += 1;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        }
+        if (cp < 0x80) {
+            dst[out] = (u8)cp;
+            out += 1;
+        } else if (cp < 0x800) {
+            dst[out] = (u8)(0xC0 | (cp >> 6));
+            dst[out + 1] = (u8)(0x80 | (cp & 0x3F));
+            out += 2;
+        } else if (cp < 0x10000) {
+            dst[out] = (u8)(0xE0 | (cp >> 12));
+            dst[out + 1] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+            dst[out + 2] = (u8)(0x80 | (cp & 0x3F));
+            out += 3;
+        } else {
+            dst[out] = (u8)(0xF0 | (cp >> 18));
+            dst[out + 1] = (u8)(0x80 | ((cp >> 12) & 0x3F));
+            dst[out + 2] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+            dst[out + 3] = (u8)(0x80 | (cp & 0x3F));
+            out += 4;
+        }
+    }
+    dst[out] = 0;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Memory: mmap-like page allocation.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
+    return raw_sys_mmap(addr, len, prot, flags, fd, off);
+}
+
+/// Anonymous RW pages, zero-initialized. prot/flags/fd/off follow the Linux
+/// mmap convention (3 = R|W, 34 = PRIVATE|ANONYMOUS); the Windows
+/// implementation reserves+commits RW pages, which are also zeroed.
+#[cfg(os.windows)]
+i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
+    if (len == 0) {
+        return -22; // EINVAL
+    }
+    u8* p = win_VirtualAlloc((u8*)addr, (u64)len, WIN_MEM_RESERVE | WIN_MEM_COMMIT, WIN_PAGE_READWRITE);
+    if (p == (u8*)0) {
+        return -12; // ENOMEM
+    }
+    return (i64)p;
+}
+
+#[cfg(os.linux)]
+i64 sys_munmap(i64 addr, i64 len) {
+    return raw_sys_munmap(addr, len);
+}
+
+/// MEM_RELEASE frees the whole reservation and requires the exact base
+/// address the allocator records in its block header, so `len` is unused.
+#[cfg(os.windows)]
+i64 sys_munmap(i64 addr, i64 len) {
+    if (addr == 0) {
+        return -22;
+    }
+    if (win_VirtualFree((u8*)addr, 0, WIN_MEM_RELEASE) == 0) {
+        return -22;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// File I/O. See the fd semantics note in the header.
+// ---------------------------------------------------------------------------
+
+/// Resolve fd 0/1/2 to the standard handles; pass everything through as a
+/// (sign-extended) Win32 handle.
+#[cfg(os.windows)]
+i64 win_fd_handle(i64 fd) {
+    if (fd == 0) { return win_GetStdHandle(WIN_STD_INPUT); }
+    if (fd == 1) { return win_GetStdHandle(WIN_STD_OUTPUT); }
+    if (fd == 2) { return win_GetStdHandle(WIN_STD_ERROR); }
+    return fd;
+}
+
+#[cfg(os.linux)]
+i64 sys_write(i64 fd, i64 buf, i64 len) {
+    return raw_sys_write(fd, buf, len);
+}
+
+#[cfg(os.windows)]
+i64 sys_write(i64 fd, i64 buf, i64 len) {
+    if (len == 0) {
+        return 0;
+    }
+    u32 written = 0;
+    i64 h = win_fd_handle(fd);
+    if (win_WriteFile(h, (u8*)buf, (u32)len, &written, (u8*)0) == 0) {
+        return -5; // EIO
+    }
+    return (i64)written;
+}
+
+#[cfg(os.linux)]
+i64 sys_read(i64 fd, i64 buf, i64 len) {
+    return raw_sys_read(fd, buf, len);
+}
+
+#[cfg(os.windows)]
+i64 sys_read(i64 fd, i64 buf, i64 len) {
+    u32 nread = 0;
+    i64 h = win_fd_handle(fd);
+    if (win_ReadFile(h, (u8*)buf, (u32)len, &nread, (u8*)0) == 0) {
+        return -5; // EIO
+    }
+    return (i64)nread;
+}
+
+/// Translate the Linux O_* bit layout (std/sys/result.ag) into a Win32
+/// create/open call. Always binary; the returned fd is the truncated handle.
+#[cfg(os.windows)]
+i64 sys_open(i64 path, i64 flags, i64 mode) {
+    u8* p8 = (u8*)path;
+    i64 units = win_utf16_len(p8);
+    // UTF-16 buffer on the stack: path lengths are small; over-allocate 4x.
+    u16 wpath[1024];
+    if (units >= 1000) {
+        return -36; // ENAMETOOLONG
+    }
+    win_utf8_to_utf16(p8, &wpath[0]);
+
+    u32 access = WIN_GENERIC_READ;
+    if ((flags & O_RDWR) == O_RDWR) {
+        access = WIN_GENERIC_READ | WIN_GENERIC_WRITE;
+    } else if ((flags & O_WRONLY) == O_WRONLY) {
+        access = WIN_GENERIC_WRITE;
+    }
+
+    u32 disp = WIN_OPEN_EXISTING;
+    if ((flags & O_CREAT) == O_CREAT) {
+        if ((flags & O_EXCL) == O_EXCL) {
+            disp = WIN_CREATE_NEW;
+        } else {
+            disp = WIN_OPEN_ALWAYS;
+        }
+    } else if ((flags & O_TRUNC) == O_TRUNC) {
+        disp = WIN_CREATE_ALWAYS;
+    }
+
+    i64 h = win_CreateFileW(&wpath[0], access, WIN_FILE_SHARE_RW, (u8*)0, disp, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == -1) {
+        return -2; // ENOENT (approximate; detailed mapping not needed by std)
+    }
+    if ((flags & O_APPEND) == O_APPEND) {
+        win_SetFilePointer(h, 0, (i32*)0, WIN_FILE_END);
+    }
+    return (i64)(i32)h;
+}
+
+#[cfg(os.linux)]
+i64 sys_close(i64 fd) {
+    return raw_sys_close(fd);
+}
+
+#[cfg(os.linux)]
+i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
+    return raw_sys_openat(dirfd, path, flags, mode);
+}
+
+#[cfg(os.linux)]
+i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
+    return raw_sys_fcntl(fd, cmd, arg);
+}
+
+#[cfg(os.linux)]
+i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
+    return raw_sys_mremap(old_addr, old_size, new_size, flags, new_addr);
+}
+
+#[cfg(os.linux)]
+i64 sys_exit(i64 code) {
+    return raw_sys_exit(code);
+}
+
+/// Only AT_FDCWD semantics are consumed by std: relative paths resolve
+/// against the process CWD, which is what the handle-less open does.
+#[cfg(os.windows)]
+i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
+    return sys_open(path, flags, mode);
+}
+
+/// Only F_GETFL/F_SETFL (O_NONBLOCK toggling) are consumed; regular files on
+/// Windows have no non-blocking mode, so report read/write capability and
+/// accept any set. Socket fcntl goes through the winsock layer.
+#[cfg(os.windows)]
+i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
+    if (cmd == 3) { // F_GETFL
+        return 2;   // O_RDWR
+    }
+    return 0;       // F_SETFL: accepted
+}
+
+/// mremap via allocate-copy-free. The page allocator's reallocations stay
+/// within one mapping in practice; this path is the general fallback.
+#[cfg(os.windows)]
+i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
+    if (old_addr == 0 || new_size == 0) {
+        return -22;
+    }
+    if (new_size <= old_size) {
+        return old_addr;
+    }
+    i64 fresh = sys_mmap(0, new_size, 3, 34, -1, 0);
+    if (fresh <= 0) {
+        return fresh;
+    }
+    i64 n = old_size;
+    if (new_size < n) {
+        n = new_size;
+    }
+    u8* src = (u8*)old_addr;
+    u8* dst = (u8*)fresh;
+    i64 i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i += 1;
+    }
+    sys_munmap(old_addr, old_size);
+    return fresh;
+}
+
+/// Process-wide exit fallback (never returns on either platform).
+#[cfg(os.windows)]
+i64 sys_exit(i64 code) {
+    win_ExitProcess((u32)code);
+    return 0;
+}
+
+#[cfg(os.windows)]
+i64 sys_close(i64 fd) {
+    if (fd >= 0 && fd <= 2) {
+        return 0; // standard handles are not ours to close
+    }
+    if (win_CloseHandle(fd) == 0) {
+        return -9; // EBADF
+    }
+    return 0;
+}
+
+#[cfg(os.linux)]
+i64 sys_lseek(i64 fd, i64 off, i64 whence) {
+    return raw_sys_lseek(fd, off, whence);
+}
+
+/// 64-bit seek via the low/high split of SetFilePointer.
+#[cfg(os.windows)]
+i64 sys_lseek(i64 fd, i64 off, i64 whence) {
+    i64 h = win_fd_handle(fd);
+    i32 high = (i32)(off >> 32);
+    i32 low = (i32)off;
+    i32 method = WIN_FILE_BEGIN;
+    if (whence == 1) { method = WIN_FILE_CURRENT; }
+    else if (whence == 2) { method = WIN_FILE_END; }
+    i32 res = win_SetFilePointer(h, low, &high, method);
+    if (res == -1) {
+        return -6; // ENXIO-ish failure (invalid handle)
+    }
+    return ((i64)(u32)high << 32) | (i64)(u32)res;
+}
+
+#[cfg(os.linux)]
+i64 sys_unlink(i64 path) {
+    return raw_sys_unlink(path);
+}
+
+#[cfg(os.windows)]
+i64 sys_unlink(i64 path) {
+    u16 wpath[1024];
+    if (win_utf16_len((u8*)path) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)path, &wpath[0]);
+    if (win_DeleteFileW(&wpath[0]) == 0) {
+        return -2;
+    }
+    return 0;
+}
+
+#[cfg(os.linux)]
+i64 sys_rename(i64 from, i64 to) {
+    return raw_sys_rename(from, to);
+}
+
+#[cfg(os.windows)]
+i64 sys_rename(i64 from, i64 to) {
+    u16 wfrom[1024];
+    u16 wto[1024];
+    if (win_utf16_len((u8*)from) >= 1000 || win_utf16_len((u8*)to) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)from, &wfrom[0]);
+    win_utf8_to_utf16((u8*)to, &wto[0]);
+    if (win_MoveFileExW(&wfrom[0], &wto[0], WIN_MOVE_REPLACE | WIN_MOVE_COPY_ALLOWED) == 0) {
+        return -2;
+    }
+    return 0;
+}
+
+/// Writes the Linux x86_64 `struct stat` layout consumed by std/io/file.ag:
+/// st_size at offset 48, st_mtim sec at 88, nsec at 96. Everything else is
+/// left as the caller's zeroed buffer.
+#[cfg(os.windows)]
+i64 sys_stat(i64 path, i64 buf) {
+    u16 wpath[1024];
+    if (win_utf16_len((u8*)path) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)path, &wpath[0]);
+    i64 h = win_CreateFileW(&wpath[0], WIN_GENERIC_READ, WIN_FILE_SHARE_RW, (u8*)0, WIN_OPEN_EXISTING, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == -1) {
+        return -2;
+    }
+    // BY_HANDLE_FILE_INFORMATION: nFileSize{High,Low} at 36/40,
+    // ftLastWriteTime (u64) at 24.
+    u8 info[48];
+    i64 i = 0;
+    while (i < 48) {
+        info[i] = 0;
+        i += 1;
+    }
+    i32 ok = win_GetFileInformationByHandle(h, &info[0]);
+    win_CloseHandle(h);
+    if (ok == 0) {
+        return -5;
+    }
+    i64 size = ((i64)(u32)win_le_i64(&info[0], 36) << 32) | (i64)(u32)win_le_i64(&info[0], 40);
+    i64 ft = win_le_i64(&info[0], 24);
+    // FILETIME (1601) -> Unix epoch (1970).
+    i64 unix100 = ft - 116444736000000000;
+    i64 sec = unix100 / 10000000;
+    i64 nsec = (unix100 % 10000000) * 100;
+    win_store_le_i64((u8*)buf, 48, size);
+    win_store_le_i64((u8*)buf, 88, sec);
+    win_store_le_i64((u8*)buf, 96, nsec);
+    return 0;
+}
+
+#[cfg(os.windows)]
+i64 win_le_i64(u8* buf, i64 off) {
+    return (i64)win_le_u64(buf, off);
+}
+
+#[cfg(os.windows)]
+u64 win_le_u64(u8* buf, i64 off) {
+    u64 v = 0;
+    i64 i = 7;
+    while (i >= 0) {
+        v = (v << 8) | (u64)buf[off + i];
+        i -= 1;
+    }
+    return v;
+}
+
+#[cfg(os.windows)]
+void win_store_le_i64(u8* buf, i64 off, i64 v) {
+    i64 i = 0;
+    while (i < 8) {
+        buf[off + i] = (u8)((u64)v & 0xFF);
+        v = (i64)((u64)v >> 8);
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process-level: exit, signals (abort only), pid.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 sys_exit_group(i64 code) {
+    return raw_sys_exit_group(code);
+}
+
+#[cfg(os.windows)]
+i64 sys_exit_group(i64 code) {
+    win_ExitProcess((u32)code);
+    return 0;
+}
+
+#[cfg(os.linux)]
+i64 sys_getpid() {
+    return raw_sys_getpid();
+}
+
+#[cfg(os.windows)]
+i64 sys_getpid() {
+    return (i64)win_GetCurrentProcessId();
+}
+
+/// Only the abort path (SIGABRT, signal 6) uses sys_kill. Windows has no
+/// signal semantics, so it maps to a forced exit with the 134 (128+SIGABRT)
+/// convention the test harness and backtrace printing expect.
+#[cfg(os.linux)]
+i64 sys_kill(i64 pid, i64 sig) {
+    return raw_sys_kill(pid, sig);
+}
+
+#[cfg(os.windows)]
+i64 sys_kill(i64 pid, i64 sig) {
+    if (sig == 6) {
+        win_ExitProcess(134);
+        return 0;
+    }
+    win_TerminateProcess(win_GetCurrentProcess(), 1);
+    return 0;
+}
+
+/// Thread-local exit: ends only the calling thread. The thread runtime's
+/// child entry uses this after storing its done flag.
+#[cfg(os.linux)]
+void thread_exit(i64 code) {
+    raw_sys_exit(code);
+}
+
+#[cfg(os.windows)]
+void thread_exit(i64 code) {
+    win_ExitThread((u32)code);
+}
+
+// ---------------------------------------------------------------------------
+// Threads: spawn seam. Linux maps a dedicated stack via clone; Windows uses
+// CreateThread with an OS-managed stack (the caller's stack pointer is
+// ignored there). The start function always has signature void(i64).
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg) {
+    return thread_clone_shim(flags, stack_top, fn, arg);
+}
+
+/// Returns the thread handle (>0) or 0 on failure. `stack_top` is the
+/// Linux-only dedicated stack; Windows threads get an OS-managed stack.
+#[cfg(os.windows)]
+i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg) {
+    // Cast void(i64) fn ptr to the CreateThread start signature: the first
+    // argument register is the same (rcx), and the exit code (rax) is
+    // ignored — completion is signalled through the TaskRecord done flag.
+    i64 h = win_CreateThread((u8*)0, 2097152, (u64(u64))fn, (u8*)arg, 0, (u32*)0);
+    if (h == 0) {
+        return 0;
+    }
+    return h;
+}
+
+// ---------------------------------------------------------------------------
+// Futex -> WaitOnAddress.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
+    return raw_sys_futex(uaddr, op, val, timeout, uaddr2, val3);
+}
+
+/// FUTEX_WAIT (op 0) sleeps while *uaddr == val; FUTEX_WAKE (op 1) wakes up
+/// to `val` waiters. WaitOnAddress re-checks the compare value atomically in
+/// the kernel, giving the same lost-wake guarantees. Timeout is a timespec*
+/// ({i64 sec, i64 nsec}) or null.
+#[cfg(os.windows)]
+i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
+    u32* addr = (u32*)uaddr;
+    if (op == 1) {
+        // FUTEX_WAKE: wake all waiters when asked for more than one; the
+        // futex protocol re-checks state after waking, so over-waking is
+        // semantically safe.
+        if (val == 1) {
+            win_WakeByAddressSingle(addr);
+        } else {
+            win_WakeByAddressAll(addr);
+        }
+        return val;
+    }
+    if (op != 0) {
+        return -22; // EINVAL: only WAIT/WAKE are used by std
+    }
+    // FUTEX_WAIT: kernel-side compare against `val`.
+    u32 expected = (u32)val;
+    u32 ms = WIN_INFINITE;
+    if (timeout != 0) {
+        i64 sec = raw_le_i64_at((i64*)timeout, 0);
+        i64 nsec = raw_le_i64_at((i64*)timeout, 1);
+        if (sec < 0) {
+            return -22;
+        }
+        ms = (u32)(sec * 1000 + nsec / 1000000);
+        if (ms == 0 && (sec > 0 || nsec > 0)) {
+            ms = 1;
+        }
+    }
+    i64 r = win_WaitOnAddress(addr, &expected, 4, ms);
+    if (r == 0) {
+        // Timed out (the only failure mode for a valid address).
+        return -110; // ETIMEDOUT
+    }
+    return 0;
+}
+
+#[cfg(os.windows)]
+i64 raw_le_i64_at(i64* p, i64 idx) {
+    return p[idx];
+}
+
+// ---------------------------------------------------------------------------
+// Time.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 sys_clock_gettime(i64 clk, i64 ts) {
+    return raw_sys_clock_gettime(clk, ts);
+}
+
+/// Fills {i64 sec, i64 nsec} at ts. clk 1 = CLOCK_MONOTONIC (QPC), anything
+/// else = CLOCK_REALTIME (GetSystemTimePreciseAsFileTime).
+#[cfg(os.windows)]
+i64 sys_clock_gettime(i64 clk, i64 ts) {
+    u8* p = (u8*)ts;
+    if (clk == 1) {
+        i64 count = 0;
+        i64 freq = 0;
+        win_QueryPerformanceCounter(&count);
+        win_QueryPerformanceFrequency(&freq);
+        if (freq == 0) {
+            freq = 10000000;
+        }
+        i64 sec = count / freq;
+        i64 frac = count % freq;
+        win_store_le_i64(p, 0, sec);
+        win_store_le_i64(p, 8, frac * 1000000000 / freq);
+        return 0;
+    }
+    u64 ft = 0;
+    win_GetSystemTimePreciseAsFileTime(&ft);
+    i64 unix100 = (i64)ft - 116444736000000000;
+    win_store_le_i64(p, 0, unix100 / 10000000);
+    win_store_le_i64(p, 8, (unix100 % 10000000) * 100);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Randomness.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.linux)]
+i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
+    return raw_sys_getrandom(buf, len, flags);
+}
+
+/// BCryptGenRandom with the system-preferred RNG fills the whole buffer;
+/// getrandom semantics (partial fills, EINTR) are not exercised by callers
+/// here.
+#[cfg(os.windows)]
+i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG = 2; null algorithm handle.
+    if (win_BCryptGenRandom(0, (u8*)buf, (u64)len, 2) != 0) {
+        return -5;
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------------------
+// One-time platform setup, called by _start before cpu init: UTF-8 console
+// codepages so @println renders correctly on a real console.
+// ---------------------------------------------------------------------------
+
+#[cfg(os.windows)]
+void sys_platform_init() {
+    win_SetConsoleOutputCP(WIN_CP_UTF8);
+    win_SetConsoleCP(WIN_CP_UTF8);
+}
+
+#[cfg(os.linux)]
+void sys_platform_init() {
+}
