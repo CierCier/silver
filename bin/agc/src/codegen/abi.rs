@@ -316,16 +316,17 @@ impl AbiHandler for Amd64Abi {
 /// Implements the Microsoft x64 calling convention struct rules
 /// (https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions):
 ///
-/// 1. If the size is <= 8 bytes, pass by value in a single integer register
-///    (rcx/rdx/r8/r9) — no eightbyte classification. A struct consisting of
-///    exactly one `float`/`double` member is coerced to that scalar and passed
-///    in an XMM register (by ordinal position).
-/// 2. If the size is > 8 bytes, pass by reference: the caller makes a temporary
-///    copy and passes a pointer (modeled as a pointer parameter with the
-///    `byval` attribute). There is no 9-16-byte two-eightbyte register case.
+/// 1. Aggregates of size exactly 1, 2, 4, or 8 bytes pass by value in a single
+///    integer register (rcx/rdx/r8/r9) — no eightbyte classification, and no
+///    single-float XMM coercion (clang/MSVC pass one-float aggregates in the
+///    integer class; XMM is reserved for scalar float/double arguments).
+///    Other sizes (3, 5, 6, 7, and everything > 8) pass by reference: the
+///    caller makes a temporary copy and passes a pointer (modeled as a pointer
+///    parameter with the `byval` attribute).
+/// 2. There is no 9-16-byte two-eightbyte register case.
 ///
-/// Returns: <= 8 bytes in `rax` (or `xmm0` for a single float/double member),
-/// > 8 bytes via a hidden `sret` pointer (caller-allocated, returned in `rax`).
+/// Returns: 1/2/4/8-byte aggregates in `rax`, everything else via a hidden
+/// `sret` pointer (caller-allocated, returned in `rax`).
 ///
 /// The 32-byte shadow space at call sites, register-assignment ordering
 /// (floats occupy XMM slots by ordinal position), and `.pdata`/`.xdata` unwind
@@ -345,31 +346,9 @@ impl Win64Abi {
         Self
     }
 
-    /// Returns Some(scalar float type) when the struct consists of exactly one
-    /// `float`/`double` member that fills the whole struct — the MSVC x64
-    /// "float struct coercion" case (passed/returned in XMM).
-    fn single_float_scalar<'ctx>(
-        target_data: &TargetData,
-        struct_ty: StructType<'ctx>,
-        size: u64,
-    ) -> Option<BasicTypeEnum<'ctx>> {
-        if size != 4 && size != 8 {
-            return None;
-        }
-        let fields = struct_ty.get_field_types();
-        if fields.len() != 1 {
-            return None;
-        }
-        match fields[0] {
-            BasicTypeEnum::FloatType(f) => {
-                if target_data.get_abi_size(&f) == size {
-                    Some(f.as_basic_type_enum())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+    /// Win64 passes aggregates by value only at exactly 1, 2, 4, or 8 bytes.
+    fn passes_by_value(size: u64) -> bool {
+        matches!(size, 1 | 2 | 4 | 8)
     }
 }
 
@@ -386,20 +365,15 @@ impl AbiHandler for Win64Abi {
     ) -> BasicTypeEnum<'ctx> {
         let size = target_data.get_abi_size(&struct_ty);
 
-        if size <= 8 {
-            // Single float/double member: coerce to the scalar (XMM by ordinal)
-            if let Some(scalar) = Self::single_float_scalar(target_data, struct_ty, size) {
-                return scalar;
-            }
-            // Everything else <= 8 bytes: single integer register
+        if Self::passes_by_value(size) {
+            // Small aggregate: single integer register
             let bits = (size * 8) as u32;
-            let bits = if bits == 0 { 1 } else { bits };
             context
                 .custom_width_int_type(NonZeroU32::new(bits).unwrap())
                 .unwrap()
                 .as_basic_type_enum()
         } else {
-            // > 8 bytes: by reference (caller-made temporary copy + pointer)
+            // Everything else: by reference (caller-made temporary copy + pointer)
             context
                 .ptr_type(inkwell::AddressSpace::default())
                 .as_basic_type_enum()
@@ -414,19 +388,14 @@ impl AbiHandler for Win64Abi {
     ) -> BasicTypeEnum<'ctx> {
         let size = target_data.get_abi_size(&struct_ty);
 
-        if size <= 8 {
-            // Single float/double member returns in xmm0
-            if let Some(scalar) = Self::single_float_scalar(target_data, struct_ty, size) {
-                return scalar;
-            }
+        if Self::passes_by_value(size) {
             let bits = (size * 8) as u32;
-            let bits = if bits == 0 { 1 } else { bits };
             context
                 .custom_width_int_type(NonZeroU32::new(bits).unwrap())
                 .unwrap()
                 .as_basic_type_enum()
         } else {
-            // > 8 bytes: hidden sret pointer
+            // Hidden sret pointer
             context
                 .ptr_type(inkwell::AddressSpace::default())
                 .as_basic_type_enum()
@@ -434,11 +403,11 @@ impl AbiHandler for Win64Abi {
     }
 
     fn needs_byval(&self, size: u64) -> bool {
-        size > 8
+        !Self::passes_by_value(size)
     }
 
     fn needs_sret(&self, size: u64) -> bool {
-        size > 8
+        !Self::passes_by_value(size)
     }
 
     fn byval_alignment(&self, struct_ty: StructType, target_data: &TargetData) -> u64 {
@@ -791,10 +760,19 @@ mod tests {
     #[test]
     fn test_win64_needs_byval_threshold_is_8() {
         let handler = Win64Abi::new();
+        // By value only at exactly 1, 2, 4, or 8 bytes.
+        assert!(!handler.needs_byval(1));
+        assert!(!handler.needs_byval(2));
+        assert!(!handler.needs_byval(4));
         assert!(!handler.needs_byval(8));
+        assert!(handler.needs_byval(3));
+        assert!(handler.needs_byval(5));
+        assert!(handler.needs_byval(6));
+        assert!(handler.needs_byval(7));
         assert!(handler.needs_byval(9));
         assert!(handler.needs_byval(16));
         assert!(!handler.needs_sret(8));
+        assert!(handler.needs_sret(6));
         assert!(handler.needs_sret(9));
     }
 
@@ -830,27 +808,29 @@ mod tests {
     }
 
     #[test]
-    fn test_win64_single_float_struct_coerces_to_scalar() {
+    fn test_win64_single_float_struct_uses_integer_class() {
         let machine = setup_target_machine();
         let tdata = machine.get_target_data();
         let context = Context::create();
         let handler = Win64Abi::new();
 
-        // { f64 } = 8 bytes: coerced to double (xmm0/xmm1 by ordinal)
+        // { f64 } = 8 bytes: aggregate rules apply — integer register, NOT xmm.
+        // Single-member float aggregates stay in the integer class (clang/MSVC
+        // interop); XMM is only for scalar float/double arguments.
         let double_struct = context.struct_type(
             &[context.f64_type().as_basic_type_enum()],
             false,
         );
         let result = handler.classify_argument(&context, &tdata, double_struct);
-        assert!(result.is_float_type(), "single-double struct coerces to f64");
+        assert!(result.is_int_type(), "single-double struct passes as i64");
 
-        // { f32 } = 4 bytes: coerced to float
+        // { f32 } = 4 bytes: integer class, returned in rax (not xmm0).
         let float_struct = context.struct_type(
             &[context.f32_type().as_basic_type_enum()],
             false,
         );
         let result = handler.classify_return(&context, &tdata, float_struct);
-        assert!(result.is_float_type(), "single-float struct returns in xmm0 as f32");
+        assert!(result.is_int_type(), "single-float struct returns as i32");
     }
 
     #[test]

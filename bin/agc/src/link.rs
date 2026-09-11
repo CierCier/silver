@@ -12,10 +12,15 @@ use crate::driver::CompilePlan;
 /// - `GnuLd`: GNU ld / ld.lld / mold via GNU flags (ELF, Mach-O).
 /// - `LldLink`: COFF linking with MSVC-style flags — `lld-link`, or the MSVC
 ///   toolchain `link.exe` located via vswhere as a drop-in replacement.
+/// - `UnsupportedMinGW`: MinGW triples use the Win64 ABI for codegen but need
+///   a dedicated GNU-ld-on-PE link flavor (mingw CRT, `-Wl` flags) that does
+///   not exist yet; linking fails with a clear error instead of silently
+///   producing MSVC-runtime binaries.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum LinkFlavor {
     GnuLd,
     LldLink,
+    UnsupportedMinGW,
 }
 
 impl LinkFlavor {
@@ -23,13 +28,25 @@ impl LinkFlavor {
     /// given the host is assumed: windows hosts link via the MSVC model,
     /// everything else via the GNU model.
     fn for_target(target: Option<&str>) -> Self {
-        if crate::codegen::abi::target_is_windows(target) {
-            Self::LldLink
+        let is_windows = crate::codegen::abi::target_is_windows(target);
+        let is_mingw = target
+            .map(|t| t.to_ascii_lowercase().contains("mingw"))
+            .unwrap_or(false);
+        if is_windows {
+            if is_mingw {
+                Self::UnsupportedMinGW
+            } else {
+                Self::LldLink
+            }
         } else {
             Self::GnuLd
         }
     }
 }
+
+const MINGW_UNSUPPORTED_ERR: &str = "MinGW targets are not yet supported: the Win64 ABI codegen \
+     is correct, but no GNU-ld-on-PE link flavor exists yet (see docs/windows-port.md §3.3). \
+     Use an MSVC triple instead, e.g. --target x86_64-pc-windows-msvc";
 
 /// Locates the COFF linker (lld-link, or the MSVC link.exe as a drop-in).
 /// Honors `SILVER_LINKER` as an explicit override.
@@ -309,8 +326,18 @@ pub(crate) fn cc_library_dirs() -> Vec<PathBuf> {
 }
 
 pub(crate) fn command_exists(name: &str) -> bool {
+    // Windows PATH lookups via CreateProcess resolve `name.exe` even when only
+    // the bare name is invoked; a plain directory check for `name` would miss
+    // installations that ship only the .exe (e.g. lld-link.exe).
+    let candidates: [String; 2] = if cfg!(windows) {
+        [name.to_string(), format!("{name}.exe")]
+    } else {
+        [name.to_string(), name.to_string()]
+    };
     std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|p| p.join(name).is_file()))
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|p| candidates.iter().any(|c| p.join(c).is_file()))
+        })
         .unwrap_or(false)
 }
 
@@ -327,6 +354,7 @@ pub(crate) fn link_exe(
         LinkFlavor::LldLink => {
             link_exe_with_lld_link(plan, object_paths, dependency_paths, native_libs)
         }
+        LinkFlavor::UnsupportedMinGW => Err(MINGW_UNSUPPORTED_ERR.to_string()),
         LinkFlavor::GnuLd => link_exe_with_ld_lld(plan, object_paths, dependency_paths, native_libs)
             .or_else(|ld_err| {
                 link_exe_with_cc(plan, object_paths, dependency_paths, native_libs).map_err(
@@ -583,7 +611,15 @@ pub(crate) fn link_shared_module(
         link.arg(format!("/OUT:{}", output_path.display()));
         link.arg("/MACHINE:X64");
         link.arg(object_path);
+        // Static module objects pass through as inputs; dynamic (.dll) module
+        // dependencies need import-lib support and are rejected for now.
         for dep in dependency_paths {
+            if dep.extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
+                return Err(format!(
+                    "dynamic module dependencies ({}) are not yet supported for Windows targets; build modules without --shared",
+                    dep.display()
+                ));
+            }
             link.arg(dep);
         }
         for dir in msvc_library_dirs() {
