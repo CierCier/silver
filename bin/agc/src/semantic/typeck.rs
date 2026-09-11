@@ -1223,12 +1223,9 @@ impl TypeChecker {
                 ) && let ast::ExpressionKind::Literal(ast::Literal::Integer(n)) =
                     operand.kind.as_ref()
                 {
-                    let value = if *operator == ast::UnaryOperator::Minus {
-                        n.checked_neg().unwrap_or(i128::MIN)
-                    } else {
-                        *n
-                    };
-                    self.type_integer_literal_value(value, expected, &expr.span)
+                    let magnitude = *n as u128;
+                    let negated = *operator == ast::UnaryOperator::Minus;
+                    self.type_integer_literal_value(magnitude, negated, expected, &expr.span)
                 } else {
                     let operand_expected =
                         expected.filter(|ty| self.is_numeric_type(ty) || is_bool(ty));
@@ -4296,7 +4293,7 @@ impl TypeChecker {
         // decompose down to the expected type with an overflow check when a
         // narrower integer type is expected (e.g. `u8 x = 300` errors).
         if let ast::Literal::Integer(value) = literal {
-            return self.type_integer_literal_value(*value, expected, span);
+            return self.type_integer_literal_value(*value as u128, false, expected, span);
         }
         if let Some(expected_ty) = expected
             && self.literal_matches_expected(literal, expected_ty)
@@ -4317,38 +4314,61 @@ impl TypeChecker {
     /// Type an integer literal value against an optional expected type: the
     /// biggest integer type (i128) by default, narrowed to the expected
     /// integer type with an overflow error when it does not fit.
+    ///
+    /// `magnitude` is the SOURCE magnitude (the lexer stores full-u128
+    /// magnitudes as their two's-complement bit pattern; `as u128` recovers
+    /// them exactly), and `negated` records a unary minus. Keeping them
+    /// separate is what distinguishes `u128 x = u128::MAX` (wrapped, legal)
+    /// from `u128 x = -1` (negated, illegal) — the combined i128 value alone
+    /// cannot.
     fn type_integer_literal_value(
         &mut self,
-        value: i128,
+        magnitude: u128,
+        negated: bool,
         expected: Option<&Type>,
         span: &Span,
     ) -> Type {
         if let Some(expected_ty) = expected
             && let Type::Primitive(prim) = expected_ty
         {
-            // Unsigned targets: the lexer stores full-u128 magnitudes as
-            // their two's-complement bit pattern, so reinterpret to recover
-            // the source magnitude before the range check. A combined
-            // negative value (unary minus) reinterprets to a huge magnitude
-            // and correctly fails the check.
             if let Some(max) = Self::unsigned_prim_max(prim) {
-                if (value as u128) > max {
+                // A negated literal never fits an unsigned type
+                // (`u8 x = -5`, `u128 x = -1` both error).
+                if negated || magnitude > max {
+                    let shown = if negated { format!("-{magnitude}") } else { format!("{magnitude}") };
                     self.error(
-                        format!("integer literal {} does not fit in type {:?}", value, prim),
+                        format!("integer literal {shown} does not fit in type {:?}", prim),
                         *span,
                     );
                 }
                 return expected_ty.clone();
             }
-            if let Some((min, max)) = Self::signed_prim_range(prim)
-                && (value < min || value > max)
-            {
-                self.error(
-                    format!("integer literal {} does not fit in type {:?}", value, prim),
-                    *span,
-                );
+            if let Some((min, max)) = Self::signed_prim_range(prim) {
+                let fits = if negated {
+                    match magnitude {
+                        m if m <= i128::MAX as u128 => {
+                            let v = -(m as i128);
+                            v >= min && v <= max
+                        }
+                        // -(2^127) is exactly i128::MIN.
+                        m if m == (i128::MAX as u128) + 1 => min == i128::MIN,
+                        _ => false,
+                    }
+                } else {
+                    magnitude <= i128::MAX as u128 && {
+                        let v = magnitude as i128;
+                        v >= min && v <= max
+                    }
+                };
+                if !fits {
+                    let shown = if negated { format!("-{magnitude}") } else { format!("{magnitude}") };
+                    self.error(
+                        format!("integer literal {shown} does not fit in type {:?}", prim),
+                        *span,
+                    );
+                }
+                return expected_ty.clone();
             }
-            return expected_ty.clone();
         }
         Type::Primitive(ast::PrimitiveType::I128)
     }
@@ -4388,12 +4408,15 @@ impl TypeChecker {
     }
 
     /// True when an integer literal value fits the integer primitive.
+    ///
+    /// `value` is the combined signed value (unary minus already applied), so
+    /// a negative value never fits an unsigned primitive. Note this cannot
+    /// see a wrapped positive magnitude (full-u128 literals): the
+    /// expected-type path routes those through `type_integer_literal_value`
+    /// with magnitude/negated kept separate.
     fn integer_value_fits(value: i128, prim: &ast::PrimitiveType) -> bool {
         if let Some(max) = Self::unsigned_prim_max(prim) {
-            // Reinterpret the stored bit pattern (see
-            // type_integer_literal_value); negatives become huge magnitudes
-            // and correctly fail.
-            return (value as u128) <= max;
+            return value >= 0 && (value as u128) <= max;
         }
         Self::signed_prim_range(prim).is_some_and(|(min, max)| value >= min && value <= max)
     }

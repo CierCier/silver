@@ -2233,18 +2233,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.cast_value_to_basic_type(value, target, span)
                 }
             }
-            // u64/u32 -> float: x86 has no direct unsigned conversion, so the
-            // signed helper (cvtsi2sd) would flip values >= 2^63 negative.
-            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => {
-                self.builder
-                    .build_unsigned_int_to_float(int_val, float_ty, "cast.u2f")
-                    .map(|v| v.as_basic_value_enum())
-                    .map_err(|e| {
-                        CodegenError::with_span(format!("unsigned float cast failed: {e}"), *span)
-                    })
-            }
-            // u128 -> float: the signed helpers would treat the high bit as
-            // a sign bit, so route to the unsigned compiler-rt variants.
+            // u128 -> float FIRST: the generic unsigned arm below would
+            // otherwise shadow this case, and the implicit 128-bit runtime
+            // lowering it triggers uses the C-ABI helper convention that is
+            // incompatible with the Silver-shaped helpers on Win64.
             (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty))
                 if int_val.get_type().get_bit_width() == 128 =>
             {
@@ -2269,6 +2261,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else {
                     Ok(wide.as_basic_value_enum())
                 }
+            }
+            // u32/u64 -> float: x86 has no direct unsigned conversion, so the
+            // signed helper (cvtsi2sd) would flip values >= 2^63 negative.
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => {
+                self.builder
+                    .build_unsigned_int_to_float(int_val, float_ty, "cast.u2f")
+                    .map(|v| v.as_basic_value_enum())
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("unsigned float cast failed: {e}"), *span)
+                    })
             }
             // float -> u128: the signed helper saturates at i128::MAX; the
             // unsigned variant covers the upper half of the u128 range.
