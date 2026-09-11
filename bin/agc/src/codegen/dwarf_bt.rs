@@ -413,6 +413,15 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
                 }
                 None => String::new(),
             }
+        } else if name_bytes[0..4] == [0, 0, 0, 0] {
+            // Modern long-name format: four zero bytes, then a u32 LE
+            // string-table offset. Names longer than eight bytes (all mangled
+            // functions) use it; decoding them as empty would merge distinct
+            // backtrace entries under one name.
+            let off = u32::from_le_bytes([name_bytes[4], name_bytes[5], name_bytes[6], name_bytes[7]])
+                as usize;
+            let mut nsr = Reader::new(strtab.get(off..)?);
+            nsr.cstr().unwrap_or_default()
         } else {
             let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(8);
             String::from_utf8_lossy(&name_bytes[..end]).into_owned()

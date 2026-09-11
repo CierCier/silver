@@ -571,10 +571,11 @@ i64 sys_stat(i64 path, i64 buf) {
         return -2;
     }
     // BY_HANDLE_FILE_INFORMATION: nFileSize{High,Low} at 36/40,
-    // ftLastWriteTime (u64) at 24.
-    u8 info[48];
+    // ftLastWriteTime (u64) at 24. The struct is 52 bytes on x64 — a
+    // short buffer would let the write run off the stack slot.
+    u8 info[52];
     i64 i = 0;
-    while (i < 48) {
+    while (i < 52) {
         info[i] = 0;
         i += 1;
     }

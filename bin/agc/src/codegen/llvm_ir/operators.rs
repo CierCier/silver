@@ -2233,6 +2233,70 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.cast_value_to_basic_type(value, target, span)
                 }
             }
+            // u64/u32 -> float: x86 has no direct unsigned conversion, so the
+            // signed helper (cvtsi2sd) would flip values >= 2^63 negative.
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => {
+                self.builder
+                    .build_unsigned_int_to_float(int_val, float_ty, "cast.u2f")
+                    .map(|v| v.as_basic_value_enum())
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("unsigned float cast failed: {e}"), *span)
+                    })
+            }
+            // u128 -> float: the signed helpers would treat the high bit as
+            // a sign bit, so route to the unsigned compiler-rt variants.
+            (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty))
+                if int_val.get_type().get_bit_width() == 128 =>
+            {
+                let f64_ty = self.context.f64_type();
+                let wide = self
+                    .call_rt_helper(
+                        "__floatuntidf",
+                        &[int_val.get_type().as_basic_type_enum()],
+                        Some(f64_ty.as_basic_type_enum()),
+                        &[int_val.as_basic_value_enum()],
+                        span,
+                    )?
+                    .unwrap()
+                    .into_float_value();
+                if float_ty.get_bit_width() == 32 {
+                    self.builder
+                        .build_float_trunc(wide, float_ty, "cast.u128f32.trunc")
+                        .map(|v| v.as_basic_value_enum())
+                        .map_err(|e| {
+                            CodegenError::with_span(format!("float trunc failed: {e}"), *span)
+                        })
+                } else {
+                    Ok(wide.as_basic_value_enum())
+                }
+            }
+            // float -> u128: the signed helper saturates at i128::MAX; the
+            // unsigned variant covers the upper half of the u128 range.
+            (BasicValueEnum::FloatValue(_), BasicTypeEnum::IntType(int_ty))
+                if int_ty.get_bit_width() == 128 =>
+            {
+                let f64_ty = self.context.f64_type();
+                let wide = match value {
+                    BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => fv,
+                    BasicValueEnum::FloatValue(fv) => self
+                        .builder
+                        .build_float_ext(fv, f64_ty, "cast.u128.ext")
+                        .map_err(|e| {
+                            CodegenError::with_span(format!("float ext failed: {e}"), *span)
+                        })?,
+                    _ => unreachable!(),
+                };
+                self.call_rt_helper(
+                    "__fixunsdfti",
+                    &[f64_ty.as_basic_type_enum()],
+                    Some(int_ty.as_basic_type_enum()),
+                    &[wide.as_basic_value_enum()],
+                    span,
+                )?
+                .ok_or_else(|| {
+                    CodegenError::with_span("unsigned 128-bit cast returned void", *span)
+                })
+            }
             _ => self.cast_value_to_basic_type(value, target, span),
         }
     }

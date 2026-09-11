@@ -611,7 +611,10 @@ def main():
 
     target = args.target or None
     runner = shlex.split(args.runner) if args.runner else None
-    libdirs = [shlex.split(d) for d in args.libdir] if args.libdir else []
+    # Each --libdir value is already a complete path from the shell/argparse;
+    # re-splitting it would break paths containing spaces (e.g. a Windows SDK
+    # under "Program Files").
+    libdirs = [[d] for d in args.libdir]
 
     selected_stems = {p.stem for p in selected_tests}
     services.start_service_if_needed(selected_stems, agc_bin)

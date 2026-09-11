@@ -196,3 +196,37 @@ f64 __floattidf(i128 a) {
     }
     return result;
 }
+
+// ---------------------------------------------------------------------------
+// Unsigned f64 <-> u128 conversions. Same 64-bit hi/lo discipline as the
+// signed variants above: no f64 <-> 128-bit cast appears in these bodies.
+// ---------------------------------------------------------------------------
+
+f64 __floatuntidf(u128 a) {
+    u64 hi = (u64)(a >> (u128)64);
+    u64 lo = (u64)a;
+    f64 result = (f64)hi * 18446744073709551616.0;
+    return result + (f64)lo;
+}
+
+u128 __fixunsdfti(f64 d) {
+    if (d < 1.0) {
+        return (u128)0;
+    }
+    u64 hi = (u64)0;
+    u64 lo = (u64)0;
+    if (d >= 340282366920938463463374607431768211456.0) { // 2^128: saturate
+        hi = (u64)18446744073709551615;
+        lo = (u64)18446744073709551615;
+        return ((u128)hi << (u128)64) | (u128)lo;
+    }
+    if (d >= 18446744073709551616.0) { // 2^64
+        f64 scaled = d / 18446744073709551616.0;
+        hi = (u64)scaled;
+        f64 frac = scaled - (f64)hi;
+        lo = (u64)(frac * 18446744073709551616.0);
+    } else {
+        lo = (u64)d;
+    }
+    return ((u128)hi << (u128)64) | (u128)lo;
+}
