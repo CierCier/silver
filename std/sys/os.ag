@@ -672,13 +672,16 @@ void thread_exit(i64 code) {
 }
 
 #[cfg(os.linux)]
-void sys_sched_yield() {
-    raw_sys_sched_yield();
+void thread_yield() {
+    // raw/thread.ag's generated wrapper has the same name as this one (and
+    // importing that module makes the overload ambiguous), so call the
+    // syscall seam directly: SYS_sched_yield = 24 on x86_64.
+    syscall0(24);
 }
 
 /// Yield the current thread's timeslice.
 #[cfg(os.windows)]
-void sys_sched_yield() {
+void thread_yield() {
     win_SwitchToThread();
 }
 

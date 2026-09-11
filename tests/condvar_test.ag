@@ -44,7 +44,7 @@ i32 main() {
 
         // Give the worker time to block on the condvar
         for (i64 i = 0; i < 500; i = i + 1) {
-            sys_sched_yield();
+            thread_yield();
         }
 
         {
@@ -72,7 +72,7 @@ i32 main() {
 
         // Give workers time to block on the condvar
         for (i64 i = 0; i < 1000; i = i + 1) {
-            sys_sched_yield();
+            thread_yield();
         }
 
         {
