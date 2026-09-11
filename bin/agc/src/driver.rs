@@ -271,6 +271,14 @@ pub struct Cli {
     )]
     pub jobs: usize,
 
+    /// Enable AST-level dead code elimination / tree-shaking
+    #[arg(long = "tree-shake", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
+    pub tree_shake: bool,
+
+    /// Disable AST-level dead code elimination / tree-shaking
+    #[arg(long = "no-tree-shake", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
+    pub no_tree_shake: bool,
+
     /// Run mode: compile and immediately execute the output binary
     #[arg(long = "run", action = ArgAction::SetTrue, hide = true)]
     pub run_mode: bool,
@@ -366,6 +374,7 @@ pub(crate) struct CompilePlan {
     pub(crate) auto_output: bool,
     pub(crate) warning_config: crate::semantic::linter::WarningConfig,
     pub(crate) test_harness: bool,
+    pub(crate) tree_shake: bool,
 }
 
 impl CompilePlan {
@@ -733,6 +742,13 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         },
         warning_config: crate::semantic::linter::WarningConfig::from_flags(&cli.warnings),
         test_harness: cli.test_harness,
+        tree_shake: if cli.no_tree_shake {
+            false
+        } else if cli.tree_shake {
+            true
+        } else {
+            matches!(emit, EmitKind::Exe | EmitKind::Obj)
+        },
     })
 }
 
@@ -1663,6 +1679,26 @@ pub fn run(cli: Cli) {
                         eprintln!("agc: {}: {error}", "error".red().bold());
                         std::process::exit(2);
                     }
+                }
+
+                if plan.tree_shake {
+                    profiler::begin_phase("tree-shake");
+                    let before_items = ast.items.len();
+                    let pruned = semantic::tree_shake::eliminate_dead_ast_items(
+                        &mut ast,
+                        Some(input_file),
+                        matches!(plan.emit, EmitKind::Module),
+                        &monomorphs,
+                    );
+                    if plan.verbose {
+                        eprintln!(
+                            "agc: tree-shaking eliminated {} unused items ({} -> {})",
+                            pruned,
+                            before_items,
+                            ast.items.len()
+                        );
+                    }
+                    profiler::end_phase("tree-shake");
                 }
 
                 profiler::begin_phase("monomorph");
@@ -2803,6 +2839,7 @@ mod tests {
             auto_output: false,
             warning_config: crate::semantic::linter::WarningConfig::default(),
             test_harness: false,
+            tree_shake: false,
         }
     }
 

@@ -15,3 +15,4 @@ pub mod send_check;
 pub mod serialize;
 pub mod typeck;
 pub mod type_properties;
+pub mod tree_shake;
