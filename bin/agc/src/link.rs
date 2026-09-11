@@ -193,9 +193,15 @@ fn msvc_library_dirs() -> Vec<PathBuf> {
 /// default and defers to the installed UCRT.
 fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
     if static_crt {
-        &["libcmt.lib", "libvcruntime.lib", "libucrt.lib", "kernel32.lib", "shell32.lib", "synchronization.lib"]
+        &[
+            "libcmt.lib",
+            "libvcruntime.lib",
+            "libucrt.lib",
+            "kernel32.lib",
+            "bcrypt.lib",
+        ]
     } else {
-        &["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "kernel32.lib", "shell32.lib", "synchronization.lib"]
+        &["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "kernel32.lib", "bcrypt.lib"]
     }
 }
 

@@ -27,22 +27,8 @@ const i64 THREAD_STACK_SIZE = 2097152;
 // Parent path returns the child tid in %rax. Child resumes after `syscall`
 // with rsp = stack_top and, taking the `jnz` fall-through, `call`s fn(arg)
 // then exits via sys_exit(60) (CLONE_THREAD ⇒ only this thread exits).
-// Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
-// arg->r10 (the asm("syscall") wrapper convention).
-#[cfg(os.linux)]
-i64 thread_clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
-    return asm("
-        syscall
-        test %rax, %rax
-        jnz 1f
-        mov %r10, %rdi
-        call *%rdx
-        mov $$0, %rdi
-        mov $$60, %eax
-        syscall
-        1:
-    ", [56, flags, stack_top, fn, arg]);
-}
+// The clone+trampoline asm lives in std.sys.os (thread_spawn_raw), which
+// thread.ag cannot import back — it owns the OS spawn seam.
 
 // Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
 // user function, signals completion (release store + futex wake so a joining

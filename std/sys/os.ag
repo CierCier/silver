@@ -23,6 +23,7 @@ import std.sys.raw.process;
 import std.sys.raw.sync;
 import std.sys.raw.time;
 import std.sys.raw.misc;
+import std.sys.syscall;
 import std.sys.errno;
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,8 @@ extern "C" {
     i32 win_QueryPerformanceCounter(i64* count);
     #[link_name("QueryPerformanceFrequency")]
     i32 win_QueryPerformanceFrequency(i64* freq);
+    #[link_name("Sleep")]
+    void win_Sleep(u32 ms);
     #[link_name("GetSystemTimePreciseAsFileTime")]
     void win_GetSystemTimePreciseAsFileTime(u64* ft);
 
@@ -94,8 +97,9 @@ extern "C" {
     u8* win_LocalFree(u8* mem);
 }
 
+// bcrypt is linked by the driver's windows default lib set (like kernel32):
+// an item-level #[link(bcrypt)] here would leak -lbcrypt into posix links.
 #[cfg(os.windows)]
-#[link(bcrypt)]
 extern "C" {
     #[link_name("BCryptGenRandom")]
     i32 win_BCryptGenRandom(i64 alg, u8* buf, u64 len, u32 flags);
@@ -342,6 +346,20 @@ i64 sys_read(i64 fd, i64 buf, i64 len) {
     return (i64)nread;
 }
 
+/// Linux: raw open(2) passthrough — the O_* bit layout consumed here is the
+/// Linux layout defined in std/sys/result.ag.
+#[cfg(os.linux)]
+i64 sys_open(i64 path, i64 flags, i64 mode) {
+    return raw_sys_open(path, flags, mode);
+}
+
+/// Linux: raw stat(2) passthrough — fills the kernel struct stat in the
+/// caller's buffer (st_size at offset 48, st_mtim at 88/96 on x86_64).
+#[cfg(os.linux)]
+i64 sys_stat(i64 path, i64 buf) {
+    return raw_sys_stat(path, buf);
+}
+
 /// Translate the Linux O_* bit layout (std/sys/result.ag) into a Win32
 /// create/open call. Always binary; the returned fd is the truncated handle.
 #[cfg(os.windows)]
@@ -390,17 +408,19 @@ i64 sys_close(i64 fd) {
 
 #[cfg(os.linux)]
 i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
-    return raw_sys_openat(dirfd, path, flags, mode);
+    // raw/fs.ag's generated wrapper has the same name as this one; call the
+    // syscall seam directly to stay unambiguous.
+    return syscall4((i64)RAW_FS.OPENAT, dirfd, path, flags, mode);
 }
 
 #[cfg(os.linux)]
 i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
-    return raw_sys_fcntl(fd, cmd, arg);
+    return syscall3((i64)RAW_FS.FCNTL, fd, cmd, arg);
 }
 
 #[cfg(os.linux)]
 i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
-    return raw_sys_mremap(old_addr, old_size, new_size, flags, new_addr);
+    return syscall5((i64)RAW_MEMORY.MREMAP, old_addr, old_size, new_size, flags, new_addr);
 }
 
 #[cfg(os.linux)]
@@ -660,7 +680,21 @@ void thread_exit(i64 code) {
 
 #[cfg(os.linux)]
 i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg) {
-    return thread_clone_shim(flags, stack_top, fn, arg);
+    // clone + child trampoline. Parent returns the child tid in %rax; the
+    // child resumes with rsp = stack_top, calls fn(arg) (arg arrives in r10,
+    // fn in rdx under the asm() syscall register convention), then exits via
+    // sys_exit(60) — CLONE_THREAD ends only this thread.
+    return asm("
+        syscall
+        test %rax, %rax
+        jnz 1f
+        mov %r10, %rdi
+        call *%rdx
+        mov $$0, %rdi
+        mov $$60, %eax
+        syscall
+        1:
+    ", [56, flags, stack_top, fn, arg]);
 }
 
 /// Returns the thread handle (>0) or 0 on failure. `stack_top` is the
@@ -743,11 +777,29 @@ i64 sys_clock_gettime(i64 clk, i64 ts) {
     return raw_sys_clock_gettime(clk, ts);
 }
 
+/// Suspend the calling thread for the requested timespec ({i64 sec, i64 nsec}).
+#[cfg(os.linux)]
+i64 sys_nanosleep(i64 req, i64 rem) {
+    return raw_sys_nanosleep(req, rem);
+}
+
+/// Windows: Sleep(ms) with round-up — sub-millisecond precision is not
+/// required by std callers. `rem` is left untouched (callers pass 0).
+#[cfg(os.windows)]
+i64 sys_nanosleep(i64 req, i64 rem) {
+    i64* ts = (i64*)req;
+    i64 ms = ts[0] * 1000 + (ts[1] + 999999) / 1000000;
+    if (ms < 1) {
+        ms = 1;
+    }
+    win_Sleep((u32)ms);
+    return 0;
+}
+
 /// Fills {i64 sec, i64 nsec} at ts. clk 1 = CLOCK_MONOTONIC (QPC), anything
 /// else = CLOCK_REALTIME (GetSystemTimePreciseAsFileTime).
 #[cfg(os.windows)]
-i64 sys_clock_gettime(i64 clk, i64 ts) {
-    u8* p = (u8*)ts;
+i64 sys_clock_gettime(i64 clk, i64 ts) {    u8* p = (u8*)ts;
     if (clk == 1) {
         i64 count = 0;
         i64 freq = 0;
