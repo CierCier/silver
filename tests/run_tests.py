@@ -10,6 +10,7 @@ import dataclasses
 import glob
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -74,6 +75,12 @@ DEFAULT_SKIP = {
 }
 
 IS_WINDOWS = os.name == "nt"
+
+
+def target_is_windows_name(target: Optional[str]) -> bool:
+    return bool(target) and any(
+        t in target.lower() for t in ("windows", "win32", "mingw")
+    )
 
 # Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
 # adjacent kernel interfaces). These are platform tests by design, not
@@ -285,10 +292,19 @@ def run_single_test(
     services: BackgroundServices,
     timeout_secs: int = 120,
     update_worker=None,
+    target: Optional[str] = None,
+    runner: Optional[List[str]] = None,
+    libdirs: Optional[List[List[str]]] = None,
 ) -> TestResult:
     name = test_path.stem
     content = test_path.read_text(errors="replace")
-    bin_path = workdir / (f"bin_{name}.exe" if IS_WINDOWS else f"bin_{name}")
+    # A windows target produces a PE: the image name must end in .exe (and
+    # Wine/CreateProcess refuse to execute extensionless images).
+    target_is_windows = bool(target) and any(
+        t in target.lower() for t in ("windows", "win32", "mingw")
+    )
+    needs_exe = target_is_windows or IS_WINDOWS
+    bin_path = workdir / (f"bin_{name}.exe" if needs_exe else f"bin_{name}")
     run_dir = workdir / f"run_{name}"
     run_dir.mkdir(parents=True, exist_ok=True)
     if name in ("tls_test", "http2_tls_test", "https_server_test"):
@@ -301,6 +317,15 @@ def run_single_test(
 
     expected_code = get_expected_exit(name, content)
     extra_flags = get_extra_flags(name, content, services)
+    if target:
+        extra_flags = ["--target", target] + extra_flags
+    if target_is_windows_name(target):
+        # COFF has no linkonce dedup: cached .agm artifacts and the app unit
+        # would define the same std symbols twice. Single-unit linking until
+        # artifact dedup/import-libs land (docs/windows-port.md §4.3).
+        extra_flags += ["--no-cache"]
+    for libdir in libdirs or []:
+        extra_flags += ["-L", *libdir]
 
     if update_worker:
         update_worker(name, "compiling")
@@ -352,7 +377,8 @@ def run_single_test(
         else:
             run_kwargs["stdin"] = subprocess.DEVNULL
 
-        rp = subprocess.run([str(bin_path)], **run_kwargs)
+        run_cmd = ([*runner, str(bin_path)]) if runner else [str(bin_path)]
+        rp = subprocess.run(run_cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return TestResult(name, "FAIL", f"timed out after {timeout_secs}s", compile_ms=compile_ms)
     except Exception as e:
@@ -531,6 +557,9 @@ def main():
     parser.add_argument("--no-tui", action="store_true", help="Disable live interactive TUI")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose test execution output")
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
+    parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
+    parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
+    parser.add_argument("--libdir", action="append", default=[], help="Library search dir passed as -L to every compile (repeatable; e.g. generated Windows import libs)")
     parser.add_argument("--compare", type=str, default="", help="Compare run time metrics with a baseline file")
     args = parser.parse_args()
 
@@ -580,6 +609,10 @@ def main():
     atexit.register(services.cleanup)
     atexit.register(lambda: shutil.rmtree(workdir, ignore_errors=True))
 
+    target = args.target or None
+    runner = shlex.split(args.runner) if args.runner else None
+    libdirs = [shlex.split(d) for d in args.libdir] if args.libdir else []
+
     selected_stems = {p.stem for p in selected_tests}
     services.start_service_if_needed(selected_stems, agc_bin)
 
@@ -619,6 +652,9 @@ def main():
                 skip_reason = "requires built Rust FFI library (build ffi/rust)"
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
+            elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:
+                # Cross-target runs: same skip set as a windows host.
+                skip_reason = WINDOWS_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)
@@ -630,6 +666,9 @@ def main():
                     services,
                     timeout_secs=args.timeout,
                     update_worker=lambda n, st: dashboard.update_worker(worker_id, f"{st} {n}"),
+                    target=target,
+                    runner=runner,
+                    libdirs=libdirs,
                 )
 
             with results_lock:

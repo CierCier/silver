@@ -337,6 +337,32 @@ Path/sysroot conventions (small but real): `module_loader.rs:619-634` (`HOME`/XD
 | P4 | COFF reader in `dwarf_bt.rs`; DWARF-in-COFF verified | `backtrace_test.ag` prints resolved frames + args on Windows |
 | P5 | harness port + CI leg | `run_tests.py` green (minus skip-gated set) on a Windows runner |
 
+### Cross-target harness leg (run from a posix host)
+
+`tests/run_tests.py` now accepts `--target`, `--runner`, and `--libdir`, so the
+same suite drives Windows binaries:
+
+```sh
+scripts/gen-win-importlibs.sh /tmp/wimplib   # llvm-dlltool import libs (no CRT)
+python3 tests/run_tests.py --no-tui \
+    --target x86_64-pc-windows-msvc \
+    --libdir /tmp/wimplib \
+    --runner wine64 <filters...>
+```
+
+Windows-target runs link single-unit (`--no-cache`): COFF has no linkonce
+dedup, so cached `.agm` artifacts and the app unit would define the same std
+symbols twice. The runtime is freestanding — the custom `_start` entry (via
+`/ENTRY:_start`), no CRT libs; `_fltused` and `__chkstk` come from
+`std/sys/os.ag`. `WINDOWS_SKIP` gates the raw-Linux-syscall tests.
+
+Status: cross-compile + COFF link verified end-to-end from Linux (a Silver PE
+links via lld-link and the driver). Execution under Wine is pending: Wine
+9.0 in this container crashes in its own startup services at a fixed address
+(`virtual_setup_exception ... 0x6fffffcad839`) for ANY freestanding exe,
+including a clang-compiled control — an environment limitation, not a Silver
+runtime failure.
+
 ### Landed (2026-09-11, this branch)
 
 **P1a — done, verified cross-compiling on Linux.**
