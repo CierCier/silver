@@ -198,10 +198,18 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "libvcruntime.lib",
             "libucrt.lib",
             "kernel32.lib",
+            "shell32.lib",
             "bcrypt.lib",
         ]
     } else {
-        &["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "kernel32.lib", "bcrypt.lib"]
+        &[
+            "msvcrt.lib",
+            "vcruntime.lib",
+            "ucrt.lib",
+            "kernel32.lib",
+            "shell32.lib",
+            "bcrypt.lib",
+        ]
     }
 }
 

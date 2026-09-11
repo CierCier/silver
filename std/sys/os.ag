@@ -159,6 +159,7 @@ const u32 WIN_CP_UTF8 = 65001;
 // ---------------------------------------------------------------------------
 
 /// UTF-8 string length in UTF-16 code units (excluding the terminator).
+/// Non-BMP code points (4-byte UTF-8) encode as surrogate pairs: 2 units.
 #[cfg(os.windows)]
 i64 win_utf16_len(u8* s) {
     i64 n = 0;
@@ -168,7 +169,7 @@ i64 win_utf16_len(u8* s) {
         i64 advance = 1;
         if ((cp & 0xE0) == 0xC0) { advance = 2; }
         else if ((cp & 0xF0) == 0xE0) { advance = 3; }
-        else if ((cp & 0xF8) == 0xF0) { advance = 4; }
+        else if ((cp & 0xF8) == 0xF0) { advance = 4; n += 1; }
         i += advance;
         n += 1;
     }
@@ -781,6 +782,20 @@ i64 sys_clock_gettime(i64 clk, i64 ts) {
 #[cfg(os.linux)]
 i64 sys_nanosleep(i64 req, i64 rem) {
     return raw_sys_nanosleep(req, rem);
+}
+
+/// Release the OS resources of a joined thread. Linux: the tid is a kernel id
+/// reaped by the CLONE_THREAD exit — nothing to do. Windows: tid carries the
+/// CreateThread handle; closing it is what frees the kernel thread object,
+/// so skipped joins would otherwise leak one handle per spawn.
+#[cfg(os.linux)]
+void thread_reclaim(i64 tid) {}
+
+#[cfg(os.windows)]
+void thread_reclaim(i64 tid) {
+    if (tid > 0) {
+        win_CloseHandle(tid);
+    }
 }
 
 /// Windows: Sleep(ms) with round-up — sub-millisecond precision is not
