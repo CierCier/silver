@@ -833,6 +833,94 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
         )
     }
+
+    pub(crate) fn register_enum_metadata(&mut self, item: &ast::EnumItem) -> CodegenResult<()> {
+        let enum_name = item.name.name.clone();
+        let enum_params: Vec<String> = item
+            .generics
+            .as_ref()
+            .map(|generics| {
+                generics
+                    .params
+                    .iter()
+                    .filter_map(|param| {
+                        if let ast::GenericParam::Type(type_param) = param {
+                            Some(type_param.name.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !enum_params.is_empty() {
+            self.struct_generics.insert(enum_name.clone(), enum_params);
+        }
+        let mut variants = HashMap::default();
+        let mut next_value = 0i128;
+        let mut min_value = 0i128;
+        let mut max_value = 0i128;
+        let mut saw_any = false;
+        let mut has_payload = false;
+        let mut max_payload_size: u64 = 0;
+
+        for variant in &item.variants {
+            let value = variant.discriminant.unwrap_or(next_value);
+            variants.insert(variant.name.name.clone(), value);
+            next_value = value.checked_add(1).unwrap_or(value);
+            if !saw_any {
+                min_value = value;
+                max_value = value;
+                saw_any = true;
+            } else {
+                min_value = min_value.min(value);
+                max_value = max_value.max(value);
+            }
+            // Compute payload size for this variant using known type sizes
+            let payload_types = match &variant.data {
+                ast::EnumVariantData::Unit => vec![],
+                ast::EnumVariantData::Tuple(types) => types.clone(),
+                ast::EnumVariantData::Struct(fields) => {
+                    fields.iter().map(|f| f.field_type.clone()).collect()
+                }
+            };
+            if !payload_types.is_empty() {
+                has_payload = true;
+                self.enum_variant_payload_types
+                    .entry(item.name.name.clone())
+                    .or_default()
+                    .insert(variant.name.name.clone(), payload_types.clone());
+            }
+            let target_data =
+                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+            let mut variant_size: u64 = 0;
+            for pt in &payload_types {
+                if let Ok(llvm_ty) = self.lower_basic_type(pt) {
+                    variant_size += target_data.get_abi_size(&llvm_ty);
+                }
+            }
+            max_payload_size = max_payload_size.max(variant_size);
+        }
+
+        if has_payload {
+            let i16_ty = self.context.i16_type();
+            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
+            let struct_ty = self
+                .context
+                .struct_type(&[i16_ty.into(), array_ty.into()], false);
+            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+            self.enum_payload_layouts
+                .insert(item.name.name.clone(), struct_ty);
+            self.struct_types.insert(item.name.name.clone(), struct_ty);
+        }
+
+        self.enum_backing_types.insert(
+            item.name.name.clone(),
+            choose_enum_backing_type(min_value, max_value),
+        );
+        self.enum_variants.insert(item.name.name.clone(), variants);
+        Ok(())
+    }
 }
 
 impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
@@ -1233,93 +1321,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         _visibility: &ast::Visibility,
         _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        // Register enum type params (e.g. `T` in `enum Optional<T>`) so that
-        // generic impl blocks on enums are recognized as templates
-        // (`is_generic_placeholder_name`), mirroring struct generics.
-        let enum_name = item.name.name.clone();
-        let enum_params: Vec<String> = item
-            .generics
-            .as_ref()
-            .map(|generics| {
-                generics
-                    .params
-                    .iter()
-                    .filter_map(|param| {
-                        if let ast::GenericParam::Type(type_param) = param {
-                            Some(type_param.name.name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !enum_params.is_empty() {
-            self.struct_generics.insert(enum_name.clone(), enum_params);
-        }
-        let mut variants = HashMap::default();
-        let mut next_value = 0i128;
-        let mut min_value = 0i128;
-        let mut max_value = 0i128;
-        let mut saw_any = false;
-        let mut has_payload = false;
-        let mut max_payload_size: u64 = 0;
-
-        for variant in &item.variants {
-            let value = variant.discriminant.unwrap_or(next_value);
-            variants.insert(variant.name.name.clone(), value);
-            next_value = value.checked_add(1).unwrap_or(value);
-            if !saw_any {
-                min_value = value;
-                max_value = value;
-                saw_any = true;
-            } else {
-                min_value = min_value.min(value);
-                max_value = max_value.max(value);
-            }
-            // Compute payload size for this variant using known type sizes
-            let payload_types = match &variant.data {
-                ast::EnumVariantData::Unit => vec![],
-                ast::EnumVariantData::Tuple(types) => types.clone(),
-                ast::EnumVariantData::Struct(fields) => {
-                    fields.iter().map(|f| f.field_type.clone()).collect()
-                }
-            };
-            if !payload_types.is_empty() {
-                has_payload = true;
-                self.enum_variant_payload_types
-                    .entry(item.name.name.clone())
-                    .or_default()
-                    .insert(variant.name.name.clone(), payload_types.clone());
-            }
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            let mut variant_size: u64 = 0;
-            for pt in &payload_types {
-                let llvm_ty = self.lower_basic_type(pt)?;
-                variant_size += target_data.get_abi_size(&llvm_ty);
-            }
-            max_payload_size = max_payload_size.max(variant_size);
-        }
-
-        if has_payload {
-            let i16_ty = self.context.i16_type();
-            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
-            let struct_ty = self
-                .context
-                .struct_type(&[i16_ty.into(), array_ty.into()], false);
-            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
-            self.enum_payload_layouts
-                .insert(item.name.name.clone(), struct_ty);
-            self.struct_types.insert(item.name.name.clone(), struct_ty);
-        }
-
-        self.enum_backing_types.insert(
-            item.name.name.clone(),
-            choose_enum_backing_type(min_value, max_value),
-        );
-        self.enum_variants.insert(item.name.name.clone(), variants);
-        Ok(())
+        self.register_enum_metadata(item)
     }
 
     fn generate_impl_item(

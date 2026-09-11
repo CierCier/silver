@@ -848,7 +848,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         };
 
-        let call_name = selected_name.unwrap_or_else(|| method.name.clone());
+        let call_name = selected_name.clone().unwrap_or_else(|| method.name.clone());
         let signature = self.signature_for_name(&call_name);
         let declared_param_count = signature
             .as_ref()

@@ -540,7 +540,7 @@ impl Type {
             }
             Type::Slice { element } => format!("Slice<{}>", element.canonical_key()),
             Type::Task(inner) => format!("Task<{}>", inner.canonical_key()),
-            Type::Optional { inner } => format!("Optional<{}>", inner.canonical_key()),
+            Type::Optional { inner } => format!("optional<{}>", inner.canonical_key()),
             Type::Tuple(items) => {
                 let args = items
                     .iter()
@@ -828,7 +828,7 @@ impl<'a> TypeParser<'a> {
         if self.consume_str("unknown") {
             return Ok(Type::Unknown);
         }
-        if self.consume_str("optional<") || self.consume_str("Optional<") {
+        if self.consume_str("optional<") {
             let inner = self.parse_type()?;
             self.expect_byte(b'>')?;
             return Ok(Type::Optional {
@@ -871,6 +871,15 @@ impl<'a> TypeParser<'a> {
         let mut generics = Vec::new();
         if self.consume_byte(b'<') {
             generics = self.parse_type_list(b'>')?;
+        }
+
+        if path.len() == 1 && path[0] == "Slice" && generics.len() == 1 {
+            return Ok(Type::Slice {
+                element: Box::new(generics.into_iter().next().unwrap()),
+            });
+        }
+        if path.len() == 1 && path[0] == "Task" && generics.len() == 1 {
+            return Ok(Type::Task(Box::new(generics.into_iter().next().unwrap())));
         }
 
         if generics.is_empty()

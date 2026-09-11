@@ -118,17 +118,19 @@ impl<'a> FileImportResolverHook<'a> {
         // `Ok`/`Err` for Result) resolve via typeck's expected-type inference
         // but need the enum types registered. Inject the matching std module
         // when the source uses those bare names without an explicit import.
-        for (ctor, module_path) in [
-            ("Some", vec!["std", "optional"]),
-            ("None", vec!["std", "optional"]),
-            ("Ok", vec!["std", "result"]),
-            ("Err", vec!["std", "result"]),
-        ] {
-            if uses_bare_constructor(&program.items, ctor) {
-                auto_modules.push(module_path);
-            }
+        if !defines_type(&program.items, "Optional")
+            && uses_type_or_constructor(&program.items, &["Some", "None", "Optional"])
+        {
+            auto_modules.push(vec!["std", "optional"]);
         }
-        if uses_bare_constructor(&program.items, "Err") {
+        if !defines_type(&program.items, "Result")
+            && uses_type_or_constructor(&program.items, &["Ok", "Err", "Result"])
+        {
+            auto_modules.push(vec!["std", "result"]);
+        }
+        if !defines_type(&program.items, "Error")
+            && uses_type_or_constructor(&program.items, &["Err"])
+        {
             auto_modules.push(vec!["std", "error"]);
         }
 
@@ -190,6 +192,60 @@ impl<'a> FileImportResolverHook<'a> {
         }
 
         self.lower_program_recursive(program, base_dir)?;
+
+        let mut post_auto_modules: Vec<Vec<&str>> = Vec::new();
+        let imports_use_optional = self.module_imports.iter().any(|(_, artifact)| {
+            artifact.exports.iter().any(|export| {
+                export.signature.contains("Optional")
+                    || export.fields.iter().any(|f| f.type_key.contains("Optional"))
+            })
+        });
+        if imports_use_optional
+            && !defines_type(&program.items, "Optional")
+            && !self.seen_modules.contains("std.optional")
+        {
+            post_auto_modules.push(vec!["std", "optional"]);
+        }
+        let imports_use_result = self.module_imports.iter().any(|(_, artifact)| {
+            artifact.exports.iter().any(|export| {
+                export.signature.contains("Result")
+                    || export.fields.iter().any(|f| f.type_key.contains("Result"))
+            })
+        });
+        if imports_use_result
+            && !defines_type(&program.items, "Result")
+            && !self.seen_modules.contains("std.result")
+        {
+            post_auto_modules.push(vec!["std", "result"]);
+        }
+
+        for module_path in post_auto_modules {
+            let module_key = module_path.join(".");
+            if !self.seen_modules.contains(&module_key) {
+                let mut extra_prog = ast::Program {
+                    items: vec![ast::Item {
+                        kind: ast::ItemKind::Import(ast::ImportItem {
+                            path: module_path
+                                .into_iter()
+                                .map(|seg| ast::Identifier {
+                                    name: seg.to_string(),
+                                    span: lexer::Span::default(),
+                                })
+                                .collect(),
+                            selection: None,
+                        }),
+                        span: lexer::Span::default(),
+                        visibility: ast::Visibility::Private,
+                        attributes: Vec::new(),
+                    }],
+                    attributes: Vec::new(),
+                    comments: Vec::new(),
+                    span: lexer::Span::default(),
+                };
+                self.lower_program_recursive(&mut extra_prog, base_dir)?;
+                program.items.splice(0..0, extra_prog.items);
+            }
+        }
         apply_all_pending_selections(
             std::mem::take(&mut self.pending_selections),
             self.module_imports.as_mut_slice(),
@@ -539,26 +595,100 @@ fn import_label(path: &Path) -> String {
     parts.join(".")
 }
 
-/// True when any item in `items` uses a bare identifier named `ctor` in an
-/// expression position (i.e. not as a field/method access target). Used to
-/// decide whether to auto-inject `std.optional` / `std.result` for bare
-/// `Some`/`None`/`Ok`/`Err` constructors.
-fn uses_bare_constructor(items: &[ast::Item], ctor: &str) -> bool {
+fn scan_type_for_ident(ty: &ast::Type, name: &str, found: &mut bool) {
+    if *found {
+        return;
+    }
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => {
+            if named.path.iter().any(|id| id.name == name) {
+                *found = true;
+                return;
+            }
+            if let Some(generics) = &named.generics {
+                for g in generics {
+                    scan_type_for_ident(g, name, found);
+                }
+            }
+        }
+        ast::TypeKind::Reference(r) => scan_type_for_ident(&r.inner, name, found),
+        ast::TypeKind::Pointer(p) => scan_type_for_ident(&p.inner, name, found),
+        ast::TypeKind::Slice(s) => scan_type_for_ident(&s.element_type, name, found),
+        ast::TypeKind::Array(a) => scan_type_for_ident(&a.element_type, name, found),
+        ast::TypeKind::Optional(inner) => scan_type_for_ident(inner, name, found),
+        _ => {}
+    }
+}
+
+fn defines_type(items: &[ast::Item], name: &str) -> bool {
+    items.iter().any(|item| match &item.kind {
+        ast::ItemKind::Struct(s) => s.name.name == name,
+        ast::ItemKind::Enum(e) => e.name.name == name,
+        ast::ItemKind::TypeAlias(t) => t.name.name == name,
+        _ => false,
+    })
+}
+
+/// True when any item in `items` uses a bare identifier or type named `ctor` in an
+/// expression or type position. Used to decide whether to auto-inject
+/// `std.optional` / `std.result` / `std.error`.
+fn uses_type_or_constructor(items: &[ast::Item], names: &[&str]) -> bool {
     items.iter().any(|item| {
         let mut found = false;
         match &item.kind {
             ast::ItemKind::Function(func) => {
-                scan_block_for_bare_ctor(&func.body, ctor, &mut found);
+                for p in &func.parameters {
+                    for n in names {
+                        scan_type_for_ident(&p.param_type, n, &mut found);
+                    }
+                }
+                if let Some(ret) = &func.return_type {
+                    for n in names {
+                        scan_type_for_ident(ret, n, &mut found);
+                    }
+                }
+                for n in names {
+                    scan_block_for_bare_ctor(&func.body, n, &mut found);
+                }
             }
             ast::ItemKind::Impl(impl_item) => {
+                for n in names {
+                    scan_type_for_ident(&impl_item.self_type, n, &mut found);
+                }
                 for member in &impl_item.items {
                     if let ast::ImplItemKind::Function(func) = member {
-                        scan_block_for_bare_ctor(&func.body, ctor, &mut found);
+                        for p in &func.parameters {
+                            for n in names {
+                                scan_type_for_ident(&p.param_type, n, &mut found);
+                            }
+                        }
+                        if let Some(ret) = &func.return_type {
+                            for n in names {
+                                scan_type_for_ident(ret, n, &mut found);
+                            }
+                        }
+                        for n in names {
+                            scan_block_for_bare_ctor(&func.body, n, &mut found);
+                        }
                     }
                 }
             }
+            ast::ItemKind::Struct(s) => {
+                for field in &s.fields {
+                    for n in names {
+                        scan_type_for_ident(&field.field_type, n, &mut found);
+                    }
+                }
+            }
+            ast::ItemKind::GlobalVariable(g) => {
+                for n in names {
+                    scan_type_for_ident(&g.var_type, n, &mut found);
+                }
+            }
             ast::ItemKind::Macro(def) => {
-                scan_block_for_bare_ctor(&def.body, ctor, &mut found);
+                for n in names {
+                    scan_block_for_bare_ctor(&def.body, n, &mut found);
+                }
             }
             _ => {}
         }
@@ -570,6 +700,9 @@ fn scan_block_for_bare_ctor(block: &ast::Block, ctor: &str, found: &mut bool) {
     for stmt in &block.statements {
         match &stmt.kind {
             ast::StatementKind::Let(let_stmt) => {
+                if let Some(ann) = &let_stmt.type_annotation {
+                    scan_type_for_ident(ann, ctor, found);
+                }
                 if let Some(init) = &let_stmt.initializer {
                     scan_expr_for_bare_ctor(init, ctor, found);
                 }
@@ -706,8 +839,13 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
         ast::ExpressionKind::MethodCall {
             receiver,
             arguments,
+            method,
             ..
         } => {
+            if ctor == "Optional" && matches!(method.name.as_str(), "is_some" | "is_none") {
+                *found = true;
+                return;
+            }
             scan_expr_for_bare_ctor(receiver, ctor, found);
             for arg in arguments {
                 scan_expr_for_bare_ctor(arg, ctor, found);
@@ -1079,6 +1217,19 @@ mod tests {
             }
             _ => panic!("expected function alias"),
         }
+    }
+
+    fn uses_bare_constructor(items: &[ast::Item], ctor: &str) -> bool {
+        items.iter().any(|item| {
+            let mut found = false;
+            match &item.kind {
+                ast::ItemKind::Function(func) => {
+                    scan_block_for_bare_ctor(&func.body, ctor, &mut found);
+                }
+                _ => {}
+            }
+            found
+        })
     }
 
     #[test]

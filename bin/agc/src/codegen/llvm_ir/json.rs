@@ -169,7 +169,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         span: &crate::lexer::Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let method = Self::json_identifier("finish", *span);
-        self.emit_method_call_expression(writer, &method, &[], false, span)?
+        self.emit_method_call_expression(writer, &method, &[], true, span)?
             .ok_or_else(|| CodegenError::with_span("JsonWriter.finish returned no value", *span))
     }
 

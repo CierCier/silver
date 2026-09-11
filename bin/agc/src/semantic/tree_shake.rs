@@ -21,12 +21,12 @@ pub fn eliminate_dead_ast_items(
     let mut collector = NameCollector::new();
 
     // 1. Mark roots and seed initial referenced names.
-    let mut live_functions: HashSet<String> = HashSet::default();
+    let mut live_function_indices: HashSet<usize> = HashSet::default();
 
     for req in monomorphs {
         match req {
             MonomorphRequest::Function { source, .. } => {
-                live_functions.insert(source.name.name.clone());
+                collector.names.insert(source.name.name.clone());
                 collector.walk_function_item(source);
             }
             MonomorphRequest::ImplMethod {
@@ -43,11 +43,16 @@ pub fn eliminate_dead_ast_items(
         }
     }
 
-    for item in &program.items {
+    let mut walked_impl_methods: HashSet<(usize, usize)> = HashSet::default();
+    let mut walked_types: HashSet<usize> = HashSet::default();
+
+    for (idx, item) in program.items.iter().enumerate() {
         if is_root_item(item, root_file_id, is_module) {
             collector.walk_item(item);
-            if let ItemKind::Function(f) = &item.kind {
-                live_functions.insert(f.name.name.clone());
+            if let ItemKind::Function(_) = &item.kind {
+                live_function_indices.insert(idx);
+            } else {
+                walked_types.insert(idx);
             }
         } else if let ItemKind::GlobalVariable(_) = &item.kind {
             collector.walk_item(item);
@@ -57,14 +62,40 @@ pub fn eliminate_dead_ast_items(
     // 2. Iterative reachability fixpoint.
     loop {
         let prev_names_count = collector.names.len();
-        let prev_funcs_count = live_functions.len();
+        let prev_funcs_count = live_function_indices.len();
+        let prev_methods_count = walked_impl_methods.len();
+        let prev_types_count = walked_types.len();
 
-        for item in &program.items {
+        for (item_idx, item) in program.items.iter().enumerate() {
             match &item.kind {
                 ItemKind::Function(f) => {
-                    if !live_functions.contains(&f.name.name) && collector.names.contains(&f.name.name) {
-                        live_functions.insert(f.name.name.clone());
+                    if !live_function_indices.contains(&item_idx) && collector.names.contains(&f.name.name) {
+                        live_function_indices.insert(item_idx);
                         collector.walk_function_item(f);
+                    }
+                }
+                ItemKind::Struct(s) => {
+                    if !walked_types.contains(&item_idx) && collector.names.contains(&s.name.name) {
+                        walked_types.insert(item_idx);
+                        collector.walk_item(item);
+                    }
+                }
+                ItemKind::Enum(e) => {
+                    if !walked_types.contains(&item_idx) && collector.names.contains(&e.name.name) {
+                        walked_types.insert(item_idx);
+                        collector.walk_item(item);
+                    }
+                }
+                ItemKind::TypeAlias(a) => {
+                    if !walked_types.contains(&item_idx) && collector.names.contains(&a.name.name) {
+                        walked_types.insert(item_idx);
+                        collector.walk_item(item);
+                    }
+                }
+                ItemKind::Trait(t) => {
+                    if !walked_types.contains(&item_idx) && collector.names.contains(&t.name.name) {
+                        walked_types.insert(item_idx);
+                        collector.walk_item(item);
                     }
                 }
                 ItemKind::Impl(imp) => {
@@ -74,7 +105,7 @@ pub fn eliminate_dead_ast_items(
 
                     if owner_live {
                         let is_generic = is_generic_impl(imp);
-                        for member in &imp.items {
+                        for (method_idx, member) in imp.items.iter().enumerate() {
                             if let ImplItemKind::Function(f) = member {
                                 let is_always_live = is_generic
                                     || f.name.name == "drop"
@@ -83,7 +114,10 @@ pub fn eliminate_dead_ast_items(
                                     || has_keep_attribute(&f.attributes)
                                     || root_file_id.map_or(false, |id| f.name.span.file == id);
 
-                                if is_always_live || collector.names.contains(&f.name.name) {
+                                if (is_always_live || collector.names.contains(&f.name.name))
+                                    && !walked_impl_methods.contains(&(item_idx, method_idx))
+                                {
+                                    walked_impl_methods.insert((item_idx, method_idx));
                                     collector.walk_impl_function(f);
                                 }
                             }
@@ -94,7 +128,11 @@ pub fn eliminate_dead_ast_items(
             }
         }
 
-        if collector.names.len() == prev_names_count && live_functions.len() == prev_funcs_count {
+        if collector.names.len() == prev_names_count
+            && live_function_indices.len() == prev_funcs_count
+            && walked_impl_methods.len() == prev_methods_count
+            && walked_types.len() == prev_types_count
+        {
             break;
         }
     }
@@ -103,11 +141,11 @@ pub fn eliminate_dead_ast_items(
     let mut pruned_count = 0usize;
     let mut retained_items = Vec::with_capacity(program.items.len());
 
-    for mut item in program.items.drain(..) {
+    for (item_idx, mut item) in program.items.drain(..).enumerate() {
         let is_root = is_root_item(&item, root_file_id, is_module);
         match &mut item.kind {
-            ItemKind::Function(f) => {
-                if is_root || live_functions.contains(&f.name.name) {
+            ItemKind::Function(_) => {
+                if is_root || live_function_indices.contains(&item_idx) {
                     retained_items.push(item);
                 } else {
                     pruned_count += 1;
@@ -229,6 +267,7 @@ pub fn is_generic_type(ty: &Type) -> bool {
         TypeKind::Optional(_) => true,
         TypeKind::Pointer(p) => is_generic_type(&p.inner),
         TypeKind::Reference(r) => is_generic_type(&r.inner),
+        TypeKind::Slice(s) => is_generic_type(&s.element_type),
         _ => false,
     }
 }
@@ -240,7 +279,8 @@ pub fn base_type_name(ty: &Type) -> Option<String> {
         TypeKind::Pointer(p) => base_type_name(&p.inner),
         TypeKind::Reference(r) => base_type_name(&r.inner),
         TypeKind::Optional(_) => Some("Optional".to_string()),
-        TypeKind::Primitive(p) => Some(format!("{p:?}")),
+        TypeKind::Slice(_) => Some("Slice".to_string()),
+        TypeKind::Primitive(p) => Some(format!("{p:?}").to_lowercase()),
         _ => None,
     }
 }
@@ -581,10 +621,25 @@ impl NameCollector {
                     self.names.insert("Vec".to_string());
                     self.names.insert("new".to_string());
                     self.names.insert("push".to_string());
+                } else if name.name == "json" {
+                    self.names.insert("JsonWriter".to_string());
+                    self.names.insert("new".to_string());
+                    self.names.insert("write_raw".to_string());
+                    self.names.insert("to_json".to_string());
+                    self.names.insert("finish".to_string());
+                } else if name.name == "from_json" {
+                    self.names.insert("JsonReader".to_string());
+                    self.names.insert("new".to_string());
+                    self.names.insert("from_json".to_string());
+                    self.names.insert("JsonError".to_string());
                 }
                 for arg in args {
                     match arg {
                         MacroArg::Expression(e) => self.walk_expr(e),
+                        MacroArg::Type(t) => self.walk_type(t),
+                        MacroArg::Identifier(id) => {
+                            self.names.insert(id.name.clone());
+                        }
                         _ => {}
                     }
                 }
@@ -594,7 +649,17 @@ impl NameCollector {
                     self.walk_expr(inp);
                 }
             }
-            ExpressionKind::Literal(_) => {}
+            ExpressionKind::Literal(lit) => {
+                let prim = match lit {
+                    Literal::Integer(_) => "i32",
+                    Literal::Float(_) => "f64",
+                    Literal::Complex(_, _) => "c64",
+                    Literal::String(_) => "str",
+                    Literal::Char(_) => "char",
+                    Literal::Bool(_) => "bool",
+                };
+                self.names.insert(prim.to_string());
+            }
         }
     }
 
@@ -622,7 +687,10 @@ impl NameCollector {
                 self.names.insert("Optional".to_string());
                 self.walk_type(o);
             }
-            TypeKind::Slice(s) => self.walk_type(&s.element_type),
+            TypeKind::Slice(s) => {
+                self.names.insert("Slice".to_string());
+                self.walk_type(&s.element_type);
+            }
             TypeKind::Array(a) => self.walk_type(&a.element_type),
             TypeKind::Tuple(types) => {
                 for t in types {
@@ -635,7 +703,9 @@ impl NameCollector {
                 }
                 self.walk_type(&f.return_type);
             }
-            TypeKind::Primitive(_) => {}
+            TypeKind::Primitive(p) => {
+                self.names.insert(format!("{p:?}").to_lowercase());
+            }
         }
     }
 

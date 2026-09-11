@@ -630,7 +630,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut needs_sret = false;
         if let Some(ret) = return_type
             && !Self::is_void_primitive(ret)
-            && let Some(_link) = &linkage
+            && let Some(link) = &linkage
+            && matches!(link, ast::ExternLinkage::C)
         {
             let lowered_ret = self.lower_basic_type(ret)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {

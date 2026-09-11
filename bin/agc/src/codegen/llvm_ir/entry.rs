@@ -832,8 +832,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.register_struct_fields(struct_item, &item.attributes);
                 }
                 ast::ItemKind::Enum(enum_item) => {
-                    self.enum_backing_types
-                        .insert(enum_item.name.name.clone(), ast::PrimitiveType::I32);
+                    self.register_enum_metadata(enum_item)?;
                 }
                 _ => {}
             }

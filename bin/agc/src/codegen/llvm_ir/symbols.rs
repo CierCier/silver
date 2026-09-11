@@ -457,6 +457,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             return sig.return_type.clone();
                         }
                     }
+                    let method_key = format!("{owner_name}::{}", method.name);
+                    if let Some(imported_link) = self.imported_function_links.get(&method_key) {
+                        if let Some(sig) = self.signature_for_name(imported_link) {
+                            return sig.return_type.clone();
+                        }
+                    }
                 }
                 self.signature_for_name(&method.name)
                     .and_then(|sig| sig.return_type)
@@ -1745,6 +1751,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                     if return_ty.is_some() {
                         break;
+                    }
+                    let method_key = format!("{owner_name}::{}", method.name);
+                    if let Some(imported_link) = self.imported_function_links.get(&method_key) {
+                        if let Some(sig) = self.signature_for_name(imported_link) {
+                            return_ty = sig.return_type.clone();
+                            break;
+                        }
                     }
                 }
                 if return_ty.is_none()
