@@ -1,4 +1,33 @@
 {
-  "setup": "set -e\n# LLVM 22 (inkwell llvm22-1 / llvm-sys 221) and Rust via mise.\nsudo install -d /usr/share/keyrings\ncurl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg\necho \"deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main\" | sudo tee /etc/apt/sources.list.d/llvm22.list >/dev/null\nsudo apt-get update -qq\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq llvm-22-dev clang-22 lld-22 libpolly-22-dev libssl-dev\nmise use -g rust@1.98.1\nexport PATH=\"$HOME/.local/share/mise/shims:/usr/lib/llvm-22/bin:$PATH\"\nexport LLVM_SYS_221_PREFIX=/usr/lib/llvm-22\ncargo build -p agc --release\ncargo test -p agc --quiet",
-  "run": "cargo run -p agc -- release"
+	"version": 1,
+	"inference": {
+		"run": {
+			"detectorVersion": 1,
+			"framework": "rust",
+			"workspacePath": null
+		}
+	},
+	"ports": {
+		"preview": 3000,
+		"additional": {}
+	},
+	"scripts": {
+		"setup": {
+			"enabled": true,
+			"command": null
+		},
+		"run": {
+			"enabled": true,
+			"command": "cargo run"
+		},
+		"archive": {
+			"enabled": true,
+			"command": null
+		},
+		"check": {
+			"enabled": true,
+			"command": null
+		}
+	},
+	"mcpServers": []
 }
