@@ -88,6 +88,8 @@ extern "C" {
     i32 win_SetConsoleOutputCP(u32 codepage);
     #[link_name("SetConsoleCP")]
     i32 win_SetConsoleCP(u32 codepage);
+    #[link_name("SwitchToThread")]
+    void win_SwitchToThread();
     #[link_name("CreateThread")]
     i64 win_CreateThread(u8* attrs, u64 stack_size, u64(u64) start, u8* param, u32 flags, u32* tid);
     #[link_name("GetCommandLineW")]
@@ -667,6 +669,17 @@ i64 sys_kill(i64 pid, i64 sig) {
 #[cfg(os.linux)]
 void thread_exit(i64 code) {
     raw_sys_exit(code);
+}
+
+#[cfg(os.linux)]
+void sys_sched_yield() {
+    raw_sys_sched_yield();
+}
+
+/// Yield the current thread's timeslice.
+#[cfg(os.windows)]
+void sys_sched_yield() {
+    win_SwitchToThread();
 }
 
 #[cfg(os.windows)]

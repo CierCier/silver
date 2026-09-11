@@ -25,7 +25,6 @@ import std.thread;
 // The module's _start is inlined into the consumer's object file by the import
 // hook, so no separate linking step is needed.
 extern "C" {
-    i32 main();
     i32 __silver_argc;
     i8** __silver_argv;
     // Win32 argv plumbing (windows entry only; unused declarations are
@@ -88,7 +87,10 @@ void _start() {
     sys_platform_init();
     __silver_win_arg_setup();
     __silver_cpu_init();
-    i32 rc = main();
+    // Signature-agnostic call: the user program may define i32/i64/void main.
+    // The 32-byte reservation is the Win64 shadow space; RSP is 16-aligned
+    // inside the function body, and 32 preserves that alignment for the call.
+    i32 rc = __silver_call_main();
     __silver_thread_registry_join_all();
     __silver_flush_all();
     i32 leak = __silver_leak_check_report();
@@ -101,6 +103,18 @@ void _start() {
 /// Windows argv plumbing: CommandLineToArgvW, then UTF-16 -> UTF-8 for every
 /// argument. Buffers come from the page allocator and live for the process
 /// lifetime. Called once from _start before __silver_cpu_init.
+/// Calls the user program's `main` without naming its type: the Linux entry
+/// blob reads the return from %rax the same way, so any main signature
+/// (i32/i64/void) links and runs.
+#[cfg(os.windows)]
+i32 __silver_call_main() {
+    return asm("
+        sub $$32, %rsp
+        call main
+        add $$32, %rsp
+    ", []);
+}
+
 #[cfg(os.windows)]
 void __silver_win_arg_setup() {
     // Define the argv globals in .bss (the Windows counterpart of the Linux
