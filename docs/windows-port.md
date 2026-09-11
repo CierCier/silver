@@ -340,11 +340,12 @@ Path/sysroot conventions (small but real): `module_loader.rs:619-634` (`HOME`/XD
 ### Landed (2026-09-11, this branch)
 
 **P1a — done, verified cross-compiling on Linux.**
-- `codegen/abi.rs`: `Win64Abi` implemented (≤8-byte structs in one integer
-  register, single-float-member structs coerced to scalar XMM, >8-byte byval
-  pointer, sret threshold 8); `get_abi_handler` now dispatches on the triple's
-  **OS** component (was arch-only — the silent-miscompile bug from §3.1);
-  `target_is_windows(triple)` helper shared with link/driver.
+- `codegen/abi.rs`: `Win64Abi` implemented (aggregates by value only at
+  exactly 1/2/4/8 bytes, always in the integer class — no single-float XMM
+  coercion; 3/5/6/7-byte and >8-byte aggregates pass byval-by-pointer, sret
+  for all non-{1,2,4,8} returns); `get_abi_handler` now dispatches on the
+  triple's **OS** component (was arch-only — the silent-miscompile bug from
+  §3.1); `target_is_windows(triple)` helper shared with link/driver.
 - `types.rs`: `lower_abi_type` now delegates all struct sizes to the ABI
   handler (the hardcoded SysV small-struct match is gone); the SysV
   `{f32,f32} → <2 x float>` SSE coercion moved into `Amd64Abi`.

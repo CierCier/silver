@@ -605,7 +605,11 @@ pub(crate) fn link_shared_module(
     dependency_paths: &[PathBuf],
     native_libs: &[String],
 ) -> Result<(), String> {
-    if LinkFlavor::for_target(plan.target.as_deref()) == LinkFlavor::LldLink {
+    let flavor = LinkFlavor::for_target(plan.target.as_deref());
+    if flavor == LinkFlavor::UnsupportedMinGW {
+        return Err(MINGW_UNSUPPORTED_ERR.to_string());
+    }
+    if flavor == LinkFlavor::LldLink {
         let mut link = find_lld_link()?;
         link.arg("/DLL");
         link.arg(format!("/OUT:{}", output_path.display()));
