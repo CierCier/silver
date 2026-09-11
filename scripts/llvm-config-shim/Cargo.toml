@@ -1,0 +1,13 @@
+[package]
+name = "llvm-config-shim"
+version = "22.1.8"
+edition = "2024"
+description = "llvm-config.exe shim for the official Windows LLVM install (no static libs, no llvm-config shipped)"
+publish = false
+
+# Standalone crate — not part of the silver workspace.
+[workspace]
+
+[[bin]]
+name = "llvm-config"
+path = "src/main.rs"
