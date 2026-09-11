@@ -171,6 +171,9 @@ pub struct LlvmIrGenerator<'ctx> {
     /// Monotonic counter for per-launch-site trampoline function names.
     pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,
+    /// Whether this module defines the process-global backtrace tables.
+    /// Suppressed for per-module unit builds (see entry.rs emit_bt_tables).
+    pub(crate) emit_bt_tables: bool,
     pub(crate) root_symbols: HashSet<String>,
     /// LLVM names of `#[volatile]` items (functions and globals): emitted
     /// into `@llvm.used` so `globaldce` treats them as roots and never

@@ -25,6 +25,7 @@ import std.sys.raw.time;
 import std.sys.raw.misc;
 import std.sys.syscall;
 import std.sys.errno;
+import std.sys.result;
 
 // ---------------------------------------------------------------------------
 // Win32 externs (kernel32 unless noted). Handles travel as i64; BOOL as i32.

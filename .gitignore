@@ -5,3 +5,4 @@ dist/
 *.ll
 *.agm
 bench/
+/target2/

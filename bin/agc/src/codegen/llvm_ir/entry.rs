@@ -184,6 +184,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .unwrap_or("x86_64-unknown-linux-gnu"),
             ),
             leak_check: false,
+            emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };
@@ -332,6 +333,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };
@@ -419,6 +421,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             false,
             false,
+            true,
         )
     }
 
@@ -466,6 +469,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         debug_info: bool,
         leak_check: bool,
     ) -> CodegenResult<()> {
+        Self::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            true,
+        )
+    }
+
+    /// `emit_bt_tables=false` is used by per-module unit builds: the
+    /// backtrace tables are process-global (only the entry-point object's
+    /// copy survives linkonce dedup on ELF), and COFF has no equivalent
+    /// dedup for their weak symbols, so unit objects must not define them.
+    pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        emit_bt_tables: bool,
+    ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
             imported_modules,
@@ -478,6 +513,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             leak_check,
+            emit_bt_tables,
         )
     }
 
@@ -531,6 +567,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             false,
             false,
+            true,
         )
     }
 
@@ -590,6 +627,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             leak_check,
+            true,
         )
     }
 
@@ -620,6 +658,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            true,
         )
     }
 
@@ -639,6 +678,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        emit_bt_tables: bool,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -711,6 +751,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            emit_bt_tables,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };

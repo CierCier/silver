@@ -142,6 +142,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         fn_debug: &[crate::codegen::dwarf_bt::BtFnDebug],
     ) {
+        if !self.emit_bt_tables {
+            return;
+        }
         // The runtime always references these symbols (even without DWARF),
         // so always define them — empty tables (null pointer, count 0) when
         // no debug info was available.
@@ -414,6 +417,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// spans), plus a count global. The runtime resolves return addresses
     /// against this table when printing a stack trace on abort/assert.
     pub(crate) fn emit_backtrace_table(&mut self) {
+        if !self.emit_bt_tables {
+            return;
+        }
         let functions: Vec<_> = self
             .module
             .get_functions()

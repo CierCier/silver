@@ -199,6 +199,7 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "libucrt.lib",
             "kernel32.lib",
             "shell32.lib",
+            "synchronization.lib",
             "bcrypt.lib",
         ]
     } else {
@@ -208,6 +209,7 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "ucrt.lib",
             "kernel32.lib",
             "shell32.lib",
+            "synchronization.lib",
             "bcrypt.lib",
         ]
     }
