@@ -552,14 +552,50 @@ impl ModuleArtifact {
         ))
     }
 
+    /// Extension the producer would have used for this module's target.
+    fn binary_extension(&self, shared: bool) -> &'static str {
+        let target = if self.target_triple == "unknown" {
+            None
+        } else {
+            Some(self.target_triple.as_str())
+        };
+        if shared {
+            if crate::codegen::abi::target_is_windows(target) {
+                "dll"
+            } else {
+                "so"
+            }
+        } else if crate::codegen::abi::target_is_windows(target) {
+            "obj"
+        } else {
+            "o"
+        }
+    }
+
+    /// Alternate extension tried when the target-specific one is missing
+    /// (covers artifacts built by other toolchain versions).
+    fn alternate_binary_extension(&self, shared: bool) -> &'static str {
+        match (shared, self.binary_extension(shared)) {
+            (false, "o") => "obj",
+            (false, "obj") => "o",
+            (true, "so") => "dll",
+            (true, "dll") => "so",
+            _ => "o",
+        }
+    }
+
     pub fn static_library_path(&self) -> Option<PathBuf> {
         if !self.code_artifacts.has_static_library {
             return None;
         }
         let artifact_path = self.artifact_path.as_ref()?;
-        let direct_o = artifact_path.with_extension("o");
-        if direct_o.exists() {
-            return Some(direct_o);
+        let primary = artifact_path.with_extension(self.binary_extension(false));
+        if primary.exists() {
+            return Some(primary);
+        }
+        let alt = artifact_path.with_extension(self.alternate_binary_extension(false));
+        if alt.exists() {
+            return Some(alt);
         }
         if let Some(parent) = artifact_path.parent()
             && let Some(grandparent) = parent.parent()
@@ -572,7 +608,7 @@ impl ModuleArtifact {
                 }
             }
         }
-        Some(direct_o)
+        Some(primary)
     }
 
     pub fn shared_library_path(&self) -> Option<PathBuf> {
@@ -580,7 +616,15 @@ impl ModuleArtifact {
             return None;
         }
         let artifact_path = self.artifact_path.as_ref()?;
-        Some(artifact_path.with_extension("so"))
+        let primary = artifact_path.with_extension(self.binary_extension(true));
+        if primary.exists() {
+            return Some(primary);
+        }
+        let alt = artifact_path.with_extension(self.alternate_binary_extension(true));
+        if alt.exists() {
+            return Some(alt);
+        }
+        Some(primary)
     }
 
     pub fn source_candidate_paths(&self) -> Vec<PathBuf> {

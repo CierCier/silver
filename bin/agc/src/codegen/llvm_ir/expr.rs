@@ -1791,6 +1791,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         clobbers: &[String],
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // asm() is currently lowered with the Linux x86_64 syscall register
+        // model ({rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}). On Win64 those
+        // semantics don't exist: user-mode `syscall` is not a stable
+        // contract (WoW64 breaks it) and rdi/rsi are nonvolatile, so a SysV
+        // blob would corrupt callee-saved state. Win64 asm support is a
+        // planned std.sys.win follow-up (docs/windows-port.md §4.1).
+        if crate::codegen::abi::target_is_windows(
+            Some(self.module.get_triple().as_str().to_str().unwrap_or("")),
+        ) {
+            return Err(CodegenError::with_span(
+                "inline asm() is not yet supported for Windows targets: it is lowered with the Linux x86_64 syscall register model (see docs/windows-port.md §4.1 — Win64 constraint support is planned)",
+                *span,
+            ));
+        }
         // Validate: x86_64 syscall has 1 syscall number (rax) + 6 arg registers
         if inputs.len() > 7 {
             return Err(CodegenError::with_span(

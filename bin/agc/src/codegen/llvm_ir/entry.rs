@@ -177,7 +177,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
+            abi_handler: abi::get_abi_handler(
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu"),
+            ),
             leak_check: false,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
@@ -219,6 +224,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            None,
         )
     }
     pub fn generate_with_imports_and_table_and_source_with_leak_check(
@@ -229,10 +235,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        target_triple: Option<&str>,
     ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        let effective_triple = target_triple
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu")
+                    .to_string()
+            });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => {
@@ -291,7 +307,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
+            abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
@@ -579,6 +595,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        // One resolved triple drives both the ABI handler and the module
+        // triple: a windows triple must select Win64 struct passing, and the
+        // default must be the host triple (not a hardcoded Linux triple).
+        let effective_triple = target_triple
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu")
+                    .to_string()
+            });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(p), Some(text)) => {
@@ -631,7 +659,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
+            abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
@@ -641,9 +669,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator.declare_imported_modules(program, imported_modules)?;
 
         Target::initialize_all(&InitializationConfig::default());
-        let triple = target_triple
-            .map(inkwell::targets::TargetTriple::create)
-            .unwrap_or_else(TargetMachine::get_default_triple);
+        let triple = inkwell::targets::TargetTriple::create(&effective_triple);
         generator.module.set_triple(&triple);
 
         let target = Target::from_triple(&triple).map_err(|e| {
