@@ -859,6 +859,10 @@ mod tests {
         assert!(target_is_windows(Some("x86_64-w64-mingw32")));
         assert!(!target_is_windows(Some("x86_64-unknown-linux-gnu")));
         assert!(!target_is_windows(Some("aarch64-apple-darwin")));
-        assert!(!target_is_windows(None));
+        assert_eq!(
+            target_is_windows(None),
+            cfg!(target_os = "windows"),
+            "None defers to the host OS"
+        );
     }
 }

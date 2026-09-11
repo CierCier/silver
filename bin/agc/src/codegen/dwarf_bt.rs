@@ -870,6 +870,14 @@ mod tests {
 
     #[test]
     fn parses_line_table_from_real_object() {
+        if cfg!(target_os = "windows") {
+            // Cannot produce an object yet: every Silver program pulls in
+            // std.sys (entry/cpu init), whose inline asm is a hard error on
+            // windows targets until the P3 std.sys.win runtime lands — and
+            // this ELF/DWARF pipeline needs the COFF reader (§5) regardless.
+            eprintln!("skipped on Windows: pending P3 std.sys.win + P4 COFF reader");
+            return;
+        }
         let dir = std::env::temp_dir();
         let src = dir.join("dwarf_bt_probe.ag");
         std::fs::write(
@@ -889,7 +897,8 @@ mod tests {
             // rebuilds target/debug/agc, so a stale cached debug binary would
             // compile the probe against a drifted frontend.
             let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-            format!("{target}/{profile}/agc")
+            let exe_suffix = std::env::consts::EXE_SUFFIX;
+            format!("{target}/{profile}/agc{exe_suffix}")
         });
         let status = std::process::Command::new(&agc)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
