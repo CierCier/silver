@@ -131,13 +131,21 @@ Implement `Win64Abi` alongside `Amd64Abi` and dispatch on the triple's **OS** co
 - Integer args: `rcx, rdx, r8, r9`; float args: `xmm0-3`, **by ordinal position** (no SysV
   INTEGER/FLOAT eightbyte classification; a `double` in arg 2 occupies `xmm1` even if arg 1
   is a float too).
-- Structs > 8 bytes: **always byval-by-pointer** (caller makes a temporary copy); ≤ 8 bytes:
-  passed in a single integer register by value. No 9-16-byte two-eightbyte case exists.
-- Returns: ≤ 8 bytes in `rax` (or `xmm0` for pure-float scalar); > 8 bytes via hidden `sret`
+- Aggregates pass by value **only at exactly 1, 2, 4, or 8 bytes** — always in the integer
+  class, including single-`float`/`double` member aggregates (XMM is reserved for scalar
+  float/double arguments; clang/MSVC interop requires aggregates to stay in the integer
+  class). All other sizes (3, 5, 6, 7, and everything > 8) pass **byval-by-pointer**
+  (caller makes a temporary copy). No 9-16-byte two-eightbyte case exists.
+- Returns: 1/2/4/8-byte aggregates in `rax`; everything else via a hidden `sret`
   pointer (caller-allocated, returned in `rax`).
 - 32-byte shadow space at every call site; stack always 16-byte aligned before `call`.
 - Varargs: caller-cleanup; float args passed in *both* `xmmN` and the integer slot.
-- `needs_byval` / `needs_sret` thresholds change: **8 bytes**, not 16.
+
+Known follow-up (shared with SysV, not Win64-specific): **call-site sret materialization**.
+`lower_function_type` shapes extern-C declarations with a hidden return pointer, but
+`call.rs` does not yet allocate the destination temporary and pass it — a call to an
+extern-C function returning a large struct fails loudly (LLVM argument-count mismatch)
+rather than miscompiling. Needed before P3 relies on C interop with large struct returns.
 
 Data layout differences (i128 align 8 vs 16, etc.) flow from the triple automatically via
 `create_target_machine` (`codegen/llvm_ir/entry.rs:643-669`); no manual work beyond not
