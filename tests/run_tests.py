@@ -73,6 +73,20 @@ DEFAULT_SKIP = {
     "mem_growth_watch",  # manual 30-sec memory growth benchmark
 }
 
+IS_WINDOWS = os.name == "nt"
+
+# Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
+# adjacent kernel interfaces). These are platform tests by design, not
+# portable suite members; on Windows the equivalent coverage comes from the
+# std.sys.win seam and the thread/allocator tests that run on both.
+WINDOWS_SKIP = {
+    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
+    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
+    "allocator_threads_test": "raw clone(2) thread creation",
+    "http_test": "std.net sockets over Linux syscalls (winsock layer pending)",
+    "cookie_test": "std.net sockets over Linux syscalls (winsock layer pending)",
+}
+
 
 @dataclasses.dataclass
 class TestResult:
@@ -123,7 +137,10 @@ class BackgroundServices:
             return env_val
         for build_mode in ["debug", "release"]:
             candidate = self.root / "target" / build_mode
-            if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
+            if IS_WINDOWS:
+                if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
+                    return str(candidate)
+            elif (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
                 return str(candidate)
         return ""
 
@@ -271,7 +288,7 @@ def run_single_test(
 ) -> TestResult:
     name = test_path.stem
     content = test_path.read_text(errors="replace")
-    bin_path = workdir / f"bin_{name}"
+    bin_path = workdir / (f"bin_{name}.exe" if IS_WINDOWS else f"bin_{name}")
     run_dir = workdir / f"run_{name}"
     run_dir.mkdir(parents=True, exist_ok=True)
     if name in ("tls_test", "http2_tls_test", "https_server_test"):
@@ -313,8 +330,12 @@ def run_single_test(
     # Run phase
     env = os.environ.copy()
     if name == "rust_ffi_test" and services.ffi_dir:
-        ld_path = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = f"{services.ffi_dir}:{ld_path}" if ld_path else services.ffi_dir
+        if IS_WINDOWS:
+            # DLL resolution: prepend the ffi dir to PATH.
+            env["PATH"] = f"{services.ffi_dir};{env.get('PATH', '')}"
+        else:
+            ld_path = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{services.ffi_dir}:{ld_path}" if ld_path else services.ffi_dir
 
     stdin_data = get_test_stdin(name)
     t0 = time.perf_counter()
@@ -344,20 +365,47 @@ def run_single_test(
 
     # Post-run special assertions
     if name == "static_link_test":
-        try:
-            ldd_out = subprocess.check_output(["ldd", str(bin_path)], stderr=subprocess.STDOUT).decode(errors="replace")
-            if "not a dynamic executable" not in ldd_out:
-                return TestResult(name, "FAIL", "binary is not static", compile_ms, run_ms, run_output=run_output)
-        except Exception:
-            pass
+        if IS_WINDOWS:
+            # Static CRT (/MT): the import table must not reference the
+            # dynamic UCRT/vcruntime DLLs. System DLLs (kernel32 etc.) are
+            # always imported and fine.
+            readobj = shutil.which("llvm-readobj")
+            if readobj:
+                try:
+                    imp_out = subprocess.check_output(
+                        [readobj, "--coff-imports", str(bin_path)], stderr=subprocess.DEVNULL
+                    ).decode(errors="replace")
+                    bad = [dll for dll in ("ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll") if dll in imp_out]
+                    if bad:
+                        return TestResult(name, "FAIL", f"binary imports dynamic CRT: {', '.join(bad)}", compile_ms, run_ms, run_output=run_output)
+                except Exception:
+                    pass
+        else:
+            try:
+                ldd_out = subprocess.check_output(["ldd", str(bin_path)], stderr=subprocess.STDOUT).decode(errors="replace")
+                if "not a dynamic executable" not in ldd_out:
+                    return TestResult(name, "FAIL", "binary is not static", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
 
     if name == "cfg_derived_test":
-        try:
-            re_out = subprocess.check_output(["readelf", "-S", str(bin_path)], stderr=subprocess.DEVNULL).decode(errors="replace")
-            if ".debug_info" in re_out:
-                return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
-        except Exception:
-            pass
+        readobj = shutil.which("llvm-readobj") if IS_WINDOWS else None
+        if readobj:
+            try:
+                re_out = subprocess.check_output(
+                    [readobj, "--sections", str(bin_path)], stderr=subprocess.DEVNULL
+                ).decode(errors="replace")
+                if ".debug_info" in re_out:
+                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
+        else:
+            try:
+                re_out = subprocess.check_output(["readelf", "-S", str(bin_path)], stderr=subprocess.DEVNULL).decode(errors="replace")
+                if ".debug_info" in re_out:
+                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
 
     if name == "backtrace_test":
         needed_frames = [
@@ -490,7 +538,7 @@ def main():
     os.chdir(root)
 
     mode = "release" if args.release else "debug"
-    agc_bin = root / "target" / mode / "agc"
+    agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
 
     # Ensure agc is built
     print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
@@ -535,6 +583,8 @@ def main():
     selected_stems = {p.stem for p in selected_tests}
     services.start_service_if_needed(selected_stems, agc_bin)
 
+    if IS_WINDOWS:
+        os.system("")  # enable ANSI escape processing in the legacy console
     is_tty = sys.stdout.isatty() and not args.no_tui
     dashboard = TestDashboard(len(selected_tests), args.jobs, is_tty, args.verbose)
 
@@ -567,6 +617,8 @@ def main():
                 skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
                 skip_reason = "requires built Rust FFI library (build ffi/rust)"
+            elif IS_WINDOWS and name in WINDOWS_SKIP:
+                skip_reason = WINDOWS_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)
