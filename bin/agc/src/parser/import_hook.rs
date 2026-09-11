@@ -274,10 +274,7 @@ impl<'a> FileImportResolverHook<'a> {
             match resolved.kind {
                 ResolvedSourceImportKind::File => {
                     // Check on-disk module cache (templates, concurrency intrinsics, and mutual-import tests are source-inlined)
-                    let p_str = resolved.source_path.to_str().unwrap_or("");
-                    let is_inlined_module = p_str.contains("std/")
-                        && !p_str.ends_with("std/atomic.ag")
-                        && !p_str.ends_with("std/ops.ag");
+                    let is_inlined_module = crate::build_graph::is_inlined_source_module(&resolved.source_path);
                     if !is_inlined_module {
                         if let Some(cached) = self.loader.get_cached_module(&resolved.source_path, &module_path) {
                             if let Ok(artifact) = ModuleArtifact::from_path(&cached.agm_path) {

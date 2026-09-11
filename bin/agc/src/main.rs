@@ -39,6 +39,32 @@ fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
         } else if cmd == "clean" {
             out.push(OsString::from("--clean"));
             i = command_index + 1;
+        } else if cmd == "cache" {
+            i = command_index + 1;
+            let sub = if i < argv.len() {
+                argv[i].to_str().unwrap_or("")
+            } else {
+                "info"
+            };
+            if sub == "clean" {
+                out.push(OsString::from("--clean"));
+                i += 1;
+            } else if sub == "prune" {
+                out.push(OsString::from("--cache-prune"));
+                i += 1;
+                if i < argv.len() {
+                    let next = argv[i].to_str().unwrap_or("");
+                    if !next.starts_with('-') {
+                        out.push(argv[i].clone());
+                        i += 1;
+                    }
+                }
+            } else {
+                out.push(OsString::from("--cache-info"));
+                if sub == "info" || sub == "stats" {
+                    i += 1;
+                }
+            }
         } else if cmd == "test" || cmd == "t" {
             out.push(OsString::from("--test"));
             i = command_index + 1;
@@ -136,7 +162,7 @@ fn find_command_index(argv: &[OsString]) -> Option<usize> {
 fn is_command_name(arg: &str) -> bool {
     matches!(
         arg,
-        "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean" | "test" | "t"
+        "init" | "build" | "b" | "run" | "r" | "check" | "c" | "clean" | "test" | "t" | "cache"
     )
 }
 
@@ -390,6 +416,34 @@ mod tests {
                 OsString::from("main.ag"),
                 OsString::from("--run-arg"),
                 OsString::from("arg"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cache_commands_are_normalized() {
+        let info = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("cache"),
+            OsString::from("info"),
+        ]);
+        assert_eq!(
+            info,
+            vec![OsString::from("agc"), OsString::from("--cache-info")]
+        );
+
+        let prune = normalize_argv_for_clap(vec![
+            OsString::from("agc"),
+            OsString::from("cache"),
+            OsString::from("prune"),
+            OsString::from("100M"),
+        ]);
+        assert_eq!(
+            prune,
+            vec![
+                OsString::from("agc"),
+                OsString::from("--cache-prune"),
+                OsString::from("100M"),
             ]
         );
     }

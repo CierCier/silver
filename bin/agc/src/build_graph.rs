@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::cache_store::{CacheStore, CachedModule};
+use crate::cache_store::{CacheKey, CacheStore, CachedModule};
 use crate::module_loader::{ModuleLoader, ResolvedSourceImportKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,6 +92,32 @@ impl CodegenElements {
             format!("{total} items ({})", parts.join(", "))
         }
     }
+
+    pub fn brief_summary(&self) -> String {
+        let total = self.total();
+        if total == 1 {
+            "1 item".to_string()
+        } else {
+            format!("{total} items")
+        }
+    }
+}
+
+pub fn is_inlined_source_module(source_path: &Path) -> bool {
+    let p_str = source_path.to_str().unwrap_or("");
+    if !p_str.contains("std/") {
+        return false;
+    }
+    let is_cacheable_std = p_str.ends_with("std/atomic.ag")
+        || p_str.ends_with("std/ops.ag")
+        || p_str.ends_with("std/math.ag")
+        || p_str.ends_with("std/math_int.ag")
+        || p_str.ends_with("std/cpu.ag")
+        || p_str.ends_with("std/hash.ag")
+        || p_str.ends_with("std/bytes.ag")
+        || p_str.ends_with("std/time.ag")
+        || p_str.ends_with("std/cffi.ag");
+    !is_cacheable_std
 }
 
 #[derive(Debug, Clone)]
@@ -254,11 +280,7 @@ impl DependencyGraph {
             }
         }
 
-        let p_str = source_path.to_str().unwrap_or("");
-        if p_str.contains("std/")
-            && !p_str.ends_with("std/atomic.ag")
-            && !p_str.ends_with("std/ops.ag")
-        {
+        if is_inlined_source_module(source_path) {
             return Ok(Some(current_module_path));
         }
 
@@ -452,17 +474,22 @@ impl BuildProgress {
         }
         let mut active = self.active.lock().unwrap();
         active.insert(module_name.to_string());
-        let current = self.completed.load(Ordering::Relaxed) + 1;
+        let current = (self.completed.load(Ordering::Relaxed) + 1).min(self.total_steps);
         let total = self.total_steps;
         let percent = if total > 0 { (current * 100) / total } else { 100 };
 
         use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent);
+        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent.min(100));
         let active_list = if active.len() > 1 {
             let names: Vec<_> = active.iter().cloned().collect();
             format!(" [active: {}]", names.join(", "))
         } else {
             String::new()
+        };
+        let summary_text = if self.verbose {
+            format!(" ({})", elements.summary())
+        } else {
+            format!(" ({})", elements.brief_summary())
         };
 
         if self.is_terminal && !self.verbose {
@@ -471,7 +498,7 @@ impl BuildProgress {
                 step_prefix.dimmed(),
                 "compiling".bold().cyan(),
                 module_name.bold(),
-                format!(" ({})", elements.summary()).dimmed(),
+                summary_text.dimmed(),
                 active_list.dimmed()
             );
             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -481,7 +508,7 @@ impl BuildProgress {
                 step_prefix.dimmed(),
                 "compiling".bold().cyan(),
                 module_name.bold(),
-                format!(" ({})", elements.summary()).dimmed()
+                summary_text.dimmed()
             );
         }
     }
@@ -504,11 +531,16 @@ impl BuildProgress {
         }
 
         use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent);
+        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current.min(total), total, percent.min(100));
         let status = if is_cached {
             "[cached]".bold().green().to_string()
         } else {
             format!("{} in {:.1?}", "compiled".bold().green(), duration)
+        };
+        let summary_text = if self.verbose {
+            format!(" ({})", elements.summary())
+        } else {
+            format!(" ({})", elements.brief_summary())
         };
 
         if self.is_terminal && !self.verbose {
@@ -517,7 +549,7 @@ impl BuildProgress {
                 step_prefix.dimmed(),
                 status,
                 module_name.bold(),
-                format!(" ({})", elements.summary()).dimmed()
+                summary_text.dimmed()
             );
         } else {
             eprintln!(
@@ -525,7 +557,7 @@ impl BuildProgress {
                 step_prefix.dimmed(),
                 status,
                 module_name.bold(),
-                format!(" ({})", elements.summary()).dimmed()
+                summary_text.dimmed()
             );
         }
     }
@@ -534,10 +566,11 @@ impl BuildProgress {
         if !self.enabled && !self.verbose {
             return;
         }
-        let current = self.total_steps;
+        let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
         let total = self.total_steps;
+        let percent = if total > 0 { (current * 100) / total } else { 100 };
         use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] 100%", current, total);
+        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current.min(total), total, percent.min(100));
         if self.is_terminal && !self.verbose {
             eprintln!(
                 "\r\x1b[2K{} {} {}",
@@ -567,12 +600,17 @@ impl BuildProgress {
         }
         use owo_colors::OwoColorize;
         let elapsed = self.start_time.elapsed();
+        let summary_text = if self.verbose {
+            total_elements.summary()
+        } else {
+            total_elements.brief_summary()
+        };
         eprintln!(
             "{} in {:.2?} ({} modules, {}, {} cached, {} compiled)",
             "Build finished".bold().green(),
             elapsed,
             total_modules.to_string().bold(),
-            total_elements.summary().bold(),
+            summary_text.bold(),
             cached_count.to_string().green(),
             compiled_count.to_string().cyan()
         );
@@ -644,26 +682,48 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut object_artifacts = Vec::new();
 
         pool.install(|| {
+            let mut module_keys: HashMap<String, CacheKey> = HashMap::default();
+
             for layer in layers {
                 if failed.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Partition layer into cache hits vs misses
+                // Compute dependency-aware cache key and partition layer into cache hits vs misses
                 let mut layer_misses = Vec::new();
                 for module_name in layer {
                     if let Some(node) = self.graph.nodes.get(&module_name) {
+                        let dep_hashes: Vec<(String, String)> = node
+                            .dependencies
+                            .iter()
+                            .filter_map(|dep| {
+                                module_keys.get(dep).map(|k| (dep.clone(), k.hash_hex.clone()))
+                            })
+                            .collect();
+
+                        let key = match self.loader.compute_cache_key_with_deps(&node.source_path, &node.module_path, &dep_hashes) {
+                            Some(k) => k,
+                            None => {
+                                failed.store(true, Ordering::Relaxed);
+                                errors.lock().unwrap().push(format!("failed to compute cache key for {}", node.source_path.display()));
+                                continue;
+                            }
+                        };
+
+                        self.loader.record_computed_cache_key(&node.source_path, key.clone());
+                        module_keys.insert(module_name.clone(), key.clone());
+
                         if self.is_root_input(&node.source_path) {
                             continue;
                         }
-                        if let Some(cached) = self.loader.get_cached_module(&node.source_path, &node.module_path) {
+                        if let Some(cached) = self.store.get(&key) {
                             total_hits += 1;
                             object_artifacts.push(cached.obj_path);
                             if let Some(p) = &self.progress {
                                 p.on_finish(&node.module_path, &node.codegen_elements, true, std::time::Duration::ZERO);
                             }
                         } else {
-                            layer_misses.push(node.clone());
+                            layer_misses.push((node.clone(), key));
                         }
                     }
                 }
@@ -675,11 +735,11 @@ impl<'a> ParallelGraphExecutor<'a> {
                 let errors_clone = errors.clone();
                 let results: Vec<Result<CachedModule, String>> = layer_misses
                     .par_iter()
-                    .map(|node| {
+                    .map(|(node, key)| {
                         if failed.load(Ordering::Relaxed) {
                             return Err("build aborted due to previous error".to_string());
                         }
-                        self.compile_single_module(node)
+                        self.compile_single_module(node, key)
                     })
                     .collect();
 
@@ -718,12 +778,12 @@ impl<'a> ParallelGraphExecutor<'a> {
         })
     }
 
-    fn compile_single_module(&self, node: &ModuleNode) -> Result<CachedModule, String> {
+    fn compile_single_module(&self, node: &ModuleNode, key: &CacheKey) -> Result<CachedModule, String> {
         let start = std::time::Instant::now();
         if let Some(p) = &self.progress {
             p.on_start(&node.module_path, &node.codegen_elements);
         }
-        let res = self.compile_single_module_inner(node);
+        let res = self.compile_single_module_inner(node, key);
         let elapsed = start.elapsed();
         if let Some(p) = &self.progress {
             if res.is_ok() {
@@ -733,13 +793,8 @@ impl<'a> ParallelGraphExecutor<'a> {
         res
     }
 
-    fn compile_single_module_inner(&self, node: &ModuleNode) -> Result<CachedModule, String> {
-        let key = self
-            .loader
-            .compute_cache_key(&node.source_path, &node.module_path)
-            .ok_or_else(|| format!("failed to generate cache key for {}", node.source_path.display()))?;
-
-        if let Some(cached) = self.store.get(&key) {
+    fn compile_single_module_inner(&self, node: &ModuleNode, key: &CacheKey) -> Result<CachedModule, String> {
+        if let Some(cached) = self.store.get(key) {
             return Ok(cached);
         }
 

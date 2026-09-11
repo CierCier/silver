@@ -253,6 +253,14 @@ pub struct Cli {
     #[arg(long = "clean", alias = "clean-cache", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
     pub clean: bool,
 
+    /// Display cache statistics and disk usage
+    #[arg(long = "cache-info", action = ArgAction::SetTrue, help_heading = "Cache & Performance")]
+    pub cache_info: bool,
+
+    /// Prune cache by size (e.g. --cache-prune 100M or --cache-prune)
+    #[arg(long = "cache-prune", value_name = "SIZE", num_args = 0..=1, default_missing_value = "500M", help_heading = "Cache & Performance")]
+    pub cache_prune: Option<String>,
+
     /// Number of parallel compilation jobs (defaults to CPU count)
     #[arg(
         short = 'j',
@@ -348,6 +356,8 @@ pub(crate) struct CompilePlan {
     pub(crate) cache_dir: Option<PathBuf>,
     pub(crate) no_cache: bool,
     pub(crate) clean: bool,
+    pub(crate) cache_info: bool,
+    pub(crate) cache_prune: Option<String>,
     pub(crate) jobs: usize,
     pub(crate) run_mode: bool,
     pub(crate) run_args: Vec<String>,
@@ -619,9 +629,9 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         inputs = vec![target.entry];
     }
 
-    if inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean {
+    if inputs.is_empty() && emit != EmitKind::Grammar && !cli.clean && !cli.cache_info && cli.cache_prune.is_none() {
         return Err(
-            "at least one input file is required (except for --emit=grammar or --clean)"
+            "at least one input file is required (except for --emit=grammar, --clean, or cache commands)"
                 .to_string(),
         );
     }
@@ -705,6 +715,8 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         cache_dir: cli.cache_dir,
         no_cache: cli.no_cache,
         clean: cli.clean,
+        cache_info: cli.cache_info,
+        cache_prune: cli.cache_prune,
         jobs: cli.jobs,
         show_graph: cli.show_graph,
         progress: {
@@ -966,6 +978,77 @@ pub fn run(cli: Cli) {
                 }
             }
 
+            if plan.cache_info {
+                let store = match plan.cache_dir.clone() {
+                    Some(dir) => crate::cache_store::CacheStore::with_dir(dir),
+                    None => crate::cache_store::CacheStore::new(),
+                };
+                match store.and_then(|s| s.stats()) {
+                    Ok(stats) => {
+                        use owo_colors::OwoColorize;
+                        println!("{}", "=== Silver Compiler Cache ===".bold().cyan());
+                        println!("  {:<18} {}", "Location:".bold(), stats.root_dir.display());
+                        let total_mb = stats.total_bytes as f64 / (1024.0 * 1024.0);
+                        let agm_kb = stats.agm_bytes as f64 / 1024.0;
+                        let obj_mb = stats.obj_bytes as f64 / (1024.0 * 1024.0);
+                        println!(
+                            "  {:<18} {} files ({:.2} MB)",
+                            "Total Size:".bold(),
+                            stats.total_files.to_string().bold(),
+                            total_mb
+                        );
+                        println!(
+                            "    • {:<14} {} files ({:.1} KB)",
+                            "Metadata (.agm):",
+                            stats.agm_count,
+                            agm_kb
+                        );
+                        println!(
+                            "    • {:<14} {} files ({:.2} MB)",
+                            "Objects (.o):",
+                            stats.obj_count,
+                            obj_mb
+                        );
+                        if let Some(oldest) = stats.oldest_entry_age_secs {
+                            let oldest_hours = oldest / 3600;
+                            println!("  {:<18} {} hours ago", "Oldest entry:".dimmed(), oldest_hours);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("agc: error reading cache statistics: {e}");
+                    }
+                }
+                if plan.inputs.is_empty() {
+                    return;
+                }
+            }
+
+            if let Some(target_size_str) = &plan.cache_prune {
+                let max_bytes = crate::cache_store::parse_size_to_bytes(target_size_str).unwrap_or(500 * 1024 * 1024);
+                let store = match plan.cache_dir.clone() {
+                    Some(dir) => crate::cache_store::CacheStore::with_dir(dir),
+                    None => crate::cache_store::CacheStore::new(),
+                };
+                match store {
+                    Ok(s) => {
+                        match s.prune_to_max_size(max_bytes) {
+                            Ok((deleted, freed)) => {
+                                let freed_mb = freed as f64 / (1024.0 * 1024.0);
+                                eprintln!(
+                                    "agc: pruned {} files, freed {:.2} MB",
+                                    deleted, freed_mb
+                                );
+                            }
+                            Err(e) => eprintln!("agc: error pruning cache: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("agc: error opening cache for pruning: {e}"),
+                }
+                if plan.inputs.is_empty() {
+                    return;
+                }
+            }
+
             if let Some(target) = plan.target.as_deref()
                 && matches!(
                     plan.emit,
@@ -1108,19 +1191,19 @@ pub fn run(cli: Cli) {
 
             let show_graph = plan.show_graph;
             let progress_enabled = plan.progress;
-            let graph = match crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
+            let dep_graph = match crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
                 Ok(graph) => graph,
                 Err(_) => {
                     std::process::exit(2);
                 }
             };
-            let total_graph_elements = graph.total_codegen_elements();
-            let total_modules = graph.nodes.len();
+            let total_graph_elements = dep_graph.total_codegen_elements();
+            let total_modules = dep_graph.nodes.len();
             if show_graph || plan.verbose {
-                graph.display_graph();
+                dep_graph.display_graph();
             }
 
-            let dep_nodes_count = graph
+            let dep_nodes_count = dep_graph
                 .nodes
                 .values()
                 .filter(|n| {
@@ -1131,12 +1214,14 @@ pub fn run(cli: Cli) {
                     })
                 })
                 .count();
+            let has_link_step = matches!(plan.emit, EmitKind::Exe);
             let total_steps = dep_nodes_count
                 + if matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
                     plan.inputs.len()
                 } else {
                     0
-                };
+                }
+                + if has_link_step { 1 } else { 0 };
             let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
                 total_steps,
                 progress_enabled,
@@ -1148,7 +1233,7 @@ pub fn run(cli: Cli) {
             if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
                 if let Some(store) = &loader.cache_store {
                     let executor = crate::build_graph::ParallelGraphExecutor::new(
-                        &graph,
+                        &dep_graph,
                         &loader,
                         store,
                         plan.jobs,
@@ -1760,34 +1845,85 @@ pub fn run(cli: Cli) {
                     symbol_table.record_program_symbols(&ast, CompilerPhase::Codegen);
                     if matches!(plan.emit, EmitKind::Obj) {
                         profiler::begin_phase("codegen");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
-                                &ast,
-                                &imported_modules,
-                                &plan.output,
-                                plan.target.as_deref(),
-                                plan.opt_level.as_deref(),
-                                &mut symbol_table,
-                                Some(input),
-                                Some(&src),
-                                plan.debug_info,
-                                plan.leak_check,
-                            );
-                        profiler::end_phase("codegen");
-                        if let Err(error) = result {
-                            if let Some(span) = error.span {
-                                eprintln!(
-                                    "{}",
-                                    diagnostics::render(
-                                        span,
-                                        &error.message,
-                                        diagnostics::Severity::Error,
-                                    )
-                                );
-                            } else {
-                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                        let stem = input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("input");
+                        let root_elements = crate::build_graph::CodegenElements::from_program(&ast);
+                        let start_time = std::time::Instant::now();
+
+                        let mut root_cache_hit = false;
+                        let mut root_key_opt = None;
+                        if !plan.no_cache {
+                            if let Some(store) = &loader.cache_store {
+                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                    .iter()
+                                    .filter_map(|(name, node)| {
+                                        loader.lookup_computed_cache_key(&node.source_path)
+                                            .map(|k| (name.clone(), k.hash_hex))
+                                    })
+                                    .collect();
+                                if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
+                                    if let Some(cached_o) = store.get_obj(&key) {
+                                        if std::fs::copy(&cached_o, &plan.output).is_ok() {
+                                            root_cache_hit = true;
+                                            cached_count += 1;
+                                            if let Some(p) = &active_progress {
+                                                p.on_finish(stem, &root_elements, true, std::time::Duration::ZERO);
+                                            }
+                                        }
+                                    }
+                                    root_key_opt = Some(key);
+                                }
                             }
-                            std::process::exit(2);
                         }
+
+                        if !root_cache_hit {
+                            if let Some(p) = &active_progress {
+                                p.on_start(stem, &root_elements);
+                            }
+                            let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                    &ast,
+                                    &imported_modules,
+                                    &plan.output,
+                                    plan.target.as_deref(),
+                                    plan.opt_level.as_deref(),
+                                    &mut symbol_table,
+                                    Some(input),
+                                    Some(&src),
+                                    plan.debug_info,
+                                    plan.leak_check,
+                                );
+                            if let Some(p) = &active_progress {
+                                if result.is_ok() {
+                                    p.on_finish(stem, &root_elements, false, start_time.elapsed());
+                                }
+                            }
+                            if let Err(error) = result {
+                                if let Some(span) = error.span {
+                                    eprintln!(
+                                        "{}",
+                                        diagnostics::render(
+                                            span,
+                                            &error.message,
+                                            diagnostics::Severity::Error,
+                                        )
+                                    );
+                                } else {
+                                    eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                                }
+                                std::process::exit(2);
+                            }
+                            if !plan.no_cache {
+                                if let (Some(store), Some(root_key)) = (&loader.cache_store, &root_key_opt) {
+                                    if let Ok(bytes) = std::fs::read(&plan.output) {
+                                        let _ = store.put_obj(root_key, &bytes);
+                                    }
+                                }
+                            }
+                            compiled_count += 1;
+                        }
+                        profiler::end_phase("codegen");
                     } else if matches!(plan.emit, EmitKind::Asm) {
                         profiler::begin_phase("codegen");
                         let result =
@@ -1864,42 +2000,79 @@ pub fn run(cli: Cli) {
                         let temp_o = temp_dir.join(format!("{stem}.o"));
                         let root_elements = crate::build_graph::CodegenElements::from_program(&ast);
                         let start_time = std::time::Instant::now();
-                        if let Some(p) = &active_progress {
-                            p.on_start(stem, &root_elements);
-                        }
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
-                                &ast,
-                                &imported_modules,
-                                &temp_o,
-                                plan.target.as_deref(),
-                                plan.opt_level.as_deref(),
-                                &mut symbol_table,
-                                Some(input),
-                                Some(&src),
-                                plan.debug_info,
-                                plan.leak_check,
-                            );
-                        profiler::end_phase("codegen");
-                        if let Some(p) = &active_progress {
-                            if result.is_ok() {
-                                p.on_finish(stem, &root_elements, false, start_time.elapsed());
+
+                        let mut root_cache_hit = false;
+                        let mut root_key_opt = None;
+                        if !plan.no_cache {
+                            if let Some(store) = &loader.cache_store {
+                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                    .iter()
+                                    .filter_map(|(name, node)| {
+                                        loader.lookup_computed_cache_key(&node.source_path)
+                                            .map(|k| (name.clone(), k.hash_hex))
+                                    })
+                                    .collect();
+                                if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
+                                    if let Some(cached_o) = store.get_obj(&key) {
+                                        if std::fs::copy(&cached_o, &temp_o).is_ok() {
+                                            root_cache_hit = true;
+                                            cached_count += 1;
+                                            if let Some(p) = &active_progress {
+                                                p.on_finish(stem, &root_elements, true, std::time::Duration::ZERO);
+                                            }
+                                        }
+                                    }
+                                    root_key_opt = Some(key);
+                                }
                             }
                         }
-                        if let Err(error) = result {
-                            if let Some(span) = error.span {
-                                eprintln!(
-                                    "{}",
-                                    diagnostics::render(
-                                        span,
-                                        &error.message,
-                                        diagnostics::Severity::Error,
-                                    )
+
+                        if !root_cache_hit {
+                            if let Some(p) = &active_progress {
+                                p.on_start(stem, &root_elements);
+                            }
+                            let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                                    &ast,
+                                    &imported_modules,
+                                    &temp_o,
+                                    plan.target.as_deref(),
+                                    plan.opt_level.as_deref(),
+                                    &mut symbol_table,
+                                    Some(input),
+                                    Some(&src),
+                                    plan.debug_info,
+                                    plan.leak_check,
                                 );
-                            } else {
-                                eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            if let Some(p) = &active_progress {
+                                if result.is_ok() {
+                                    p.on_finish(stem, &root_elements, false, start_time.elapsed());
+                                }
                             }
-                            std::process::exit(2);
+                            if let Err(error) = result {
+                                if let Some(span) = error.span {
+                                    eprintln!(
+                                        "{}",
+                                        diagnostics::render(
+                                            span,
+                                            &error.message,
+                                            diagnostics::Severity::Error,
+                                        )
+                                    );
+                                } else {
+                                    eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                                }
+                                std::process::exit(2);
+                            }
+                            if !plan.no_cache {
+                                if let (Some(store), Some(root_key)) = (&loader.cache_store, &root_key_opt) {
+                                    if let Ok(bytes) = std::fs::read(&temp_o) {
+                                        let _ = store.put_obj(root_key, &bytes);
+                                    }
+                                }
+                            }
+                            compiled_count += 1;
                         }
+                        profiler::end_phase("codegen");
                         exe_object_files.push(temp_o);
                     }
                 }
@@ -2620,6 +2793,8 @@ mod tests {
             cache_dir: None,
             no_cache: false,
             clean: false,
+            cache_info: false,
+            cache_prune: None,
             jobs: 0,
             run_mode: false,
             run_args: Vec::new(),

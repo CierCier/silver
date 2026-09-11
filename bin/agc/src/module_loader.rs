@@ -50,6 +50,7 @@ pub struct ModuleLoader {
     /// Cache of loaded module artifacts keyed by module path (e.g. "std.mem.vec").
     pub module_cache: Mutex<HashMap<String, Result<ModuleArtifact, String>>>,
     pub cache_store: Option<Arc<CacheStore>>,
+    pub computed_keys: Mutex<HashMap<PathBuf, CacheKey>>,
     pub no_cache: bool,
     pub target: Option<String>,
     pub opt_level: Option<String>,
@@ -72,6 +73,7 @@ impl ModuleLoader {
             cwd: std::env::current_dir().ok(),
             module_cache: Mutex::new(HashMap::default()),
             cache_store: None,
+            computed_keys: Mutex::new(HashMap::default()),
             no_cache: false,
             target: None,
             opt_level: None,
@@ -81,7 +83,26 @@ impl ModuleLoader {
         }
     }
 
-    pub fn compute_cache_key(&self, source_path: &Path, _module_path: &str) -> Option<CacheKey> {
+    pub fn record_computed_cache_key(&self, source_path: &Path, key: CacheKey) {
+        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        self.computed_keys.lock().insert(canonical, key);
+    }
+
+    pub fn lookup_computed_cache_key(&self, source_path: &Path) -> Option<CacheKey> {
+        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        self.computed_keys.lock().get(&canonical).cloned()
+    }
+
+    pub fn compute_cache_key(&self, source_path: &Path, module_path: &str) -> Option<CacheKey> {
+        self.compute_cache_key_with_deps(source_path, module_path, &[])
+    }
+
+    pub fn compute_cache_key_with_deps(
+        &self,
+        source_path: &Path,
+        _module_path: &str,
+        deps: &[(String, String)],
+    ) -> Option<CacheKey> {
         let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
         let mut builder = CacheKeyBuilder::new(&canonical.display().to_string());
         if builder.add_file(&canonical).is_err() {
@@ -97,6 +118,9 @@ impl ModuleLoader {
         if self.leak_check {
             builder.add_str("leak_check");
         }
+        if !deps.is_empty() {
+            builder.add_dependencies(deps);
+        }
         Some(builder.finish())
     }
 
@@ -105,6 +129,9 @@ impl ModuleLoader {
             return None;
         }
         let store = self.cache_store.as_ref()?;
+        if let Some(key) = self.lookup_computed_cache_key(source_path) {
+            return store.get(&key);
+        }
         let key = self.compute_cache_key(source_path, module_path)?;
         store.get(&key)
     }

@@ -270,6 +270,24 @@ impl CacheKeyBuilder {
         self
     }
 
+    pub fn add_dependency_hash(&mut self, dep_name: &str, dep_hash: &str) -> &mut Self {
+        self.add_str("dep");
+        self.add_str(dep_name);
+        self.add_str(dep_hash);
+        self
+    }
+
+    pub fn add_dependencies(&mut self, deps: &[(String, String)]) -> &mut Self {
+        self.add_str("dependencies");
+        self.hasher.update(&(deps.len() as u64).to_be_bytes());
+        let mut sorted = deps.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, hash) in sorted {
+            self.add_dependency_hash(&name, &hash);
+        }
+        self
+    }
+
     pub fn finish(self) -> CacheKey {
         let digest = self.hasher.finalize();
         let hash_hex = bytes_to_hex(&digest);
@@ -426,6 +444,199 @@ impl CacheStore {
         }
         Ok(count)
     }
+
+    /// Check for a cached standalone object artifact.
+    pub fn get_obj(&self, key: &CacheKey) -> Option<PathBuf> {
+        let path = self.obj_path(key);
+        if path.is_file() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Atomically store a standalone object artifact.
+    pub fn put_obj(&self, key: &CacheKey, obj_bytes: &[u8]) -> io::Result<PathBuf> {
+        self.ensure_dirs()?;
+        let pid = std::process::id();
+        let tmp_obj = self.tmp_dir().join(format!("{}.{pid}.tmp.o", key.hash_hex));
+        fs::write(&tmp_obj, obj_bytes)?;
+        let final_obj = self.obj_path(key);
+        fs::rename(&tmp_obj, &final_obj)?;
+        Ok(final_obj)
+    }
+
+    /// Compute summary statistics of the cache store.
+    pub fn stats(&self) -> io::Result<CacheStats> {
+        let mut stats = CacheStats {
+            root_dir: self.root_dir.clone(),
+            ..Default::default()
+        };
+
+        let now = std::time::SystemTime::now();
+        let mut min_mtime: Option<std::time::SystemTime> = None;
+        let mut max_mtime: Option<std::time::SystemTime> = None;
+
+        if let Ok(entries) = fs::read_dir(self.agm_dir()) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        stats.agm_count += 1;
+                        stats.agm_bytes += meta.len();
+                        if let Ok(modified) = meta.modified() {
+                            min_mtime = Some(min_mtime.map_or(modified, |m| m.min(modified)));
+                            max_mtime = Some(max_mtime.map_or(modified, |m| m.max(modified)));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(self.obj_dir()) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        stats.obj_count += 1;
+                        stats.obj_bytes += meta.len();
+                        if let Ok(modified) = meta.modified() {
+                            min_mtime = Some(min_mtime.map_or(modified, |m| m.min(modified)));
+                            max_mtime = Some(max_mtime.map_or(modified, |m| m.max(modified)));
+                        }
+                    }
+                }
+            }
+        }
+
+        stats.total_bytes = stats.agm_bytes + stats.obj_bytes;
+        stats.total_files = stats.agm_count + stats.obj_count;
+
+        stats.oldest_entry_age_secs = min_mtime.and_then(|m| now.duration_since(m).ok()).map(|d| d.as_secs());
+        stats.newest_entry_age_secs = max_mtime.and_then(|m| now.duration_since(m).ok()).map(|d| d.as_secs());
+
+        Ok(stats)
+    }
+
+    /// Prune cache entries until total disk usage is under `max_bytes`.
+    /// Evicts the oldest files first based on modification time (mtime).
+    /// Returns the number of files deleted and total bytes freed.
+    pub fn prune_to_max_size(&self, max_bytes: u64) -> io::Result<(usize, u64)> {
+        let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let mut total_bytes: u64 = 0;
+
+        for dir in &[self.agm_dir(), self.obj_dir()] {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            let len = meta.len();
+                            total_bytes += len;
+                            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            files.push((entry.path(), len, mtime));
+                        }
+                    }
+                }
+            }
+        }
+
+        if total_bytes <= max_bytes {
+            return Ok((0, 0));
+        }
+
+        // Sort oldest first
+        files.sort_by_key(|f| f.2);
+
+        let mut deleted_count = 0;
+        let mut freed_bytes = 0;
+
+        for (path, size, _) in files {
+            if total_bytes.saturating_sub(freed_bytes) <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                deleted_count += 1;
+                freed_bytes += size;
+            }
+        }
+
+        Ok((deleted_count, freed_bytes))
+    }
+
+    /// Prune cache entries older than `max_age`.
+    pub fn prune_older_than(&self, max_age: std::time::Duration) -> io::Result<(usize, u64)> {
+        let now = std::time::SystemTime::now();
+        let mut deleted_count = 0;
+        let mut freed_bytes = 0;
+
+        for dir in &[self.agm_dir(), self.obj_dir()] {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            if let Ok(mtime) = meta.modified() {
+                                if let Ok(age) = now.duration_since(mtime) {
+                                    if age > max_age {
+                                        let len = meta.len();
+                                        if fs::remove_file(entry.path()).is_ok() {
+                                            deleted_count += 1;
+                                            freed_bytes += len;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((deleted_count, freed_bytes))
+    }
+
+    /// Delete all cache content and recreate empty directory structure.
+    pub fn clean_all(&self) -> io::Result<()> {
+        let _ = fs::remove_dir_all(&self.root_dir);
+        self.ensure_dirs()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    pub root_dir: PathBuf,
+    pub agm_count: usize,
+    pub agm_bytes: u64,
+    pub obj_count: usize,
+    pub obj_bytes: u64,
+    pub total_bytes: u64,
+    pub total_files: usize,
+    pub oldest_entry_age_secs: Option<u64>,
+    pub newest_entry_age_secs: Option<u64>,
+}
+
+/// Parse human-readable size strings like "500M", "1G", "100KB", "1048576" into bytes.
+pub fn parse_size_to_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = if let Some(stripped) = s.strip_suffix(['G', 'g']) {
+        (stripped, 1024 * 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix("GB").or_else(|| s.strip_suffix("gb")) {
+        (stripped, 1024 * 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix(['M', 'm']) {
+        (stripped, 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix("MB").or_else(|| s.strip_suffix("mb")) {
+        (stripped, 1024 * 1024)
+    } else if let Some(stripped) = s.strip_suffix(['K', 'k']) {
+        (stripped, 1024)
+    } else if let Some(stripped) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kb")) {
+        (stripped, 1024)
+    } else if let Some(stripped) = s.strip_suffix(['B', 'b']) {
+        (stripped, 1)
+    } else {
+        (s, 1024 * 1024) // Default unit is MB
+    };
+    let num: f64 = num_str.trim().parse().ok()?;
+    Some((num * unit as f64) as u64)
 }
 
 // ===========================================================================
@@ -505,6 +716,62 @@ mod tests {
         let fetched = store.get(&key).expect("cache hit");
         assert_eq!(fs::read(&fetched.agm_path).unwrap(), agm_data);
         assert_eq!(fs::read(&fetched.obj_path).unwrap(), obj_data);
+
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn test_cache_key_dependency_sensitivity() {
+        let mut b1 = CacheKeyBuilder::new("app");
+        b1.add_file(&PathBuf::from("Cargo.toml")).ok();
+        b1.add_dependencies(&[("dep_a".to_string(), "hash_111".to_string())]);
+        let k1 = b1.finish();
+
+        let mut b2 = CacheKeyBuilder::new("app");
+        b2.add_file(&PathBuf::from("Cargo.toml")).ok();
+        b2.add_dependencies(&[("dep_a".to_string(), "hash_111".to_string())]);
+        let k2 = b2.finish();
+        assert_eq!(k1, k2);
+
+        // When dependency hash changes, dependent's cache key MUST change
+        let mut b3 = CacheKeyBuilder::new("app");
+        b3.add_file(&PathBuf::from("Cargo.toml")).ok();
+        b3.add_dependencies(&[("dep_a".to_string(), "hash_222".to_string())]);
+        let k3 = b3.finish();
+        assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn test_cache_store_stats_and_prune() {
+        let tmp_root = std::env::temp_dir().join("silver_cache_test_prune");
+        let _ = fs::remove_dir_all(&tmp_root);
+
+        let store = CacheStore::with_dir(tmp_root.clone()).expect("init cache store");
+        let k1 = CacheKey::new("m1", "1111111111111111111111111111111111111111111111111111111111111111");
+        let k2 = CacheKey::new("m2", "2222222222222222222222222222222222222222222222222222222222222222");
+
+        store.put(&k1, b"agm_data_1", b"obj_data_1_long_payload").unwrap();
+        store.put(&k2, b"agm_data_2", b"obj_data_2_long_payload").unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.agm_count, 2);
+        assert_eq!(stats.obj_count, 2);
+        assert_eq!(stats.total_files, 4);
+        assert!(stats.total_bytes > 0);
+
+        // Standalone obj test
+        let k3 = CacheKey::new("root", "3333333333333333333333333333333333333333333333333333333333333333");
+        store.put_obj(&k3, b"root_elf_data").unwrap();
+        assert!(store.get_obj(&k3).is_some());
+
+        // Pruning test: prune to very small size (1 byte) should delete entries
+        let (deleted, freed) = store.prune_to_max_size(1).unwrap();
+        assert!(deleted > 0);
+        assert!(freed > 0);
+
+        store.clean_all().unwrap();
+        let stats_after = store.stats().unwrap();
+        assert_eq!(stats_after.total_files, 0);
 
         let _ = fs::remove_dir_all(&tmp_root);
     }
