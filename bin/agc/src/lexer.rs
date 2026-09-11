@@ -805,11 +805,14 @@ impl Lexer {
                     message: "Invalid hex literal: expected hex digits after 0x".to_string(),
                 });
             }
-            let value =
-                i128::from_str_radix(&hex_str, 16).map_err(|_| LexError::InvalidNumber {
+            // Full u128 range: values above i128::MAX wrap to their bit
+            // pattern; the type checker reinterprets the literal against the
+            // target type (same convention as the decimal path).
+            let value = u128::from_str_radix(&hex_str, 16)
+                .map_err(|_| LexError::InvalidNumber {
                     span: (start_pos, self.position),
                     message: "Invalid hex number".to_string(),
-                })?;
+                })? as i128;
             return Ok(Token::IntLiteral(value));
         }
 
@@ -865,12 +868,15 @@ impl Lexer {
             }
 
             // Regular integer
+            // Full u128 range: values above i128::MAX wrap to their bit
+            // pattern; the type checker reinterprets the literal against the
+            // target type.
             let value = number_str
-                .parse::<i128>()
+                .parse::<u128>()
                 .map_err(|_| LexError::InvalidNumber {
                     span: (start_pos, self.position),
                     message: "Invalid integer number".to_string(),
-                })?;
+                })? as i128;
             Ok(Token::IntLiteral(value))
         }
     }

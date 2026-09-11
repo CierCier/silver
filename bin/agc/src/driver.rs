@@ -1366,9 +1366,10 @@ pub fn run(cli: Cli) {
                             diagnostics::render(span, &error.message, diagnostics::Severity::Error,)
                         );
                     }
-                    if ast.items.is_empty() {
-                        std::process::exit(2);
-                    }
+                    // A truncated AST must never reach codegen: the missing
+                    // functions surface later as baffling link errors (e.g.
+                    // `undefined symbol: main`) far from the real cause.
+                    std::process::exit(2);
                 }
 
                 let pre_lowering_link_libs = match collect_program_link_libraries(&ast) {
