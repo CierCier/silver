@@ -815,6 +815,35 @@ void thread_reclaim(i64 tid) {
     }
 }
 
+// MSVC compatibility markers for the freestanding (no-CRT) Windows link:
+// the backend references `_fltused` whenever float operations exist, and
+// emits `__chkstk` calls before frames larger than one page. The probe
+// walks down from the current stack pointer one 4KB page at a time so the
+// guard page is hit in order; RAX carries the frame size on entry (it is
+// preserved, which is the contract the compiler-generated call relies on).
+#[cfg(os.windows)]
+i32 _fltused = 1;
+
+#[cfg(os.windows)]
+void __chkstk() {
+    asm("
+        push %rcx
+        push %rax
+        cmp $$0x1000, %rax
+        jb 1f
+        mov %rsp, %rcx
+        2:
+        sub $$0x1000, %rcx
+        sub $$0x1000, %rax
+        testl $$0, (%rcx)
+        cmp $$0x1000, %rax
+        ja 2b
+        1:
+        pop %rax
+        pop %rcx
+    ", []);
+}
+
 /// Windows: Sleep(ms) with round-up — sub-millisecond precision is not
 /// required by std callers. `rem` is left untouched (callers pass 0).
 #[cfg(os.windows)]
