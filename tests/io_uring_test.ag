@@ -89,7 +89,7 @@ void test_io_uring_file_io() {
         return;
     }
 
-    str path = "/tmp/__silver_uring_test.txt";
+    str path = "__silver_uring_test.txt";
     Result<i64, Error> wr_fd = try_open(path, O_RDWR | O_CREAT | O_TRUNC, 438);
     @assert(wr_fd.is_ok());
     i32 fd = (i32)wr_fd.value();

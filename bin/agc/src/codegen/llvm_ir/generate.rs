@@ -58,6 +58,19 @@ pub(crate) fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
 /// Run a lightweight LLVM optimization pipeline on a module before machine-code
 /// emission. Uses the new pass manager (LLVM 17+) via LLVMRunPasses.
 /// At opt-level 0 this is a no-op.
+/// True for generic-instance mangled names: `name__<types>__<16 hex>`.
+/// These are re-instantiated per consumer, so unit objects keep them local
+/// (COFF weak symbols never dedup across objects).
+fn is_generic_instance_name(name: &str) -> bool {
+    match name.rfind("__") {
+        Some(pos) => {
+            let hash = &name[pos + 2..];
+            hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit())
+        }
+        None => false,
+    }
+}
+
 pub(crate) fn run_module_optimization_passes(
     module: &Module<'_>,
     machine: &TargetMachine,
@@ -418,6 +431,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// against this table when printing a stack trace on abort/assert.
     pub(crate) fn emit_backtrace_table(&mut self) {
         if !self.emit_bt_tables {
+            // Per-module unit builds must not export the freestanding
+            // CRT-compat markers: `_fltused` and `__chkstk` are process-
+            // global, every unit inlines std/sys/os.ag which defines them,
+            // and COFF has no dedup for plain external symbols (same
+            // rationale as the backtrace tables below). The root object is
+            // the copy that matters.
+            // declare_imported_modules may also create extern declarations
+            // for these names (they appear in unit .agm export tables), so
+            // walk every global/function and internalize the DEFINITIONS
+            // (initialized globals, functions with bodies).
+            for global in self.module.get_globals() {
+                let name = global.get_name().to_str().unwrap_or("");
+                if (name == "_fltused" || name == "__chkstk")
+                    && global.get_initializer().is_some()
+                {
+                    // Internalize AND rename: the plain internalization can
+                    // be undone when declare_imported_modules later creates
+                    // an extern declaration of the same name from another
+                    // unit's .agm export table, so the marker gets a
+                    // unit-unique local name. Nothing references it.
+                    global.set_linkage(inkwell::module::Linkage::Internal);
+                    let _ = global.set_name(&format!("__silver_unit{}", name));
+                }
+            }
+            for func in self.module.get_functions() {
+                if func.get_name().to_str().unwrap_or("") == "__chkstk"
+                    && func.count_basic_blocks() > 0
+                {
+                    func.set_linkage(inkwell::module::Linkage::Internal);
+                }
+            }
             return;
         }
         let functions: Vec<_> = self

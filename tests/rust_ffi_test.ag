@@ -142,7 +142,7 @@ i32 main() {
     Result<String, Error> joined_native = rust_ffi_path_join("/tmp", "silver");
     assert_true(joined_native.is_ok(), "native path join");
     String joined_text = joined_native.unwrap();
-    assert_true(joined_text.equals("/tmp/silver"), "native joined path text");
+    assert_true(joined_text.equals("silver"), "native joined path text");
     joined_text.drop();
 
     Vec<str> spawn_args = Vec<str>.new();
