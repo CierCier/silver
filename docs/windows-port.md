@@ -406,6 +406,23 @@ just emitter constraints.
 **P1b remaining**: first real link on a Windows host (CRT + SDK libs) — the
 only part of P1 that cannot be verified on Linux.
 
+**Generic-instance COFF dedup (2026-09-12, this branch)**: `iter_suite_test`
+and `slice_syntax_test` are unskipped. Root cause was twofold — (1) LLVM
+lowers `linkonce_odr` *without* a COMDAT to a weak-alias + renamed strong
+body per object, and lld-link rejects the conflicting aliases across unit
+objects; (2) generic *method* instances (`Owner__method__<hash>`) missed the
+`__\d+_` linkage heuristic and were emitted strong-`External` in every unit.
+Fix: monomorph tags instances with a synthetic `silver_monomorph_instance`
+attribute, and codegen gives every instance `linkonce_odr` + an `any` COMDAT
+(what Clang emits for C++ inlines) — dedup on COFF exactly like ELF. The
+same change covers the lazy codegen-emitted instances, which previously got
+no linkage assignment at all. Also: `gen-win-importlibs.sh` gains the
+`ntdll` import lib (`RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/
+CaptureStackBackTrace`) plus missing `kernel32` exports, and `link.rs`
+links `ntdll.lib` by default. Verified end-to-end from Linux (cached
+multi-unit link + execution under Wine); after pulling, run
+`agc --clean` once to drop pre-fix cached objects.
+
 `memory_pentest.ag` remains the definitive regression gate at every phase that touches
 ownership/ABI/codegen (per AGENTS.md §8).
 

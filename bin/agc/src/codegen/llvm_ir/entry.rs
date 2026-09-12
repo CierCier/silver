@@ -41,15 +41,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     pub(crate) fn apply_function_linkage(
+        &self,
         function: FunctionValue<'ctx>,
         visibility: &ast::Visibility,
+        attributes: &[ast::Attribute],
     ) {
         let fn_name = function.get_name().to_str().unwrap_or("");
         // Monomorphized generic instances (e.g. alloc__1_u8__...) carry arity markers `__\d+_`
         // and use linkonce_odr so they are shared and deduplicated across compilation units.
-        let is_monomorph = (0..=9).any(|d| fn_name.contains(&format!("__{d}_")));
+        // Method instances (`Owner__method__<hash>`) are name-ambiguous with plain
+        // methods, so monomorph tags those with the synthetic
+        // `silver_monomorph_instance` attribute instead.
+        let is_monomorph = (0..=9).any(|d| fn_name.contains(&format!("__{d}_")))
+            || attributes
+                .iter()
+                .any(|attr| attr.name.name == crate::semantic::monomorph::MONOMORPH_INSTANCE_ATTR);
         if is_monomorph {
             function.set_linkage(Linkage::LinkOnceODR);
+            // COFF has no dedup for bare weak symbols: without an explicit COMDAT,
+            // every object keeps its own `.weak.<name>.*` copy and the link fails
+            // with duplicate symbols. An `any` COMDAT deduplicates on COFF exactly
+            // like linkonce_odr does on ELF (this is what Clang emits for C++
+            // inline functions).
+            let comdat = self.module.get_or_insert_comdat(fn_name);
+            comdat.set_selection_kind(inkwell::comdat::ComdatSelectionKind::Any);
+            function.as_global_value().set_comdat(comdat);
         } else if Self::is_private(visibility) {
             function.set_linkage(Linkage::Internal);
         } else {
