@@ -367,6 +367,14 @@ i64 sys_read(i64 fd, i64 buf, i64 len) {
     u32 nread = 0;
     i64 h = win_fd_handle(fd);
     if (win_ReadFile(h, (u8*)buf, (u32)len, &nread, (u8*)0) == 0) {
+        // EOF on a pipe arrives as a ReadFile FAILURE (not a 0-byte
+        // success): the write end closed -> ERROR_BROKEN_PIPE (109), a
+        // synchronous handle drained -> ERROR_HANDLE_EOF (38). Both are
+        // clean EOF; anything else maps through the errno approximation.
+        i64 err = (i64)win_GetLastError();
+        if (err == 109 || err == 38) {
+            return 0;
+        }
         return -win_errno_or_io();
     }
     return (i64)nread;
