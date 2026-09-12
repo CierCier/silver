@@ -1832,7 +1832,7 @@ pub fn run(cli: Cli) {
                         module_binary_output_path(&plan.output, plan.shared, plan.target.as_deref());
                     if plan.shared {
                         let temp_object = plan.output.with_extension("module.tmp.o");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &temp_object,
@@ -1843,6 +1843,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                false,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1871,7 +1872,7 @@ pub fn run(cli: Cli) {
                         }
                         let _ = std::fs::remove_file(&temp_object);
                     } else {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &binary_output,
@@ -1882,6 +1883,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                false,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
