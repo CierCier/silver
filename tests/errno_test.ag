@@ -6,6 +6,12 @@ import std.test;
 import std.mem;
 import std.sys.errno;
 import std.sys.result;
+
+// Platform-portable null device path.
+#[cfg(os.linux)]
+str null_device() { return "/dev/null"; }
+#[cfg(os.windows)]
+str null_device() { return "NUL"; }
 i32 main() {
     STDOUT.write_str("=== errno / Result<i64, Error> Tests ===\n\n");
 
@@ -121,7 +127,7 @@ i32 main() {
     // --- open / read / lseek / close on /dev/null and /dev/zero ---
     STDOUT.write_str("\n--- try_open / try_read / try_lseek / try_close ---\n");
     {
-        Result<i64, Error> o = try_open("/dev/null", O_RDONLY, 0);
+        Result<i64, Error> o = try_open(null_device(), O_RDONLY, 0);
         assert_true(o.is_ok(), "open /dev/null succeeds");
         assert_true(o.value() >= 0, "open returns a valid fd");
         i32 fd = (i32)o.value();
@@ -139,15 +145,19 @@ i32 main() {
         assert_true(c.is_ok(), "close succeeds");
         assert_eq_i64(c.value(), 0, "close returns 0");
 
-        Result<i64, Error> oat = try_openat((i32)AT_FDCWD, "/dev/zero", O_RDONLY, 0);
+        Result<i64, Error> oat = try_openat((i32)AT_FDCWD, null_device(), O_RDONLY, 0);
         assert_true(oat.is_ok(), "openat(AT_FDCWD, /dev/zero) succeeds");
         i32 zfd = (i32)oat.value();
         u8* zbuf = alloc<u8>(8);
         zbuf[0] = (u8)255;
         Result<i64, Error> zr = try_read(zfd, zbuf, 8);
-        assert_true(zr.is_ok(), "read from /dev/zero succeeds");
-        assert_eq_i64(zr.value(), 8, "read from /dev/zero returns 8 bytes");
-        assert_true(zbuf[0] == (u8)0, "/dev/zero reads zeroes");
+        // /dev/zero's zero-fill semantics have no Windows analogue (NUL
+        // reads return EOF), so the byte-count asserts are Linux-only.
+        if (@cfg(os.linux)) {
+            assert_true(zr.is_ok(), "read from /dev/zero succeeds");
+            assert_eq_i64(zr.value(), 8, "read from /dev/zero returns 8 bytes");
+            assert_true(zbuf[0] == (u8)0, "/dev/zero reads zeroes");
+        }
         free(zbuf);
         try_close(zfd);
     }

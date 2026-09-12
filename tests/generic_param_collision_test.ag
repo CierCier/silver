@@ -11,6 +11,12 @@ import std.sys.entry;
 import std.test;
 import std.io.file;
 
+// Platform-portable null device path.
+#[cfg(os.linux)]
+str null_device() { return "/dev/null"; }
+#[cfg(os.windows)]
+str null_device() { return "NUL"; }
+
 struct T {
     i64 v;
 }
@@ -19,7 +25,7 @@ i32 main() {
     test_start("user struct T coexists with generic std impls");
 
     // Generic methods on std's Result<T, E> must resolve normally.
-    Result<i64, Error> r = try_open("/dev/null", O_RDONLY, 0);
+    Result<i64, Error> r = try_open(null_device(), O_RDONLY, 0);
     assert_true(!r.is_err(), "try_open /dev/null succeeds");
     i64 fd = r.value();
     assert_eq_i64(0, fd % fd, "value() usable");
