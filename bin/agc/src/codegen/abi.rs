@@ -263,6 +263,12 @@ impl AbiHandler for Amd64Abi {
         let size = target_data.get_abi_size(&struct_ty);
 
         if size <= 8 {
+            // SysV SSE class: a struct of exactly two floats (8 bytes) is
+            // passed as a single <2 x float> in one XMM register.
+            let fields = struct_ty.get_field_types();
+            if size == 8 && fields.len() == 2 && fields.iter().all(|f| f.is_float_type()) {
+                return context.f32_type().vec_type(2).as_basic_type_enum();
+            }
             // Small struct: pass as integer of exact bit width
             let bits = (size * 8) as u32;
             // LLVM requires at least 1 bit
@@ -305,20 +311,134 @@ impl AbiHandler for Amd64Abi {
     }
 }
 
+/// Windows x64 ABI handler.
+///
+/// Implements the Microsoft x64 calling convention struct rules
+/// (https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions):
+///
+/// 1. Aggregates of size exactly 1, 2, 4, or 8 bytes pass by value in a single
+///    integer register (rcx/rdx/r8/r9) — no eightbyte classification, and no
+///    single-float XMM coercion (clang/MSVC pass one-float aggregates in the
+///    integer class; XMM is reserved for scalar float/double arguments).
+///    Other sizes (3, 5, 6, 7, and everything > 8) pass by reference: the
+///    caller makes a temporary copy and passes a pointer (modeled as a pointer
+///    parameter with the `byval` attribute).
+/// 2. There is no 9-16-byte two-eightbyte register case.
+///
+/// Returns: 1/2/4/8-byte aggregates in `rax`, everything else via a hidden
+/// `sret` pointer (caller-allocated, returned in `rax`).
+///
+/// The 32-byte shadow space at call sites, register-assignment ordering
+/// (floats occupy XMM slots by ordinal position), and `.pdata`/`.xdata` unwind
+/// info are handled by LLVM's backend for windows triples; this handler only
+/// shapes the LLVM type used in function signatures.
+pub struct Win64Abi;
+
+impl Default for Win64Abi {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl Win64Abi {
+    /// Creates a new Win64 ABI handler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Win64 passes aggregates by value only at exactly 1, 2, 4, or 8 bytes.
+    fn passes_by_value(size: u64) -> bool {
+        matches!(size, 1 | 2 | 4 | 8)
+    }
+}
+
+impl AbiHandler for Win64Abi {
+    fn name(&self) -> &str {
+        "win64"
+    }
+
+    fn classify_argument<'ctx>(
+        &self,
+        context: &'ctx inkwell::context::Context,
+        target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> BasicTypeEnum<'ctx> {
+        let size = target_data.get_abi_size(&struct_ty);
+
+        if Self::passes_by_value(size) {
+            // Small aggregate: single integer register
+            let bits = (size * 8) as u32;
+            context
+                .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+                .unwrap()
+                .as_basic_type_enum()
+        } else {
+            // Everything else: by reference (caller-made temporary copy + pointer)
+            context
+                .ptr_type(inkwell::AddressSpace::default())
+                .as_basic_type_enum()
+        }
+    }
+
+    fn classify_return<'ctx>(
+        &self,
+        context: &'ctx inkwell::context::Context,
+        target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> BasicTypeEnum<'ctx> {
+        let size = target_data.get_abi_size(&struct_ty);
+
+        if Self::passes_by_value(size) {
+            let bits = (size * 8) as u32;
+            context
+                .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+                .unwrap()
+                .as_basic_type_enum()
+        } else {
+            // Hidden sret pointer
+            context
+                .ptr_type(inkwell::AddressSpace::default())
+                .as_basic_type_enum()
+        }
+    }
+
+    fn needs_byval(&self, size: u64) -> bool {
+        !Self::passes_by_value(size)
+    }
+
+    fn needs_sret(&self, size: u64) -> bool {
+        !Self::passes_by_value(size)
+    }
+
+    fn byval_alignment(&self, struct_ty: StructType, target_data: &TargetData) -> u64 {
+        target_data.get_abi_alignment(&struct_ty) as u64
+    }
+}
+
 /// Factory function to get the appropriate ABI handler for a target triple.
 ///
+/// Dispatch considers both the architecture and the OS component: the same
+/// x86_64 architecture uses System V (Linux/macOS/BSD) or Win64 (Windows)
+/// struct-passing rules, and they are NOT compatible.
+///
 /// Currently supports:
-/// - x86_64 (amd64): System V AMD64 ABI
+/// - x86_64 linux/mac/bsd: System V AMD64 ABI
+/// - x86_64 windows: Win64 (Microsoft x64) ABI
 ///
 /// Future support:
 /// - aarch64 (arm64): AAPCS64 ABI
-/// - x86_64-pc-windows-msvc: Windows x64 ABI
 pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
-    if target_triple.contains("x86_64") || target_triple.contains("amd64") {
-        Box::new(Amd64Abi::new())
-    } else if target_triple.contains("aarch64")
-        || target_triple.contains("arm64")
-        || target_triple.contains("armv8")
+    let triple = target_triple.to_ascii_lowercase();
+    let is_windows = target_is_windows(Some(&triple));
+    if triple.contains("x86_64") || triple.contains("amd64") {
+        if is_windows {
+            Box::new(Win64Abi::new())
+        } else {
+            Box::new(Amd64Abi::new())
+        }
+    } else if triple.contains("aarch64")
+        || triple.contains("arm64")
+        || triple.contains("armv8")
     {
         // ARM64 support would go here
         // For now, fall back to AMD64 as a reasonable default
@@ -329,6 +449,20 @@ pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
     } else {
         // Default to AMD64 for unknown targets
         Box::new(Amd64Abi::new())
+    }
+}
+
+/// Returns true when the target triple denotes a Windows target.
+///
+/// Shared by codegen/link/driver passes that must branch on the OS component
+/// of the triple rather than the host OS.
+pub fn target_is_windows(target_triple: Option<&str>) -> bool {
+    match target_triple {
+        Some(triple) => {
+            let t = triple.to_ascii_lowercase();
+            t.contains("windows") || t.contains("win32") || t.contains("mingw")
+        }
+        None => cfg!(target_os = "windows"),
     }
 }
 
@@ -613,5 +747,102 @@ mod tests {
         // Currently falls back to AMD64
         let handler = get_abi_handler("aarch64-unknown-linux-gnu");
         assert_eq!(handler.name(), "amd64");
+    }
+
+    #[test]
+    fn test_get_abi_handler_windows_selects_win64() {
+        let handler = get_abi_handler("x86_64-pc-windows-msvc");
+        assert_eq!(handler.name(), "win64");
+        let handler = get_abi_handler("X86_64-PC-WINDOWS-MSVC");
+        assert_eq!(handler.name(), "win64");
+    }
+
+    #[test]
+    fn test_win64_needs_byval_threshold_is_8() {
+        let handler = Win64Abi::new();
+        // By value only at exactly 1, 2, 4, or 8 bytes.
+        assert!(!handler.needs_byval(1));
+        assert!(!handler.needs_byval(2));
+        assert!(!handler.needs_byval(4));
+        assert!(!handler.needs_byval(8));
+        assert!(handler.needs_byval(3));
+        assert!(handler.needs_byval(5));
+        assert!(handler.needs_byval(6));
+        assert!(handler.needs_byval(7));
+        assert!(handler.needs_byval(9));
+        assert!(handler.needs_byval(16));
+        assert!(!handler.needs_sret(8));
+        assert!(handler.needs_sret(6));
+        assert!(handler.needs_sret(9));
+    }
+
+    #[test]
+    fn test_win64_classify_small_struct_integer_register() {
+        let machine = setup_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+        let handler = Win64Abi::new();
+
+        // { i32, i32 } = 8 bytes: one integer register (rax/rcx), NOT xmm
+        let struct_ty = context.struct_type(
+            &[
+                context.i32_type().as_basic_type_enum(),
+                context.i32_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, struct_ty);
+        assert!(result.is_int_type(), "two-float struct passes in an integer register on Win64");
+
+        // { i64, i64, i64 } = 24 bytes: by reference (pointer + byval)
+        let big = context.struct_type(
+            &[
+                context.i64_type().as_basic_type_enum(),
+                context.i64_type().as_basic_type_enum(),
+                context.i64_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, big);
+        assert!(result.is_pointer_type(), ">8-byte structs pass by reference on Win64");
+    }
+
+    #[test]
+    fn test_win64_single_float_struct_uses_integer_class() {
+        let machine = setup_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+        let handler = Win64Abi::new();
+
+        // { f64 } = 8 bytes: aggregate rules apply — integer register, NOT xmm.
+        // Single-member float aggregates stay in the integer class (clang/MSVC
+        // interop); XMM is only for scalar float/double arguments.
+        let double_struct = context.struct_type(
+            &[context.f64_type().as_basic_type_enum()],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, double_struct);
+        assert!(result.is_int_type(), "single-double struct passes as i64");
+
+        // { f32 } = 4 bytes: integer class, returned in rax (not xmm0).
+        let float_struct = context.struct_type(
+            &[context.f32_type().as_basic_type_enum()],
+            false,
+        );
+        let result = handler.classify_return(&context, &tdata, float_struct);
+        assert!(result.is_int_type(), "single-float struct returns as i32");
+    }
+
+    #[test]
+    fn test_target_is_windows() {
+        assert!(target_is_windows(Some("x86_64-pc-windows-msvc")));
+        assert!(target_is_windows(Some("x86_64-w64-mingw32")));
+        assert!(!target_is_windows(Some("x86_64-unknown-linux-gnu")));
+        assert!(!target_is_windows(Some("aarch64-apple-darwin")));
+        assert_eq!(
+            target_is_windows(None),
+            cfg!(target_os = "windows"),
+            "None defers to the host OS"
+        );
     }
 }

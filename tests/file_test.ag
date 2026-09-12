@@ -3,8 +3,8 @@ import std.test;
 import std.string;
 import std.mem.vec;
 
-str test_file = "/tmp/silver_file_test.txt";
-str test_file2 = "/tmp/silver_file_test2.txt";
+str test_file = "silver_file_test.txt";
+str test_file2 = "silver_file_test2.txt";
 
 void drop_vec_strings(Vec<String>* v) {
     i64 i = 0;
@@ -41,7 +41,7 @@ i32 main() {
     STDOUT.write_str("\n--- File Existence ---\n");
     
     assert_true(file_exists(test_file), "file_exists() returns true for existing file");
-    assert_true(!file_exists("/tmp/nonexistent_silver_test_12345.txt"), 
+    assert_true(!file_exists("nonexistent_silver_test_12345.txt"), 
                 "file_exists() returns false for nonexistent file");
     
     // Test: File reading - basic open and size check
@@ -192,7 +192,7 @@ i32 main() {
     // Test: Error handling - opening nonexistent file
     STDOUT.write_str("\n--- Error Handling ---\n");
     
-    File bad = File.open_read("/tmp/this_file_does_not_exist_silver_test.txt");
+    File bad = File.open_read("this_file_does_not_exist_silver_test.txt");
     assert_true(!bad.valid(), "opening nonexistent file returns invalid File");
     assert_true(!bad.is_open, "nonexistent file is_open is false");
     
@@ -249,7 +249,7 @@ i32 main() {
         assert_true(info.size > 0, "stat size positive for written file");
         assert_true(info.mtime_sec > 0, "mtime epoch seconds positive");
     }
-    Result<FileStat, Error> missing = stat_path("/tmp/silver_file_test_missing.xyz");
+    Result<FileStat, Error> missing = stat_path("silver_file_test_missing.xyz");
     assert_true(missing.is_err(), "stat of missing file errors");
 
     // Final cleanup

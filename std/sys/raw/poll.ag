@@ -9,6 +9,7 @@
 
 import std.sys.syscall;
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum RAW_POLL {
     POLL = 7;
@@ -36,98 +37,122 @@ enum RAW_POLL {
     EPOLL_PWAIT2 = 441;
 }
 
+#[cfg(os.linux)]
 i64 sys_poll(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_POLL.POLL, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_select(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_POLL.SELECT, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_create(i64 a1) {
     return syscall1((i64)RAW_POLL.EPOLL_CREATE, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_wait(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_POLL.EPOLL_WAIT, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_ctl(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_POLL.EPOLL_CTL, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_inotify_init() {
     return syscall0((i64)RAW_POLL.INOTIFY_INIT);
 }
 
+#[cfg(os.linux)]
 i64 sys_inotify_add_watch(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_POLL.INOTIFY_ADD_WATCH, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_inotify_rm_watch(i64 a1, i64 a2) {
     return syscall2((i64)RAW_POLL.INOTIFY_RM_WATCH, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_pselect6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_POLL.PSELECT6, a1, a2, a3, a4, a5, a6);
 }
 
+#[cfg(os.linux)]
 i64 sys_ppoll(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_POLL.PPOLL, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_pwait(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_POLL.EPOLL_PWAIT, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_signalfd(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_POLL.SIGNALFD, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_eventfd(i64 a1) {
     return syscall1((i64)RAW_POLL.EVENTFD, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_signalfd4(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_POLL.SIGNALFD4, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_eventfd2(i64 a1, i64 a2) {
     return syscall2((i64)RAW_POLL.EVENTFD2, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_create1(i64 a1) {
     return syscall1((i64)RAW_POLL.EPOLL_CREATE1, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_inotify_init1(i64 a1, i64 a2) {
     return syscall2((i64)RAW_POLL.INOTIFY_INIT1, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_fanotify_init(i64 a1, i64 a2) {
     return syscall2((i64)RAW_POLL.FANOTIFY_INIT, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_fanotify_mark(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_POLL.FANOTIFY_MARK, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_io_uring_setup(i64 a1, i64 a2) {
     return syscall2((i64)RAW_POLL.IO_URING_SETUP, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_io_uring_enter(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_POLL.IO_URING_ENTER, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_io_uring_enter6(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_POLL.IO_URING_ENTER, a1, a2, a3, a4, a5, a6);
 }
 
+#[cfg(os.linux)]
 i64 sys_io_uring_register(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_POLL.IO_URING_REGISTER, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_epoll_pwait2(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_POLL.EPOLL_PWAIT2, a1, a2, a3, a4, a5, a6);
 }

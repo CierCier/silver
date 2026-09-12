@@ -9,6 +9,7 @@
 
 import std.sys.syscall;
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum RAW_PROCESS {
     GETPID = 39;
@@ -46,134 +47,167 @@ enum RAW_PROCESS {
     CLONE3 = 435;
 }
 
-i64 sys_getpid() {
+#[cfg(os.linux)]
+i64 raw_sys_getpid() {
     return syscall0((i64)RAW_PROCESS.GETPID);
 }
 
+#[cfg(os.linux)]
 i64 sys_clone(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_PROCESS.CLONE, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_fork() {
     return syscall0((i64)RAW_PROCESS.FORK);
 }
 
+#[cfg(os.linux)]
 i64 sys_execve(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.EXECVE, a1, a2, a3);
 }
 
-i64 sys_exit(i64 a1) {
+#[cfg(os.linux)]
+i64 raw_sys_exit(i64 a1) {
     return syscall1((i64)RAW_PROCESS.EXIT, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_wait4(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_PROCESS.WAIT4, a1, a2, a3, a4);
 }
 
-i64 sys_kill(i64 a1, i64 a2) {
+#[cfg(os.linux)]
+i64 raw_sys_kill(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.KILL, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_getuid() {
     return syscall0((i64)RAW_PROCESS.GETUID);
 }
 
+#[cfg(os.linux)]
 i64 sys_getgid() {
     return syscall0((i64)RAW_PROCESS.GETGID);
 }
 
+#[cfg(os.linux)]
 i64 sys_setuid(i64 a1) {
     return syscall1((i64)RAW_PROCESS.SETUID, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_setgid(i64 a1) {
     return syscall1((i64)RAW_PROCESS.SETGID, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_geteuid() {
     return syscall0((i64)RAW_PROCESS.GETEUID);
 }
 
+#[cfg(os.linux)]
 i64 sys_getegid() {
     return syscall0((i64)RAW_PROCESS.GETEGID);
 }
 
+#[cfg(os.linux)]
 i64 sys_setpgid(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.SETPGID, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_getppid() {
     return syscall0((i64)RAW_PROCESS.GETPPID);
 }
 
+#[cfg(os.linux)]
 i64 sys_getpgrp() {
     return syscall0((i64)RAW_PROCESS.GETPGRP);
 }
 
+#[cfg(os.linux)]
 i64 sys_setsid() {
     return syscall0((i64)RAW_PROCESS.SETSID);
 }
 
+#[cfg(os.linux)]
 i64 sys_getgroups(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.GETGROUPS, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_setgroups(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.SETGROUPS, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_setresuid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.SETRESUID, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_getresuid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.GETRESUID, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_setresgid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.SETRESGID, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_getresgid(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.GETRESGID, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_getpgid() {
     return syscall0((i64)RAW_PROCESS.GETPGID);
 }
 
+#[cfg(os.linux)]
 i64 sys_prctl(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_PROCESS.PRCTL, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_arch_prctl(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.ARCH_PRCTL, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_gettid() {
     return syscall0((i64)RAW_PROCESS.GETTID);
 }
 
+#[cfg(os.linux)]
 i64 sys_tkill(i64 a1, i64 a2) {
     return syscall2((i64)RAW_PROCESS.TKILL, a1, a2);
 }
 
-i64 sys_exit_group(i64 a1) {
+#[cfg(os.linux)]
+i64 raw_sys_exit_group(i64 a1) {
     return syscall1((i64)RAW_PROCESS.EXIT_GROUP, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_tgkill(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_PROCESS.TGKILL, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_waitid(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_PROCESS.WAITID, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_execveat(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) {
     return syscall5((i64)RAW_PROCESS.EXECVEAT, a1, a2, a3, a4, a5);
 }
 
+#[cfg(os.linux)]
 i64 sys_clone3(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_PROCESS.CLONE3, a1, a2, a3, a4);
 }

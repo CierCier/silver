@@ -12,7 +12,7 @@
 // machine word of argument. This is the M3 "threads pass addresses" core that
 // the T1 `Task<T>` message layer and channels build on.
 
-import std.sys.raw.process;
+import std.sys.os;
 import std.rt.thread_registry;
 import std.mem.alloc;
 
@@ -27,21 +27,8 @@ const i64 THREAD_STACK_SIZE = 2097152;
 // Parent path returns the child tid in %rax. Child resumes after `syscall`
 // with rsp = stack_top and, taking the `jnz` fall-through, `call`s fn(arg)
 // then exits via sys_exit(60) (CLONE_THREAD ⇒ only this thread exits).
-// Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
-// arg->r10 (the asm("syscall") wrapper convention).
-i64 thread_clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
-    return asm("
-        syscall
-        test %rax, %rax
-        jnz 1f
-        mov %r10, %rdi
-        call *%rdx
-        mov $$0, %rdi
-        mov $$60, %eax
-        syscall
-        1:
-    ", [56, flags, stack_top, fn, arg]);
-}
+// The clone+trampoline asm lives in std.sys.os (thread_spawn_raw), which
+// thread.ag cannot import back — it owns the OS spawn seam.
 
 // Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
 // user function, signals completion (release store + futex wake so a joining
@@ -52,7 +39,7 @@ void thread_entry(i64 arg) {
     fn(rec.arg);
     __atomic_store_i64(&rec.done, 1, ATOMIC_RELEASE);
     thread_wake_done_futex(rec);
-    sys_exit(0);
+    thread_exit(0);
 }
 
 /// Spawn a thread running `fn(arg)`. Returns the TaskRecord handle to join, or
@@ -82,24 +69,9 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     rec.done = 0;
     thread_lock_release();
 
-    // mmap a dedicated stack (16-byte aligned top; base is page-aligned and
-    // THREAD_STACK_SIZE is a multiple of 16).
-    u8* stack = mem_sys_alloc(THREAD_STACK_SIZE);
-    if (stack == (u8*)0) {
-        thread_lock_acquire();
-        rec.tid = 0;
-        thread_lock_release();
-        return (TaskRecord*)0;
-    }
-    rec.stack = stack;
-    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
-
-    i64 tid = thread_clone_shim(THREAD_CLONE_FLAGS, top, (i64)thread_entry, (i64)rec);
-    if (tid < 0) {
-        mem_sys_free(stack, THREAD_STACK_SIZE);
-        thread_lock_acquire();
-        rec.tid = 0;
-        thread_lock_release();
+    i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
+    if (tid <= 0) {
+        thread_spawn_cleanup(rec, (u8*)0);
         return (TaskRecord*)0;
     }
     rec.tid = tid;
@@ -139,29 +111,53 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
     rec.pack = (i64)pack;
     thread_lock_release();
 
-    // mmap a dedicated stack (16-byte aligned top).
-    u8* stack = mem_sys_alloc(THREAD_STACK_SIZE);
-    if (stack == (u8*)0) {
-        thread_lock_acquire();
-        rec.tid = 0;
-        rec.pack = 0;
-        thread_lock_release();
-        mem_free_raw_impl(pack);
-        return 0;
-    }
-    rec.stack = stack;
-    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
-
-    i64 tid = thread_clone_shim(THREAD_CLONE_FLAGS, top, (i64)thread_entry, (i64)rec);
-    if (tid < 0) {
-        mem_sys_free(stack, THREAD_STACK_SIZE);
-        thread_lock_acquire();
-        rec.tid = 0;
-        rec.pack = 0;
-        thread_lock_release();
-        mem_free_raw_impl(pack);
+    i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
+    if (tid <= 0) {
+        thread_spawn_cleanup(rec, pack);
         return 0;
     }
     rec.tid = tid;
     return (i64)rec;
+}
+
+/// Allocates the Linux-only dedicated stack and spawns the child running
+/// fn(rec.arg). Returns the tid/handle (> 0) or 0 on failure. On Linux the
+/// child stack is mmapped and recorded in rec.stack; on Windows CreateThread
+/// manages the stack and rec.stack stays null.
+i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
+    u8* stack = (u8*)0;
+    if (@cfg(os.linux)) {
+        // 16-byte aligned top; base is page-aligned and THREAD_STACK_SIZE is
+        // a multiple of 16.
+        stack = mem_sys_alloc(THREAD_STACK_SIZE);
+        if (stack == (u8*)0) {
+            return 0;
+        }
+        rec.stack = stack;
+    }
+    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
+    i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec);
+    if (tid <= 0 && stack != (u8*)0) {
+        mem_sys_free(stack, THREAD_STACK_SIZE);
+        rec.stack = (u8*)0;
+    }
+    return tid;
+}
+
+/// Rolls a failed spawn back: frees the Linux child stack when present and
+/// the launch pack (which may be null for spawn()).
+void thread_spawn_cleanup(TaskRecord* rec, u8* pack) {
+    if (rec.stack != (u8*)0) {
+        mem_sys_free(rec.stack, THREAD_STACK_SIZE);
+        rec.stack = (u8*)0;
+    }
+    thread_lock_acquire();
+    rec.tid = 0;
+    if (pack != (u8*)0) {
+        rec.pack = 0;
+    }
+    thread_lock_release();
+    if (pack != (u8*)0) {
+        mem_free_raw_impl(pack);
+    }
 }

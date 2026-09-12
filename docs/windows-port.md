@@ -1,6 +1,6 @@
 # Windows Port — Design & Gap Analysis
 
-Branch: `feat/windows` · Status: design (no code changes yet) · Author: porting survey, 2026-09-11
+Branch: `feat/windows` · Status: P1a + P1b landed (see §7) · Author: porting survey, 2026-09-11
 
 This document catalogs every Linux-only assumption in Silver and proposes the Windows
 equivalent for each, phased so the compiler builds first, then compiles correct COFF,
@@ -131,13 +131,21 @@ Implement `Win64Abi` alongside `Amd64Abi` and dispatch on the triple's **OS** co
 - Integer args: `rcx, rdx, r8, r9`; float args: `xmm0-3`, **by ordinal position** (no SysV
   INTEGER/FLOAT eightbyte classification; a `double` in arg 2 occupies `xmm1` even if arg 1
   is a float too).
-- Structs > 8 bytes: **always byval-by-pointer** (caller makes a temporary copy); ≤ 8 bytes:
-  passed in a single integer register by value. No 9-16-byte two-eightbyte case exists.
-- Returns: ≤ 8 bytes in `rax` (or `xmm0` for pure-float scalar); > 8 bytes via hidden `sret`
+- Aggregates pass by value **only at exactly 1, 2, 4, or 8 bytes** — always in the integer
+  class, including single-`float`/`double` member aggregates (XMM is reserved for scalar
+  float/double arguments; clang/MSVC interop requires aggregates to stay in the integer
+  class). All other sizes (3, 5, 6, 7, and everything > 8) pass **byval-by-pointer**
+  (caller makes a temporary copy). No 9-16-byte two-eightbyte case exists.
+- Returns: 1/2/4/8-byte aggregates in `rax`; everything else via a hidden `sret`
   pointer (caller-allocated, returned in `rax`).
 - 32-byte shadow space at every call site; stack always 16-byte aligned before `call`.
 - Varargs: caller-cleanup; float args passed in *both* `xmmN` and the integer slot.
-- `needs_byval` / `needs_sret` thresholds change: **8 bytes**, not 16.
+
+Known follow-up (shared with SysV, not Win64-specific): **call-site sret materialization**.
+`lower_function_type` shapes extern-C declarations with a hidden return pointer, but
+`call.rs` does not yet allocate the destination temporary and pass it — a call to an
+extern-C function returning a large struct fails loudly (LLVM argument-count mismatch)
+rather than miscompiling. Needed before P3 relies on C interop with large struct returns.
 
 Data layout differences (i128 align 8 vs 16, etc.) flow from the triple automatically via
 `create_target_machine` (`codegen/llvm_ir/entry.rs:643-669`); no manual work beyond not
@@ -328,6 +336,75 @@ Path/sysroot conventions (small but real): `module_loader.rs:619-634` (`HOME`/XD
 | P3 | `std.sys.win` (allocator, threads, sync, io, entry) | `tests/memory_pentest.ag` passes on Windows; "hello world" + threads + `Vec`/`String`/`Rc` programs run |
 | P4 | COFF reader in `dwarf_bt.rs`; DWARF-in-COFF verified | `backtrace_test.ag` prints resolved frames + args on Windows |
 | P5 | harness port + CI leg | `run_tests.py` green (minus skip-gated set) on a Windows runner |
+
+### Cross-target harness leg (run from a posix host)
+
+`tests/run_tests.py` now accepts `--target`, `--runner`, and `--libdir`, so the
+same suite drives Windows binaries:
+
+```sh
+scripts/gen-win-importlibs.sh /tmp/wimplib   # llvm-dlltool import libs (no CRT)
+python3 tests/run_tests.py --no-tui \
+    --target x86_64-pc-windows-msvc \
+    --libdir /tmp/wimplib \
+    --runner wine64 <filters...>
+```
+
+Windows-target runs link single-unit (`--no-cache`): COFF has no linkonce
+dedup, so cached `.agm` artifacts and the app unit would define the same std
+symbols twice. The runtime is freestanding — the custom `_start` entry (via
+`/ENTRY:_start`), no CRT libs; `_fltused` and `__chkstk` come from
+`std/sys/os.ag`. `WINDOWS_SKIP` gates the raw-Linux-syscall tests.
+
+Status: cross-compile + COFF link verified end-to-end from Linux (a Silver PE
+links via lld-link and the driver). Execution under Wine is pending: Wine
+9.0 in this container crashes in its own startup services at a fixed address
+(`virtual_setup_exception ... 0x6fffffcad839`) for ANY freestanding exe,
+including a clang-compiled control — an environment limitation, not a Silver
+runtime failure.
+
+### Landed (2026-09-11, this branch)
+
+**P1a — done, verified cross-compiling on Linux.**
+- `codegen/abi.rs`: `Win64Abi` implemented (aggregates by value only at
+  exactly 1/2/4/8 bytes, always in the integer class — no single-float XMM
+  coercion; 3/5/6/7-byte and >8-byte aggregates pass byval-by-pointer, sret
+  for all non-{1,2,4,8} returns); `get_abi_handler` now dispatches on the
+  triple's **OS** component (was arch-only — the silent-miscompile bug from
+  §3.1); `target_is_windows(triple)` helper shared with link/driver.
+- `types.rs`: `lower_abi_type` now delegates all struct sizes to the ABI
+  handler (the hardcoded SysV small-struct match is gone); the SysV
+  `{f32,f32} → <2 x float>` SSE coercion moved into `Amd64Abi`.
+- `entry.rs`: the ABI handler is constructed from the resolved triple; the
+  no-target default is the **host** triple (`TargetMachine::get_default_triple`)
+  instead of hardcoded `x86_64-unknown-linux-gnu`. The `.agm`/IR-string codegen
+  path takes the target too.
+- Verified: `windows_triple_emits_coff_object` (COFF AMD64 header) and
+  `windows_triple_uses_win64_abi_for_extern_structs` (16-byte struct → ptr
+  param on windows, register struct on linux) in `codegen/llvm_ir/tests.rs`.
+
+**P1b — driver plumbing done; CRT link needs the P0 Windows box.**
+- `link.rs`: `LinkFlavor { GnuLd, LldLink }`; windows flavor resolves the tool
+  via `SILVER_LINKER` → `lld-link` → VS `link.exe` (vswhere), builds `/OUT:`,
+  `/MACHINE:X64`, `/SUBSYSTEM:CONSOLE`, `/LIBPATH:` from `%LIB%` + vswhere-
+  discovered MSVC/SDK dirs, and the CRT set (`/MD` default, `--static` → `/MT`).
+  Shared modules emit `/DLL`. Command shape verified against real `lld-link`
+  on Linux (COFF object → PE).
+- `driver.rs`: `a.exe`/`.obj`/`.asm` defaults, run-mode temp binary gets
+  `.exe` (CreateProcess contract), module binaries `.dll`/`.obj`,
+  test-harness temp binaries get `.exe` on windows hosts.
+- `module_artifact.rs`: consumer lookups accept both posix and windows
+  extensions (producer/consumer symmetric across toolchain versions).
+
+**P2 — interim policy**: `asm()` on windows triples is a hard codegen error
+(pointing at this doc) until Win64 constraint modeling lands. Rationale: the
+emitter hardcodes the SysV syscall register binding, and Win64 would silently
+corrupt nonvolatile registers. Note `std/cpu.ag`'s cpuid/xgetbv blobs are
+*textually* SysV (%rdi/%rsi) — porting them is part of P3's std gating, not
+just emitter constraints.
+
+**P1b remaining**: first real link on a Windows host (CRT + SDK libs) — the
+only part of P1 that cannot be verified on Linux.
 
 `memory_pentest.ag` remains the definitive regression gate at every phase that touches
 ownership/ABI/codegen (per AGENTS.md §8).

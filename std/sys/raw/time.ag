@@ -9,6 +9,7 @@
 
 import std.sys.syscall;
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum RAW_TIME {
     NANOSLEEP = 35;
@@ -29,66 +30,82 @@ enum RAW_TIME {
     CLOCK_ADJTIME = 305;
 }
 
-i64 sys_nanosleep(i64 a1, i64 a2) {
+#[cfg(os.linux)]
+i64 raw_sys_nanosleep(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.NANOSLEEP, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_getitimer(i64 a1) {
     return syscall1((i64)RAW_TIME.GETITIMER, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_setitimer(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.SETITIMER, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_adjtimex(i64 a1) {
     return syscall1((i64)RAW_TIME.ADJTIMEX, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_timer_create(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_TIME.TIMER_CREATE, a1, a2, a3);
 }
 
+#[cfg(os.linux)]
 i64 sys_timer_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_TIME.TIMER_SETTIME, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_timer_gettime(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.TIMER_GETTIME, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_timer_getoverrun(i64 a1) {
     return syscall1((i64)RAW_TIME.TIMER_GETOVERRUN, a1);
 }
 
+#[cfg(os.linux)]
 i64 sys_timer_delete(i64 a1) {
     return syscall1((i64)RAW_TIME.TIMER_DELETE, a1);
 }
 
-i64 sys_clock_gettime(i64 a1, i64 a2) {
+#[cfg(os.linux)]
+i64 raw_sys_clock_gettime(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.CLOCK_GETTIME, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_clock_getres(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.CLOCK_GETRES, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_clock_nanosleep(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_TIME.CLOCK_NANOSLEEP, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_timerfd_create(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.TIMERFD_CREATE, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_timerfd_settime(i64 a1, i64 a2, i64 a3, i64 a4) {
     return syscall4((i64)RAW_TIME.TIMERFD_SETTIME, a1, a2, a3, a4);
 }
 
+#[cfg(os.linux)]
 i64 sys_timerfd_gettime(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.TIMERFD_GETTIME, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_clock_adjtime(i64 a1, i64 a2) {
     return syscall2((i64)RAW_TIME.CLOCK_ADJTIME, a1, a2);
 }

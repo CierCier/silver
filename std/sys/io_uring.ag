@@ -9,51 +9,89 @@ import std.mem.memory;
 import std.sys.raw.poll;
 import std.sys.result;
 
+#[cfg(os.linux)]
 // Setup flags (IORING_SETUP_*)
 const u32 IORING_SETUP_IOPOLL        = 1;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_SQPOLL        = 2;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_SQ_AFF        = 4;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_CQSIZE        = 8;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_CLAMP         = 16;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_ATTACH_WQ     = 32;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_R_DISABLED    = 64;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_SUBMIT_ALL    = 128;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_COOP_TASKRUN  = 256;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_TASKRUN_FLAG  = 512;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_SQE128        = 1024;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_CQE32         = 2048;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_SINGLE_ISSUER = 4096;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_DEFER_TASKRUN = 8192;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_NO_MMAP       = 16384;
+#[cfg(os.linux)]
 const u32 IORING_SETUP_NO_SQARRAY    = 65536;
 
+#[cfg(os.linux)]
 // Kernel features (IORING_FEAT_*)
 const u32 IORING_FEAT_SINGLE_MMAP     = 1;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_NODROP          = 2;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_SUBMIT_STABLE   = 4;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_RW_CUR_POS      = 8;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_CUR_PERSONALITY = 16;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_FAST_POLL       = 32;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_POLL_32BITS     = 64;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_SQPOLL_NONFIXED = 128;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_EXT_ARG         = 256;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_NATIVE_WORKERS  = 512;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_RSRC_TAGS       = 1024;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_CQE_SKIP        = 2048;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_LINKED_FILE     = 4096;
+#[cfg(os.linux)]
 const u32 IORING_FEAT_REG_REG_RING    = 8192;
 
+#[cfg(os.linux)]
 // Magic mmap offsets (IORING_OFF_*)
 const i64 IORING_OFF_SQ_RING = 0;
+#[cfg(os.linux)]
 const i64 IORING_OFF_CQ_RING = 0x8000000;
+#[cfg(os.linux)]
 const i64 IORING_OFF_SQES    = 0x10000000;
 
+#[cfg(os.linux)]
 // io_uring_enter flags
 const u32 IORING_ENTER_GETEVENTS = 1;
+#[cfg(os.linux)]
 const u32 IORING_ENTER_SQ_WAKEUP = 2;
+#[cfg(os.linux)]
 const u32 IORING_ENTER_SQ_WAIT   = 4;
+#[cfg(os.linux)]
 const u32 IORING_ENTER_EXT_ARG   = 8;
 
+#[cfg(os.linux)]
 // io_uring opcodes
 enum IoUringOp {
     NOP = 0;
@@ -80,6 +118,7 @@ enum IoUringOp {
     SOCKET = 45;
 }
 
+#[cfg(os.linux)]
 // Memory offsets for submission ring (40 bytes)
 struct IoSqringOffsets {
     u32 head;
@@ -93,6 +132,7 @@ struct IoSqringOffsets {
     u64 user_addr;
 }
 
+#[cfg(os.linux)]
 // Memory offsets for completion ring (40 bytes)
 struct IoCqringOffsets {
     u32 head;
@@ -106,6 +146,7 @@ struct IoCqringOffsets {
     u64 user_addr;
 }
 
+#[cfg(os.linux)]
 // Parameters structure passed to io_uring_setup (120 bytes)
 struct IoUringParams {
     u32 sq_entries;
@@ -122,6 +163,7 @@ struct IoUringParams {
     IoCqringOffsets cq_off;
 }
 
+#[cfg(os.linux)]
 // Submission Queue Entry (64 bytes)
 struct IoUringSqe {
     u8  opcode;
@@ -140,6 +182,7 @@ struct IoUringSqe {
     u64 pad;
 }
 
+#[cfg(os.linux)]
 // Completion Queue Entry (16 bytes)
 struct IoUringCqe {
     u64 user_data;
@@ -160,6 +203,7 @@ Result<i64, Error> try_io_uring_register(i32 fd, u32 opcode, void* arg, u32 nr_a
     return Result<i64, Error>.from_raw(sys_io_uring_register((i64)fd, (i64)opcode, (i64)arg));
 }
 
+#[cfg(os.linux)]
 // High-level RAII io_uring instance
 struct IoUring {
     i32 ring_fd;
@@ -199,6 +243,7 @@ struct IoUring {
     u32* cq_kflags;
 }
 
+#[cfg(os.linux)]
 impl IoUring {
     Result<IoUring, Error> new(u32 entries) {
         IoUringParams p;
@@ -466,6 +511,7 @@ impl IoUring {
     }
 }
 
+#[cfg(os.linux)]
 impl Drop for IoUring {
     void drop(*self) {
         self.close();

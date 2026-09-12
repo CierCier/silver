@@ -6,42 +6,49 @@
 /// Each wrapper passes the syscall number as the first asm input (→rax),
 /// then args sequentially per the ABI. The asm returns a single i64 from rax.
 
+#[cfg(os.linux)]
 /// Performs a 0-argument syscall.
 /// Maps `num` to RAX.
 i64 syscall0(i64 num) {
     return asm("syscall", [num]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 1-argument syscall.
 /// Maps `num` to RAX and `arg1` to RDI.
 i64 syscall1(i64 num, i64 arg1) {
     return asm("syscall", [num, arg1]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 2-argument syscall.
 /// Maps `num` to RAX, `arg1` to RDI, and `arg2` to RSI.
 i64 syscall2(i64 num, i64 arg1, i64 arg2) {
     return asm("syscall", [num, arg1, arg2]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 3-argument syscall.
 /// Maps `num` to RAX, `arg1` to RDI, `arg2` to RSI, and `arg3` to RDX.
 i64 syscall3(i64 num, i64 arg1, i64 arg2, i64 arg3) {
     return asm("syscall", [num, arg1, arg2, arg3]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 4-argument syscall.
 /// Maps `num` to RAX, `arg1` to RDI, `arg2` to RSI, `arg3` to RDX, and `arg4` to R10.
 i64 syscall4(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4) {
     return asm("syscall", [num, arg1, arg2, arg3, arg4]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 5-argument syscall.
 /// Maps `num` to RAX, `arg1` to RDI, `arg2` to RSI, `arg3` to RDX, `arg4` to R10, and `arg5` to R8.
 i64 syscall5(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4, i64 arg5) {
     return asm("syscall", [num, arg1, arg2, arg3, arg4, arg5]);
 }
 
+#[cfg(os.linux)]
 /// Performs a 6-argument syscall.
 /// Maps `num` to RAX, `arg1` to RDI, `arg2` to RSI, `arg3` to RDX, `arg4` to R10, `arg5` to R8, and `arg6` to R9.
 i64 syscall6(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4, i64 arg5, i64 arg6) {

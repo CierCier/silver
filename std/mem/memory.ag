@@ -726,8 +726,7 @@ i64 strlen(const char* s) {
 // Sends SIGABRT to self, then exits with 128+6.
 // ---------------------------------------------------------------------------
 
-import std.sys.raw.fs;
-import std.sys.raw.process;
+import std.sys.os;
 import std.rt.backtrace;
 
 void abort() {

@@ -104,7 +104,10 @@ impl CodegenElements {
 }
 
 pub fn is_inlined_source_module(source_path: &Path) -> bool {
-    let p_str = source_path.to_str().unwrap_or("");
+    // Normalize separators: Windows paths use backslashes and would never
+    // match the "std/" checks below, silently flipping every std import into
+    // an .agm signature lookup (whose exports lack transitive symbols).
+    let p_str = source_path.to_str().unwrap_or("").replace('\\', "/");
     if !p_str.contains("std/") {
         return false;
     }
@@ -949,7 +952,7 @@ impl<'a> ParallelGraphExecutor<'a> {
 
         let pid = std::process::id();
         let temp_o = std::env::temp_dir().join(format!("par_mod_{pid}_{}.o", key.hash_hex));
-        crate::codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+        crate::codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
             &ast,
             &import_lowering.module_artifacts,
             &temp_o,
@@ -960,6 +963,7 @@ impl<'a> ParallelGraphExecutor<'a> {
             Some(&src),
             self.loader.debug_info,
             self.loader.leak_check,
+            false,
         ).map_err(|e| {
             eprint!("\r\x1b[2K");
             if let Some(span) = e.span {

@@ -10,7 +10,7 @@ import std.test;
     Result<SocketAddr, AddrError> v6 = SocketAddr.v6("::1", (u16)443);
     assert_true(v6.success(), "valid IPv6 constructor");
 
-    Result<SocketAddr, AddrError> unix_addr = SocketAddr.unix("/tmp/silver.sock");
+    Result<SocketAddr, AddrError> unix_addr = SocketAddr.unix("silver.sock");
     assert_true(unix_addr.success(), "valid Unix constructor");
 
     Result<SocketAddr, AddrError> parsed_v4 = SocketAddr.parse("127.0.0.1:8080");

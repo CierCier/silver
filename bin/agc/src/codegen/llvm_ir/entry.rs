@@ -177,11 +177,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
+            abi_handler: abi::get_abi_handler(
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu"),
+            ),
             leak_check: false,
+            emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };
+        // Set the module's target triple and data layout from the effective
+        // target before generating IR: lower_abi_type and TargetData queries
+        // must observe the target's layout (Win64 i128 alignment etc.), and
+        // emit_asm_expression branches on the module triple.
+        Target::initialize_all(&InitializationConfig::default());
+        let host_triple = TargetMachine::get_default_triple();
+        generator.module.set_triple(&host_triple);
+        if let Ok(target) = Target::from_triple(&host_triple) {
+            if let Some(machine) = target.create_target_machine(
+                &host_triple,
+                "generic",
+                "",
+                generate::map_opt_level(None),
+                RelocMode::Default,
+                CodeModel::Default,
+            ) {
+                generator
+                    .module
+                    .set_data_layout(&machine.get_target_data().get_data_layout());
+            }
+        }
         generator.generate_program(program)?;
         generator.emit_backtrace_table();
         table.absorb_from(&generator.symbol_table);
@@ -219,6 +246,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            None,
         )
     }
     pub fn generate_with_imports_and_table_and_source_with_leak_check(
@@ -229,10 +257,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        target_triple: Option<&str>,
     ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        let effective_triple = target_triple
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu")
+                    .to_string()
+            });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => {
@@ -291,13 +329,41 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler("x86_64-unknown-linux-gnu"),
+            abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };
+        // Configure the module's target before declare_imported_modules: it
+        // performs TargetData queries for imported enums, which must observe
+        // the effective target's layout, not the module's unset default.
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = inkwell::targets::TargetTriple::create(&effective_triple);
+        generator.module.set_triple(&triple);
+        let target = Target::from_triple(&triple).map_err(|e| {
+            CodegenError::new(format!("failed to resolve LLVM target `{}`: {e}", triple))
+        })?;
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                generate::map_opt_level(None),
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| {
+                CodegenError::new(format!(
+                    "failed to create LLVM target machine for `{}`",
+                    triple
+                ))
+            })?;
+        generator
+            .module
+            .set_data_layout(&machine.get_target_data().get_data_layout());
         generator.declare_imported_modules(program, imported_modules)?;
         generator.generate_program(program)?;
         generator.emit_backtrace_table();
@@ -355,6 +421,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             false,
             false,
+            true,
         )
     }
 
@@ -402,6 +469,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         debug_info: bool,
         leak_check: bool,
     ) -> CodegenResult<()> {
+        Self::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            true,
+        )
+    }
+
+    /// `emit_bt_tables=false` is used by per-module unit builds: the
+    /// backtrace tables are process-global (only the entry-point object's
+    /// copy survives linkonce dedup on ELF), and COFF has no equivalent
+    /// dedup for their weak symbols, so unit objects must not define them.
+    pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        emit_bt_tables: bool,
+    ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
             imported_modules,
@@ -414,6 +513,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             leak_check,
+            emit_bt_tables,
         )
     }
 
@@ -467,6 +567,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None,
             false,
             false,
+            true,
         )
     }
 
@@ -526,6 +627,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             leak_check,
+            true,
         )
     }
 
@@ -556,6 +658,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            true,
         )
     }
 
@@ -575,10 +678,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        emit_bt_tables: bool,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
+        // One resolved triple drives both the ABI handler and the module
+        // triple: a windows triple must select Win64 struct passing, and the
+        // default must be the host triple (not a hardcoded Linux triple).
+        let effective_triple = target_triple
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu")
+                    .to_string()
+            });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(p), Some(text)) => {
@@ -631,19 +747,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
-            abi_handler: abi::get_abi_handler(target_triple.unwrap_or("x86_64-unknown-linux-gnu")),
+            abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
             leak_check,
+            emit_bt_tables,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
         };
-        generator.declare_imported_modules(program, imported_modules)?;
-
+        // Set the module's target triple and data layout BEFORE declaring
+        // imported modules: declare_imported_modules performs TargetData
+        // queries for imported enums and must observe the effective target's
+        // layout, not the module's unset default.
         Target::initialize_all(&InitializationConfig::default());
-        let triple = target_triple
-            .map(inkwell::targets::TargetTriple::create)
-            .unwrap_or_else(TargetMachine::get_default_triple);
+        let triple = inkwell::targets::TargetTriple::create(&effective_triple);
         generator.module.set_triple(&triple);
 
         let target = Target::from_triple(&triple).map_err(|e| {
@@ -667,6 +784,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+        generator.declare_imported_modules(program, imported_modules)?;
 
         if !debug_info {
             generator.emit_bt_debug_tables(&[]);

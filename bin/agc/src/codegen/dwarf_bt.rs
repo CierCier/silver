@@ -165,9 +165,11 @@ struct ElfSym {
     size: u64,
     is_func: bool,
     defined: bool,
+    /// COFF only: 1-based section number (0 = undefined).
+    section: i16,
 }
 
-struct ElfFile<'a> {
+struct ObjectFile<'a> {
     data: &'a [u8],
     sections: Vec<ElfSection>,
     symbols: Vec<ElfSym>,
@@ -175,7 +177,7 @@ struct ElfFile<'a> {
     relocations: HashMap<usize, u64>,
 }
 
-fn elf_parse(data: &[u8]) -> Option<ElfFile<'_>> {
+fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     if !data.starts_with(b"\x7fELF\x02\x01\x01") {
         return None;
     }
@@ -255,6 +257,7 @@ fn elf_parse(data: &[u8]) -> Option<ElfFile<'_>> {
                 size: st_size,
                 is_func: st_info & 0xf == 2,
                 defined: st_shndx != 0,
+                section: st_shndx as i16,
             });
         }
     }
@@ -285,7 +288,7 @@ fn elf_parse(data: &[u8]) -> Option<ElfFile<'_>> {
             }
         }
     }
-    Some(ElfFile {
+    Some(ObjectFile {
         data,
         sections,
         symbols,
@@ -293,7 +296,252 @@ fn elf_parse(data: &[u8]) -> Option<ElfFile<'_>> {
     })
 }
 
-fn elf_section<'a>(elf: &ElfFile<'a>, name: &str) -> Option<&'a [u8]> {
+
+// ---------------------------------------------------------------------------
+// COFF (x64) container — Windows objects. Mirrors the ObjectFile contract:
+// named sections, defined function symbols (section-relative values, sizes
+// from the function aux records), and a debug-section-relative relocation
+// map for ADDR64/ADDR32/SECREL against symbol values.
+// ---------------------------------------------------------------------------
+
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+const IMAGE_SYM_TYPE_FUNCTION: u16 = 0x20;
+const COFF_REL_ADDR64: u16 = 1;
+const COFF_REL_ADDR32: u16 = 2;
+const COFF_REL_SECREL: u16 = 11;
+
+fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
+    let mut r = Reader::new(data);
+    let machine = r.u16()?;
+    if machine != IMAGE_FILE_MACHINE_AMD64 {
+        return None;
+    }
+    let number_of_sections = r.u16()? as usize;
+    let _time_stamp = r.u32()?;
+    let sym_table_off = r.u32()? as usize;
+    let sym_count = r.u32()? as usize;
+    let _opt_size = r.u16()?;
+    let _characteristics = r.u16()?;
+    if number_of_sections > 96 || sym_table_off == 0 || sym_count == 0 {
+        return None;
+    }
+
+    // Section headers immediately follow the 20-byte file header. Long names
+    // (all .debug_* names exceed 8 bytes) are "/<offset>" into the string
+    // table, resolved after it is located.
+    struct Sec {
+        name: String,
+        raw_ptr: usize,
+        raw_size: usize,
+        reloc_ptr: usize,
+        reloc_count: usize,
+        long_name_off: Option<usize>,
+    }
+    let mut secs: Vec<Sec> = Vec::with_capacity(number_of_sections);
+    for i in 0..number_of_sections {
+        let mut sr = Reader::new(data.get(20 + i * 40..)?);
+        let mut name_bytes = [0u8; 8];
+        for b in name_bytes.iter_mut() {
+            *b = sr.u8()?;
+        }
+        let _virtual_size = sr.u32()?;
+        let _virtual_address = sr.u32()?;
+        let raw_size = sr.u32()? as usize;
+        let raw_ptr = sr.u32()? as usize;
+        let reloc_ptr = sr.u32()? as usize;
+        let _lineno_ptr = sr.u32()?;
+        let reloc_count = sr.u16()? as usize;
+        let _lineno_count = sr.u16()?;
+        let _characteristics = sr.u32()?;
+
+        let (name, long_name_off) = if name_bytes[0] == b'/' {
+            let digits = &name_bytes[1..];
+            let end = digits.iter().position(|&c| c == 0).unwrap_or(digits.len());
+            let off: usize = std::str::from_utf8(&digits[..end]).ok()?.parse().ok()?;
+            (String::new(), Some(off))
+        } else {
+            let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(8);
+            (String::from_utf8_lossy(&name_bytes[..end]).into_owned(), None)
+        };
+        secs.push(Sec {
+            name,
+            raw_ptr,
+            raw_size,
+            reloc_ptr,
+            reloc_count,
+            long_name_off,
+        });
+    }
+
+    // String table sits immediately after the symbol table; its first four
+    // bytes hold the total size (including the size field itself).
+    let strtab_off = sym_table_off + sym_count * 18;
+    let strtab_size = Reader::new(data.get(strtab_off..)?).u32()? as usize;
+    let strtab = data.get(strtab_off..strtab_off + strtab_size)?;
+
+    for sec in &mut secs {
+        if let Some(off) = sec.long_name_off {
+            let mut sr = Reader::new(strtab.get(off..)?);
+            sec.name = sr.cstr().unwrap_or_default();
+        }
+    }
+
+    // Symbol table: 18-byte records; aux records occupy entries too, so the
+    // Vec stays index-aligned with COFF symbol indices.
+    let mut symbols: Vec<ElfSym> = Vec::with_capacity(sym_count);
+    let mut i = 0usize;
+    while i < sym_count {
+        let rec = data.get(sym_table_off + i * 18..sym_table_off + (i + 1) * 18)?;
+        let mut sr = Reader::new(rec);
+        let mut name_bytes = [0u8; 8];
+        for b in name_bytes.iter_mut() {
+            *b = sr.u8()?;
+        }
+        let value = sr.u32()? as u64;
+        let section_number = sr.u16()? as i16;
+        let sym_type = sr.u16()?;
+        let _storage_class = sr.u8()?;
+        let aux_count = sr.u8()? as usize;
+
+        let name = if name_bytes[0] == b'/' {
+            let digits = &name_bytes[1..];
+            let end = digits.iter().position(|&c| c == 0).unwrap_or(digits.len());
+            match std::str::from_utf8(&digits[..end]).ok().and_then(|s| s.parse::<usize>().ok()) {
+                Some(off) => {
+                    let mut nsr = Reader::new(strtab.get(off..)?);
+                    nsr.cstr().unwrap_or_default()
+                }
+                None => String::new(),
+            }
+        } else if name_bytes[0..4] == [0, 0, 0, 0] {
+            // Modern long-name format: four zero bytes, then a u32 LE
+            // string-table offset. Names longer than eight bytes (all mangled
+            // functions) use it; decoding them as empty would merge distinct
+            // backtrace entries under one name.
+            let off = u32::from_le_bytes([name_bytes[4], name_bytes[5], name_bytes[6], name_bytes[7]])
+                as usize;
+            let mut nsr = Reader::new(strtab.get(off..)?);
+            nsr.cstr().unwrap_or_default()
+        } else {
+            let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(8);
+            String::from_utf8_lossy(&name_bytes[..end]).into_owned()
+        };
+
+        // Function size comes from the function aux record's TotalSize field.
+        let mut size = 0u64;
+        if aux_count > 0 {
+            if let Some(aux) = data.get(sym_table_off + (i + 1) * 18..sym_table_off + (i + 2) * 18) {
+                let mut ar = Reader::new(aux);
+                ar.u32(); // tag index
+                size = ar.u32().unwrap_or(0) as u64; // total size
+            }
+        }
+
+        symbols.push(ElfSym {
+            name,
+            value,
+            size,
+            is_func: (sym_type & IMAGE_SYM_TYPE_FUNCTION) != 0,
+            defined: section_number > 0,
+            section: section_number,
+        });
+        for _ in 0..aux_count {
+            symbols.push(ElfSym {
+                name: String::new(),
+                value: 0,
+                size: 0,
+                is_func: false,
+                defined: false,
+                section: 0,
+            });
+        }
+        i += 1 + aux_count;
+    }
+
+    // COFF function symbols carry no size (LLVM emits no aux records), so
+    // derive each function's extent from the next function symbol in the
+    // same section — push_entry bounds line entries by [start, start+size).
+    {
+        let text_sections: Vec<usize> = secs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.name == ".text")
+            .map(|(i, _)| i)
+            .collect();
+        let _ = &text_sections;
+        let mut per_section: HashMap<i16, Vec<usize>> = HashMap::default();
+        for (idx, sym) in symbols.iter().enumerate() {
+            if sym.is_func && sym.defined {
+                per_section.entry(sym.section).or_default().push(idx);
+            }
+        }
+        let mut ordered: Vec<(usize, u64, u64)> = Vec::new(); // (sym idx, value, section end)
+        for (sec_no, mut idxs) in per_section {
+            let Some(sec_idx) = (sec_no as usize).checked_sub(1) else { continue };
+            let Some(sec) = secs.get(sec_idx) else { continue };
+            idxs.sort_by_key(|&i| symbols[i].value);
+            for w in 0..idxs.len() {
+                let next = if w + 1 < idxs.len() {
+                    symbols[idxs[w + 1]].value
+                } else {
+                    sec.raw_size as u64
+                };
+                ordered.push((idxs[w], symbols[idxs[w]].value, next));
+            }
+        }
+        for (idx, _val, end) in ordered {
+            if end > symbols[idx].value {
+                symbols[idx].size = end - symbols[idx].value;
+            }
+        }
+    }
+
+    // Relocations: per-section records (VirtualAddress u32, SymbolTableIndex
+    // u32, Type u16), applied in place — debug info expects the symbol's
+    // section-relative value, matching the ELF object semantics.
+    let mut relocations = HashMap::default();
+    for sec in &secs {
+        for j in 0..sec.reloc_count {
+            let Some(ent) = data.get(sec.reloc_ptr + j * 10..sec.reloc_ptr + j * 10 + 10) else {
+                continue;
+            };
+            let mut rr = Reader::new(ent);
+            let vaddr = rr.u32()? as usize;
+            let sym_idx = rr.u32()? as usize;
+            let rel_type = rr.u16()?;
+            if rel_type == COFF_REL_ADDR64 || rel_type == COFF_REL_ADDR32 || rel_type == COFF_REL_SECREL {
+                let val = symbols.get(sym_idx).map(|s| s.value).unwrap_or(0);
+                relocations.insert(sec.raw_ptr + vaddr, val);
+            }
+        }
+    }
+
+    Some(ObjectFile {
+        data,
+        sections: secs
+            .into_iter()
+            .map(|s| ElfSection {
+                name: s.name,
+                name_off: 0,
+                offset: s.raw_ptr,
+                size: s.raw_size,
+                link: 0,
+                info: 0,
+                entsize: 0,
+                ty: 0,
+            })
+            .collect(),
+        symbols,
+        relocations,
+    })
+}
+
+/// Parse either container: ELF (Linux) or COFF (Windows).
+fn object_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
+    elf_parse(data).or_else(|| coff_parse(data))
+}
+
+fn elf_section<'a>(elf: &ObjectFile<'a>, name: &str) -> Option<&'a [u8]> {
     for sec in &elf.sections {
         if sec.name == name {
             return elf.data.get(sec.offset..sec.offset + sec.size);
@@ -312,7 +560,7 @@ fn basename(path: &str) -> String {
 
 /// Returns the set of defined function symbol names with code in the object.
 pub fn parse_defined_function_symbols(obj: &[u8]) -> HashSet<String> {
-    let Some(elf) = elf_parse(obj) else {
+    let Some(elf) = object_parse(obj) else {
         return HashSet::default();
     };
     elf.symbols
@@ -324,7 +572,7 @@ pub fn parse_defined_function_symbols(obj: &[u8]) -> HashSet<String> {
 
 /// Parse all line tables; returns per-function line entries.
 pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
-    let Some(elf) = elf_parse(obj) else {
+    let Some(elf) = object_parse(obj) else {
         return Vec::new();
     };
     let Some(line_data) = elf_section(&elf, ".debug_line") else {
@@ -616,7 +864,7 @@ pub fn parse_object_params(
     obj: &[u8],
     targets: &HashSet<String>,
 ) -> Vec<(String, Vec<(String, BtParamLoc)>)> {
-    let Some(elf) = elf_parse(obj) else {
+    let Some(elf) = object_parse(obj) else {
         return Vec::new();
     };
     let Some(info) = elf_section(&elf, ".debug_info") else {
@@ -762,7 +1010,7 @@ fn read_str(
     strs: &[u8],
     cu_pos: usize,
     info_sec_off: usize,
-    elf: &ElfFile,
+    elf: &ObjectFile,
 ) -> Option<String> {
     match form {
         DW_FORM_STRING => r.cstr(),
@@ -867,6 +1115,49 @@ fn skip_form(r: &mut Reader, form: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn probe_param_locations_windows() {
+        // Resolve the just-built compiler the same way
+        // parses_line_table_from_real_object does, and skip when it is not
+        // present (the probe is a diagnostic aid, not a correctness gate).
+        let target = std::env::var("CARGO_TARGET_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let exe_suffix = std::env::consts::EXE_SUFFIX;
+        let agc_path = format!("{target}/{profile}/agc{exe_suffix}");
+        if !Path::new(&agc_path).is_file() {
+            eprintln!("skipped: compiler binary not found at {agc_path}");
+            return;
+        }
+        let dir = std::env::temp_dir();
+        let src = dir.join("dwarf_bt_probe.ag");
+        std::fs::write(
+            &src,
+            "import std.io;
+             i64 f3(i64 x) { return x * 2; }
+             i64 f2(i64 x) { return f3(x + 1); }
+             i32 main() { i64 r = f2(41); @println(\"{}\", r); return 0; }
+",
+        )
+        .unwrap();
+        let out = dir.join("dwarf_bt_probe.obj");
+        let status = std::process::Command::new(&agc_path)
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .args(["-c", "-g", src.to_str().unwrap(), "-o", out.to_str().unwrap()])
+            .status()
+            .expect("run agc");
+        assert!(status.success());
+        let obj = std::fs::read(&out).unwrap();
+        let targets: HashSet<String> = ["f2", "f3"].iter().map(|s| s.to_string()).collect();
+        let params = parse_object_params(&obj, &targets);
+        for (name, ps) in &params {
+            for (pname, loc) in ps {
+                println!("PARAM {} {} {:?}", name, pname, loc);
+            }
+        }
+    }
 
     #[test]
     fn parses_line_table_from_real_object() {
@@ -877,7 +1168,7 @@ mod tests {
             "import std.io;\n\
              i64 f3(i64 x) { return x * 2; }\n\
              i64 f2(i64 x) { return f3(x + 1); }\n\
-             void main() { i64 r = f2(41); @println(\"{}\", r); }\n",
+             i32 main() { i64 r = f2(41); @println(\"{}\", r); return 0; }\n",
         )
         .unwrap();
         let out = dir.join("dwarf_bt_probe.o");
@@ -889,7 +1180,8 @@ mod tests {
             // rebuilds target/debug/agc, so a stale cached debug binary would
             // compile the probe against a drifted frontend.
             let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-            format!("{target}/{profile}/agc")
+            let exe_suffix = std::env::consts::EXE_SUFFIX;
+            format!("{target}/{profile}/agc{exe_suffix}")
         });
         let status = std::process::Command::new(&agc)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))

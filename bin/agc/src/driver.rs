@@ -468,12 +468,19 @@ fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
     Ok(derived.unwrap_or(EmitKind::Exe))
 }
 
-fn default_output_for(emit: EmitKind, inputs: &[PathBuf]) -> PathBuf {
+fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) -> PathBuf {
+    let windows = crate::codegen::abi::target_is_windows(target);
     match emit {
-        EmitKind::Exe => PathBuf::from("a.out"),
+        EmitKind::Exe => {
+            if windows {
+                PathBuf::from("a.exe")
+            } else {
+                PathBuf::from("a.out")
+            }
+        }
         EmitKind::Check => PathBuf::from(""),
-        EmitKind::Obj => with_ext_or_default(inputs, "o"),
-        EmitKind::Asm => with_ext_or_default(inputs, "s"),
+        EmitKind::Obj => with_ext_or_default(inputs, if windows { "obj" } else { "o" }),
+        EmitKind::Asm => with_ext_or_default(inputs, if windows { "asm" } else { "s" }),
         EmitKind::LlvmIr => with_ext_or_default(inputs, "ll"),
         EmitKind::Tokens => with_ext_or_default(inputs, "tokens"),
         EmitKind::Ast => with_ext_or_default(inputs, "ast"),
@@ -667,7 +674,16 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        env::temp_dir().join(format!("agc_run_{}_{}", std::process::id(), timestamp))
+        let mut bin = env::temp_dir().join(format!(
+            "agc_run_{}_{}",
+            std::process::id(),
+            timestamp
+        ));
+        // CreateProcess only finds the image when the path ends in .exe
+        if crate::codegen::abi::target_is_windows(cli.target.as_deref()) {
+            bin.set_extension("exe");
+        }
+        bin
     } else if auto_output
         && emit == EmitKind::Module
         && package_target_kind == Some(package::TargetKind::Lib)
@@ -678,7 +694,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         ))
     } else {
         cli.output
-            .unwrap_or_else(|| default_output_for(emit, &inputs))
+            .unwrap_or_else(|| default_output_for(emit, &inputs, cli.target.as_deref()))
     };
 
     Ok(CompilePlan {
@@ -824,8 +840,19 @@ fn module_path_from_source_path(plan: &CompilePlan, input: &Path) -> String {
         .join(".")
 }
 
-fn module_binary_output_path(manifest_path: &Path, shared: bool) -> PathBuf {
-    manifest_path.with_extension(if shared { "so" } else { "o" })
+fn module_binary_output_path(manifest_path: &Path, shared: bool, target: Option<&str>) -> PathBuf {
+    let ext = if shared {
+        if crate::codegen::abi::target_is_windows(target) {
+            "dll"
+        } else {
+            "so"
+        }
+    } else if crate::codegen::abi::target_is_windows(target) {
+        "obj"
+    } else {
+        "o"
+    };
+    manifest_path.with_extension(ext)
 }
 
 fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> Option<String> {
@@ -1339,9 +1366,10 @@ pub fn run(cli: Cli) {
                             diagnostics::render(span, &error.message, diagnostics::Severity::Error,)
                         );
                     }
-                    if ast.items.is_empty() {
-                        std::process::exit(2);
-                    }
+                    // A truncated AST must never reach codegen: the missing
+                    // functions surface later as baffling link errors (e.g.
+                    // `undefined symbol: main`) far from the real cause.
+                    std::process::exit(2);
                 }
 
                 let pre_lowering_link_libs = match collect_program_link_libraries(&ast) {
@@ -1800,10 +1828,11 @@ pub fn run(cli: Cli) {
                         );
                         std::process::exit(2);
                     }
-                    let binary_output = module_binary_output_path(&plan.output, plan.shared);
+                    let binary_output =
+                        module_binary_output_path(&plan.output, plan.shared, plan.target.as_deref());
                     if plan.shared {
                         let temp_object = plan.output.with_extension("module.tmp.o");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &temp_object,
@@ -1814,6 +1843,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                true,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1842,7 +1872,7 @@ pub fn run(cli: Cli) {
                         }
                         let _ = std::fs::remove_file(&temp_object);
                     } else {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &binary_output,
@@ -1853,6 +1883,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                false,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2001,6 +2032,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                plan.target.as_deref(),
                             );
                         profiler::end_phase("codegen");
                         match output {
@@ -2434,7 +2466,11 @@ fn execute_test(
     index: usize,
 ) -> TestExecutionResult {
     let start = std::time::Instant::now();
-    let temp_bin = temp_dir.join(format!("test_bin_{index}"));
+    let mut temp_bin = temp_dir.join(format!("test_bin_{index}"));
+    // CreateProcess only resolves extensionless images by appending .exe
+    if cfg!(target_os = "windows") {
+        temp_bin.set_extension("exe");
+    }
     let content = std::fs::read_to_string(&target.path).unwrap_or_default();
     let expected_code = expected_exit_code(&target.path, &content);
     let extra_flags = test_specific_flags(&target.path, &content);

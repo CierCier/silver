@@ -94,6 +94,54 @@ i128 __modti3(i128 a, i128 b) {
 }
 
 // ---------------------------------------------------------------------------
+// 128-bit multiply: LLVM lowers `mul i128` to __multi3. 32-bit schoolbook so
+// every partial product fits in a u64 (a 128-bit multiply here would recurse
+// into this very function).
+// ---------------------------------------------------------------------------
+u128 __multi3(i128 a, i128 b) {
+    u32 a0 = (u32)(u64)(u128)a;
+    u32 a1 = (u32)((u64)((u128)a >> (u128)32));
+    u32 a2 = (u32)((u64)((u128)a >> (u128)64));
+    u32 a3 = (u32)((u64)((u128)a >> (u128)96));
+    u32 b0 = (u32)(u64)(u128)b;
+    u32 b1 = (u32)((u64)((u128)b >> (u128)32));
+    u32 b2 = (u32)((u64)((u128)b >> (u128)64));
+    u32 b3 = (u32)((u64)((u128)b >> (u128)96));
+    u32 r0 = (u32)0;
+    u32 r1 = (u32)0;
+    u32 r2 = (u32)0;
+    u32 r3 = (u32)0;
+    u64 acc = 0;
+    // limb k = 0
+    acc = (u64)a0 * (u64)b0 + (u64)r0;
+    r0 = (u32)acc;
+    acc = (acc >> 32) + (u64)a1 * (u64)b0 + (u64)r1;
+    r1 = (u32)acc;
+    acc = (acc >> 32) + (u64)a2 * (u64)b0 + (u64)r2;
+    r2 = (u32)acc;
+    acc = (acc >> 32) + (u64)a3 * (u64)b0 + (u64)r3;
+    r3 = (u32)acc;
+    // limb k = 1
+    acc = (u64)a0 * (u64)b1 + (u64)r1;
+    r1 = (u32)acc;
+    acc = (acc >> 32) + (u64)a1 * (u64)b1 + (u64)r2;
+    r2 = (u32)acc;
+    acc = (acc >> 32) + (u64)a2 * (u64)b1 + (u64)r3;
+    r3 = (u32)acc;
+    // limb k = 2
+    acc = (u64)a0 * (u64)b2 + (u64)r2;
+    r2 = (u32)acc;
+    acc = (acc >> 32) + (u64)a1 * (u64)b2 + (u64)r3;
+    r3 = (u32)acc;
+    // limb k = 3
+    acc = (u64)a0 * (u64)b3 + (u64)r3;
+    r3 = (u32)acc;
+    u128 lo = (u128)(u64)((u128)(u64)r1 << (u128)32) | (u128)(u64)r0;
+    u128 hi = (u128)(u64)((u128)(u64)r3 << (u128)32) | (u128)(u64)r2;
+    return (hi << (u128)64) | lo;
+}
+
+// ---------------------------------------------------------------------------
 // f64 <-> i128 conversions. Convert through the u64 hi/lo split so the body
 // never contains an f64 <-> i128 cast (which would recurse into this file).
 // Out-of-range f64 inputs saturate; the compiler-rt contract leaves them UB.
@@ -147,4 +195,38 @@ f64 __floattidf(i128 a) {
         result = -result;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Unsigned f64 <-> u128 conversions. Same 64-bit hi/lo discipline as the
+// signed variants above: no f64 <-> 128-bit cast appears in these bodies.
+// ---------------------------------------------------------------------------
+
+f64 __floatuntidf(u128 a) {
+    u64 hi = (u64)(a >> (u128)64);
+    u64 lo = (u64)a;
+    f64 result = (f64)hi * 18446744073709551616.0;
+    return result + (f64)lo;
+}
+
+u128 __fixunsdfti(f64 d) {
+    if (d < 1.0) {
+        return (u128)0;
+    }
+    u64 hi = (u64)0;
+    u64 lo = (u64)0;
+    if (d >= 340282366920938463463374607431768211456.0) { // 2^128: saturate
+        hi = (u64)18446744073709551615;
+        lo = (u64)18446744073709551615;
+        return ((u128)hi << (u128)64) | (u128)lo;
+    }
+    if (d >= 18446744073709551616.0) { // 2^64
+        f64 scaled = d / 18446744073709551616.0;
+        hi = (u64)scaled;
+        f64 frac = scaled - (f64)hi;
+        lo = (u64)(frac * 18446744073709551616.0);
+    } else {
+        lo = (u64)d;
+    }
+    return ((u128)hi << (u128)64) | (u128)lo;
 }

@@ -9,8 +9,11 @@ import std.sys.raw.fs;
 import std.sys.raw.poll;
 import std.sys.result;
 
+#[cfg(os.linux)]
 const i64 EFD_SEMAPHORE = 1;
+#[cfg(os.linux)]
 const i64 EFD_CLOEXEC   = 524288; // 0o2000000
+#[cfg(os.linux)]
 const i64 EFD_NONBLOCK  = 2048;   // 0o4000
 
 /// Create an eventfd with initial counter value and flags.
@@ -18,12 +21,14 @@ Result<i64, Error> try_eventfd(u32 initval, i64 flags) {
     return Result<i64, Error>.from_raw(sys_eventfd2((i64)initval, flags));
 }
 
+#[cfg(os.linux)]
 /// RAII eventfd wrapper.
 struct EventFd {
     i32 fd;
     bool is_open;
 }
 
+#[cfg(os.linux)]
 impl EventFd {
     /// Create an eventfd with optional non-blocking mode.
     Result<EventFd, Error> new(u32 initval, bool nonblock) {
@@ -68,6 +73,7 @@ impl EventFd {
     }
 }
 
+#[cfg(os.linux)]
 impl Drop for EventFd {
     void drop(*self) {
         self.close();

@@ -12,7 +12,7 @@
 // Imported transitively by std.sys.entry and directly by std.thread.
 import std.mem.alloc;
 import std.atomic;
-import std.sys.raw.sync;
+import std.sys.os;
 
 // Maximum concurrently live threads (slots are reclaimed by thread_join).
 const i64 MAX_THREADS = 64;
@@ -105,6 +105,9 @@ i64 thread_join(TaskRecord* rec) {
     thread_lock_acquire();
     rec.tid = 0;
     thread_lock_release();
+    // The child has exited (done flag set): release its OS resources. On
+    // Windows tid is the CreateThread handle and must be closed.
+    thread_reclaim(tid);
     return tid;
 }
 
@@ -131,6 +134,7 @@ u8* __silver_wait_done(i64 rec) {
     }
     thread_lock_acquire();
     u8* pack = (u8*)r.pack;
+    i64 tid = r.tid;
     r.tid = 0;
     r.fn = 0;
     r.arg = 0;
@@ -138,6 +142,9 @@ u8* __silver_wait_done(i64 rec) {
     r.done = 0;
     r.pack = 0;
     thread_lock_release();
+    // The child has exited: release its OS resources (Windows CreateThread
+    // handle). Returned packs are task results, not thread handles.
+    thread_reclaim(tid);
     return pack;
 }
 
