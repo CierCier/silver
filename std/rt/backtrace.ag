@@ -340,58 +340,36 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
     }
 }
 
-/// Print a named stack trace to stderr (fd 2): walk the rbp chain from the
-/// caller's frame, resolving each return address against the symbol table.
+/// Print a named stack trace to stderr: on Linux the SysV `[rbp]` chain is
+/// walked directly; on Windows the frame pointers are REBASED by LLVM
+/// (`push rbp; push rsi; ...; mov rbp, rsp; sub N; lea rbp=rsp+K`), so the
+/// OS unwinder (RtlVirtualUnwind) provides each frame instead — including
+/// the established frame pointer the args table needs.
 /// `skip` frames are omitted from the top (the walker's own frame and the
 /// abort/assert frame that invoked it).
+#[cfg(os.linux)]
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
-    bt_write_cstr(fd, (u8*)"backtrace:\n");
+    bt_write_cstr(fd, (u8*)"backtrace:
+");
     i64 rbp = bt_read_rbp();
     i64 frame = 0;
     i64 printed = 0;
     while (rbp != 0 && printed < 24) {
+        // SysV prologue is exactly `push rbp; mov rbp, rsp`: the saved rbp
+        // is at [rbp] and the return address at [rbp+8]. A return address
+        // that resolves to no Silver function is the boundary to foreign
+        // (native/FFI) code — stop there rather than trust an incompatible
+        // foreign frame layout.
+        i64* saved_ptr = (i64*)rbp;
+        i64 s = *saved_ptr;
+        i64* ret_ptr = (i64*)(rbp + 8);
+        i64 r = *ret_ptr;
         i64 callee_rbp = 0;
         i64 ret_addr = 0;
-        if (@cfg(os.linux)) {
-            // SysV prologue is exactly `push rbp; mov rbp, rsp`: the saved
-            // rbp is at [rbp] and the return address at [rbp+8], and the
-            // chain terminates at the entry (which zeroes rbp). A return
-            // address that resolves to no Silver function is the boundary
-            // to foreign (native/FFI) code — stop there rather than trust
-            // an incompatible foreign frame layout.
-            i64* saved_ptr = (i64*)rbp;
-            i64 s = *saved_ptr;
-            i64* ret_ptr = (i64*)(rbp + 8);
-            i64 r = *ret_ptr;
-            if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
-                callee_rbp = s;
-                ret_addr = r;
-            }
-        } else {
-            // Win64 frame pointers are REBASED: LLVM emits `push rbp; push
-            // <callee-saves>; mov rbp, rsp`, so the delta from rbp to the
-            // saved-rbp slot is 8x the number of callee-saved pushes after
-            // rbp and varies per function. Scan candidate deltas and accept
-            // the first whose (saved, ret) pair is monotonic and whose
-            // return address resolves to Silver code (foreign frames end
-            // the walk). WIP: abort-path deltas exceed this scan range —
-            // the planned replacement is RtlCaptureStackBackTrace for exact
-            // return addresses + per-frame delta search validated against
-            // the captured address.
-            i64 delta = 0;
-            while (delta <= 40) {
-                i64* saved_ptr = (i64*)(rbp + delta);
-                i64* ret_ptr = (i64*)(rbp + delta + 8);
-                i64 s = *saved_ptr;
-                i64 r = *ret_ptr;
-                if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
-                    callee_rbp = s;
-                    ret_addr = r;
-                    break;
-                }
-                delta += 8;
-            }
+        if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
+            callee_rbp = s;
+            ret_addr = r;
         }
         if (callee_rbp == 0) {
             break;  // no Silver caller found: end of the managed chain
@@ -404,7 +382,6 @@ void silver_print_backtrace(i64 skip) {
                 bt_write_cstr(fd, (u8*)"  ");
                 BtEntry e = __silver_bt_entries[idx];
                 bt_write_cstr(fd, e.name);
-                // Exact call-site line when the DWARF-derived table exists.
                 u8* line_file = (u8*)0;
                 i64 line_num = 0;
                 bt_line_lookup(e.addr, ret_addr, &line_file, &line_num);
@@ -421,19 +398,137 @@ void silver_print_backtrace(i64 skip) {
                 }
                 bt_write_cstr(fd, (u8*)" (");
                 bt_write_hex(fd, ret_addr);
-                bt_write_cstr(fd, (u8*)")\n");
+                bt_write_cstr(fd, (u8*)")
+");
                 bt_print_args(fd, callee_rbp, e.addr);
             } else {
                 bt_write_cstr(fd, (u8*)"  <unknown> (");
                 bt_write_hex(fd, ret_addr);
-                bt_write_cstr(fd, (u8*)")\n");
+                bt_write_cstr(fd, (u8*)")
+");
             }
             printed = printed + 1;
         }
         if (callee_rbp <= rbp) {
-            break;  // corrupt chain — stop
+            break;
         }
         rbp = callee_rbp;
         frame = frame + 1;
     }
 }
+
+// x64 CONTEXT offsets (byte) used by the Windows walker.
+// Rsp = 0x98, Rbp = 0xa0, Rip = 0xf8; sizeof(CONTEXT) = 0x4d0 (1232).
+const i64 CTX_RSP = 0x98;
+const i64 CTX_RIP = 0xf8;
+const i64 CTX_SIZE = 0x4d0;
+
+#[cfg(os.windows)]
+extern "C" {
+    #[link_name("RtlCaptureContext")]
+    void win_RtlCaptureContext(void* ctx);
+    #[link_name("RtlLookupFunctionEntry")]
+    void* win_RtlLookupFunctionEntry(u64 control_pc, u64* image_base, void* history_table);
+    #[link_name("RtlVirtualUnwind")]
+    void win_RtlVirtualUnwind(u32 handler_type, u64 image_base, u64 control_pc, void* fn_entry, void* ctx, void** handler_data, u64* establisher_frame, void* context_pointers);
+}
+
+#[cfg(os.windows)]
+i64 ctx_get_rip(u8* ctx) {
+    i64* q = (i64*)ctx;
+    return q[CTX_RIP / 8];
+}
+
+#[cfg(os.windows)]
+void silver_print_backtrace(i64 skip) {
+    i64 fd = 2;
+    bt_write_cstr(fd, (u8*)"backtrace:
+");
+    // CONTEXT (1232 bytes) must be 16-byte aligned; over-allocate and mask.
+    u8 ctxbuf[1248];
+    i64 ctx_addr = (((i64)&ctxbuf[0]) + 15) & -16;
+    u8* ctx = (u8*)ctx_addr;
+    i64 zi = 0;
+    while (zi < CTX_SIZE) {
+        ctx[zi] = 0;
+        zi += 1;
+    }
+    win_RtlCaptureContext(ctx);
+
+    i64 frame = 0;
+    i64 printed = 0;
+    i64 rip = ctx_get_rip(ctx);
+    while (rip != 0 && printed < 24) {
+        // Resolve this frame's function and unwind it: RtlVirtualUnwind
+        // updates the context in place to the caller and reports the
+        // unwind function's established frame pointer, which — with
+        // frame-pointer=all — is exactly the rebased rbp the args table's
+        // fbreg offsets are relative to.
+        u64 imgbase = 0;
+        void* fn_entry = win_RtlLookupFunctionEntry((u64)rip, &imgbase, (void*)0);
+        i64 establisher = 0;
+        if (fn_entry == (void*)0) {
+            // Leaf frame without unwind info: the return address is at
+            // [rsp]; nothing else is recoverable.
+            i64* rsp_q = (i64*)(ctx + CTX_RSP);
+            rip = *rsp_q;
+            if (rip == 0) {
+                break;
+            }
+            frame = frame + 1;
+            continue;
+        }
+        void* handler_data = (void*)0;
+        u64 establisher_frame = 0;
+        win_RtlVirtualUnwind(0, imgbase, (u64)rip, fn_entry, ctx, &handler_data, &establisher_frame, (void*)0);
+        // The Windows DWARF emits fbreg relative to the CFA, which equals
+        // the caller's rsp restored by the unwind (post-unwind Rsp).
+        i64* rsp_q = (i64*)ctx;
+        establisher = rsp_q[CTX_RSP / 8];
+
+        if (frame >= skip) {
+            i64 idx = bt_resolve(rip);
+            bt_write_cstr(fd, (u8*)"  #");
+            bt_write_dec(fd, printed);
+            if (idx >= 0) {
+                bt_write_cstr(fd, (u8*)"  ");
+                BtEntry e = __silver_bt_entries[idx];
+                bt_write_cstr(fd, e.name);
+                u8* line_file = (u8*)0;
+                i64 line_num = 0;
+                bt_line_lookup(e.addr, rip, &line_file, &line_num);
+                if (line_num > 0 && line_file != (u8*)0) {
+                    bt_write_cstr(fd, (u8*)" at ");
+                    bt_write_cstr(fd, line_file);
+                    bt_write_cstr(fd, (u8*)":");
+                    bt_write_dec(fd, line_num);
+                } else {
+                    bt_write_cstr(fd, (u8*)" at ");
+                    bt_write_cstr(fd, e.file);
+                    bt_write_cstr(fd, (u8*)":");
+                    bt_write_dec(fd, e.line);
+                }
+                bt_write_cstr(fd, (u8*)" (");
+                bt_write_hex(fd, rip);
+                bt_write_cstr(fd, (u8*)")
+");
+                bt_print_args(fd, establisher, e.addr);
+            } else {
+                bt_write_cstr(fd, (u8*)"  <unknown> (");
+                bt_write_hex(fd, rip);
+                bt_write_cstr(fd, (u8*)")
+");
+            }
+            printed = printed + 1;
+        }
+        // The context now describes the caller; its Rip is the next
+        // frame's return address. The chain ends when the unwinder reports
+        // zero (no more unwind info) or the entry frame.
+        rip = ctx_get_rip(ctx);
+        if (rip == 0) {
+            break;
+        }
+        frame = frame + 1;
+    }
+}
+

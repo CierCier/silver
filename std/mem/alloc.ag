@@ -257,6 +257,12 @@ void mem_free_raw_impl(u8* ptr) {
 
 extern "C" { bool __silver_leak_check_enabled; }
 
+#[cfg(os.windows)]
+extern "C" {
+    #[link_name("RtlCaptureStackBackTrace")]
+    i32 win_RtlCaptureStackBackTrace(u32 skip_frames, u32 count, void** backtrace, u32* hash);
+}
+
 const i64 LEAK_MAX_RECORDS = 65536;
 const i64 LEAK_CANARY_LIVE = 0x4C4956454C495645;  // "LIVELIVE"
 const i64 LEAK_CANARY_DEAD = 0x4445414444454144;  // "DEADDEAD"
@@ -436,31 +442,63 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
     __leak_states[slot] = (u8)1;
 
     i64 alloc_caller = 0;
-    i64 cur_rbp = bt_read_rbp();
-    i64 depth = 0;
-    while (cur_rbp > 65536 && depth < 8) {
-        i64* p_rbp = (i64*)cur_rbp;
-        i64 next_rbp = *p_rbp;
-        if (next_rbp <= cur_rbp || next_rbp < 65536) {
-            break;
-        }
-        i64* p_ret = (i64*)(cur_rbp + 8);
-        i64 ret_addr = *p_ret;
-        if (ret_addr > 65536) {
-            alloc_caller = ret_addr;
-            i64 idx = bt_resolve(ret_addr);
-            if (idx >= 0) {
-                BtEntry e = __silver_bt_entries[idx];
-                if (e.file != (u8*)0
-                    && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
-                    && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
-                    && strcmp((const char*)e.name, (const char*)"__silver_leak_alloc") != 0) {
-                    break;
+    // Win64 frame pointers are REBASED (push rbp; push <callee-saves>;
+    // mov rbp, rsp; sub N; lea rbp=rsp+K), so [rbp] is a spilled local and
+    // the SysV [rbp]/[rbp+8] walk dereferences garbage -> access violation.
+    // On Windows, attribute the caller via the OS unwinder instead:
+    // RtlCaptureStackBackTrace skips this allocator's own frames, and the
+    // first captured address that resolves outside mem/alloc internals is
+    // the caller's return address. Origin reporting stays exact; the rbp
+    // chain is simply not consulted.
+    if (@cfg(os.windows)) {
+        void* addrs[8];
+        i32 n = win_RtlCaptureStackBackTrace(0, 8, &addrs[0], (u32*)0);
+        i32 ai = 0;
+        while (ai < n) {
+            i64 ret_addr = (i64)addrs[ai];
+            if (ret_addr > 65536) {
+                i64 idx = bt_resolve(ret_addr);
+                if (idx >= 0) {
+                    BtEntry e = __silver_bt_entries[idx];
+                    if (e.file != (u8*)0
+                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
+                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
+                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        alloc_caller = ret_addr;
+                        break;
+                    }
                 }
             }
+            ai += 1;
         }
-        cur_rbp = next_rbp;
-        depth = depth + 1;
+    }
+    if (@cfg(os.linux)) {
+        i64 cur_rbp = bt_read_rbp();
+        i64 depth = 0;
+        while (cur_rbp > 65536 && depth < 8) {
+            i64* p_rbp = (i64*)cur_rbp;
+            i64 next_rbp = *p_rbp;
+            if (next_rbp <= cur_rbp || next_rbp < 65536) {
+                break;
+            }
+            i64* p_ret = (i64*)(cur_rbp + 8);
+            i64 ret_addr = *p_ret;
+            if (ret_addr > 65536) {
+                alloc_caller = ret_addr;
+                i64 idx = bt_resolve(ret_addr);
+                if (idx >= 0) {
+                    BtEntry e = __silver_bt_entries[idx];
+                    if (e.file != (u8*)0
+                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
+                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
+                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        break;
+                    }
+                }
+            }
+            cur_rbp = next_rbp;
+            depth = depth + 1;
+        }
     }
     __leak_callers[slot] = alloc_caller;
     return (u8*)user;
