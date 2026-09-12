@@ -229,8 +229,11 @@ void bt_ensure_sorted() {
     bt_lock_release();
 }
 
-/// Resolve a return address to the entry with the largest addr <= it
-/// (the function containing the address). Returns -1 when unresolved.
+/// Resolve a return address to the entry whose extent contains it. The
+/// binary search finds the largest addr <= ret_addr; the extent is bounded
+/// by the next entry's start (the last entry by a 1MB cap — no real Silver
+/// function approaches that, while far-larger candidates are stack or heap
+/// addresses, not text). Returns -1 when the address is not Silver code.
 i64 bt_resolve(i64 ret_addr) {
     i64 count = __silver_bt_count;
     if (count <= 0) {
@@ -249,7 +252,18 @@ i64 bt_resolve(i64 ret_addr) {
             hi = mid - 1;
         }
     }
-    return best;
+    if (best >= 0) {
+        i64 start = __silver_bt_entries[best].addr;
+        i64 end = start + 1048576;
+        if (best + 1 < count) {
+            end = __silver_bt_entries[best + 1].addr;
+        }
+        if (ret_addr < start || ret_addr >= end) {
+            return -1;
+        }
+        return best;
+    }
+    return -1;
 }
 
 /// Look up the exact source line for a return address: the line table is
@@ -342,12 +356,15 @@ void silver_print_backtrace(i64 skip) {
         if (@cfg(os.linux)) {
             // SysV prologue is exactly `push rbp; mov rbp, rsp`: the saved
             // rbp is at [rbp] and the return address at [rbp+8], and the
-            // chain terminates at the entry (which zeroes rbp).
+            // chain terminates at the entry (which zeroes rbp). A return
+            // address that resolves to no Silver function is the boundary
+            // to foreign (native/FFI) code — stop there rather than trust
+            // an incompatible foreign frame layout.
             i64* saved_ptr = (i64*)rbp;
             i64 s = *saved_ptr;
             i64* ret_ptr = (i64*)(rbp + 8);
             i64 r = *ret_ptr;
-            if (s > rbp && r != 0) {
+            if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
                 callee_rbp = s;
                 ret_addr = r;
             }
