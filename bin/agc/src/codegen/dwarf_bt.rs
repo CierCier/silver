@@ -1115,9 +1115,22 @@ fn skip_form(r: &mut Reader, form: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn probe_param_locations_windows() {
+        // Resolve the just-built compiler the same way
+        // parses_line_table_from_real_object does, and skip when it is not
+        // present (the probe is a diagnostic aid, not a correctness gate).
+        let target = std::env::var("CARGO_TARGET_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let exe_suffix = std::env::consts::EXE_SUFFIX;
+        let agc_path = format!("{target}/{profile}/agc{exe_suffix}");
+        if !Path::new(&agc_path).is_file() {
+            eprintln!("skipped: compiler binary not found at {agc_path}");
+            return;
+        }
         let dir = std::env::temp_dir();
         let src = dir.join("dwarf_bt_probe.ag");
         std::fs::write(
@@ -1130,8 +1143,7 @@ mod tests {
         )
         .unwrap();
         let out = dir.join("dwarf_bt_probe.obj");
-        let agc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target2/debug/agc.exe");
-        let status = std::process::Command::new(agc)
+        let status = std::process::Command::new(&agc_path)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .args(["-c", "-g", src.to_str().unwrap(), "-o", out.to_str().unwrap()])
             .status()
