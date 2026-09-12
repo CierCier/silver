@@ -142,7 +142,12 @@ i32 main() {
     Result<String, Error> joined_native = rust_ffi_path_join("/tmp", "silver");
     assert_true(joined_native.is_ok(), "native path join");
     String joined_text = joined_native.unwrap();
-    assert_true(joined_text.equals("silver"), "native joined path text");
+    // PathBuf::join("/tmp", "silver") is "/tmp/silver" on POSIX and
+    "	mp\silver" under a Windows root, so compare against the tail.
+    assert_true(joined_text.len() >= 6, "native joined path length");
+    String tail = joined_text.substr(joined_text.len() - 6, 6);
+    assert_true(tail.equals("silver"), "native joined path text");
+    tail.drop();
     joined_text.drop();
 
     Vec<str> spawn_args = Vec<str>.new();

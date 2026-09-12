@@ -634,7 +634,7 @@ def main():
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
     # under "Program Files").
-    libdirs = [[d] for d in args.libdir]
+    libdirs = [[d] for d in args.libdir]  # each value is one complete path; never resplit ("Program Files" spaces)
 
     selected_stems = {p.stem for p in selected_tests}
     services.start_service_if_needed(selected_stems, agc_bin)

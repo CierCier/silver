@@ -4293,7 +4293,13 @@ impl TypeChecker {
         // decompose down to the expected type with an overflow check when a
         // narrower integer type is expected (e.g. `u8 x = 300` errors).
         if let ast::Literal::Integer(value) = literal {
-            return self.type_integer_literal_value(*value as u128, false, expected, span);
+            // Macro constant folding can replace `-<literal>` with a plain
+            // negative literal; recover the source negation so unsigned-fit
+            // rules reject `u128 x = -1` the same way the direct form is
+            // rejected (see type_integer_literal_value).
+            let negated = *value < 0;
+            let magnitude = (*value).unsigned_abs();
+            return self.type_integer_literal_value(magnitude, negated, expected, span);
         }
         if let Some(expected_ty) = expected
             && self.literal_matches_expected(literal, expected_ty)

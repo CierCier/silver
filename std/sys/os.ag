@@ -92,6 +92,8 @@ extern "C" {
     i32 win_SetConsoleCP(u32 codepage);
     #[link_name("SwitchToThread")]
     void win_SwitchToThread();
+    #[link_name("OpenProcess")]
+    i64 win_OpenProcess(u32 access, bool inherit, u32 pid);
     #[link_name("CreateThread")]
     i64 win_CreateThread(u8* attrs, u64 stack_size, u64(u64) start, u8* param, u32 flags, u32* tid);
     #[link_name("GetCommandLineW")]
@@ -690,10 +692,13 @@ i64 sys_kill(i64 pid, i64 sig) {
 #[cfg(os.windows)]
 i64 sys_kill(i64 pid, i64 sig) {
     if (sig == 0) {
-        // Existence probe: only the calling process is known to exist.
-        if (pid != win_GetCurrentProcessId()) {
+        // Existence probe: OpenProcess with query rights succeeds for any
+        // live process we can see, regardless of who owns it.
+        i64 proc = win_OpenProcess(0x1000, 0, (u32)pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (proc == 0) {
             return -3; // ESRCH
         }
+        win_CloseHandle(proc);
         return 0;
     }
     if (sig == 6) {
