@@ -288,6 +288,7 @@ void bt_line_lookup(i64 fn_addr, i64 ret_addr, u8** out_file, i64* out_line) {
     *out_line = 0;
 }
 
+
 /// Print the spilled arguments of the function whose frame pointer is
 /// `callee_rbp` (frame base = rbp) and whose start address is `fn_addr`.
 void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
@@ -336,11 +337,47 @@ void silver_print_backtrace(i64 skip) {
     i64 frame = 0;
     i64 printed = 0;
     while (rbp != 0 && printed < 24) {
-        i64* ret_ptr = (i64*)(rbp + 8);
-        i64 ret_addr = *ret_ptr;
-        // The callee's own frame pointer (frame base for its args).
-        i64* saved_ptr = (i64*)rbp;
-        i64 callee_rbp = *saved_ptr;
+        // Win64 frame pointers are REBASED: LLVM emits `push rbp; push
+        // <callee-saves>; mov rbp, rsp`, so the delta from rbp to the
+        // saved-rbp slot is 8x the number of callee-saved pushes after rbp
+        // and varies per function. Scan candidate deltas and accept the
+        // first whose (saved, ret) pair is monotonic and whose return
+        // address resolves to Silver code (foreign frames end the walk).
+        i64 callee_rbp = 0;
+        i64 ret_addr = 0;
+        i64 delta = 0;
+        while (delta <= 40) {
+            i64* saved_ptr = (i64*)(rbp + delta);
+            i64* ret_ptr = (i64*)(rbp + delta + 8);
+            i64 s = *saved_ptr;
+            i64 r = *ret_ptr;
+            if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
+                callee_rbp = s;
+                ret_addr = r;
+                break;
+            }
+            delta += 8;
+        }
+        if (callee_rbp == 0) {
+            // DEBUG: dump scan candidates
+            i64 d = 0;
+            while (d <= 40) {
+                i64* sp = (i64*)(rbp + d);
+                i64* rp = (i64*)(rbp + d + 8);
+                bt_write_cstr(fd, (u8*)" DBG d=");
+                bt_write_dec(fd, d);
+                bt_write_cstr(fd, (u8*)" s=");
+                bt_write_hex(fd, *sp);
+                bt_write_cstr(fd, (u8*)" r=");
+                bt_write_hex(fd, *rp);
+                bt_write_cstr(fd, (u8*)" res=");
+                bt_write_dec(fd, bt_resolve(*rp));
+                bt_write_cstr(fd, (u8*)"
+");
+                d += 8;
+            }
+            break;  // no Silver caller found: end of the managed chain
+        }
         if (frame >= skip) {
             i64 idx = bt_resolve(ret_addr);
             bt_write_cstr(fd, (u8*)"  #");
@@ -375,7 +412,7 @@ void silver_print_backtrace(i64 skip) {
             }
             printed = printed + 1;
         }
-        if (callee_rbp <= rbp && callee_rbp != 0) {
+        if (callee_rbp <= rbp) {
             break;  // corrupt chain — stop
         }
         rbp = callee_rbp;
