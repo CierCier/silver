@@ -468,13 +468,37 @@ void silver_print_backtrace(i64 skip) {
         void* fn_entry = win_RtlLookupFunctionEntry((u64)rip, &imgbase, (void*)0);
         i64 establisher = 0;
         if (fn_entry == (void*)0) {
-            // Leaf frame without unwind info: the return address is at
-            // [rsp]; nothing else is recoverable.
+            // Leaf frame without unwind info: the return address into its
+            // caller sits at [rsp]. Print the leaf's own address, advance
+            // Rsp past the return-address slot, and continue with the
+            // caller's identity (there is no established frame pointer, so
+            // no args are recoverable for this frame).
             i64* rsp_q = (i64*)(ctx + CTX_RSP);
-            rip = *rsp_q;
-            if (rip == 0) {
+            i64 rsp_val = *rsp_q;
+            i64* ret_ptr = (i64*)rsp_val;
+            i64 ret = *ret_ptr;
+            if (ret == 0) {
                 break;
             }
+            if (frame >= skip) {
+                i64 idx = bt_resolve(rip);
+                bt_write_cstr(fd, (u8*)"  #");
+                bt_write_dec(fd, printed);
+                if (idx >= 0) {
+                    bt_write_cstr(fd, (u8*)"  ");
+                    BtEntry e = __silver_bt_entries[idx];
+                    bt_write_cstr(fd, e.name);
+                } else {
+                    bt_write_cstr(fd, (u8*)"  <unknown>");
+                }
+                bt_write_cstr(fd, (u8*)" (");
+                bt_write_hex(fd, rip);
+                bt_write_cstr(fd, (u8*)")
+");
+                printed = printed + 1;
+            }
+            *rsp_q = rsp_val + 8;
+            rip = ret;
             frame = frame + 1;
             continue;
         }

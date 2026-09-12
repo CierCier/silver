@@ -1843,7 +1843,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
-                                false,
+                                true,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
