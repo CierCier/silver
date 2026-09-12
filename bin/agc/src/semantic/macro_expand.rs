@@ -1105,7 +1105,11 @@ fn eval_binary_op(left: &Literal, op: &BinaryOperator, right: &Literal) -> Optio
 
 fn eval_unary_op(op: &UnaryOperator, val: &Literal) -> Option<Literal> {
     match (op, val) {
-        (UnaryOperator::Minus, Literal::Integer(i)) => Some(Literal::Integer(-i)),
+        // Minus over an integer is deliberately NOT folded: the folded value
+        // loses the negation, and the literal checker would reinterpret a
+        // stored -1 as the magnitude u128::MAX for unsigned targets. Leave
+        // the unary node in place so range checking sees the negation.
+        (UnaryOperator::Minus, Literal::Integer(_)) => None,
         (UnaryOperator::Minus, Literal::Float(f)) => Some(Literal::Float(-f)),
         (UnaryOperator::Not, Literal::Bool(b)) => Some(Literal::Bool(!b)),
         (UnaryOperator::BitwiseNot, Literal::Integer(i)) => Some(Literal::Integer(!i)),

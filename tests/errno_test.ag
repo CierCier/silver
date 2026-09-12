@@ -12,6 +12,12 @@ import std.sys.result;
 str null_device() { return "/dev/null"; }
 #[cfg(os.windows)]
 str null_device() { return "NUL"; }
+// Zero-fill device: only Linux has one (NUL reads EOF on Windows, so the
+// zero-fill asserts are @cfg(os.linux)-gated).
+#[cfg(os.linux)]
+str zero_device() { return "/dev/zero"; }
+#[cfg(os.windows)]
+str zero_device() { return "NUL"; }
 i32 main() {
     STDOUT.write_str("=== errno / Result<i64, Error> Tests ===\n\n");
 
@@ -145,7 +151,7 @@ i32 main() {
         assert_true(c.is_ok(), "close succeeds");
         assert_eq_i64(c.value(), 0, "close returns 0");
 
-        Result<i64, Error> oat = try_openat((i32)AT_FDCWD, null_device(), O_RDONLY, 0);
+        Result<i64, Error> oat = try_openat((i32)AT_FDCWD, zero_device(), O_RDONLY, 0);
         assert_true(oat.is_ok(), "openat(AT_FDCWD, /dev/zero) succeeds");
         i32 zfd = (i32)oat.value();
         u8* zbuf = alloc<u8>(8);
