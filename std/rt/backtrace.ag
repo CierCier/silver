@@ -337,45 +337,46 @@ void silver_print_backtrace(i64 skip) {
     i64 frame = 0;
     i64 printed = 0;
     while (rbp != 0 && printed < 24) {
-        // Win64 frame pointers are REBASED: LLVM emits `push rbp; push
-        // <callee-saves>; mov rbp, rsp`, so the delta from rbp to the
-        // saved-rbp slot is 8x the number of callee-saved pushes after rbp
-        // and varies per function. Scan candidate deltas and accept the
-        // first whose (saved, ret) pair is monotonic and whose return
-        // address resolves to Silver code (foreign frames end the walk).
         i64 callee_rbp = 0;
         i64 ret_addr = 0;
-        i64 delta = 0;
-        while (delta <= 40) {
-            i64* saved_ptr = (i64*)(rbp + delta);
-            i64* ret_ptr = (i64*)(rbp + delta + 8);
+        if (@cfg(os.linux)) {
+            // SysV prologue is exactly `push rbp; mov rbp, rsp`: the saved
+            // rbp is at [rbp] and the return address at [rbp+8], and the
+            // chain terminates at the entry (which zeroes rbp).
+            i64* saved_ptr = (i64*)rbp;
             i64 s = *saved_ptr;
+            i64* ret_ptr = (i64*)(rbp + 8);
             i64 r = *ret_ptr;
-            if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
+            if (s > rbp && r != 0) {
                 callee_rbp = s;
                 ret_addr = r;
-                break;
             }
-            delta += 8;
+        } else {
+            // Win64 frame pointers are REBASED: LLVM emits `push rbp; push
+            // <callee-saves>; mov rbp, rsp`, so the delta from rbp to the
+            // saved-rbp slot is 8x the number of callee-saved pushes after
+            // rbp and varies per function. Scan candidate deltas and accept
+            // the first whose (saved, ret) pair is monotonic and whose
+            // return address resolves to Silver code (foreign frames end
+            // the walk). WIP: abort-path deltas exceed this scan range —
+            // the planned replacement is RtlCaptureStackBackTrace for exact
+            // return addresses + per-frame delta search validated against
+            // the captured address.
+            i64 delta = 0;
+            while (delta <= 40) {
+                i64* saved_ptr = (i64*)(rbp + delta);
+                i64* ret_ptr = (i64*)(rbp + delta + 8);
+                i64 s = *saved_ptr;
+                i64 r = *ret_ptr;
+                if (s > rbp && r != 0 && bt_resolve(r) >= 0) {
+                    callee_rbp = s;
+                    ret_addr = r;
+                    break;
+                }
+                delta += 8;
+            }
         }
         if (callee_rbp == 0) {
-            // DEBUG: dump scan candidates
-            i64 d = 0;
-            while (d <= 40) {
-                i64* sp = (i64*)(rbp + d);
-                i64* rp = (i64*)(rbp + d + 8);
-                bt_write_cstr(fd, (u8*)" DBG d=");
-                bt_write_dec(fd, d);
-                bt_write_cstr(fd, (u8*)" s=");
-                bt_write_hex(fd, *sp);
-                bt_write_cstr(fd, (u8*)" r=");
-                bt_write_hex(fd, *rp);
-                bt_write_cstr(fd, (u8*)" res=");
-                bt_write_dec(fd, bt_resolve(*rp));
-                bt_write_cstr(fd, (u8*)"
-");
-                d += 8;
-            }
             break;  // no Silver caller found: end of the managed chain
         }
         if (frame >= skip) {
