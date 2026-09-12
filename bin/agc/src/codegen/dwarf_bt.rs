@@ -1117,6 +1117,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn probe_param_locations_windows() {
+        let dir = std::env::temp_dir();
+        let src = dir.join("dwarf_bt_probe.ag");
+        std::fs::write(
+            &src,
+            "import std.io;
+             i64 f3(i64 x) { return x * 2; }
+             i64 f2(i64 x) { return f3(x + 1); }
+             i32 main() { i64 r = f2(41); @println(\"{}\", r); return 0; }
+",
+        )
+        .unwrap();
+        let out = dir.join("dwarf_bt_probe.obj");
+        let agc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target2/debug/agc.exe");
+        let status = std::process::Command::new(agc)
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .args(["-c", "-g", src.to_str().unwrap(), "-o", out.to_str().unwrap()])
+            .status()
+            .expect("run agc");
+        assert!(status.success());
+        let obj = std::fs::read(&out).unwrap();
+        let targets: HashSet<String> = ["f2", "f3"].iter().map(|s| s.to_string()).collect();
+        let params = parse_object_params(&obj, &targets);
+        for (name, ps) in &params {
+            for (pname, loc) in ps {
+                println!("PARAM {} {} {:?}", name, pname, loc);
+            }
+        }
+    }
+
+    #[test]
     fn parses_line_table_from_real_object() {
         let dir = std::env::temp_dir();
         let src = dir.join("dwarf_bt_probe.ag");
