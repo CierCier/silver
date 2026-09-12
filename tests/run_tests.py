@@ -110,8 +110,6 @@ WINDOWS_SKIP = {
     "libc_test": "Linux libc interop test",
     "process_test": "fork/exec via Linux process syscalls",
     "stream_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "iter_suite_test": "duplicate generic-instance linkage across COFF unit objects (weak-symbol dedup pending)",
-    "slice_syntax_test": "duplicate generic-instance linkage across COFF unit objects (weak-symbol dedup pending)",
 }
 
 

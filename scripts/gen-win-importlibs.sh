@@ -36,10 +36,12 @@ EXPORTS
   GetCurrentProcessId
   GetCommandLineW
   GetFileInformationByHandle
+  GetLastError
   GetStdHandle
   GetSystemTimePreciseAsFileTime
   LocalFree
   MoveFileExW
+  OpenProcess
   QueryPerformanceCounter
   QueryPerformanceFrequency
   ReadFile
@@ -61,6 +63,18 @@ cat > shell32.def <<'EOF'
 LIBRARY shell32.dll
 EXPORTS
   CommandLineToArgvW
+EOF
+
+# The OS unwinder + leak-check attribution live in ntdll (backtrace.ag,
+# mem/alloc.ag). RtlCaptureStackBackTrace is also forwarded by kernel32,
+# but the unwind trio is ntdll-only, so bind all four to ntdll.dll.
+cat > ntdll.def <<'EOF'
+LIBRARY ntdll.dll
+EXPORTS
+  RtlCaptureContext
+  RtlCaptureStackBackTrace
+  RtlLookupFunctionEntry
+  RtlVirtualUnwind
 EOF
 
 cat > bcrypt.def <<'EOF'

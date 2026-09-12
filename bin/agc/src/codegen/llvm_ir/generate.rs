@@ -809,7 +809,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 None,
             )?;
             let function = self.module.add_function(llvm_name, fn_ty, None);
-            Self::apply_function_linkage(function, visibility);
+            self.apply_function_linkage(function, visibility, attributes);
         }
 
         let Some(function) = self.module.get_function(llvm_name) else {
@@ -818,7 +818,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 func.name.span,
             ));
         };
-        Self::apply_function_linkage(function, visibility);
+        self.apply_function_linkage(function, visibility, attributes);
         Self::apply_target_feature_attributes(function, attributes);
         Self::apply_inline_always_attribute(function, attributes, self.context);
 
@@ -1469,7 +1469,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &func.attributes);
                     }
 
                     let Some(function) = self.module.get_function(&mangled_name) else {
@@ -1478,7 +1478,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             func.span,
                         ));
                     };
-                    Self::apply_function_linkage(function, &effective_visibility);
+                    self.apply_function_linkage(function, &effective_visibility, &func.attributes);
                     Self::apply_target_feature_attributes(function, &func.attributes);
                     Self::apply_inline_always_attribute(function, &func.attributes, self.context);
 
@@ -1526,7 +1526,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &[]);
                     }
 
                     let Some(function) = self.module.get_function(&mangled_name) else {
@@ -1535,7 +1535,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             cast.span,
                         ));
                     };
-                    Self::apply_function_linkage(function, &effective_visibility);
+                    self.apply_function_linkage(function, &effective_visibility, &[]);
 
                     // Cast receivers are borrowed: skip the by-value self
                     // param's destructor so it does not free the caller's

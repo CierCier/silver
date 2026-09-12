@@ -762,7 +762,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     None,
                 )?;
                 let function = self.module.add_function(name, fn_ty, None);
-                Self::apply_function_linkage(function, &ast::Visibility::Public);
+                self.apply_function_linkage(function, &ast::Visibility::Public, &[]);
                 function
             } else {
                 continue;
