@@ -614,9 +614,9 @@ i64 sys_stat(i64 path, i64 buf) {
     if (h == -1) {
         return -2;
     }
-    // BY_HANDLE_FILE_INFORMATION: nFileSize{High,Low} at 36/40,
-    // ftLastWriteTime (u64) at 24. The struct is 52 bytes on x64 — a
-    // short buffer would let the write run off the stack slot.
+    // BY_HANDLE_FILE_INFORMATION (52 bytes): ftLastWriteTime (u64) at 20,
+    // nFileSizeHigh at 32, nFileSizeLow at 36. A short buffer would let
+    // the write run off the stack slot.
     u8 info[52];
     i64 i = 0;
     while (i < 52) {
@@ -628,8 +628,8 @@ i64 sys_stat(i64 path, i64 buf) {
     if (ok == 0) {
         return -5;
     }
-    i64 size = ((i64)(u32)win_le_i64(&info[0], 36) << 32) | (i64)(u32)win_le_i64(&info[0], 40);
-    i64 ft = win_le_i64(&info[0], 24);
+    i64 size = ((i64)(u32)win_le_i64(&info[0], 32) << 32) | (i64)(u32)win_le_i64(&info[0], 36);
+    i64 ft = win_le_i64(&info[0], 20);
     // FILETIME (1601) -> Unix epoch (1970).
     i64 unix100 = ft - 116444736000000000;
     i64 sec = unix100 / 10000000;

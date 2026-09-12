@@ -249,6 +249,20 @@ i32 main() {
         assert_true(info.size > 0, "stat size positive for written file");
         assert_true(info.mtime_sec > 0, "mtime epoch seconds positive");
     }
+    // stat_path: exact size for a known payload. The `size > 0` check above
+    // cannot catch wrong struct-field offsets (any nonzero field passes),
+    // so pin the exact byte count.
+    str exact_file = "silver_file_test_exact.bin";
+    File ef = File.open_write(exact_file);
+    ef.write_str("0123456789ABCDEF");
+    ef.close();
+    Result<FileStat, Error> est = stat_path(exact_file);
+    assert_true(est.is_ok(), "stat of exact-size file");
+    if (est.is_ok()) {
+        FileStat einfo = est.unwrap();
+        assert_eq_i64(16, einfo.size, "stat size exact for 16-byte file");
+    }
+    file_delete(exact_file);
     Result<FileStat, Error> missing = stat_path("silver_file_test_missing.xyz");
     assert_true(missing.is_err(), "stat of missing file errors");
 
