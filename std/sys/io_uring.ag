@@ -191,14 +191,17 @@ struct IoUringCqe {
 }
 
 // Raw syscall helpers
+#[cfg(os.linux)]
 Result<i64, Error> try_io_uring_setup(u32 entries, IoUringParams* params) {
     return Result<i64, Error>.from_raw(sys_io_uring_setup((i64)entries, (i64)params));
 }
 
+#[cfg(os.linux)]
 Result<i64, Error> try_io_uring_enter(i32 fd, u32 to_submit, u32 min_complete, u32 flags) {
     return Result<i64, Error>.from_raw(sys_io_uring_enter6((i64)fd, (i64)to_submit, (i64)min_complete, (i64)flags, 0, 0));
 }
 
+#[cfg(os.linux)]
 Result<i64, Error> try_io_uring_register(i32 fd, u32 opcode, void* arg, u32 nr_args) {
     return Result<i64, Error>.from_raw(sys_io_uring_register((i64)fd, (i64)opcode, (i64)arg));
 }

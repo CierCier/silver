@@ -26,16 +26,19 @@ impl IoVec {
     }
 }
 
+#[cfg(os.linux)]
 /// Write data from multiple buffers in a single system call (writev(2)).
 Result<i64, Error> try_writev(i32 fd, IoVec* iov, i64 count) {
     return Result<i64, Error>.from_raw(sys_writev((i64)fd, (i64)iov, count));
 }
 
+#[cfg(os.linux)]
 /// Read data into multiple buffers in a single system call (readv(2)).
 Result<i64, Error> try_readv(i32 fd, IoVec* iov, i64 count) {
     return Result<i64, Error>.from_raw(sys_readv((i64)fd, (i64)iov, count));
 }
 
+#[cfg(os.linux)]
 /// Zero-copy transfer from file descriptor `in_fd` to socket `out_fd` (sendfile(2)).
 /// If `offset` is non-null, reading starts at `*offset` and updates it upon completion.
 Result<i64, Error> try_sendfile(i32 out_fd, i32 in_fd, i64* offset, i64 count) {

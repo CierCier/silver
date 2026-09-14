@@ -70,16 +70,19 @@ impl EpollEvent {
     }
 }
 
+#[cfg(os.linux)]
 /// Create an epoll instance with flags (e.g. EPOLL_CLOEXEC).
 Result<i64, Error> try_epoll_create1(i64 flags) {
     return Result<i64, Error>.from_raw(sys_epoll_create1(flags));
 }
 
+#[cfg(os.linux)]
 /// Control an epoll instance (EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD).
 Result<i64, Error> try_epoll_ctl(i32 epfd, i32 op, i32 fd, EpollEvent* event) {
     return Result<i64, Error>.from_raw(sys_epoll_ctl((i64)epfd, (i64)op, (i64)fd, (i64)event));
 }
 
+#[cfg(os.linux)]
 /// Wait for events on an epoll instance.
 Result<i64, Error> try_epoll_wait(i32 epfd, EpollEvent* events, i64 maxevents, i64 timeout_ms) {
     return Result<i64, Error>.from_raw(sys_epoll_wait((i64)epfd, (i64)events, maxevents, timeout_ms));
