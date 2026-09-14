@@ -10,7 +10,7 @@ then runs real Silver programs against a Win32-backed runtime.
 
 ## 0. TL;DR
 
-Silver is currently ** ELF-only in three independent places**, any one of which breaks Windows:
+Silver is currently **ELF-only in three independent places**, any one of which breaks Windows:
 
 1. **The link driver** (`bin/agc/src/link.rs`) is a GNU/ELF machine: `cc`, `ld.lld -flavor gnu`,
    PT_INTERP, `-rpath`, `.so`, and a `-nostdlib` "no CRT" design that relies on Linux's

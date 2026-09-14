@@ -58,7 +58,9 @@ if (Test-Path $LlvmClang) {
         throw "could not parse LLVM version"
     }
     $llvmMajor = $Matches[1]
-    if ($llvmMajor -lt 22) { Warn "LLVM $llvmMajor is older than the required 22.x (llvm-sys 221)" }
+    if ($llvmMajor -lt 22) {
+        $Failures += "LLVM $llvmMajor is older than the required 22.x (llvm-sys 221) — install LLVM 22"
+    }
     if (Test-Path (Join-Path $LlvmRoot "lib\LLVM-C.lib")) {
         Ok "LLVM-C.lib (import lib) present"
     } else {

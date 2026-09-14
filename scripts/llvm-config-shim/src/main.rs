@@ -56,9 +56,13 @@ fn short_path(path: &Path) -> String {
         .chain(std::iter::once(0))
         .collect();
     let mut buf = vec![0u16; wide.len() * 2];
-    let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
-    if len == 0 {
-        // 8.3 name generation disabled — fall back to the long path.
+    let mut len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if len > buf.len() as u32 {
+        buf.resize(len as usize, 0);
+        len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
+    if len == 0 || len > buf.len() as u32 {
+        // 8.3 name generation disabled or failed — fall back to the long path.
         return path.to_string_lossy().into_owned();
     }
     buf.truncate(len as usize);
