@@ -211,7 +211,6 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "kernel32.lib",
             "ntdll.lib",
             "shell32.lib",
-            "synchronization.lib",
             "bcrypt.lib",
         ]
     }
@@ -386,8 +385,9 @@ pub(crate) fn link_exe(
 
 /// Windows-flavored executable link via `lld-link` (or MSVC link.exe).
 ///
-/// Uses the standard `mainCRTStartup` entry from the CRT: Silver programs
-/// define `main` and the CRT initializes the heap/stdio/environ around it.
+/// Uses the custom `_start` entry point from `std.sys.entry` (bypassing the
+/// CRT's `mainCRTStartup`): Silver programs set up argv and thread cleanup in
+/// `_start`, then call `main` freestanding.
 /// No dynamic loader, no rpath — DLLs are found next to the exe or on PATH.
 pub(crate) fn link_exe_with_lld_link(
     plan: &CompilePlan,
