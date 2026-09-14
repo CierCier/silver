@@ -943,4 +943,24 @@ mod tests {
             "expected compile-time constant length 4 for array:\n{ir}"
         );
     }
+
+    #[test]
+    fn f80_and_128bit_integer_casts() {
+        let source = r#"
+            i32 main() {
+                f80 val = (f80)1.5;
+                i128 i = (i128)val;
+                u128 u = (u128)val;
+                f80 from_i = (f80)i;
+                f80 from_u = (f80)u;
+                return 0;
+            }
+        "#;
+        let ir = lower_to_llvm(source);
+        assert!(ir.contains("call i128 @__fixdfti"), "expected call to __fixdfti:\n{ir}");
+        assert!(ir.contains("call i128 @__fixunsdfti"), "expected call to __fixunsdfti:\n{ir}");
+        assert!(ir.contains("call double @__floattidf"), "expected call to __floattidf:\n{ir}");
+        assert!(ir.contains("call double @__floatuntidf"), "expected call to __floatuntidf:\n{ir}");
+    }
 }
+

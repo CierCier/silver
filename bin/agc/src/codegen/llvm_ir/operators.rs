@@ -1294,7 +1294,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None => self.context.void_type().fn_type(&param_meta, false),
         };
         let fun = match self.module.get_function(name) {
-            Some(f) => f,
+            Some(f) => {
+                if f.get_type() != fn_ty {
+                    return Err(CodegenError::with_span(
+                        format!("reused RT helper '{name}' with mismatched signature"),
+                        *span,
+                    ));
+                }
+                f
+            }
             None => self.module.add_function(name, fn_ty, None),
         };
         let call_args: Vec<BasicMetadataValueEnum<'ctx>> =
@@ -1350,12 +1358,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .unwrap()
                 .into_float_value();
             return match target {
-                BasicTypeEnum::FloatType(ft) if ft.get_bit_width() == 32 => self
+                BasicTypeEnum::FloatType(ft) => self
                     .builder
-                    .build_float_trunc(wide, ft, "cast.f128.trunc")
+                    .build_float_cast(wide, ft, "cast.f128.fcast")
                     .map(|v| v.as_basic_value_enum())
                     .map_err(|e| {
-                        CodegenError::with_span(format!("float trunc failed: {e}"), *span)
+                        CodegenError::with_span(format!("float cast failed: {e}"), *span)
                     }),
                 _ => Ok(wide.as_basic_value_enum()),
             };
@@ -1367,9 +1375,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => fv,
                 BasicValueEnum::FloatValue(fv) => self
                     .builder
-                    .build_float_ext(fv, f64_ty, "cast.f128.ext")
+                    .build_float_cast(fv, f64_ty, "cast.f128.fcast")
                     .map_err(|e| {
-                        CodegenError::with_span(format!("float ext failed: {e}"), *span)
+                        CodegenError::with_span(format!("float cast failed: {e}"), *span)
                     })?,
                 _ => unreachable!(),
             };
@@ -1852,6 +1860,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Ok(coerced);
             }
         }
+        if matches!(
+            target_type.kind.as_ref(),
+            ast::TypeKind::Primitive(ast::PrimitiveType::U128)
+        ) && matches!(value, BasicValueEnum::FloatValue(_)) {
+            return self.cast_unsigned_value_to_ast_type(value, target_type, span);
+        }
         self.cast_value_to_basic_type(value, target, span)
     }
 
@@ -2251,16 +2265,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?
                     .unwrap()
                     .into_float_value();
-                if float_ty.get_bit_width() == 32 {
-                    self.builder
-                        .build_float_trunc(wide, float_ty, "cast.u128f32.trunc")
-                        .map(|v| v.as_basic_value_enum())
-                        .map_err(|e| {
-                            CodegenError::with_span(format!("float trunc failed: {e}"), *span)
-                        })
-                } else {
-                    Ok(wide.as_basic_value_enum())
-                }
+                self.builder
+                    .build_float_cast(wide, float_ty, "cast.u128f.fcast")
+                    .map(|v| v.as_basic_value_enum())
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("float cast failed: {e}"), *span)
+                    })
             }
             // u32/u64 -> float: x86 has no direct unsigned conversion, so the
             // signed helper (cvtsi2sd) would flip values >= 2^63 negative.
@@ -2282,9 +2292,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     BasicValueEnum::FloatValue(fv) if fv.get_type().get_bit_width() == 64 => fv,
                     BasicValueEnum::FloatValue(fv) => self
                         .builder
-                        .build_float_ext(fv, f64_ty, "cast.u128.ext")
+                        .build_float_cast(fv, f64_ty, "cast.u128.fcast")
                         .map_err(|e| {
-                            CodegenError::with_span(format!("float ext failed: {e}"), *span)
+                            CodegenError::with_span(format!("float cast failed: {e}"), *span)
                         })?,
                     _ => unreachable!(),
                 };
