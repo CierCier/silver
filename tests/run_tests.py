@@ -162,10 +162,9 @@ class BackgroundServices:
             return env_val
         for build_mode in ["debug", "release"]:
             candidate = self.root / "target" / build_mode
-            if IS_WINDOWS:
-                if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
-                    return str(candidate)
-            elif (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
+            if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
+                return str(candidate)
+            if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
                 return str(candidate)
         return ""
 
@@ -373,9 +372,10 @@ def run_single_test(
     # Run phase
     env = os.environ.copy()
     if name == "rust_ffi_test" and services.ffi_dir:
-        if IS_WINDOWS:
-            # DLL resolution: prepend the ffi dir to PATH.
+        if target_is_windows or IS_WINDOWS:
+            # DLL resolution: prepend the ffi dir to PATH and WINEPATH.
             env["PATH"] = f"{services.ffi_dir};{env.get('PATH', '')}"
+            env["WINEPATH"] = f"{services.ffi_dir};{env.get('WINEPATH', '')}"
         else:
             ld_path = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{services.ffi_dir}:{ld_path}" if ld_path else services.ffi_dir
@@ -409,7 +409,7 @@ def run_single_test(
 
     # Post-run special assertions
     if name == "static_link_test":
-        if IS_WINDOWS:
+        if target_is_windows or IS_WINDOWS:
             # Static CRT (/MT): the import table must not reference the
             # dynamic UCRT/vcruntime DLLs. System DLLs (kernel32 etc.) are
             # always imported and fine.
@@ -419,7 +419,7 @@ def run_single_test(
                     imp_out = subprocess.check_output(
                         [readobj, "--coff-imports", str(bin_path)], stderr=subprocess.DEVNULL
                     ).decode(errors="replace")
-                    bad = [dll for dll in ("ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll") if dll in imp_out]
+                    bad = [dll for dll in ("ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll") if dll in imp_out.lower()]
                     if bad:
                         return TestResult(name, "FAIL", f"binary imports dynamic CRT: {', '.join(bad)}", compile_ms, run_ms, run_output=run_output)
                 except Exception:
@@ -433,7 +433,7 @@ def run_single_test(
                 pass
 
     if name == "cfg_derived_test":
-        readobj = shutil.which("llvm-readobj") if IS_WINDOWS else None
+        readobj = shutil.which("llvm-readobj") if (target_is_windows or IS_WINDOWS) else None
         if readobj:
             try:
                 re_out = subprocess.check_output(

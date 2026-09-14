@@ -64,12 +64,17 @@ i32 main() {
     assert_true(environment.len > 0, "environment value is non-empty");
 
     RustFfiProcess process = rust_ffi_process_new();
-    // `sh -c true` instead of a hardcoded /bin/true: sh comes from PATH, so
-    // the test also passes on NixOS.
+    // `sh -c true` instead of a hardcoded /bin/true on Unix; cmd.exe on Windows.
     RustFfiSlice program = rust_ffi_text("sh");
     RustFfiSlice* argv = (RustFfiSlice*)malloc(@size(RustFfiSlice) * 2);
-    argv[0] = rust_ffi_text("-c");
-    argv[1] = rust_ffi_text("true");
+    if (@cfg(os.windows)) {
+        program = rust_ffi_text("cmd.exe");
+        argv[0] = rust_ffi_text("/c");
+        argv[1] = rust_ffi_text("exit 0");
+    } else {
+        argv[0] = rust_ffi_text("-c");
+        argv[1] = rust_ffi_text("true");
+    }
     assert_eq_i32(SILVER_FFI_OK,
         silver_process_spawn((const RustFfiSlice*)&program,
             (const RustFfiSlice*)argv, (i64)2,
