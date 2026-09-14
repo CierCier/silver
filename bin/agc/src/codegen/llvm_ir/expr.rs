@@ -1784,14 +1784,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-/// True when the asm blob invokes the `syscall` instruction (word match so
-/// register names like "nosyscall" don't trigger it).
-fn normalized_asm_contains_syscall(code: &str) -> bool {
-    let lower = code.to_ascii_lowercase();
-    lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word == "syscall")
-}
+    /// True when the asm blob invokes the `syscall` instruction (word match so
+    /// register names like "nosyscall" don't trigger it).
+    fn normalized_asm_contains_syscall(code: &str) -> bool {
+        let lower = code.to_ascii_lowercase();
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == "syscall")
+    }
 
 pub(crate) fn emit_asm_expression(
         &mut self,

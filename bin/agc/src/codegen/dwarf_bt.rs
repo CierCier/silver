@@ -321,8 +321,8 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     let sym_table_off = r.u32()? as usize;
     let sym_count = r.u32()? as usize;
     let _opt_size = r.u16()?;
-    let _characteristics = r.u16()?;
-    if number_of_sections > 96 || sym_table_off == 0 || sym_count == 0 {
+    let sym_bytes = sym_count.checked_mul(18)?;
+    if number_of_sections > 96 || sym_table_off == 0 || sym_count == 0 || sym_table_off.checked_add(sym_bytes)? > data.len() {
         return None;
     }
 
@@ -462,13 +462,6 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     // derive each function's extent from the next function symbol in the
     // same section — push_entry bounds line entries by [start, start+size).
     {
-        let text_sections: Vec<usize> = secs
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.name == ".text")
-            .map(|(i, _)| i)
-            .collect();
-        let _ = &text_sections;
         let mut per_section: HashMap<i16, Vec<usize>> = HashMap::default();
         for (idx, sym) in symbols.iter().enumerate() {
             if sym.is_func && sym.defined {
@@ -1132,7 +1125,7 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir();
-        let src = dir.join("dwarf_bt_probe.ag");
+        let src = dir.join("dwarf_bt_probe_win.ag");
         std::fs::write(
             &src,
             "import std.io;
@@ -1142,7 +1135,7 @@ mod tests {
 ",
         )
         .unwrap();
-        let out = dir.join("dwarf_bt_probe.obj");
+        let out = dir.join("dwarf_bt_probe_win.obj");
         let status = std::process::Command::new(&agc_path)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .args(["-c", "-g", src.to_str().unwrap(), "-o", out.to_str().unwrap()])
