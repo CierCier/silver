@@ -85,8 +85,6 @@ extern "C" {
     void win_Sleep(u32 ms);
     #[link_name("OpenProcess")]
     i64 win_OpenProcess(u32 access, i32 inherit, u32 pid);
-    #[link_name("GetLastError")]
-    u32 win_GetLastError();
     #[link_name("GetSystemTimePreciseAsFileTime")]
     void win_GetSystemTimePreciseAsFileTime(u64* ft);
 
@@ -135,6 +133,7 @@ const u32 WIN_CREATE_NEW = 1;
 const u32 WIN_CREATE_ALWAYS = 2;
 #[cfg(os.windows)]
 const u32 WIN_OPEN_EXISTING = 3;
+#[cfg(os.windows)]
 const u32 WIN_TRUNCATE_EXISTING = 5;
 #[cfg(os.windows)]
 const u32 WIN_OPEN_ALWAYS = 4;
@@ -556,7 +555,7 @@ i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     if (whence == 1) { method = WIN_FILE_CURRENT; }
     else if (whence == 2) { method = WIN_FILE_END; }
     i32 res = win_SetFilePointer(h, low, &high, method);
-    if (res == -1) {
+    if (res == -1 && win_GetLastError() != 0) {
         return -win_errno_or_io();
     }
     return ((i64)(u32)high << 32) | (i64)(u32)res;

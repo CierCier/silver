@@ -458,7 +458,7 @@ void silver_print_backtrace(i64 skip) {
     i64 frame = 0;
     i64 printed = 0;
     i64 rip = ctx_get_rip(ctx);
-    while (rip != 0 && printed < 24) {
+    while (rip != 0 && printed < 24 && frame < 64) {
         // Resolve this frame's function and unwind it: RtlVirtualUnwind
         // updates the context in place to the caller and reports the
         // unwind function's established frame pointer, which — with
@@ -493,8 +493,7 @@ void silver_print_backtrace(i64 skip) {
                 }
                 bt_write_cstr(fd, (u8*)" (");
                 bt_write_hex(fd, rip);
-                bt_write_cstr(fd, (u8*)")
-");
+                bt_write_cstr(fd, (u8*)")\n");
                 printed = printed + 1;
             }
             *rsp_q = rsp_val + 8;
@@ -534,14 +533,12 @@ void silver_print_backtrace(i64 skip) {
                 }
                 bt_write_cstr(fd, (u8*)" (");
                 bt_write_hex(fd, rip);
-                bt_write_cstr(fd, (u8*)")
-");
+                bt_write_cstr(fd, (u8*)")\n");
                 bt_print_args(fd, establisher, e.addr);
             } else {
                 bt_write_cstr(fd, (u8*)"  <unknown> (");
                 bt_write_hex(fd, rip);
-                bt_write_cstr(fd, (u8*)")
-");
+                bt_write_cstr(fd, (u8*)")\n");
             }
             printed = printed + 1;
         }

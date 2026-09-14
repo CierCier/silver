@@ -112,7 +112,7 @@ i32 __silver_call_main() {
         sub $$32, %rsp
         call main
         add $$32, %rsp
-    ", []);
+    ", [], ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"]);
 }
 
 #[cfg(os.windows)]
