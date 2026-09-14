@@ -4293,13 +4293,12 @@ impl TypeChecker {
         // decompose down to the expected type with an overflow check when a
         // narrower integer type is expected (e.g. `u8 x = 300` errors).
         if let ast::Literal::Integer(value) = literal {
-            // Macro constant folding can replace `-<literal>` with a plain
-            // negative literal; recover the source negation so unsigned-fit
-            // rules reject `u128 x = -1` the same way the direct form is
-            // rejected (see type_integer_literal_value).
-            let negated = *value < 0;
-            let magnitude = (*value).unsigned_abs();
-            return self.type_integer_literal_value(magnitude, negated, expected, span);
+            // Source integer literals are always non-negative magnitudes in the
+            // range 0..=u128::MAX (stored as wrapped two's-complement i128 bits).
+            // Unary negation (`-n`) is represented as ast::UnaryOperator::Minus
+            // and handled by check_expr, so bare integer literals have negated = false.
+            let magnitude = *value as u128;
+            return self.type_integer_literal_value(magnitude, false, expected, span);
         }
         if let Some(expected_ty) = expected
             && self.literal_matches_expected(literal, expected_ty)
@@ -9657,5 +9656,38 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_large_unsigned_integer_literals_and_negation() {
+        let valid_program = parse(
+            "i32 main() { \
+                 u128 max_u128 = 340282366920938463463374607431768211455; \
+                 u128 pow2_127 = 170141183460469231731687303715884105728; \
+                 i128 min_i128 = -170141183460469231731687303715884105728; \
+                 i128 max_i128 = 170141183460469231731687303715884105727; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&valid_program);
+        assert!(errors.is_empty(), "expected valid large literals to typecheck, got: {errors:?}");
+
+        let invalid_neg_unsigned = parse(
+            "i32 main() { \
+                 u128 bad = -1; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&invalid_neg_unsigned);
+        assert!(!errors.is_empty(), "expected u128 = -1 to error");
+
+        let invalid_overflow_signed = parse(
+            "i32 main() { \
+                 i128 bad = 340282366920938463463374607431768211455; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&invalid_overflow_signed);
+        assert!(!errors.is_empty(), "expected i128 = u128::MAX to error");
     }
 }
