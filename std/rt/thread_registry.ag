@@ -101,13 +101,15 @@ i64 thread_join(TaskRecord* rec) {
             break;
         }
     }
-    i64 tid = rec.tid;
     thread_lock_acquire();
+    i64 tid = rec.tid;
     rec.tid = 0;
     thread_lock_release();
     // The child has exited (done flag set): release its OS resources. On
     // Windows tid is the CreateThread handle and must be closed.
-    thread_reclaim(tid);
+    if (tid > 0) {
+        thread_reclaim(tid);
+    }
     return tid;
 }
 
@@ -144,7 +146,9 @@ u8* __silver_wait_done(i64 rec) {
     thread_lock_release();
     // The child has exited: release its OS resources (Windows CreateThread
     // handle). Returned packs are task results, not thread handles.
-    thread_reclaim(tid);
+    if (tid > 0) {
+        thread_reclaim(tid);
+    }
     return pack;
 }
 

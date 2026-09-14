@@ -67,6 +67,7 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     rec.arg = arg;
     rec.stack = (u8*)0;
     rec.done = 0;
+    rec.pack = 0;
     thread_lock_release();
 
     i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
@@ -126,6 +127,7 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
 /// manages the stack and rec.stack stays null.
 i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
     u8* stack = (u8*)0;
+    u8* top = (u8*)0;
     if (@cfg(os.linux)) {
         // 16-byte aligned top; base is page-aligned and THREAD_STACK_SIZE is
         // a multiple of 16.
@@ -134,8 +136,8 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
             return 0;
         }
         rec.stack = stack;
+        top = (u8*)((i64)stack + THREAD_STACK_SIZE);
     }
-    u8* top = (u8*)((i64)stack + THREAD_STACK_SIZE);
     i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec);
     if (tid <= 0 && stack != (u8*)0) {
         mem_sys_free(stack, THREAD_STACK_SIZE);
@@ -153,9 +155,7 @@ void thread_spawn_cleanup(TaskRecord* rec, u8* pack) {
     }
     thread_lock_acquire();
     rec.tid = 0;
-    if (pack != (u8*)0) {
-        rec.pack = 0;
-    }
+    rec.pack = 0;
     thread_lock_release();
     if (pack != (u8*)0) {
         mem_free_raw_impl(pack);
