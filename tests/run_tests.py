@@ -317,9 +317,7 @@ def run_single_test(
     content = test_path.read_text(errors="replace")
     # A windows target produces a PE: the image name must end in .exe (and
     # Wine/CreateProcess refuse to execute extensionless images).
-    target_is_windows = bool(target) and any(
-        t in target.lower() for t in ("windows", "win32", "mingw")
-    )
+    target_is_windows = target_is_windows_name(target)
     needs_exe = target_is_windows or IS_WINDOWS
     bin_path = workdir / (f"bin_{name}.exe" if needs_exe else f"bin_{name}")
     run_dir = workdir / f"run_{name}"
@@ -636,7 +634,7 @@ def main():
 
     target = args.target or None
     runner = shlex.split(args.runner) if args.runner else None
-    if not runner:
+    if not runner and target_is_windows_name(target) and not IS_WINDOWS:
         env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
         if env_runner:
             runner = shlex.split(env_runner)
