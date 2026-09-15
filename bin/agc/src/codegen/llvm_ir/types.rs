@@ -55,6 +55,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     p
                 )),
             },
+            TypeKind::Pointer(_) | TypeKind::Reference(_) => Ok("write_ptr".to_string()),
             _ => Err(format!("no BufWriter write method for type {:?}", kind,)),
         }
     }

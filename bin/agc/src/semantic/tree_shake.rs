@@ -452,17 +452,25 @@ impl NameCollector {
                 self.walk_expr(left);
                 self.walk_expr(right);
                 match operator {
-                    BinaryOperator::Add => { self.names.insert("__add".to_string()); }
-                    BinaryOperator::Subtract => { self.names.insert("__sub".to_string()); }
-                    BinaryOperator::Multiply => { self.names.insert("__mul".to_string()); }
-                    BinaryOperator::Divide => { self.names.insert("__div".to_string()); }
-                    BinaryOperator::Modulo => { self.names.insert("__rem".to_string()); }
+                    BinaryOperator::Add | BinaryOperator::AddAssign => { self.names.insert("__add".to_string()); }
+                    BinaryOperator::Subtract | BinaryOperator::SubtractAssign => { self.names.insert("__sub".to_string()); }
+                    BinaryOperator::Multiply | BinaryOperator::MultiplyAssign => { self.names.insert("__mul".to_string()); }
+                    BinaryOperator::Divide | BinaryOperator::DivideAssign => { self.names.insert("__div".to_string()); }
+                    BinaryOperator::Modulo | BinaryOperator::ModuloAssign => {
+                        self.names.insert("__mod".to_string());
+                        self.names.insert("__rem".to_string());
+                    }
                     BinaryOperator::Equal => { self.names.insert("__eq".to_string()); }
                     BinaryOperator::NotEqual => { self.names.insert("__ne".to_string()); }
                     BinaryOperator::Less => { self.names.insert("__lt".to_string()); }
                     BinaryOperator::LessEqual => { self.names.insert("__le".to_string()); }
                     BinaryOperator::Greater => { self.names.insert("__gt".to_string()); }
                     BinaryOperator::GreaterEqual => { self.names.insert("__ge".to_string()); }
+                    BinaryOperator::BitwiseAnd | BinaryOperator::BitwiseAndAssign => { self.names.insert("__bitand".to_string()); }
+                    BinaryOperator::BitwiseOr | BinaryOperator::BitwiseOrAssign => { self.names.insert("__bitor".to_string()); }
+                    BinaryOperator::BitwiseXor | BinaryOperator::BitwiseXorAssign => { self.names.insert("__bitxor".to_string()); }
+                    BinaryOperator::LeftShift | BinaryOperator::LeftShiftAssign => { self.names.insert("__shl".to_string()); }
+                    BinaryOperator::RightShift | BinaryOperator::RightShiftAssign => { self.names.insert("__shr".to_string()); }
                     _ => {}
                 }
             }
@@ -472,7 +480,10 @@ impl NameCollector {
                 match operator {
                     UnaryOperator::Minus => { self.names.insert("__neg".to_string()); }
                     UnaryOperator::Not => { self.names.insert("__not".to_string()); }
-                    UnaryOperator::BitwiseNot => { self.names.insert("__bit_not".to_string()); }
+                    UnaryOperator::BitwiseNot => {
+                        self.names.insert("__bitnot".to_string());
+                        self.names.insert("__bit_not".to_string());
+                    }
                     _ => {}
                 }
             }
@@ -608,6 +619,7 @@ impl NameCollector {
                     self.names.insert("write_u8".to_string());
                     self.names.insert("write_i128".to_string());
                     self.names.insert("write_u128".to_string());
+                    self.names.insert("write_ptr".to_string());
                     self.names.insert("flush".to_string());
                     self.names.insert("Stdout".to_string());
                     self.names.insert("Stderr".to_string());

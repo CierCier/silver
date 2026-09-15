@@ -2186,14 +2186,38 @@ fn parse_assignment(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
         Token::StarAssign => Some(ast::BinaryOperator::MultiplyAssign),
         Token::SlashAssign => Some(ast::BinaryOperator::DivideAssign),
         Token::PercentAssign => Some(ast::BinaryOperator::ModuloAssign),
+        Token::BitwiseAndAssign => Some(ast::BinaryOperator::BitwiseAndAssign),
+        Token::BitwiseOrAssign => Some(ast::BinaryOperator::BitwiseOrAssign),
+        Token::BitwiseXorAssign => Some(ast::BinaryOperator::BitwiseXorAssign),
+        Token::LeftShiftAssign => Some(ast::BinaryOperator::LeftShiftAssign),
+        Token::RightShiftAssign => Some(ast::BinaryOperator::RightShiftAssign),
         _ => None,
     };
 
-    let Some(operator) = operator else {
+    let operator = if let Some(op) = operator {
+        cursor.bump();
+        op
+    } else if cursor.pos + 2 < cursor.end
+        && matches!(cursor.tokens[cursor.pos].kind, Token::Less)
+        && matches!(cursor.tokens[cursor.pos + 1].kind, Token::Less)
+        && matches!(cursor.tokens[cursor.pos + 2].kind, Token::Assign)
+    {
+        cursor.bump();
+        cursor.bump();
+        cursor.bump();
+        ast::BinaryOperator::LeftShiftAssign
+    } else if cursor.pos + 2 < cursor.end
+        && matches!(cursor.tokens[cursor.pos].kind, Token::Greater)
+        && matches!(cursor.tokens[cursor.pos + 1].kind, Token::Greater)
+        && matches!(cursor.tokens[cursor.pos + 2].kind, Token::Assign)
+    {
+        cursor.bump();
+        cursor.bump();
+        cursor.bump();
+        ast::BinaryOperator::RightShiftAssign
+    } else {
         return Ok(lhs);
     };
-
-    cursor.bump();
     let rhs = parse_assignment(cursor)?;
     let span = lhs.span.extend_to(&rhs.span);
     Ok(ast::Expression {

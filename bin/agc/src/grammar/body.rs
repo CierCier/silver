@@ -366,6 +366,11 @@ impl<'a, 'e> BodyParser<'a, 'e> {
                     | Tok::StarAssign
                     | Tok::SlashAssign
                     | Tok::PercentAssign
+                    | Tok::BitAndAssign
+                    | Tok::BitOrAssign
+                    | Tok::BitXorAssign
+                    | Tok::ShlAssign
+                    | Tok::ShrAssign
             )
         );
         if assign_op {

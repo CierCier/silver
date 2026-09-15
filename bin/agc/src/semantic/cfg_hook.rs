@@ -46,6 +46,11 @@ pub fn fold_and_prune(program: &mut ast::Program, cfg: &CfgSet) {
 fn rewrite_item(item: &mut ast::Item, cfg: &CfgSet) {
     match &mut item.kind {
         ast::ItemKind::Function(function) => rewrite_block(&mut function.body, cfg),
+        ast::ItemKind::GlobalVariable(global) => {
+            if let Some(init) = &mut global.initializer {
+                rewrite_expression(init, cfg);
+            }
+        }
         ast::ItemKind::Impl(impl_item) => {
             for impl_member in &mut impl_item.items {
                 match impl_member {
@@ -55,6 +60,16 @@ fn rewrite_item(item: &mut ast::Item, cfg: &CfgSet) {
                 }
             }
         }
+        ast::ItemKind::Trait(trait_item) => {
+            for member in &mut trait_item.items {
+                if let ast::TraitItemKind::Function(f) = member
+                    && let Some(body) = &mut f.default_body
+                {
+                    rewrite_block(body, cfg);
+                }
+            }
+        }
+        ast::ItemKind::Macro(m) => rewrite_block(&mut m.body, cfg),
         _ => {}
     }
 }
@@ -101,6 +116,31 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
                 // Rewrite the expansion so its own @cfg(debug) folds and the
                 // branch prunes: debug builds keep the check, release builds
                 // compile it away entirely.
+                *expression = expanded;
+                rewrite_expression(expression, cfg);
+            } else if name.name == "file" && args.is_empty() {
+                let file = crate::lexer::source_file(expression.span.file)
+                    .map(|f| f.path)
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                *expression = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(file))),
+                    span: expression.span,
+                };
+            } else if name.name == "line" && args.is_empty() {
+                let line = expression.span.start_line as i128;
+                *expression = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(line))),
+                    span: expression.span,
+                };
+            } else if name.name == "column" && args.is_empty() {
+                let col = expression.span.start_col as i128;
+                *expression = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(col))),
+                    span: expression.span,
+                };
+            } else if name.name == "dbg"
+                && let Some(expanded) = expand_dbg(args, expression.span)
+            {
                 *expression = expanded;
                 rewrite_expression(expression, cfg);
             }
@@ -417,6 +457,111 @@ fn expand_assert(args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> 
             },
             else_branch: None,
         }),
+        span,
+    })
+}
+
+fn expand_dbg(args: &[ast::MacroArg], span: Span) -> Option<ast::Expression> {
+    if args.len() != 1 {
+        return None;
+    }
+    let ast::MacroArg::Expression(inner_expr) = &args[0] else {
+        return None;
+    };
+    let file = crate::lexer::source_file(span.file)
+        .map(|f| f.path)
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let line = span.start_line;
+    let col = span.start_col;
+
+    let expr_text = crate::lexer::source_file(inner_expr.span.file)
+        .and_then(|f| {
+            if inner_expr.span.start < f.text.len() && inner_expr.span.end <= f.text.len() {
+                let txt = f.text[inner_expr.span.start..inner_expr.span.end].trim();
+                if !txt.is_empty() {
+                    Some(txt.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "<expr>".to_string());
+
+    static DBG_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let var_name = format!(
+        "__silver_dbg_{}",
+        DBG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let fmt_str = format!("[{}:{}:{}] {} = {{}}", file, line, col, expr_text);
+
+    Some(ast::Expression {
+        kind: Box::new(ast::ExpressionKind::Block(ast::Block {
+            statements: vec![
+                ast::Statement {
+                    kind: ast::StatementKind::Let(ast::LetStatement {
+                        pattern: ast::Pattern {
+                            kind: ast::PatternKind::Identifier(ast::Identifier {
+                                name: var_name.clone(),
+                                span,
+                            }),
+                            span,
+                        },
+                        type_annotation: None,
+                        initializer: Some((*inner_expr).clone()),
+                        is_mutable: false,
+                        is_static: false,
+                        is_volatile: false,
+                    }),
+                    span,
+                },
+                ast::Statement {
+                    kind: ast::StatementKind::Expression(ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::MacroCall {
+                            name: ast::Identifier {
+                                name: "eprintln".to_string(),
+                                span,
+                            },
+                            args: vec![
+                                ast::MacroArg::Expression(ast::Expression {
+                                    kind: Box::new(ast::ExpressionKind::Literal(
+                                        ast::Literal::String(fmt_str),
+                                    )),
+                                    span,
+                                }),
+                                ast::MacroArg::Expression(ast::Expression {
+                                    kind: Box::new(ast::ExpressionKind::Identifier(
+                                        ast::Identifier {
+                                            name: var_name.clone(),
+                                            span,
+                                        },
+                                    )),
+                                    span,
+                                }),
+                            ],
+                        }),
+                        span,
+                    }),
+                    span,
+                },
+                ast::Statement {
+                    kind: ast::StatementKind::Expression(ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Move(Box::new(ast::Expression {
+                            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                                name: var_name,
+                                span,
+                            })),
+                            span,
+                        }))),
+                        span,
+                    }),
+                    span,
+                },
+            ],
+            span,
+        })),
         span,
     })
 }

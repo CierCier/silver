@@ -884,6 +884,11 @@ pub enum BinaryOperator {
     MultiplyAssign,
     DivideAssign,
     ModuloAssign,
+    BitwiseAndAssign,
+    BitwiseOrAssign,
+    BitwiseXorAssign,
+    LeftShiftAssign,
+    RightShiftAssign,
 }
 
 /// Unary operators

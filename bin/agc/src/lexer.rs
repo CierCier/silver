@@ -121,6 +121,11 @@ pub enum Token {
     StarAssign,
     SlashAssign,
     PercentAssign,
+    BitwiseAndAssign,
+    BitwiseOrAssign,
+    BitwiseXorAssign,
+    LeftShiftAssign,
+    RightShiftAssign,
 
     BitwiseAnd,
     BitwiseOr,
@@ -563,14 +568,22 @@ impl Lexer {
                 }
             }
             '<' => {
-                if self.match_char('=') {
+                if !self.is_at_end() && self.peek() == '<' && self.peek_next() == Some('=') {
+                    self.advance();
+                    self.advance();
+                    Ok(Token::LeftShiftAssign)
+                } else if self.match_char('=') {
                     Ok(Token::LessEqual)
                 } else {
                     Ok(Token::Less)
                 }
             }
             '>' => {
-                if self.match_char('=') {
+                if !self.is_at_end() && self.peek() == '>' && self.peek_next() == Some('=') {
+                    self.advance();
+                    self.advance();
+                    Ok(Token::RightShiftAssign)
+                } else if self.match_char('=') {
                     Ok(Token::GreaterEqual)
                 } else {
                     Ok(Token::Greater)
@@ -579,6 +592,8 @@ impl Lexer {
             '&' => {
                 if self.match_char('&') {
                     Ok(Token::And)
+                } else if self.match_char('=') {
+                    Ok(Token::BitwiseAndAssign)
                 } else {
                     Ok(Token::BitwiseAnd)
                 }
@@ -586,11 +601,19 @@ impl Lexer {
             '|' => {
                 if self.match_char('|') {
                     Ok(Token::Or)
+                } else if self.match_char('=') {
+                    Ok(Token::BitwiseOrAssign)
                 } else {
                     Ok(Token::BitwiseOr)
                 }
             }
-            '^' => Ok(Token::BitwiseXor),
+            '^' => {
+                if self.match_char('=') {
+                    Ok(Token::BitwiseXorAssign)
+                } else {
+                    Ok(Token::BitwiseXor)
+                }
+            }
             ':' => {
                 if self.match_char(':') {
                     Ok(Token::DoubleColon)
@@ -792,36 +815,87 @@ impl Lexer {
     fn number_literal(&mut self, first_digit: char) -> Result<Token, LexError> {
         let start_pos = self.position - 1;
 
-        // Check for hex literal (0x or 0X prefix)
-        if first_digit == '0' && !self.is_at_end() && (self.peek() == 'x' || self.peek() == 'X') {
-            self.advance(); // consume 'x' or 'X'
-            let mut hex_str = String::new();
-            while !self.is_at_end() && self.peek().is_ascii_hexdigit() {
-                hex_str.push(self.advance());
+        // Check for hex literal (0x or 0X prefix), binary (0b or 0B), or octal (0o or 0O)
+        if first_digit == '0' && !self.is_at_end() {
+            let next_c = self.peek();
+            if next_c == 'x' || next_c == 'X' {
+                self.advance(); // consume 'x' or 'X'
+                let mut hex_str = String::new();
+                while !self.is_at_end() && (self.peek().is_ascii_hexdigit() || self.peek() == '_') {
+                    let ch = self.advance();
+                    if ch != '_' {
+                        hex_str.push(ch);
+                    }
+                }
+                if hex_str.is_empty() {
+                    return Err(LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid hex literal: expected hex digits after 0x".to_string(),
+                    });
+                }
+                // Full u128 range: values above i128::MAX wrap to their bit
+                // pattern; the type checker reinterprets the literal against the
+                // target type (same convention as the decimal path).
+                let value = u128::from_str_radix(&hex_str, 16)
+                    .map_err(|_| LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid hex number".to_string(),
+                    })? as i128;
+                return Ok(Token::IntLiteral(value));
+            } else if next_c == 'b' || next_c == 'B' {
+                self.advance(); // consume 'b' or 'B'
+                let mut bin_str = String::new();
+                while !self.is_at_end() && (self.peek() == '0' || self.peek() == '1' || self.peek() == '_') {
+                    let ch = self.advance();
+                    if ch != '_' {
+                        bin_str.push(ch);
+                    }
+                }
+                if bin_str.is_empty() {
+                    return Err(LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid binary literal: expected binary digits after 0b".to_string(),
+                    });
+                }
+                let value = u128::from_str_radix(&bin_str, 2)
+                    .map_err(|_| LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid binary number".to_string(),
+                    })? as i128;
+                return Ok(Token::IntLiteral(value));
+            } else if next_c == 'o' || next_c == 'O' {
+                self.advance(); // consume 'o' or 'O'
+                let mut oct_str = String::new();
+                while !self.is_at_end() && (matches!(self.peek(), '0'..='7') || self.peek() == '_') {
+                    let ch = self.advance();
+                    if ch != '_' {
+                        oct_str.push(ch);
+                    }
+                }
+                if oct_str.is_empty() {
+                    return Err(LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid octal literal: expected octal digits after 0o".to_string(),
+                    });
+                }
+                let value = u128::from_str_radix(&oct_str, 8)
+                    .map_err(|_| LexError::InvalidNumber {
+                        span: (start_pos, self.position),
+                        message: "Invalid octal number".to_string(),
+                    })? as i128;
+                return Ok(Token::IntLiteral(value));
             }
-            if hex_str.is_empty() {
-                return Err(LexError::InvalidNumber {
-                    span: (start_pos, self.position),
-                    message: "Invalid hex literal: expected hex digits after 0x".to_string(),
-                });
-            }
-            // Full u128 range: values above i128::MAX wrap to their bit
-            // pattern; the type checker reinterprets the literal against the
-            // target type (same convention as the decimal path).
-            let value = u128::from_str_radix(&hex_str, 16)
-                .map_err(|_| LexError::InvalidNumber {
-                    span: (start_pos, self.position),
-                    message: "Invalid hex number".to_string(),
-                })? as i128;
-            return Ok(Token::IntLiteral(value));
         }
 
         let mut number_str = String::new();
         number_str.push(first_digit);
 
-        // Collect digits
-        while !self.is_at_end() && self.peek().is_ascii_digit() {
-            number_str.push(self.advance());
+        // Collect digits and '_' separators
+        while !self.is_at_end() && (self.peek().is_ascii_digit() || self.peek() == '_') {
+            let ch = self.advance();
+            if ch != '_' {
+                number_str.push(ch);
+            }
         }
 
         // Check for decimal point
@@ -830,8 +904,11 @@ impl Lexer {
             && self.peek_next().is_some_and(|c| c.is_ascii_digit())
         {
             number_str.push(self.advance()); // consume '.'
-            while !self.is_at_end() && self.peek().is_ascii_digit() {
-                number_str.push(self.advance());
+            while !self.is_at_end() && (self.peek().is_ascii_digit() || self.peek() == '_') {
+                let ch = self.advance();
+                if ch != '_' {
+                    number_str.push(ch);
+                }
             }
 
             // Check for complex number suffix 'i'
@@ -1563,6 +1640,40 @@ mod tests {
                 Token::Assign,
                 Token::IntLiteral(2),
                 Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compound_bitwise_assignment_tokens() {
+        let mut lexer = Lexer::new("&= |= ^= <<= >>=".to_string());
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::BitwiseAndAssign,
+                Token::BitwiseOrAssign,
+                Token::BitwiseXorAssign,
+                Token::LeftShiftAssign,
+                Token::RightShiftAssign,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_binary_and_octal_literals_with_separators() {
+        let mut lexer = Lexer::new("0b1010_1100 0o755 0xDEAD_BEEF 1_000_000 3.141_592".to_string());
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::IntLiteral(0b10101100),
+                Token::IntLiteral(0o755),
+                Token::IntLiteral(0xDEADBEEF),
+                Token::IntLiteral(1_000_000),
+                Token::FloatLiteral(3.141592),
                 Token::Eof,
             ]
         );

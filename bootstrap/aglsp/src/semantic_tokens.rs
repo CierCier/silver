@@ -210,6 +210,11 @@ fn classify(
         | Token::StarAssign
         | Token::SlashAssign
         | Token::PercentAssign
+        | Token::BitwiseAndAssign
+        | Token::BitwiseOrAssign
+        | Token::BitwiseXorAssign
+        | Token::LeftShiftAssign
+        | Token::RightShiftAssign
         | Token::BitwiseAnd
         | Token::BitwiseOr
         | Token::BitwiseXor

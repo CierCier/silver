@@ -1060,6 +1060,11 @@ fn try_eval_const_block(block: &Block, env: &HashMap<String, ConstVal>) -> Optio
                         BinaryOperator::MultiplyAssign => BinaryOperator::Multiply,
                         BinaryOperator::DivideAssign => BinaryOperator::Divide,
                         BinaryOperator::ModuloAssign => BinaryOperator::Modulo,
+                        BinaryOperator::BitwiseAndAssign => BinaryOperator::BitwiseAnd,
+                        BinaryOperator::BitwiseOrAssign => BinaryOperator::BitwiseOr,
+                        BinaryOperator::BitwiseXorAssign => BinaryOperator::BitwiseXor,
+                        BinaryOperator::LeftShiftAssign => BinaryOperator::LeftShift,
+                        BinaryOperator::RightShiftAssign => BinaryOperator::RightShift,
                         _ => return None,
                     };
                     if let ExpressionKind::Identifier(id) = left.kind.as_ref() {

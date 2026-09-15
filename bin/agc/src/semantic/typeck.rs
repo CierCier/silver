@@ -1160,7 +1160,7 @@ impl TypeChecker {
         }
     }
 
-    fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
+    pub(crate) fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
         #[expect(
             clippy::match_like_matches_macro,
             reason = "two-column (primitive, literal) table reads better as a match than matches!"
@@ -1533,38 +1533,20 @@ impl TypeChecker {
                 | ast::BinaryOperator::RightShift => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
-                    if left_ty != right_ty {
-                        // Integer literals default to i128, so a literal
-                        // operand narrows to the other operand's type; mixed
-                        // integer widths share a common type (codegen casts).
-                        if !(self.is_integer_type(&left_ty)
-                            && self.is_integer_type(&right_ty)
-                            && self.common_numeric_type(&left_ty, &right_ty).is_some())
-                            && !self
-                                .defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
-                        {
-                            self.error(
-                                format!(
-                                    "bitwise operands must match, got {} and {}",
-                                    left_ty, right_ty
-                                ),
-                                expr.span,
-                            );
-                        }
-                    }
-                    if !self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty) {
-                        if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span)
-                        {
+                    if self.is_integer_type(&left_ty) && self.is_integer_type(&right_ty) {
+                        if matches!(
+                            operator,
+                            ast::BinaryOperator::LeftShift | ast::BinaryOperator::RightShift
+                        ) {
                             return left_ty;
                         }
-                        self.error(
-                            format!(
-                                "bitwise operator requires integer operands, got {} and {}",
-                                left_ty, right_ty
-                            ),
-                            expr.span,
-                        );
+                        return self.common_numeric_type(&left_ty, &right_ty).unwrap_or(left_ty);
                     }
+
+                    if self.defer_operator_if_generic(&left_ty, &right_ty, operator, expr.span) {
+                        return left_ty;
+                    }
+
                     // Try operator overload for non-primitive types
                     if !self.is_primitive_type(&left_ty)
                         && let Some(result_ty) =
@@ -1573,15 +1555,16 @@ impl TypeChecker {
                         return result_ty;
                     }
 
-                    self.common_numeric_type(&left_ty, &right_ty)
-                        .unwrap_or(left_ty)
+                    if self.is_primitive_type(&left_ty) || self.is_primitive_type(&right_ty) {
+                        self.error(
+                            msg::bitwise_operator_requires_integers(&left_ty, &right_ty),
+                            expr.span,
+                        );
+                    }
+
+                    Type::Unknown
                 }
-                ast::BinaryOperator::Assign
-                | ast::BinaryOperator::AddAssign
-                | ast::BinaryOperator::SubtractAssign
-                | ast::BinaryOperator::MultiplyAssign
-                | ast::BinaryOperator::DivideAssign
-                | ast::BinaryOperator::ModuloAssign => {
+                ast::BinaryOperator::Assign => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
@@ -1604,26 +1587,79 @@ impl TypeChecker {
                     {
                         self.error(msg::cannot_assign_const_field(&ident.name), ident.span);
                     }
-                    // Try operator overload for compound assignment
-                    if !self.is_primitive_type(&left_ty)
-                        && matches!(
-                            operator,
-                            ast::BinaryOperator::AddAssign
-                                | ast::BinaryOperator::SubtractAssign
-                                | ast::BinaryOperator::MultiplyAssign
-                                | ast::BinaryOperator::DivideAssign
-                                | ast::BinaryOperator::ModuloAssign
-                        )
+                    left_ty
+                }
+                ast::BinaryOperator::AddAssign
+                | ast::BinaryOperator::SubtractAssign
+                | ast::BinaryOperator::MultiplyAssign
+                | ast::BinaryOperator::DivideAssign
+                | ast::BinaryOperator::ModuloAssign
+                | ast::BinaryOperator::BitwiseAndAssign
+                | ast::BinaryOperator::BitwiseOrAssign
+                | ast::BinaryOperator::BitwiseXorAssign
+                | ast::BinaryOperator::LeftShiftAssign
+                | ast::BinaryOperator::RightShiftAssign => {
+                    let left_ty = self.check_expr(left, None);
+                    let right_ty = self.check_expr(right, None);
+                    // Check mutability of assignment target
+                    if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
+                        && let Some((_, is_mut)) = self.lookup(&ident.name)
+                        && !is_mut
                     {
+                        self.error(msg::cannot_assign_const(&ident.name), ident.span);
+                    }
+                    if let ast::ExpressionKind::FieldAccess { object, .. } = left.kind.as_ref()
+                        && let ast::ExpressionKind::Identifier(ident) = object.kind.as_ref()
+                        && let Some((_, is_mut)) = self.lookup(&ident.name)
+                        && !is_mut
+                    {
+                        self.error(msg::cannot_assign_const_field(&ident.name), ident.span);
+                    }
+
+                    if self.is_primitive_type(&left_ty) {
+                        if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
+                            self.error(
+                                msg::assignment_type_mismatch(&left_ty, &right_ty),
+                                expr.span,
+                            );
+                        }
+                        // For bitwise compound assignments on primitive types, enforce integer operands
+                        if matches!(
+                            operator,
+                            ast::BinaryOperator::BitwiseAndAssign
+                                | ast::BinaryOperator::BitwiseOrAssign
+                                | ast::BinaryOperator::BitwiseXorAssign
+                                | ast::BinaryOperator::LeftShiftAssign
+                                | ast::BinaryOperator::RightShiftAssign
+                        ) && (!self.is_integer_type(&left_ty) || !self.is_integer_type(&right_ty))
+                        {
+                            self.error(
+                                msg::bitwise_assignment_requires_integers(&left_ty, &right_ty),
+                                expr.span,
+                            );
+                        }
+                    } else {
                         let bin_op = match operator {
                             ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
                             ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
                             ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
                             ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
                             ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                            ast::BinaryOperator::BitwiseAndAssign => ast::BinaryOperator::BitwiseAnd,
+                            ast::BinaryOperator::BitwiseOrAssign => ast::BinaryOperator::BitwiseOr,
+                            ast::BinaryOperator::BitwiseXorAssign => ast::BinaryOperator::BitwiseXor,
+                            ast::BinaryOperator::LeftShiftAssign => ast::BinaryOperator::LeftShift,
+                            ast::BinaryOperator::RightShiftAssign => ast::BinaryOperator::RightShift,
                             _ => unreachable!(),
                         };
-                        self.resolve_operator_overload(&left_ty, &right_ty, &bin_op, expr);
+                        if let Some(res_ty) = self.resolve_operator_overload(&left_ty, &right_ty, &bin_op, expr) {
+                            if res_ty != left_ty && !self.is_implicitly_castable(&res_ty, &left_ty) {
+                                self.error(
+                                    msg::assignment_type_mismatch(&left_ty, &res_ty),
+                                    expr.span,
+                                );
+                            }
+                        }
                     }
 
                     left_ty
@@ -3021,6 +3057,10 @@ impl TypeChecker {
                             "memcpy",
                             "memset",
                             "memmove",
+                            "file",
+                            "line",
+                            "column",
+                            "dbg",
                         ];
                         let suggestion =
                             crate::diagnostics::suggestion_suffix(&name.name, known_macros);
@@ -6321,11 +6361,11 @@ impl TypeChecker {
             Greater => ">",
             LessEqual => "<=",
             GreaterEqual => ">=",
-            BitwiseAnd => "&",
-            BitwiseOr => "|",
-            BitwiseXor => "^",
-            LeftShift => "<<",
-            RightShift => ">>",
+            BitwiseAnd | BitwiseAndAssign => "&",
+            BitwiseOr | BitwiseOrAssign => "|",
+            BitwiseXor | BitwiseXorAssign => "^",
+            LeftShift | LeftShiftAssign => "<<",
+            RightShift | RightShiftAssign => ">>",
             LogicalAnd => "&&",
             LogicalOr => "||",
             Assign => "=",
@@ -7516,7 +7556,7 @@ impl TypeChecker {
         }
     }
 
-    fn error(&mut self, message: impl Into<String>, span: Span) {
+    pub(crate) fn error(&mut self, message: impl Into<String>, span: Span) {
         self.errors.push(TypeError {
             message: message.into(),
             span,

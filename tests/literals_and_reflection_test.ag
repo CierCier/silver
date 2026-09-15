@@ -1,0 +1,96 @@
+// tests/literals_and_reflection_test.ag — Comprehensive test for:
+// 1. Binary literals (0b / 0B)
+// 2. Octal literals (0o / 0O)
+// 3. Digit separators in decimal, hex, binary, octal, and floating point
+// 4. Source location macros (@file(), @line(), @column()) in local and global const contexts
+// 5. Rust-style @dbg(expr) macro for primitives, pointers, and nested calls
+
+import std.io;
+import std.sys.entry;
+import std.test;
+import std.string;
+
+const u32 GLOBAL_REFLECT_LINE = @line();
+const str GLOBAL_REFLECT_FILE = @file();
+
+i32 main() {
+    test_start("binary and octal literals");
+    {
+        i64 bin1 = 0b1010;
+        assert_eq_i64(10, bin1, "0b1010 == 10");
+
+        i64 bin2 = 0B1111;
+        assert_eq_i64(15, bin2, "0B1111 == 15");
+
+        i64 oct1 = 0o755;
+        assert_eq_i64(493, oct1, "0o755 == 493");
+
+        i64 oct2 = 0O77;
+        assert_eq_i64(63, oct2, "0O77 == 63");
+
+        u64 zero_b = 0b0;
+        u64 zero_o = 0o0;
+        assert_eq_u64(0, zero_b, "0b0 == 0");
+        assert_eq_u64(0, zero_o, "0o0 == 0");
+    }
+
+    test_start("digit separators");
+    {
+        i64 million = 1_000_000;
+        assert_eq_i64(1000000, million, "1_000_000 decimal with underscores");
+
+        u64 hex = 0xDE_AD_BE_EF;
+        assert_eq_u64(3735928559, hex, "0xDE_AD_BE_EF hex with underscores");
+
+        u32 bin_grouped = 0b1111_0000_1010_0101;
+        assert_eq_u64(61605, (u64)bin_grouped, "0b1111_0000_1010_0101 binary with underscores");
+
+        u32 oct_grouped = 0o7_5_5;
+        assert_eq_u64(493, (u64)oct_grouped, "0o7_5_5 octal with underscores");
+
+        f64 pi = 3.141_592_65;
+        assert_true(pi > 3.1415 && pi < 3.1416, "floating point with digit separators");
+    }
+
+    test_start("source reflection macros");
+    {
+        assert_eq_u64(13, (u64)GLOBAL_REFLECT_LINE, "GLOBAL_REFLECT_LINE is 13");
+        assert_true(GLOBAL_REFLECT_FILE != (str)0, "GLOBAL_REFLECT_FILE != null");
+
+        str cur_file = @file();
+        assert_true(cur_file != (str)0, "@file() is non-null");
+
+        // The line macro reports the exact line it is invoked on
+        u32 line_here = @line();
+        // line_here is on line 64
+        assert_eq_u64(64, (u64)line_here, "@line() reports line 64");
+
+        u32 col_here = @column();
+        assert_true(col_here > 0, "@column() is greater than 0");
+    }
+
+    test_start("dbg macro expression pass-through");
+    {
+        // @dbg logs to stderr and returns the evaluated expression value unchanged
+        i64 x = @dbg(10 + 20);
+        assert_eq_i64(30, x, "@dbg(10 + 20) evaluates to 30");
+
+        i64 doubled = @dbg(x * 2);
+        assert_eq_i64(60, doubled, "@dbg(x * 2) evaluates to 60");
+
+        str msg = @dbg("silver compiler");
+        assert_true(msg != (str)0, "@dbg with str expression");
+
+        // Pointer support in @dbg
+        i32 val = 123;
+        i32* pval = &val;
+        i32* pdbg = @dbg(pval);
+        assert_eq_i32(123, *pdbg, "@dbg on pointer preserved pointer value");
+
+        // Nested @dbg calls
+        i32 nested = @dbg(@dbg(50 + 50));
+        assert_eq_i32(100, nested, "nested @dbg evaluates correctly");
+    }
+
+    return done();
+}

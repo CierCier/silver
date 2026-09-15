@@ -407,7 +407,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::BinaryOperator::SubtractAssign
             | ast::BinaryOperator::MultiplyAssign
             | ast::BinaryOperator::DivideAssign
-            | ast::BinaryOperator::ModuloAssign => {
+            | ast::BinaryOperator::ModuloAssign
+            | ast::BinaryOperator::BitwiseAndAssign
+            | ast::BinaryOperator::BitwiseOrAssign
+            | ast::BinaryOperator::BitwiseXorAssign
+            | ast::BinaryOperator::LeftShiftAssign
+            | ast::BinaryOperator::RightShiftAssign => {
                 self.check_assignment_mutability(left)?;
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let llvm_ty = self.lower_basic_type(&target_ty)?;
@@ -428,6 +433,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
                         ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
                         ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                        ast::BinaryOperator::BitwiseAndAssign => ast::BinaryOperator::BitwiseAnd,
+                        ast::BinaryOperator::BitwiseOrAssign => ast::BinaryOperator::BitwiseOr,
+                        ast::BinaryOperator::BitwiseXorAssign => ast::BinaryOperator::BitwiseXor,
+                        ast::BinaryOperator::LeftShiftAssign => ast::BinaryOperator::LeftShift,
+                        ast::BinaryOperator::RightShiftAssign => ast::BinaryOperator::RightShift,
                         _ => unreachable!(),
                     };
                     if let Some(method_name) = operator_method_name(&bin_op) {
@@ -922,6 +932,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map_err(|e| CodegenError::new(format!("int rem failed: {e}")))?
                         }
                     }
+                    ast::BinaryOperator::BitwiseAnd | ast::BinaryOperator::BitwiseAndAssign => self
+                        .builder
+                        .build_and(*lhs, *rhs, "band")
+                        .map_err(|e| CodegenError::new(format!("bitwise and failed: {e}")))?,
+                    ast::BinaryOperator::BitwiseOr | ast::BinaryOperator::BitwiseOrAssign => self
+                        .builder
+                        .build_or(*lhs, *rhs, "bor")
+                        .map_err(|e| CodegenError::new(format!("bitwise or failed: {e}")))?,
+                    ast::BinaryOperator::BitwiseXor | ast::BinaryOperator::BitwiseXorAssign => self
+                        .builder
+                        .build_xor(*lhs, *rhs, "bxor")
+                        .map_err(|e| CodegenError::new(format!("bitwise xor failed: {e}")))?,
+                    ast::BinaryOperator::LeftShift | ast::BinaryOperator::LeftShiftAssign => self
+                        .builder
+                        .build_left_shift(*lhs, *rhs, "shl")
+                        .map_err(|e| CodegenError::new(format!("left shift failed: {e}")))?,
+                    ast::BinaryOperator::RightShift | ast::BinaryOperator::RightShiftAssign => self
+                        .builder
+                        .build_right_shift(*lhs, *rhs, !is_unsigned, "shr")
+                        .map_err(|e| CodegenError::new(format!("right shift failed: {e}")))?,
                     _ => {
                         return Err(CodegenError::with_span(
                             "unsupported arithmetic operation",

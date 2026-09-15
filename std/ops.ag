@@ -13,6 +13,13 @@ trait Div<B>        { Self __div(self, B other); }
 trait Mod<B>        { Self __mod(self, B other); }
 trait Neg           { Self __neg(self); }
 
+trait BitAnd<B>     { Self __bitand(self, B other); }
+trait BitOr<B>      { Self __bitor(self, B other); }
+trait BitXor<B>     { Self __bitxor(self, B other); }
+trait Shl<B>        { Self __shl(self, B other); }
+trait Shr<B>        { Self __shr(self, B other); }
+trait BitNot        { Self __bitnot(self); }
+
 trait Eq<A>   { bool __eq(*self, A* other); }
 trait Ne<A>   { bool __ne(*self, A* other); }
 trait Lt<A>   { bool __lt(*self, A* other); }

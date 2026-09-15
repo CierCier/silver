@@ -482,3 +482,27 @@ pub fn test_fn_must_take_no_parameters(name: &str) -> String {
 pub fn test_fn_must_return_void(name: &str) -> String {
     format!("test function `{name}` must return void")
 }
+
+pub fn bitwise_operator_requires_integers(left: &impl Display, right: &impl Display) -> String {
+    format!("bitwise operator requires integer operands, got {left} and {right}")
+}
+
+pub fn bitwise_assignment_requires_integers(left: &impl Display, right: &impl Display) -> String {
+    format!("bitwise assignment requires integer types, found {left} and {right}")
+}
+
+pub fn file_expects_zero() -> &'static str {
+    "@file() takes 0 arguments"
+}
+
+pub fn line_expects_zero() -> &'static str {
+    "@line() takes 0 arguments"
+}
+
+pub fn column_expects_zero() -> &'static str {
+    "@column() takes 0 arguments"
+}
+
+pub fn dbg_expects_one() -> &'static str {
+    "@dbg expects exactly 1 argument"
+}

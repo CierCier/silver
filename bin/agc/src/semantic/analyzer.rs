@@ -556,6 +556,11 @@ impl Analyzer {
                         | ast::BinaryOperator::MultiplyAssign
                         | ast::BinaryOperator::DivideAssign
                         | ast::BinaryOperator::ModuloAssign
+                        | ast::BinaryOperator::BitwiseAndAssign
+                        | ast::BinaryOperator::BitwiseOrAssign
+                        | ast::BinaryOperator::BitwiseXorAssign
+                        | ast::BinaryOperator::LeftShiftAssign
+                        | ast::BinaryOperator::RightShiftAssign
                 ) {
                     self.mark_mutated(left);
                 }

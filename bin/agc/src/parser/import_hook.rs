@@ -139,7 +139,7 @@ impl<'a> FileImportResolverHook<'a> {
         if uses_macro(
             &program.items,
             &[
-                "print", "println", "eprint", "eprintln", "fprint", "sprint", "format",
+                "print", "println", "eprint", "eprintln", "fprint", "sprint", "format", "dbg",
             ],
         ) {
             auto_modules.push(vec!["std", "io"]);

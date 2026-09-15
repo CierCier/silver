@@ -1,11 +1,11 @@
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::codegen::CodegenResult;
+use crate::codegen::{CodegenError, CodegenResult};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::parser::ast;
 use crate::semantic::typeck::TypeChecker;
 use crate::types::Type;
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValue, BasicValueEnum};
 
 pub trait MacroHandler {
     fn type_check(
@@ -55,6 +55,10 @@ impl MacroRegistry {
         registry.register("memcpy", Box::new(MemcpyHandler));
         registry.register("memset", Box::new(MemsetHandler));
         registry.register("memmove", Box::new(MemmoveHandler));
+        registry.register("file", Box::new(FileHandler));
+        registry.register("line", Box::new(LineHandler));
+        registry.register("column", Box::new(ColumnHandler));
+        registry.register("dbg", Box::new(DbgHandler));
         registry
     }
 
@@ -278,6 +282,135 @@ impl MacroHandler for MemmoveHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.memmove_codegen(expr, args)
+    }
+}
+
+pub struct FileHandler;
+
+impl MacroHandler for FileHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if !args.is_empty() {
+            checker.error(crate::diagnostics::messages::file_expects_zero(), expr.span);
+        }
+        Type::Primitive(ast::PrimitiveType::Str)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let file_path = crate::lexer::source_file(expr.span.file)
+            .map(|f| f.path)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        generator
+            .intern_string_literal(&file_path)
+            .map(|ptr| ptr.as_basic_value_enum())
+    }
+}
+
+pub struct LineHandler;
+
+impl MacroHandler for LineHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if !args.is_empty() {
+            checker.error(crate::diagnostics::messages::line_expects_zero(), expr.span);
+        }
+        Type::Primitive(ast::PrimitiveType::U32)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let line = expr.span.start_line as u64;
+        let u32_ty = generator.context.i32_type();
+        Ok(u32_ty.const_int(line, false).as_basic_value_enum())
+    }
+}
+
+pub struct ColumnHandler;
+
+impl MacroHandler for ColumnHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if !args.is_empty() {
+            checker.error(crate::diagnostics::messages::column_expects_zero(), expr.span);
+        }
+        Type::Primitive(ast::PrimitiveType::U32)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let col = expr.span.start_col as u64;
+        let u32_ty = generator.context.i32_type();
+        Ok(u32_ty.const_int(col, false).as_basic_value_enum())
+    }
+}
+
+pub struct DbgHandler;
+
+impl MacroHandler for DbgHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if args.len() != 1 {
+            checker.error(crate::diagnostics::messages::dbg_expects_one(), expr.span);
+            return Type::Unknown;
+        }
+        let ast::MacroArg::Expression(inner) = &args[0] else {
+            checker.error(crate::diagnostics::messages::dbg_expects_one(), expr.span);
+            return Type::Unknown;
+        };
+        checker.check_expr(inner, None)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if let Some(ast::MacroArg::Expression(inner)) = args.first() {
+            generator.emit_expression_value(inner)
+        } else {
+            Err(CodegenError::with_span(
+                crate::diagnostics::messages::dbg_expects_one(),
+                expr.span,
+            ))
+        }
     }
 }
 

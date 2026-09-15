@@ -221,6 +221,36 @@ impl BufWriter {
         self.write(&c, 1);
     }
 
+    /// Format and buffer a pointer value as 0x... hex.
+    void write_ptr(*self, void* p) {
+        u64 val = (u64)p;
+        if (val == (u64)0) {
+            self.write_str("0x0");
+            return;
+        }
+        u8 buf[20];
+        buf[0] = (u8)'0';
+        buf[1] = (u8)'x';
+        u8 hex_digits[16];
+        i64 n = 0;
+        while (val > (u64)0) {
+            u64 d = val & (u64)0xF;
+            if (d < (u64)10) {
+                hex_digits[n] = (u8)((u8)'0' + (u8)d);
+            } else {
+                hex_digits[n] = (u8)((u8)'a' + (u8)(d - (u64)10));
+            }
+            n = n + 1;
+            val = val >> (u64)4;
+        }
+        i64 i = 0;
+        while (i < n) {
+            buf[2 + i] = hex_digits[n - 1 - i];
+            i = i + 1;
+        }
+        self.write(&buf[0], 2 + n);
+    }
+
     /// Promote an in-memory writer (IOMODE_MEMORY) from its stack scratch
     /// buffer to an owned heap block before @format/@sprint hand the buffer
     /// off to a String or return it as str. No-op when already heap-owned.

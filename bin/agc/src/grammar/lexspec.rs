@@ -105,6 +105,11 @@ pub enum Tok {
     StarAssign,
     SlashAssign,
     PercentAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShlAssign,
+    ShrAssign,
     BitAnd,
     BitOr,
     BitXor,
@@ -155,6 +160,11 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("*=", Tok::StarAssign),
     ("/=", Tok::SlashAssign),
     ("%=", Tok::PercentAssign),
+    ("&=", Tok::BitAndAssign),
+    ("|=", Tok::BitOrAssign),
+    ("^=", Tok::BitXorAssign),
+    ("<<=", Tok::ShlAssign),
+    (">>=", Tok::ShrAssign),
     ("==", Tok::Equal),
     ("!=", Tok::NotEqual),
     ("<=", Tok::LessEqual),
@@ -357,14 +367,17 @@ impl LexSpec for SilverLexSpec {
 fn scan_number(bytes: &[u8], start: usize) -> Result<(Tok, usize), LexError> {
     let mut pos = start;
 
-    // Hex literal: 0x<hexdigits>+ — no suffix handling after hex.
+    // Hex literal: 0x<hexdigits|_>+ — no suffix handling after hex.
     if bytes[pos] == b'0' && pos + 1 < bytes.len() && (bytes[pos + 1] | 0x20) == b'x' {
         pos += 2;
-        let digits_start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
+        let mut has_digit = false;
+        while pos < bytes.len() && (bytes[pos].is_ascii_hexdigit() || bytes[pos] == b'_') {
+            if bytes[pos] != b'_' {
+                has_digit = true;
+            }
             pos += 1;
         }
-        if pos == digits_start {
+        if !has_digit {
             return Err(LexError::message(
                 start,
                 "Invalid hex literal: expected hex digits after 0x",
@@ -373,15 +386,53 @@ fn scan_number(bytes: &[u8], start: usize) -> Result<(Tok, usize), LexError> {
         return Ok((Tok::IntLit, pos));
     }
 
-    // Integer part.
-    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+    // Binary literal: 0b<0|1|_>+
+    if bytes[pos] == b'0' && pos + 1 < bytes.len() && (bytes[pos + 1] | 0x20) == b'b' {
+        pos += 2;
+        let mut has_digit = false;
+        while pos < bytes.len() && (bytes[pos] == b'0' || bytes[pos] == b'1' || bytes[pos] == b'_') {
+            if bytes[pos] != b'_' {
+                has_digit = true;
+            }
+            pos += 1;
+        }
+        if !has_digit {
+            return Err(LexError::message(
+                start,
+                "Invalid binary literal: expected binary digits after 0b",
+            ));
+        }
+        return Ok((Tok::IntLit, pos));
+    }
+
+    // Octal literal: 0o<0..7|_>+
+    if bytes[pos] == b'0' && pos + 1 < bytes.len() && (bytes[pos + 1] | 0x20) == b'o' {
+        pos += 2;
+        let mut has_digit = false;
+        while pos < bytes.len() && (matches!(bytes[pos], b'0'..=b'7') || bytes[pos] == b'_') {
+            if bytes[pos] != b'_' {
+                has_digit = true;
+            }
+            pos += 1;
+        }
+        if !has_digit {
+            return Err(LexError::message(
+                start,
+                "Invalid octal literal: expected octal digits after 0o",
+            ));
+        }
+        return Ok((Tok::IntLit, pos));
+    }
+
+    // Integer part: digits and '_'
+    while pos < bytes.len() && (bytes[pos].is_ascii_digit() || bytes[pos] == b'_') {
         pos += 1;
     }
 
     // Fraction: '.' only when followed by another digit.
     if pos + 1 < bytes.len() && bytes[pos] == b'.' && bytes[pos + 1].is_ascii_digit() {
         pos += 1; // '.'
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        while pos < bytes.len() && (bytes[pos].is_ascii_digit() || bytes[pos] == b'_') {
             pos += 1;
         }
         // Complex float: 3.5i
@@ -615,6 +666,11 @@ impl Tok {
             x if x == Tok::StarAssign as u16 => Tok::StarAssign,
             x if x == Tok::SlashAssign as u16 => Tok::SlashAssign,
             x if x == Tok::PercentAssign as u16 => Tok::PercentAssign,
+            x if x == Tok::BitAndAssign as u16 => Tok::BitAndAssign,
+            x if x == Tok::BitOrAssign as u16 => Tok::BitOrAssign,
+            x if x == Tok::BitXorAssign as u16 => Tok::BitXorAssign,
+            x if x == Tok::ShlAssign as u16 => Tok::ShlAssign,
+            x if x == Tok::ShrAssign as u16 => Tok::ShrAssign,
             x if x == Tok::BitAnd as u16 => Tok::BitAnd,
             x if x == Tok::BitOr as u16 => Tok::BitOr,
             x if x == Tok::BitXor as u16 => Tok::BitXor,
@@ -670,7 +726,10 @@ mod discriminant_tests {
             Tok::Less, Tok::Greater, Tok::LessEqual, Tok::GreaterEqual,
             Tok::AndAnd, Tok::OrOr, Tok::Not, Tok::Assign,
             Tok::PlusAssign, Tok::MinusAssign, Tok::StarAssign,
-            Tok::SlashAssign, Tok::PercentAssign, Tok::BitAnd,
+            Tok::SlashAssign, Tok::PercentAssign,
+            Tok::BitAndAssign, Tok::BitOrAssign, Tok::BitXorAssign,
+            Tok::ShlAssign, Tok::ShrAssign,
+            Tok::BitAnd,
             Tok::BitOr, Tok::BitXor, Tok::BitNot, Tok::Increment,
             Tok::Decrement, Tok::LParen, Tok::RParen, Tok::LBrace,
             Tok::RBrace, Tok::LBracket, Tok::RBracket, Tok::Semi,
