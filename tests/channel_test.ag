@@ -59,7 +59,7 @@ void producer_tag(i64 arg) {
 void producer_slow(i64 arg) {
     // Give the consumer time to block on an empty channel first.
     for (i64 i = 0; i < 2000; i = i + 1) {
-        sys_sched_yield();
+        thread_yield();
     }
     g_ch3.send(777);
 }

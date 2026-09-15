@@ -1,8 +1,12 @@
 // tests/cfg_derived_test.ag — compiler-derived cfg keys.
 //
 // The harness compiles this test with `-O2`, so `release` is derived; the
-// host triple derives arch.x86_64 / os.linux on this machine. Debug/release
+// host triple derives arch.x86_64 and the platform os.* key. Debug/release
 // and arch/os come from the build configuration, not from --cfg flags.
+//
+// Platform-portable: exactly one of os.linux / os.windows is derived from
+// the host triple, so the assertions branch on @cfg — dead branches are
+// pruned at semantic time, and only the live platform's item is compiled in.
 
 import std.sys.entry;
 import std.test;
@@ -19,6 +23,9 @@ i32 arch_x86_64() { return 3; }
 #[cfg(os.linux)]
 i32 os_linux() { return 4; }
 
+#[cfg(os.windows)]
+i32 os_windows() { return 5; }
+
 i32 main() {
     test_start("cfg derived release");
     // -O2 derives release; the debug-mode item must be dropped.
@@ -28,13 +35,23 @@ i32 main() {
     assert_eq_i64(0, d, "debug not set in an -O2 build");
 
     test_start("cfg derived arch/os");
-    // On this machine the triple is x86_64-unknown-linux-gnu.
+    // The host triple derives arch.x86_64 on x86-64 machines.
     i64 a = 0;
     if (@cfg(arch.x86_64)) { a = 1; }
     assert_eq_i64(1, a, "arch.x86_64 derived from host triple");
-    i64 o = 0;
-    if (@cfg(os.linux)) { o = 1; }
-    assert_eq_i64(1, o, "os.linux derived from host triple");
+
+    // Exactly one platform key is derived from the host triple.
+    i64 saw_platform = 0;
+    if (@cfg(os.linux)) {
+        saw_platform = 1;
+        assert_eq_i64(4, os_linux(), "os.linux derived from host triple");
+    }
+    if (@cfg(os.windows)) {
+        assert_eq_i64(saw_platform, 0, "only one os.* key derived");
+        saw_platform = 1;
+        assert_eq_i64(5, os_windows(), "os.windows derived from host triple");
+    }
+    assert_eq_i64(1, saw_platform, "a platform os.* key must be derived");
 
     return done();
 }

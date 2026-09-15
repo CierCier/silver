@@ -176,6 +176,9 @@ impl PRT_Parser {
                     tok(Token::F32),
                     tok(Token::F64),
                     tok(Token::F80),
+                    tok(Token::C32),
+                    tok(Token::C64),
+                    tok(Token::C80),
                     tok(Token::Bool),
                     tok(Token::Str),
                     tok(Token::Char),
@@ -366,6 +369,9 @@ impl PRT_Parser {
             Token::F32 => Some(ast::PrimitiveType::F32),
             Token::F64 => Some(ast::PrimitiveType::F64),
             Token::F80 => Some(ast::PrimitiveType::F80),
+            Token::C32 => Some(ast::PrimitiveType::C32),
+            Token::C64 => Some(ast::PrimitiveType::C64),
+            Token::C80 => Some(ast::PrimitiveType::C80),
             Token::Bool => Some(ast::PrimitiveType::Bool),
             Token::Str => Some(ast::PrimitiveType::Str),
             Token::Char => Some(ast::PrimitiveType::Char),
@@ -645,6 +651,9 @@ impl PRT_Parser {
                 | Token::F32
                 | Token::F64
                 | Token::F80
+                | Token::C32
+                | Token::C64
+                | Token::C80
                 | Token::Bool
                 | Token::Str
                 | Token::Char

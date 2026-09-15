@@ -7,6 +7,7 @@
 //       std/sys/syscall_args.json \
 //       std/sys/linux.ag --split-dir std/sys/raw
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum SYSCALL {
     READ = 0;

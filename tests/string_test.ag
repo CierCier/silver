@@ -509,7 +509,7 @@ i32 main(){
     }
     test_start("read_to_string and read_lines");
     {
-        str tmp_path = "/tmp/silver_string_read_test.txt";
+        str tmp_path = "silver_string_read_test.txt";
         Result<i64, Error> r_w = try_open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 438);
         if (r_w.is_ok()) {
             i32 fd = (i32)r_w.value();

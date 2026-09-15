@@ -1223,12 +1223,9 @@ impl TypeChecker {
                 ) && let ast::ExpressionKind::Literal(ast::Literal::Integer(n)) =
                     operand.kind.as_ref()
                 {
-                    let value = if *operator == ast::UnaryOperator::Minus {
-                        n.checked_neg().unwrap_or(i128::MIN)
-                    } else {
-                        *n
-                    };
-                    self.type_integer_literal_value(value, expected, &expr.span)
+                    let magnitude = *n as u128;
+                    let negated = *operator == ast::UnaryOperator::Minus;
+                    self.type_integer_literal_value(magnitude, negated, expected, &expr.span)
                 } else {
                     let operand_expected =
                         expected.filter(|ty| self.is_numeric_type(ty) || is_bool(ty));
@@ -4296,7 +4293,12 @@ impl TypeChecker {
         // decompose down to the expected type with an overflow check when a
         // narrower integer type is expected (e.g. `u8 x = 300` errors).
         if let ast::Literal::Integer(value) = literal {
-            return self.type_integer_literal_value(*value, expected, span);
+            // Source integer literals are always non-negative magnitudes in the
+            // range 0..=u128::MAX (stored as wrapped two's-complement i128 bits).
+            // Unary negation (`-n`) is represented as ast::UnaryOperator::Minus
+            // and handled by check_expr, so bare integer literals have negated = false.
+            let magnitude = *value as u128;
+            return self.type_integer_literal_value(magnitude, false, expected, span);
         }
         if let Some(expected_ty) = expected
             && self.literal_matches_expected(literal, expected_ty)
@@ -4317,47 +4319,111 @@ impl TypeChecker {
     /// Type an integer literal value against an optional expected type: the
     /// biggest integer type (i128) by default, narrowed to the expected
     /// integer type with an overflow error when it does not fit.
+    ///
+    /// `magnitude` is the SOURCE magnitude (the lexer stores full-u128
+    /// magnitudes as their two's-complement bit pattern; `as u128` recovers
+    /// them exactly), and `negated` records a unary minus. Keeping them
+    /// separate is what distinguishes `u128 x = u128::MAX` (wrapped, legal)
+    /// from `u128 x = -1` (negated, illegal) — the combined i128 value alone
+    /// cannot.
     fn type_integer_literal_value(
         &mut self,
-        value: i128,
+        magnitude: u128,
+        negated: bool,
         expected: Option<&Type>,
         span: &Span,
     ) -> Type {
         if let Some(expected_ty) = expected
             && let Type::Primitive(prim) = expected_ty
-            && let Some((min, max)) = Self::integer_prim_range(prim)
         {
-            if value < min || value > max {
-                self.error(
-                    format!("integer literal {} does not fit in type {:?}", value, prim),
-                    *span,
-                );
+            if let Some(max) = Self::unsigned_prim_max(prim) {
+                // A negated literal never fits an unsigned type
+                // (`u8 x = -5`, `u128 x = -1` both error).
+                if negated || magnitude > max {
+                    let shown = if negated { format!("-{magnitude}") } else { format!("{magnitude}") };
+                    self.error(
+                        format!("integer literal {shown} does not fit in type {:?}", prim),
+                        *span,
+                    );
+                }
+                return expected_ty.clone();
             }
-            return expected_ty.clone();
+            if let Some((min, max)) = Self::signed_prim_range(prim) {
+                let fits = if negated {
+                    match magnitude {
+                        m if m <= i128::MAX as u128 => {
+                            let v = -(m as i128);
+                            v >= min && v <= max
+                        }
+                        // -(2^127) is exactly i128::MIN.
+                        m if m == (i128::MAX as u128) + 1 => min == i128::MIN,
+                        _ => false,
+                    }
+                } else {
+                    magnitude <= i128::MAX as u128 && {
+                        let v = magnitude as i128;
+                        v >= min && v <= max
+                    }
+                };
+                if !fits {
+                    let shown = if negated { format!("-{magnitude}") } else { format!("{magnitude}") };
+                    self.error(
+                        format!("integer literal {shown} does not fit in type {:?}", prim),
+                        *span,
+                    );
+                }
+                return expected_ty.clone();
+            }
         }
         Type::Primitive(ast::PrimitiveType::I128)
     }
 
+    /// Inclusive maximum for an unsigned integer primitive, or None.
+    fn unsigned_prim_max(prim: &ast::PrimitiveType) -> Option<u128> {
+        Some(match prim {
+            ast::PrimitiveType::U8 => u8::MAX as u128,
+            ast::PrimitiveType::U16 => u16::MAX as u128,
+            ast::PrimitiveType::U32 => u32::MAX as u128,
+            ast::PrimitiveType::U64 => u64::MAX as u128,
+            ast::PrimitiveType::U128 => u128::MAX,
+            _ => return None,
+        })
+    }
+
     /// Inclusive value range for an integer primitive, or None for non-ints.
+    /// Unsigned prims report the signed-representable subset; checks that
+    /// need the full source magnitude use `unsigned_prim_max` instead.
     fn integer_prim_range(prim: &ast::PrimitiveType) -> Option<(i128, i128)> {
+        if let Some((min, max)) = Self::signed_prim_range(prim) {
+            return Some((min, max));
+        }
+        Self::unsigned_prim_max(prim).map(|max| (0, (max as i128).min(i128::MAX)))
+    }
+
+    /// Inclusive value range for a signed integer primitive, or None.
+    fn signed_prim_range(prim: &ast::PrimitiveType) -> Option<(i128, i128)> {
         Some(match prim {
             ast::PrimitiveType::I8 => (i8::MIN as i128, i8::MAX as i128),
             ast::PrimitiveType::I16 => (i16::MIN as i128, i16::MAX as i128),
             ast::PrimitiveType::I32 => (i32::MIN as i128, i32::MAX as i128),
             ast::PrimitiveType::I64 => (i64::MIN as i128, i64::MAX as i128),
             ast::PrimitiveType::I128 => (i128::MIN, i128::MAX),
-            ast::PrimitiveType::U8 => (0, u8::MAX as i128),
-            ast::PrimitiveType::U16 => (0, u16::MAX as i128),
-            ast::PrimitiveType::U32 => (0, u32::MAX as i128),
-            ast::PrimitiveType::U64 => (0, u64::MAX as i128),
-            ast::PrimitiveType::U128 => (0, i128::MAX), // AST literal is i128
             _ => return None,
         })
     }
 
     /// True when an integer literal value fits the integer primitive.
+    ///
+    /// `value` is the combined signed value (unary minus already applied), so
+    /// a negative value never fits an unsigned primitive. Note this cannot
+    /// see a wrapped positive magnitude (full-u128 literals): the
+    /// expected-type path routes those through `type_integer_literal_value`
+    /// with magnitude/negated kept separate.
     fn integer_value_fits(value: i128, prim: &ast::PrimitiveType) -> bool {
-        Self::integer_prim_range(prim).is_some_and(|(min, max)| value >= min && value <= max)
+        if let Some(max) = Self::unsigned_prim_max(prim) {
+            return value >= 0 && (value as u128) <= max;
+        }
+        Self::signed_prim_range(prim).is_some_and(|(min, max)| value >= min && value <= max)
     }
 
     /// Extract the effective integer value of a literal expression, honoring
@@ -9590,5 +9656,119 @@ mod tests {
         );
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn type_checks_large_unsigned_integer_literals_and_negation() {
+        let valid_program = parse(
+            "i32 main() { \
+                 u128 max_u128 = 340282366920938463463374607431768211455; \
+                 u128 pow2_127 = 170141183460469231731687303715884105728; \
+                 i128 min_i128 = -170141183460469231731687303715884105728; \
+                 i128 max_i128 = 170141183460469231731687303715884105727; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&valid_program);
+        assert!(errors.is_empty(), "expected valid large literals to typecheck, got: {errors:?}");
+
+        let invalid_neg_unsigned = parse(
+            "i32 main() { \
+                 u128 bad = -1; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&invalid_neg_unsigned);
+        assert!(!errors.is_empty(), "expected u128 = -1 to error");
+
+        let invalid_overflow_signed = parse(
+            "i32 main() { \
+                 i128 bad = 340282366920938463463374607431768211455; \
+                 return 0; \
+             }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&invalid_overflow_signed);
+        assert!(!errors.is_empty(), "expected i128 = u128::MAX to error");
+    }
+
+    #[test]
+    fn rejects_folded_negative_literal_assigned_to_unsigned() {
+        let mut program = parse(
+            "macro i32 sub() { return 1 - 2; } \
+             i32 main() { \
+                 u128 bad = @sub(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected u128 bad = @sub() (folded to -1) to error, got no errors");
+    }
+
+    #[test]
+    fn accepts_folded_unsigned_literal_above_signed_max() {
+        let mut program = parse(
+            "macro u128 max_u128() { return 340282366920938463463374607431768211455; } \
+             i32 main() { \
+                 u128 ok = @max_u128(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @max_u128() to succeed, got {errors:?}");
+    }
+
+    #[test]
+    fn generic_macro_folds_negative_integer_expression_correctly() {
+        let mut program = parse(
+            "macro T sub<T>(T a, T b) { return a - b; } \
+             i32 main() { \
+                 i32 ok = @sub<i32>(1, 2); \
+                 return ok; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @sub<i32>(1, 2) to succeed with -1, got {errors:?}");
+
+        let mut invalid = parse(
+            "macro T sub<T>(T a, T b) { return a - b; } \
+             i32 main() { \
+                 u128 bad = @sub<i32>(1, 2); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut invalid);
+        let (errors, _) = TypeChecker::new().check_program(&invalid);
+        assert!(!errors.is_empty(), "expected u128 bad = @sub<i32>(1, 2) to error");
+    }
+
+    #[test]
+    fn rejects_signed_macro_returning_u128_max_magnitude() {
+        let mut program = parse(
+            "macro i32 bad() { return 340282366920938463463374607431768211455; } \
+             i32 main() { \
+                 i32 x = @bad(); \
+                 return x; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected @bad() returning u128::MAX for i32 to fail range check");
+    }
+
+    #[test]
+    fn macro_folds_complex_literal_preserving_c64_type() {
+        let mut program = parse(
+            "macro c64 make_complex() { return 3.5i; } \
+             i32 main() { \
+                 c64 c = @make_complex(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @make_complex() to return c64, got {errors:?}");
     }
 }

@@ -105,6 +105,9 @@ fn parse_type_in_parens(tokens: &[LexToken], start: usize, end: usize) -> Option
         Token::F32 => ast::TypeKind::Primitive(ast::PrimitiveType::F32),
         Token::F64 => ast::TypeKind::Primitive(ast::PrimitiveType::F64),
         Token::F80 => ast::TypeKind::Primitive(ast::PrimitiveType::F80),
+        Token::C32 => ast::TypeKind::Primitive(ast::PrimitiveType::C32),
+        Token::C64 => ast::TypeKind::Primitive(ast::PrimitiveType::C64),
+        Token::C80 => ast::TypeKind::Primitive(ast::PrimitiveType::C80),
         Token::Bool => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
         Token::Str => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
         Token::Char => ast::TypeKind::Primitive(ast::PrimitiveType::Char),
@@ -465,6 +468,9 @@ fn parse_simple_type_prefix(
                 Token::F32 => ast::TypeKind::Primitive(ast::PrimitiveType::F32),
                 Token::F64 => ast::TypeKind::Primitive(ast::PrimitiveType::F64),
                 Token::F80 => ast::TypeKind::Primitive(ast::PrimitiveType::F80),
+                Token::C32 => ast::TypeKind::Primitive(ast::PrimitiveType::C32),
+                Token::C64 => ast::TypeKind::Primitive(ast::PrimitiveType::C64),
+                Token::C80 => ast::TypeKind::Primitive(ast::PrimitiveType::C80),
                 Token::Bool => ast::TypeKind::Primitive(ast::PrimitiveType::Bool),
                 Token::Str => ast::TypeKind::Primitive(ast::PrimitiveType::Str),
                 Token::Char => ast::TypeKind::Primitive(ast::PrimitiveType::Char),
@@ -615,6 +621,14 @@ fn parse_match_pattern(cursor: &mut ExprCursor<'_>) -> Result<ast::Pattern, Pars
             cursor.bump();
             Ok(ast::Pattern {
                 kind: ast::PatternKind::Literal(ast::Literal::Float(*value)),
+                span,
+            })
+        }
+        Token::ComplexLiteral(r, i) => {
+            let span = token.span;
+            cursor.bump();
+            Ok(ast::Pattern {
+                kind: ast::PatternKind::Literal(ast::Literal::Complex(*r, *i)),
                 span,
             })
         }
@@ -1013,6 +1027,10 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
         },
         Token::FloatLiteral(value) => ast::Expression {
             kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Float(*value))),
+            span: token.span,
+        },
+        Token::ComplexLiteral(r, i) => ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Complex(*r, *i))),
             span: token.span,
         },
         Token::StringLiteral(value) => ast::Expression {

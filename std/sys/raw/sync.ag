@@ -9,6 +9,7 @@
 
 import std.sys.syscall;
 
+#[cfg(os.linux)]
 // Syscall number constants
 enum RAW_SYNC {
     FUTEX = 202;
@@ -17,18 +18,22 @@ enum RAW_SYNC {
     GET_ROBUST_LIST = 274;
 }
 
-i64 sys_futex(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
+#[cfg(os.linux)]
+i64 raw_sys_futex(i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) {
     return syscall6((i64)RAW_SYNC.FUTEX, a1, a2, a3, a4, a5, a6);
 }
 
+#[cfg(os.linux)]
 i64 sys_restart_syscall() {
     return syscall0((i64)RAW_SYNC.RESTART_SYSCALL);
 }
 
+#[cfg(os.linux)]
 i64 sys_set_robust_list(i64 a1, i64 a2) {
     return syscall2((i64)RAW_SYNC.SET_ROBUST_LIST, a1, a2);
 }
 
+#[cfg(os.linux)]
 i64 sys_get_robust_list(i64 a1, i64 a2, i64 a3) {
     return syscall3((i64)RAW_SYNC.GET_ROBUST_LIST, a1, a2, a3);
 }

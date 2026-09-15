@@ -13,6 +13,25 @@ use crate::types::Type;
 /// pathological input) and is reported instead of hanging the compiler.
 const MAX_FIXPOINT_GENERATIONS: usize = 256;
 
+/// Synthetic attribute marking a generated monomorph instance (a concrete
+/// function or impl-method produced from a generic template). Codegen gives
+/// marked functions `linkonce_odr` linkage plus an `any` COMDAT so duplicate
+/// instantiations across compilation units deduplicate at link time — on ELF
+/// via weak symbols and on COFF via COMDAT selection (COFF has no dedup for
+/// bare weak symbols, so the COMDAT is what makes Windows links work).
+pub(crate) const MONOMORPH_INSTANCE_ATTR: &str = "silver_monomorph_instance";
+
+pub(crate) fn monomorph_instance_attr() -> ast::Attribute {
+    ast::Attribute {
+        name: ast::Identifier {
+            name: MONOMORPH_INSTANCE_ATTR.to_string(),
+            span: Span::default(),
+        },
+        args: Vec::new(),
+        span: Span::default(),
+    }
+}
+
 /// Report a non-converging monomorphization fixpoint at `span` and stop
 /// expanding. We deliberately do not abort the process: the missing
 /// instantiations surface as ordinary downstream errors (and the LSP shares
@@ -1405,6 +1424,7 @@ fn instantiate_impls(
             for item in &mut new_impl.items {
                 if let ast::ImplItemKind::Function(func) = item {
                     func.generics = None;
+                    func.attributes.push(monomorph_instance_attr());
                     for param in &mut func.parameters {
                         param.param_type = substitute_ast_type(&param.param_type, &mapping);
                     }
@@ -1490,7 +1510,7 @@ fn instantiate_requests(
                         span: Span::default(),
                     }]
                 } else {
-                    Vec::new()
+                    vec![monomorph_instance_attr()]
                 };
 
                 items.push(ast::Item {
@@ -1533,6 +1553,7 @@ fn instantiate_requests(
                     .map(|mut item| {
                         if let ast::ImplItemKind::Function(func) = &mut item {
                             func.generics = None;
+                            func.attributes.push(monomorph_instance_attr());
                             for param in &mut func.parameters {
                                 param.param_type = substitute_ast_type(&param.param_type, mapping);
                             }

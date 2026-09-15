@@ -10,6 +10,7 @@ import dataclasses
 import glob
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -73,6 +74,51 @@ DEFAULT_SKIP = {
     "mem_growth_watch",  # manual 30-sec memory growth benchmark
 }
 
+IS_WINDOWS = os.name == "nt"
+
+
+def target_is_windows_name(target: Optional[str]) -> bool:
+    return bool(target) and any(
+        t in target.lower() for t in ("windows", "win32", "mingw")
+    )
+
+# Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
+# adjacent kernel interfaces). These are platform tests by design, not
+# portable suite members; on Windows the equivalent coverage comes from the
+# std.sys.win seam and the thread/allocator tests that run on both.
+WINDOWS_SKIP = {
+    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
+    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
+    "allocator_threads_test": "raw clone(2) thread creation",
+    "http_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "cookie_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "net_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "net_udp_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "net_dns_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "socket_addr_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "udp_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "dial_timeout_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "timeout_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http2_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http2_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http2_tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "https_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http_bench": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http_perf_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "json_tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "server_raw_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "pool_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "sse_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "websocket_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "io_uring_test": "Linux io_uring kernel interface",
+    "libc_test": "Linux libc interop test",
+    "process_test": "fork/exec via Linux process syscalls",
+    "stream_test": "std.net over Linux socket syscalls (winsock layer pending)",
+}
+
 
 @dataclasses.dataclass
 class TestResult:
@@ -89,9 +135,10 @@ class TestResult:
 
 
 class BackgroundServices:
-    def __init__(self, root: Path, workdir: Path):
+    def __init__(self, root: Path, workdir: Path, target: Optional[str] = None):
         self.root = root
         self.workdir = workdir
+        self.target = target
         self.procs: List[subprocess.Popen] = []
         self.openssl_lib = self._find_openssl()
         self.has_node = shutil.which("node") is not None
@@ -121,27 +168,34 @@ class BackgroundServices:
         env_val = os.environ.get("SILVER_FFI_LIBRARY_DIR", "")
         if env_val:
             return env_val
+        target_is_win = target_is_windows_name(self.target) or IS_WINDOWS
         for build_mode in ["debug", "release"]:
             candidate = self.root / "target" / build_mode
-            if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
-                return str(candidate)
+            if target_is_win:
+                if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
+                    return str(candidate)
+            else:
+                if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
+                    return str(candidate)
         return ""
-
-    def start_service_if_needed(self, test_names: Set[str], agc_bin: Path):
+    def start_service_if_needed(self, test_names: Set[str], agc_bin: Path, target: Optional[str] = None):
         # Module import precompilation
         if "module_import_test" in test_names:
             self.modlib_dir.mkdir(parents=True, exist_ok=True)
             mod_src = self.root / "tests/modules/module_lib.ag"
             if mod_src.is_file():
+                cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+                eff_target = target or self.target
+                if eff_target:
+                    cmd.extend(["--target", eff_target])
                 res = subprocess.run(
-                    [str(agc_bin), "--emit=module", str(mod_src)],
+                    cmd,
                     cwd=str(self.modlib_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
                 if res.returncode != 0:
                     print(f"{C_YELLOW}warning: failed to emit module_lib for module_import_test{C_RESET}")
-
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -268,10 +322,17 @@ def run_single_test(
     services: BackgroundServices,
     timeout_secs: int = 120,
     update_worker=None,
+    target: Optional[str] = None,
+    runner: Optional[List[str]] = None,
+    libdirs: Optional[List[List[str]]] = None,
 ) -> TestResult:
     name = test_path.stem
     content = test_path.read_text(errors="replace")
-    bin_path = workdir / f"bin_{name}"
+    # A windows target produces a PE: the image name must end in .exe (and
+    # Wine/CreateProcess refuse to execute extensionless images).
+    target_is_windows = target_is_windows_name(target)
+    needs_exe = target_is_windows or IS_WINDOWS
+    bin_path = workdir / (f"bin_{name}.exe" if needs_exe else f"bin_{name}")
     run_dir = workdir / f"run_{name}"
     run_dir.mkdir(parents=True, exist_ok=True)
     if name in ("tls_test", "http2_tls_test", "https_server_test"):
@@ -284,6 +345,15 @@ def run_single_test(
 
     expected_code = get_expected_exit(name, content)
     extra_flags = get_extra_flags(name, content, services)
+    if target:
+        extra_flags = ["--target", target] + extra_flags
+    if target_is_windows_name(target):
+        # COFF has no linkonce dedup: cached .agm artifacts and the app unit
+        # would define the same std symbols twice. Single-unit linking until
+        # artifact dedup/import-libs land (docs/windows-port.md §4.3).
+        extra_flags += ["--no-cache"]
+    for libdir in libdirs or []:
+        extra_flags += ["-L", *libdir]
 
     if update_worker:
         update_worker(name, "compiling")
@@ -313,8 +383,13 @@ def run_single_test(
     # Run phase
     env = os.environ.copy()
     if name == "rust_ffi_test" and services.ffi_dir:
-        ld_path = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = f"{services.ffi_dir}:{ld_path}" if ld_path else services.ffi_dir
+        if target_is_windows or IS_WINDOWS:
+            # DLL resolution: prepend the ffi dir to PATH and WINEPATH.
+            env["PATH"] = f"{services.ffi_dir}{os.pathsep}{env.get('PATH', '')}"
+            env["WINEPATH"] = f"{services.ffi_dir};{env.get('WINEPATH', '')}"
+        else:
+            ld_path = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{services.ffi_dir}:{ld_path}" if ld_path else services.ffi_dir
 
     stdin_data = get_test_stdin(name)
     t0 = time.perf_counter()
@@ -331,7 +406,15 @@ def run_single_test(
         else:
             run_kwargs["stdin"] = subprocess.DEVNULL
 
-        rp = subprocess.run([str(bin_path)], **run_kwargs)
+        if target_is_windows and not IS_WINDOWS and not runner:
+            return TestResult(
+                name,
+                "FAIL",
+                "cannot execute Windows binary on non-Windows host without runner (use --runner wine64 or set SILVER_TEST_RUNNER/WINE)",
+                compile_ms=compile_ms,
+            )
+        run_cmd = ([*runner, str(bin_path)]) if runner else [str(bin_path)]
+        rp = subprocess.run(run_cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return TestResult(name, "FAIL", f"timed out after {timeout_secs}s", compile_ms=compile_ms)
     except Exception as e:
@@ -344,20 +427,47 @@ def run_single_test(
 
     # Post-run special assertions
     if name == "static_link_test":
-        try:
-            ldd_out = subprocess.check_output(["ldd", str(bin_path)], stderr=subprocess.STDOUT).decode(errors="replace")
-            if "not a dynamic executable" not in ldd_out:
-                return TestResult(name, "FAIL", "binary is not static", compile_ms, run_ms, run_output=run_output)
-        except Exception:
-            pass
+        if target_is_windows or IS_WINDOWS:
+            # Static CRT (/MT): the import table must not reference the
+            # dynamic UCRT/vcruntime DLLs. System DLLs (kernel32 etc.) are
+            # always imported and fine.
+            readobj = shutil.which("llvm-readobj")
+            if readobj:
+                try:
+                    imp_out = subprocess.check_output(
+                        [readobj, "--coff-imports", str(bin_path)], stderr=subprocess.DEVNULL
+                    ).decode(errors="replace")
+                    bad = [dll for dll in ("ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll") if dll in imp_out.lower()]
+                    if bad:
+                        return TestResult(name, "FAIL", f"binary imports dynamic CRT: {', '.join(bad)}", compile_ms, run_ms, run_output=run_output)
+                except Exception:
+                    pass
+        else:
+            try:
+                ldd_out = subprocess.check_output(["ldd", str(bin_path)], stderr=subprocess.STDOUT).decode(errors="replace")
+                if "not a dynamic executable" not in ldd_out:
+                    return TestResult(name, "FAIL", "binary is not static", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
 
     if name == "cfg_derived_test":
-        try:
-            re_out = subprocess.check_output(["readelf", "-S", str(bin_path)], stderr=subprocess.DEVNULL).decode(errors="replace")
-            if ".debug_info" in re_out:
-                return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
-        except Exception:
-            pass
+        readobj = shutil.which("llvm-readobj") if (target_is_windows or IS_WINDOWS) else None
+        if readobj:
+            try:
+                re_out = subprocess.check_output(
+                    [readobj, "--sections", str(bin_path)], stderr=subprocess.DEVNULL
+                ).decode(errors="replace")
+                if ".debug_info" in re_out:
+                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
+        else:
+            try:
+                re_out = subprocess.check_output(["readelf", "-S", str(bin_path)], stderr=subprocess.DEVNULL).decode(errors="replace")
+                if ".debug_info" in re_out:
+                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
+            except Exception:
+                pass
 
     if name == "backtrace_test":
         needed_frames = [
@@ -483,6 +593,9 @@ def main():
     parser.add_argument("--no-tui", action="store_true", help="Disable live interactive TUI")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose test execution output")
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
+    parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
+    parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
+    parser.add_argument("--libdir", action="append", default=[], help="Library search dir passed as -L to every compile (repeatable; e.g. generated Windows import libs)")
     parser.add_argument("--compare", type=str, default="", help="Compare run time metrics with a baseline file")
     args = parser.parse_args()
 
@@ -490,7 +603,7 @@ def main():
     os.chdir(root)
 
     mode = "release" if args.release else "debug"
-    agc_bin = root / "target" / mode / "agc"
+    agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
 
     # Ensure agc is built
     print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
@@ -526,15 +639,27 @@ def main():
         print(f"{C_RED}error: no tests matched {args.filters}{C_RESET}")
         sys.exit(1)
 
+    target = args.target or None
+    runner = shlex.split(args.runner) if args.runner else None
     # Initialize workdir and services
     workdir = Path(tempfile.mkdtemp(prefix="silver-test-run-"))
-    services = BackgroundServices(root, workdir)
+    services = BackgroundServices(root, workdir, target=target)
     atexit.register(services.cleanup)
     atexit.register(lambda: shutil.rmtree(workdir, ignore_errors=True))
+    if not runner and target_is_windows_name(target) and not IS_WINDOWS:
+        env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
+        if env_runner:
+            runner = shlex.split(env_runner)
+    # Each --libdir value is already a complete path from the shell/argparse;
+    # re-splitting it would break paths containing spaces (e.g. a Windows SDK
+    # under "Program Files").
+    libdirs = [[d] for d in args.libdir]  # each value is one complete path; never resplit ("Program Files" spaces)
 
     selected_stems = {p.stem for p in selected_tests}
-    services.start_service_if_needed(selected_stems, agc_bin)
+    services.start_service_if_needed(selected_stems, agc_bin, target=target)
 
+    if IS_WINDOWS:
+        os.system("")  # enable ANSI escape processing in the legacy console
     is_tty = sys.stdout.isatty() and not args.no_tui
     dashboard = TestDashboard(len(selected_tests), args.jobs, is_tty, args.verbose)
 
@@ -567,6 +692,11 @@ def main():
                 skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
                 skip_reason = "requires built Rust FFI library (build ffi/rust)"
+            elif IS_WINDOWS and name in WINDOWS_SKIP:
+                skip_reason = WINDOWS_SKIP[name]
+            elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:
+                # Cross-target runs: same skip set as a windows host.
+                skip_reason = WINDOWS_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)
@@ -578,6 +708,9 @@ def main():
                     services,
                     timeout_secs=args.timeout,
                     update_worker=lambda n, st: dashboard.update_worker(worker_id, f"{st} {n}"),
+                    target=target,
+                    runner=runner,
+                    libdirs=libdirs,
                 )
 
             with results_lock:

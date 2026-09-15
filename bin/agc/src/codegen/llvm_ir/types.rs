@@ -299,36 +299,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if let BasicTypeEnum::StructType(struct_ty) = lowered {
             let target_data =
                 TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            let size = target_data.get_store_size(&struct_ty);
-
-            match size {
-                1 => Ok(self.context.i8_type().as_basic_type_enum()),
-                2 => Ok(self.context.i16_type().as_basic_type_enum()),
-                4 => Ok(self.context.i32_type().as_basic_type_enum()),
-                8 => {
-                    // Special case: two floats → <2 x float> for AMD64
-                    let fields = struct_ty.get_field_types();
-                    if fields.len() == 2 && fields.iter().all(|f| f.is_float_type()) {
-                        Ok(self.context.f32_type().vec_type(2).as_basic_type_enum())
-                    } else {
-                        Ok(self.context.i64_type().as_basic_type_enum())
-                    }
-                }
-                9..=16 => {
-                    // Use full ABI classification for 9-16 byte structs
-                    Ok(self
-                        .abi_handler
-                        .classify_argument(self.context, &target_data, struct_ty))
-                }
-                s if s > 16 => {
-                    // Large struct: pass by reference
-                    Ok(self
-                        .context
-                        .ptr_type(AddressSpace::default())
-                        .as_basic_type_enum())
-                }
-                _ => Ok(lowered),
-            }
+            // Full delegation to the target ABI handler: SysV eightbyte
+            // classification vs Win64 by-reference rules live in abi.rs.
+            Ok(self
+                .abi_handler
+                .classify_argument(self.context, &target_data, struct_ty))
         } else {
             Ok(lowered)
         }

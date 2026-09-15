@@ -1110,7 +1110,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 func.is_variadic,
                 None,
             )?;
-            self.module.add_function(&instance, fn_ty, None);
+            let lazy_fn = self.module.add_function(&instance, fn_ty, None);
+            self.apply_function_linkage(lazy_fn, &ast::Visibility::Private, &[]);
             bodies.push((func, instance));
         }
         // Second phase: rewrite + emit every declared body (all instances
@@ -1595,7 +1596,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     None,
                 )?;
                 let function = self.module.add_function(&mangled_name, fn_ty, None);
-                Self::apply_function_linkage(function, &func.visibility);
+                self.apply_function_linkage(function, &func.visibility, &func.attributes);
 
                 let expects_ref = func
                     .parameters
@@ -2018,9 +2019,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &func.attributes);
                     } else if let Some(function) = self.module.get_function(&mangled_name) {
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &func.attributes);
                     }
                 }
                 ast::ImplItemKind::Cast(cast) => {
@@ -2070,9 +2071,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &[]);
                     } else if let Some(function) = self.module.get_function(&mangled_name) {
-                        Self::apply_function_linkage(function, &effective_visibility);
+                        self.apply_function_linkage(function, &effective_visibility, &[]);
                     }
                 }
                 _ => {}

@@ -1,8 +1,8 @@
 // std/process.ag — process management.
-// Backed by sys_fork, sys_execve, sys_wait4, sys_exit_group.
 
-import std.sys.raw.process;
+import std.sys.os;
 
+#[cfg(os.linux)]
 struct Child {
     i64 pid;
 }

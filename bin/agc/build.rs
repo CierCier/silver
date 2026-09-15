@@ -1,4 +1,14 @@
 fn main() {
+    // Windows: the official LLVM-C.dll only builds a subset of LLVM targets,
+    // but inkwell declares init externs for all of them — link no-op stubs
+    // for the missing ones (see win_llvm_stubs.c).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=win_llvm_stubs.c");
+        cc::Build::new()
+            .file("win_llvm_stubs.c")
+            .compile("silver_llvm_target_stubs");
+    }
+
     let git_dir = git_cmd(&["rev-parse", "--git-dir"]).map(std::path::PathBuf::from);
 
     let describe = git_cmd(&["describe", "--tags", "--dirty", "--always"])

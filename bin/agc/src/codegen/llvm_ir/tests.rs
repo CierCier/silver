@@ -600,6 +600,78 @@ mod tests {
     }
 
     #[test]
+    fn windows_triple_emits_coff_object() {
+        // P1a gate (docs/windows-port.md §7): a windows triple must produce a
+        // COFF object, and the Win64 ABI handler must shape C-extern calls.
+        let source = "i32 main() { return 42; }";
+        let program = parse_and_typecheck(source);
+        let mut table = CompilerSymbolTable::new();
+        let dir = std::env::temp_dir().join(format!("agc_coff_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("win_probe.obj");
+        LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+            &program,
+            &[],
+            &obj_path,
+            Some("x86_64-pc-windows-msvc"),
+            None,
+            &mut table,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("failed to emit windows-triple object");
+        let bytes = std::fs::read(&obj_path).unwrap();
+        // COFF header: Machine = 0x8664 (AMD64), little-endian.
+        assert_eq!(
+            &bytes[..2],
+            &[0x64, 0x86],
+            "expected COFF AMD64 machine field, got prefix {:#02x?}",
+            &bytes[..8.min(bytes.len())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_triple_uses_win64_abi_for_extern_structs() {
+        // A 16-byte struct is byval-by-reference on Win64 (>8 bytes) but fits
+        // in two eightbyte registers on SysV. The IR signature must reflect
+        // the target: ptr param for windows.
+        let source = "struct Pair { i64 a; i64 b; }\nextern \"C\" {\n    void consume_pair(Pair p);\n}\ni32 main() {\n    Pair p = { .a = 1, .b = 2 };\n    consume_pair(p);\n    return 0;\n}";
+        let ir = LlvmIrGenerator::generate_with_imports_and_table_and_source_with_leak_check(
+            &parse_and_typecheck(source),
+            &[],
+            &mut CompilerSymbolTable::new(),
+            None,
+            None,
+            false,
+            false,
+            Some("x86_64-pc-windows-msvc"),
+        )
+        .expect("failed to generate windows IR");
+        assert!(
+            ir.contains("declare void @consume_pair(ptr"),
+            "Win64 must pass >8-byte structs as pointers (byval):\n{ir}"
+        );
+        let linux_ir = LlvmIrGenerator::generate_with_imports_and_table_and_source_with_leak_check(
+            &parse_and_typecheck(source),
+            &[],
+            &mut CompilerSymbolTable::new(),
+            None,
+            None,
+            false,
+            false,
+            Some("x86_64-unknown-linux-gnu"),
+        )
+        .expect("failed to generate linux IR");
+        assert!(
+            !linux_ir.contains("declare void @consume_pair(ptr"),
+            "SysV must keep 16-byte structs in two eightbyte registers:\n{linux_ir}"
+        );
+    }
+
+    #[test]
     fn generates_debug_info_metadata() {
         let source = "i32 main() { i32 a = 42; return a; }";
         let program = parse_and_typecheck(source);
@@ -871,4 +943,46 @@ mod tests {
             "expected compile-time constant length 4 for array:\n{ir}"
         );
     }
+
+    #[test]
+    fn f80_and_128bit_integer_casts() {
+        let source = r#"
+            i32 main() {
+                f80 val = (f80)1.5;
+                i128 i = (i128)val;
+                u128 u = (u128)val;
+                f80 from_i = (f80)i;
+                f80 from_u = (f80)u;
+                return 0;
+            }
+        "#;
+        let ir = lower_to_llvm(source);
+        assert!(ir.contains("call i128 @__fixdfti"), "expected call to __fixdfti:\n{ir}");
+        assert!(ir.contains("call i128 @__fixunsdfti"), "expected call to __fixunsdfti:\n{ir}");
+        assert!(ir.contains("call double @__floattidf"), "expected call to __floattidf:\n{ir}");
+        assert!(ir.contains("call double @__floatuntidf"), "expected call to __floatuntidf:\n{ir}");
+    }
+
+    #[test]
+    fn implicit_u128_to_float_conversion_uses_unsigned_helper() {
+        let source = r#"
+            f64 take_float(f64 val) {
+                return val;
+            }
+            f64 return_u128(u128 u) {
+                return u;
+            }
+            i32 main() {
+                u128 u = (u128)42;
+                f64 implicit_let = u;
+                f64 implicit_call = take_float(u);
+                f64 implicit_ret = return_u128(u);
+                return 0;
+            }
+        "#;
+        let ir = lower_to_llvm(source);
+        assert!(ir.contains("call double @__floatuntidf"), "expected call to __floatuntidf for implicit u128->float:\n{ir}");
+        assert!(!ir.contains("call double @__floattidf"), "expected no signed __floattidf for unsigned u128->float:\n{ir}");
+    }
 }
+

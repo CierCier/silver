@@ -468,12 +468,19 @@ fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
     Ok(derived.unwrap_or(EmitKind::Exe))
 }
 
-fn default_output_for(emit: EmitKind, inputs: &[PathBuf]) -> PathBuf {
+fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) -> PathBuf {
+    let windows = crate::codegen::abi::target_is_windows(target);
     match emit {
-        EmitKind::Exe => PathBuf::from("a.out"),
+        EmitKind::Exe => {
+            if windows {
+                PathBuf::from("a.exe")
+            } else {
+                PathBuf::from("a.out")
+            }
+        }
         EmitKind::Check => PathBuf::from(""),
-        EmitKind::Obj => with_ext_or_default(inputs, "o"),
-        EmitKind::Asm => with_ext_or_default(inputs, "s"),
+        EmitKind::Obj => with_ext_or_default(inputs, if windows { "obj" } else { "o" }),
+        EmitKind::Asm => with_ext_or_default(inputs, if windows { "asm" } else { "s" }),
         EmitKind::LlvmIr => with_ext_or_default(inputs, "ll"),
         EmitKind::Tokens => with_ext_or_default(inputs, "tokens"),
         EmitKind::Ast => with_ext_or_default(inputs, "ast"),
@@ -667,7 +674,16 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        env::temp_dir().join(format!("agc_run_{}_{}", std::process::id(), timestamp))
+        let mut bin = env::temp_dir().join(format!(
+            "agc_run_{}_{}",
+            std::process::id(),
+            timestamp
+        ));
+        // CreateProcess only finds the image when the path ends in .exe
+        if crate::codegen::abi::target_is_windows(cli.target.as_deref()) {
+            bin.set_extension("exe");
+        }
+        bin
     } else if auto_output
         && emit == EmitKind::Module
         && package_target_kind == Some(package::TargetKind::Lib)
@@ -678,7 +694,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         ))
     } else {
         cli.output
-            .unwrap_or_else(|| default_output_for(emit, &inputs))
+            .unwrap_or_else(|| default_output_for(emit, &inputs, cli.target.as_deref()))
     };
 
     Ok(CompilePlan {
@@ -824,8 +840,19 @@ fn module_path_from_source_path(plan: &CompilePlan, input: &Path) -> String {
         .join(".")
 }
 
-fn module_binary_output_path(manifest_path: &Path, shared: bool) -> PathBuf {
-    manifest_path.with_extension(if shared { "so" } else { "o" })
+fn module_binary_output_path(manifest_path: &Path, shared: bool, target: Option<&str>) -> PathBuf {
+    let ext = if shared {
+        if crate::codegen::abi::target_is_windows(target) {
+            "dll"
+        } else {
+            "so"
+        }
+    } else if crate::codegen::abi::target_is_windows(target) {
+        "obj"
+    } else {
+        "o"
+    };
+    manifest_path.with_extension(ext)
 }
 
 fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> Option<String> {
@@ -876,6 +903,83 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     }
 
     None
+}
+
+fn module_artifact_content_hash(module: &ModuleArtifact) -> String {
+    if let Some(path) = &module.artifact_path {
+        if let Ok(bytes) = std::fs::read(path) {
+            return crate::cache_store::Sha256::digest_hex(&bytes);
+        }
+    }
+    if let Ok(bytes) = module.to_bytes() {
+        return crate::cache_store::Sha256::digest_hex(&bytes);
+    }
+    format!("{:016x}", module.source_hash_fnv1a64)
+}
+
+fn split_shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' && !in_single_quote {
+            escaped = true;
+        } else if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if ch.is_whitespace() && !in_single_quote && !in_double_quote {
+            if !current.is_empty() {
+                words.push(current);
+                current = String::new();
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn build_target_runner_command(
+    binary_path: &Path,
+    target: Option<&str>,
+) -> Result<std::process::Command, String> {
+    let target_is_windows = crate::codegen::abi::target_is_windows(target);
+    if target_is_windows && !cfg!(target_os = "windows") {
+        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
+            let mut parts = split_shell_words(&runner);
+            if !parts.is_empty() {
+                let prog = parts.remove(0);
+                let mut cmd = std::process::Command::new(prog);
+                cmd.args(&parts);
+                cmd.arg(binary_path);
+                return Ok(cmd);
+            }
+        }
+        if let Ok(wine) = std::env::var("WINE") {
+            let mut parts = split_shell_words(&wine);
+            if !parts.is_empty() {
+                let prog = parts.remove(0);
+                let mut cmd = std::process::Command::new(prog);
+                cmd.args(&parts);
+                cmd.arg(binary_path);
+                return Ok(cmd);
+            }
+        }
+        return Err(
+            "cannot execute Windows binary on non-Windows host without runner; set SILVER_TEST_RUNNER (e.g. 'wine64') or WINE".to_string(),
+        );
+    }
+    Ok(std::process::Command::new(binary_path))
 }
 
 fn collect_dependency_link_artifacts(
@@ -1339,9 +1443,10 @@ pub fn run(cli: Cli) {
                             diagnostics::render(span, &error.message, diagnostics::Severity::Error,)
                         );
                     }
-                    if ast.items.is_empty() {
-                        std::process::exit(2);
-                    }
+                    // A truncated AST must never reach codegen: the missing
+                    // functions surface later as baffling link errors (e.g.
+                    // `undefined symbol: main`) far from the real cause.
+                    std::process::exit(2);
                 }
 
                 let pre_lowering_link_libs = match collect_program_link_libraries(&ast) {
@@ -1800,10 +1905,11 @@ pub fn run(cli: Cli) {
                         );
                         std::process::exit(2);
                     }
-                    let binary_output = module_binary_output_path(&plan.output, plan.shared);
+                    let binary_output =
+                        module_binary_output_path(&plan.output, plan.shared, plan.target.as_deref());
                     if plan.shared {
                         let temp_object = plan.output.with_extension("module.tmp.o");
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &temp_object,
@@ -1814,6 +1920,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                true,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1842,7 +1949,7 @@ pub fn run(cli: Cli) {
                         }
                         let _ = std::fs::remove_file(&temp_object);
                     } else {
-                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                        let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
                                 &ast,
                                 &imported_modules,
                                 &binary_output,
@@ -1853,6 +1960,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                false,
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -1892,13 +2000,17 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
                                     .iter()
                                     .filter_map(|(name, node)| {
                                         loader.lookup_computed_cache_key(&node.source_path)
                                             .map(|k| (name.clone(), k.hash_hex))
                                     })
                                     .collect();
+                                for artifact in &imported_modules {
+                                    let hash = module_artifact_content_hash(artifact);
+                                    root_deps.push((artifact.module_path.clone(), hash));
+                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &plan.output).is_ok() {
@@ -2001,6 +2113,7 @@ pub fn run(cli: Cli) {
                                 Some(&src),
                                 plan.debug_info,
                                 plan.leak_check,
+                                plan.target.as_deref(),
                             );
                         profiler::end_phase("codegen");
                         match output {
@@ -2041,13 +2154,17 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
                                     .iter()
                                     .filter_map(|(name, node)| {
                                         loader.lookup_computed_cache_key(&node.source_path)
                                             .map(|k| (name.clone(), k.hash_hex))
                                     })
                                     .collect();
+                                for artifact in &imported_modules {
+                                    let hash = module_artifact_content_hash(artifact);
+                                    root_deps.push((artifact.module_path.clone(), hash));
+                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &temp_o).is_ok() {
@@ -2179,7 +2296,16 @@ pub fn run(cli: Cli) {
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 if plan.run_mode {
-                    let mut cmd = std::process::Command::new(&plan.output);
+                    let mut cmd = match build_target_runner_command(&plan.output, plan.target.as_deref()) {
+                        Ok(cmd) => cmd,
+                        Err(err) => {
+                            if plan.auto_output {
+                                let _ = std::fs::remove_file(&plan.output);
+                            }
+                            eprintln!("agc: {}: {err}", "error".red().bold());
+                            std::process::exit(1);
+                        }
+                    };
                     cmd.args(&plan.run_args);
                     let status = cmd.status();
                     if plan.auto_output {
@@ -2434,7 +2560,11 @@ fn execute_test(
     index: usize,
 ) -> TestExecutionResult {
     let start = std::time::Instant::now();
-    let temp_bin = temp_dir.join(format!("test_bin_{index}"));
+    let mut temp_bin = temp_dir.join(format!("test_bin_{index}"));
+    let target_is_windows = crate::codegen::abi::target_is_windows(cli.target.as_deref());
+    if target_is_windows {
+        temp_bin.set_extension("exe");
+    }
     let content = std::fs::read_to_string(&target.path).unwrap_or_default();
     let expected_code = expected_exit_code(&target.path, &content);
     let extra_flags = test_specific_flags(&target.path, &content);
@@ -2533,7 +2663,19 @@ fn execute_test(
         };
     }
 
-    let mut run_cmd = std::process::Command::new(&temp_bin);
+    let mut run_cmd = match build_target_runner_command(&temp_bin, cli.target.as_deref()) {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_bin);
+            return TestExecutionResult {
+                name: target.name.clone(),
+                passed: false,
+                duration: start.elapsed(),
+                error_message: Some(err),
+                output: String::new(),
+            };
+        }
+    };
     run_cmd.args(&cli.run_args);
 
     let run_output = match run_cmd.output() {

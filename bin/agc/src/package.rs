@@ -2016,8 +2016,12 @@ manifest = "modules/std"
         write_manifest(
             &project,
             &format!(
-                "name = \"root\"\nversion = \"0.1.0\"\n[dependencies.git-child]\nmanifest = \"git+file://{}\"\nrev = \"{}\"\n",
-                repository.display(),
+                "name = \"root\"\nversion = \"0.1.0\"\n[dependencies.git-child]\nmanifest = \"{}{}\"\nrev = \"{}\"\n",
+                // Windows paths cannot appear raw in a TOML double-quoted
+                // string (backslashes start escapes) and break the URL form —
+                // use forward slashes and the 3-slash file URL.
+                if cfg!(windows) { "git+file:///" } else { "git+file://" },
+                repository.display().to_string().replace('\\', "/"),
                 revision
             ),
         );

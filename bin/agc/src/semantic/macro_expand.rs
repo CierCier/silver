@@ -484,6 +484,20 @@ fn expand_macros_in_expr(
     }
 }
 
+fn is_signed_type(ty: &ast::Type) -> bool {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Primitive(prim) => matches!(
+            prim,
+            ast::PrimitiveType::I8
+                | ast::PrimitiveType::I16
+                | ast::PrimitiveType::I32
+                | ast::PrimitiveType::I64
+                | ast::PrimitiveType::I128
+        ),
+        _ => false,
+    }
+}
+
 /// Expands a single user macro invocation.
 fn expand_macro_invocation(
     def: &MacroDef,
@@ -558,26 +572,67 @@ fn expand_macro_invocation(
     }
 
     // Try compile-time evaluation if all arguments are constant
-    let mut const_env: HashMap<String, Literal> = HashMap::default();
+    let mut const_env: HashMap<String, ConstVal> = HashMap::default();
     for (param_name, expr) in &param_subst {
-        if let ExpressionKind::Literal(lit) = expr.kind.as_ref() {
-            const_env.insert(param_name.clone(), lit.clone());
+        if let Some(cval) = expr_to_const_val(expr) {
+            const_env.insert(param_name.clone(), cval);
         }
     }
     if let Some((_vararg_name, varargs)) = &vararg_subst {
         let mut vararg_lits = Vec::new();
         for arg in varargs {
-            if let ExpressionKind::Literal(lit) = arg.kind.as_ref() {
-                vararg_lits.push(lit.clone());
+            if let Some(cval) = expr_to_const_val(arg) {
+                vararg_lits.push(cval);
             }
         }
     }
 
-    if let Some(folded_lit) = try_eval_const_block(&body, &const_env) {
-        return Expression {
-            kind: Box::new(ExpressionKind::Literal(folded_lit)),
-            span: call_span,
+    if let Some(folded_val) = try_eval_const_block(&body, &const_env) {
+        let is_signed = match def.return_type.clone() {
+            Some(mut ret_ty) => {
+                substitute_type(&mut ret_ty, &type_subst);
+                is_signed_type(&ret_ty)
+            }
+            None => expected.map(is_signed_type).unwrap_or(false),
         };
+        let _ = is_signed;
+        let folded_expr = match folded_val {
+            ConstVal::Negative(pos) => Expression {
+                kind: Box::new(ExpressionKind::Unary {
+                    operator: ast::UnaryOperator::Minus,
+                    operand: Box::new(Expression {
+                        kind: Box::new(ExpressionKind::Literal(Literal::Integer(pos as i128))),
+                        span: call_span,
+                    }),
+                }),
+                span: call_span,
+            },
+            ConstVal::Magnitude(m) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Integer(m as i128))),
+                span: call_span,
+            },
+            ConstVal::Float(f) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Float(f))),
+                span: call_span,
+            },
+            ConstVal::Complex(re, im) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Complex(re, im))),
+                span: call_span,
+            },
+            ConstVal::Bool(b) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Bool(b))),
+                span: call_span,
+            },
+            ConstVal::String(s) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::String(s))),
+                span: call_span,
+            },
+            ConstVal::Char(c) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Char(c))),
+                span: call_span,
+            },
+        };
+        return folded_expr;
     }
 
     // Convert if-else ending with returns to ternary if applicable, or return expr to expression stmt:
@@ -931,7 +986,52 @@ fn apply_hygiene_and_subst_in_expr(
 // Compile-Time Constant Evaluator
 // ----------------------------------------------------------------------------
 
-fn try_eval_const_block(block: &Block, env: &HashMap<String, Literal>) -> Option<Literal> {
+#[derive(Clone, Debug, PartialEq)]
+enum ConstVal {
+    Magnitude(u128),
+    Negative(u128),
+    Float(f64),
+    Complex(f64, f64),
+    Bool(bool),
+    String(String),
+    Char(char),
+}
+
+impl ConstVal {
+    fn from_literal(lit: &Literal) -> Self {
+        match lit {
+            Literal::Integer(n) => ConstVal::Magnitude(*n as u128),
+            Literal::Float(f) => ConstVal::Float(*f),
+            Literal::Complex(re, im) => ConstVal::Complex(*re, *im),
+            Literal::Bool(b) => ConstVal::Bool(*b),
+            Literal::String(s) => ConstVal::String(s.clone()),
+            Literal::Char(c) => ConstVal::Char(*c),
+        }
+    }
+}
+
+fn expr_to_const_val(expr: &Expression) -> Option<ConstVal> {
+    match expr.kind.as_ref() {
+        ExpressionKind::Literal(lit) => Some(ConstVal::from_literal(lit)),
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Minus,
+            operand,
+        } => {
+            let inner = expr_to_const_val(operand)?;
+            match inner {
+                ConstVal::Magnitude(0) => Some(ConstVal::Magnitude(0)),
+                ConstVal::Magnitude(m) => Some(ConstVal::Negative(m)),
+                ConstVal::Negative(m) => Some(ConstVal::Magnitude(m)),
+                ConstVal::Float(f) => Some(ConstVal::Float(-f)),
+                ConstVal::Complex(re, im) => Some(ConstVal::Complex(-re, -im)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn try_eval_const_block(block: &Block, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     let mut local_env = env.clone();
     for stmt in &block.statements {
         match &stmt.kind {
@@ -972,7 +1072,7 @@ fn try_eval_const_block(block: &Block, env: &HashMap<String, Literal>) -> Option
                     }
                 } else if let ExpressionKind::If { condition, then_branch, else_branch } = expr.kind.as_ref() {
                     let cond_val = try_eval_const_expr(condition, &local_env)?;
-                    if let Literal::Bool(b) = cond_val {
+                    if let ConstVal::Bool(b) = cond_val {
                         if b {
                             if let Some(ret) = try_eval_const_block(then_branch, &local_env) {
                                 return Some(ret);
@@ -1003,9 +1103,9 @@ fn try_eval_const_block(block: &Block, env: &HashMap<String, Literal>) -> Option
     None
 }
 
-fn try_eval_const_expr(expr: &Expression, env: &HashMap<String, Literal>) -> Option<Literal> {
+fn try_eval_const_expr(expr: &Expression, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     match expr.kind.as_ref() {
-        ExpressionKind::Literal(lit) => Some(lit.clone()),
+        ExpressionKind::Literal(lit) => Some(ConstVal::from_literal(lit)),
         ExpressionKind::Identifier(id) => env.get(&id.name).cloned(),
         ExpressionKind::Binary { left, operator, right } => {
             let l = try_eval_const_expr(left, env)?;
@@ -1018,7 +1118,7 @@ fn try_eval_const_expr(expr: &Expression, env: &HashMap<String, Literal>) -> Opt
         }
         ExpressionKind::If { condition, then_branch, else_branch } => {
             let cond_val = try_eval_const_expr(condition, env)?;
-            if let Literal::Bool(b) = cond_val {
+            if let ConstVal::Bool(b) = cond_val {
                 if b {
                     try_eval_const_block(then_branch, env)
                 } else if let Some(else_b) = else_branch {
@@ -1035,80 +1135,247 @@ fn try_eval_const_expr(expr: &Expression, env: &HashMap<String, Literal>) -> Opt
     }
 }
 
-fn eval_binary_op(left: &Literal, op: &BinaryOperator, right: &Literal) -> Option<Literal> {
+fn eval_binary_op(left: &ConstVal, op: &BinaryOperator, right: &ConstVal) -> Option<ConstVal> {
     match (left, right) {
-        (Literal::Integer(l), Literal::Integer(r)) => match op {
-            BinaryOperator::Add => Some(Literal::Integer(l.wrapping_add(*r))),
-            BinaryOperator::Subtract => Some(Literal::Integer(l.wrapping_sub(*r))),
-            BinaryOperator::Multiply => Some(Literal::Integer(l.wrapping_mul(*r))),
-            BinaryOperator::Divide => {
-                if *r == 0 {
-                    None
-                } else {
-                    Some(Literal::Integer(l.wrapping_div(*r)))
-                }
-            }
-            BinaryOperator::Modulo => {
-                if *r == 0 {
-                    None
-                } else {
-                    Some(Literal::Integer(l.wrapping_rem(*r)))
-                }
-            }
-            BinaryOperator::BitwiseAnd => Some(Literal::Integer(l & r)),
-            BinaryOperator::BitwiseOr => Some(Literal::Integer(l | r)),
-            BinaryOperator::BitwiseXor => Some(Literal::Integer(l ^ r)),
-            BinaryOperator::LeftShift => Some(Literal::Integer(l.wrapping_shl(*r as u32))),
-            BinaryOperator::RightShift => Some(Literal::Integer(l.wrapping_shr(*r as u32))),
-            BinaryOperator::Equal => Some(Literal::Bool(l == r)),
-            BinaryOperator::NotEqual => Some(Literal::Bool(l != r)),
-            BinaryOperator::Less => Some(Literal::Bool(l < r)),
-            BinaryOperator::LessEqual => Some(Literal::Bool(l <= r)),
-            BinaryOperator::Greater => Some(Literal::Bool(l > r)),
-            BinaryOperator::GreaterEqual => Some(Literal::Bool(l >= r)),
+        (ConstVal::Float(l), ConstVal::Float(r)) => match op {
+            BinaryOperator::Add => Some(ConstVal::Float(l + r)),
+            BinaryOperator::Subtract => Some(ConstVal::Float(l - r)),
+            BinaryOperator::Multiply => Some(ConstVal::Float(l * r)),
+            BinaryOperator::Divide => Some(ConstVal::Float(l / r)),
+            BinaryOperator::Equal => Some(ConstVal::Bool((l - r).abs() < f64::EPSILON)),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool((l - r).abs() >= f64::EPSILON)),
+            BinaryOperator::Less => Some(ConstVal::Bool(l < r)),
+            BinaryOperator::LessEqual => Some(ConstVal::Bool(l <= r)),
+            BinaryOperator::Greater => Some(ConstVal::Bool(l > r)),
+            BinaryOperator::GreaterEqual => Some(ConstVal::Bool(l >= r)),
             _ => None,
         },
-        (Literal::Float(l), Literal::Float(r)) => match op {
-            BinaryOperator::Add => Some(Literal::Float(l + r)),
-            BinaryOperator::Subtract => Some(Literal::Float(l - r)),
-            BinaryOperator::Multiply => Some(Literal::Float(l * r)),
-            BinaryOperator::Divide => Some(Literal::Float(l / r)),
-            BinaryOperator::Equal => Some(Literal::Bool((l - r).abs() < f64::EPSILON)),
-            BinaryOperator::NotEqual => Some(Literal::Bool((l - r).abs() >= f64::EPSILON)),
-            BinaryOperator::Less => Some(Literal::Bool(l < r)),
-            BinaryOperator::LessEqual => Some(Literal::Bool(l <= r)),
-            BinaryOperator::Greater => Some(Literal::Bool(l > r)),
-            BinaryOperator::GreaterEqual => Some(Literal::Bool(l >= r)),
+        (ConstVal::Complex(r1, i1), ConstVal::Complex(r2, i2)) => match op {
+            BinaryOperator::Add => Some(ConstVal::Complex(r1 + r2, i1 + i2)),
+            BinaryOperator::Subtract => Some(ConstVal::Complex(r1 - r2, i1 - i2)),
+            BinaryOperator::Multiply => Some(ConstVal::Complex(
+                r1 * r2 - i1 * i2,
+                r1 * i2 + i1 * r2,
+            )),
+            BinaryOperator::Equal => Some(ConstVal::Bool(
+                (r1 - r2).abs() < f64::EPSILON && (i1 - i2).abs() < f64::EPSILON,
+            )),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool(
+                (r1 - r2).abs() >= f64::EPSILON || (i1 - i2).abs() >= f64::EPSILON,
+            )),
             _ => None,
         },
-        (Literal::Bool(l), Literal::Bool(r)) => match op {
-            BinaryOperator::LogicalAnd => Some(Literal::Bool(*l && *r)),
-            BinaryOperator::LogicalOr => Some(Literal::Bool(*l || *r)),
-            BinaryOperator::Equal => Some(Literal::Bool(l == r)),
-            BinaryOperator::NotEqual => Some(Literal::Bool(l != r)),
+        (ConstVal::Bool(l), ConstVal::Bool(r)) => match op {
+            BinaryOperator::LogicalAnd => Some(ConstVal::Bool(*l && *r)),
+            BinaryOperator::LogicalOr => Some(ConstVal::Bool(*l || *r)),
+            BinaryOperator::Equal => Some(ConstVal::Bool(l == r)),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool(l != r)),
             _ => None,
         },
-        (Literal::String(l), Literal::String(r)) => match op {
-            BinaryOperator::Add => Some(Literal::String(format!("{l}{r}"))),
-            BinaryOperator::Equal => Some(Literal::Bool(l == r)),
-            BinaryOperator::NotEqual => Some(Literal::Bool(l != r)),
+        (ConstVal::String(l), ConstVal::String(r)) => match op {
+            BinaryOperator::Add => Some(ConstVal::String(format!("{l}{r}"))),
+            BinaryOperator::Equal => Some(ConstVal::Bool(l == r)),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool(l != r)),
             _ => None,
         },
-        (Literal::Char(l), Literal::Char(r)) => match op {
-            BinaryOperator::Equal => Some(Literal::Bool(l == r)),
-            BinaryOperator::NotEqual => Some(Literal::Bool(l != r)),
+        (ConstVal::Char(l), ConstVal::Char(r)) => match op {
+            BinaryOperator::Equal => Some(ConstVal::Bool(l == r)),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool(l != r)),
             _ => None,
         },
+        (l, r) => {
+            let (l_neg, l_val) = const_val_as_int(l)?;
+            let (r_neg, r_val) = const_val_as_int(r)?;
+            eval_int_binary_op(l_neg, l_val, op, r_neg, r_val)
+        }
+    }
+}
+
+fn const_val_as_int(val: &ConstVal) -> Option<(bool, u128)> {
+    match val {
+        ConstVal::Magnitude(m) => Some((false, *m)),
+        ConstVal::Negative(m) => Some((true, *m)),
         _ => None,
     }
 }
 
-fn eval_unary_op(op: &UnaryOperator, val: &Literal) -> Option<Literal> {
+fn eval_int_binary_op(
+    l_neg: bool,
+    l: u128,
+    op: &BinaryOperator,
+    r_neg: bool,
+    r: u128,
+) -> Option<ConstVal> {
+    match op {
+        BinaryOperator::Add => Some(add_int(l_neg, l, r_neg, r)),
+        BinaryOperator::Subtract => {
+            let (neg_r_neg, neg_r) = if r == 0 {
+                (false, 0)
+            } else {
+                (!r_neg, r)
+            };
+            Some(add_int(l_neg, l, neg_r_neg, neg_r))
+        }
+        BinaryOperator::Multiply => {
+            if l == 0 || r == 0 {
+                return Some(ConstVal::Magnitude(0));
+            }
+            let mag = l.wrapping_mul(r);
+            if mag == 0 {
+                Some(ConstVal::Magnitude(0))
+            } else if l_neg == r_neg {
+                Some(ConstVal::Magnitude(mag))
+            } else {
+                Some(ConstVal::Negative(mag))
+            }
+        }
+        BinaryOperator::Divide => {
+            if r == 0 {
+                return None;
+            }
+            let mag = l / r;
+            if mag == 0 {
+                Some(ConstVal::Magnitude(0))
+            } else if l_neg == r_neg {
+                Some(ConstVal::Magnitude(mag))
+            } else {
+                Some(ConstVal::Negative(mag))
+            }
+        }
+        BinaryOperator::Modulo => {
+            if r == 0 {
+                return None;
+            }
+            let mag = l % r;
+            if mag == 0 {
+                Some(ConstVal::Magnitude(0))
+            } else if l_neg {
+                Some(ConstVal::Negative(mag))
+            } else {
+                Some(ConstVal::Magnitude(mag))
+            }
+        }
+        BinaryOperator::BitwiseAnd => {
+            let lb = to_bits(l_neg, l);
+            let rb = to_bits(r_neg, r);
+            Some(ConstVal::Magnitude(lb & rb))
+        }
+        BinaryOperator::BitwiseOr => {
+            let lb = to_bits(l_neg, l);
+            let rb = to_bits(r_neg, r);
+            Some(ConstVal::Magnitude(lb | rb))
+        }
+        BinaryOperator::BitwiseXor => {
+            let lb = to_bits(l_neg, l);
+            let rb = to_bits(r_neg, r);
+            Some(ConstVal::Magnitude(lb ^ rb))
+        }
+        BinaryOperator::LeftShift => {
+            let lb = to_bits(l_neg, l);
+            Some(ConstVal::Magnitude(lb.wrapping_shl(r as u32)))
+        }
+        BinaryOperator::RightShift => {
+            let lb = to_bits(l_neg, l);
+            Some(ConstVal::Magnitude(lb.wrapping_shr(r as u32)))
+        }
+        BinaryOperator::Equal => {
+            if l == 0 && r == 0 {
+                Some(ConstVal::Bool(true))
+            } else {
+                Some(ConstVal::Bool(l_neg == r_neg && l == r))
+            }
+        }
+        BinaryOperator::NotEqual => {
+            if l == 0 && r == 0 {
+                Some(ConstVal::Bool(false))
+            } else {
+                Some(ConstVal::Bool(l_neg != r_neg || l != r))
+            }
+        }
+        BinaryOperator::Less => {
+            Some(ConstVal::Bool(int_less(l_neg, l, r_neg, r)))
+        }
+        BinaryOperator::LessEqual => {
+            Some(ConstVal::Bool(int_less(l_neg, l, r_neg, r) || int_equal(l_neg, l, r_neg, r)))
+        }
+        BinaryOperator::Greater => {
+            Some(ConstVal::Bool(!int_less(l_neg, l, r_neg, r) && !int_equal(l_neg, l, r_neg, r)))
+        }
+        BinaryOperator::GreaterEqual => {
+            Some(ConstVal::Bool(!int_less(l_neg, l, r_neg, r)))
+        }
+        _ => None,
+    }
+}
+
+fn add_int(l_neg: bool, l: u128, r_neg: bool, r: u128) -> ConstVal {
+    match (l_neg, r_neg) {
+        (false, false) => ConstVal::Magnitude(l.wrapping_add(r)),
+        (true, true) => {
+            let sum = l.wrapping_add(r);
+            if sum == 0 {
+                ConstVal::Magnitude(0)
+            } else {
+                ConstVal::Negative(sum)
+            }
+        }
+        (false, true) => {
+            if l >= r {
+                ConstVal::Magnitude(l - r)
+            } else {
+                ConstVal::Negative(r - l)
+            }
+        }
+        (true, false) => {
+            if r >= l {
+                ConstVal::Magnitude(r - l)
+            } else {
+                ConstVal::Negative(l - r)
+            }
+        }
+    }
+}
+
+fn to_bits(is_neg: bool, mag: u128) -> u128 {
+    if is_neg {
+        (!mag).wrapping_add(1)
+    } else {
+        mag
+    }
+}
+
+fn int_equal(l_neg: bool, l: u128, r_neg: bool, r: u128) -> bool {
+    if l == 0 && r == 0 {
+        true
+    } else {
+        l_neg == r_neg && l == r
+    }
+}
+
+fn int_less(l_neg: bool, l: u128, r_neg: bool, r: u128) -> bool {
+    if l == 0 && r == 0 {
+        return false;
+    }
+    match (l_neg, r_neg) {
+        (true, false) => r > 0 || l > 0,
+        (false, true) => false,
+        (false, false) => l < r,
+        (true, true) => l > r,
+    }
+}
+
+fn eval_unary_op(op: &UnaryOperator, val: &ConstVal) -> Option<ConstVal> {
     match (op, val) {
-        (UnaryOperator::Minus, Literal::Integer(i)) => Some(Literal::Integer(-i)),
-        (UnaryOperator::Minus, Literal::Float(f)) => Some(Literal::Float(-f)),
-        (UnaryOperator::Not, Literal::Bool(b)) => Some(Literal::Bool(!b)),
-        (UnaryOperator::BitwiseNot, Literal::Integer(i)) => Some(Literal::Integer(!i)),
+        (UnaryOperator::Minus, ConstVal::Magnitude(0)) => Some(ConstVal::Magnitude(0)),
+        (UnaryOperator::Minus, ConstVal::Magnitude(m)) => Some(ConstVal::Negative(*m)),
+        (UnaryOperator::Minus, ConstVal::Negative(m)) => Some(ConstVal::Magnitude(*m)),
+        (UnaryOperator::Minus, ConstVal::Float(f)) => Some(ConstVal::Float(-f)),
+        (UnaryOperator::Minus, ConstVal::Complex(re, im)) => Some(ConstVal::Complex(-re, -im)),
+        (UnaryOperator::Not, ConstVal::Bool(b)) => Some(ConstVal::Bool(!b)),
+        (UnaryOperator::BitwiseNot, ConstVal::Magnitude(m)) => Some(ConstVal::Magnitude(!m)),
+        (UnaryOperator::BitwiseNot, ConstVal::Negative(m)) => {
+            Some(ConstVal::Magnitude(m.wrapping_sub(1)))
+        }
         _ => None,
     }
 }

@@ -233,6 +233,9 @@ pub fn parse_struct_attributes(
                 out.serialize_formats.extend(formats);
             }
             "link" => {}
+            // cfg survives gating on items whose predicate matched; it has no
+            // layout meaning here.
+            "cfg" => {}
             _ => {
                 return Err(StructAttrError {
                     message: format!("unknown struct attribute '{}'", attr.name.name),
