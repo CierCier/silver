@@ -86,45 +86,92 @@ i32 main() {
 
 ---
 
+## Installation
+
+### GitHub Releases
+
+Prebuilt binaries are available on the [Releases](https://github.com/CierCier/silver/releases) page.
+
+1. Download the archive for your operating system and architecture.
+2. Extract the archive and place `agc` (and companion tools `aglsp`, `agsm`) in your `$PATH`.
+
+> [!NOTE]
+> **LLVM Requirement**: Prebuilt binaries require **LLVM 22** runtime libraries (`llvm` / `libclang`) and a system C toolchain or linker (`cc`, `clang`, or `ld.lld`) installed on your host system.
+
+### Building from Source
+
+1. **Prerequisites**:
+   - **Rust Toolchain** with Cargo (1.75+)
+   - **LLVM 22** development headers and libraries (for `inkwell` / `llvm-sys`; set `LLVM_SYS_221_PREFIX` if installed in a custom path)
+   - A system C toolchain / linker (`cc`, `clang`, or `ld.lld`)
+
+2. **Build and Install**:
+   ```bash
+   git clone https://github.com/CierCier/silver.git
+   cd silver
+
+   # Build compiler in release mode
+   cargo build --release -p agc
+
+   # Or install binary to ~/.cargo/bin
+   cargo install --path bin/agc
+   ```
+
+### Nix
+
+If you use Nix, all dependencies—including LLVM 22, the compiler runtime, and sysroot paths—are hermetically managed out of the box.
+
+- **Install via Flakes**:
+  ```bash
+  nix profile install github:CierCier/silver
+  ```
+
+- **Run directly without installing**:
+  ```bash
+  nix run github:CierCier/silver -- run path/to/file.ag
+  ```
+
+- **Development Shell**:
+  ```bash
+  # Drops into an environment with LLVM 22, Rust, and all variables configured
+  nix develop
+
+  # Or with legacy nix-shell
+  nix-shell
+  ```
+
+---
+
 ## Getting Started
 
-### Prerequisites
-- **Rust Toolchain** with Cargo (1.75+)
-- **LLVM 22** development environment for `inkwell`
-- A working system C toolchain / linker (`cc` or `ld.lld`)
+### Compiling & Running Programs
 
-### Building the Compiler
-
+Compile a source file to an executable:
 ```bash
-cargo build -p agc
+agc path/to/file.ag -o out
+# or with cargo:
+cargo run -p agc -- path/to/file.ag -o out
+```
+
+Fast frontend-only type checking (`agc check`):
+```bash
+agc check path/to/file.ag
+```
+
+Compile and run directly in one step (`agc run`):
+```bash
+agc run path/to/file.ag [args...]
+```
+
+Run with leak checking enabled:
+```bash
+agc --leak-check run path/to/file.ag
 ```
 
 ### Running Tests
 
 ```bash
 cargo test -p agc
-```
-
-### Compiling & Running Programs
-
-Compile a source file to an executable:
-```bash
-cargo run -p agc -- path/to/file.ag -o out
-```
-
-Fast frontend-only type checking (`agc check`):
-```bash
-cargo run -p agc -- check path/to/file.ag
-```
-
-Compile and run directly in one step (`agc run`):
-```bash
-cargo run -p agc -- run path/to/file.ag [args...]
-```
-
-Run with leak checking enabled:
-```bash
-cargo run -p agc -- --leak-check run path/to/file.ag
 ```
 
 ### Rust-backed C ABI
