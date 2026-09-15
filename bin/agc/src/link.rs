@@ -200,7 +200,6 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "kernel32.lib",
             "ntdll.lib",
             "shell32.lib",
-            "synchronization.lib",
             "bcrypt.lib",
         ]
     } else {

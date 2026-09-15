@@ -1866,6 +1866,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         ) && matches!(value, BasicValueEnum::FloatValue(_)) {
             return self.cast_unsigned_value_to_ast_type(value, target_type, span);
         }
+        if source_expr.is_some_and(|expr| self.expression_is_unsigned(expr)) {
+            return self.cast_unsigned_value_to_ast_type(value, target_type, span);
+        }
         self.cast_value_to_basic_type(value, target, span)
     }
 

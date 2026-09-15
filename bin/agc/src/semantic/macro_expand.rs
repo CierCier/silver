@@ -574,10 +574,26 @@ fn expand_macro_invocation(
     }
 
     if let Some(folded_lit) = try_eval_const_block(&body, &const_env) {
-        return Expression {
-            kind: Box::new(ExpressionKind::Literal(folded_lit)),
-            span: call_span,
+        let folded_expr = match folded_lit {
+            Literal::Integer(v) if v < 0 => {
+                let pos_val = v.wrapping_neg();
+                Expression {
+                    kind: Box::new(ExpressionKind::Unary {
+                        operator: ast::UnaryOperator::Minus,
+                        operand: Box::new(Expression {
+                            kind: Box::new(ExpressionKind::Literal(Literal::Integer(pos_val))),
+                            span: call_span,
+                        }),
+                    }),
+                    span: call_span,
+                }
+            }
+            _ => Expression {
+                kind: Box::new(ExpressionKind::Literal(folded_lit)),
+                span: call_span,
+            },
         };
+        return folded_expr;
     }
 
     // Convert if-else ending with returns to ternary if applicable, or return expr to expression stmt:

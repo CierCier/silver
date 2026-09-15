@@ -9690,4 +9690,18 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&invalid_overflow_signed);
         assert!(!errors.is_empty(), "expected i128 = u128::MAX to error");
     }
+
+    #[test]
+    fn rejects_folded_negative_literal_assigned_to_unsigned() {
+        let mut program = parse(
+            "macro i32 sub() { return 1 - 2; } \
+             i32 main() { \
+                 u128 bad = @sub(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected u128 bad = @sub() (folded to -1) to error, got no errors");
+    }
 }

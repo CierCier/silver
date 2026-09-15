@@ -374,7 +374,7 @@ def run_single_test(
     if name == "rust_ffi_test" and services.ffi_dir:
         if target_is_windows or IS_WINDOWS:
             # DLL resolution: prepend the ffi dir to PATH and WINEPATH.
-            env["PATH"] = f"{services.ffi_dir};{env.get('PATH', '')}"
+            env["PATH"] = f"{services.ffi_dir}{os.pathsep}{env.get('PATH', '')}"
             env["WINEPATH"] = f"{services.ffi_dir};{env.get('WINEPATH', '')}"
         else:
             ld_path = env.get("LD_LIBRARY_PATH", "")

@@ -54,12 +54,13 @@ if (-not (Test-Path $LlvmClang)) {
 if (Test-Path $LlvmClang) {
     $llvmVer = & $LlvmClang --version | Select-Object -First 1
     Ok $llvmVer
-    if ($llvmVer -notmatch "version (\d+)\.") {
+    if ($llvmVer -notmatch "version (\d+)\.(\d+)") {
         throw "could not parse LLVM version"
     }
-    $llvmMajor = $Matches[1]
-    if ($llvmMajor -lt 22) {
-        $Failures += "LLVM $llvmMajor is older than the required 22.x (llvm-sys 221) — install LLVM 22"
+    $llvmMajor = [int]$Matches[1]
+    $llvmMinor = [int]$Matches[2]
+    if ($llvmMajor -lt 22 -or ($llvmMajor -eq 22 -and $llvmMinor -lt 1)) {
+        $Failures += "LLVM $llvmMajor.$llvmMinor is older than the required 22.1.x (llvm-sys 221) — install LLVM 22.1+"
     }
     if (Test-Path (Join-Path $LlvmRoot "lib\LLVM-C.lib")) {
         Ok "LLVM-C.lib (import lib) present"

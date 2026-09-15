@@ -1923,13 +1923,20 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
                                     .iter()
                                     .filter_map(|(name, node)| {
                                         loader.lookup_computed_cache_key(&node.source_path)
                                             .map(|k| (name.clone(), k.hash_hex))
                                     })
                                     .collect();
+                                for artifact in &imported_modules {
+                                    let hash = artifact.artifact_path.as_ref()
+                                        .and_then(|p| p.file_stem())
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    root_deps.push((artifact.module_path.clone(), hash.to_string()));
+                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &plan.output).is_ok() {
@@ -2073,13 +2080,20 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
                                     .iter()
                                     .filter_map(|(name, node)| {
                                         loader.lookup_computed_cache_key(&node.source_path)
                                             .map(|k| (name.clone(), k.hash_hex))
                                     })
                                     .collect();
+                                for artifact in &imported_modules {
+                                    let hash = artifact.artifact_path.as_ref()
+                                        .and_then(|p| p.file_stem())
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    root_deps.push((artifact.module_path.clone(), hash.to_string()));
+                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &temp_o).is_ok() {

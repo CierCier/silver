@@ -962,5 +962,27 @@ mod tests {
         assert!(ir.contains("call double @__floattidf"), "expected call to __floattidf:\n{ir}");
         assert!(ir.contains("call double @__floatuntidf"), "expected call to __floatuntidf:\n{ir}");
     }
+
+    #[test]
+    fn implicit_u128_to_float_conversion_uses_unsigned_helper() {
+        let source = r#"
+            f64 take_float(f64 val) {
+                return val;
+            }
+            f64 return_u128(u128 u) {
+                return u;
+            }
+            i32 main() {
+                u128 u = (u128)42;
+                f64 implicit_let = u;
+                f64 implicit_call = take_float(u);
+                f64 implicit_ret = return_u128(u);
+                return 0;
+            }
+        "#;
+        let ir = lower_to_llvm(source);
+        assert!(ir.contains("call double @__floatuntidf"), "expected call to __floatuntidf for implicit u128->float:\n{ir}");
+        assert!(!ir.contains("call double @__floattidf"), "expected no signed __floattidf for unsigned u128->float:\n{ir}");
+    }
 }
 
