@@ -9,3 +9,8 @@ bench/
 
 # Python bytecode from the integration harness
 __pycache__/
+
+# Nix build outputs and direnv
+result
+result-*
+.direnv/
