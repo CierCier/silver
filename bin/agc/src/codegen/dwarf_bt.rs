@@ -296,7 +296,6 @@ fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // COFF (x64) container — Windows objects. Mirrors the ObjectFile contract:
 // named sections, defined function symbols (section-relative values, sizes
@@ -322,7 +321,11 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     let sym_count = r.u32()? as usize;
     let _opt_size = r.u16()?;
     let sym_bytes = sym_count.checked_mul(18)?;
-    if number_of_sections > 96 || sym_table_off == 0 || sym_count == 0 || sym_table_off.checked_add(sym_bytes)? > data.len() {
+    if number_of_sections > 96
+        || sym_table_off == 0
+        || sym_count == 0
+        || sym_table_off.checked_add(sym_bytes)? > data.len()
+    {
         return None;
     }
 
@@ -361,7 +364,10 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
             (String::new(), Some(off))
         } else {
             let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(8);
-            (String::from_utf8_lossy(&name_bytes[..end]).into_owned(), None)
+            (
+                String::from_utf8_lossy(&name_bytes[..end]).into_owned(),
+                None,
+            )
         };
         secs.push(Sec {
             name,
@@ -406,7 +412,10 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
         let name = if name_bytes[0] == b'/' {
             let digits = &name_bytes[1..];
             let end = digits.iter().position(|&c| c == 0).unwrap_or(digits.len());
-            match std::str::from_utf8(&digits[..end]).ok().and_then(|s| s.parse::<usize>().ok()) {
+            match std::str::from_utf8(&digits[..end])
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
                 Some(off) => {
                     let mut nsr = Reader::new(strtab.get(off..)?);
                     nsr.cstr().unwrap_or_default()
@@ -418,8 +427,9 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
             // string-table offset. Names longer than eight bytes (all mangled
             // functions) use it; decoding them as empty would merge distinct
             // backtrace entries under one name.
-            let off = u32::from_le_bytes([name_bytes[4], name_bytes[5], name_bytes[6], name_bytes[7]])
-                as usize;
+            let off =
+                u32::from_le_bytes([name_bytes[4], name_bytes[5], name_bytes[6], name_bytes[7]])
+                    as usize;
             let mut nsr = Reader::new(strtab.get(off..)?);
             nsr.cstr().unwrap_or_default()
         } else {
@@ -430,7 +440,8 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
         // Function size comes from the function aux record's TotalSize field.
         let mut size = 0u64;
         if aux_count > 0 {
-            if let Some(aux) = data.get(sym_table_off + (i + 1) * 18..sym_table_off + (i + 2) * 18) {
+            if let Some(aux) = data.get(sym_table_off + (i + 1) * 18..sym_table_off + (i + 2) * 18)
+            {
                 let mut ar = Reader::new(aux);
                 ar.u32(); // tag index
                 size = ar.u32().unwrap_or(0) as u64; // total size
@@ -470,8 +481,12 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
         }
         let mut ordered: Vec<(usize, u64, u64)> = Vec::new(); // (sym idx, value, section end)
         for (sec_no, mut idxs) in per_section {
-            let Some(sec_idx) = (sec_no as usize).checked_sub(1) else { continue };
-            let Some(sec) = secs.get(sec_idx) else { continue };
+            let Some(sec_idx) = (sec_no as usize).checked_sub(1) else {
+                continue;
+            };
+            let Some(sec) = secs.get(sec_idx) else {
+                continue;
+            };
             idxs.sort_by_key(|&i| symbols[i].value);
             for w in 0..idxs.len() {
                 let next = if w + 1 < idxs.len() {
@@ -502,7 +517,10 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
             let vaddr = rr.u32()? as usize;
             let sym_idx = rr.u32()? as usize;
             let rel_type = rr.u16()?;
-            if rel_type == COFF_REL_ADDR64 || rel_type == COFF_REL_ADDR32 || rel_type == COFF_REL_SECREL {
+            if rel_type == COFF_REL_ADDR64
+                || rel_type == COFF_REL_ADDR32
+                || rel_type == COFF_REL_SECREL
+            {
                 let val = symbols.get(sym_idx).map(|s| s.value).unwrap_or(0);
                 relocations.insert(sec.raw_ptr + vaddr, val);
             }
@@ -672,7 +690,8 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
                     0x02 => {
                         // set address (64-bit, may be relocated)
                         let raw = sr.u64().unwrap_or(0);
-                        let field_off = line_sec_off + pos + 4 + prog_start_in_table + sub_start + 1;
+                        let field_off =
+                            line_sec_off + pos + 4 + prog_start_in_table + sub_start + 1;
                         let reloc = elf.relocations.get(&field_off).copied().unwrap_or(0);
                         address = raw.wrapping_add(reloc);
                     }
@@ -1108,8 +1127,19 @@ fn skip_form(r: &mut Reader, form: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("agc-{label}-{pid}-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
     #[test]
     fn probe_param_locations_windows() {
         // Resolve the just-built compiler the same way
@@ -1117,14 +1147,18 @@ mod tests {
         // present (the probe is a diagnostic aid, not a correctness gate).
         let target = std::env::var("CARGO_TARGET_DIR")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
-        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
         let exe_suffix = std::env::consts::EXE_SUFFIX;
         let agc_path = format!("{target}/{profile}/agc{exe_suffix}");
         if !Path::new(&agc_path).is_file() {
             eprintln!("skipped: compiler binary not found at {agc_path}");
             return;
         }
-        let dir = std::env::temp_dir();
+        let dir = unique_temp_dir("dwarf-bt-probe-win");
         let src = dir.join("dwarf_bt_probe_win.ag");
         std::fs::write(
             &src,
@@ -1138,7 +1172,13 @@ mod tests {
         let out = dir.join("dwarf_bt_probe_win.obj");
         let status = std::process::Command::new(&agc_path)
             .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .args(["-c", "-g", src.to_str().unwrap(), "-o", out.to_str().unwrap()])
+            .args([
+                "-c",
+                "-g",
+                src.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+            ])
             .status()
             .expect("run agc");
         assert!(status.success());
@@ -1150,11 +1190,12 @@ mod tests {
                 println!("PARAM {} {} {:?}", name, pname, loc);
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn parses_line_table_from_real_object() {
-        let dir = std::env::temp_dir();
+        let dir = unique_temp_dir("dwarf-bt-probe");
         let src = dir.join("dwarf_bt_probe.ag");
         std::fs::write(
             &src,
@@ -1167,12 +1208,17 @@ mod tests {
         let out = dir.join("dwarf_bt_probe.o");
         let _ = std::fs::remove_file(&out);
         let agc = std::env::var("AGC").unwrap_or_else(|_| {
-            let target = std::env::var("CARGO_TARGET_DIR")
-                .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
+            let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string()
+            });
             // Match the test binary's profile: `cargo test --release` never
             // rebuilds target/debug/agc, so a stale cached debug binary would
             // compile the probe against a drifted frontend.
-            let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+            let profile = if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            };
             let exe_suffix = std::env::consts::EXE_SUFFIX;
             format!("{target}/{profile}/agc{exe_suffix}")
         });
@@ -1214,5 +1260,6 @@ mod tests {
             "x is spilled to the frame: {:?}",
             f2p.1[0].1
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
