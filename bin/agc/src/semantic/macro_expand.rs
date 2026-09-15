@@ -484,6 +484,20 @@ fn expand_macros_in_expr(
     }
 }
 
+fn is_signed_type(ty: &ast::Type) -> bool {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Primitive(prim) => matches!(
+            prim,
+            ast::PrimitiveType::I8
+                | ast::PrimitiveType::I16
+                | ast::PrimitiveType::I32
+                | ast::PrimitiveType::I64
+                | ast::PrimitiveType::I128
+        ),
+        _ => false,
+    }
+}
+
 /// Expands a single user macro invocation.
 fn expand_macro_invocation(
     def: &MacroDef,
@@ -574,8 +588,12 @@ fn expand_macro_invocation(
     }
 
     if let Some(folded_lit) = try_eval_const_block(&body, &const_env) {
+        let is_signed = match &def.return_type {
+            Some(ret_ty) => is_signed_type(ret_ty),
+            None => expected.map(is_signed_type).unwrap_or(false),
+        };
         let folded_expr = match folded_lit {
-            Literal::Integer(v) if v < 0 => {
+            Literal::Integer(v) if is_signed && v < 0 => {
                 let pos_val = v.wrapping_neg();
                 Expression {
                     kind: Box::new(ExpressionKind::Unary {

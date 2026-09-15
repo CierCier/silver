@@ -229,8 +229,16 @@ fn fold_comptime_cast(inner: &ast::Expression) -> Option<ast::Expression> {
     };
 
     let folded_literal = cast_literal(source_literal, target_primitive)?;
+    let is_signed = matches!(
+        target_primitive,
+        ast::PrimitiveType::I8
+            | ast::PrimitiveType::I16
+            | ast::PrimitiveType::I32
+            | ast::PrimitiveType::I64
+            | ast::PrimitiveType::I128
+    );
     let folded_expr = match folded_literal {
-        ast::Literal::Integer(v) if v < 0 => {
+        ast::Literal::Integer(v) if is_signed && v < 0 => {
             let pos_val = v.wrapping_neg();
             ast::Expression {
                 kind: Box::new(ast::ExpressionKind::Unary {
@@ -297,9 +305,6 @@ fn cast_literal(source: &ast::Literal, target: &ast::PrimitiveType) -> Option<as
                 )))
             } else {
                 let unsigned = cast_i128_to_unsigned_bits(int_value, bits);
-                if unsigned > i128::MAX as u128 {
-                    return None;
-                }
                 Some(ast::Literal::Integer(unsigned as i128))
             }
         }

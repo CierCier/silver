@@ -2,11 +2,11 @@
 #
 # Verifies and (optionally, with -InstallMissing) installs everything needed to
 # build and run the Silver compiler on Windows x64:
-#   1. LLVM 22.x (official winget install — shared-only: LLVM-C.dll + LLVM-C.lib)
+#   1. LLVM 22.x (official winget install -- shared-only: LLVM-C.dll + LLVM-C.lib)
 #   2. VS 2022 Build Tools w/ C++ workload + Windows SDK (rustc linker, CRT libs)
 #   3. Rust toolchain (x86_64-pc-windows-msvc host)
 #   4. The llvm-config shim (official LLVM has no llvm-config.exe and no static
-#      libs; llvm-sys needs both quirks papered over — see docs/windows-port.md
+#      libs; llvm-sys needs both quirks papered over -- see docs/windows-port.md
 #      section 2)
 #
 # Usage:
@@ -60,12 +60,12 @@ if (Test-Path $LlvmClang) {
     $llvmMajor = [int]$Matches[1]
     $llvmMinor = [int]$Matches[2]
     if ($llvmMajor -lt 22 -or ($llvmMajor -eq 22 -and $llvmMinor -lt 1)) {
-        $Failures += "LLVM $llvmMajor.$llvmMinor is older than the required 22.1.x (llvm-sys 221) — install LLVM 22.1+"
+        $Failures += "LLVM $llvmMajor.$llvmMinor is older than the required 22.1.x (llvm-sys 221) -- install LLVM 22.1+"
     }
     if (Test-Path (Join-Path $LlvmRoot "lib\LLVM-C.lib")) {
         Ok "LLVM-C.lib (import lib) present"
     } else {
-        $Failures += "LLVM-C.lib missing from $LlvmRoot\lib — install the official LLVM package"
+        $Failures += "LLVM-C.lib missing from $LlvmRoot\lib -- install the official LLVM package"
     }
 }
 
@@ -155,7 +155,7 @@ if (-not $Failures) {
         cargo build -p agc
         if ($LASTEXITCODE -ne 0) { throw "agc build failed" }
     } finally { Pop-Location }
-    Ok "agc built — Windows compiler toolchain is complete"
+    Ok "agc built -- Windows compiler toolchain is complete"
 } else {
     Write-Host ""
     Warn "Missing components (fix these, or re-run with -InstallMissing):"

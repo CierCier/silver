@@ -9704,4 +9704,18 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected u128 bad = @sub() (folded to -1) to error, got no errors");
     }
+
+    #[test]
+    fn accepts_folded_unsigned_literal_above_signed_max() {
+        let mut program = parse(
+            "macro u128 max_u128() { return 340282366920938463463374607431768211455; } \
+             i32 main() { \
+                 u128 ok = @max_u128(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @max_u128() to succeed, got {errors:?}");
+    }
 }

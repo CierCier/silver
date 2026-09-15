@@ -905,6 +905,18 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     None
 }
 
+fn module_artifact_content_hash(module: &ModuleArtifact) -> String {
+    if let Some(path) = &module.artifact_path {
+        if let Ok(bytes) = std::fs::read(path) {
+            return crate::cache_store::Sha256::digest_hex(&bytes);
+        }
+    }
+    if let Ok(bytes) = module.to_bytes() {
+        return crate::cache_store::Sha256::digest_hex(&bytes);
+    }
+    format!("{:016x}", module.source_hash_fnv1a64)
+}
+
 fn collect_dependency_link_artifacts(
     loader: &ModuleLoader,
     roots: &[ModuleArtifact],
@@ -1931,11 +1943,8 @@ pub fn run(cli: Cli) {
                                     })
                                     .collect();
                                 for artifact in &imported_modules {
-                                    let hash = artifact.artifact_path.as_ref()
-                                        .and_then(|p| p.file_stem())
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("");
-                                    root_deps.push((artifact.module_path.clone(), hash.to_string()));
+                                    let hash = module_artifact_content_hash(artifact);
+                                    root_deps.push((artifact.module_path.clone(), hash));
                                 }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
@@ -2088,11 +2097,8 @@ pub fn run(cli: Cli) {
                                     })
                                     .collect();
                                 for artifact in &imported_modules {
-                                    let hash = artifact.artifact_path.as_ref()
-                                        .and_then(|p| p.file_stem())
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("");
-                                    root_deps.push((artifact.module_path.clone(), hash.to_string()));
+                                    let hash = module_artifact_content_hash(artifact);
+                                    root_deps.push((artifact.module_path.clone(), hash));
                                 }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
@@ -2481,8 +2487,12 @@ fn execute_test(
 ) -> TestExecutionResult {
     let start = std::time::Instant::now();
     let mut temp_bin = temp_dir.join(format!("test_bin_{index}"));
-    // CreateProcess only resolves extensionless images by appending .exe
-    if cfg!(target_os = "windows") {
+    let target_is_windows = cli
+        .target
+        .as_deref()
+        .map(|t| t.contains("windows"))
+        .unwrap_or(cfg!(target_os = "windows"));
+    if target_is_windows {
         temp_bin.set_extension("exe");
     }
     let content = std::fs::read_to_string(&target.path).unwrap_or_default();
@@ -2583,7 +2593,39 @@ fn execute_test(
         };
     }
 
-    let mut run_cmd = std::process::Command::new(&temp_bin);
+    let mut runner_args: Vec<String> = Vec::new();
+    let runner_cmd: Option<String> = if target_is_windows && !cfg!(target_os = "windows") {
+        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
+            let mut parts = runner.split_whitespace();
+            let prog = parts.next().map(|s| s.to_string());
+            runner_args.extend(parts.map(|s| s.to_string()));
+            prog
+        } else if let Ok(wine) = std::env::var("WINE") {
+            Some(wine)
+        } else {
+            let _ = std::fs::remove_file(&temp_bin);
+            return TestExecutionResult {
+                name: target.name.clone(),
+                passed: false,
+                duration: start.elapsed(),
+                error_message: Some(
+                    "cannot execute Windows binary on non-Windows host without runner; set SILVER_TEST_RUNNER (e.g. 'wine64') or use tests/run_tests.py --runner wine64".to_string()
+                ),
+                output: String::new(),
+            };
+        }
+    } else {
+        None
+    };
+
+    let mut run_cmd = if let Some(prog) = runner_cmd {
+        let mut c = std::process::Command::new(prog);
+        c.args(&runner_args);
+        c.arg(&temp_bin);
+        c
+    } else {
+        std::process::Command::new(&temp_bin)
+    };
     run_cmd.args(&cli.run_args);
 
     let run_output = match run_cmd.output() {
