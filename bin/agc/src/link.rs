@@ -72,8 +72,8 @@ fn find_lld_link() -> Result<Command, String> {
 
 /// Best-effort location of VS `link.exe` via vswhere.exe.
 fn locate_msvc_link_exe() -> Option<PathBuf> {
-    let program_files_x86 =
-        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+    let program_files_x86 = std::env::var("ProgramFiles(x86)")
+        .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
     let vswhere = PathBuf::from(&program_files_x86)
         .join("Microsoft Visual Studio")
         .join("Installer")
@@ -101,28 +101,41 @@ fn locate_msvc_link_exe() -> Option<PathBuf> {
         return None;
     }
     // Pick the highest-versioned MSVC toolset directory.
-    let vc_tools = PathBuf::from(&install_root).join("VC").join("Tools").join("MSVC");
+    let vc_tools = PathBuf::from(&install_root)
+        .join("VC")
+        .join("Tools")
+        .join("MSVC");
     let mut versions: Vec<_> = std::fs::read_dir(&vc_tools)
         .ok()?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().join("bin").join("Hostx64").join("x64").is_dir())
+        .filter(|entry| {
+            entry
+                .path()
+                .join("bin")
+                .join("Hostx64")
+                .join("x64")
+                .is_dir()
+        })
         .map(|entry| entry.file_name())
         .collect();
     versions.sort();
-    let link = versions
-        .last()?
-        .to_str()
-        .map(|ver| vc_tools.join(ver).join("bin").join("Hostx64").join("x64").join("link.exe"))?;
+    let link = versions.last()?.to_str().map(|ver| {
+        vc_tools
+            .join(ver)
+            .join("bin")
+            .join("Hostx64")
+            .join("x64")
+            .join("link.exe")
+    })?;
     link.is_file().then_some(link)
 }
 
 /// Library search dirs for windows-flavored links: `%LIB%` (populated by VS
 /// dev shells) plus the MSVC CRT and Windows SDK dirs discovered via vswhere.
 fn msvc_library_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var("LIB").unwrap_or_default())
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var("LIB").unwrap_or_default())
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
 
     let program_files_x86 = std::env::var("ProgramFiles(x86)")
         .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
@@ -151,7 +164,10 @@ fn msvc_library_dirs() -> Vec<PathBuf> {
     if install_root.is_empty() {
         return dirs;
     }
-    let vc_tools = PathBuf::from(&install_root).join("VC").join("Tools").join("MSVC");
+    let vc_tools = PathBuf::from(&install_root)
+        .join("VC")
+        .join("Tools")
+        .join("MSVC");
     if let Ok(entries) = std::fs::read_dir(&vc_tools) {
         let mut versions: Vec<_> = entries
             .filter_map(|entry| entry.ok())
@@ -201,6 +217,7 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "ntdll.lib",
             "shell32.lib",
             "bcrypt.lib",
+            "synchronization.lib",
         ]
     } else {
         &[
@@ -211,6 +228,7 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "ntdll.lib",
             "shell32.lib",
             "bcrypt.lib",
+            "synchronization.lib",
         ]
     }
 }
@@ -221,7 +239,10 @@ fn add_native_library_win(command: &mut Command, library: &str) {
     let path = Path::new(library);
     if path.is_absolute() {
         command.arg(library);
-    } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lib")) {
+    } else if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("lib"))
+    {
         command.arg(library);
     } else {
         command.arg(format!("{library}.lib"));
@@ -371,14 +392,17 @@ pub(crate) fn link_exe(
             link_exe_with_lld_link(plan, object_paths, dependency_paths, native_libs)
         }
         LinkFlavor::UnsupportedMinGW => Err(MINGW_UNSUPPORTED_ERR.to_string()),
-        LinkFlavor::GnuLd => link_exe_with_ld_lld(plan, object_paths, dependency_paths, native_libs)
-            .or_else(|ld_err| {
-                link_exe_with_cc(plan, object_paths, dependency_paths, native_libs).map_err(
-                    |cc_err| {
-                        format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
-                    },
-                )
-            }),
+        LinkFlavor::GnuLd => link_exe_with_ld_lld(
+            plan,
+            object_paths,
+            dependency_paths,
+            native_libs,
+        )
+        .or_else(|ld_err| {
+            link_exe_with_cc(plan, object_paths, dependency_paths, native_libs).map_err(|cc_err| {
+                format!("ld.lld path failed: {ld_err}; fallback linker failed: {cc_err}")
+            })
+        }),
     }
 }
 
@@ -411,7 +435,10 @@ pub(crate) fn link_exe_with_lld_link(
     // Static .agm module objects pass through as inputs; dynamic (.dll)
     // module dependencies need import-lib support and are rejected for now.
     for dep in dependency_paths {
-        if dep.extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
+        if dep
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("dll"))
+        {
             return Err(format!(
                 "dynamic module dependencies ({}) are not yet supported for Windows targets; build modules without --shared",
                 dep.display()
@@ -638,7 +665,10 @@ pub(crate) fn link_shared_module(
         // Static module objects pass through as inputs; dynamic (.dll) module
         // dependencies need import-lib support and are rejected for now.
         for dep in dependency_paths {
-            if dep.extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
+            if dep
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("dll"))
+            {
                 return Err(format!(
                     "dynamic module dependencies ({}) are not yet supported for Windows targets; build modules without --shared",
                     dep.display()

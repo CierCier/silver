@@ -53,9 +53,6 @@ EXPORTS
   TerminateProcess
   VirtualAlloc
   VirtualFree
-  WaitOnAddress
-  WakeByAddressAll
-  WakeByAddressSingle
   WriteFile
 EOF
 
@@ -83,10 +80,11 @@ EXPORTS
   BCryptGenRandom
 EOF
 
-# WaitOnAddress lives in the Synch API set on real Windows; binding the
-# import to kernel32.dll keeps it resolvable under Wine as well.
+# WaitOnAddress lives in the Synch API set on real Windows and is exported
+# by kernelbase.dll on Windows 8+ and Wine; binding the import to kernelbase.dll
+# keeps it resolvable under Wine as well.
 cat > synchronization.def <<'EOF'
-LIBRARY kernel32.dll
+LIBRARY kernelbase.dll
 EXPORTS
   WaitOnAddress
   WakeByAddressSingle

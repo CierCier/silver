@@ -102,10 +102,17 @@ WINDOWS_SKIP = {
     "timeout_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "http_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "http2_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http2_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http2_tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "https_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "http_bench": "std.net over Linux socket syscalls (winsock layer pending)",
+    "http_perf_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "json_tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "server_raw_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "pool_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "sse_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    "websocket_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "io_uring_test": "Linux io_uring kernel interface",
     "libc_test": "Linux libc interop test",
     "process_test": "fork/exec via Linux process syscalls",
@@ -128,9 +135,10 @@ class TestResult:
 
 
 class BackgroundServices:
-    def __init__(self, root: Path, workdir: Path):
+    def __init__(self, root: Path, workdir: Path, target: Optional[str] = None):
         self.root = root
         self.workdir = workdir
+        self.target = target
         self.procs: List[subprocess.Popen] = []
         self.openssl_lib = self._find_openssl()
         self.has_node = shutil.which("node") is not None
@@ -160,29 +168,34 @@ class BackgroundServices:
         env_val = os.environ.get("SILVER_FFI_LIBRARY_DIR", "")
         if env_val:
             return env_val
+        target_is_win = target_is_windows_name(self.target) or IS_WINDOWS
         for build_mode in ["debug", "release"]:
             candidate = self.root / "target" / build_mode
-            if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
-                return str(candidate)
-            if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
-                return str(candidate)
+            if target_is_win:
+                if (candidate / "silver_ffi.dll").is_file() or (candidate / "silver_ffi.lib").is_file():
+                    return str(candidate)
+            else:
+                if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
+                    return str(candidate)
         return ""
-
-    def start_service_if_needed(self, test_names: Set[str], agc_bin: Path):
+    def start_service_if_needed(self, test_names: Set[str], agc_bin: Path, target: Optional[str] = None):
         # Module import precompilation
         if "module_import_test" in test_names:
             self.modlib_dir.mkdir(parents=True, exist_ok=True)
             mod_src = self.root / "tests/modules/module_lib.ag"
             if mod_src.is_file():
+                cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+                eff_target = target or self.target
+                if eff_target:
+                    cmd.extend(["--target", eff_target])
                 res = subprocess.run(
-                    [str(agc_bin), "--emit=module", str(mod_src)],
+                    cmd,
                     cwd=str(self.modlib_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
                 if res.returncode != 0:
                     print(f"{C_YELLOW}warning: failed to emit module_lib for module_import_test{C_RESET}")
-
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -626,14 +639,13 @@ def main():
         print(f"{C_RED}error: no tests matched {args.filters}{C_RESET}")
         sys.exit(1)
 
-    # Initialize workdir and services
-    workdir = Path(tempfile.mkdtemp(prefix="silver-test-run-"))
-    services = BackgroundServices(root, workdir)
-    atexit.register(services.cleanup)
-    atexit.register(lambda: shutil.rmtree(workdir, ignore_errors=True))
-
     target = args.target or None
     runner = shlex.split(args.runner) if args.runner else None
+    # Initialize workdir and services
+    workdir = Path(tempfile.mkdtemp(prefix="silver-test-run-"))
+    services = BackgroundServices(root, workdir, target=target)
+    atexit.register(services.cleanup)
+    atexit.register(lambda: shutil.rmtree(workdir, ignore_errors=True))
     if not runner and target_is_windows_name(target) and not IS_WINDOWS:
         env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
         if env_runner:
@@ -644,7 +656,7 @@ def main():
     libdirs = [[d] for d in args.libdir]  # each value is one complete path; never resplit ("Program Files" spaces)
 
     selected_stems = {p.stem for p in selected_tests}
-    services.start_service_if_needed(selected_stems, agc_bin)
+    services.start_service_if_needed(selected_stems, agc_bin, target=target)
 
     if IS_WINDOWS:
         os.system("")  # enable ANSI escape processing in the legacy console
