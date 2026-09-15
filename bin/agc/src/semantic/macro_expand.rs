@@ -615,6 +615,10 @@ fn expand_macro_invocation(
                 kind: Box::new(ExpressionKind::Literal(Literal::Float(f))),
                 span: call_span,
             },
+            ConstVal::Complex(re, im) => Expression {
+                kind: Box::new(ExpressionKind::Literal(Literal::Complex(re, im))),
+                span: call_span,
+            },
             ConstVal::Bool(b) => Expression {
                 kind: Box::new(ExpressionKind::Literal(Literal::Bool(b))),
                 span: call_span,
@@ -987,6 +991,7 @@ enum ConstVal {
     Magnitude(u128),
     Negative(u128),
     Float(f64),
+    Complex(f64, f64),
     Bool(bool),
     String(String),
     Char(char),
@@ -997,10 +1002,10 @@ impl ConstVal {
         match lit {
             Literal::Integer(n) => ConstVal::Magnitude(*n as u128),
             Literal::Float(f) => ConstVal::Float(*f),
+            Literal::Complex(re, im) => ConstVal::Complex(*re, *im),
             Literal::Bool(b) => ConstVal::Bool(*b),
             Literal::String(s) => ConstVal::String(s.clone()),
             Literal::Char(c) => ConstVal::Char(*c),
-            Literal::Complex(..) => ConstVal::Magnitude(0),
         }
     }
 }
@@ -1018,6 +1023,7 @@ fn expr_to_const_val(expr: &Expression) -> Option<ConstVal> {
                 ConstVal::Magnitude(m) => Some(ConstVal::Negative(m)),
                 ConstVal::Negative(m) => Some(ConstVal::Magnitude(m)),
                 ConstVal::Float(f) => Some(ConstVal::Float(-f)),
+                ConstVal::Complex(re, im) => Some(ConstVal::Complex(-re, -im)),
                 _ => None,
             }
         }
@@ -1142,6 +1148,21 @@ fn eval_binary_op(left: &ConstVal, op: &BinaryOperator, right: &ConstVal) -> Opt
             BinaryOperator::LessEqual => Some(ConstVal::Bool(l <= r)),
             BinaryOperator::Greater => Some(ConstVal::Bool(l > r)),
             BinaryOperator::GreaterEqual => Some(ConstVal::Bool(l >= r)),
+            _ => None,
+        },
+        (ConstVal::Complex(r1, i1), ConstVal::Complex(r2, i2)) => match op {
+            BinaryOperator::Add => Some(ConstVal::Complex(r1 + r2, i1 + i2)),
+            BinaryOperator::Subtract => Some(ConstVal::Complex(r1 - r2, i1 - i2)),
+            BinaryOperator::Multiply => Some(ConstVal::Complex(
+                r1 * r2 - i1 * i2,
+                r1 * i2 + i1 * r2,
+            )),
+            BinaryOperator::Equal => Some(ConstVal::Bool(
+                (r1 - r2).abs() < f64::EPSILON && (i1 - i2).abs() < f64::EPSILON,
+            )),
+            BinaryOperator::NotEqual => Some(ConstVal::Bool(
+                (r1 - r2).abs() >= f64::EPSILON || (i1 - i2).abs() >= f64::EPSILON,
+            )),
             _ => None,
         },
         (ConstVal::Bool(l), ConstVal::Bool(r)) => match op {
@@ -1349,6 +1370,7 @@ fn eval_unary_op(op: &UnaryOperator, val: &ConstVal) -> Option<ConstVal> {
         (UnaryOperator::Minus, ConstVal::Magnitude(m)) => Some(ConstVal::Negative(*m)),
         (UnaryOperator::Minus, ConstVal::Negative(m)) => Some(ConstVal::Magnitude(*m)),
         (UnaryOperator::Minus, ConstVal::Float(f)) => Some(ConstVal::Float(-f)),
+        (UnaryOperator::Minus, ConstVal::Complex(re, im)) => Some(ConstVal::Complex(-re, -im)),
         (UnaryOperator::Not, ConstVal::Bool(b)) => Some(ConstVal::Bool(!b)),
         (UnaryOperator::BitwiseNot, ConstVal::Magnitude(m)) => Some(ConstVal::Magnitude(!m)),
         (UnaryOperator::BitwiseNot, ConstVal::Negative(m)) => {

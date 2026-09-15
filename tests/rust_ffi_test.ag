@@ -17,6 +17,21 @@ i32 collect_bytes(void* userdata, const RustFfiSlice* chunk) {
     return 0;
 }
 
+#[cfg(os.linux)]
+str ffi_test_shell_prog() { return "/bin/sh"; }
+#[cfg(os.windows)]
+str ffi_test_shell_prog() { return "cmd.exe"; }
+
+#[cfg(os.linux)]
+str ffi_test_shell_plain_prog() { return "sh"; }
+#[cfg(os.windows)]
+str ffi_test_shell_plain_prog() { return "cmd.exe"; }
+
+#[cfg(os.linux)]
+str ffi_test_shell_flag() { return "-c"; }
+#[cfg(os.windows)]
+str ffi_test_shell_flag() { return "/c"; }
+
 i32 main() {
     test_start("Rust FFI ABI, filesystem, and native layer");
     assert_eq_i32(SILVER_FFI_ABI_VERSION, silver_ffi_abi_version(),
@@ -154,10 +169,10 @@ i32 main() {
     joined_text.drop();
 
     Vec<str> spawn_args = Vec<str>.new();
-    spawn_args.push("-c");
+    spawn_args.push(ffi_test_shell_flag());
     spawn_args.push("exit 7");
     Result<RustFfiProcess, Error> spawned =
-        RustFfiProcess.spawn_with_args("/bin/sh", &spawn_args);
+        RustFfiProcess.spawn_with_args(ffi_test_shell_prog(), &spawn_args);
     assert_true(spawned.is_ok(), "native spawn with args");
     RustFfiProcess arg_child = spawned.unwrap();
     Result<i32, Error> child_exit = arg_child.join();
@@ -170,10 +185,10 @@ i32 main() {
         "native one-shot join code");
 
     Vec<str> plain_args = Vec<str>.new();
-    plain_args.push("-c");
-    plain_args.push("true");
+    plain_args.push(ffi_test_shell_flag());
+    plain_args.push("exit 0");
     Result<RustFfiProcess, Error> spawned_plain = RustFfiProcess.spawn_with_args(
-        "sh", &plain_args);
+        ffi_test_shell_plain_prog(), &plain_args);
     assert_true(spawned_plain.is_ok(), "native spawn without args");
     RustFfiProcess plain_child = spawned_plain.unwrap();
     Result<i32, Error> plain_exit = plain_child.join();

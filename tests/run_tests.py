@@ -395,6 +395,13 @@ def run_single_test(
         else:
             run_kwargs["stdin"] = subprocess.DEVNULL
 
+        if target_is_windows and not IS_WINDOWS and not runner:
+            return TestResult(
+                name,
+                "FAIL",
+                "cannot execute Windows binary on non-Windows host without runner (use --runner wine64 or set SILVER_TEST_RUNNER/WINE)",
+                compile_ms=compile_ms,
+            )
         run_cmd = ([*runner, str(bin_path)]) if runner else [str(bin_path)]
         rp = subprocess.run(run_cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
@@ -629,6 +636,10 @@ def main():
 
     target = args.target or None
     runner = shlex.split(args.runner) if args.runner else None
+    if not runner:
+        env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
+        if env_runner:
+            runner = shlex.split(env_runner)
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
     # under "Program Files").

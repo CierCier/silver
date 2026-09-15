@@ -9757,4 +9757,18 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected @bad() returning u128::MAX for i32 to fail range check");
     }
+
+    #[test]
+    fn macro_folds_complex_literal_preserving_c64_type() {
+        let mut program = parse(
+            "macro c64 make_complex() { return 3.5i; } \
+             i32 main() { \
+                 c64 c = @make_complex(); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @make_complex() to return c64, got {errors:?}");
+    }
 }
