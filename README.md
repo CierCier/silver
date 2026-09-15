@@ -1,44 +1,8 @@
-# Silver — A Modern Systems Programming Language
+# Silver
 
-Silver is a statically typed, LLVM-backed systems programming language designed to be simple and easy to use without sacrificing performance and control.
+Silver is a statically typed systems programming language with an LLVM backend. It provides deterministic resource management, compile-time borrow checks, structured concurrency, and a freestanding runtime.
 
-It combines **deterministic RAII destruction**, **compile-time escape-checked borrowing**, **first-class structured concurrency (`launch`/`wait`)**, and **zero-cost abstractions** on top of a **pure freestanding static runtime**.
-
----
-
-## Design
-
-### 1. Deterministic Resource Management (RAII) & Ownership
-- **Automatic Field Destruction**: Scoped cleanup via compiler-generated drop flags. Destructors and struct field cleanup cascade automatically without explicit manual drop chains.
-- **Explicit Moves (`move`)**: Ownership transfers are declared explicitly with `move x`, invalidating the source drop flag to prevent double destruction.
-- **Enforced Borrowing (`&T`, `&mut T`)**: References serve as borrow origins. The compiler statically enforces that returned references only derive from valid origins and never escape stack-local frames.
-- **Unchecked Escape Hatch (`T*`)**: Raw pointers remain available for FFI, heap-backed abstractions, and manual memory arithmetic without borrow constraints.
-
-### 2. First-Class Concurrency & Static Send Gate
-- **1:1 OS Thread Tasks**: Spawn background tasks with `launch f(args...)`, which returns a typed `Task<T>` handle. Arguments are moved across the thread boundary.
-- **Explicit Joining**: Join tasks using `wait task` to move out and consume results.
-- **Compile-Time Send Gate**: The compiler inspects types moved into tasks, disallowing un-Send data (such as non-atomic `Rc<T>`, raw pointers `T*`, or borrows `&T`) from crossing thread boundaries.
-- **Synchronization Primitives**: Pure-Silver RAII `Mutex<T>` / `Guard<T>`, low-level futex `RawMutex`, unbounded MPSC `Channel<T>`, `WaitGroup`, and atomic operations (`std.atomic`).
-
-### 3. Freestanding Static Runtime
-- Applications compile to native binaries running on a pure-Silver runtime (`std/rt/`, `std/sys/entry`).
-- Freestanding execution without libc bloat or hidden runtime dispatch.
-
-### 4. Zero-Cost Ergonomics
-- **Monomorphized Generics**: Full compile-time monomorphization of generic functions, structs, and traits.
-- **Algebraic Data Types & Match**: Enums with unit, tuple, and struct variants paired with expression-level `match` pattern matching and tag-aware payload cleanup.
-- **Zero-Cost Iterators**: `for x in iter` lowers directly into state-machine loops via `Iterator` and `IntoIterator` traits.
-- **Operator Overloading**: Double-underscored method protocols (`__add`, `__index_get`, `__index_set`, etc.) backed by `std.ops`.
-
-### 5. Developer Tooling & Safety Diagnostics
-- **Built-in Leak Checker (`--leak-check`)**: Tracks allocations and resolves exact allocation sites (function, file, and line) if memory remains unreleased at exit.
-- **Runtime Backtraces**: Built-in DWARF-backed backtrace walker reporting exact function names, source lines, and arguments on crashes/assertions.
-- **DWARF by Default**: Native debug information emission for seamless GDB/LLDB debugging and variable inspection.
-- **LSP Support (`aglsp`)**: Language server providing real-time diagnostics, symbol outlines, inlay hints, and go-to-definition.
-
----
-
-## Language Tour
+## Example
 
 ```silver
 import std.io;
@@ -53,14 +17,10 @@ i64 compute(i64 val) {
 }
 
 i32 main() {
-    // RAII and formatted printing
     Point p = { .x = 10.0, .y = 20.0 };
     @println("Point: ({}, {})", p.x, p.y);
 
-    // First-class structured concurrency
     Task<i64> task = launch compute(21);
-
-    // Explicit join consuming the task handle
     i64 answer = wait task;
     @println("Computed answer: {}", answer);
 
@@ -68,153 +28,111 @@ i32 main() {
 }
 ```
 
----
+## Features
 
-## Repository Layout
-
-- `bin/` — Executable binaries and CLI drivers:
-  - `bin/agc/` — Reference Silver compiler (`agc` CLI driver and LLVM backend, powered by [Elise](https://github.com/CierCier/elise))
-  - `bin/aglsp/` — Silver Language Server Protocol implementation (`aglsp`)
-  - `bin/agsm/` — Source maps and module artifact generator (`agsm`)
-- `std/` — Standard library sources (memory management, concurrency, I/O, collections, runtime)
-- `ffi/rust/` — Optional Rust implementation behind Silver's stable C ABI
-- `examples/` — Sample Silver programs
-- `tests/` — Test suites including language unit tests, memory pentests, and integration tests
-- `docs/` — Language specifications and architecture design docs
-- `vendor/` — Third-party library headers and bindings (e.g. `vendor.gfx`)
-- `bootstrap/` — Rust bootstrap compiler and tooling projects
-
----
+- **Resource management**: Automatic drop cleanup on scope exit via compiler-managed drop flags. Ownership transfers explicitly with `move`.
+- **Borrowing**: References (`&T`, `&mut T`) cannot escape their stack frames. Raw pointers (`T*`) remain available for manual control and FFI.
+- **Concurrency**: Structured task spawning with `launch` and `wait`. The compiler enforces that non-thread-safe types cannot cross task boundaries.
+- **Freestanding runtime**: Pure-Silver runtime (`std/rt/`) with no required C standard library dependency.
+- **Tooling and diagnostics**: DWARF debug information by default, built-in allocation leak tracking (`--leak-check`), crash backtraces, and Language Server Protocol (`aglsp`) support.
 
 ## Installation
 
-### GitHub Releases
-
-Prebuilt binaries are available on the [Releases](https://github.com/CierCier/silver/releases) page.
-
-1. Download the archive for your operating system and architecture.
-2. Extract the archive and place `agc` (and companion tools `aglsp`, `agsm`) in your `$PATH`.
-
-> [!NOTE]
-> **LLVM Requirement**: Prebuilt binaries require **LLVM 22** runtime libraries (`llvm` / `libclang`) and a system C toolchain or linker (`cc`, `clang`, or `ld.lld`) installed on your host system.
-
-### Building from Source
-
-1. **Prerequisites**:
-   - **Rust Toolchain** with Cargo (1.75+)
-   - **LLVM 22** development headers and libraries (for `inkwell` / `llvm-sys`; set `LLVM_SYS_221_PREFIX` if installed in a custom path)
-   - A system C toolchain / linker (`cc`, `clang`, or `ld.lld`)
-
-2. **Build and Install**:
-   ```bash
-   git clone https://github.com/CierCier/silver.git
-   cd silver
-
-   # Build compiler in release mode
-   cargo build --release -p agc
-
-   # Or install binary to ~/.cargo/bin
-   cargo install --path bin/agc
-   ```
-
 ### Nix
 
-If you use Nix, all dependencies—including LLVM 22, the compiler runtime, and sysroot paths—are hermetically managed out of the box.
+Nix provides reproducible builds with LLVM 22, the compiler, and standard library sysroots:
 
-- **Install via Flakes**:
-  ```bash
-  nix profile install github:CierCier/silver
-  ```
-
-- **Run directly without installing**:
-  ```bash
-  nix run github:CierCier/silver -- run path/to/file.ag
-  ```
-
-- **Development Shell**:
-  ```bash
-  # Drops into an environment with LLVM 22, Rust, and all variables configured
-  nix develop
-
-  # Or with legacy nix-shell
-  nix-shell
-  ```
-
----
-
-## Getting Started
-
-### Compiling & Running Programs
-
-Compile a source file to an executable:
 ```bash
+# Install to profile
+nix profile install github:CierCier/silver
+
+# Or run directly without installing
+nix run github:CierCier/silver -- run path/to/file.ag
+
+# Enter a development shell
+nix develop
+```
+
+### Prebuilt binaries
+
+Download prebuilt archives from the [Releases](https://github.com/CierCier/silver/releases) page. Extract the archive and add the binary directory to your `PATH`.
+
+Prebuilt binaries require LLVM 22 runtime libraries (`libLLVM-22` or `libclang`) and a system linker (`cc`, `clang`, or `ld.lld`).
+
+### Building from source
+
+Requirements:
+- Rust toolchain with Cargo 1.75+
+- LLVM 22 development headers and libraries (`inkwell` / `llvm-sys`)
+- System C toolchain and linker (`cc`, `clang`, or `ld.lld`)
+
+```bash
+git clone https://github.com/CierCier/silver.git
+cd silver
+
+# Build compiler in release mode
+cargo build --release -p agc
+
+# Or install to ~/.local with
+./scripts/install.sh
+```
+
+## Usage
+
+### Compile and run
+
+```bash
+# Compile to an executable
 agc path/to/file.ag -o out
-# or with cargo:
-cargo run -p agc -- path/to/file.ag -o out
-```
 
-Fast frontend-only type checking (`agc check`):
-```bash
-agc check path/to/file.ag
-```
-
-Compile and run directly in one step (`agc run`):
-```bash
+# Compile and run in one step
 agc run path/to/file.ag [args...]
-```
 
-Run with leak checking enabled:
-```bash
+# Frontend type checking only
+agc check path/to/file.ag
+
+# Run with allocation leak tracking
 agc --leak-check run path/to/file.ag
 ```
 
-### Running Tests
+### Modules and packaging
 
 ```bash
+# Emit a precompiled module (.agm)
+agc path/to/file.ag --emit=module -o path/to/file.agm
+
+# Emit a shared packaged module
+agc path/to/file.ag --emit=module --shared -o path/to/file.agm
+```
+
+### Running tests
+
+```bash
+# Run compiler unit and parser parity tests
 cargo test -p agc
+
+# Run integration test suite
+python3 tests/run_tests.py --no-tui
 ```
 
-### Rust-backed C ABI
+## Repository layout
 
-The optional `silver-ffi` crate provides filesystem, environment, process,
-owned-buffer, error, and callback primitives through a versioned C ABI. It is
-not Rust ABI compatibility and does not change Silver's freestanding runtime.
-`std/ffi/` adds a native layer over the same ABI — `Result<T, Error>`
-returns, `String` values, and `Drop`-owned process handles — so Rust-backed
-tooling reads like ordinary stdlib code.
+- `bin/agc/`: Compiler driver and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
+- `bin/aglsp/`: Language Server Protocol implementation
+- `bin/agsm/`: Source maps and module artifact generator
+- `std/`: Standard library (allocators, collections, I/O, networking, runtime)
+- `ffi/rust/`: Optional Rust implementation behind Silver's versioned C ABI
+- `examples/`: Sample programs
+- `tests/`: Unit, ownership, and integration test suites
+- `docs/`: Language specifications and standard protocol designs
 
-```bash
-cargo build -p silver-ffi
-cargo run -p agc -- examples/rust_ffi_tool.ag \
-  -L target/debug -o /tmp/rust_ffi_tool
-LD_LIBRARY_PATH="$PWD/target/debug" /tmp/rust_ffi_tool
-```
+## Documentation
 
-See [`docs/rust-ffi.md`](docs/rust-ffi.md) and
-[`ffi/rust/README.md`](ffi/rust/README.md) for ownership, panic containment,
-platform assumptions, and the complete ABI contract.
-
-### Modules & Packaging
-
-Emit a precompiled module artifact (`.agm`):
-```bash
-cargo run -p agc -- path/to/file.ag --emit=module -o path/to/file.agm
-```
-
-Emit a shared packaged module:
-```bash
-cargo run -p agc -- path/to/file.ag --emit=module --shared -o path/to/file.agm
-```
-
-
----
-
-## Contributing
-
-Contributions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before submitting pull requests.
-
-For detailed technical specifications of the compiler architecture and pipeline, see [AGENTS.md](AGENTS.md) and [SYNTAX.md](SYNTAX.md).
+- [Syntax Specification](SYNTAX.md)
+- [Compiler Architecture Guide](AGENTS.md)
+- [C ABI and FFI](docs/rust-ffi.md)
+- [Standard Library Protocols](docs/standards/README.md)
 
 ## License
 
-This project is available under the MIT License. See [LICENSE](LICENSE) for details.
+MIT
