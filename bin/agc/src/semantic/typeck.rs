@@ -9718,4 +9718,43 @@ mod tests {
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(errors.is_empty(), "expected @max_u128() to succeed, got {errors:?}");
     }
+
+    #[test]
+    fn generic_macro_folds_negative_integer_expression_correctly() {
+        let mut program = parse(
+            "macro T sub<T>(T a, T b) { return a - b; } \
+             i32 main() { \
+                 i32 ok = @sub<i32>(1, 2); \
+                 return ok; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "expected @sub<i32>(1, 2) to succeed with -1, got {errors:?}");
+
+        let mut invalid = parse(
+            "macro T sub<T>(T a, T b) { return a - b; } \
+             i32 main() { \
+                 u128 bad = @sub<i32>(1, 2); \
+                 return 0; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut invalid);
+        let (errors, _) = TypeChecker::new().check_program(&invalid);
+        assert!(!errors.is_empty(), "expected u128 bad = @sub<i32>(1, 2) to error");
+    }
+
+    #[test]
+    fn rejects_signed_macro_returning_u128_max_magnitude() {
+        let mut program = parse(
+            "macro i32 bad() { return 340282366920938463463374607431768211455; } \
+             i32 main() { \
+                 i32 x = @bad(); \
+                 return x; \
+             }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(!errors.is_empty(), "expected @bad() returning u128::MAX for i32 to fail range check");
+    }
 }

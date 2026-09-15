@@ -61,6 +61,7 @@ pub(crate) fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
 /// True for generic-instance mangled names: `name__<types>__<16 hex>`.
 /// These are re-instantiated per consumer, so unit objects keep them local
 /// (COFF weak symbols never dedup across objects).
+#[allow(dead_code)]
 fn is_generic_instance_name(name: &str) -> bool {
     match name.rfind("__") {
         Some(pos) => {

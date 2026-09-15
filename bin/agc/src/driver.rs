@@ -917,6 +917,71 @@ fn module_artifact_content_hash(module: &ModuleArtifact) -> String {
     format!("{:016x}", module.source_hash_fnv1a64)
 }
 
+fn split_shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' && !in_single_quote {
+            escaped = true;
+        } else if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if ch.is_whitespace() && !in_single_quote && !in_double_quote {
+            if !current.is_empty() {
+                words.push(current);
+                current = String::new();
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn build_target_runner_command(
+    binary_path: &Path,
+    target: Option<&str>,
+) -> Result<std::process::Command, String> {
+    let target_is_windows = crate::codegen::abi::target_is_windows(target);
+    if target_is_windows && !cfg!(target_os = "windows") {
+        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
+            let mut parts = split_shell_words(&runner);
+            if !parts.is_empty() {
+                let prog = parts.remove(0);
+                let mut cmd = std::process::Command::new(prog);
+                cmd.args(&parts);
+                cmd.arg(binary_path);
+                return Ok(cmd);
+            }
+        }
+        if let Ok(wine) = std::env::var("WINE") {
+            let mut parts = split_shell_words(&wine);
+            if !parts.is_empty() {
+                let prog = parts.remove(0);
+                let mut cmd = std::process::Command::new(prog);
+                cmd.args(&parts);
+                cmd.arg(binary_path);
+                return Ok(cmd);
+            }
+        }
+        return Err(
+            "cannot execute Windows binary on non-Windows host without runner; set SILVER_TEST_RUNNER (e.g. 'wine64') or WINE".to_string(),
+        );
+    }
+    Ok(std::process::Command::new(binary_path))
+}
+
 fn collect_dependency_link_artifacts(
     loader: &ModuleLoader,
     roots: &[ModuleArtifact],
@@ -2231,7 +2296,16 @@ pub fn run(cli: Cli) {
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 if plan.run_mode {
-                    let mut cmd = std::process::Command::new(&plan.output);
+                    let mut cmd = match build_target_runner_command(&plan.output, plan.target.as_deref()) {
+                        Ok(cmd) => cmd,
+                        Err(err) => {
+                            if plan.auto_output {
+                                let _ = std::fs::remove_file(&plan.output);
+                            }
+                            eprintln!("agc: {}: {err}", "error".red().bold());
+                            std::process::exit(1);
+                        }
+                    };
                     cmd.args(&plan.run_args);
                     let status = cmd.status();
                     if plan.auto_output {
@@ -2487,11 +2561,7 @@ fn execute_test(
 ) -> TestExecutionResult {
     let start = std::time::Instant::now();
     let mut temp_bin = temp_dir.join(format!("test_bin_{index}"));
-    let target_is_windows = cli
-        .target
-        .as_deref()
-        .map(|t| t.contains("windows"))
-        .unwrap_or(cfg!(target_os = "windows"));
+    let target_is_windows = crate::codegen::abi::target_is_windows(cli.target.as_deref());
     if target_is_windows {
         temp_bin.set_extension("exe");
     }
@@ -2593,38 +2663,18 @@ fn execute_test(
         };
     }
 
-    let mut runner_args: Vec<String> = Vec::new();
-    let runner_cmd: Option<String> = if target_is_windows && !cfg!(target_os = "windows") {
-        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
-            let mut parts = runner.split_whitespace();
-            let prog = parts.next().map(|s| s.to_string());
-            runner_args.extend(parts.map(|s| s.to_string()));
-            prog
-        } else if let Ok(wine) = std::env::var("WINE") {
-            Some(wine)
-        } else {
+    let mut run_cmd = match build_target_runner_command(&temp_bin, cli.target.as_deref()) {
+        Ok(cmd) => cmd,
+        Err(err) => {
             let _ = std::fs::remove_file(&temp_bin);
             return TestExecutionResult {
                 name: target.name.clone(),
                 passed: false,
                 duration: start.elapsed(),
-                error_message: Some(
-                    "cannot execute Windows binary on non-Windows host without runner; set SILVER_TEST_RUNNER (e.g. 'wine64') or use tests/run_tests.py --runner wine64".to_string()
-                ),
+                error_message: Some(err),
                 output: String::new(),
             };
         }
-    } else {
-        None
-    };
-
-    let mut run_cmd = if let Some(prog) = runner_cmd {
-        let mut c = std::process::Command::new(prog);
-        c.args(&runner_args);
-        c.arg(&temp_bin);
-        c
-    } else {
-        std::process::Command::new(&temp_bin)
     };
     run_cmd.args(&cli.run_args);
 
