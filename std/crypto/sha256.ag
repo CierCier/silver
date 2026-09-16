@@ -1,7 +1,5 @@
 // std/crypto/sha256.ag — pure-Silver SHA-256 and HMAC-SHA256 implementation (FIPS 180-4 / RFC 6234).
 
-import std.mem.alloc;
-import std.mem.drop;
 import std.mem.memory;
 import std.string;
 
@@ -9,7 +7,7 @@ const i64 SHA256_BLOCK = 64;
 const i64 SHA256_OUT = 32;
 
 i64 sha256_rotr(i64 x, i64 n) {
-    return (((x >> n) | (x << (64 - n))) & (i64)0xffffffff) | ((((x & (i64)0xffffffff) >> n) | ((x & (i64)0xffffffff) << (32 - n))) & (i64)0xffffffff);
+    return (((x & (i64)0xffffffff) >> n) | ((x & (i64)0xffffffff) << (32 - n))) & (i64)0xffffffff;
 }
 
 i64 sha256_shr(i64 x, i64 n) {
@@ -59,47 +57,39 @@ u32 K256[64] = {
     (u32)0x90befffa, (u32)0xa4506ceb, (u32)0xbef9a3f7, (u32)0xc67178f2
 };
 
-/// Compute SHA-256 digest over `len` bytes at `data`.
-/// Output is written to `out` (must be at least 32 bytes).
-bool sha256(u8* data, i64 len, u8* out) {
-    if (data == (u8*)0 && len != 0) {
-        return false;
+struct Sha256 {
+    i64 h0;
+    i64 h1;
+    i64 h2;
+    i64 h3;
+    i64 h4;
+    i64 h5;
+    i64 h6;
+    i64 h7;
+    u8 buf[64];
+    i64 buf_len;
+    u64 total_len;
+}
+
+impl Sha256 {
+    Sha256 new() {
+        Sha256 s;
+        s.h0 = (i64)0x6a09e667;
+        s.h1 = (i64)0xbb67ae85;
+        s.h2 = (i64)0x3c6ef372;
+        s.h3 = (i64)0xa54ff53a;
+        s.h4 = (i64)0x510e527f;
+        s.h5 = (i64)0x9b05688c;
+        s.h6 = (i64)0x1f83d9ab;
+        s.h7 = (i64)0x5be0cd19;
+        s.buf_len = 0;
+        s.total_len = (u64)0;
+        return s;
     }
 
-    i64 h0 = (i64)0x6a09e667;
-    i64 h1 = (i64)0xbb67ae85;
-    i64 h2 = (i64)0x3c6ef372;
-    i64 h3 = (i64)0xa54ff53a;
-    i64 h4 = (i64)0x510e527f;
-    i64 h5 = (i64)0x9b05688c;
-    i64 h6 = (i64)0x1f83d9ab;
-    i64 h7 = (i64)0x5be0cd19;
-
-    u64 bit_len = (u64)len * 8;
-    i64 blocks = (len + 72) / 64;
-
-    i64 w[64];
-    i64 off = 0;
-    i64 b = 0;
-    while (b < blocks) {
-        u8 block[64];
+    void process_block(&mut self, u8* block) {
+        i64 w[64];
         i64 i = 0;
-        while (i < 64) {
-            if (off < len) {
-                block[i] = data[off];
-            } else if (off == len) {
-                block[i] = (u8)0x80;
-            } else if (off >= blocks * 64 - 8) {
-                i64 byte_idx = off - (blocks * 64 - 8);
-                block[i] = (u8)((bit_len >> ((7 - byte_idx) * 8)) & 0xff);
-            } else {
-                block[i] = (u8)0;
-            }
-            off = off + 1;
-            i = i + 1;
-        }
-
-        i = 0;
         while (i < 16) {
             w[i] = ((i64)block[i * 4] << 24) | ((i64)block[i * 4 + 1] << 16)
                 | ((i64)block[i * 4 + 2] << 8) | (i64)block[i * 4 + 3];
@@ -112,14 +102,14 @@ bool sha256(u8* data, i64 len, u8* out) {
             i = i + 1;
         }
 
-        i64 a = h0;
-        i64 bv = h1;
-        i64 c = h2;
-        i64 d = h3;
-        i64 e = h4;
-        i64 f = h5;
-        i64 g = h6;
-        i64 h = h7;
+        i64 a = self.h0;
+        i64 bv = self.h1;
+        i64 c = self.h2;
+        i64 d = self.h3;
+        i64 e = self.h4;
+        i64 f = self.h5;
+        i64 g = self.h6;
+        i64 h = self.h7;
 
         i = 0;
         while (i < 64) {
@@ -142,26 +132,98 @@ bool sha256(u8* data, i64 len, u8* out) {
             i = i + 1;
         }
 
-        h0 = (h0 + a) & (i64)0xffffffff;
-        h1 = (h1 + bv) & (i64)0xffffffff;
-        h2 = (h2 + c) & (i64)0xffffffff;
-        h3 = (h3 + d) & (i64)0xffffffff;
-        h4 = (h4 + e) & (i64)0xffffffff;
-        h5 = (h5 + f) & (i64)0xffffffff;
-        h6 = (h6 + g) & (i64)0xffffffff;
-        h7 = (h7 + h) & (i64)0xffffffff;
-
-        b = b + 1;
+        self.h0 = (self.h0 + a) & (i64)0xffffffff;
+        self.h1 = (self.h1 + bv) & (i64)0xffffffff;
+        self.h2 = (self.h2 + c) & (i64)0xffffffff;
+        self.h3 = (self.h3 + d) & (i64)0xffffffff;
+        self.h4 = (self.h4 + e) & (i64)0xffffffff;
+        self.h5 = (self.h5 + f) & (i64)0xffffffff;
+        self.h6 = (self.h6 + g) & (i64)0xffffffff;
+        self.h7 = (self.h7 + h) & (i64)0xffffffff;
     }
 
-    out[0]  = (u8)(h0 >> 24); out[1]  = (u8)(h0 >> 16); out[2]  = (u8)(h0 >> 8); out[3]  = (u8)h0;
-    out[4]  = (u8)(h1 >> 24); out[5]  = (u8)(h1 >> 16); out[6]  = (u8)(h1 >> 8); out[7]  = (u8)h1;
-    out[8]  = (u8)(h2 >> 24); out[9]  = (u8)(h2 >> 16); out[10] = (u8)(h2 >> 8); out[11] = (u8)h2;
-    out[12] = (u8)(h3 >> 24); out[13] = (u8)(h3 >> 16); out[14] = (u8)(h3 >> 8); out[15] = (u8)h3;
-    out[16] = (u8)(h4 >> 24); out[17] = (u8)(h4 >> 16); out[18] = (u8)(h4 >> 8); out[19] = (u8)h4;
-    out[20] = (u8)(h5 >> 24); out[21] = (u8)(h5 >> 16); out[22] = (u8)(h5 >> 8); out[23] = (u8)h5;
-    out[24] = (u8)(h6 >> 24); out[25] = (u8)(h6 >> 16); out[26] = (u8)(h6 >> 8); out[27] = (u8)h6;
-    out[28] = (u8)(h7 >> 24); out[29] = (u8)(h7 >> 16); out[30] = (u8)(h7 >> 8); out[31] = (u8)h7;
+    void update(&mut self, u8* data, i64 len) {
+        if (data == (u8*)0 || len <= 0) {
+            return;
+        }
+        self.total_len = self.total_len + (u64)len;
+        i64 off = 0;
+        if (self.buf_len > 0) {
+            i64 take = 64 - self.buf_len;
+            if (take > len) {
+                take = len;
+            }
+            silver_rt_memcpy(&self.buf[self.buf_len], data, take);
+            self.buf_len = self.buf_len + take;
+            off = take;
+            if (self.buf_len == 64) {
+                self.process_block(&self.buf[0]);
+                self.buf_len = 0;
+            }
+        }
+        while (off + 64 <= len) {
+            self.process_block(&data[off]);
+            off = off + 64;
+        }
+        if (off < len) {
+            i64 rem = len - off;
+            silver_rt_memcpy(&self.buf[0], &data[off], rem);
+            self.buf_len = rem;
+        }
+    }
+
+    void finish(&mut self, u8* out) {
+        u64 bit_len = self.total_len * (u64)8;
+        // Pad with 0x80
+        self.buf[self.buf_len] = (u8)0x80;
+        self.buf_len = self.buf_len + 1;
+
+        if (self.buf_len > 56) {
+            while (self.buf_len < 64) {
+                self.buf[self.buf_len] = (u8)0;
+                self.buf_len = self.buf_len + 1;
+            }
+            self.process_block(&self.buf[0]);
+            self.buf_len = 0;
+        }
+
+        while (self.buf_len < 56) {
+            self.buf[self.buf_len] = (u8)0;
+            self.buf_len = self.buf_len + 1;
+        }
+
+        // Append 64-bit length in big-endian
+        self.buf[56] = (u8)(bit_len >> 56);
+        self.buf[57] = (u8)(bit_len >> 48);
+        self.buf[58] = (u8)(bit_len >> 40);
+        self.buf[59] = (u8)(bit_len >> 32);
+        self.buf[60] = (u8)(bit_len >> 24);
+        self.buf[61] = (u8)(bit_len >> 16);
+        self.buf[62] = (u8)(bit_len >> 8);
+        self.buf[63] = (u8)bit_len;
+
+        self.process_block(&self.buf[0]);
+
+        out[0]  = (u8)(self.h0 >> 24); out[1]  = (u8)(self.h0 >> 16); out[2]  = (u8)(self.h0 >> 8); out[3]  = (u8)self.h0;
+        out[4]  = (u8)(self.h1 >> 24); out[5]  = (u8)(self.h1 >> 16); out[6]  = (u8)(self.h1 >> 8); out[7]  = (u8)self.h1;
+        out[8]  = (u8)(self.h2 >> 24); out[9]  = (u8)(self.h2 >> 16); out[10] = (u8)(self.h2 >> 8); out[11] = (u8)self.h2;
+        out[12] = (u8)(self.h3 >> 24); out[13] = (u8)(self.h3 >> 16); out[14] = (u8)(self.h3 >> 8); out[15] = (u8)self.h3;
+        out[16] = (u8)(self.h4 >> 24); out[17] = (u8)(self.h4 >> 16); out[18] = (u8)(self.h4 >> 8); out[19] = (u8)self.h4;
+        out[20] = (u8)(self.h5 >> 24); out[21] = (u8)(self.h5 >> 16); out[22] = (u8)(self.h5 >> 8); out[23] = (u8)self.h5;
+        out[24] = (u8)(self.h6 >> 24); out[25] = (u8)(self.h6 >> 16); out[26] = (u8)(self.h6 >> 8); out[27] = (u8)self.h6;
+        out[28] = (u8)(self.h7 >> 24); out[29] = (u8)(self.h7 >> 16); out[30] = (u8)(self.h7 >> 8); out[31] = (u8)self.h7;
+    }
+}
+
+/// Compute SHA-256 digest over `len` bytes at `data`.
+/// Output is written to `out` (must be at least 32 bytes).
+bool sha256(u8* data, i64 len, u8* out) {
+    if (data == (u8*)0 && len != 0) {
+        return false;
+    }
+    Sha256 s = Sha256.new();
+    s.update(data, len);
+    s.finish(out);
     return true;
 }
 
@@ -182,6 +244,7 @@ String sha256_hex(u8* data, i64 len) {
 
 /// Compute HMAC-SHA256 (RFC 2104).
 /// Output is written to `out` (must be at least 32 bytes).
+/// Uses streaming SHA-256 state with zero heap allocations.
 bool hmac_sha256(u8* key, i64 key_len, u8* msg, i64 msg_len, u8* out) {
     u8 k_pad[64];
     for (i64 i = 0; i < 64; i = i + 1) {
@@ -204,21 +267,18 @@ bool hmac_sha256(u8* key, i64 key_len, u8* msg, i64 msg_len, u8* out) {
         o_pad[i] = k_pad[i] ^ (u8)0x5c;
     }
 
-    i64 inner_len = 64 + msg_len;
-    u8* inner_buf = alloc<u8>(inner_len);
-    silver_rt_memcpy(inner_buf, &i_pad[0], 64);
+    Sha256 inner = Sha256.new();
+    inner.update(&i_pad[0], 64);
     if (msg_len > 0 && msg != (u8*)0) {
-        silver_rt_memcpy(&inner_buf[64], msg, msg_len);
+        inner.update(msg, msg_len);
     }
-
     u8 inner_hash[32];
-    sha256(inner_buf, inner_len, &inner_hash[0]);
-    free((void*)inner_buf);
+    inner.finish(&inner_hash[0]);
 
     // Outer hash: SHA-256((k_pad ^ 0x5c) || inner_hash)
-    u8 outer_buf[96];
-    silver_rt_memcpy(&outer_buf[0], &o_pad[0], 64);
-    silver_rt_memcpy(&outer_buf[64], &inner_hash[0], 32);
-
-    return sha256(&outer_buf[0], 96, out);
+    Sha256 outer = Sha256.new();
+    outer.update(&o_pad[0], 64);
+    outer.update(&inner_hash[0], 32);
+    outer.finish(out);
+    return true;
 }

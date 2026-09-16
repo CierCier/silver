@@ -41,5 +41,21 @@ i32 main() {
     assert_true(hmac_hex.equals("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "HMAC-SHA256 RFC 4231 Test Case 1");
     hmac_hex.drop();
 
+    // Test 5: Incremental streaming SHA-256
+    Sha256 chunk_s = Sha256.new();
+    chunk_s.update((u8*)msg56, 10);
+    chunk_s.update((u8*)((i64)msg56 + 10), 20);
+    chunk_s.update((u8*)((i64)msg56 + 30), strlen(msg56) - 30);
+    u8 chunk_digest[32];
+    chunk_s.finish(&chunk_digest[0]);
+    String chunk_hex = String.with_capacity(64);
+    for (i64 k = 0; k < 32; k = k + 1) {
+        u8 byte = chunk_digest[k];
+        chunk_hex.push((u8)hex_chars[(i64)(byte >> 4)]);
+        chunk_hex.push((u8)hex_chars[(i64)(byte & (u8)0x0f)]);
+    }
+    assert_true(chunk_hex.equals("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"), "Streaming SHA-256 chunked");
+    chunk_hex.drop();
+
     return done();
 }
