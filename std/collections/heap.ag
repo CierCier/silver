@@ -41,14 +41,21 @@ impl BinaryHeap<T> {
         h.cap = capacity;
         return h;
     }
-    /// Build a binary heap from a vector by pushing each element.
-    /// Elements are moved out with `pop` (the for-in binding of a generic
-    /// element type is currently typed i64 by the post-monomorph typeck).
+    /// Build a binary heap from a vector using Floyd's linear-time (O(N)) bottom-up heapify.
     BinaryHeap<T> from_vec(Vec<T> v) {
-        BinaryHeap<T> h = BinaryHeap<T>.with_capacity(v.len());
-        while (v.len() > 0) {
-            T val = v.pop();
-            h.push(move val);
+        BinaryHeap<T> h;
+        h.data = v.data;
+        h.len = v.len;
+        h.cap = v.cap;
+        v.data = (T*)0;
+        v.len = 0;
+        v.cap = 0;
+        if (h.len > 1) {
+            i64 start = (h.len / 2) - 1;
+            while (start >= 0) {
+                h.sift_down(start);
+                start = start - 1;
+            }
         }
         return h;
     }
@@ -123,28 +130,31 @@ impl BinaryHeap<T> {
         if (self.len > 0) {
             T last = self.data[self.len];
             self.data[0] = move last;
-
-            // Sift down: swap root with larger child while root < child
-            i64 root = 0;
-            while (true) {
-                i64 child = 2 * root + 1;
-                if (child >= self.len) {
-                    break;
-                }
-                if (child + 1 < self.len && self.data[child] < self.data[child + 1]) {
-                    child = child + 1;
-                }
-                if (!(self.data[root] < self.data[child])) {
-                    break;
-                }
-                T tmp_r = self.data[root];
-                T tmp_c = self.data[child];
-                self.data[root] = move tmp_c;
-                self.data[child] = move tmp_r;
-                root = child;
-            }
+            self.sift_down(0);
         }
         return result;
+    }
+
+    /// Sift down element at index root_idx to restore max-heap property.
+    void sift_down(&mut self, i64 root_idx) {
+        i64 root = root_idx;
+        while (true) {
+            i64 child = 2 * root + 1;
+            if (child >= self.len) {
+                break;
+            }
+            if (child + 1 < self.len && self.data[child] < self.data[child + 1]) {
+                child = child + 1;
+            }
+            if (!(self.data[root] < self.data[child])) {
+                break;
+            }
+            T tmp_r = self.data[root];
+            T tmp_c = self.data[child];
+            self.data[root] = move tmp_c;
+            self.data[child] = move tmp_r;
+            root = child;
+        }
     }
 
     /// Return a copy of the greatest element without removing it.  Aborts if empty.
