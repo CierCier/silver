@@ -140,7 +140,6 @@ u8* __silver_wait_done(i64 rec) {
     r.tid = 0;
     r.fn = 0;
     r.arg = 0;
-    r.stack = (u8*)0;
     r.done = 0;
     r.pack = 0;
     thread_lock_release();
@@ -167,6 +166,11 @@ void __silver_thread_registry_join_all() {
         if (pack != (u8*)0) {
             mem_free_raw_impl(pack);
             g_threads[i].pack = 0;
+        }
+        // Reclaim the thread stack on process exit.
+        if (g_threads[i].stack != (u8*)0) {
+            mem_sys_free(g_threads[i].stack, 2097152);
+            g_threads[i].stack = (u8*)0;
         }
     }
 }
