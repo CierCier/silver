@@ -31,5 +31,18 @@ i32 main() {
     assert_true(argv.len() >= 1, "argv has at least program name");
     argv.drop();
 
+    // Test 5: set_var and remove_var
+    set_var("__SILVER_DYNAMIC_TEST_VAR__", "dynamic_value_123");
+    Optional<String> dyn_val = var("__SILVER_DYNAMIC_TEST_VAR__");
+    assert_true(dyn_val.is_some(), "dynamic var is some after set_var");
+    if (dyn_val.is_some()) {
+        String s = dyn_val.unwrap();
+        assert_true(s.equals("dynamic_value_123"), "dynamic var matches set value");
+        s.drop();
+    }
+    remove_var("__SILVER_DYNAMIC_TEST_VAR__");
+    Optional<String> rem_val = var("__SILVER_DYNAMIC_TEST_VAR__");
+    assert_true(rem_val.is_none(), "dynamic var is none after remove_var");
+
     return done();
 }

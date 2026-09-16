@@ -51,5 +51,64 @@ i32 main() {
     assert_true(dir_removed, "remove_dir succeeded");
     assert_true(!exists(test_dir), "test_dir no longer exists");
 
+    // Test 7: is_file and is_dir and metadata
+    write_file(test_file, "file content");
+    assert_true(is_file(test_file), "test_file is_file is true");
+    assert_true(!is_dir(test_file), "test_file is_dir is false");
+    Result<Metadata, Error> meta = metadata(test_file);
+    assert_true(meta.is_ok(), "metadata succeeds for file");
+    if (meta.is_ok()) {
+        Metadata m = meta.unwrap();
+        assert_eq_i64(12, m.size, "metadata size matches");
+        assert_true(m.is_file, "metadata is_file is true");
+        assert_true(!m.is_dir, "metadata is_dir is false");
+    }
+
+    // Test 8: rename and copy_file
+    str ren_file = "/tmp/__silver_fs_test_file_renamed.txt";
+    str copy_dest = "/tmp/__silver_fs_test_file_copy.txt";
+    if (exists(ren_file)) { remove_file(ren_file); }
+    if (exists(copy_dest)) { remove_file(copy_dest); }
+
+    bool ren_ok = rename(test_file, ren_file);
+    assert_true(ren_ok, "rename succeeded");
+    assert_true(!exists(test_file), "old path does not exist after rename");
+    assert_true(exists(ren_file), "new path exists after rename");
+
+    bool copy_ok = copy_file(ren_file, copy_dest);
+    assert_true(copy_ok, "copy_file succeeded");
+    assert_true(exists(copy_dest), "copy dest exists");
+    assert_eq_i64(12, file_size(copy_dest), "copied file has same size");
+
+    remove_file(ren_file);
+    remove_file(copy_dest);
+
+    // Test 9: read_dir
+    create_dir(test_dir);
+    str inner_file = "/tmp/__silver_fs_test_dir/inner.txt";
+    write_file(inner_file, "inner data");
+    assert_true(is_dir(test_dir), "test_dir is_dir is true");
+    assert_true(!is_file(test_dir), "test_dir is_file is false");
+
+    Result<Vec<String>, Error> rd = read_dir(test_dir);
+    assert_true(rd.is_ok(), "read_dir succeeds");
+    if (rd.is_ok()) {
+        Vec<String> entries = rd.unwrap();
+        assert_true(entries.len() >= 1, "read_dir found at least 1 entry");
+        bool found_inner = false;
+        for (i64 i = 0; i < entries.len(); i = i + 1) {
+            String* s = entries.get_ptr(i);
+            if (s.equals("inner.txt")) {
+                found_inner = true;
+            }
+            s.drop();
+        }
+        assert_true(found_inner, "read_dir found inner.txt");
+        entries.drop();
+    }
+
+    remove_file(inner_file);
+    remove_dir(test_dir);
+
     return done();
 }

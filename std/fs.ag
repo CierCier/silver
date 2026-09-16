@@ -2,8 +2,20 @@
 
 import std.error;
 import std.io.file;
+import std.mem.memory;
+import std.mem.vec;
+import std.result;
 import std.string;
 import std.sys.raw.fs;
+
+/// Metadata for a file or directory.
+struct Metadata {
+    i64 size;
+    i64 mtime_sec;
+    i64 mtime_nsec;
+    bool is_dir;
+    bool is_file;
+}
 
 /// Read entire file at `path` into an owned String.
 Result<String, Error> read_file(str path) {
@@ -31,6 +43,82 @@ bool exists(str path) {
     return r == 0;
 }
 
+/// Query metadata for path.
+Result<Metadata, Error> metadata(str path) {
+    Result<FileStat, Error> r = stat_path(path);
+    if (r.is_err()) {
+        return Result<Metadata, Error>.Err(r.unwrap_err());
+    }
+    FileStat st = r.unwrap();
+    Metadata m;
+    m.size = st.size;
+    m.mtime_sec = st.mtime_sec;
+    m.mtime_nsec = st.mtime_nsec;
+    m.is_dir = st.is_dir();
+    m.is_file = st.is_file();
+    return Result<Metadata, Error>.Ok(m);
+}
+
+/// Returns true if `path` is a directory.
+bool is_dir(str path) {
+    Result<Metadata, Error> r = metadata(path);
+    if (r.is_err()) {
+        return false;
+    }
+    Metadata m = r.unwrap();
+    return m.is_dir;
+}
+
+/// Returns true if `path` is a regular file.
+bool is_file(str path) {
+    Result<Metadata, Error> r = metadata(path);
+    if (r.is_err()) {
+        return false;
+    }
+    Metadata m = r.unwrap();
+    return m.is_file;
+}
+
+/// Read entries of directory at `path`. Excludes "." and "..".
+Result<Vec<String>, Error> read_dir(str path) {
+    if (path == (str)0) {
+        Error e = Error.new(22, "invalid path"); // EINVAL
+        return Result<Vec<String>, Error>.Err(move e);
+    }
+    i64 fd = raw_sys_open((i64)path, 65536, 0); // O_DIRECTORY = 0x10000 = 65536
+    if (fd < 0) {
+        Error e = Error.new(-fd, "open directory failed");
+        return Result<Vec<String>, Error>.Err(move e);
+    }
+    Vec<String> entries = Vec<String>.new();
+    u8 buf[4096];
+    while (true) {
+        i64 nread = sys_getdents64(fd, (i64)&buf[0], 4096);
+        if (nread < 0) {
+            raw_sys_close(fd);
+            Error e = Error.new(-nread, "getdents64 failed");
+            return Result<Vec<String>, Error>.Err(move e);
+        }
+        if (nread == 0) {
+            break;
+        }
+        i64 bpos = 0;
+        while (bpos < nread) {
+            u16 reclen = (u16)buf[bpos + 16] | ((u16)buf[bpos + 17] << (u16)8);
+            if (reclen == (u16)0) {
+                break;
+            }
+            str name = (str)&buf[bpos + 19];
+            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                entries.push(String.from_str(name));
+            }
+            bpos = bpos + (i64)reclen;
+        }
+    }
+    raw_sys_close(fd);
+    return Result<Vec<String>, Error>.Ok(move entries);
+}
+
 /// Create a new directory at `path` with mode 0755. Returns true on success.
 bool create_dir(str path) {
     if (path == (str)0) {
@@ -56,6 +144,27 @@ bool remove_dir(str path) {
     }
     i64 r = sys_rmdir((i64)path);
     return r == 0;
+}
+
+/// Rename file or directory from `from` to `to`. Returns true on success.
+bool rename(str from, str to) {
+    if (from == (str)0 || to == (str)0) {
+        return false;
+    }
+    i64 r = sys_rename((i64)from, (i64)to);
+    return r == 0;
+}
+
+/// Copy file from `from` to `to`. Returns true on success.
+bool copy_file(str from, str to) {
+    Result<String, Error> content = read_file(from);
+    if (content.is_err()) {
+        return false;
+    }
+    String s = content.unwrap();
+    bool ok = write_file(to, s.to_str());
+    s.drop();
+    return ok;
 }
 
 /// Returns the size in bytes of file at `path`, or -1 on error.

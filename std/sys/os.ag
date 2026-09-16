@@ -633,6 +633,12 @@ i64 sys_stat(i64 path, i64 buf) {
     i64 unix100 = ft - 116444736000000000;
     i64 sec = unix100 / 10000000;
     i64 nsec = (unix100 % 10000000) * 100;
+    i64 attr = win_le_i64(&info[0], 0);
+    i64 mode = 33188;
+    if ((attr & 16) != 0) {
+        mode = 16877;
+    }
+    win_store_le_i64((u8*)buf, 24, mode);
     win_store_le_i64((u8*)buf, 48, size);
     win_store_le_i64((u8*)buf, 88, sec);
     win_store_le_i64((u8*)buf, 96, nsec);

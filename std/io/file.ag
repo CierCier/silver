@@ -782,6 +782,17 @@ struct FileStat {
     i64 size;       // bytes
     i64 mtime_sec;  // modification time, seconds since the epoch
     i64 mtime_nsec; // nanosecond part of the modification time
+    i32 mode;       // file mode and type bits
+}
+
+impl FileStat {
+    bool is_dir(&self) {
+        return (self.mode & 61440) == 16384; // S_IFDIR = 0x4000 = 16384
+    }
+
+    bool is_file(&self) {
+        return (self.mode & 61440) == 32768; // S_IFREG = 0x8000 = 32768
+    }
 }
 
 /// Little-endian i64 from a raw buffer (x86-64 stat fields are LE).
@@ -814,6 +825,7 @@ Result<FileStat, Error> stat_path(str path) {
     st.size = read_le_i64(buf, 48);
     st.mtime_sec = read_le_i64(buf, 88);
     st.mtime_nsec = read_le_i64(buf, 96);
+    st.mode = (i32)read_le_i64(buf, 24);
     return Result<FileStat, Error>.Ok(move st);
 }
 
