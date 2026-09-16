@@ -444,8 +444,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // (initialized globals, functions with bodies).
             for global in self.module.get_globals() {
                 let name = global.get_name().to_str().unwrap_or("");
-                if (name == "_fltused" || name == "__chkstk")
-                    && global.get_initializer().is_some()
+                if (name == "_fltused" || name == "__chkstk") && global.get_initializer().is_some()
                 {
                     // Internalize AND rename: the plain internalization can
                     // be undone when declare_imported_modules later creates
@@ -589,20 +588,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // module references them — the same mechanism C's
         // `__attribute__((used))` lowers to.
         if !self.keep_items.is_empty() {
-            let ptr_ty = self
-                .context
-                .ptr_type(inkwell::AddressSpace::default());
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let mut refs: Vec<LLVMValueRef> = Vec::new();
             for name in &self.keep_items {
                 if let Some(global) = self.module.get_global(name) {
                     refs.push(global.as_pointer_value().as_value_ref());
                 } else if let Some(function) = self.module.get_function(name) {
-                    refs.push(
-                        function
-                            .as_global_value()
-                            .as_pointer_value()
-                            .as_value_ref(),
-                    );
+                    refs.push(function.as_global_value().as_pointer_value().as_value_ref());
                 }
             }
             if !refs.is_empty() {
@@ -726,9 +718,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
-        let keep_item = attributes
-            .iter()
-            .any(|attr| attr.name.name == "volatile");
+        let keep_item = attributes.iter().any(|attr| attr.name.name == "volatile");
         let link_name = function_link_name(attributes);
         let symbol_name = self.free_function_symbol_name(
             &func.name.name,
@@ -822,6 +812,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.apply_function_linkage(function, visibility, attributes);
         Self::apply_target_feature_attributes(function, attributes);
         Self::apply_inline_always_attribute(function, attributes, self.context);
+        let is_noreturn = attributes.iter().any(|attr| attr.name.name == "noreturn")
+            || self.noreturn_functions.contains(&func.name.name)
+            || self.noreturn_functions.contains(llvm_name);
+        if is_noreturn {
+            self.noreturn_functions.insert(func.name.name.clone());
+            self.noreturn_functions.insert(llvm_name.to_string());
+            let noreturn_kind = Attribute::get_named_enum_kind_id("noreturn");
+            let noreturn_attr = self.context.create_enum_attribute(noreturn_kind, 0);
+            function.add_attribute(AttributeLoc::Function, noreturn_attr);
+        }
 
         if llvm_name == "_start" {
             let body_is_pure_asm = func.body.statements.len() == 1
@@ -1244,13 +1244,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ast::ItemKind::Function(function_item) => {
                 self.emit_function_item_body(function_item, &item.attributes)
             }
-            ast::ItemKind::GlobalVariable(global_variable_item) => {
-                self.generate_global_variable_item(
+            ast::ItemKind::GlobalVariable(global_variable_item) => self
+                .generate_global_variable_item(
                     global_variable_item,
                     &item.visibility,
                     &item.attributes,
-                )
-            }
+                ),
             ast::ItemKind::Struct(struct_item) => {
                 self.generate_struct_item(struct_item, &item.visibility, &item.attributes)
             }
@@ -1470,7 +1469,11 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                             None,
                         )?;
                         let function = self.module.add_function(&mangled_name, fn_ty, None);
-                        self.apply_function_linkage(function, &effective_visibility, &func.attributes);
+                        self.apply_function_linkage(
+                            function,
+                            &effective_visibility,
+                            &func.attributes,
+                        );
                     }
 
                     let Some(function) = self.module.get_function(&mangled_name) else {
@@ -1663,6 +1666,18 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             let function = self.module.add_function(llvm_name, fn_ty, None);
             self.apply_abi_attributes(function, &sig)?;
         }
+        let is_noreturn = attributes.iter().any(|attr| attr.name.name == "noreturn")
+            || self.noreturn_functions.contains(&item.name.name)
+            || self.noreturn_functions.contains(llvm_name);
+        if is_noreturn {
+            self.noreturn_functions.insert(item.name.name.clone());
+            self.noreturn_functions.insert(llvm_name.to_string());
+            if let Some(function) = self.module.get_function(llvm_name) {
+                let noreturn_kind = Attribute::get_named_enum_kind_id("noreturn");
+                let noreturn_attr = self.context.create_enum_attribute(noreturn_kind, 0);
+                function.add_attribute(AttributeLoc::Function, noreturn_attr);
+            }
+        }
 
         Ok(())
     }
@@ -1838,7 +1853,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         self.clear_field_flags(&ident.name)?;
                     }
                     if let Some(return_ty) = self.current_return_type.clone() {
-                        value = self.cast_expr_to_ast_type(value, Some(expr), &return_ty, &expr_span)?;
+                        value =
+                            self.cast_expr_to_ast_type(value, Some(expr), &return_ty, &expr_span)?;
                     }
                     Some((value, expr_span))
                 } else {

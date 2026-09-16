@@ -517,6 +517,24 @@ impl Facts {
     }
 }
 
+fn is_noreturn_call(expr: &ast::Expression) -> bool {
+    if let ast::ExpressionKind::Call { function, .. } = expr.kind.as_ref() {
+        if let ast::ExpressionKind::Identifier(id) = function.kind.as_ref() {
+            return matches!(
+                id.name.as_str(),
+                "abort"
+                    | "silver_rt_abort"
+                    | "exit"
+                    | "sys_exit"
+                    | "sys_exit_group"
+                    | "__optional_abort"
+                    | "__result_abort"
+            );
+        }
+    }
+    false
+}
+
 /// True if control never falls through `stmt` (return / break / continue).
 fn statement_terminates(stmt: &ast::Statement) -> bool {
     match &stmt.kind {
@@ -524,13 +542,15 @@ fn statement_terminates(stmt: &ast::Statement) -> bool {
         | ast::StatementKind::Break(_)
         | ast::StatementKind::Continue => true,
         ast::StatementKind::Block(block) => block_terminates(block),
-        ast::StatementKind::Expression(expr) => expression_terminates(expr),
+        ast::StatementKind::Expression(expr) => {
+            is_noreturn_call(expr) || expression_terminates(expr)
+        }
         _ => false,
     }
 }
 
 fn block_terminates(block: &ast::Block) -> bool {
-    block.statements.last().is_some_and(statement_terminates)
+    block.statements.iter().any(statement_terminates)
 }
 
 fn expression_terminates(expr: &ast::Expression) -> bool {

@@ -10,7 +10,6 @@ import std.io.file;
 /// Terminates the process with SIGABRT, like C `abort()`.
 void __result_abort() {
     abort();
-    while (true) {}
 }
 
 enum Result<T, E> {
@@ -46,14 +45,15 @@ impl Result<T, E> {
     /// Extract the success value, transferring ownership out of the
     /// result (move-out binding). Aborts if the result is an error.
     T unwrap(self) {
-        if (self.is_ok()) {
-            T dummy;
-            return match self { Ok(move v) : v, Err(e) : dummy };
+        match self {
+            Ok(move v) : {
+                return move v;
+            },
+            Err(e) : {
+                STDERR.write_str("Result::unwrap: called on an err value\n");
+                __result_abort();
+            }
         }
-        STDERR.write_str("Result::unwrap: called on an err value\n");
-        __result_abort();
-        T dummy;
-        return dummy;
     }
 
     T unwrap_or(self, T fallback) {
@@ -63,14 +63,15 @@ impl Result<T, E> {
     /// Extract the error value, transferring ownership out of the result.
     /// Aborts if the result is ok.
     E unwrap_err(self) {
-        if (self.is_err()) {
-            E dummy;
-            return match self { Ok(v) : dummy, Err(move e) : e };
+        match self {
+            Ok(v) : {
+                STDERR.write_str("Result::unwrap_err: called on an ok value\n");
+                __result_abort();
+            },
+            Err(move e) : {
+                return move e;
+            }
         }
-        STDERR.write_str("Result::unwrap_err: called on an ok value\n");
-        __result_abort();
-        E dummy;
-        return dummy;
     }
 
     E get_error(self) {

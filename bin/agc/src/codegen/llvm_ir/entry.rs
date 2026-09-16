@@ -203,6 +203,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
         };
         // Set the module's target triple and data layout from the effective
         // target before generating IR: lower_abi_type and TargetData queries
@@ -278,15 +279,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
-        let effective_triple = target_triple
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                TargetMachine::get_default_triple()
-                    .as_str()
-                    .to_str()
-                    .unwrap_or("x86_64-unknown-linux-gnu")
-                    .to_string()
-            });
+        let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
+            TargetMachine::get_default_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("x86_64-unknown-linux-gnu")
+                .to_string()
+        });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(path), Some(text)) => {
@@ -352,6 +351,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             emit_bt_tables: true,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
         };
         // Configure the module's target before declare_imported_modules: it
         // performs TargetData queries for imported enums, which must observe
@@ -702,15 +702,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // One resolved triple drives both the ABI handler and the module
         // triple: a windows triple must select Win64 struct passing, and the
         // default must be the host triple (not a hardcoded Linux triple).
-        let effective_triple = target_triple
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                TargetMachine::get_default_triple()
-                    .as_str()
-                    .to_str()
-                    .unwrap_or("x86_64-unknown-linux-gnu")
-                    .to_string()
-            });
+        let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
+            TargetMachine::get_default_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("x86_64-unknown-linux-gnu")
+                .to_string()
+        });
         let debug = if debug_info {
             match (source_path, source_text) {
                 (Some(p), Some(text)) => {
@@ -770,6 +768,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             emit_bt_tables,
             root_symbols: HashSet::default(),
             keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
         };
         // Set the module's target triple and data layout BEFORE declaring
         // imported modules: declare_imported_modules performs TargetData
@@ -1961,13 +1960,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 name: "__promote_in_memory".to_string(),
                 span: expr.span,
             };
-            self.emit_method_call_expression(
-                &writer_expr,
-                &promote_method,
-                &[],
-                true,
-                &expr.span,
-            )?;
+            self.emit_method_call_expression(&writer_expr, &promote_method, &[], true, &expr.span)?;
 
             // Load `data` from the stack BufWriter
             let buf_writer_type = ast::Type {

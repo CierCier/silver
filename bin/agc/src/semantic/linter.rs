@@ -454,7 +454,20 @@ fn statement_terminates(stmt: &ast::Statement) -> bool {
         | ast::StatementKind::Continue => true,
         ast::StatementKind::Expression(expr) => match expr.kind.as_ref() {
             ast::ExpressionKind::Call { function, .. } => {
-                matches!(function.kind.as_ref(), ast::ExpressionKind::Identifier(id) if id.name == "abort")
+                matches!(
+                    function.kind.as_ref(),
+                    ast::ExpressionKind::Identifier(id)
+                        if matches!(
+                            id.name.as_str(),
+                            "abort"
+                                | "silver_rt_abort"
+                                | "exit"
+                                | "sys_exit"
+                                | "sys_exit_group"
+                                | "__optional_abort"
+                                | "__result_abort"
+                        )
+                )
             }
             _ => false,
         },

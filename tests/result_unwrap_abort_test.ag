@@ -1,0 +1,8 @@
+// expected_exit: 134
+import std.result;
+
+i32 main() {
+    Result<i32, str> res = Result.Err("boom");
+    i32 _val = res.unwrap();
+    return 0;
+}

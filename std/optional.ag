@@ -10,7 +10,6 @@ import std.io.file;
 // Uses the pure-Silver abort() from std.mem.memory (transitively via std.io).
 void __optional_abort() {
     abort();
-    while (true) {}
 }
 
 // Optional<T> — None carries no value, Some(T) carries a value.
@@ -45,14 +44,15 @@ impl Optional<T> {
     /// Extract the contained value, transferring ownership out of the
     /// optional (move-out binding). Aborts if the optional is none.
     T unwrap(self) {
-        if (self.is_some()) {
-            T dummy;
-            return match self { Some(move v) : v, None : dummy };
+        match self {
+            Some(move v) : {
+                return move v;
+            },
+            None : {
+                STDERR.write_str("Optional::unwrap: called on a none value\n");
+                __optional_abort();
+            }
         }
-        STDERR.write_str("Optional::unwrap: called on a none value\n");
-        __optional_abort();
-        T dummy;
-        return dummy;
     }
 
     T unwrap_or(self, T fallback) {

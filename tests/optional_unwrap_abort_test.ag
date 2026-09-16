@@ -1,0 +1,8 @@
+// expected_exit: 134
+import std.optional;
+
+i32 main() {
+    Optional<i32> opt = Optional.none();
+    i32 _val = opt.unwrap();
+    return 0;
+}

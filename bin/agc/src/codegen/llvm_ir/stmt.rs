@@ -618,17 +618,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // for Copy containers the receiver is a copy.)
                 if matches!(mode, ast::IterAccessMode::ByValue) {
                     if let ast::ExpressionKind::Identifier(ident) = iterable.kind.as_ref() {
-                        if let Some(orig_ptr) =
-                            self.lookup_variable(&ident.name).map(|v| v.ptr)
-                        {
+                        if let Some(orig_ptr) = self.lookup_variable(&ident.name).map(|v| v.ptr) {
                             let zero = iterable_llvm_ty.const_zero();
-                            self.builder
-                                .build_store(orig_ptr, zero)
-                                .map_err(|e| {
-                                    CodegenError::new(format!(
-                                        "failed to zero consumed iterable: {e}"
-                                    ))
-                                })?;
+                            self.builder.build_store(orig_ptr, zero).map_err(|e| {
+                                CodegenError::new(format!("failed to zero consumed iterable: {e}"))
+                            })?;
                         }
                     }
                 }
@@ -756,7 +750,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_extract_value(opt_sv, 1, &binding.name)
                     .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
-                let ast_ty = found_ast_ty.unwrap_or_else(|| self.infer_ast_type_from_value(&thing_loaded, span));
+                let ast_ty = found_ast_ty
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&thing_loaded, span));
                 let debug_ty = ast_ty.clone();
                 let var_ptr =
                     self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
@@ -815,19 +810,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<()> {
         match &let_stmt.pattern.kind {
             ast::PatternKind::Identifier(identifier) => {
-                let (storage_ty, init_value, inferred_ty) = if let Some(init_expr) = &let_stmt.initializer {
-                    let mut init_value =
-                        if let ast::ExpressionKind::Initializer { items } = init_expr.kind.as_ref() {
-                            let Some(annotation) = &let_stmt.type_annotation else {
-                                return Err(CodegenError::with_span(
-                                    "initializer requires a type annotation in LLVM IR codegen",
-                                    init_expr.span,
-                                ));
-                            };
-                            self.emit_typed_initializer_value(items, annotation, &init_expr.span)?
-                        } else {
-                            self.emit_expression_value(init_expr)?
+                let (storage_ty, init_value, inferred_ty) = if let Some(init_expr) =
+                    &let_stmt.initializer
+                {
+                    let mut init_value = if let ast::ExpressionKind::Initializer { items } =
+                        init_expr.kind.as_ref()
+                    {
+                        let Some(annotation) = &let_stmt.type_annotation else {
+                            return Err(CodegenError::with_span(
+                                "initializer requires a type annotation in LLVM IR codegen",
+                                init_expr.span,
+                            ));
                         };
+                        self.emit_typed_initializer_value(items, annotation, &init_expr.span)?
+                    } else {
+                        self.emit_expression_value(init_expr)?
+                    };
 
                     let storage_ty = if let Some(annotation) = &let_stmt.type_annotation {
                         self.lower_basic_type(annotation)?
@@ -835,8 +833,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         init_value.get_type()
                     };
                     if let Some(annotation) = &let_stmt.type_annotation {
-                        init_value =
-                            self.cast_expr_to_ast_type(init_value, Some(init_expr), annotation, &init_expr.span)?;
+                        init_value = self.cast_expr_to_ast_type(
+                            init_value,
+                            Some(init_expr),
+                            annotation,
+                            &init_expr.span,
+                        )?;
                     }
                     let inferred_ty = if let Some(annotation) = &let_stmt.type_annotation {
                         annotation.clone()
@@ -956,15 +958,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         has_initializer: bool,
     ) -> CodegenResult<()> {
         let alloca = self.create_entry_alloca(function, &identifier.name, storage_ty)?;
-        let zero_fill_bytes = if !has_initializer
-            && matches!(inferred_ty.kind.as_ref(), ast::TypeKind::Array(_))
-        {
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            Some(target_data.get_store_size(&storage_ty.as_any_type_enum()))
-        } else {
-            None
-        };
+        let zero_fill_bytes =
+            if !has_initializer && matches!(inferred_ty.kind.as_ref(), ast::TypeKind::Array(_)) {
+                let target_data =
+                    TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+                Some(target_data.get_store_size(&storage_ty.as_any_type_enum()))
+            } else {
+                None
+            };
         if let Some(size) = zero_fill_bytes.filter(|&size| size > 64) {
             self.build_memset(alloca, size, is_volatile)?;
         } else if is_volatile {
@@ -1071,7 +1072,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     })?
             } else if tuple_val.is_pointer_value() {
                 let ptr = tuple_val.into_pointer_value();
-                let struct_ty = self.lower_basic_type(annotation.unwrap())?.into_struct_type();
+                let struct_ty = self
+                    .lower_basic_type(annotation.unwrap())?
+                    .into_struct_type();
                 let elem_ptr = self
                     .builder
                     .build_struct_gep(struct_ty, ptr, i as u32, &format!("tuple.gep.{i}"))
@@ -1204,6 +1207,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .get_insert_block()
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
 
+        let mut all_arms_terminated = !arms.is_empty();
         for (arm_index, arm) in arms.iter().enumerate() {
             let arm_bb = self
                 .context
@@ -1665,9 +1669,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     }
                 };
-                let function = self.current_fn.ok_or_else(|| {
-                    CodegenError::new("no active function for match guard")
-                })?;
+                let function = self
+                    .current_fn
+                    .ok_or_else(|| CodegenError::new("no active function for match guard"))?;
                 let body_bb = self
                     .context
                     .append_basic_block(function, &format!("match.body.{arm_index}"));
@@ -1685,6 +1689,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .and_then(|bb| bb.get_terminator())
                 .is_some();
             if !arm_terminated {
+                all_arms_terminated = false;
                 self.builder
                     .build_unconditional_branch(end_bb)
                     .map_err(|e| CodegenError::new(format!("failed match arm end branch: {e}")))?;
@@ -1713,12 +1718,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .and_then(|bb| bb.get_terminator())
             .is_some();
         if !cond_terminated {
-            self.builder
-                .build_unconditional_branch(end_bb)
-                .map_err(|e| CodegenError::new(format!("failed final match branch: {e}")))?;
+            if all_arms_terminated {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::new(format!("failed final match branch: {e}")))?;
+            } else {
+                self.builder
+                    .build_unconditional_branch(end_bb)
+                    .map_err(|e| CodegenError::new(format!("failed final match branch: {e}")))?;
+            }
         }
 
         self.builder.position_at_end(end_bb);
+        if all_arms_terminated {
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CodegenError::new(format!("failed match end unreachable: {e}")))?;
+        }
         Ok(())
     }
 }

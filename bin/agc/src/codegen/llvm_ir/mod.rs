@@ -182,6 +182,25 @@ pub struct LlvmIrGenerator<'ctx> {
     /// (LLVM function name, doc comment text) pairs collected while
     /// generating; spliced into the printed IR in `finish()` as `;` lines.
     pub(crate) doc_comments: Vec<(String, String)>,
+    pub(crate) noreturn_functions: HashSet<String>,
+}
+
+impl<'ctx> LlvmIrGenerator<'ctx> {
+    pub(crate) fn default_noreturn_functions() -> HashSet<String> {
+        let mut set = HashSet::default();
+        for name in [
+            "abort",
+            "silver_rt_abort",
+            "exit",
+            "sys_exit",
+            "sys_exit_group",
+            "__optional_abort",
+            "__result_abort",
+        ] {
+            set.insert(name.to_string());
+        }
+        set
+    }
 }
 
 pub(crate) mod call;

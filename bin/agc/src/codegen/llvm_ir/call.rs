@@ -7,9 +7,9 @@ use inkwell::values::{
 };
 use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
+use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
-use crate::codegen::SilverGenerator;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -37,9 +37,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .emit_method_call_expression(receiver, method, arguments, true, &expr.span)?;
                 Ok(())
             }
-            ast::ExpressionKind::Block(block) => {
-                self.generate_block(block)
-            }
+            ast::ExpressionKind::Block(block) => self.generate_block(block),
             _ => {
                 let _ = self.emit_expression_value(expr)?;
                 Ok(())
@@ -287,7 +285,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             let trailing_args = &arguments[fixed_count..];
             let slice_ty = &signature.as_ref().unwrap().params[fixed_count];
-            let slice_val = self.emit_variadic_slice_pack(slice_ty, trailing_args, function_expr.span)?;
+            let slice_val =
+                self.emit_variadic_slice_pack(slice_ty, trailing_args, function_expr.span)?;
             args.push(BasicMetadataValueEnum::from(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
@@ -299,14 +298,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // ownership. Clear the caller's flag to avoid a
                         // double free; extern functions never drop params.
                         if signature.linkage.is_none() {
-                            let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
-                                self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
-                            } else if index < signature.params.len() {
-                                self.param_type_drops_on_exit(&signature.params[index])
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            };
+                            let arg_drops =
+                                if let Some(arg_ty) = self.resolve_argument_type(argument) {
+                                    self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
+                                } else if index < signature.params.len() {
+                                    self.param_type_drops_on_exit(&signature.params[index])
+                                        .unwrap_or(false)
+                                } else {
+                                    false
+                                };
                             if arg_drops {
                                 self.clear_drop_flag_of(argument)?;
                             }
@@ -372,6 +372,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
+        }
+        let is_noreturn = self.noreturn_functions.contains(&fn_name)
+            || self
+                .noreturn_functions
+                .contains(function.get_name().to_str().unwrap_or(""));
+        if is_noreturn {
+            let noreturn_kind = Attribute::get_named_enum_kind_id("noreturn");
+            let noreturn_attr = self.context.create_enum_attribute(noreturn_kind, 0);
+            call.add_attribute(AttributeLoc::Function, noreturn_attr);
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CodegenError::new(format!("failed to emit unreachable: {e}")))?;
         }
         if let Some(value) = call.try_as_basic_value().basic() {
             if let Some(signature) = &signature
@@ -540,7 +552,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Err(CodegenError::with_span(
                     "expected slice type for variadic parameter",
                     span,
-                ))
+                ));
             }
         };
         let elem_llvm_ty = self.lower_basic_type(elem_ast_ty)?;
@@ -548,29 +560,39 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let len_val = i64_ty.const_int(arguments.len() as u64, false);
 
         let data_ptr = if arguments.is_empty() {
-            self.context.ptr_type(inkwell::AddressSpace::default()).const_null()
+            self.context
+                .ptr_type(inkwell::AddressSpace::default())
+                .const_null()
         } else {
             let arr_llvm_ty = elem_llvm_ty.array_type(arguments.len() as u32);
             let arr_alloca =
                 self.create_entry_alloca(function_ctx, "variadic.pack", arr_llvm_ty.into())?;
             for (i, arg) in arguments.iter().enumerate() {
                 let mut arg_val = self.emit_expression_value(arg)?;
-                if let Some(casted) = self.try_apply_user_cast(arg_val, arg, elem_ast_ty, &arg.span)? {
+                if let Some(casted) =
+                    self.try_apply_user_cast(arg_val, arg, elem_ast_ty, &arg.span)?
+                {
                     arg_val = casted;
                 } else {
-                    arg_val = self.cast_expr_to_ast_type(arg_val, Some(arg), elem_ast_ty, &arg.span)?;
+                    arg_val =
+                        self.cast_expr_to_ast_type(arg_val, Some(arg), elem_ast_ty, &arg.span)?;
                 }
                 let idx_val = i64_ty.const_int(i as u64, false);
                 let elem_ptr = unsafe {
-                    self.builder.build_gep(
-                        arr_llvm_ty,
-                        arr_alloca,
-                        &[i64_ty.const_zero(), idx_val],
-                        "var.elem.ptr",
-                    ).map_err(|e| CodegenError::with_span(e.to_string(), arg.span))?
+                    self.builder
+                        .build_gep(
+                            arr_llvm_ty,
+                            arr_alloca,
+                            &[i64_ty.const_zero(), idx_val],
+                            "var.elem.ptr",
+                        )
+                        .map_err(|e| CodegenError::with_span(e.to_string(), arg.span))?
                 };
                 self.builder.build_store(elem_ptr, arg_val).map_err(|e| {
-                    CodegenError::with_span(format!("failed to store variadic element: {e}"), arg.span)
+                    CodegenError::with_span(
+                        format!("failed to store variadic element: {e}"),
+                        arg.span,
+                    )
                 })?;
                 if self.param_type_drops_on_exit(elem_ast_ty).unwrap_or(false) {
                     self.clear_drop_flag_of(arg)?;
@@ -578,12 +600,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             let zero = i64_ty.const_zero();
             unsafe {
-                self.builder.build_gep(
-                    arr_llvm_ty,
-                    arr_alloca,
-                    &[zero, zero],
-                    "var.data.ptr",
-                ).map_err(|e| CodegenError::with_span(e.to_string(), span))?
+                self.builder
+                    .build_gep(arr_llvm_ty, arr_alloca, &[zero, zero], "var.data.ptr")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), span))?
             }
         };
 
@@ -593,7 +612,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Err(CodegenError::with_span(
                     "expected struct type for slice",
                     span,
-                ))
+                ));
             }
         };
         let s0 = slice_struct_ty.get_undef();
@@ -695,7 +714,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if slice_variadic && arguments.len() < declared.saturating_sub(1) {
                 continue;
             }
-            if variadic || slice_variadic || self.argument_types_match(signature.as_ref(), arguments, 0) {
+            if variadic
+                || slice_variadic
+                || self.argument_types_match(signature.as_ref(), arguments, 0)
+            {
                 type_match = Some(candidate.clone());
                 break;
             }
@@ -793,7 +815,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             };
             if variadic || arity_matches {
                 let offset = if receiver_is_type { 0 } else { 1 };
-                if variadic || slice_variadic || self.argument_types_match(signature.as_ref(), arguments, offset) {
+                if variadic
+                    || slice_variadic
+                    || self.argument_types_match(signature.as_ref(), arguments, offset)
+                {
                     if receiver_is_type {
                         if static_type.is_none() {
                             static_type = Some((name.clone(), function));

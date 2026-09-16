@@ -278,8 +278,6 @@ impl HashMap<K, V> {
         }
         STDOUT.write_str("HashMap::get: key not found\n");
         abort();
-        V dummy;
-        return dummy;
     }
 
     /// Get value for key, or None when the key is absent.
