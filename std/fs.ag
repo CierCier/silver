@@ -1,0 +1,70 @@
+// std/fs.ag — native filesystem operations.
+
+import std.error;
+import std.io.file;
+import std.string;
+import std.sys.raw.fs;
+
+/// Read entire file at `path` into an owned String.
+Result<String, Error> read_file(str path) {
+    return String.from_file(path);
+}
+
+/// Write entire string `content` to file at `path`. Overwrites existing file.
+/// Returns true on success.
+bool write_file(str path, str content) {
+    File f = File.open_write(path);
+    if (!f.valid()) {
+        return false;
+    }
+    i32 r = f.write_str(content);
+    f.close();
+    return r == 0;
+}
+
+/// Check whether a file or directory exists at `path`.
+bool exists(str path) {
+    if (path == (str)0) {
+        return false;
+    }
+    i64 r = sys_access((i64)path, 0); // F_OK = 0
+    return r == 0;
+}
+
+/// Create a new directory at `path` with mode 0755. Returns true on success.
+bool create_dir(str path) {
+    if (path == (str)0) {
+        return false;
+    }
+    i64 r = sys_mkdir((i64)path, 493); // 0755 octal = 493 decimal
+    return r == 0;
+}
+
+/// Remove a file at `path`. Returns true on success.
+bool remove_file(str path) {
+    if (path == (str)0) {
+        return false;
+    }
+    i64 r = raw_sys_unlink((i64)path);
+    return r == 0;
+}
+
+/// Remove an empty directory at `path`. Returns true on success.
+bool remove_dir(str path) {
+    if (path == (str)0) {
+        return false;
+    }
+    i64 r = sys_rmdir((i64)path);
+    return r == 0;
+}
+
+/// Returns the size in bytes of file at `path`, or -1 on error.
+i64 file_size(str path) {
+    File f = File.open_read(path);
+    if (!f.valid()) {
+        return -1;
+    }
+    i64 sz = f.size();
+    f.close();
+    return sz;
+}

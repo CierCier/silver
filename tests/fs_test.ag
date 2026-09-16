@@ -1,0 +1,55 @@
+import std.fs;
+import std.test;
+import std.string;
+
+i32 main() {
+    test_start("std.fs: native filesystem operations");
+
+    str test_file = "/tmp/__silver_fs_test_file.txt";
+    str test_dir = "/tmp/__silver_fs_test_dir";
+
+    // Clean up any stale files from prior runs
+    if (exists(test_file)) {
+        remove_file(test_file);
+    }
+    if (exists(test_dir)) {
+        remove_dir(test_dir);
+    }
+
+    // Test 1: exists on non-existent file
+    assert_true(!exists(test_file), "test_file does not exist initially");
+
+    // Test 2: write_file
+    bool wrote = write_file(test_file, "Hello Silver Filesystem!");
+    assert_true(wrote, "write_file succeeded");
+    assert_true(exists(test_file), "test_file exists after write");
+
+    // Test 3: file_size
+    i64 sz = file_size(test_file);
+    assert_eq_i64(sz, 24, "file_size matches content length");
+
+    // Test 4: read_file
+    Result<String, Error> res = read_file(test_file);
+    assert_true(res.is_ok(), "read_file succeeded");
+    if (res.is_ok()) {
+        String content = res.unwrap();
+        assert_true(content.equals("Hello Silver Filesystem!"), "read_file content matches");
+        content.drop();
+    }
+
+    // Test 5: remove_file
+    bool removed = remove_file(test_file);
+    assert_true(removed, "remove_file succeeded");
+    assert_true(!exists(test_file), "test_file no longer exists");
+
+    // Test 6: directory creation and removal
+    bool dir_created = create_dir(test_dir);
+    assert_true(dir_created, "create_dir succeeded");
+    assert_true(exists(test_dir), "test_dir exists");
+
+    bool dir_removed = remove_dir(test_dir);
+    assert_true(dir_removed, "remove_dir succeeded");
+    assert_true(!exists(test_dir), "test_dir no longer exists");
+
+    return done();
+}
