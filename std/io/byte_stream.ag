@@ -6,6 +6,8 @@ import std.io.file;
 import std.mem;
 import std.mem.alloc;
 import std.sys.result;
+import std.optional;
+import std.string;
 
 struct ByteStream {
     File file;
@@ -105,6 +107,38 @@ impl ByteStream {
         return total;
     }
 
+    ByteStream from_file(File f) {
+        ByteStream bs;
+        bs.file = move f;
+        bs.cap = 4096;
+        bs.buf = alloc<u8>(bs.cap);
+        bs.len = 0;
+        bs.pos = 0;
+        return bs;
+    }
+
+    Optional<String> read_line(&mut self) {
+        if (self.eof()) {
+            return Optional<String>.none();
+        }
+        String s = String.new();
+        while (true) {
+            i32 b = self.read_byte();
+            if (b < 0) {
+                if (s.len() == 0) {
+                    s.drop();
+                    return Optional<String>.none();
+                }
+                break;
+            }
+            s.push((u8)b);
+            if (b == 10) {
+                break;
+            }
+        }
+        return Optional<String>.some(move s);
+    }
+
     bool eof(&self) {
         if (self.pos < self.len) {
             return false;
@@ -123,5 +157,33 @@ impl Drop for ByteStream {
         self.len = 0;
         self.pos = 0;
         self.cap = 0;
+    }
+}
+
+struct BufReader {
+    ByteStream inner;
+}
+
+impl BufReader {
+    BufReader new(File f) {
+        BufReader br;
+        br.inner = ByteStream.from_file(move f);
+        return br;
+    }
+
+    i32 read_byte(&mut self) {
+        return self.inner.read_byte();
+    }
+
+    i64 read_into(&mut self, u8* dst, i64 dst_len) {
+        return self.inner.read_into(dst, dst_len);
+    }
+
+    Optional<String> read_line(&mut self) {
+        return self.inner.read_line();
+    }
+
+    bool eof(&self) {
+        return self.inner.eof();
     }
 }

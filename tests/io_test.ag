@@ -1,5 +1,7 @@
-// Test suite for std.io - I/O operations
 import std.test;
+import std.io.file;
+import std.string;
+import std.optional;
 i32 main() {
     STDOUT.write_str("=== I/O Tests ===\n\n");
 
@@ -95,6 +97,34 @@ i32 main() {
     eprintln("stderr message via eprintln");
     assert_true(true, "eprintln works");
     tests_passed = tests_passed + 1;
+
+    // Test: File write_line and read_line
+    {
+        str test_path = "/tmp/test_silver_io_read_line.txt";
+        File out_f = File.open(test_path, "w");
+        assert_true(out_f.is_open, "opened test file for writing");
+        out_f.write_line("first line");
+        out_f.write_line("second line");
+        out_f.close();
+
+        File in_f = File.open(test_path, "r");
+        assert_true(in_f.is_open, "opened test file for reading");
+        Optional<String> l1 = in_f.read_line();
+        assert_true(l1.is_some(), "read first line");
+        String s1 = l1.unwrap();
+        assert_eq_str(s1.to_str(), "first line\n", "first line content matches");
+        s1.drop();
+
+        Optional<String> l2 = in_f.read_line();
+        assert_true(l2.is_some(), "read second line");
+        String s2 = l2.unwrap();
+        assert_eq_str(s2.to_str(), "second line\n", "second line content matches");
+        s2.drop();
+
+        Optional<String> l3 = in_f.read_line();
+        assert_true(l3.is_none(), "read EOF is none");
+        in_f.close();
+    }
 
     // Summary
     return done();
