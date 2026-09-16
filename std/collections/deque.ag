@@ -105,7 +105,7 @@ impl Deque<T> {
             }
             self.grow(min_cap);
         }
-        i64 tail = (self.head + self.len) % self.cap;
+        i64 tail = (self.head + self.len) & (self.cap - 1);
         self.data[tail] = move value;
         self.len = self.len + 1;
     }
@@ -119,7 +119,7 @@ impl Deque<T> {
             }
             self.grow(min_cap);
         }
-        self.head = (self.head - 1 + self.cap) % self.cap;
+        self.head = (self.head - 1 + self.cap) & (self.cap - 1);
         self.data[self.head] = move value;
         self.len = self.len + 1;
     }
@@ -131,7 +131,7 @@ impl Deque<T> {
             abort();
         }
         T result = move self.data[self.head];
-        self.head = (self.head + 1) % self.cap;
+        self.head = (self.head + 1) & (self.cap - 1);
         self.len = self.len - 1;
         return move result;
     }
@@ -143,7 +143,7 @@ impl Deque<T> {
             abort();
         }
         self.len = self.len - 1;
-        i64 tail = (self.head + self.len) % self.cap;
+        i64 tail = (self.head + self.len) & (self.cap - 1);
         T result = move self.data[tail];
         return move result;
     }
@@ -161,7 +161,7 @@ impl Deque<T> {
         if (self.len == 0) {
             abort();
         }
-        i64 tail = (self.head + self.len - 1) % self.cap;
+        i64 tail = (self.head + self.len - 1) & (self.cap - 1);
         return self.data[tail];
     }
 
@@ -313,7 +313,7 @@ impl<T> Iterator for DequeIter<T> {
     /// Move the next element out; Copy is bitwise.
     Optional<T> next(*self) {
         if (self.idx < self.len) {
-            i64 pos = (self.head + self.idx) % self.cap;
+            i64 pos = (self.head + self.idx) & (self.cap - 1);
             T tmp = self.data[pos];
             T value = move tmp;
             self.idx = self.idx + 1;
@@ -328,7 +328,7 @@ impl<T> Iterator for DequeBorrowIter<T> {
     /// Borrow the next element; the deque remains owned by the caller.
     Optional<T> next(*self) {
         if (self.idx < self.len) {
-            i64 pos = (self.head + self.idx) % self.cap;
+            i64 pos = (self.head + self.idx) & (self.cap - 1);
             T v = self.data[pos];
             self.idx = self.idx + 1;
             return Some(v);

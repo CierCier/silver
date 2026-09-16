@@ -27,13 +27,18 @@ impl Queue<T> {
     /// Reserve space for `capacity` elements up front.
     Queue<T> with_capacity(i64 capacity) {
         Queue<T> q;
-        if (capacity != 0) {
-            q.data = (T*)(malloc(@size(T) * capacity));
+        if (capacity > 0) {
+            i64 cap = 1;
+            while (cap < capacity) {
+                cap = cap * 2;
+            }
+            q.data = (T*)(malloc(@size(T) * cap));
+            q.cap = cap;
         } else {
             q.data = (T*)0;
+            q.cap = 0;
         }
         q.len = 0;
-        q.cap = capacity;
         q.head = 0;
         return q;
     }
@@ -70,7 +75,7 @@ impl Queue<T> {
             if (old_cap > 0) {
                 i64 i = 0;
                 while (i < self.len) {
-                    new_data[i] = self.data[(self.head + i) % old_cap];
+                    new_data[i] = self.data[(self.head + i) & (old_cap - 1)];
                     i = i + 1;
                 }
             }
@@ -81,7 +86,7 @@ impl Queue<T> {
             self.head = 0;
             self.cap = new_cap;
         }
-        i64 tail = (self.head + self.len) % self.cap;
+        i64 tail = (self.head + self.len) & (self.cap - 1);
         self.data[tail] = move value;
         self.len = self.len + 1;
     }
@@ -92,7 +97,7 @@ impl Queue<T> {
             abort();
         }
         T result = self.data[self.head];
-        self.head = (self.head + 1) % self.cap;
+        self.head = (self.head + 1) & (self.cap - 1);
         self.len = self.len - 1;
         return result;
     }
