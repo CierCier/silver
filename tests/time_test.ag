@@ -2,9 +2,35 @@ import std.test;
 import std.time;
 
 i32 main() {
+    test_start("std.time: Instant and Duration");
+
     Instant t1 = now();
+    sleep_ms(5);
     Instant t2 = now();
-    i64 elapsed = t2.elapsed_ns(t1);
-    assert_true(elapsed >= 0, "time elapsed is non-negative");
+    i64 elapsed_ns = t2.elapsed_ns(t1);
+    assert_true(elapsed_ns > 0, "time elapsed is positive after sleep");
+
+    Duration d_el = t1.elapsed();
+    assert_true(d_el.as_nanos() > 0, "elapsed Duration is positive");
+
+    Duration d1 = Duration.from_secs(2);
+    assert_eq_i64(d1.as_secs(), 2, "d1 as_secs");
+    assert_eq_i64(d1.as_millis(), 2000, "d1 as_millis");
+    assert_eq_i64(d1.as_micros(), 2000000, "d1 as_micros");
+    assert_eq_i64(d1.as_nanos(), 2000000000, "d1 as_nanos");
+
+    Duration d2 = Duration.from_millis(1500);
+    assert_eq_i64(d2.as_secs(), 1, "d2 as_secs");
+    assert_eq_i64(d2.as_millis(), 1500, "d2 as_millis");
+    assert_eq_i64(d2.as_micros(), 1500000, "d2 as_micros");
+
+    Duration d3 = Duration.from_micros(750);
+    assert_eq_i64(d3.as_micros(), 750, "d3 as_micros");
+    assert_eq_i64(d3.as_nanos(), 750000, "d3 as_nanos");
+
+    SystemTime st = system_time_now();
+    assert_true(st.unix_timestamp() > 1700000000, "unix timestamp is plausible");
+    assert_true(st.unix_timestamp_millis() > 1700000000000, "unix timestamp millis is plausible");
+
     return done();
 }

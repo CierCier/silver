@@ -2,11 +2,59 @@
 
 import std.sys.os;
 
+const i64 CLOCK_REALTIME = 0;
 const i64 CLOCK_MONOTONIC = 1;
 
 struct Timespec {
     i64 sec;
     i64 nsec;
+}
+
+struct Duration {
+    i64 secs;
+    i64 nanos;
+}
+
+impl Duration {
+    Duration zero() {
+        Duration d;
+        d.secs = 0;
+        d.nanos = 0;
+        return d;
+    }
+
+    Duration from_secs(i64 s) {
+        Duration d;
+        d.secs = s;
+        d.nanos = 0;
+        return d;
+    }
+
+    Duration from_millis(i64 ms) {
+        Duration d;
+        d.secs = ms / 1000;
+        d.nanos = (ms % 1000) * 1000000;
+        return d;
+    }
+
+    Duration from_micros(i64 us) {
+        Duration d;
+        d.secs = us / 1000000;
+        d.nanos = (us % 1000000) * 1000;
+        return d;
+    }
+
+    Duration from_nanos(i64 ns) {
+        Duration d;
+        d.secs = ns / 1000000000;
+        d.nanos = ns % 1000000000;
+        return d;
+    }
+
+    i64 as_secs(*self) { return self.secs; }
+    i64 as_millis(*self) { return self.secs * 1000 + self.nanos / 1000000; }
+    i64 as_micros(*self) { return self.secs * 1000000 + self.nanos / 1000; }
+    i64 as_nanos(*self) { return self.secs * 1000000000 + self.nanos; }
 }
 
 struct Instant {
@@ -25,4 +73,51 @@ impl Instant {
         i64 nsec_diff = self.ts.nsec - earlier.ts.nsec;
         return sec_diff * 1000000000 + nsec_diff;
     }
+
+    Duration elapsed(*self) {
+        Instant current = now();
+        i64 ns = current.elapsed_ns(*self);
+        return Duration.from_nanos(ns);
+    }
+}
+
+struct SystemTime {
+    Timespec ts;
+}
+
+SystemTime system_time_now() {
+    SystemTime st;
+    sys_clock_gettime(CLOCK_REALTIME, (i64)&st.ts);
+    return st;
+}
+
+impl SystemTime {
+    i64 unix_timestamp(*self) {
+        return self.ts.sec;
+    }
+
+    i64 unix_timestamp_millis(*self) {
+        return self.ts.sec * 1000 + self.ts.nsec / 1000000;
+    }
+}
+
+void sleep(Duration d) {
+    Timespec req;
+    req.sec = d.secs;
+    req.nsec = d.nanos;
+    Timespec rem;
+    while (true) {
+        i64 r = sys_nanosleep((i64)&req, (i64)&rem);
+        if (r == 0) { break; }
+        if (r == -4) { // EINTR
+            req.sec = rem.sec;
+            req.nsec = rem.nsec;
+            continue;
+        }
+        break;
+    }
+}
+
+void sleep_ms(i64 ms) {
+    sleep(Duration.from_millis(ms));
 }
