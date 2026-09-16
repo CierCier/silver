@@ -134,12 +134,15 @@ pub struct ModuleNode {
 #[derive(Debug, Default, Clone)]
 pub struct DependencyGraph {
     pub nodes: HashMap<String, ModuleNode>,
+    /// Source paths for all discovered modules, including source-inlined modules.
+    pub source_paths: HashMap<String, PathBuf>,
 }
 
 impl DependencyGraph {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::default(),
+            source_paths: HashMap::default(),
         }
     }
 
@@ -262,6 +265,8 @@ impl DependencyGraph {
                 .unwrap_or("main")
                 .to_string()
         });
+        self.source_paths
+            .insert(current_module_path.clone(), source_path.to_path_buf());
 
         let mut direct_deps = Vec::new();
         for item in &ast.items {

@@ -2000,17 +2000,29 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let root_deps: Vec<(String, String)> = dep_graph
+                                    .source_paths
                                     .iter()
-                                    .filter_map(|(name, node)| {
-                                        loader.lookup_computed_cache_key(&node.source_path)
-                                            .map(|k| (name.clone(), k.hash_hex))
+                                    .filter_map(|(name, path)| {
+                                        let is_root = plan.inputs.iter().any(|input| {
+                                            std::fs::canonicalize(input).ok()
+                                                == std::fs::canonicalize(path).ok()
+                                        });
+                                        if is_root {
+                                            return None;
+                                        }
+                                        loader
+                                            .lookup_computed_cache_key(path)
+                                            .or_else(|| loader.compute_cache_key(path, name))
+                                            .map(|key| (name.clone(), key.hash_hex))
                                     })
+                                    .chain(imported_modules.iter().map(|artifact| {
+                                        (
+                                            artifact.module_path.clone(),
+                                            module_artifact_content_hash(artifact),
+                                        )
+                                    }))
                                     .collect();
-                                for artifact in &imported_modules {
-                                    let hash = module_artifact_content_hash(artifact);
-                                    root_deps.push((artifact.module_path.clone(), hash));
-                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &plan.output).is_ok() {
@@ -2154,17 +2166,29 @@ pub fn run(cli: Cli) {
                         let mut root_key_opt = None;
                         if !plan.no_cache {
                             if let Some(store) = &loader.cache_store {
-                                let mut root_deps: Vec<(String, String)> = dep_graph.nodes
+                                let root_deps: Vec<(String, String)> = dep_graph
+                                    .source_paths
                                     .iter()
-                                    .filter_map(|(name, node)| {
-                                        loader.lookup_computed_cache_key(&node.source_path)
-                                            .map(|k| (name.clone(), k.hash_hex))
+                                    .filter_map(|(name, path)| {
+                                        let is_root = plan.inputs.iter().any(|input| {
+                                            std::fs::canonicalize(input).ok()
+                                                == std::fs::canonicalize(path).ok()
+                                        });
+                                        if is_root {
+                                            return None;
+                                        }
+                                        loader
+                                            .lookup_computed_cache_key(path)
+                                            .or_else(|| loader.compute_cache_key(path, name))
+                                            .map(|key| (name.clone(), key.hash_hex))
                                     })
+                                    .chain(imported_modules.iter().map(|artifact| {
+                                        (
+                                            artifact.module_path.clone(),
+                                            module_artifact_content_hash(artifact),
+                                        )
+                                    }))
                                     .collect();
-                                for artifact in &imported_modules {
-                                    let hash = module_artifact_content_hash(artifact);
-                                    root_deps.push((artifact.module_path.clone(), hash));
-                                }
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &temp_o).is_ok() {
