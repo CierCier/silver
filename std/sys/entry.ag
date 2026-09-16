@@ -27,6 +27,7 @@ import std.thread;
 extern "C" {
     i32 __silver_argc;
     i8** __silver_argv;
+    i8** __silver_envp;
     // Win32 argv plumbing (windows entry only; unused declarations are
     // dead-code-eliminated on other targets).
     #[link_name("GetCommandLineW")]
@@ -45,6 +46,10 @@ i8** silver_argv() {
     return __silver_argv;
 }
 
+i8** silver_envp() {
+    return __silver_envp;
+}
+
 // Linux entry: raw ET_EXEC _start. argc/argv come off the process stack and
 // exit goes through exit_group — the classic no-libc crt0 contract.
 #[cfg(os.linux)]
@@ -53,12 +58,15 @@ void _start() {
         .section .bss
         __silver_argc: .zero 4
         __silver_argv: .zero 8
+        __silver_envp: .zero 8
         .text
         xor %ebp, %ebp
         mov (%rsp), %rdi
         lea 8(%rsp), %rsi
         mov %rdi, __silver_argc(%rip)
         mov %rsi, __silver_argv(%rip)
+        lea 16(%rsp,%rdi,8), %rdx
+        mov %rdx, __silver_envp(%rip)
         and $$-16, %rsp
         call __silver_cpu_init
         call main
@@ -123,6 +131,7 @@ void __silver_win_arg_setup() {
         .section .bss
         __silver_argc: .zero 4
         __silver_argv: .zero 8
+        __silver_envp: .zero 8
         .text
     ");
     u16* cmd = win_GetCommandLineW();

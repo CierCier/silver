@@ -1,0 +1,35 @@
+import std.env;
+import std.test;
+import std.string;
+import std.optional;
+import std.mem.vec;
+
+i32 main() {
+    test_start("std.env: environment and process info");
+
+    // Test 1: Lookup standard environment variable (PATH is always set in linux/unix environments)
+    Optional<String> path_opt = var("PATH");
+    assert_true(path_opt.is_some(), "var('PATH') is some");
+    if (path_opt.is_some()) {
+        String path_val = path_opt.unwrap();
+        assert_true(path_val.len() > 0, "PATH length > 0");
+        path_val.drop();
+    }
+
+    // Test 2: Lookup non-existent variable
+    Optional<String> missing = var("__SILVER_NON_EXISTENT_VAR_12345__");
+    assert_true(missing.is_none(), "non-existent variable is none");
+
+    // Test 3: Current directory
+    String cwd = current_dir();
+    assert_true(cwd.len() > 0, "current_dir is not empty");
+    assert_true(cwd.starts_with("/"), "current_dir starts with /");
+    cwd.drop();
+
+    // Test 4: Command-line arguments
+    Vec<String> argv = args();
+    assert_true(argv.len() >= 1, "argv has at least program name");
+    argv.drop();
+
+    return done();
+}
