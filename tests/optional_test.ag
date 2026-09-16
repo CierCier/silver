@@ -9,6 +9,7 @@
 import std.test;
 import std.optional;
 import std.result;
+import std.string;
 import std.mem.alloc;
 i32 main() {
     STDOUT.write_str("=== Optional<i32> Tests ===\n\n");
@@ -173,6 +174,27 @@ i32 main() {
     assert_true(lookup2.is_none(), "invalid index returns None");
     assert_eq_i32(lookup2.unwrap_or(-1), -1, "default value used for invalid index");
     
+    // Test: unwrap on owned types (String)
+    {
+        Optional<String> opt_s = Optional<String>.some(String.from_str("hello"));
+        assert_true(opt_s.is_some(), "opt_s is some");
+        String s = opt_s.unwrap();
+        assert_eq_i64(s.len(), 5, "unwrapped string len is 5");
+        s.drop();
+
+        Result<String, i32> res_s = Result<String, i32>.ok(String.from_str("world"));
+        assert_true(res_s.success(), "res_s is success");
+        String s2 = res_s.unwrap();
+        assert_eq_i64(s2.len(), 5, "unwrapped result string len is 5");
+        s2.drop();
+
+        Result<i32, String> res_err = Result<i32, String>.err(String.from_str("error_msg"));
+        assert_true(res_err.failed(), "res_err is failed");
+        String err_str = res_err.unwrap_err();
+        assert_eq_i64(err_str.len(), 9, "unwrapped err string len is 9");
+        err_str.drop();
+    }
+
     // Summary
     STDOUT.write_str("\n=== Results ===\n");
     STDOUT.write_str("Passed: ");
