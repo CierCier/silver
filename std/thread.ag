@@ -65,7 +65,6 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     rec.tid = -1; // claimed, child not yet running
     rec.fn = (i64)fn;
     rec.arg = arg;
-    rec.stack = (u8*)0;
     rec.done = 0;
     rec.pack = 0;
     thread_lock_release();
@@ -107,7 +106,6 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
     rec.tid = -1; // claimed, child not yet running
     rec.fn = (i64)tramp;
     rec.arg = (i64)pack;
-    rec.stack = (u8*)0;
     rec.done = 0;
     rec.pack = (i64)pack;
     thread_lock_release();
@@ -131,11 +129,15 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
     if (@cfg(os.linux)) {
         // 16-byte aligned top; base is page-aligned and THREAD_STACK_SIZE is
         // a multiple of 16.
-        stack = mem_sys_alloc(THREAD_STACK_SIZE);
-        if (stack == (u8*)0) {
-            return 0;
+        if (rec.stack == (u8*)0) {
+            stack = mem_sys_alloc(THREAD_STACK_SIZE);
+            if (stack == (u8*)0) {
+                return 0;
+            }
+            rec.stack = stack;
+        } else {
+            stack = rec.stack;
         }
-        rec.stack = stack;
         top = (u8*)((i64)stack + THREAD_STACK_SIZE);
     }
     i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec);
