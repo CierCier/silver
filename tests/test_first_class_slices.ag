@@ -83,6 +83,20 @@ i32 main() {
         return 13;
     }
 
+    // 7. split_at, first, and last
+    [Slice<u8>, Slice<u8>] parts = hello.split_at(5);
+    if (parts[0].len != 5 || parts[1].len != 6) {
+        return 14;
+    }
+    u8* f = hello.first();
+    if (f == (u8*)0 || *f != (u8)'h') {
+        return 15;
+    }
+    u8* l = hello.last();
+    if (l == (u8*)0 || *l != (u8)'d') {
+        return 16;
+    }
+
     println("All first-class slice tests passed successfully!");
     return 0;
 }

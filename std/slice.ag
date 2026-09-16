@@ -84,10 +84,10 @@ impl<T> Slice<T> {
         return s;
     }
 
-    /// Splits the slice at `mid`, returning (left, right).
-    Slice<T> split_at(&self, i64 mid) {
+    /// Splits the slice at `mid`, returning [left, right].
+    [Slice<T>, Slice<T>] split_at(&self, i64 mid) {
         if (mid < 0 || mid > self.len) { abort(); }
-        return self.sub_slice(0, mid);
+        return [self.sub_slice(0, mid), self.sub_slice(mid, self.len - mid)];
     }
 
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
@@ -106,16 +106,16 @@ impl<T> Slice<T> {
         return self.sub_slice(start, end - start);
     }
 
-    /// Returns the first element, or None if empty.
-    T first(&self) {
-        if (self.len == 0) { abort(); }
-        return self.data[0];
+    /// Returns a pointer to the first element, or null if empty.
+    T* first(&self) {
+        if (self.len == 0) { return (T*)0; }
+        return &self.data[0];
     }
 
-    /// Returns the last element, or None if empty.
-    T last(&self) {
-        if (self.len == 0) { abort(); }
-        return self.data[self.len - 1];
+    /// Returns a pointer to the last element, or null if empty.
+    T* last(&self) {
+        if (self.len == 0) { return (T*)0; }
+        return &self.data[self.len - 1];
     }
 
     /// Returns an iterator over the slice.
